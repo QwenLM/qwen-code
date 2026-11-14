@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import {
   getHookExecutionOwner,
   runWithHookExecutionOwner,
@@ -20,7 +20,13 @@ import {
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import type { FunctionDeclaration, GenerateContentConfig } from '@google/genai';
+import type {
+  Content,
+  FunctionCall,
+  FunctionDeclaration,
+  GenerateContentConfig,
+  Part,
+} from '@google/genai';
 import {
   AgentCore,
   buildInheritedForkExecutionToolNames,
@@ -84,6 +90,9 @@ import {
 } from '../../core/coreToolScheduler.js';
 import { markToolCallArgumentsIncomplete } from '../../core/incomplete-tool-call-args.js';
 import { ToolConfirmationOutcome } from '../../tools/tools.js';
+import { runAgentLoop } from '../../core/agent-loop.js';
+import { LoopDetectionService } from '../../services/loopDetectionService.js';
+import { streamOf } from '../../test-utils/model-fixtures.js';
 import {
   AgentEventType,
   type AgentApprovalRequestEvent,
@@ -91,6 +100,134 @@ import {
   type AgentToolResultEvent,
   type AgentToolOutputUpdateEvent,
 } from './agent-events.js';
+
+vi.mock('../../core/agent-loop.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../core/agent-loop.js')>();
+  return { ...actual, runAgentLoop: vi.fn(actual.runAgentLoop) };
+});
+
+/**
+ * The returned check asserts that the agent's tool steps ran in the shared
+ * loop's rounds when `shared` is set, and on the current tool step otherwise.
+ */
+function trackToolSteps(shared: boolean, kernel: boolean): () => void {
+  vi.mocked(runAgentLoop).mockClear();
+  const steps = vi.spyOn(AgentCore.prototype, 'processFunctionCalls');
+  return () => {
+    if (shared) expect(steps).not.toHaveBeenCalled();
+    else expect(vi.mocked(runAgentLoop)).not.toHaveBeenCalled();
+    for (const [options] of vi.mocked(runAgentLoop).mock.calls) {
+      expect(options.useEventBus).toBe(kernel);
+    }
+    steps.mockRestore();
+  };
+}
+
+/**
+ * The loops a test runs on: the current loop, the shared loop, and the shared
+ * loop on the event-bus kernel.
+ */
+type Loop = { name: string; shared: boolean; kernel: boolean };
+const LOOPS: Loop[] = [
+  { name: 'current', shared: false, kernel: false },
+  { name: 'shared', shared: true, kernel: false },
+  { name: 'kernel', shared: true, kernel: true },
+];
+
+/**
+ * The agent's tool step for `calls`. On the current loop it is
+ * `processFunctionCalls`. On the shared loop it is the first round of a run
+ * whose model asks for `calls`, with the results the step finalized; the run
+ * gives the round its own prompt id and number 1.
+ */
+async function runToolStep(
+  core: AgentCore,
+  shared: boolean,
+  calls: FunctionCall[],
+  abortController: AbortController,
+  promptId: string,
+  toolsList: FunctionDeclaration[],
+): Promise<{ messages: Content[]; results: unknown[] }> {
+  if (!shared) {
+    return core.processFunctionCalls(
+      calls,
+      abortController,
+      promptId,
+      1,
+      toolsList,
+    );
+  }
+  const rounds = vi.mocked(runAgentLoop).mock.calls.length;
+  let step: { messages: Content[]; results: unknown[] } | undefined;
+  core
+    .getEventEmitter()
+    .on(AgentEventType.TOOL_RESPONSES_FINALIZED, ({ responses }) => {
+      step ??= {
+        messages: [
+          {
+            role: 'user',
+            parts: responses.flatMap(
+              ({ responseParts }) => responseParts as Part[],
+            ),
+          },
+        ],
+        results: responses,
+      };
+    });
+  let sent = 0;
+  const chat = {
+    sendMessageStream: async () =>
+      streamOf({
+        type: 'chunk',
+        value:
+          sent++ === 0
+            ? {
+                functionCalls: calls,
+                candidates: [
+                  {
+                    content: {
+                      parts: calls.map((functionCall) => ({ functionCall })),
+                    },
+                  },
+                ],
+              }
+            : {
+                candidates: [
+                  {
+                    content: { parts: [{ text: 'Done.' }] },
+                    finishReason: 'STOP',
+                  },
+                ],
+              },
+      }),
+    getHistoryToolCallFingerprints: () => [],
+  } as unknown as LlmChat;
+  // The loop detector is not under test here.
+  const detector = [
+    vi
+      .spyOn(LoopDetectionService.prototype, 'checkAlwaysOnSafeties')
+      .mockReturnValue(false),
+    vi
+      .spyOn(LoopDetectionService.prototype, 'addAndCheckHeuristicLoops')
+      .mockReturnValue(false),
+    vi
+      .spyOn(LoopDetectionService.prototype, 'recordToolResult')
+      .mockReturnValue(false),
+  ];
+  try {
+    await core.runReasoningLoop(
+      chat,
+      [{ role: 'user', parts: [{ text: 'Go.' }] }],
+      toolsList,
+      abortController,
+    );
+  } finally {
+    for (const spy of detector) spy.mockRestore();
+  }
+  expect(vi.mocked(runAgentLoop).mock.calls.length).toBeGreaterThan(rounds);
+  return step ?? { messages: [{ role: 'user', parts: [] }], results: [] };
+}
 
 const boundaryObserveMock = vi.hoisted(() =>
   vi.fn((_observation: ToolResultBoundaryObservation) => false),
@@ -690,659 +827,1262 @@ describe('AgentCore.runInAgentFrames', () => {
   });
 });
 
-describe('AgentCore approval response deduplication', () => {
-  type Scheduler = {
-    onToolCallsUpdate?: (calls: ToolCall[]) => void;
-    onAllToolCallsComplete?: (calls: ToolCall[]) => Promise<void>;
-    isToolExecutionAllowed?: (name: string) => boolean;
-  };
-  type Request = {
-    callId: string;
-    name: string;
-    args: Record<string, unknown>;
-    prompt_id: string;
-  };
-  type Call = { id: string; name: string; args: Record<string, unknown> };
+describe.each(LOOPS)(
+  'AgentCore approval response deduplication ($name loop)',
+  ({ shared, kernel }) => {
+    let checkToolSteps: () => void;
+    beforeEach(() => {
+      checkToolSteps = trackToolSteps(shared, kernel);
+    });
+    afterEach(() => checkToolSteps());
 
-  /** `<slug>-agent` with session `<slug>-session`; `overrides` patch the config. */
-  function buildCore(
-    slug = 'approval',
-    toolConfig?: ToolConfig,
-    overrides: Record<string, unknown> = {},
-  ): { core: AgentCore; errorSpy: ReturnType<typeof vi.fn> } {
-    const errorSpy = vi.fn();
-    const config = {
-      getToolRegistry: vi.fn().mockReturnValue({
-        getTool: vi.fn(),
-      }),
-      getDebugLogger: vi
-        .fn()
-        .mockReturnValue({ debug: vi.fn(), error: errorSpy }),
-      getToolOutputBatchBudget: vi
-        .fn()
-        .mockReturnValue(Number.POSITIVE_INFINITY),
-      getToolResultBytesWritten: vi.fn().mockReturnValue(0),
-      getSessionId: vi.fn().mockReturnValue(`${slug}-session`),
-      ...overrides,
-    } as unknown as Config;
-    const core = new AgentCore(
-      `${slug}-agent`,
-      config,
-      { systemPrompt: '' },
-      { model: 'test-model' },
-      { max_turns: 1 },
-      toolConfig,
-    );
-    return { core, errorSpy };
-  }
-
-  it('preserves settled execution status when cancelled before post-processing completes', async () => {
-    const { core } = buildCore('late-synthetic', { tools: ['*'] });
-    const results = recordToolEvents(core).results;
-    const outputs: AgentToolOutputUpdateEvent[] = [];
-    core
-      .getEventEmitter()
-      .on(AgentEventType.TOOL_OUTPUT_UPDATE, (event) => outputs.push(event));
-    let settle!: (
-      callId: string,
-      status: 'success' | 'cancelled',
-      duration: number,
-    ) => void;
-    const schedule = vi
-      .spyOn(CoreToolScheduler.prototype, 'schedule')
-      .mockImplementation(async function (this: CoreToolScheduler) {
-        const options = (
-          this as unknown as {
-            schedulerOptions: {
-              onToolExecutionStarted: (callId: string, epoch: number) => void;
-              onToolExecutionSettled: typeof settle;
-            };
-          }
-        ).schedulerOptions;
-        settle = options.onToolExecutionSettled;
-        options.onToolExecutionStarted('late-call', 100);
-      });
-    try {
-      const controller = new AbortController();
-      const running = core.processFunctionCalls(
-        [{ id: 'late-call', name: 'read_file', args: {} }],
-        controller,
-        'late-prompt',
-        1,
-        [{ name: 'read_file' }],
-      );
-      await vi.waitFor(() => expect(outputs).toHaveLength(1));
-      settle('late-call', 'success', 20);
-      controller.abort();
-      await running;
-      settle('late-call', 'success', 20);
-      expect(results).toHaveLength(1);
-      expect(
-        [...outputs, ...results]
-          .map((event) => event.lifecycle)
-          .filter(Boolean),
-      ).toEqual([
-        expect.objectContaining({ phase: 'started' }),
-        expect.objectContaining({
-          phase: 'ended',
-          outcome: 'cancelled',
-          executionStatus: 'success',
-          executionDurationMs: 20,
-        }),
-      ]);
-    } finally {
-      schedule.mockRestore();
-    }
-  });
-
-  it('emits one late lifecycle terminal after synthetic cancellation without a second tool result', async () => {
-    const { core } = buildCore('late-synthetic', { tools: ['*'] });
-    const results = recordToolEvents(core).results;
-    const outputs: AgentToolOutputUpdateEvent[] = [];
-    core
-      .getEventEmitter()
-      .on(AgentEventType.TOOL_OUTPUT_UPDATE, (event) => outputs.push(event));
-    let settle!: (
-      callId: string,
-      status: 'cancelled',
-      duration: number,
-    ) => void;
-    const schedule = vi
-      .spyOn(CoreToolScheduler.prototype, 'schedule')
-      .mockImplementation(async function (this: CoreToolScheduler) {
-        const options = (
-          this as unknown as {
-            schedulerOptions: {
-              onToolExecutionStarted: (callId: string, epoch: number) => void;
-              onToolExecutionSettled: typeof settle;
-            };
-          }
-        ).schedulerOptions;
-        settle = options.onToolExecutionSettled;
-        options.onToolExecutionStarted('late-call', 100);
-      });
-    try {
-      const controller = new AbortController();
-      const running = core.processFunctionCalls(
-        [{ id: 'late-call', name: 'read_file', args: {} }],
-        controller,
-        'late-prompt',
-        1,
-        [{ name: 'read_file' }],
-      );
-      await vi.waitFor(() => expect(outputs).toHaveLength(1));
-      controller.abort();
-      await running;
-      expect(results).toHaveLength(1);
-      expect(results[0].lifecycle).toBeUndefined();
-      settle('late-call', 'cancelled', 20);
-      settle('late-call', 'cancelled', 20);
-      expect(results).toHaveLength(1);
-      expect(outputs.map((event) => event.lifecycle)).toEqual([
-        expect.objectContaining({ phase: 'started' }),
-        expect.objectContaining({
-          phase: 'ended',
-          outcome: 'cancelled',
-          executionStatus: 'cancelled',
-          executionDurationMs: 20,
-        }),
-      ]);
-    } finally {
-      schedule.mockRestore();
-    }
-  });
-
-  it('keeps output and PID intact for lifecycle-only updates and ignores late terminal output', () => {
-    const { core } = buildCore('output');
-    const emitter = core.getEventEmitter();
-    const update = {
-      subagentId: 'output-agent',
-      round: 1,
-      callId: 'call',
-      outputChunk: 'visible output',
-      pid: 42,
-      timestamp: 100,
+    type Scheduler = {
+      onToolCallsUpdate?: (calls: ToolCall[]) => void;
+      onAllToolCallsComplete?: (calls: ToolCall[]) => Promise<void>;
+      isToolExecutionAllowed?: (name: string) => boolean;
     };
-    emitter.emit(AgentEventType.TOOL_OUTPUT_UPDATE, update);
-    const base = {
-      v: 1 as const,
-      kind: 'tool' as const,
-      executionId: 'execution',
-      sessionId: 'output-session',
-      callId: 'call',
-      toolName: 'read',
+    type Request = {
+      callId: string;
+      name: string;
+      args: Record<string, unknown>;
+      prompt_id: string;
     };
-    emitter.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
-      ...update,
-      outputChunk: '',
-      pid: 99,
-      lifecycle: {
-        ...base,
-        phase: 'started',
-        executionStatus: 'running',
-        startedAt: 100,
-      },
-    });
-    expect(core.getLiveOutputs().get('call')).toBe('visible output');
-    expect(core.getShellPids().get('call')).toBe(42);
-    emitter.emit(AgentEventType.TOOL_RESULT, {
-      subagentId: 'output-agent',
-      round: 1,
-      callId: 'call',
-      name: 'read',
-      success: false,
-      timestamp: 110,
-    });
-    emitter.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
-      ...update,
-      outputChunk: '',
-      lifecycle: {
-        ...base,
-        phase: 'ended',
-        executionStatus: 'cancelled',
-        outcome: 'cancelled',
-        startedAt: 100,
-        endedAt: 120,
-        executionDurationMs: 20,
-      },
-    });
-    expect(core.getLiveOutputs().has('call')).toBe(false);
-    expect(core.getShellPids().has('call')).toBe(false);
-  });
+    type Call = { id: string; name: string; args: Record<string, unknown> };
 
-  it.each(['undeclared', 'allowlist'])(
-    'records %s rejection as not_started with original owner',
-    async (reason) => {
-      let owner = 'original-owner';
-      const { core } = buildCore(
-        'rejected',
-        { tools: ['*'], executionAllowedTools: [] },
-        { getSessionId: () => owner },
-      );
-      const events = recordToolEvents(core);
-      core.getEventEmitter().on(AgentEventType.TOOL_CALL, () => {
-        owner = 'rotated-owner';
-      });
-      const result = await core.processFunctionCalls(
-        [{ id: 'rejected-call', name: 'read_file', args: {} }],
-        new AbortController(),
-        'prompt-rejected',
-        1,
-        reason === 'undeclared' ? [] : [{ name: 'read_file' }],
-      );
-      expect(result.results).toHaveLength(1);
-      expect(events.results).toHaveLength(1);
-      expect(events.results[0].success).toBe(false);
-      expect(events.results[0].error).toContain(
-        reason === 'undeclared' ? 'not found' : 'not allowed',
-      );
-      expect(events.results[0].lifecycle).toMatchObject({
-        kind: 'tool',
-        phase: 'ended',
-        callId: 'rejected-call',
-        toolName: 'read_file',
-        sessionId: 'original-owner',
-        subagentId: events.results[0].subagentId,
-        executionStatus: 'not_started',
-        outcome: 'error',
-      });
-      expect(events.results[0].lifecycle).not.toHaveProperty('startedAt');
-      expect(events.results[0].lifecycle).not.toHaveProperty(
-        'executionDurationMs',
-      );
-    },
-  );
-
-  const request = (
-    slug: string,
-    name = 'Shell',
-    args: Record<string, unknown> = { command: 'git status' },
-  ) => ({
-    callId: `call-${slug}`,
-    name,
-    args,
-    isClientInitiated: true,
-    prompt_id: `prompt-${slug}`,
-  });
-  const execWaiting = (
-    req: Request,
-    onConfirm: unknown = vi.fn(async () => {}),
-  ) =>
-    ({
-      status: 'awaiting_approval',
-      request: req,
-      confirmationDetails: {
-        type: 'exec',
-        title: 'Run command?',
-        command: 'git status',
-        rootCommand: 'git status',
-        onConfirm,
-      },
-    }) as unknown as WaitingToolCall;
-  const hookWaiting = (req: Request, onConfirm: unknown) =>
-    ({
-      status: 'awaiting_approval',
-      request: req,
-      confirmationDetails: {
-        type: 'info',
-        title: 'Hook confirmation',
-        prompt: 'Approve bounced execution?',
-        onConfirm,
-      },
-    }) as unknown as WaitingToolCall;
-  const scheduled = (req: Request, status = 'scheduled') =>
-    ({ status, request: req }) as unknown as ToolCall;
-
-  const directCall = (req: Request): Call => ({
-    id: req.callId,
-    name: req.name,
-    args: req.args,
-  });
-  /** The model-facing tool_call wrapper that bridges to `req`'s target. */
-  const bridgedCall = (req: Request): Call => ({
-    id: req.callId,
-    name: ToolNames.TOOL_CALL,
-    args: { name: req.name, arguments: req.args },
-  });
-
-  const onApproval = (
-    core: AgentCore,
-    listener: (event: AgentApprovalRequestEvent) => void,
-  ) =>
-    core.getEventEmitter().on(AgentEventType.TOOL_WAITING_APPROVAL, listener);
-  function collectApprovals(core: AgentCore) {
-    const events: AgentApprovalRequestEvent[] = [];
-    onApproval(core, (event) => {
-      events.push(event);
-    });
-    return events;
-  }
-  function recordToolEvents(core: AgentCore) {
-    const calls: AgentToolCallEvent[] = [];
-    const results: AgentToolResultEvent[] = [];
-    const order: string[] = [];
-    core.getEventEmitter().on(AgentEventType.TOOL_CALL, (event) => {
-      calls.push(event);
-      order.push(`call:${event.name}`);
-    });
-    core.getEventEmitter().on(AgentEventType.TOOL_RESULT, (event) => {
-      results.push(event);
-      order.push(`result:${event.name}`);
-    });
-    return { calls, results, order };
-  }
-  /** A listener that always throws the same error. */
-  const throwing = (message: string) => {
-    const error = new Error(message);
-    return vi.fn(() => {
-      throw error;
-    });
-  };
-  /** A listener that throws `error` on its first call only. */
-  const failOnce = (error: Error) => {
-    let shouldThrow = true;
-    return vi.fn(() => {
-      if (shouldThrow) {
-        shouldThrow = false;
-        throw error;
-      }
-    });
-  };
-
-  /** Stubs schedule() to replay `batches` through onToolCallsUpdate. */
-  function mockScheduleUpdates(batches: ToolCall[][], gate?: Promise<void>) {
-    return vi
-      .spyOn(CoreToolScheduler.prototype, 'schedule')
-      .mockImplementation(async function (this: CoreToolScheduler) {
-        if (gate) await gate;
-        for (const calls of batches) {
-          (this as unknown as Scheduler).onToolCallsUpdate?.(calls);
-        }
-      });
-  }
-  /** The scheduler instance the active schedule() stub was called on. */
-  const currentScheduler = () =>
-    vi.mocked(CoreToolScheduler.prototype.schedule).mock
-      .instances[0] as unknown as Scheduler;
-
-  function startCall(core: AgentCore, call: Call, promptId: string) {
-    const abortController = new AbortController();
-    const processing = core.processFunctionCalls(
-      [call],
-      abortController,
-      promptId,
-      1,
-      [{ name: call.name } as FunctionDeclaration],
-    );
-    return { abortController, processing };
-  }
-
-  // Processes `req` with schedule() replaying `batches` and runs `body`
-  // while the call is in flight; then aborts, drains, restores schedule()
-  // and real timers.
-  async function whileScheduled(
-    core: AgentCore,
-    req: Request,
-    batches: ToolCall[][],
-    body: (run: ReturnType<typeof startCall>) => Promise<void> | void,
-    toCall = directCall,
-  ) {
-    const scheduleSpy = mockScheduleUpdates(batches);
-    const run = startCall(core, toCall(req), req.prompt_id);
-    try {
-      await body(run);
-    } finally {
-      run.abortController.abort();
-      await run.processing;
-      scheduleSpy.mockRestore();
-      vi.useRealTimers();
-    }
-  }
-
-  // Runs `call` for a `<slug>` core with schedule() stubbed to capture the
-  // isToolExecutionAllowed predicate it was handed, then aborts.
-  async function capturePredicate(
-    slug: string,
-    toolConfig: ToolConfig,
-    call: Omit<Call, 'id'>,
-    overrides?: Record<string, unknown>,
-  ): Promise<((name: string) => boolean) | undefined> {
-    const { core } = buildCore(slug, toolConfig, overrides);
-    let capturedPredicate: ((name: string) => boolean) | undefined;
-    const scheduleSpy = vi
-      .spyOn(CoreToolScheduler.prototype, 'schedule')
-      .mockImplementation(async function (this: CoreToolScheduler) {
-        capturedPredicate = (this as unknown as Scheduler)
-          .isToolExecutionAllowed;
-      });
-    const { abortController, processing } = startCall(
-      core,
-      { id: `call-${slug}`, ...call },
-      `prompt-${slug}`,
-    );
-    await vi.waitFor(() => expect(scheduleSpy).toHaveBeenCalledOnce());
-    abortController.abort();
-    await processing;
-    scheduleSpy.mockRestore();
-    return capturedPredicate;
-  }
-  const bridgeTo = (target: string) => ({
-    name: ToolNames.TOOL_CALL,
-    args: { name: target, arguments: {} },
-  });
-
-  it('emits scheduler-resolved tool identity for bridged calls', async () => {
-    const { core } = buildCore();
-    const { calls, results } = recordToolEvents(core);
-    const targetRequest = {
-      ...request('bridge', 'mcp__docs__read', { path: 'README.md' }),
-      modelFacingName: ToolNames.TOOL_CALL,
-      modelFacingArgs: {
-        name: 'mcp__docs__read',
-        arguments: { path: 'README.md' },
-      },
-    };
-
-    await whileScheduled(
-      core,
-      targetRequest,
-      [[scheduled(targetRequest)]],
-      async () => {
-        await vi.waitFor(() => expect(calls).toHaveLength(1));
-        expect(calls[0]).toMatchObject({
-          callId: targetRequest.callId,
-          name: targetRequest.name,
-          args: targetRequest.args,
-          modelFacingName: ToolNames.TOOL_CALL,
-          modelFacingArgs: {
-            name: targetRequest.name,
-            arguments: targetRequest.args,
-          },
-        });
-      },
-      bridgedCall,
-    );
-
-    expect(results).toHaveLength(1);
-    expect(results[0]).toMatchObject({
-      callId: targetRequest.callId,
-      name: targetRequest.name,
-      success: false,
-    });
-    expect(results[0].responseParts?.[0]?.functionResponse?.name).toBe(
-      ToolNames.TOOL_CALL,
-    );
-  });
-
-  it('emits a wrapper TOOL_CALL before a bridge cancellation on abort', async () => {
-    // The abort lands BEFORE the scheduler resolves the target. Persist the
-    // model-facing wrapper call before its synthetic cancellation, then ignore
-    // the scheduler's late resolved-target update.
-    const { core } = buildCore();
-    const { calls, results, order } = recordToolEvents(core);
-    const targetRequest = request('bridge-aborted', 'mcp__docs__read', {
-      path: 'README.md',
-    });
-    let releaseUpdate!: () => void;
-    const updateGate = new Promise<void>((resolve) => {
-      releaseUpdate = resolve;
-    });
-    // Hold the first update until after the abort has run.
-    const scheduleSpy = mockScheduleUpdates(
-      [[scheduled(targetRequest)]],
-      updateGate,
-    );
-    const { abortController, processing } = startCall(
-      core,
-      bridgedCall(targetRequest),
-      targetRequest.prompt_id,
-    );
-
-    await vi.waitFor(() => expect(scheduleSpy).toHaveBeenCalledOnce());
-    abortController.abort();
-    releaseUpdate();
-    await processing;
-    scheduleSpy.mockRestore();
-
-    expect(order).toEqual([
-      `call:${ToolNames.TOOL_CALL}`,
-      `result:${ToolNames.TOOL_CALL}`,
-    ]);
-    expect(calls).toHaveLength(1);
-    expect(calls[0]).toMatchObject({
-      callId: targetRequest.callId,
-      name: ToolNames.TOOL_CALL,
-      args: {
-        name: targetRequest.name,
-        arguments: targetRequest.args,
-      },
-    });
-    expect(results).toHaveLength(1);
-    expect(results[0]).toMatchObject({
-      callId: targetRequest.callId,
-      success: false,
-    });
-    expect(results[0].responseParts?.[0]?.functionResponse?.name).toBe(
-      ToolNames.TOOL_CALL,
-    );
-  });
-
-  it('passes the execution allowlist to the scheduler for bridged targets', async () => {
-    // The pre-schedule gates only see the wrapper name (tool_call), which a
-    // fork's allowlist always contains; the scheduler must be given a
-    // predicate bound to the same allowlist to re-check resolved targets.
-    const capturedPredicate = await capturePredicate(
-      'allowlist',
-      {
-        tools: ['*'],
-        executionAllowedTools: [
-          ToolNames.TOOL_CALL,
-          ToolNames.TOOL_SEARCH,
-          'read_file',
-        ],
-      },
-      bridgeTo('web_fetch'),
-    );
-
-    expect(capturedPredicate).toBeDefined();
-    expect(capturedPredicate?.('web_fetch')).toBe(false);
-    expect(capturedPredicate?.('read_file')).toBe(true);
-    expect(capturedPredicate?.(ToolNames.TOOL_CALL)).toBe(true);
-  });
-
-  it('folds the configured tool allowlist into the bridged-target re-check', async () => {
-    const capturedPredicate = await capturePredicate(
-      'configured-allowlist',
-      {
-        tools: [
-          ToolNames.READ_FILE,
-          ToolNames.TOOL_SEARCH,
-          ToolNames.TOOL_CALL,
-        ],
-      },
-      bridgeTo('mcp__slack__post_message'),
-    );
-
-    expect(capturedPredicate).toBeDefined();
-    expect(capturedPredicate?.('mcp__slack__post_message')).toBe(false);
-    expect(capturedPredicate?.(ToolNames.READ_FILE)).toBe(true);
-    expect(capturedPredicate?.(ToolNames.TOOL_CALL)).toBe(true);
-  });
-
-  it('folds the per-agent disallowedTools blocklist into the bridged-target re-check', async () => {
-    // R6-8: the tool_call bridge resolves around the declaration list, so
-    // the disallowedTools blocklist prepareTools applies to declarations
-    // must be re-checked at invocation level, symmetrically to the
-    // execution allowlist above. Without this fold a subagent configured
-    // with disallowedTools: ['mcp__slack'] could bridge-execute
-    // mcp__slack__post_message even though prepareTools filtered it out of
-    // the declarations. Mutation check: removing the blocklist fold from
-    // isToolExecutionAllowed turns this test red.
-    const capturedPredicate = await capturePredicate(
-      'blocklist',
-      { tools: ['*'], disallowedTools: ['mcp__slack', ToolNames.TODO_WRITE] },
-      bridgeTo('mcp__slack__post_message'),
-    );
-
-    expect(capturedPredicate).toBeDefined();
-    // Server-level MCP pattern blocks every tool of that server…
-    expect(capturedPredicate?.('mcp__slack__post_message')).toBe(false);
-    expect(capturedPredicate?.('mcp__slack')).toBe(false);
-    // …without touching other servers.
-    expect(capturedPredicate?.('mcp__github__create_issue')).toBe(true);
-    // Exact-match blocklisting for non-MCP tools.
-    expect(capturedPredicate?.(ToolNames.TODO_WRITE)).toBe(false);
-    expect(capturedPredicate?.('read_file')).toBe(true);
-    expect(capturedPredicate?.(ToolNames.TOOL_CALL)).toBe(true);
-  });
-
-  it('lets disallowedTools beat the execution allowlist for bridged targets', async () => {
-    // R7-13: the two policy lists must compose with the blocklist winning;
-    // an allowlist entry cannot re-admit a tool the agent's disallowedTools
-    // removes. Mutation check: moving the blocklist fold after the allowlist
-    // pass (or dropping it) turns this red.
-    const capturedPredicate = await capturePredicate(
-      'precedence',
-      {
-        tools: ['*'],
-        executionAllowedTools: [
-          ToolNames.TOOL_CALL,
-          ToolNames.TOOL_SEARCH,
-          'mcp__slack__post_message',
-        ],
-        disallowedTools: ['mcp__slack'],
-      },
-      bridgeTo('mcp__slack__post_message'),
-    );
-
-    expect(capturedPredicate).toBeDefined();
-    // Allowlisted AND blocklisted → blocklist wins.
-    expect(capturedPredicate?.('mcp__slack__post_message')).toBe(false);
-    // Allowlisted and not blocklisted → allowed.
-    expect(capturedPredicate?.(ToolNames.TOOL_CALL)).toBe(true);
-  });
-
-  it.each([ToolNames.EXEC, ToolNames.TOOL_SEARCH])(
-    'keeps %s invocable in CodeModeOnly when the configured tools omit it',
-    async (gateway) => {
-      // R30-1: in CodeModeOnly the registry declares exec unconditionally
-      // (getCodeModeFunctionDeclarations keeps exposure 'exec' regardless of
-      // the allowed set), so a finite tools list without exec must not fold
-      // into an execution allowlist that refuses the only declared tool — the
-      // agent would degrade to text-only. Mutation check: removing the exec
-      // carve-out from the executionAllowedTools === undefined branch of
-      // isToolExecutionAllowed turns this red.
+    /** `<slug>-agent` with session `<slug>-session`; `overrides` patch the config. */
+    function buildCore(
+      slug = 'approval',
+      toolConfig?: ToolConfig,
+      overrides: Record<string, unknown> = {},
+    ): { core: AgentCore; errorSpy: ReturnType<typeof vi.fn> } {
+      const errorSpy = vi.fn();
       const config = {
         getToolRegistry: vi.fn().mockReturnValue({
-          warmAll: vi.fn().mockResolvedValue(undefined),
           getTool: vi.fn(),
-          getAllToolNames: vi
-            .fn()
-            .mockReturnValue([ToolNames.EXEC, ToolNames.READ_FILE]),
-          getFunctionDeclarationsFiltered: vi
-            .fn()
-            .mockReturnValue([{ name: ToolNames.EXEC }]),
         }),
+        getDebugLogger: vi
+          .fn()
+          .mockReturnValue({ debug: vi.fn(), error: errorSpy }),
+        getToolOutputBatchBudget: vi
+          .fn()
+          .mockReturnValue(Number.POSITIVE_INFINITY),
+        getToolResultBytesWritten: vi.fn().mockReturnValue(0),
+        getSessionId: vi.fn().mockReturnValue(`${slug}-session`),
+        isUnifiedAgentLoopEnabled: () => shared,
+        getSkipLoopDetection: () => false,
+        isEventBusAgentLoopEnabled: () => kernel,
+        ...overrides,
+      } as unknown as Config;
+      const core = new AgentCore(
+        `${slug}-agent`,
+        config,
+        { systemPrompt: '' },
+        { model: 'test-model' },
+        { max_turns: 1 },
+        toolConfig,
+      );
+      return { core, errorSpy };
+    }
+
+    it('preserves settled execution status when cancelled before post-processing completes', async () => {
+      const { core } = buildCore('late-synthetic', { tools: ['*'] });
+      const results = recordToolEvents(core).results;
+      const outputs: AgentToolOutputUpdateEvent[] = [];
+      core
+        .getEventEmitter()
+        .on(AgentEventType.TOOL_OUTPUT_UPDATE, (event) => outputs.push(event));
+      let settle!: (
+        callId: string,
+        status: 'success' | 'cancelled',
+        duration: number,
+      ) => void;
+      const schedule = vi
+        .spyOn(CoreToolScheduler.prototype, 'schedule')
+        .mockImplementation(async function (this: CoreToolScheduler) {
+          const options = (
+            this as unknown as {
+              schedulerOptions: {
+                onToolExecutionStarted: (callId: string, epoch: number) => void;
+                onToolExecutionSettled: typeof settle;
+              };
+            }
+          ).schedulerOptions;
+          settle = options.onToolExecutionSettled;
+          options.onToolExecutionStarted('late-call', 100);
+        });
+      try {
+        const controller = new AbortController();
+        const running = runToolStep(
+          core,
+          shared,
+          [{ id: 'late-call', name: 'read_file', args: {} }],
+          controller,
+          'late-prompt',
+          [{ name: 'read_file' }],
+        );
+        await vi.waitFor(() => expect(outputs).toHaveLength(1));
+        settle('late-call', 'success', 20);
+        controller.abort();
+        const result = await running;
+        settle('late-call', 'success', 20);
+        expect(results).toHaveLength(1);
+        // The cancelled call's result stays for the next round's check.
+        expect(result.messages[0].parts).toEqual([
+          {
+            functionResponse: {
+              id: 'late-call',
+              name: 'read_file',
+              response: { error: 'Tool call cancelled by user abort.' },
+            },
+          },
+        ]);
+        expect(
+          [...outputs, ...results]
+            .map((event) => event.lifecycle)
+            .filter(Boolean),
+        ).toEqual([
+          expect.objectContaining({ phase: 'started' }),
+          expect.objectContaining({
+            phase: 'ended',
+            outcome: 'cancelled',
+            executionStatus: 'success',
+            executionDurationMs: 20,
+          }),
+        ]);
+      } finally {
+        schedule.mockRestore();
+      }
+    });
+
+    it('emits one late lifecycle terminal after synthetic cancellation without a second tool result', async () => {
+      const { core } = buildCore('late-synthetic', { tools: ['*'] });
+      const results = recordToolEvents(core).results;
+      const outputs: AgentToolOutputUpdateEvent[] = [];
+      core
+        .getEventEmitter()
+        .on(AgentEventType.TOOL_OUTPUT_UPDATE, (event) => outputs.push(event));
+      let settle!: (
+        callId: string,
+        status: 'cancelled',
+        duration: number,
+      ) => void;
+      const schedule = vi
+        .spyOn(CoreToolScheduler.prototype, 'schedule')
+        .mockImplementation(async function (this: CoreToolScheduler) {
+          const options = (
+            this as unknown as {
+              schedulerOptions: {
+                onToolExecutionStarted: (callId: string, epoch: number) => void;
+                onToolExecutionSettled: typeof settle;
+              };
+            }
+          ).schedulerOptions;
+          settle = options.onToolExecutionSettled;
+          options.onToolExecutionStarted('late-call', 100);
+        });
+      try {
+        const controller = new AbortController();
+        const running = runToolStep(
+          core,
+          shared,
+          [{ id: 'late-call', name: 'read_file', args: {} }],
+          controller,
+          'late-prompt',
+          [{ name: 'read_file' }],
+        );
+        await vi.waitFor(() => expect(outputs).toHaveLength(1));
+        controller.abort();
+        await running;
+        expect(results).toHaveLength(1);
+        expect(results[0].lifecycle).toBeUndefined();
+        settle('late-call', 'cancelled', 20);
+        settle('late-call', 'cancelled', 20);
+        expect(results).toHaveLength(1);
+        expect(outputs.map((event) => event.lifecycle)).toEqual([
+          expect.objectContaining({ phase: 'started' }),
+          expect.objectContaining({
+            phase: 'ended',
+            outcome: 'cancelled',
+            executionStatus: 'cancelled',
+            executionDurationMs: 20,
+          }),
+        ]);
+      } finally {
+        schedule.mockRestore();
+      }
+    });
+
+    it('keeps output and PID intact for lifecycle-only updates and ignores late terminal output', () => {
+      const { core } = buildCore('output');
+      const emitter = core.getEventEmitter();
+      const update = {
+        subagentId: 'output-agent',
+        round: 1,
+        callId: 'call',
+        outputChunk: 'visible output',
+        pid: 42,
+        timestamp: 100,
+      };
+      emitter.emit(AgentEventType.TOOL_OUTPUT_UPDATE, update);
+      const base = {
+        v: 1 as const,
+        kind: 'tool' as const,
+        executionId: 'execution',
+        sessionId: 'output-session',
+        callId: 'call',
+        toolName: 'read',
+      };
+      emitter.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
+        ...update,
+        outputChunk: '',
+        pid: 99,
+        lifecycle: {
+          ...base,
+          phase: 'started',
+          executionStatus: 'running',
+          startedAt: 100,
+        },
+      });
+      expect(core.getLiveOutputs().get('call')).toBe('visible output');
+      expect(core.getShellPids().get('call')).toBe(42);
+      emitter.emit(AgentEventType.TOOL_RESULT, {
+        subagentId: 'output-agent',
+        round: 1,
+        callId: 'call',
+        name: 'read',
+        success: false,
+        timestamp: 110,
+      });
+      emitter.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
+        ...update,
+        outputChunk: '',
+        lifecycle: {
+          ...base,
+          phase: 'ended',
+          executionStatus: 'cancelled',
+          outcome: 'cancelled',
+          startedAt: 100,
+          endedAt: 120,
+          executionDurationMs: 20,
+        },
+      });
+      expect(core.getLiveOutputs().has('call')).toBe(false);
+      expect(core.getShellPids().has('call')).toBe(false);
+    });
+
+    it.skipIf(!kernel)(
+      'drops scheduler output after the loop cancellation cap',
+      async () => {
+        vi.useFakeTimers();
+        const { core } = buildCore('late-output', { tools: ['*'] });
+        let sendOutput!: (callId: string, chunk: string) => void;
+        let release!: () => void;
+        const waiting = new Promise<void>((resolve) => (release = resolve));
+        const schedule = vi
+          .spyOn(CoreToolScheduler.prototype, 'schedule')
+          .mockImplementation(async function (this: CoreToolScheduler) {
+            const { outputUpdateHandler } = (
+              this as unknown as {
+                schedulerOptions: { outputUpdateHandler: typeof sendOutput };
+              }
+            ).schedulerOptions;
+            sendOutput = outputUpdateHandler;
+            await waiting;
+          });
+        try {
+          const abort = new AbortController();
+          const running = runToolStep(
+            core,
+            shared,
+            [{ id: 'late-call', name: 'read_file', args: {} }],
+            abort,
+            'late-prompt',
+            [{ name: 'read_file' }],
+          );
+          await vi.advanceTimersByTimeAsync(0);
+          expect(sendOutput).toBeDefined();
+          sendOutput('late-call', 'live');
+          expect(core.getLiveOutputs().get('late-call')).toBe('live');
+          abort.abort();
+          await vi.advanceTimersByTimeAsync(10_000);
+          await running;
+          sendOutput('late-call', 'late');
+          expect(core.getLiveOutputs().has('late-call')).toBe(false);
+        } finally {
+          release();
+          await vi.advanceTimersByTimeAsync(0);
+          schedule.mockRestore();
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it.each(['undeclared', 'allowlist'])(
+      'records %s rejection as not_started with original owner',
+      async (reason) => {
+        let owner = 'original-owner';
+        const { core } = buildCore(
+          'rejected',
+          { tools: ['*'], executionAllowedTools: [] },
+          { getSessionId: () => owner },
+        );
+        const events = recordToolEvents(core);
+        core.getEventEmitter().on(AgentEventType.TOOL_CALL, () => {
+          owner = 'rotated-owner';
+        });
+        const result = await runToolStep(
+          core,
+          shared,
+          [{ id: 'rejected-call', name: 'read_file', args: {} }],
+          new AbortController(),
+          'prompt-rejected',
+          reason === 'undeclared' ? [] : [{ name: 'read_file' }],
+        );
+        expect(result.results).toHaveLength(1);
+        expect(events.results).toHaveLength(1);
+        expect(events.results[0].success).toBe(false);
+        expect(events.results[0].error).toContain(
+          reason === 'undeclared' ? 'not found' : 'not allowed',
+        );
+        expect(events.results[0].lifecycle).toMatchObject({
+          kind: 'tool',
+          phase: 'ended',
+          callId: 'rejected-call',
+          toolName: 'read_file',
+          sessionId: 'original-owner',
+          subagentId: events.results[0].subagentId,
+          executionStatus: 'not_started',
+          outcome: 'error',
+        });
+        expect(events.results[0].lifecycle).not.toHaveProperty('startedAt');
+        expect(events.results[0].lifecycle).not.toHaveProperty(
+          'executionDurationMs',
+        );
+      },
+    );
+
+    it('schedules an MCP tool that recovers before the batch starts', async () => {
+      const name = 'mcp__catalog__lookup';
+      let available = false;
+      const { core } = buildCore(
+        'mcp-reconnect',
+        { tools: [name], executionAllowedTools: ['mcp__catalog__look*'] },
+        {
+          getToolRegistry: () => ({
+            getTool: (toolName: string) =>
+              available && toolName === name
+                ? { serverName: 'catalog', serverToolName: 'lookup' }
+                : undefined,
+          }),
+          getSkipLoopDetection: () => true,
+          getMaxToolCallsPerTurn: () => 100,
+          isMaxToolCallsPerTurnExplicit: () => false,
+        },
+      );
+      const chat = {
+        sendMessageStream: async () =>
+          (async function* () {
+            yield {
+              type: 'chunk',
+              value: { functionCalls: [{ id: 'lookup', name, args: {} }] },
+            };
+            available = true;
+          })(),
+        getHistoryToolCallFingerprints: () => new Map(),
+      } as unknown as LlmChat;
+      const schedule = vi
+        .spyOn(CoreToolScheduler.prototype, 'schedule')
+        .mockImplementation(async function (this: CoreToolScheduler) {
+          await (this as unknown as Scheduler).onAllToolCallsComplete?.([]);
+        });
+      try {
+        await core.runReasoningLoop(
+          chat,
+          [],
+          [{ name }],
+          new AbortController(),
+          { maxTurns: 1 },
+        );
+        expect(schedule).toHaveBeenCalledOnce();
+        expect(schedule.mock.calls[0]?.[0]).toEqual([
+          expect.objectContaining({ callId: 'lookup', name }),
+        ]);
+      } finally {
+        schedule.mockRestore();
+      }
+    });
+
+    it("keeps the agent's results out of the session's transcript", async () => {
+      const recordToolResult = vi.fn();
+      const { core } = buildCore(
+        'unrecorded',
+        { tools: ['*'] },
+        { getChatRecordingService: () => ({ recordToolResult }) },
+      );
+      const result = await runToolStep(
+        core,
+        shared,
+        [{ id: 'unrecorded-call', name: 'read_file', args: {} }],
+        new AbortController(),
+        'prompt-unrecorded',
+        [],
+      );
+      expect(result.messages[0].parts).toEqual([
+        {
+          functionResponse: {
+            id: 'unrecorded-call',
+            name: 'read_file',
+            response: {
+              error:
+                'Tool "read_file" not found. Tools must use the exact names provided.',
+            },
+          },
+        },
+      ]);
+      expect(recordToolResult).not.toHaveBeenCalled();
+    });
+
+    const request = (
+      slug: string,
+      name = 'Shell',
+      args: Record<string, unknown> = { command: 'git status' },
+    ) => ({
+      callId: `call-${slug}`,
+      name,
+      args,
+      isClientInitiated: true,
+      prompt_id: `prompt-${slug}`,
+    });
+    const execWaiting = (
+      req: Request,
+      onConfirm: unknown = vi.fn(async () => {}),
+    ) =>
+      ({
+        status: 'awaiting_approval',
+        request: req,
+        confirmationDetails: {
+          type: 'exec',
+          title: 'Run command?',
+          command: 'git status',
+          rootCommand: 'git status',
+          onConfirm,
+        },
+      }) as unknown as WaitingToolCall;
+    const hookWaiting = (req: Request, onConfirm: unknown) =>
+      ({
+        status: 'awaiting_approval',
+        request: req,
+        confirmationDetails: {
+          type: 'info',
+          title: 'Hook confirmation',
+          prompt: 'Approve bounced execution?',
+          onConfirm,
+        },
+      }) as unknown as WaitingToolCall;
+    const scheduled = (req: Request, status = 'scheduled') =>
+      ({ status, request: req }) as unknown as ToolCall;
+
+    const directCall = (req: Request): Call => ({
+      id: req.callId,
+      name: req.name,
+      args: req.args,
+    });
+    /** The model-facing tool_call wrapper that bridges to `req`'s target. */
+    const bridgedCall = (req: Request): Call => ({
+      id: req.callId,
+      name: ToolNames.TOOL_CALL,
+      args: { name: req.name, arguments: req.args },
+    });
+
+    const onApproval = (
+      core: AgentCore,
+      listener: (event: AgentApprovalRequestEvent) => void,
+    ) =>
+      core.getEventEmitter().on(AgentEventType.TOOL_WAITING_APPROVAL, listener);
+    function collectApprovals(core: AgentCore) {
+      const events: AgentApprovalRequestEvent[] = [];
+      onApproval(core, (event) => {
+        events.push(event);
+      });
+      return events;
+    }
+
+    it('resolves each approval before its tool batch returns results', async () => {
+      const { core } = buildCore();
+      const approvals = collectApprovals(core);
+      const resolved = vi.fn();
+      core
+        .getEventEmitter()
+        .on(AgentEventType.TOOL_APPROVAL_RESOLVED, resolved);
+      const { results } = recordToolEvents(core);
+      const req = request('first');
+      const sibling = request('sibling');
+      const siblingWaiting = execWaiting(sibling);
+
+      await whileScheduled(
+        core,
+        req,
+        [[execWaiting(req), siblingWaiting]],
+        async () => {
+          await vi.waitFor(() => expect(approvals).toHaveLength(2));
+          expect(resolved).not.toHaveBeenCalled();
+
+          currentScheduler().onToolCallsUpdate?.([
+            scheduled(req),
+            siblingWaiting,
+          ]);
+          expect(resolved).toHaveBeenCalledExactlyOnceWith({
+            subagentId: expect.any(String),
+            round: 1,
+            callId: req.callId,
+            timestamp: expect.any(Number),
+          });
+
+          // An automatic or IDE decision bypasses the inline respond callback.
+          currentScheduler().onToolCallsUpdate?.([
+            scheduled(req, 'executing'),
+            scheduled(sibling),
+          ]);
+          expect(resolved).toHaveBeenCalledTimes(2);
+          expect(resolved).toHaveBeenLastCalledWith(
+            expect.objectContaining({ callId: sibling.callId }),
+          );
+          expect(results).toEqual([]);
+        },
+      );
+    });
+
+    it('restores the frames of the tool step when an approval is answered outside them', async () => {
+      // The tool step parks a call for approval inside the agent's frames;
+      // the UI answers from its own async chain, outside them, and the
+      // approved call must run back inside them.
+      const { core } = buildCore('frames');
+      const approvals = collectApprovals(core);
+      const view = {} as RuntimeContentGeneratorView;
+      let seen: unknown;
+      const onConfirm = vi.fn(async () => {
+        seen = {
+          view: getRuntimeContentGenerator(),
+          agentId: getCurrentAgentId(),
+          depth: getCurrentAgentDepth(),
+          teammate: getTeammateContext()?.agentName,
+        };
+      });
+      const req = request('frames');
+      const scheduleSpy = mockScheduleUpdates([[execWaiting(req, onConfirm)]]);
+      let run: ReturnType<typeof startCall> | undefined;
+      try {
+        await runWithRuntimeContentGenerator(view, () =>
+          runWithAgentContext('outer', () =>
+            runWithAgentContext('inner', () =>
+              runWithTeammateIdentity(teammate('scribe', 'crew'), async () => {
+                run = startCall(core, directCall(req), req.prompt_id);
+                await vi.waitFor(() => expect(approvals).toHaveLength(1));
+              }),
+            ),
+          ),
+        );
+        expect(getCurrentAgentId()).toBeNull();
+        await approvals[0].respond(ToolConfirmationOutcome.ProceedOnce);
+        expect(onConfirm).toHaveBeenCalledOnce();
+        expect(seen).toEqual({
+          view,
+          agentId: 'inner',
+          depth: 1,
+          teammate: 'scribe',
+        });
+      } finally {
+        run?.abortController.abort();
+        await run?.processing;
+        scheduleSpy.mockRestore();
+      }
+    });
+
+    it('retires an old approval before delivering its replacement', async () => {
+      const { core } = buildCore();
+      const order: string[] = [];
+      onApproval(core, () => order.push('waiting'));
+      core
+        .getEventEmitter()
+        .on(AgentEventType.TOOL_APPROVAL_RESOLVED, () =>
+          order.push('resolved'),
+        );
+      const req = request('replacement');
+
+      await whileScheduled(
+        core,
+        req,
+        [[execWaiting(req)], [hookWaiting(req, vi.fn())]],
+        async () => {
+          await vi.waitFor(() =>
+            expect(order).toEqual(['waiting', 'resolved', 'waiting']),
+          );
+        },
+      );
+    });
+
+    function recordToolEvents(core: AgentCore) {
+      const calls: AgentToolCallEvent[] = [];
+      const results: AgentToolResultEvent[] = [];
+      const order: string[] = [];
+      core.getEventEmitter().on(AgentEventType.TOOL_CALL, (event) => {
+        calls.push(event);
+        order.push(`call:${event.name}`);
+      });
+      core.getEventEmitter().on(AgentEventType.TOOL_RESULT, (event) => {
+        results.push(event);
+        order.push(`result:${event.name}`);
+      });
+      return { calls, results, order };
+    }
+    /** A listener that always throws the same error. */
+    const throwing = (message: string) => {
+      const error = new Error(message);
+      return vi.fn(() => {
+        throw error;
+      });
+    };
+    /** A listener that throws `error` on its first call only. */
+    const failOnce = (error: Error) => {
+      let shouldThrow = true;
+      return vi.fn(() => {
+        if (shouldThrow) {
+          shouldThrow = false;
+          throw error;
+        }
+      });
+    };
+
+    /** Stubs schedule() to replay `batches` through onToolCallsUpdate. */
+    function mockScheduleUpdates(batches: ToolCall[][], gate?: Promise<void>) {
+      return vi
+        .spyOn(CoreToolScheduler.prototype, 'schedule')
+        .mockImplementation(async function (this: CoreToolScheduler) {
+          if (gate) await gate;
+          for (const calls of batches) {
+            (this as unknown as Scheduler).onToolCallsUpdate?.(calls);
+          }
+        });
+    }
+    /** The scheduler instance the active schedule() stub was called on. */
+    const currentScheduler = () =>
+      vi.mocked(CoreToolScheduler.prototype.schedule).mock
+        .instances[0] as unknown as Scheduler;
+
+    function startCall(core: AgentCore, call: Call, promptId: string) {
+      const abortController = new AbortController();
+      const processing = runToolStep(
+        core,
+        shared,
+        [call],
+        abortController,
+        promptId,
+        [{ name: call.name } as FunctionDeclaration],
+      );
+      return { abortController, processing };
+    }
+
+    // Processes `req` with schedule() replaying `batches` and runs `body`
+    // while the call is in flight; then aborts, drains, restores schedule()
+    // and real timers.
+    async function whileScheduled(
+      core: AgentCore,
+      req: Request,
+      batches: ToolCall[][],
+      body: (run: ReturnType<typeof startCall>) => Promise<void> | void,
+      toCall = directCall,
+    ) {
+      const scheduleSpy = mockScheduleUpdates(batches);
+      const run = startCall(core, toCall(req), req.prompt_id);
+      try {
+        // On the shared loop the call is scheduled in the run's first round.
+        // Microtasks only: fake timers must not advance meanwhile.
+        for (let i = 0; i < 1000 && !scheduleSpy.mock.calls.length; i++) {
+          await Promise.resolve();
+        }
+        await body(run);
+      } finally {
+        run.abortController.abort();
+        await run.processing;
+        scheduleSpy.mockRestore();
+        vi.useRealTimers();
+      }
+    }
+
+    // Runs `call` for a `<slug>` core with schedule() stubbed to capture the
+    // isToolExecutionAllowed predicate it was handed, then aborts.
+    async function capturePredicate(
+      slug: string,
+      toolConfig: ToolConfig,
+      call: Omit<Call, 'id'>,
+      overrides?: Record<string, unknown>,
+    ): Promise<((name: string) => boolean) | undefined> {
+      const { core } = buildCore(slug, toolConfig, overrides);
+      let capturedPredicate: ((name: string) => boolean) | undefined;
+      const scheduleSpy = vi
+        .spyOn(CoreToolScheduler.prototype, 'schedule')
+        .mockImplementation(async function (this: CoreToolScheduler) {
+          capturedPredicate = (this as unknown as Scheduler)
+            .isToolExecutionAllowed;
+        });
+      const { abortController, processing } = startCall(
+        core,
+        { id: `call-${slug}`, ...call },
+        `prompt-${slug}`,
+      );
+      await vi.waitFor(() => expect(scheduleSpy).toHaveBeenCalledOnce());
+      abortController.abort();
+      await processing;
+      scheduleSpy.mockRestore();
+      return capturedPredicate;
+    }
+    const bridgeTo = (target: string) => ({
+      name: ToolNames.TOOL_CALL,
+      args: { name: target, arguments: {} },
+    });
+
+    it('emits scheduler-resolved tool identity for bridged calls', async () => {
+      const { core } = buildCore();
+      const { calls, results } = recordToolEvents(core);
+      const targetRequest = {
+        ...request('bridge', 'mcp__docs__read', { path: 'README.md' }),
+        modelFacingName: ToolNames.TOOL_CALL,
+        modelFacingArgs: {
+          name: 'mcp__docs__read',
+          arguments: { path: 'README.md' },
+        },
+      };
+
+      await whileScheduled(
+        core,
+        targetRequest,
+        [[scheduled(targetRequest)]],
+        async () => {
+          await vi.waitFor(() => expect(calls).toHaveLength(1));
+          expect(calls[0]).toMatchObject({
+            callId: targetRequest.callId,
+            name: targetRequest.name,
+            args: targetRequest.args,
+            modelFacingName: ToolNames.TOOL_CALL,
+            modelFacingArgs: {
+              name: targetRequest.name,
+              arguments: targetRequest.args,
+            },
+          });
+        },
+        bridgedCall,
+      );
+
+      expect(results).toHaveLength(1);
+      expect(results[0]).toMatchObject({
+        callId: targetRequest.callId,
+        name: targetRequest.name,
+        success: false,
+      });
+      expect(results[0].responseParts?.[0]?.functionResponse?.name).toBe(
+        ToolNames.TOOL_CALL,
+      );
+    });
+
+    it('emits a wrapper TOOL_CALL before a bridge cancellation on abort', async () => {
+      // The abort lands BEFORE the scheduler resolves the target. Persist the
+      // model-facing wrapper call before its synthetic cancellation, then ignore
+      // the scheduler's late resolved-target update.
+      const { core } = buildCore();
+      const { calls, results, order } = recordToolEvents(core);
+      const targetRequest = request('bridge-aborted', 'mcp__docs__read', {
+        path: 'README.md',
+      });
+      let releaseUpdate!: () => void;
+      const updateGate = new Promise<void>((resolve) => {
+        releaseUpdate = resolve;
+      });
+      // Hold the first update until after the abort has run.
+      const scheduleSpy = mockScheduleUpdates(
+        [[scheduled(targetRequest)]],
+        updateGate,
+      );
+      const { abortController, processing } = startCall(
+        core,
+        bridgedCall(targetRequest),
+        targetRequest.prompt_id,
+      );
+
+      await vi.waitFor(() => expect(scheduleSpy).toHaveBeenCalledOnce());
+      abortController.abort();
+      releaseUpdate();
+      await processing;
+      scheduleSpy.mockRestore();
+
+      expect(order).toEqual([
+        `call:${ToolNames.TOOL_CALL}`,
+        `result:${ToolNames.TOOL_CALL}`,
+      ]);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        callId: targetRequest.callId,
+        name: ToolNames.TOOL_CALL,
+        args: {
+          name: targetRequest.name,
+          arguments: targetRequest.args,
+        },
+      });
+      expect(results).toHaveLength(1);
+      expect(results[0]).toMatchObject({
+        callId: targetRequest.callId,
+        success: false,
+      });
+      expect(results[0].responseParts?.[0]?.functionResponse?.name).toBe(
+        ToolNames.TOOL_CALL,
+      );
+    });
+
+    it('passes the execution allowlist to the scheduler for bridged targets', async () => {
+      // The pre-schedule gates only see the wrapper name (tool_call), which a
+      // fork's allowlist always contains; the scheduler must be given a
+      // predicate bound to the same allowlist to re-check resolved targets.
+      const capturedPredicate = await capturePredicate(
+        'allowlist',
+        {
+          tools: ['*'],
+          executionAllowedTools: [
+            ToolNames.TOOL_CALL,
+            ToolNames.TOOL_SEARCH,
+            'read_file',
+          ],
+        },
+        bridgeTo('web_fetch'),
+      );
+
+      expect(capturedPredicate).toBeDefined();
+      expect(capturedPredicate?.('web_fetch')).toBe(false);
+      expect(capturedPredicate?.('read_file')).toBe(true);
+      expect(capturedPredicate?.(ToolNames.TOOL_CALL)).toBe(true);
+    });
+
+    it('folds the configured tool allowlist into the bridged-target re-check', async () => {
+      const capturedPredicate = await capturePredicate(
+        'configured-allowlist',
+        {
+          tools: [
+            ToolNames.READ_FILE,
+            ToolNames.TOOL_SEARCH,
+            ToolNames.TOOL_CALL,
+          ],
+        },
+        bridgeTo('mcp__slack__post_message'),
+      );
+
+      expect(capturedPredicate).toBeDefined();
+      expect(capturedPredicate?.('mcp__slack__post_message')).toBe(false);
+      expect(capturedPredicate?.(ToolNames.READ_FILE)).toBe(true);
+      expect(capturedPredicate?.(ToolNames.TOOL_CALL)).toBe(true);
+    });
+
+    it('folds the per-agent disallowedTools blocklist into the bridged-target re-check', async () => {
+      // R6-8: the tool_call bridge resolves around the declaration list, so
+      // the disallowedTools blocklist prepareTools applies to declarations
+      // must be re-checked at invocation level, symmetrically to the
+      // execution allowlist above. Without this fold a subagent configured
+      // with disallowedTools: ['mcp__slack'] could bridge-execute
+      // mcp__slack__post_message even though prepareTools filtered it out of
+      // the declarations. Mutation check: removing the blocklist fold from
+      // isToolExecutionAllowed turns this test red.
+      const capturedPredicate = await capturePredicate(
+        'blocklist',
+        { tools: ['*'], disallowedTools: ['mcp__slack', ToolNames.TODO_WRITE] },
+        bridgeTo('mcp__slack__post_message'),
+      );
+
+      expect(capturedPredicate).toBeDefined();
+      // Server-level MCP pattern blocks every tool of that server…
+      expect(capturedPredicate?.('mcp__slack__post_message')).toBe(false);
+      expect(capturedPredicate?.('mcp__slack')).toBe(false);
+      // …without touching other servers.
+      expect(capturedPredicate?.('mcp__github__create_issue')).toBe(true);
+      // Exact-match blocklisting for non-MCP tools.
+      expect(capturedPredicate?.(ToolNames.TODO_WRITE)).toBe(false);
+      expect(capturedPredicate?.('read_file')).toBe(true);
+      expect(capturedPredicate?.(ToolNames.TOOL_CALL)).toBe(true);
+    });
+
+    it('lets disallowedTools beat the execution allowlist for bridged targets', async () => {
+      // R7-13: the two policy lists must compose with the blocklist winning;
+      // an allowlist entry cannot re-admit a tool the agent's disallowedTools
+      // removes. Mutation check: moving the blocklist fold after the allowlist
+      // pass (or dropping it) turns this red.
+      const capturedPredicate = await capturePredicate(
+        'precedence',
+        {
+          tools: ['*'],
+          executionAllowedTools: [
+            ToolNames.TOOL_CALL,
+            ToolNames.TOOL_SEARCH,
+            'mcp__slack__post_message',
+          ],
+          disallowedTools: ['mcp__slack'],
+        },
+        bridgeTo('mcp__slack__post_message'),
+      );
+
+      expect(capturedPredicate).toBeDefined();
+      // Allowlisted AND blocklisted → blocklist wins.
+      expect(capturedPredicate?.('mcp__slack__post_message')).toBe(false);
+      // Allowlisted and not blocklisted → allowed.
+      expect(capturedPredicate?.(ToolNames.TOOL_CALL)).toBe(true);
+    });
+
+    it.each([ToolNames.EXEC, ToolNames.TOOL_SEARCH])(
+      'keeps %s invocable in CodeModeOnly when the configured tools omit it',
+      async (gateway) => {
+        // R30-1: in CodeModeOnly the registry declares exec unconditionally
+        // (getCodeModeFunctionDeclarations keeps exposure 'exec' regardless of
+        // the allowed set), so a finite tools list without exec must not fold
+        // into an execution allowlist that refuses the only declared tool — the
+        // agent would degrade to text-only. Mutation check: removing the exec
+        // carve-out from the executionAllowedTools === undefined branch of
+        // isToolExecutionAllowed turns this red.
+        const config = {
+          getToolRegistry: vi.fn().mockReturnValue({
+            warmAll: vi.fn().mockResolvedValue(undefined),
+            getTool: vi.fn(),
+            getAllToolNames: vi
+              .fn()
+              .mockReturnValue([ToolNames.EXEC, ToolNames.READ_FILE]),
+            getFunctionDeclarationsFiltered: vi
+              .fn()
+              .mockReturnValue([{ name: ToolNames.EXEC }]),
+          }),
+          getDebugLogger: vi
+            .fn()
+            .mockReturnValue({ debug: vi.fn(), error: vi.fn() }),
+          getToolOutputBatchBudget: vi
+            .fn()
+            .mockReturnValue(Number.POSITIVE_INFINITY),
+          getToolResultBytesWritten: vi.fn().mockReturnValue(0),
+          getSessionId: vi.fn().mockReturnValue('code-mode-exec-session'),
+          getMaxSubagentDepth: vi.fn().mockReturnValue(5),
+          getToolMode: vi.fn().mockReturnValue(ToolMode.CodeModeOnly),
+          isUnifiedAgentLoopEnabled: () => shared,
+          getSkipLoopDetection: () => false,
+          isEventBusAgentLoopEnabled: () => kernel,
+        } as unknown as Config;
+        const core = new AgentCore(
+          'code-mode-exec-agent',
+          config,
+          { systemPrompt: '' },
+          { model: 'test-model' },
+          { max_turns: 1 },
+          { tools: [ToolNames.READ_FILE] },
+        );
+
+        let capturedPredicate: ((name: string) => boolean) | undefined;
+        const scheduleSpy = vi
+          .spyOn(CoreToolScheduler.prototype, 'schedule')
+          .mockImplementation(async function (this: CoreToolScheduler) {
+            capturedPredicate = (
+              this as unknown as {
+                isToolExecutionAllowed?: (name: string) => boolean;
+              }
+            ).isToolExecutionAllowed;
+          });
+        const abortController = new AbortController();
+
+        const processing = runToolStep(
+          core,
+          shared,
+          [
+            {
+              id: 'call-code-mode-exec',
+              name: gateway,
+              args: { source: 'await tools.read_file({ path: "x" })' },
+            },
+          ],
+          abortController,
+          'prompt-code-mode-exec',
+          [{ name: gateway } as FunctionDeclaration],
+        );
+        await vi.waitFor(() => expect(scheduleSpy).toHaveBeenCalledOnce());
+        expect(scheduleSpy.mock.calls[0][0]).toEqual([
+          expect.objectContaining({
+            name: gateway,
+            codeModeAllowedToolNames: [ToolNames.READ_FILE],
+          }),
+        ]);
+        abortController.abort();
+        await processing;
+        scheduleSpy.mockRestore();
+
+        expect(capturedPredicate).toBeDefined();
+        // The one tool code mode always declares stays invocable …
+        expect(capturedPredicate?.(gateway)).toBe(true);
+        // … without widening the configured list for anything else.
+        expect(capturedPredicate?.('web_fetch')).toBe(false);
+      },
+    );
+
+    it('retries only a transiently failed listener', async () => {
+      const { core, errorSpy } = buildCore();
+      const deliveryError = new Error('approval listener failed');
+      const transientListener = failOnce(deliveryError);
+      onApproval(core, transientListener);
+      const approvalEvents = collectApprovals(core);
+      const req = request('retry');
+
+      await whileScheduled(core, req, [[execWaiting(req)]], async () => {
+        await vi.waitFor(() =>
+          expect(transientListener).toHaveBeenCalledTimes(2),
+        );
+        expect(approvalEvents).toHaveLength(1);
+        expect(transientListener).toHaveBeenCalledTimes(2);
+        expect(errorSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Approval event delivery failed for call-retry',
+          ),
+          deliveryError,
+        );
+      });
+    });
+
+    it('continues past a thrower before a healthy listener', async () => {
+      const { core } = buildCore();
+      const thrower = throwing('approval listener always fails');
+      onApproval(core, thrower);
+      const healthyListener = vi.fn();
+      onApproval(core, healthyListener);
+      const req = request('bounded-retry');
+
+      await whileScheduled(core, req, [[execWaiting(req)]], () => {
+        expect(thrower).toHaveBeenCalledOnce();
+        expect(healthyListener).toHaveBeenCalledOnce();
+      });
+    });
+
+    it('bounds persistent listener retries and reports exhaustion', async () => {
+      vi.useFakeTimers();
+      const { core, errorSpy } = buildCore();
+      const consoleErrorSpy = vi
+        .spyOn(console, 'error')
+        .mockImplementation(() => {});
+      const thrower = throwing('approval listener always fails');
+      onApproval(core, thrower);
+      const req = request('bounded-retry');
+      const waiting = execWaiting(req);
+
+      try {
+        await whileScheduled(core, req, [[waiting]], async () => {
+          await vi.runAllTimersAsync();
+          expect(thrower).toHaveBeenCalledTimes(3);
+          expect(errorSpy).toHaveBeenCalledTimes(3);
+          expect(consoleErrorSpy).toHaveBeenCalledOnce();
+          expect(consoleErrorSpy).toHaveBeenCalledWith(
+            expect.stringContaining(
+              'Approval event delivery for call-bounded-retry exhausted 3 attempts for 1 listener',
+            ),
+          );
+          const sibling = {
+            ...req,
+            callId: 'call-sibling',
+            args: { command: 'pwd' },
+          };
+          currentScheduler().onToolCallsUpdate?.([waiting, scheduled(sibling)]);
+          currentScheduler().onToolCallsUpdate?.([
+            waiting,
+            scheduled(sibling, 'executing'),
+          ]);
+          expect(thrower).toHaveBeenCalledTimes(3);
+        });
+      } finally {
+        consoleErrorSpy.mockRestore();
+      }
+    });
+
+    it('cancels a pending delivery retry when the approval settles', async () => {
+      vi.useFakeTimers();
+      const { core } = buildCore();
+      let attempts = 0;
+      onApproval(core, () => {
+        attempts++;
+        throw new Error('approval listener failed');
+      });
+      const req = request('settled-retry');
+
+      await whileScheduled(core, req, [[execWaiting(req)], []], async () => {
+        await vi.runAllTimersAsync();
+        expect(attempts).toBe(1);
+      });
+    });
+
+    it('does not duplicate a healthy listener before a failed listener', async () => {
+      const { core } = buildCore();
+      const retainedEvents = collectApprovals(core);
+      const transientListener = failOnce(new Error('later listener failed'));
+      onApproval(core, transientListener);
+      let retryEvent: AgentApprovalRequestEvent | undefined;
+      onApproval(core, (event) => {
+        retryEvent = event;
+      });
+      const onConfirm = vi.fn(async () => {});
+      const req = request('partial-delivery');
+
+      await whileScheduled(
+        core,
+        req,
+        [[execWaiting(req, onConfirm)]],
+        async () => {
+          await vi.waitFor(() =>
+            expect(transientListener).toHaveBeenCalledTimes(2),
+          );
+          expect(retryEvent).toBeDefined();
+          expect(retainedEvents).toHaveLength(1);
+          expect(transientListener).toHaveBeenCalledTimes(2);
+          await Promise.all([
+            retainedEvents[0].respond(ToolConfirmationOutcome.ProceedOnce),
+            retryEvent!.respond(ToolConfirmationOutcome.ProceedOnce),
+          ]);
+          expect(onConfirm).toHaveBeenCalledOnce();
+        },
+      );
+    });
+
+    it('cancels a pending delivery retry on abort', async () => {
+      vi.useFakeTimers();
+      const { core } = buildCore();
+      const thrower = throwing('approval listener failed');
+      onApproval(core, thrower);
+      const req = request('aborted-retry');
+
+      await whileScheduled(
+        core,
+        req,
+        [[execWaiting(req)]],
+        async ({ abortController, processing }) => {
+          expect(thrower).toHaveBeenCalledOnce();
+          abortController.abort();
+          await processing;
+          await vi.runAllTimersAsync();
+          expect(thrower).toHaveBeenCalledOnce();
+        },
+      );
+    });
+
+    it('cancels a pending delivery retry when all tool calls complete', async () => {
+      vi.useFakeTimers();
+      const { core } = buildCore();
+      const thrower = throwing('approval listener failed');
+      onApproval(core, thrower);
+      const req = request('completed-retry');
+
+      await whileScheduled(
+        core,
+        req,
+        [[execWaiting(req)]],
+        async ({ processing }) => {
+          expect(thrower).toHaveBeenCalledOnce();
+          await currentScheduler().onAllToolCallsComplete?.([]);
+          await processing;
+          await vi.runAllTimersAsync();
+          expect(thrower).toHaveBeenCalledOnce();
+        },
+      );
+    });
+
+    it('rejects an old approval after the call bounces to a new incarnation', async () => {
+      const { core } = buildCore();
+      const approvalEvents = collectApprovals(core);
+      const firstOnConfirm = vi.fn(async () => {});
+      const secondOnConfirm = vi.fn(async () => {});
+      const req = request('stale-approval');
+
+      await whileScheduled(
+        core,
+        req,
+        [[execWaiting(req, firstOnConfirm)]],
+        async () => {
+          await vi.waitFor(() => expect(approvalEvents).toHaveLength(1));
+          currentScheduler().onToolCallsUpdate?.([
+            hookWaiting(req, secondOnConfirm),
+          ]);
+          await vi.waitFor(() => expect(approvalEvents).toHaveLength(2));
+
+          await approvalEvents[0].respond(ToolConfirmationOutcome.ProceedOnce);
+          await approvalEvents[1].respond(ToolConfirmationOutcome.ProceedOnce);
+
+          expect(firstOnConfirm).not.toHaveBeenCalled();
+          expect(secondOnConfirm).toHaveBeenCalledOnce();
+        },
+      );
+    });
+
+    it('creates a new approval when the same details become active again', async () => {
+      const { core } = buildCore();
+      const approvalEvents = collectApprovals(core);
+      const onConfirm = vi.fn(async () => {});
+      const req = request('reused-details');
+      const waiting = execWaiting(req, onConfirm);
+
+      await whileScheduled(core, req, [[waiting]], async () => {
+        expect(approvalEvents).toHaveLength(1);
+        currentScheduler().onToolCallsUpdate?.([]);
+        currentScheduler().onToolCallsUpdate?.([waiting]);
+        expect(approvalEvents).toHaveLength(2);
+
+        await approvalEvents[0].respond(ToolConfirmationOutcome.ProceedOnce);
+        await approvalEvents[1].respond(ToolConfirmationOutcome.ProceedOnce);
+
+        expect(onConfirm).toHaveBeenCalledOnce();
+      });
+    });
+
+    it('emits once per approval incarnation and allows each response', async () => {
+      const { core } = buildCore();
+      const approvalEvents = collectApprovals(core);
+      const firstOnConfirm = vi.fn(async () => {});
+      const secondOnConfirm = vi.fn(async () => {});
+      const req = request('1');
+      const secondWaiting = hookWaiting(req, secondOnConfirm);
+      const firstWaiting = execWaiting(
+        req,
+        vi.fn(async () => {
+          await firstOnConfirm();
+          currentScheduler().onToolCallsUpdate?.([secondWaiting]);
+        }),
+      );
+
+      await whileScheduled(
+        core,
+        req,
+        [[firstWaiting], [firstWaiting]],
+        async () => {
+          await vi.waitFor(() => expect(approvalEvents).toHaveLength(1));
+          await Promise.all([
+            approvalEvents[0].respond(ToolConfirmationOutcome.ProceedOnce),
+            approvalEvents[0].respond(ToolConfirmationOutcome.ProceedOnce),
+          ]);
+          await vi.waitFor(() => expect(approvalEvents).toHaveLength(2));
+          await Promise.all([
+            approvalEvents[1].respond(ToolConfirmationOutcome.ProceedOnce),
+            approvalEvents[1].respond(ToolConfirmationOutcome.ProceedOnce),
+          ]);
+
+          expect(firstOnConfirm).toHaveBeenCalledOnce();
+          expect(secondOnConfirm).toHaveBeenCalledOnce();
+        },
+      );
+    });
+  },
+);
+
+describe('AgentCore.processFunctionCalls incomplete-argument marker', () => {
+  it.each(LOOPS)(
+    'forwards hadIncompleteArguments when the turn was not token-truncated ($name loop)',
+    async ({ shared, kernel }) => {
+      const checkToolSteps = trackToolSteps(shared, kernel);
+      const config = {
+        isUnifiedAgentLoopEnabled: () => shared,
+        getSkipLoopDetection: () => false,
+        isEventBusAgentLoopEnabled: () => kernel,
+        getToolRegistry: vi.fn().mockReturnValue({ getTool: vi.fn() }),
         getDebugLogger: vi
           .fn()
           .mockReturnValue({ debug: vi.fn(), error: vi.fn() }),
@@ -1350,394 +2090,75 @@ describe('AgentCore approval response deduplication', () => {
           .fn()
           .mockReturnValue(Number.POSITIVE_INFINITY),
         getToolResultBytesWritten: vi.fn().mockReturnValue(0),
-        getSessionId: vi.fn().mockReturnValue('code-mode-exec-session'),
-        getMaxSubagentDepth: vi.fn().mockReturnValue(5),
-        getToolMode: vi.fn().mockReturnValue(ToolMode.CodeModeOnly),
+        getSessionId: vi.fn().mockReturnValue('incomplete-args-session'),
       } as unknown as Config;
       const core = new AgentCore(
-        'code-mode-exec-agent',
+        'incomplete-args-agent',
         config,
         { systemPrompt: '' },
         { model: 'test-model' },
         { max_turns: 1 },
-        { tools: [ToolNames.READ_FILE] },
       );
 
-      let capturedPredicate: ((name: string) => boolean) | undefined;
+      const functionCall = {
+        id: 'call-incomplete',
+        name: 'write_file',
+        args: { file_path: 'a.txt', content: 'half-written' },
+      };
+      markToolCallArgumentsIncomplete([{ functionCall }]);
+      // Negative control: an unmarked sibling must reach the scheduler WITHOUT
+      // hadIncompleteArguments, or over-application of the marker (which would
+      // reject every subagent Edit call) is undetectable.
+      const cleanFunctionCall = {
+        id: 'call-clean',
+        name: 'write_file',
+        args: { file_path: 'b.txt', content: 'complete' },
+      };
+
       const scheduleSpy = vi
         .spyOn(CoreToolScheduler.prototype, 'schedule')
-        .mockImplementation(async function (this: CoreToolScheduler) {
-          capturedPredicate = (
-            this as unknown as {
-              isToolExecutionAllowed?: (name: string) => boolean;
-            }
-          ).isToolExecutionAllowed;
-        });
+        .mockResolvedValue(undefined);
       const abortController = new AbortController();
 
-      const processing = core.processFunctionCalls(
-        [
-          {
-            id: 'call-code-mode-exec',
-            name: gateway,
-            args: { source: 'await tools.read_file({ path: "x" })' },
-          },
-        ],
+      // The subagent turn saw no token cut, so the marker is the only thing
+      // left that can arm the scheduler's data-loss guard here — a subagent
+      // has no approval prompt between the response and the write (#12970).
+      const processing = runToolStep(
+        core,
+        shared,
+        [functionCall, cleanFunctionCall],
         abortController,
-        'prompt-code-mode-exec',
-        1,
-        [{ name: gateway } as FunctionDeclaration],
+        'prompt-incomplete',
+        [{ name: 'write_file' } as FunctionDeclaration],
       );
-      await vi.waitFor(() => expect(scheduleSpy).toHaveBeenCalledOnce());
-      expect(scheduleSpy.mock.calls[0][0]).toEqual([
-        expect.objectContaining({
-          name: gateway,
-          codeModeAllowedToolNames: [ToolNames.READ_FILE],
-        }),
-      ]);
-      abortController.abort();
-      await processing;
-      scheduleSpy.mockRestore();
-
-      expect(capturedPredicate).toBeDefined();
-      // The one tool code mode always declares stays invocable …
-      expect(capturedPredicate?.(gateway)).toBe(true);
-      // … without widening the configured list for anything else.
-      expect(capturedPredicate?.('web_fetch')).toBe(false);
-    },
-  );
-
-  it('retries only a transiently failed listener', async () => {
-    const { core, errorSpy } = buildCore();
-    const deliveryError = new Error('approval listener failed');
-    const transientListener = failOnce(deliveryError);
-    onApproval(core, transientListener);
-    const approvalEvents = collectApprovals(core);
-    const req = request('retry');
-
-    await whileScheduled(core, req, [[execWaiting(req)]], async () => {
-      await vi.waitFor(() =>
-        expect(transientListener).toHaveBeenCalledTimes(2),
-      );
-      expect(approvalEvents).toHaveLength(1);
-      expect(transientListener).toHaveBeenCalledTimes(2);
-      expect(errorSpy).toHaveBeenCalledWith(
-        expect.stringContaining(
-          'Approval event delivery failed for call-retry',
-        ),
-        deliveryError,
-      );
-    });
-  });
-
-  it('continues past a thrower before a healthy listener', async () => {
-    const { core } = buildCore();
-    const thrower = throwing('approval listener always fails');
-    onApproval(core, thrower);
-    const healthyListener = vi.fn();
-    onApproval(core, healthyListener);
-    const req = request('bounded-retry');
-
-    await whileScheduled(core, req, [[execWaiting(req)]], () => {
-      expect(thrower).toHaveBeenCalledOnce();
-      expect(healthyListener).toHaveBeenCalledOnce();
-    });
-  });
-
-  it('bounds persistent listener retries and reports exhaustion', async () => {
-    vi.useFakeTimers();
-    const { core, errorSpy } = buildCore();
-    const consoleErrorSpy = vi
-      .spyOn(console, 'error')
-      .mockImplementation(() => {});
-    const thrower = throwing('approval listener always fails');
-    onApproval(core, thrower);
-    const req = request('bounded-retry');
-    const waiting = execWaiting(req);
-
-    try {
-      await whileScheduled(core, req, [[waiting]], async () => {
-        await vi.runAllTimersAsync();
-        expect(thrower).toHaveBeenCalledTimes(3);
-        expect(errorSpy).toHaveBeenCalledTimes(3);
-        expect(consoleErrorSpy).toHaveBeenCalledOnce();
-        expect(consoleErrorSpy).toHaveBeenCalledWith(
-          expect.stringContaining(
-            'Approval event delivery for call-bounded-retry exhausted 3 attempts for 1 listener',
-          ),
-        );
-        const sibling = {
-          ...req,
-          callId: 'call-sibling',
-          args: { command: 'pwd' },
-        };
-        currentScheduler().onToolCallsUpdate?.([waiting, scheduled(sibling)]);
-        currentScheduler().onToolCallsUpdate?.([
-          waiting,
-          scheduled(sibling, 'executing'),
+      try {
+        await vi.waitFor(() => expect(scheduleSpy).toHaveBeenCalledOnce());
+        const scheduledRequests = scheduleSpy.mock.calls[0]?.[0];
+        expect(scheduledRequests).toEqual([
+          expect.objectContaining({
+            callId: 'call-incomplete',
+            name: 'write_file',
+            wasOutputTruncated: false,
+            hadIncompleteArguments: true,
+          }),
+          expect.objectContaining({
+            callId: 'call-clean',
+            name: 'write_file',
+            wasOutputTruncated: false,
+          }),
         ]);
-        expect(thrower).toHaveBeenCalledTimes(3);
-      });
-    } finally {
-      consoleErrorSpy.mockRestore();
-    }
-  });
-
-  it('cancels a pending delivery retry when the approval settles', async () => {
-    vi.useFakeTimers();
-    const { core } = buildCore();
-    let attempts = 0;
-    onApproval(core, () => {
-      attempts++;
-      throw new Error('approval listener failed');
-    });
-    const req = request('settled-retry');
-
-    await whileScheduled(core, req, [[execWaiting(req)], []], async () => {
-      await vi.runAllTimersAsync();
-      expect(attempts).toBe(1);
-    });
-  });
-
-  it('does not duplicate a healthy listener before a failed listener', async () => {
-    const { core } = buildCore();
-    const retainedEvents = collectApprovals(core);
-    const transientListener = failOnce(new Error('later listener failed'));
-    onApproval(core, transientListener);
-    let retryEvent: AgentApprovalRequestEvent | undefined;
-    onApproval(core, (event) => {
-      retryEvent = event;
-    });
-    const onConfirm = vi.fn(async () => {});
-    const req = request('partial-delivery');
-
-    await whileScheduled(
-      core,
-      req,
-      [[execWaiting(req, onConfirm)]],
-      async () => {
-        await vi.waitFor(() =>
-          expect(transientListener).toHaveBeenCalledTimes(2),
+        expect(Array.isArray(scheduledRequests)).toBe(true);
+        expect((scheduledRequests as unknown[])[1]).not.toHaveProperty(
+          'hadIncompleteArguments',
         );
-        expect(retryEvent).toBeDefined();
-        expect(retainedEvents).toHaveLength(1);
-        expect(transientListener).toHaveBeenCalledTimes(2);
-        await Promise.all([
-          retainedEvents[0].respond(ToolConfirmationOutcome.ProceedOnce),
-          retryEvent!.respond(ToolConfirmationOutcome.ProceedOnce),
-        ]);
-        expect(onConfirm).toHaveBeenCalledOnce();
-      },
-    );
-  });
-
-  it('cancels a pending delivery retry on abort', async () => {
-    vi.useFakeTimers();
-    const { core } = buildCore();
-    const thrower = throwing('approval listener failed');
-    onApproval(core, thrower);
-    const req = request('aborted-retry');
-
-    await whileScheduled(
-      core,
-      req,
-      [[execWaiting(req)]],
-      async ({ abortController, processing }) => {
-        expect(thrower).toHaveBeenCalledOnce();
+      } finally {
         abortController.abort();
         await processing;
-        await vi.runAllTimersAsync();
-        expect(thrower).toHaveBeenCalledOnce();
-      },
-    );
-  });
-
-  it('cancels a pending delivery retry when all tool calls complete', async () => {
-    vi.useFakeTimers();
-    const { core } = buildCore();
-    const thrower = throwing('approval listener failed');
-    onApproval(core, thrower);
-    const req = request('completed-retry');
-
-    await whileScheduled(
-      core,
-      req,
-      [[execWaiting(req)]],
-      async ({ processing }) => {
-        expect(thrower).toHaveBeenCalledOnce();
-        await currentScheduler().onAllToolCallsComplete?.([]);
-        await processing;
-        await vi.runAllTimersAsync();
-        expect(thrower).toHaveBeenCalledOnce();
-      },
-    );
-  });
-
-  it('rejects an old approval after the call bounces to a new incarnation', async () => {
-    const { core } = buildCore();
-    const approvalEvents = collectApprovals(core);
-    const firstOnConfirm = vi.fn(async () => {});
-    const secondOnConfirm = vi.fn(async () => {});
-    const req = request('stale-approval');
-
-    await whileScheduled(
-      core,
-      req,
-      [[execWaiting(req, firstOnConfirm)]],
-      async () => {
-        await vi.waitFor(() => expect(approvalEvents).toHaveLength(1));
-        currentScheduler().onToolCallsUpdate?.([
-          hookWaiting(req, secondOnConfirm),
-        ]);
-        await vi.waitFor(() => expect(approvalEvents).toHaveLength(2));
-
-        await approvalEvents[0].respond(ToolConfirmationOutcome.ProceedOnce);
-        await approvalEvents[1].respond(ToolConfirmationOutcome.ProceedOnce);
-
-        expect(firstOnConfirm).not.toHaveBeenCalled();
-        expect(secondOnConfirm).toHaveBeenCalledOnce();
-      },
-    );
-  });
-
-  it('creates a new approval when the same details become active again', async () => {
-    const { core } = buildCore();
-    const approvalEvents = collectApprovals(core);
-    const onConfirm = vi.fn(async () => {});
-    const req = request('reused-details');
-    const waiting = execWaiting(req, onConfirm);
-
-    await whileScheduled(core, req, [[waiting]], async () => {
-      expect(approvalEvents).toHaveLength(1);
-      currentScheduler().onToolCallsUpdate?.([]);
-      currentScheduler().onToolCallsUpdate?.([waiting]);
-      expect(approvalEvents).toHaveLength(2);
-
-      await approvalEvents[0].respond(ToolConfirmationOutcome.ProceedOnce);
-      await approvalEvents[1].respond(ToolConfirmationOutcome.ProceedOnce);
-
-      expect(onConfirm).toHaveBeenCalledOnce();
-    });
-  });
-
-  it('emits once per approval incarnation and allows each response', async () => {
-    const { core } = buildCore();
-    const approvalEvents = collectApprovals(core);
-    const firstOnConfirm = vi.fn(async () => {});
-    const secondOnConfirm = vi.fn(async () => {});
-    const req = request('1');
-    const secondWaiting = hookWaiting(req, secondOnConfirm);
-    const firstWaiting = execWaiting(
-      req,
-      vi.fn(async () => {
-        await firstOnConfirm();
-        currentScheduler().onToolCallsUpdate?.([secondWaiting]);
-      }),
-    );
-
-    await whileScheduled(
-      core,
-      req,
-      [[firstWaiting], [firstWaiting]],
-      async () => {
-        await vi.waitFor(() => expect(approvalEvents).toHaveLength(1));
-        await Promise.all([
-          approvalEvents[0].respond(ToolConfirmationOutcome.ProceedOnce),
-          approvalEvents[0].respond(ToolConfirmationOutcome.ProceedOnce),
-        ]);
-        await vi.waitFor(() => expect(approvalEvents).toHaveLength(2));
-        await Promise.all([
-          approvalEvents[1].respond(ToolConfirmationOutcome.ProceedOnce),
-          approvalEvents[1].respond(ToolConfirmationOutcome.ProceedOnce),
-        ]);
-
-        expect(firstOnConfirm).toHaveBeenCalledOnce();
-        expect(secondOnConfirm).toHaveBeenCalledOnce();
-      },
-    );
-  });
-});
-
-describe('AgentCore.processFunctionCalls incomplete-argument marker', () => {
-  it('forwards hadIncompleteArguments when the turn was not token-truncated', async () => {
-    const config = {
-      getToolRegistry: vi.fn().mockReturnValue({ getTool: vi.fn() }),
-      getDebugLogger: vi
-        .fn()
-        .mockReturnValue({ debug: vi.fn(), error: vi.fn() }),
-      getToolOutputBatchBudget: vi
-        .fn()
-        .mockReturnValue(Number.POSITIVE_INFINITY),
-      getToolResultBytesWritten: vi.fn().mockReturnValue(0),
-      getSessionId: vi.fn().mockReturnValue('incomplete-args-session'),
-    } as unknown as Config;
-    const core = new AgentCore(
-      'incomplete-args-agent',
-      config,
-      { systemPrompt: '' },
-      { model: 'test-model' },
-      { max_turns: 1 },
-    );
-
-    const functionCall = {
-      id: 'call-incomplete',
-      name: 'write_file',
-      args: { file_path: 'a.txt', content: 'half-written' },
-    };
-    markToolCallArgumentsIncomplete([{ functionCall }]);
-    // Negative control: an unmarked sibling must reach the scheduler WITHOUT
-    // hadIncompleteArguments, or over-application of the marker (which would
-    // reject every subagent Edit call) is undetectable.
-    const cleanFunctionCall = {
-      id: 'call-clean',
-      name: 'write_file',
-      args: { file_path: 'b.txt', content: 'complete' },
-    };
-
-    const scheduleSpy = vi
-      .spyOn(CoreToolScheduler.prototype, 'schedule')
-      .mockResolvedValue(undefined);
-    const abortController = new AbortController();
-
-    const processing = core.processFunctionCalls(
-      [functionCall, cleanFunctionCall],
-      abortController,
-      'prompt-incomplete',
-      1,
-      [{ name: 'write_file' } as FunctionDeclaration],
-      undefined,
-      // The subagent turn saw finishReason STOP (delayed usage disproved a
-      // token cut), so the marker is the only thing left that can arm the
-      // scheduler's data-loss guard here — a subagent has no approval prompt
-      // between the response and the write (#12970).
-      false,
-    );
-    try {
-      await vi.waitFor(() => expect(scheduleSpy).toHaveBeenCalledOnce());
-      const scheduledRequests = scheduleSpy.mock.calls[0]?.[0];
-      expect(scheduledRequests).toEqual([
-        expect.objectContaining({
-          callId: 'call-incomplete',
-          name: 'write_file',
-          wasOutputTruncated: false,
-          hadIncompleteArguments: true,
-        }),
-        expect.objectContaining({
-          callId: 'call-clean',
-          name: 'write_file',
-          wasOutputTruncated: false,
-        }),
-      ]);
-      expect(Array.isArray(scheduledRequests)).toBe(true);
-      expect((scheduledRequests as unknown[])[1]).not.toHaveProperty(
-        'hadIncompleteArguments',
-      );
-    } finally {
-      abortController.abort();
-      await processing;
-      scheduleSpy.mockRestore();
-    }
-  });
+        scheduleSpy.mockRestore();
+      }
+      checkToolSteps();
+    },
+  );
 });
 
 describe('AgentCore.prepareTools', () => {
@@ -1751,6 +2172,7 @@ describe('AgentCore.prepareTools', () => {
     fnDeclarations: FunctionDeclaration[],
     maxSubagentDepth = 5,
     toolOutputBatchBudget = Number.POSITIVE_INFINITY,
+    { shared, kernel }: Pick<Loop, 'shared' | 'kernel'> = LOOPS[0],
   ): {
     core: AgentCore;
     debugSpy: ReturnType<typeof vi.fn>;
@@ -1780,6 +2202,9 @@ describe('AgentCore.prepareTools', () => {
       getMaxSubagentDepth: vi.fn().mockReturnValue(maxSubagentDepth),
       getToolOutputBatchBudget: vi.fn().mockReturnValue(toolOutputBatchBudget),
       getToolResultBytesWritten: vi.fn().mockReturnValue(500 * 1024 * 1024),
+      isUnifiedAgentLoopEnabled: () => shared,
+      getSkipLoopDetection: () => false,
+      isEventBusAgentLoopEnabled: () => kernel,
     } as unknown as Config;
 
     const core = new AgentCore(
@@ -2129,73 +2554,80 @@ describe('AgentCore.prepareTools', () => {
     },
   );
 
-  it('hard-caps the aggregate subagent tool response', async () => {
-    const { core } = buildAgentForTools(undefined, [], 5, 1000);
-    const missingName = `missing_${'a'.repeat(2000)}`;
-    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-core-'));
-    const jsonlPath = path.join(tempDir, 'agent.jsonl');
-    const writer = attachJsonlTranscriptWriter(
-      core.getEventEmitter(),
-      jsonlPath,
-      {
-        agentId: 'agent-budget',
-        agentName: 'test-subagent',
-        sessionId: 'session-budget',
-        cwd: tempDir,
-        version: 'test',
-      },
-    );
-
-    try {
-      const result = await core.processFunctionCalls(
-        [
-          { name: missingName, args: {} },
-          { name: missingName, args: {} },
-        ],
-        new AbortController(),
-        'prompt-budget',
-        1,
-        [],
+  it.each(LOOPS)(
+    'hard-caps the aggregate subagent tool response ($name loop)',
+    async (loop) => {
+      const { shared } = loop;
+      const checkToolSteps = trackToolSteps(shared, loop.kernel);
+      const { core } = buildAgentForTools(undefined, [], 5, 1000, loop);
+      const missingName = `missing_${'a'.repeat(2000)}`;
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-core-'));
+      const jsonlPath = path.join(tempDir, 'agent.jsonl');
+      const writer = attachJsonlTranscriptWriter(
+        core.getEventEmitter(),
+        jsonlPath,
+        {
+          agentId: 'agent-budget',
+          agentName: 'test-subagent',
+          sessionId: 'session-budget',
+          cwd: tempDir,
+          version: 'test',
+        },
       );
 
-      const parts = result.messages[0].parts ?? [];
-      const total = parts.reduce((sum, part) => {
-        const response = part.functionResponse?.response;
-        const output = response?.['output'];
-        const error = response?.['error'];
-        return (
-          sum +
-          (typeof output === 'string' ? output.length : 0) +
-          (typeof error === 'string' ? error.length : 0)
+      try {
+        const result = await runToolStep(
+          core,
+          shared,
+          [
+            { name: missingName, args: {} },
+            { name: missingName, args: {} },
+          ],
+          new AbortController(),
+          'prompt-budget',
+          [],
         );
-      }, 0);
-      expect(total).toBeLessThanOrEqual(1000);
-      const responseIds = parts.map((part) => part.functionResponse?.id);
-      expect(new Set(responseIds).size).toBe(2);
-      expect(responseIds[0]).toMatch(/-0$/);
-      expect(responseIds[1]).toMatch(/-1$/);
 
-      writer.cleanup();
-      const records = fs
-        .readFileSync(jsonlPath, 'utf8')
-        .trim()
-        .split('\n')
-        .map(
-          (line) =>
-            JSON.parse(line) as {
-              type?: string;
-              message?: { parts?: unknown[] };
-            },
-        );
-      const transcriptParts = records
-        .filter((record) => record.type === 'tool_result')
-        .flatMap((record) => record.message?.parts ?? []);
-      expect(transcriptParts).toEqual(parts);
-    } finally {
-      writer.cleanup();
-      fs.rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+        const parts = result.messages[0].parts ?? [];
+        const total = parts.reduce((sum, part) => {
+          const response = part.functionResponse?.response;
+          const output = response?.['output'];
+          const error = response?.['error'];
+          return (
+            sum +
+            (typeof output === 'string' ? output.length : 0) +
+            (typeof error === 'string' ? error.length : 0)
+          );
+        }, 0);
+        expect(total).toBeLessThanOrEqual(1000);
+        const responseIds = parts.map((part) => part.functionResponse?.id);
+        expect(new Set(responseIds).size).toBe(2);
+        expect(responseIds[0]).toMatch(/-0$/);
+        expect(responseIds[1]).toMatch(/-1$/);
+
+        writer.cleanup();
+        const records = fs
+          .readFileSync(jsonlPath, 'utf8')
+          .trim()
+          .split('\n')
+          .map(
+            (line) =>
+              JSON.parse(line) as {
+                type?: string;
+                message?: { parts?: unknown[] };
+              },
+          );
+        const transcriptParts = records
+          .filter((record) => record.type === 'tool_result')
+          .flatMap((record) => record.message?.parts ?? []);
+        expect(transcriptParts).toEqual(parts);
+      } finally {
+        writer.cleanup();
+        fs.rmSync(tempDir, { recursive: true, force: true });
+      }
+      checkToolSteps();
+    },
+  );
 
   // ─── Nested sub-agents ──────────────────────────────────────────
   // The AgentTool is depth-gated: available to a sub-agent only while

@@ -809,6 +809,8 @@ describe('persistUsageBeforeTranscriptDeletion (issue #7384)', () => {
     [true, 'request_lifecycle'],
     [false, 'tool_lifecycle'],
     [true, 'tool_lifecycle'],
+    [false, 'hook_lifecycle'],
+    [true, 'hook_lifecycle'],
   ] as const)(
     'ignores lifecycle frames during usage rebuild and salvage (metrics: %s, event: %s)',
     async (withMetrics, eventName) => {

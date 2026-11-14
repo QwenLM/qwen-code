@@ -723,7 +723,8 @@ export interface SessionPrUpsertManyResult {
  * earlier ones under the tail cap). A number already bound at the SAME url
  * keeps its position and createdAt — moving it would falsify the
  * binding-time order the badge and tooltip render by — but a stronger
- * explicit source upgrades the entry in place. A number bound at a
+ * explicit source upgrades the entry in place, and an explicit state
+ * repairs a stateless or stale snapshot without moving it. A number bound at a
  * DIFFERENT url is another PR (the same number in another repository is
  * another PR): the candidate re-binds it the way {@link upsertSessionPr}
  * does — replace the entry, fresh createdAt, the candidate's own source,
@@ -780,6 +781,15 @@ export function upsertSessionPrs(
             sessionPrSourceAuthority(known.source)
         ) {
           upgraded = { ...upgraded, source: candidate.source };
+        }
+        // An explicit state (a fresh gh resolution on a manual re-bind)
+        // repairs a stateless or stale snapshot in place — the same rule
+        // upsertSessionPr applies — without moving the entry.
+        if (
+          candidate.state !== undefined &&
+          upgraded.state !== candidate.state
+        ) {
+          upgraded = { ...upgraded, state: candidate.state };
         }
         // A re-offer stamps a role only where none exists: an explicit
         // metadata-route role outranks every later command-position
