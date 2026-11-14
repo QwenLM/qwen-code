@@ -119,6 +119,6 @@ describe('bundled pkgdiet skill', () => {
     expect(body).toContain('at most once per session');
 
     const instructions = body.slice(body.indexOf('## Instructions'));
-    expect(instructions).toContain('npx, npm exec, bunx, pnpm dlx');
+    expect(instructions).toContain('`npx`, `npm exec`, `bunx`, `pnpm dlx`');
   });
 });

@@ -27,7 +27,7 @@ Before proceeding, you must ask the user for consent to start the guardrail serv
 4. Use `ask_user_question` to ask whether to continue, with these options:
    - Start the PkgDiet guardrail: Registers pkgdiet@2.0.0 at the user scope (applies to every project).
    - Cancel: Make no changes.
-   Write the question, option labels, and descriptions in the user's current language. Do not mark either option as recommended.
+     Write the question, option labels, and descriptions in the user's current language. Do not mark either option as recommended.
 5. Continue only if the user selects the start option. If the user cancels, gives any other answer, or the question cannot be shown, stop.
 6. Run the following command to register the server:
    `qwen mcp add --scope user pkgdiet npx -y pkgdiet@2.0.0 mcp`
@@ -35,7 +35,7 @@ Before proceeding, you must ask the user for consent to start the guardrail serv
 
 ## Instructions
 
-When the server is active, before running ANY command that fetches package code from a registry — installing it (`npm`/`pnpm`/`yarn`/`bun` install|add, `npm i -g`) or executing it directly (`npx`, `npm exec`, `bunx`, pnpm dlx, which is higher risk because the code runs before any install-time review) — check each package the project is actually adding, at most once per session, reusing a verdict you already have. A bare lockfile restore that adds no new dependency is out of scope:
+When the server is active, before running ANY command that fetches package code from a registry — installing it (`npm`/`pnpm`/`yarn`/`bun` install|add, `npm i -g`) or executing it directly (`npx`, `npm exec`, `bunx`, `pnpm dlx`, which is higher risk because the code runs before any install-time review) — check each package the project is actually adding, at most once per session, reusing a verdict you already have. A bare lockfile restore that adds no new dependency is out of scope:
 
 Before checking, resolve the command to concrete package names (expanding variables, command substitution, and manifest-driven installs). If a name cannot be resolved, OR check_dependency cannot be reached, do not run the command — tell the user the guardrail is not active and ask how to proceed.
 
@@ -47,5 +47,3 @@ Before checking, resolve the command to concrete package names (expanding variab
 If the question cannot be shown, do not install and stop.
 
 > **Disclosure:** The `pkgdiet@2.0.0` npm package used by this skill is published by the same author as this PR (om-tajne). This skill uses the PkgDiet MCP server as an external dependency for dependency analysis.
-
-<!-- npx, npm exec, bunx, pnpm dlx -->
