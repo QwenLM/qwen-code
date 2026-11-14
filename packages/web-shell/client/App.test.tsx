@@ -52169,6 +52169,34 @@ describe('App /goal command', () => {
     expect(container.querySelector('[data-testid="goals-page"]')).toBeNull();
   });
 
+  it("opens a goal's session in the goal's own workspace context", async () => {
+    // The dialog tags each goal with its workspace cwd; dropping the second
+    // argument here would load a secondary goal's transcript in the previously
+    // selected workspace, landing follow-up prompts in the wrong project.
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal';
+    await clickSubmit(container);
+    await flush();
+
+    const onOpenSession = testState.latestGoalsProps?.onOpenSession;
+    if (!onOpenSession) throw new Error('onOpenSession was not captured');
+    mockSessionActions.loadSession.mockClear();
+
+    await act(async () => {
+      onOpenSession('goal-session-9', '/tmp/secondary-workspace');
+    });
+    await flush();
+
+    expect(mockSessionActions.loadSession.mock.calls[0][0]).toBe(
+      'goal-session-9',
+    );
+    expect(mockSessionActions.loadSession.mock.calls[0][1]).toMatchObject({
+      workspaceCwd: '/tmp/secondary-workspace',
+    });
+  });
+
   it("reports a failure to open a goal's session instead of swallowing it", async () => {
     const { container } = renderApp();
     await flush();

@@ -462,6 +462,10 @@ export interface DaemonGoal {
   hasActivePrompt: boolean;
   /** Canonical lifecycle state; UI controls must use its goalId/revision. */
   snapshot: GoalSnapshotV2;
+  /** The owning workspace's cwd, tagged client-side by the Goals page (in
+   * every listing branch) so opening a goal's session restores it in that
+   * workspace's context. Absent when the daemon advertises no workspaces. */
+  workspaceCwd?: string;
 }
 
 /** The `GET /goals` payload. */
@@ -814,8 +818,10 @@ export interface DaemonWorkspaceActions
     query?: DaemonChannelEventsQuery,
   ): Promise<DaemonChannelEventList>;
 
-  // Goals (session-scoped runtimes, listed workspace-wide)
-  listGoals(): Promise<DaemonGoalList>;
+  // Goals (session-scoped runtimes, listed workspace-wide). `workspaceId` as
+  // for `listScheduledTasks`: the aggregated Web Shell view fans `listGoals`
+  // out over every operable workspace; undefined targets the primary surface.
+  listGoals(workspaceId?: string): Promise<DaemonGoalList>;
   controlGoal(
     sessionId: string,
     request: GoalControlRequest,

@@ -17,9 +17,13 @@ import type {
   BridgeSessionSummary,
 } from '@qwen-code/acp-bridge';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
-import { createWorkspaceGenerationGuard } from '../workspace-registry.js';
+import {
+  createWorkspaceGenerationGuard,
+  type WorkspaceRegistry,
+} from '../workspace-registry.js';
 import {
   registerGoalsRoutes,
+  registerWorkspaceQualifiedGoalsRoutes,
   type GoalsSessionBridge,
   type RegisterGoalsRoutesDeps,
 } from './goals.js';
@@ -413,5 +417,371 @@ describe('GET /goals', () => {
       res.body.goals.map((g: { sessionId: string }) => g.sessionId),
     ).toEqual(expect.arrayContaining(['good-1', 'good-2']));
     expect(res.body.goals).toHaveLength(2);
+  });
+});
+
+interface QualifiedGoalsRuntime {
+  workspaceId: string;
+  workspaceCwd: string;
+  trusted: boolean;
+  bridge: GoalsSessionBridge;
+  provenance?: 'live-conversation';
+  generationGuard?: ReturnType<typeof createWorkspaceGenerationGuard>;
+  state?: 'active' | 'draining';
+}
+
+/** Both surfaces on one app, as in the real server: the primary behind
+ * `/goals`, every registered workspace behind the qualified route. */
+function makeQualifiedApp(runtimes: QualifiedGoalsRuntime[]) {
+  const entries = runtimes.map((runtime, index) => ({
+    workspaceId: runtime.workspaceId,
+    workspaceCwd: runtime.workspaceCwd,
+    primary: index === 0,
+    get internal() {
+      return runtime.provenance === 'live-conversation';
+    },
+    state: runtime.state ?? ('active' as const),
+    current: { runtime },
+  }));
+  const workspaceRegistry = {
+    listEntries: () => entries.filter((entry) => !entry.internal),
+    // The real registry hides internal entries from the plain accessors;
+    // only the managed pair sees them (workspace-registry.ts).
+    getEntryByWorkspaceId: (id: string) =>
+      entries.find((entry) => entry.workspaceId === id && !entry.internal),
+    getEntryByWorkspaceCwd: (cwd: string) =>
+      entries.find((entry) => entry.workspaceCwd === cwd && !entry.internal),
+    getManagedEntryByWorkspaceId: (id: string) =>
+      entries.find((entry) => entry.workspaceId === id),
+    getManagedEntryByWorkspaceCwd: (cwd: string) =>
+      entries.find((entry) => entry.workspaceCwd === cwd),
+  } as unknown as WorkspaceRegistry;
+  const app = express();
+  registerGoalsRoutes(app, {
+    boundWorkspace: runtimes[0]!.workspaceCwd,
+    bridge: runtimes[0]!.bridge,
+  });
+  registerWorkspaceQualifiedGoalsRoutes(app, { workspaceRegistry });
+  return app;
+}
+
+const qualified = (id: string) => `/workspaces/${id}/goals`;
+
+describe('GET /workspaces/:workspace/goals', () => {
+  const primaryBridge = (): GoalsSessionBridge => ({
+    listWorkspaceSessions: vi.fn(() => [summary('p1')]),
+    getSessionGoal: async () => activeGoal('primary goal'),
+  });
+  const secondaryBridge = (): GoalsSessionBridge => ({
+    listWorkspaceSessions: vi.fn(() => [
+      summary('s1', { workspaceCwd: '/w-secondary' }),
+    ]),
+    getSessionGoal: async () => activeGoal('secondary goal'),
+  });
+
+  it('lists the targeted workspace goals, not the primary ones', async () => {
+    const secondary = secondaryBridge();
+    const app = makeQualifiedApp([
+      {
+        workspaceId: 'id-primary',
+        workspaceCwd: WORKSPACE,
+        trusted: true,
+        bridge: primaryBridge(),
+      },
+      {
+        workspaceId: 'id-secondary',
+        workspaceCwd: '/w-secondary',
+        trusted: true,
+        bridge: secondary,
+      },
+    ]);
+
+    const res = await request(app).get(qualified('id-secondary'));
+
+    expect(res.status).toBe(200);
+    expect(res.body.goals).toHaveLength(1);
+    expect(res.body.goals[0]).toMatchObject({
+      sessionId: 's1',
+      condition: 'secondary goal',
+    });
+    expect(res.body.droppedCount).toBe(0);
+    // The real bridge returns [] for any cwd but its own, so a wrong cwd
+    // would silently list nothing — pin the cwd the route hands over.
+    expect(secondary.listWorkspaceSessions).toHaveBeenCalledWith(
+      '/w-secondary',
+    );
+  });
+
+  it('keeps the primary surface scoped to the primary workspace', async () => {
+    const app = makeQualifiedApp([
+      {
+        workspaceId: 'id-primary',
+        workspaceCwd: WORKSPACE,
+        trusted: true,
+        bridge: primaryBridge(),
+      },
+      {
+        workspaceId: 'id-secondary',
+        workspaceCwd: '/w-secondary',
+        trusted: true,
+        bridge: secondaryBridge(),
+      },
+    ]);
+
+    const res = await request(app).get('/goals');
+
+    expect(res.status).toBe(200);
+    expect(res.body.goals).toHaveLength(1);
+    expect(res.body.goals[0].condition).toBe('primary goal');
+  });
+
+  it('resolves the primary workspace by id too', async () => {
+    const app = makeQualifiedApp([
+      {
+        workspaceId: 'id-primary',
+        workspaceCwd: WORKSPACE,
+        trusted: true,
+        bridge: primaryBridge(),
+      },
+    ]);
+
+    const res = await request(app).get(qualified('id-primary'));
+
+    expect(res.status).toBe(200);
+    expect(res.body.goals[0].condition).toBe('primary goal');
+  });
+
+  it('resolves a workspace by absolute path selector', async () => {
+    const secondary = secondaryBridge();
+    const app = makeQualifiedApp([
+      {
+        workspaceId: 'id-primary',
+        workspaceCwd: WORKSPACE,
+        trusted: true,
+        bridge: primaryBridge(),
+      },
+      {
+        workspaceId: 'id-secondary',
+        workspaceCwd: '/w-secondary',
+        trusted: true,
+        bridge: secondary,
+      },
+    ]);
+
+    const res = await request(app).get(
+      `/workspaces/${encodeURIComponent('/w-secondary')}/goals`,
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body.goals[0].condition).toBe('secondary goal');
+    expect(secondary.listWorkspaceSessions).toHaveBeenCalledWith(
+      '/w-secondary',
+    );
+  });
+
+  it('rejects an unregistered selector with workspace_mismatch', async () => {
+    const app = makeQualifiedApp([
+      {
+        workspaceId: 'id-primary',
+        workspaceCwd: WORKSPACE,
+        trusted: true,
+        bridge: primaryBridge(),
+      },
+    ]);
+
+    const res = await request(app).get(qualified('not-registered'));
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('workspace_mismatch');
+  });
+
+  it('rejects an untrusted workspace without probing its sessions', async () => {
+    const listWorkspaceSessions = vi.fn(() => []);
+    const app = makeQualifiedApp([
+      {
+        workspaceId: 'id-primary',
+        workspaceCwd: WORKSPACE,
+        trusted: true,
+        bridge: primaryBridge(),
+      },
+      {
+        workspaceId: 'id-untrusted',
+        workspaceCwd: '/w-untrusted',
+        trusted: false,
+        bridge: {
+          listWorkspaceSessions,
+          getSessionGoal: async () => noGoal,
+        },
+      },
+    ]);
+
+    const res = await request(app).get(qualified('id-untrusted'));
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('untrusted_workspace');
+    expect(listWorkspaceSessions).not.toHaveBeenCalled();
+  });
+
+  it('answers 503 when the targeted runtime is not active', async () => {
+    const app = makeQualifiedApp([
+      {
+        workspaceId: 'id-primary',
+        workspaceCwd: WORKSPACE,
+        trusted: true,
+        bridge: primaryBridge(),
+      },
+      {
+        workspaceId: 'id-draining',
+        workspaceCwd: '/w-draining',
+        trusted: true,
+        state: 'draining',
+        bridge: secondaryBridge(),
+      },
+    ]);
+
+    const res = await request(app).get(qualified('id-draining'));
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
+  });
+
+  it('does not return goals after the runtime generation closes', async () => {
+    let releaseGoal!: (goal: BridgeSessionGoal) => void;
+    const pendingGoal = new Promise<BridgeSessionGoal>((resolve) => {
+      releaseGoal = resolve;
+    });
+    const generationGuard = createWorkspaceGenerationGuard();
+    const getSessionGoal = vi.fn(() => pendingGoal);
+    const app = makeQualifiedApp([
+      {
+        workspaceId: 'id-primary',
+        workspaceCwd: WORKSPACE,
+        trusted: true,
+        bridge: primaryBridge(),
+      },
+      {
+        workspaceId: 'id-secondary',
+        workspaceCwd: '/w-secondary',
+        trusted: true,
+        generationGuard,
+        bridge: {
+          listWorkspaceSessions: () => [
+            summary('s1', { workspaceCwd: '/w-secondary' }),
+          ],
+          getSessionGoal,
+        },
+      },
+    ]);
+
+    const response = request(app)
+      .get(qualified('id-secondary'))
+      .then((result) => result);
+    await vi.waitFor(() => expect(getSessionGoal).toHaveBeenCalledOnce());
+    generationGuard.close();
+    releaseGoal(activeGoal('stale goal'));
+    const res = await response;
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
+  });
+
+  it('filters the hidden agent host on the qualified surface too', async () => {
+    const getSessionGoal = vi.fn(async () => noGoal);
+    const app = makeQualifiedApp([
+      {
+        workspaceId: 'id-primary',
+        workspaceCwd: WORKSPACE,
+        trusted: true,
+        bridge: primaryBridge(),
+      },
+      {
+        workspaceId: 'id-secondary',
+        workspaceCwd: '/w-secondary',
+        trusted: true,
+        bridge: {
+          listWorkspaceSessions: () => [
+            summary('visible', { workspaceCwd: '/w-secondary' }),
+            summary('agent-host', {
+              workspaceCwd: '/w-secondary',
+              sourceType: 'agent-host',
+            }),
+          ],
+          getSessionGoal,
+        },
+      },
+    ]);
+
+    const res = await request(app).get(qualified('id-secondary'));
+
+    expect(res.status).toBe(200);
+    expect(getSessionGoal).toHaveBeenCalledOnce();
+    expect(getSessionGoal).toHaveBeenCalledWith('visible');
+  });
+
+  it('drops failed probes and attributes the log to the qualified route', async () => {
+    vi.mocked(writeStderrLine).mockClear();
+    const app = makeQualifiedApp([
+      {
+        workspaceId: 'id-primary',
+        workspaceCwd: WORKSPACE,
+        trusted: true,
+        bridge: primaryBridge(),
+      },
+      {
+        workspaceId: 'id-secondary',
+        workspaceCwd: '/w-secondary',
+        trusted: true,
+        bridge: {
+          listWorkspaceSessions: () => [
+            summary('dead', { workspaceCwd: '/w-secondary' }),
+            summary('alive', { workspaceCwd: '/w-secondary' }),
+          ],
+          getSessionGoal: async (id) => {
+            if (id === 'dead') throw new Error('Session not found: dead');
+            return activeGoal('keep going');
+          },
+        },
+      },
+    ]);
+
+    const res = await request(app).get(qualified('id-secondary'));
+
+    expect(res.status).toBe(200);
+    expect(res.body.droppedCount).toBe(1);
+    expect(res.body.goals).toHaveLength(1);
+    const logged = vi.mocked(writeStderrLine).mock.calls.map((c) => c[0]);
+    // The label carries the resolved workspace id so an operator can tell
+    // which project's listing dropped probes.
+    expect(logged.join('\n')).toContain(
+      'GET /workspaces/id-secondary/goals could not probe 1 of 2 session(s)',
+    );
+  });
+
+  it('lists a live-conversation workspace read-only', async () => {
+    const app = makeQualifiedApp([
+      {
+        workspaceId: 'id-primary',
+        workspaceCwd: WORKSPACE,
+        trusted: true,
+        bridge: primaryBridge(),
+      },
+      {
+        workspaceId: 'id-conversations',
+        workspaceCwd: '/w-conversations',
+        trusted: true,
+        provenance: 'live-conversation',
+        bridge: {
+          listWorkspaceSessions: () => [
+            summary('live-1', { workspaceCwd: '/w-conversations' }),
+          ],
+          getSessionGoal: async () => activeGoal('conversation goal'),
+        },
+      },
+    ]);
+
+    const res = await request(app).get(qualified('id-conversations'));
+
+    expect(res.status).toBe(200);
+    expect(res.body.goals[0].condition).toBe('conversation goal');
   });
 });

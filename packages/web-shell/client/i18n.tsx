@@ -3532,6 +3532,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'goals.empty': 'No active goals. Set one with /goal <condition>.',
   'goals.refresh': 'Refresh',
   'goals.new': 'New goal',
+  'goals.workspace': 'Workspace',
   'goals.newHint':
     'The goal starts in a new session and runs until its condition holds. For an enforced turn or time ceiling, run /config model.goalMaxTurns=20 or /config model.goalMaxActiveMinutes=30 in the chat; it applies after the daemon restarts, to Goals created afterwards.',
   'goals.condition': 'Condition',
@@ -3550,6 +3551,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'goals.idle': 'Waiting',
   'goals.dropped': (v) =>
     `${v?.count ?? 0} session${Number(v?.count) === 1 ? '' : 's'} could not be reached — any goals they are running are missing from this list.`,
+  'goals.untrustedSkipped': (v) =>
+    `${v?.count ?? 0} workspace${Number(v?.count) === 1 ? '' : 's'} not shown (untrusted).`,
   'goals.notYetEvaluated': 'not yet evaluated',
   'goals.openSessionHint': "Open this goal's session",
   'goals.error.emptyCondition': 'Enter a condition for the goal.',
@@ -8563,6 +8566,7 @@ const ZH: Messages = {
   'goals.empty': '没有进行中的目标。用 /goal <条件> 设置一个。',
   'goals.refresh': '刷新',
   'goals.new': '新建目标',
+  'goals.workspace': '工作区',
   'goals.newHint':
     '目标会在一个新会话中启动，并持续运行直到条件满足。如需强制的轮数或时长上限，请在对话中运行 /config model.goalMaxTurns=20 或 /config model.goalMaxActiveMinutes=30，daemon 重启后生效，且只对之后新建的 Goal 生效。',
   'goals.condition': '条件',
@@ -8581,6 +8585,8 @@ const ZH: Messages = {
   'goals.idle': '等待中',
   'goals.dropped': (v) =>
     `有 ${v?.count ?? 0} 个会话无法访问——它们正在运行的目标未显示在此列表中。`,
+  'goals.untrustedSkipped': (v) =>
+    `有 ${v?.count ?? 0} 个工作区未显示（未受信）。`,
   'goals.notYetEvaluated': '尚未判定',
   'goals.openSessionHint': '打开该目标所在的会话',
   'goals.error.emptyCondition': '请输入目标条件。',
@@ -10252,6 +10258,7 @@ const RU: Messages = {
   'goals.empty': 'Нет активных целей. Задайте: /goal <условие>.',
   'goals.refresh': 'Обновить',
   'goals.new': 'Новая цель',
+  'goals.workspace': 'Рабочая область',
   'goals.newHint':
     'Цель запускается в новой сессии и работает, пока условие не выполняется. Жёсткий лимит по числу ходов или времени задаётся в чате: /config model.goalMaxTurns=20 или /config model.goalMaxActiveMinutes=30 (применяется после перезапуска демона, к целям, созданным позже).',
   'goals.condition': 'Условие',
@@ -10270,6 +10277,8 @@ const RU: Messages = {
   'goals.idle': 'Ожидание',
   'goals.dropped': (v) =>
     `не удалось связаться с ${v?.count ?? 0} ${ruPlural(v?.count, 'сессией', 'сессиями', 'сессиями')} — цели, которые они выполняли, отсутствуют в этом списке.`,
+  'goals.untrustedSkipped': (v) =>
+    `Пропущено рабочих областей (нет доверия): ${v?.count ?? 0}.`,
   'goals.notYetEvaluated': 'ещё не оценено',
   'goals.openSessionHint': 'Открыть сессию этой цели',
   'goals.error.emptyCondition': 'Введите условие для цели.',

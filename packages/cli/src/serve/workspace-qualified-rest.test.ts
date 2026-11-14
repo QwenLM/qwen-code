@@ -114,6 +114,23 @@ function makeBridge(): AcpSessionBridge {
       sessions: [],
     })),
     listWorkspaceSessions: vi.fn(() => []),
+    getSessionGoal: vi.fn(async () => ({
+      snapshot: {
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'goal-1',
+          revision: 1,
+          objective: 'qualified objective',
+          status: 'active',
+          evidenceCursor: { recordId: null },
+          turnCount: 0,
+          activeTimeMs: 0,
+          createdAt: 1000,
+          updatedAt: 1000,
+        },
+      },
+    })),
     getSessionSummary: vi.fn(() => {
       throw new Error('not found');
     }),
@@ -456,6 +473,57 @@ describe('workspace-qualified file deletion isolation', () => {
 });
 
 describe('workspace-qualified core REST', () => {
+  it('serves the workspace-qualified goals listing through createServeApp', async () => {
+    // Pins the server.ts registration itself: deleting it would 404 the
+    // qualified path while every route-local suite stayed green.
+    const h = await makeHarness();
+    try {
+      const sessions = h.secondaryBridge
+        .listWorkspaceSessions as unknown as ReturnType<typeof vi.fn>;
+      sessions.mockReturnValue([
+        {
+          sessionId: 'sec-goal-session',
+          workspaceCwd: h.secondaryCwd,
+          createdAt: new Date(0).toISOString(),
+          clientCount: 1,
+          hasActivePrompt: false,
+        },
+      ]);
+
+      const res = await request(h.app)
+        .get(`/workspaces/${encodeURIComponent(h.secondaryId)}/goals`)
+        .set('Host', host());
+
+      expect(res.status).toBe(200);
+      expect(res.body.v).toBe(1);
+      expect(res.body.goals).toHaveLength(1);
+      expect(res.body.goals[0]).toMatchObject({
+        sessionId: 'sec-goal-session',
+        condition: 'qualified objective',
+      });
+      expect(sessions).toHaveBeenCalledWith(h.secondaryCwd);
+
+      const primaryRes = await request(h.app).get('/goals').set('Host', host());
+      expect(primaryRes.status).toBe(200);
+      expect(primaryRes.body.goals).toEqual([]);
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects the qualified goals listing for an untrusted workspace', async () => {
+    const h = await makeHarness({ secondaryTrusted: false });
+    try {
+      const res = await request(h.app)
+        .get(`/workspaces/${encodeURIComponent(h.secondaryId)}/goals`)
+        .set('Host', host());
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('untrusted_workspace');
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('routes file reads to the workspace selected by id', async () => {
     const h = await makeHarness();
     try {

@@ -4,21 +4,27 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { buildGoalControlRequest } from '../../utils/goalControlRequest';
 import { canResumeGoal } from '../../utils/goalGate';
 import {
   useWorkspaceActions,
   type DaemonGoal,
 } from '@qwen-code/web-shell/daemon-react-sdk';
+import type { DaemonWorkspaceCapability } from '@qwen-code/sdk/daemon';
 import { Pause, Pencil, Play, Trash2 } from 'lucide-react';
 import { useI18n } from '../../i18n';
+import {
+  disambiguateWorkspaceLabels,
+  workspaceLabel,
+} from '../../utils/workspace';
 import { DialogShell } from './DialogShell';
 import {
   getGoalActiveTimeLabel,
   getGoalActiveTimeMs,
   getGoalTokenLabel,
 } from '../GoalStatusStrip';
+import { WorkspacePill } from '../WorkspacePill';
 import styles from './GoalsDialog.module.css';
 
 /**
@@ -33,21 +39,92 @@ const TICK_INTERVAL_MS = 1000;
 
 interface GoalsDialogProps {
   /** Create a canonical Goal in a brand-new session and switch to it.
-   * Return `false` when session setup failed and the error was already shown;
-   * throw to render the control failure inline. */
-  onCreateGoal: (condition: string) => boolean | void | Promise<boolean | void>;
-  /** Open the session driving a goal — its transcript IS the goal's history. */
-  onOpenSession: (sessionId: string) => void;
+   * `workspaceCwd` targets that workspace when the multi-workspace picker
+   * chose one; absent keeps the App's default target. Return `false` when
+   * session setup failed and the error was already shown; throw to render the
+   * control failure inline. */
+  onCreateGoal: (
+    condition: string,
+    workspaceCwd?: string,
+  ) => boolean | void | Promise<boolean | void>;
+  /** Open the session driving a goal — its transcript IS the goal's history.
+   * `workspaceCwd` is the goal's own workspace when the aggregated view
+   * tagged it, so the App loads the session in that workspace's context. */
+  onOpenSession: (sessionId: string, workspaceCwd?: string) => void;
+  /** Registered workspaces on a multi-workspace daemon (from capabilities).
+   * When more than one is present the page aggregates every operable
+   * workspace's goals (each card tagged with its workspace) and the New form
+   * offers a workspace picker. Absent or a single entry → the plain
+   * primary-only view. */
+  workspaces?: DaemonWorkspaceCapability[];
+  /** Forces all goal listing through this workspace's route. */
+  lockedWorkspace?: DaemonWorkspaceCapability;
+  /** The workspace the create form defaults to (the App's currently selected
+   * workspace). Falls back to the primary when absent or not operable. */
+  defaultWorkspaceCwd?: string;
   onError: (error: unknown, fallback: string) => void;
 }
 
 export function GoalsDialog({
   onCreateGoal,
   onOpenSession,
+  workspaces,
+  lockedWorkspace,
+  defaultWorkspaceCwd,
   onError,
 }: GoalsDialogProps) {
   const { t } = useI18n();
   const actions = useWorkspaceActions();
+
+  // Multi-workspace aggregation, mirroring ScheduledTasksDialog. Memoized so
+  // the derived arrays are stable identities — `reload` depends on them, and a
+  // fresh array each render would re-fire its mount effect in a loop.
+  const workspaceList = useMemo(() => workspaces ?? [], [workspaces]);
+  const isMultiWorkspace = !lockedWorkspace && workspaceList.length > 1;
+  // The workspaces the page can actually read: every trusted one, PLUS the
+  // primary even when untrusted — both primary read surfaces are trust-gated,
+  // so an untrusted primary surfaces as a partial-load error rather than
+  // silently disappearing. Secondaries stay gated on trust; their qualified
+  // route rejects an untrusted read, and the page says so instead of showing
+  // a bare "no goals" for a workspace it never read.
+  const operableWorkspaces = useMemo(
+    () => workspaceList.filter((ws) => ws.primary || ws.trusted),
+    [workspaceList],
+  );
+  const skippedWorkspaces = useMemo(
+    () => workspaceList.filter((ws) => !ws.primary && !ws.trusted),
+    [workspaceList],
+  );
+  // The notice only renders in the aggregated view; the empty-state
+  // suppression must use the same predicate so a locked view never hides its
+  // empty state without showing the notice.
+  const showSkippedNotice = isMultiWorkspace && skippedWorkspaces.length > 0;
+  // Two checkouts can share a basename; a native <select> cannot carry a
+  // tooltip, so the picker (and the badges) disambiguate like the composer's
+  // workspace menu does.
+  const labeledWorkspaces = useMemo(
+    () =>
+      disambiguateWorkspaceLabels(
+        operableWorkspaces.map((ws) => ({ ...ws, label: workspaceLabel(ws) })),
+      ),
+    [operableWorkspaces],
+  );
+  const workspaceDisplayLabel = useCallback(
+    (cwd: string) =>
+      labeledWorkspaces.find((ws) => ws.cwd === cwd)?.label ??
+      workspaceLabel({ cwd }),
+    [labeledWorkspaces],
+  );
+  // The workspace id to pass to listGoals: primary uses its unqualified route
+  // (undefined), secondaries their qualified one.
+  const workspaceActionId = useCallback(
+    (ws: DaemonWorkspaceCapability): string | undefined =>
+      ws.primary ? undefined : ws.id,
+    [],
+  );
+  const lockedWorkspaceId = lockedWorkspace
+    ? workspaceActionId(lockedWorkspace)
+    : undefined;
 
   const [goals, setGoals] = useState<DaemonGoal[] | null>(null);
   /** Sessions the daemon could not probe; their goals are missing from `goals`. */
@@ -63,6 +140,24 @@ export function GoalsDialog({
   const [condition, setCondition] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  // The workspace the create form targets. Only meaningful in the
+  // multi-workspace view; the edit form has no picker (a goal's session
+  // already owns its workspace).
+  const [formWorkspaceCwd, setFormWorkspaceCwd] = useState<string | undefined>(
+    undefined,
+  );
+  const defaultCreateWorkspaceCwd = useMemo(() => {
+    if (
+      defaultWorkspaceCwd &&
+      operableWorkspaces.some((ws) => ws.cwd === defaultWorkspaceCwd)
+    ) {
+      return defaultWorkspaceCwd;
+    }
+    return (
+      operableWorkspaces.find((ws) => ws.primary)?.cwd ??
+      operableWorkspaces[0]?.cwd
+    );
+  }, [defaultWorkspaceCwd, operableWorkspaces]);
 
   const [now, setNow] = useState(() => Date.now());
 
@@ -80,11 +175,78 @@ export function GoalsDialog({
   const reload = useCallback(async () => {
     const seq = ++reloadSeqRef.current;
     try {
-      const list = await actions.listGoals();
+      let list: DaemonGoal[];
+      let dropped = 0;
+      let firstError: string | null = null;
+      if (lockedWorkspace) {
+        const result = await actions.listGoals(lockedWorkspaceId);
+        // Tag even without a badge so opening a goal's session restores it
+        // in the locked workspace's context, as the scheduled-tasks page does.
+        list = result.goals.map((goal) => ({
+          ...goal,
+          workspaceCwd: lockedWorkspace.cwd,
+        }));
+        dropped = result.droppedCount;
+      } else if (isMultiWorkspace) {
+        // Fan out over every operable workspace and tag each goal with its
+        // workspace so cards can badge it. One workspace failing must not
+        // blank the whole list — keep the others and surface the first error,
+        // named so the user knows which project is missing.
+        let failures = 0;
+        const results = await Promise.all(
+          operableWorkspaces.map(async (ws) => {
+            const actionId = workspaceActionId(ws);
+            try {
+              const result = await actions.listGoals(actionId);
+              return {
+                goals: result.goals.map((goal) => ({
+                  ...goal,
+                  workspaceCwd: ws.cwd,
+                })),
+                droppedCount: result.droppedCount,
+              };
+            } catch (err) {
+              failures += 1;
+              if (!firstError) {
+                const message =
+                  err instanceof Error ? err.message : String(err);
+                firstError = `${workspaceDisplayLabel(ws.cwd)}: ${message}`;
+              }
+              return { goals: [] as DaemonGoal[], droppedCount: 0 };
+            }
+          }),
+        );
+        if (failures === operableWorkspaces.length) {
+          // A total outage (daemon restart, wedged bridges) must not erase the
+          // page for multi-workspace users only — keep the previous list, the
+          // same retention the single/locked views get from the outer catch.
+          if (!mountedRef.current || seq !== reloadSeqRef.current) return;
+          setLoadError(firstError);
+          setGoals((prev) => prev ?? []);
+          setDroppedCount(0);
+          return;
+        }
+        list = results.flatMap((result) => result.goals);
+        dropped = results.reduce((sum, result) => sum + result.droppedCount, 0);
+      } else {
+        // The one workspace of a single-project daemon: its goals' sessions
+        // are restored there, not in a standalone or Live context. Daemons
+        // that advertise no workspace list keep the untagged legacy shape.
+        const sole = workspaceList.find((ws) => ws.primary);
+        const result = await actions.listGoals();
+        list =
+          sole && workspaceList.length === 1
+            ? result.goals.map((goal) => ({ ...goal, workspaceCwd: sole.cwd }))
+            : result.goals;
+        dropped = result.droppedCount;
+      }
       if (!mountedRef.current || seq !== reloadSeqRef.current) return;
-      setGoals(list.goals);
-      setDroppedCount(list.droppedCount);
-      setLoadError(null);
+      // Each workspace's listing is newest-first; the merged list re-sorts so
+      // the aggregate keeps that order across workspaces.
+      list.sort((a, b) => b.setAt - a.setAt);
+      setGoals(list);
+      setDroppedCount(dropped);
+      setLoadError(firstError);
     } catch (err) {
       if (!mountedRef.current || seq !== reloadSeqRef.current) return;
       setLoadError(err instanceof Error ? err.message : String(err));
@@ -94,7 +256,16 @@ export function GoalsDialog({
       // reporting a partial probe that no longer happened.
       setDroppedCount(0);
     }
-  }, [actions]);
+  }, [
+    actions,
+    isMultiWorkspace,
+    lockedWorkspace,
+    lockedWorkspaceId,
+    operableWorkspaces,
+    workspaceActionId,
+    workspaceDisplayLabel,
+    workspaceList,
+  ]);
 
   // One self-chaining loop owns both the initial load and the polling: each
   // fetch is scheduled only once the previous one has settled. `GET /goals`
@@ -188,7 +359,10 @@ export function GoalsDialog({
           }),
         );
       } else {
-        const created = await onCreateGoal(trimmed);
+        const created = await onCreateGoal(
+          trimmed,
+          isMultiWorkspace ? formWorkspaceCwd : undefined,
+        );
         if (!mountedRef.current) return;
         if (created === false) return;
       }
@@ -211,7 +385,9 @@ export function GoalsDialog({
     actions,
     condition,
     editingGoal,
+    formWorkspaceCwd,
     goals,
+    isMultiWorkspace,
     onCreateGoal,
     onError,
     reload,
@@ -269,6 +445,7 @@ export function GoalsDialog({
               setCondition('');
               setEditingGoal(null);
               setFormError(null);
+              setFormWorkspaceCwd(defaultCreateWorkspaceCwd);
               setShowForm(true);
             }}
           >
@@ -288,6 +465,27 @@ export function GoalsDialog({
           onClose={resetForm}
         >
           <div className={styles.formFields}>
+            {isMultiWorkspace && !editingGoal && (
+              <label className={styles.field}>
+                <span className={styles.fieldLabel}>
+                  {t('goals.workspace')}
+                </span>
+                <select
+                  className={styles.select}
+                  value={formWorkspaceCwd ?? ''}
+                  disabled={submitting || operableWorkspaces.length <= 1}
+                  onChange={(e) =>
+                    setFormWorkspaceCwd(e.target.value || undefined)
+                  }
+                >
+                  {labeledWorkspaces.map((ws) => (
+                    <option key={ws.id} value={ws.cwd}>
+                      {ws.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
             <label className={styles.field}>
               <span className={styles.fieldLabel}>
                 {t('goals.objective')}
@@ -352,9 +550,18 @@ export function GoalsDialog({
         </div>
       )}
 
-      {goals !== null && goals.length === 0 && !loadError && (
-        <div className={styles.empty}>{t('goals.empty')}</div>
+      {showSkippedNotice && (
+        <div className={styles.degraded} data-testid="goals-skipped">
+          {t('goals.untrustedSkipped', { count: skippedWorkspaces.length })}
+        </div>
       )}
+
+      {goals !== null &&
+        goals.length === 0 &&
+        !loadError &&
+        !showSkippedNotice && (
+          <div className={styles.empty}>{t('goals.empty')}</div>
+        )}
 
       {/* Explicit list semantics: these are divs, and even a real <ul> loses its
           implicit role under `display: flex` in Safari. Without them a screen
@@ -444,6 +651,14 @@ export function GoalsDialog({
               )}
 
               <div className={styles.cardFooter}>
+                {isMultiWorkspace && item.workspaceCwd && (
+                  <span data-testid="goal-workspace">
+                    <WorkspacePill
+                      cwd={item.workspaceCwd}
+                      label={workspaceDisplayLabel(item.workspaceCwd)}
+                    />
+                  </span>
+                )}
                 <span className={styles.statusPill}>
                   {t(`goal.status.${goal.status}`)}
                 </span>
@@ -475,7 +690,9 @@ export function GoalsDialog({
                 <button
                   type="button"
                   className={styles.sessionLink}
-                  onClick={() => onOpenSession(item.sessionId)}
+                  onClick={() =>
+                    onOpenSession(item.sessionId, item.workspaceCwd)
+                  }
                   title={t('goals.openSessionHint')}
                   // The visible text is just the session's name, which says
                   // nothing about what activating it does. Name the action AND

@@ -160,6 +160,20 @@ export interface WebShellDaemonScenario {
   /** Response for `POST /session/:id/btw`. */
   btwAnswer?: string;
   goalSnapshot: GoalSnapshotV2;
+  /**
+   * Per-workspace goal listings for `GET /workspaces/:id/goals`, keyed by
+   * workspace id. Each entry projects exactly like the primary `/goals`
+   * branch. An id absent from the map answers 400 `workspace_mismatch`,
+   * like the real daemon's qualified route.
+   */
+  goalsByWorkspace?: Record<
+    string,
+    {
+      sessionId: string;
+      displayName?: string | null;
+      snapshot: GoalSnapshotV2;
+    }
+  >;
   midTurnMessages: Array<{ messageId: string; text: string }>;
   /** Stateful response and replay used by historical branch E2E flows. */
   branch?: {
@@ -496,6 +510,7 @@ export function createWebShellDaemonScenario(
       goal: null,
       activity: 'idle',
     },
+    goalsByWorkspace: overrides.goalsByWorkspace,
     midTurnMessages: overrides.midTurnMessages ?? [],
     branch: overrides.branch,
   };
@@ -887,6 +902,7 @@ function isDaemonPath(path: string): boolean {
       path,
     ) ||
     path === '/goals' ||
+    /^\/workspaces\/[^/]+\/goals\/?$/.test(path) ||
     /^\/file\/?$/.test(path) ||
     /^\/session\/[^/]+\/metadata\/?$/.test(path) ||
     /^\/workspaces\/[^/]+\/session\/[^/]+\/metadata\/?$/.test(path) ||
@@ -1112,6 +1128,9 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   }
   if (method === 'GET' && path === '/goals') return true;
+  if (method === 'GET' && /^\/workspaces\/[^/]+\/goals\/?$/.test(path)) {
+    return true;
+  }
   if (
     (method === 'GET' || method === 'POST') &&
     /^\/session\/[^/]+\/goal\/?$/.test(path)
@@ -2369,6 +2388,57 @@ async function handleDaemonRoute(
     await json(route, sessionEnvelope(scenario, { attached: false }));
     return;
   }
+  const workspaceGoalsMatch = path.match(/^\/workspaces\/([^/]+)\/goals\/?$/);
+  if (method === 'GET' && workspaceGoalsMatch) {
+    const selector = decodeURIComponent(workspaceGoalsMatch[1]!);
+    // Gate on registration and trust like the real route, not on map
+    // membership: an advertised workspace with no goals lists empty, and an
+    // untrusted one is rejected even if the fixture gave it goals.
+    const ws = (scenario.capabilities.workspaces ?? []).find(
+      (w) => w.id === selector || w.cwd === selector,
+    );
+    if (!ws) {
+      await json(
+        route,
+        {
+          error:
+            'Workspace mismatch: the requested workspace is not registered with this daemon.',
+          code: 'workspace_mismatch',
+        },
+        400,
+      );
+      return;
+    }
+    if (!ws.trusted) {
+      await json(
+        route,
+        { error: 'Workspace is not trusted.', code: 'untrusted_workspace' },
+        403,
+      );
+      return;
+    }
+    const entry = scenario.goalsByWorkspace?.[ws.id];
+    const goal = entry?.snapshot.goal;
+    await json(route, {
+      v: 1,
+      goals:
+        entry && goal && goal.status !== 'complete'
+          ? [
+              {
+                sessionId: entry.sessionId,
+                displayName: entry.displayName ?? null,
+                condition: goal.objective,
+                iterations: goal.turnCount,
+                setAt: goal.createdAt,
+                hasActivePrompt: entry.snapshot.activity !== 'idle',
+                snapshot: entry.snapshot,
+              },
+            ]
+          : [],
+      droppedCount: 0,
+    });
+    return;
+  }
   if (method === 'GET' && path === '/goals') {
     const goal = scenario.goalSnapshot.goal;
     await json(route, {
@@ -2394,15 +2464,32 @@ async function handleDaemonRoute(
 
   const goalMatch = path.match(/^\/session\/([^/]+)\/goal\/?$/);
   if (goalMatch) {
+    // Resolve the target snapshot by session id so controlling a secondary
+    // goal does not mutate the primary's card (the real routes address the
+    // owning runtime).
+    const sessionId = decodeURIComponent(goalMatch[1]!);
+    const wsEntry = Object.values(scenario.goalsByWorkspace ?? {}).find(
+      (entry) => entry.sessionId === sessionId,
+    );
     if (method === 'GET') {
-      await json(route, { snapshot: scenario.goalSnapshot });
+      await json(route, {
+        snapshot: wsEntry ? wsEntry.snapshot : scenario.goalSnapshot,
+      });
       return;
     }
-    scenario.goalSnapshot = reduceMockGoal(
-      scenario.goalSnapshot,
-      body as GoalControlRequest,
-    );
-    await json(route, { snapshot: scenario.goalSnapshot });
+    if (wsEntry) {
+      wsEntry.snapshot = reduceMockGoal(
+        wsEntry.snapshot,
+        body as GoalControlRequest,
+      );
+      await json(route, { snapshot: wsEntry.snapshot });
+    } else {
+      scenario.goalSnapshot = reduceMockGoal(
+        scenario.goalSnapshot,
+        body as GoalControlRequest,
+      );
+      await json(route, { snapshot: scenario.goalSnapshot });
+    }
     return;
   }
   if (method === 'GET' && /^\/session\/[^/]+\/status\/?$/.test(path)) {
