@@ -19,12 +19,19 @@
  */
 
 import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 import type { TaskBase, TaskRegistration } from '../agents/tasks/types.js';
 import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getInvocationContext } from '../utils/invocation-context.js';
 import { openSyncNoFollow } from '../utils/no-follow-open.js';
+import {
+  isPidAlive,
+  readLocalBootId,
+  readPidNamespaceId,
+} from '../utils/process-liveness.js';
 import {
   promptIdContext,
   todoWorkChainContext,
@@ -238,6 +245,309 @@ export function statusFilePathFor(outputFile: string): string {
   return outputFile.endsWith('.output')
     ? `${outputFile.slice(0, -'.output'.length)}.status`
     : `${outputFile}.status`;
+}
+
+/** How often a watched orphan's process is checked. */
+const ORPHANED_SHELL_POLL_MS = 2_000;
+
+/**
+ * Largest sidecar worth reading. `writeStatusFile()` writes a few hundred
+ * bytes plus the command, so anything larger was not written by it.
+ */
+const MAX_STATUS_FILE_BYTES = 1024 * 1024;
+
+/**
+ * The `status` values a sidecar can hold on disk: the registry's own states,
+ * plus `unknown`, which {@link settleOrphanedShellStatusFiles} writes when the
+ * session that started the process ended without recording how it finished.
+ * `BackgroundShellStatus` stays the in-memory set, which never holds
+ * `unknown`.
+ */
+export type ShellStatusFileStatus = BackgroundShellStatus | 'unknown';
+
+/**
+ * Where a sidecar's `pid` names a process. A pid means something only within
+ * one pid namespace of one running kernel, and `~/.qwen` can be shared with a
+ * container, another machine or an earlier boot, so only a process with the
+ * same scope judges it. `bootId` and `pidNamespace` are `null` where the
+ * platform does not expose them.
+ */
+export interface ShellPidScope {
+  hostname: string;
+  bootId: string | null;
+  pidNamespace: number | null;
+}
+
+function currentShellPidScope(): ShellPidScope {
+  return {
+    hostname: os.hostname(),
+    bootId: readLocalBootId(),
+    pidNamespace: readPidNamespaceId(),
+  };
+}
+
+function isSamePidScope(recorded: unknown, current: ShellPidScope): boolean {
+  // Matching nulls prove neither the machine/boot nor its PID namespace.
+  if (current.bootId === null || current.pidNamespace === null) return false;
+  if (typeof recorded !== 'object' || recorded === null) return false;
+  const scope = recorded as Record<string, unknown>;
+  return (
+    scope['hostname'] === current.hostname &&
+    scope['bootId'] === current.bootId &&
+    scope['pidNamespace'] === current.pidNamespace
+  );
+}
+
+/** A sidecar that still says `running` and has not been settled. */
+export interface OrphanedShellStatusFile {
+  statusPath: string;
+  /** The recorded pid; absent when the sidecar could not be read. */
+  pid?: number;
+}
+
+type StatusFileOutcome =
+  /** Rewritten to `unknown`. */
+  | { kind: 'settled' }
+  /** Not a sidecar to settle now or later. */
+  | { kind: 'skipped' }
+  /** Still `running` and its process is alive. */
+  | { kind: 'alive'; pid: number }
+  /** The read failed and may succeed later. */
+  | { kind: 'unreadable'; error: unknown }
+  /** Its process is gone, but the rewrite failed. */
+  | { kind: 'unwritten'; pid: number; error: unknown };
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Reads one sidecar and settles it when it still says `running`, was
+ * written in `scope`, and its recorded process is gone. Only a regular file
+ * within {@link MAX_STATUS_FILE_BYTES} is read.
+ */
+function settleShellStatusFile(
+  statusPath: string,
+  isAlive: (pid: number) => boolean,
+  scope: ShellPidScope,
+): StatusFileOutcome {
+  let text: string;
+  let fd: number | undefined;
+  try {
+    // Never follows a symlink, and never waits on a FIFO.
+    fd = openSyncNoFollow(statusPath, { nonBlocking: true });
+    const stats = fs.fstatSync(fd);
+    if (!stats.isFile() || stats.size > MAX_STATUS_FILE_BYTES) {
+      return { kind: 'skipped' };
+    }
+    // One byte more than `fstat` reported shows whether the file grew since.
+    const buffer = Buffer.allocUnsafe(stats.size + 1);
+    let bytesRead = 0;
+    while (bytesRead < buffer.length) {
+      const count = fs.readSync(
+        fd,
+        buffer,
+        bytesRead,
+        buffer.length - bytesRead,
+        bytesRead,
+      );
+      if (count === 0) break;
+      bytesRead += count;
+    }
+    // `writeStatusFile()` replaces a sidecar instead of appending to it, so
+    // one that grew while open was written by something else.
+    if (bytesRead > stats.size) return { kind: 'skipped' };
+    text = buffer.toString('utf8', 0, bytesRead);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    // Gone, or a symlink: nothing a later attempt could settle.
+    if (code === 'ENOENT' || code === 'ELOOP') return { kind: 'skipped' };
+    return { kind: 'unreadable', error };
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* best effort */
+      }
+    }
+  }
+  let payload: unknown;
+  try {
+    payload = JSON.parse(text);
+  } catch {
+    // Sidecars are replaced atomically, so this is not a partial write.
+    return { kind: 'skipped' };
+  }
+  if (
+    typeof payload !== 'object' ||
+    payload === null ||
+    Array.isArray(payload)
+  ) {
+    return { kind: 'skipped' };
+  }
+  const record = payload as Record<string, unknown>;
+  const pid = record['pid'];
+  if (
+    record['status'] !== 'running' ||
+    typeof pid !== 'number' ||
+    !Number.isSafeInteger(pid) ||
+    pid <= 0
+  ) {
+    return { kind: 'skipped' };
+  }
+  // A pid recorded in another scope, or by a version that recorded none,
+  // cannot be checked here: it may name a live process this one cannot see.
+  if (!isSamePidScope(record['pidScope'], scope)) return { kind: 'skipped' };
+  if (isAlive(pid)) return { kind: 'alive', pid };
+  const status: ShellStatusFileStatus = 'unknown';
+  try {
+    atomicWriteFileSync(
+      statusPath,
+      JSON.stringify(
+        { ...record, status, updatedAt: new Date().toISOString() },
+        null,
+        2,
+      ),
+      { flush: false, mode: 0o600, forceMode: true, noFollow: true },
+    );
+  } catch (error) {
+    return { kind: 'unwritten', pid, error };
+  }
+  return { kind: 'settled' };
+}
+
+/**
+ * Settles the status sidecars in `dir` that still say `running` although the
+ * process they recorded is gone. Only the CLI that started a shell updates its
+ * sidecar, so a CLI that died without shutting down leaves it `running` for
+ * good (#15800). The outcome was never observed, so the status becomes
+ * `unknown` and every other field is kept.
+ *
+ * Left `running`: sidecars without a pid, and sidecars whose `pidScope` does
+ * not match this process, including those written before it was recorded.
+ * A reused pid can at worst keep a sidecar `running`.
+ *
+ * Returns the sidecars still `running` that may need settling later: those
+ * whose process is alive, whose rewrite failed, or that could not be read.
+ * Nothing will update them unless {@link watchOrphanedShellStatusFiles} does.
+ * Only call this for a session that no live process owns.
+ */
+export function settleOrphanedShellStatusFiles(
+  dir: string,
+  options: { isAlive?: (pid: number) => boolean; scope?: ShellPidScope } = {},
+): { settled: number; unsettled: OrphanedShellStatusFile[] } {
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { settled: 0, unsettled: [] };
+    }
+    throw error;
+  }
+  const isAlive = options.isAlive ?? isPidAlive;
+  const scope = options.scope ?? currentShellPidScope();
+  let settled = 0;
+  const unsettled: OrphanedShellStatusFile[] = [];
+  for (const name of names) {
+    if (!name.endsWith('.status')) continue;
+    const statusPath = path.join(dir, name);
+    let outcome: StatusFileOutcome;
+    try {
+      outcome = settleShellStatusFile(statusPath, isAlive, scope);
+    } catch (error) {
+      // `isAlive` is the only thing left that can throw; one sidecar must
+      // not stop the rest.
+      debugLogger.warn(
+        `could not check status sidecar ${statusPath}: ${describeError(error)}`,
+      );
+      continue;
+    }
+    switch (outcome.kind) {
+      case 'settled':
+        settled++;
+        break;
+      case 'alive':
+        unsettled.push({ statusPath, pid: outcome.pid });
+        break;
+      case 'unwritten':
+        debugLogger.warn(
+          `could not settle status sidecar ${statusPath}: ${describeError(outcome.error)}`,
+        );
+        unsettled.push({ statusPath, pid: outcome.pid });
+        break;
+      case 'unreadable':
+        debugLogger.warn(
+          `could not read status sidecar ${statusPath}: ${describeError(outcome.error)}`,
+        );
+        unsettled.push({ statusPath });
+        break;
+      case 'skipped':
+        break;
+      default: {
+        const _exhaustive: never = outcome;
+        return _exhaustive;
+      }
+    }
+  }
+  return { settled, unsettled };
+}
+
+/**
+ * Keeps checking sidecars that {@link settleOrphanedShellStatusFiles} left
+ * `running` and settles each one once its process is gone. A sidecar stays
+ * watched until it is settled or no longer needs settling, so a failed read
+ * or write is retried on the next check and logged once. Each attempt reads
+ * the sidecar again, so a pid recorded earlier only saves a read while that
+ * process is alive. The timer does not keep the process alive. Returns a
+ * function that stops watching.
+ */
+export function watchOrphanedShellStatusFiles(
+  orphans: readonly OrphanedShellStatusFile[],
+  options: {
+    intervalMs?: number;
+    isAlive?: (pid: number) => boolean;
+    scope?: ShellPidScope;
+  } = {},
+): () => void {
+  const isAlive = options.isAlive ?? isPidAlive;
+  const scope = options.scope ?? currentShellPidScope();
+  const pending = new Map(
+    orphans.map((orphan) => [orphan.statusPath, orphan.pid]),
+  );
+  if (pending.size === 0) return () => {};
+  const warned = new Set<string>();
+  const warnOnce = (statusPath: string, error: unknown): void => {
+    if (warned.has(statusPath)) return;
+    warned.add(statusPath);
+    debugLogger.warn(
+      `could not settle status sidecar ${statusPath}, will retry: ${describeError(error)}`,
+    );
+  };
+  const timer = setInterval(() => {
+    for (const [statusPath, pid] of pending) {
+      try {
+        if (pid !== undefined && isAlive(pid)) continue;
+        const outcome = settleShellStatusFile(statusPath, isAlive, scope);
+        if (outcome.kind === 'settled' || outcome.kind === 'skipped') {
+          pending.delete(statusPath);
+        } else if (outcome.kind === 'alive') {
+          pending.set(statusPath, outcome.pid);
+        } else if (
+          outcome.kind === 'unreadable' ||
+          outcome.kind === 'unwritten'
+        ) {
+          warnOnce(statusPath, outcome.error);
+        }
+      } catch (error) {
+        warnOnce(statusPath, error);
+      }
+    }
+    if (pending.size === 0) clearInterval(timer);
+  }, options.intervalMs ?? ORPHANED_SHELL_POLL_MS);
+  timer.unref();
+  return () => clearInterval(timer);
 }
 
 /** Fires when a new entry is registered. */
@@ -461,8 +771,9 @@ export class BackgroundShellRegistry {
    * whether a background shell is still alive instead of inferring
    * liveness from the output file — which block-buffering children keep
    * empty for their whole run (#7626). Timestamps are ISO strings for
-   * model readability; `pid` is included so a `running` sidecar left
-   * behind by a hard-killed CLI can still be cross-checked.
+   * model readability; `pid` and the `pidScope` it belongs to are included
+   * so a `running` sidecar left behind by a hard-killed CLI can still be
+   * cross-checked (see {@link settleOrphanedShellStatusFiles}).
    *
    * Fire-and-forget: a write failure (disk full, permission change)
    * must not poison the registry or the spawn path — mirror of the
@@ -473,13 +784,16 @@ export class BackgroundShellRegistry {
     const statusPath = statusFilePathFor(entry.outputFile);
     const payload: Record<string, unknown> = {
       id: entry.id,
-      status: entry.status,
+      status: entry.status satisfies ShellStatusFileStatus,
       command: entry.command,
       cwd: entry.cwd,
       startTime: new Date(entry.startTime).toISOString(),
       updatedAt: new Date().toISOString(),
     };
-    if (entry.pid !== undefined) payload['pid'] = entry.pid;
+    if (entry.pid !== undefined) {
+      payload['pid'] = entry.pid;
+      payload['pidScope'] = currentShellPidScope();
+    }
     if (entry.endTime !== undefined) {
       payload['endTime'] = new Date(entry.endTime).toISOString();
     }
