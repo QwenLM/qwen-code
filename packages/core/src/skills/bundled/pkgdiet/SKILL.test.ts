@@ -55,7 +55,7 @@ describe('bundled pkgdiet skill', () => {
     expect(fastPath).toBeGreaterThan(sandboxCheck);
 
     const confirmation = normalizedBody.indexOf(
-      'Use sk_user_question to ask whether to continue',
+      'Use `ask_user_question` to ask whether to continue',
     );
     const installOption = normalizedBody.indexOf(
       '- Start the PkgDiet guardrail',
