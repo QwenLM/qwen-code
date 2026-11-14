@@ -77,7 +77,7 @@ describe('managed host build lane', () => {
     }
   });
 
-  it('builds untrusted PR code with a read-only token and no secrets', () => {
+  it('builds PR code with a read-only token and no secrets on either arm', () => {
     // A job-level `permissions:` block replaces the workflow default, so the
     // job's effective scope is the one the untrusted build actually runs with.
     expect(job.permissions ?? workflow.permissions).toEqual({

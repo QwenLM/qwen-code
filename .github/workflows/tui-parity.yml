@@ -177,10 +177,11 @@ jobs:
       # The heal above fixes permissions, not index state. A previous fleet
       # job's sparse checkout (qwen-triage's publisher scripts check out
       # non-cone at the base-branch head on this fleet) leaves a sparse
-      # index: checkout's clean/reset skip the excluded paths, then
-      # `sparse-checkout disable` aborts on the leftovers and leaves the
-      # tree without .github/actions/self-hosted-node — runs 43621213523
-      # and 43621721648 lost the parity job exactly that way. Drop .git to
+      # index: checkout's clean/reset skip the excluded paths, and
+      # `sparse-checkout disable` then exits without materialising them, so
+      # the tree ends up without .github/actions/self-hosted-node — runs
+      # 43621213523 and 43621721648 lost the parity job at the next step
+      # exactly that way. Drop .git to
       # force a fresh clone, as ci.yml and e2e.yml do before every
       # self-hosted checkout.
       - name: 'Recreate runner Git metadata'
@@ -333,10 +334,11 @@ jobs:
       # The heal above fixes permissions, not index state. A previous fleet
       # job's sparse checkout (qwen-triage's publisher scripts check out
       # non-cone at the base-branch head on this fleet) leaves a sparse
-      # index: checkout's clean/reset skip the excluded paths, then
-      # `sparse-checkout disable` aborts on the leftovers and leaves the
-      # tree without .github/actions/self-hosted-node — runs 43621213523
-      # and 43621721648 lost the parity job exactly that way. Drop .git to
+      # index: checkout's clean/reset skip the excluded paths, and
+      # `sparse-checkout disable` then exits without materialising them, so
+      # the tree ends up without .github/actions/self-hosted-node — runs
+      # 43621213523 and 43621721648 lost the parity job at the next step
+      # exactly that way. Drop .git to
       # force a fresh clone, as ci.yml and e2e.yml do before every
       # self-hosted checkout.
       - name: 'Recreate runner Git metadata'

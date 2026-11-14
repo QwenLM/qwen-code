@@ -2,9 +2,10 @@
 
 [English](2026-11-07-ephemeral-container-runners.md) | [简体中文](2026-11-07-ephemeral-container-runners.zh-CN.md)
 
-Date: 2026-11-07. Status: runner lifecycle implemented; thirty fixed slots are
-deployed on hz4. Direct external-PR routing still needs default-branch
-deployment and real CI acceptance.
+Date: 2026-11-07. Status: runner lifecycle implemented. When this was written
+hz4 deployed thirty fixed slots; as of 2026-11-15 hz4 and hz5 run twenty slots
+each, see the capacity update below. Direct external-PR routing still needs
+default-branch deployment and real CI acceptance.
 
 Ten slots registering and running ten keyless test jobs of a private repository
 at the same time on the Hangzhou shared test machine; containers, networks and
@@ -56,7 +57,7 @@ Each container
 ```
 
 The manager keeps a configured number of slots, at most one container per slot.
-The Hangzhou trial ran ten slots at once; the hz4 deployment now maintains thirty slots. It takes no webhook, schedules no PR
+The Hangzhou trial ran ten slots at once; the hz4 deployment maintained thirty slots when this was written, and the capacity update below supersedes that count. It takes no webhook, schedules no PR
 itself, and introduces neither Kubernetes nor a database. GitHub assigns work by
 runner label. Each ECS runs its own manager against its local Docker socket,
 with a unique `poolId` and a per-host `slots` count. Hosts share the scheduling
@@ -358,8 +359,8 @@ substitutions so a drift between them fails a test rather than a job.
 Joining the fleet also means inheriting its workspace reuse. The disposable
 pool starts every job in a fresh container; a fleet runner's workspace survives
 between jobs, and a previous lane can leave root-owned files that fail
-`git clean`, or a sparse index that makes checkout's `sparse-checkout disable`
-abort and leave `.github/actions/` off disk. Both rerouted lanes therefore
+`git clean`, or a sparse index that leaves the excluded paths off disk even
+after checkout's `sparse-checkout disable` runs. Both rerouted lanes therefore
 adopt the fleet's standard pre-checkout pair — restore workspace ownership,
 then drop `.git` so checkout clones fresh — and join the checkout matrix pinned
 by `scripts/tests/qwen-runner-checkout-workflow.test.js`. The first live run

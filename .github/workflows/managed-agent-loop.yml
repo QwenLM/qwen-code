@@ -62,9 +62,9 @@ jobs:
       # either heal. Root-owned leftovers fail git clean and send checkout
       # into its recreate path, which dies in its own auth cleanup (run
       # 43621213542, kernel leg). A leftover sparse index makes checkout's
-      # clean/reset skip the excluded paths, then `sparse-checkout disable`
-      # aborts and leaves no .github/actions/ on disk (e2e.yml documents the
-      # same failure). Same pair as ci.yml/e2e.yml, pinned by
+      # clean/reset skip the excluded paths, and `sparse-checkout disable`
+      # then exits without materialising them, leaving no .github/actions/ on
+      # disk. Same pair as ci.yml/e2e.yml, pinned by
       # qwen-runner-checkout-workflow.test.js.
       - name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -91,6 +91,18 @@ jobs:
       - name: 'Use pre-installed Node.js'
         if: "${{ runner.environment == 'self-hosted' }}"
         uses: './.github/actions/self-hosted-node'
+      # The fleet hosts run other lanes' jobs too, so a host at or near its
+      # disk or inode floor must fail here, before this lane installs and
+      # builds twice, instead of surfacing as an opaque build error or as a
+      # `Require both paths to have passed` failure on the lane whose job is
+      # telling a real managed-loop regression from a host fault. Same gate
+      # and constants as the sibling Managed Host lane.
+      - name: 'Disk floor gate (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        env:
+          DISK_FLOOR_MIN_FREE_KB: '8388608'
+          DISK_FLOOR_MAX_USED_PCT: '85'
+        run: 'bash .github/scripts/check-disk-floor.sh "${GITHUB_WORKSPACE}" "${RUNNER_TEMP:-/tmp}"'
       - name: 'Cache pnpm store'
         if: "${{ runner.environment == 'github-hosted' }}"
         uses: './.github/actions/pnpm-store-cache'

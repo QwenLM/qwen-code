@@ -139,12 +139,7 @@ function evalExpression(
   ];
   let expr = expression.replace(/^\$\{\{\s*/, '').replace(/\s*\}\}$/, '');
   for (const [term, value] of substitutions) {
-    // Global: a selector may repeat a term to price its own timeout on the
-    // arm it selects (the Managed Host lane repeats both trust terms). A
-    // single substitution would leave the second copy unsubstituted and fail
-    // the unrecognized-term guard below rather than evaluate it. The flags
-    // are rebuilt because `replaceAll` rejects a non-global RegExp.
-    expr = expr.replace(new RegExp(term.source, `${term.flags}g`), value);
+    expr = expr.replace(term, value);
   }
   expr = expr.replace(/fromJSON\('(\[[^\]]*\])'\)/g, '$1');
   assert.doesNotMatch(
@@ -1302,18 +1297,42 @@ describe('credential-free jobs on the disposable pool', () => {
           trusted ? 20 : 90,
           `managed-host ceiling sameRepo=${sameRepo} assoc='${assoc}'`,
         );
+        // The kill switch reverts the arm to hosted, so the ceiling must
+        // follow it: dropping the `vars` term leaves a reverted PR priced at
+        // 90 minutes on a GitHub-hosted runner.
+        assert.equal(
+          evalExpression(timeout, {
+            eventName: 'pull_request',
+            ecsDisabled: true,
+            sameRepo,
+            assoc,
+          }),
+          20,
+          `kill-switch must price managed-host PR builds as hosted sameRepo=${sameRepo} assoc='${assoc}'`,
+        );
       }
     }
     for (const eventName of ['push', 'workflow_dispatch', 'merge_group']) {
-      assert.equal(
-        evalExpression(timeout, {
-          eventName,
-          ecsDisabled: false,
-          sameRepo: true,
-        }),
-        20,
-        `managed-host ${eventName} keeps the hosted ceiling`,
-      );
+      for (const ecsDisabled of [false, true]) {
+        // Price the non-PR cells on both head shapes: dropping the event term
+        // leaves a push or dispatch priced at 90 by the trust clause, which
+        // the same-repo-only cell above cannot see.
+        for (const [sameRepo, assoc] of [
+          [true, 'OWNER'],
+          [false, 'NONE'],
+        ]) {
+          assert.equal(
+            evalExpression(timeout, {
+              eventName,
+              ecsDisabled,
+              sameRepo,
+              assoc,
+            }),
+            20,
+            `managed-host ${eventName} keeps the hosted ceiling sameRepo=${sameRepo} assoc='${assoc}' ecsDisabled=${ecsDisabled}`,
+          );
+        }
+      }
     }
   });
 

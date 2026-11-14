@@ -7,9 +7,12 @@ name: 'Web Shell Managed Host Build'
 # an artifact nothing in the repo reads. This lane buys the same rot detection
 # on CI only, and only when the entry or its build wiring changes.
 #
-# Security: builds untrusted PR code on a disposable self-hosted runner with
-# `contents: read` and no secrets. Push and manual runs remain GitHub-hosted.
-# It produces no artifact and posts nothing.
+# Security: both self-hosted arms are credential-free (`contents: read`, no
+# secrets). Untrusted fork PRs build on the disposable pool; trusted PRs — a
+# head in this repository, or an OWNER/MEMBER/COLLABORATOR author — build on
+# the persistent x64 fleet, whose workspace survives between jobs, which is
+# why the ownership heal and `.git` reset below exist. Push and manual runs
+# remain GitHub-hosted. It produces no artifact and posts nothing.
 on:
   pull_request:
     branches:
