@@ -31,6 +31,7 @@ import {
   type PrWatchPendingEntry,
   type PrWatchRoleGroup,
   type PrWatchState,
+  type PrTransitionType,
 } from './pr-watch-store.js';
 
 /** Pending entries older than this are dropped with a log line (master §5). */
@@ -84,7 +85,15 @@ export interface PrWatchDrainDeps {
   readPushedHeads: (
     recipient: PrWatchRecipient,
   ) => Promise<ReadonlySet<string> | undefined>;
-  actions?: ReadonlyMap<string, string>;
+  /**
+   * The templates for one entry's type on its PR's host. Undefined keeps the
+   * legacy single winner; a map — possibly empty — selects role-aware
+   * delivery. An empty map means no role subscribed that type.
+   */
+  actionsForEvent?: (
+    type: PrTransitionType,
+    host: string,
+  ) => ReadonlyMap<string, string> | undefined;
   wakeDormant?: boolean;
   now?: () => number;
   log?: (message: string) => void;
@@ -694,9 +703,11 @@ async function drainEntry(
   log: (message: string) => void,
 ): Promise<{ delivered: number; done: boolean; entry: PrWatchPendingEntry }> {
   const identity = current.pr;
-  // An empty map is not a subscription: treat it as no actions so a
-  // momentarily empty configuration cannot strand live transitions.
-  const actions = deps.actions?.size ? deps.actions : undefined;
+  // The subscription decides per type: undefined keeps the legacy single
+  // winner, while a map — possibly empty — selects role-aware delivery. The
+  // alias uses the empty map to mean "no role subscribed", which must not
+  // fall back to the single winner.
+  const actions = deps.actionsForEvent?.(entry.type, identity.host);
   const roleAware = actions !== undefined;
   const deliveredKeys = new Set(current.delivered ?? []);
   const isGone = (sessionId: string): boolean => {
@@ -940,7 +951,7 @@ async function restoreAndAdmit(
         const liveEntry = (current.pending ?? []).find(
           (p) => p.key === entry.key,
         );
-        const actions = deps.actions?.size ? deps.actions : undefined;
+        const actions = deps.actionsForEvent?.(entry.type, identity.host);
         const promptText = buildDrainPrompt(
           current,
           liveEntry ?? entry,

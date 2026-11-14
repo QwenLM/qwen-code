@@ -26,7 +26,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { E2E_MEMORY_SETTINGS_DEFAULTS } from '../e2e-memory-defaults.js';
 import {
@@ -36,7 +36,7 @@ import {
   type FakeOpenAIServer,
 } from '../fake-openai-server.js';
 import { pickE2eRenderer } from '../renderer-matrix.js';
-import { IS_CONTAINER_SANDBOX } from '../test-helper.js';
+import { IS_CONTAINER_SANDBOX, readDebugLogs } from '../test-helper.js';
 import { InteractiveSession } from './interactive-session.js';
 
 type JsonObject = Record<string, unknown>;
@@ -241,23 +241,32 @@ const VOLATILE_KEYS = new Set([
 // Timings, such as the telemetry recorded with each response.
 const TIMING_KEY = /(_ms|Ms)$/;
 
-// The background shell scenario's launch text names its task id, its process,
-// the project's runtime directory, and the sizes of that text. The sizes are
-// the one piece normalize() cannot recover from the normalized text: the
-// kernel picks the process id's width, which sets them. The token estimates
-// are ceilings of the same lengths, so they step with it too.
+// The sizes of a shell result's text. normalize() cannot recover them from
+// the normalized text: the kernel picks the process id's width, which sets
+// them, and the token estimates are ceilings of the same lengths, so they
+// step with it too.
+const SHELL_SIZE_VOLATILE_KEYS = [
+  'content_length',
+  'raw_content_length',
+  'processed_estimated_tokens',
+  'raw_estimated_tokens',
+];
+
+// The background shell scenario's launch text also names its task id, its
+// process and the project's runtime directory.
 const BACKGROUND_SHELL_VOLATILE: Volatile = {
-  keys: [
-    'content_length',
-    'raw_content_length',
-    'processed_estimated_tokens',
-    'raw_estimated_tokens',
-  ],
+  keys: SHELL_SIZE_VOLATILE_KEYS,
   text: [
     [/\bbg_[0-9a-f]{8}\b/g, 'bg_<ID>'],
     [/(pid: |pid |<pid>)\d+/g, '$1<PID>'],
     [/\/tmp\/[0-9a-f]{64}\//g, '/tmp/<HASH>/'],
   ],
+};
+
+// The queued-input scenario runs a foreground shell, whose result names its
+// process group and so carries the same size fields.
+const FOREGROUND_SHELL_VOLATILE: Volatile = {
+  keys: SHELL_SIZE_VOLATILE_KEYS,
 };
 
 const DATE_REMINDER =
@@ -446,6 +455,74 @@ describe('normalize', () => {
     );
     expect(plain.systemPayload.uiEvent['processed_estimated_tokens']).toBe(
       Math.ceil((launchText(99).length + 64) / 4),
+    );
+
+    // A foreground shell's result ends with its process group too, so the
+    // queued-input scenario's sizes move with the pid's width in the same
+    // way. These texts cross a multiple of four, which steps both ceilings.
+    const shellText = (pid: number, output = 'queue-now') =>
+      `Command: echo ${output} && node -e "setTimeout(() => {}, 5000)"\n` +
+      'Directory: (root)\n' +
+      `Output: ${output}\n` +
+      'Error: (none)\n' +
+      'Exit Code: 0\n' +
+      'Signal: (none)\n' +
+      `Process Group PGID: ${pid}`;
+    const shellRecord = (pid: number, output?: string) => {
+      const text = shellText(pid, output);
+      return [
+        {
+          type: 'system',
+          subtype: 'ui_telemetry',
+          systemPayload: {
+            uiEvent: {
+              'event.name': 'tool_call',
+              call_id: 'call_slow',
+              content_length: text.length,
+              raw_content_length: text.length,
+              raw_estimated_tokens: Math.ceil(text.length / 4),
+              processed_estimated_tokens: Math.ceil((text.length + 64) / 4),
+            },
+          },
+        },
+        {
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_slow',
+                  name: 'run_shell_command',
+                  response: { output: text },
+                },
+              },
+            ],
+          },
+        },
+      ];
+    };
+    const normalizedShell = (
+      pid: number,
+      volatile?: Volatile,
+      output?: string,
+    ) =>
+      normalize(shellRecord(pid, output), '/workspace', '/scratch', volatile);
+    expect(shellText(99).length % 4).toBe(0);
+    // Without the scenario's keys the counts follow the pid's width; with
+    // them the records compare, while the PGID text is scrubbed either way.
+    expect(normalizedShell(99)).not.toEqual(normalizedShell(100));
+    expect(JSON.stringify(normalizedShell(99))).toContain(
+      'Process Group PGID: <PGID>',
+    );
+    expect(normalizedShell(99, FOREGROUND_SHELL_VOLATILE)).toEqual(
+      normalizedShell(100, FOREGROUND_SHELL_VOLATILE),
+    );
+    // A real output difference still compares unequal, so widening the keys
+    // to 'output' cannot quietly retire what the scenario detects. The
+    // replacement keeps the length, leaving the text as the only difference.
+    expect(normalizedShell(99, FOREGROUND_SHELL_VOLATILE)).not.toEqual(
+      normalizedShell(99, FOREGROUND_SHELL_VOLATILE, 'queue-noX'),
     );
   });
 });
@@ -830,14 +907,7 @@ describeTui(SUITE, () => {
       () => session!.exitResult() !== undefined,
       '/quit exits the TUI',
     );
-    const debugDir = join(runtimeDir, 'debug');
-    const debugLog = existsSync(debugDir)
-      ? files(debugDir)
-          // `latest` points at the session's own log.
-          .filter((file) => basename(file) !== 'latest')
-          .map((file) => readFileSync(file, 'utf8'))
-          .join('')
-      : '';
+    const debugLog = readDebugLogs(runtimeDir);
     return {
       requests: modelRequests(server, workspace, scratch, scenario),
       sideRequests: modelRequests(server, workspace, scratch, scenario, false),
@@ -1174,6 +1244,7 @@ describeTui(SUITE, () => {
       rounds: 2,
       batches: 1,
       prompts: ['Run the slow command.'],
+      volatile: FOREGROUND_SHELL_VOLATILE,
       queue: { on: 'queue-now', input: 'Also mention the weather.' },
       sent: 'Also mention the weather.',
       reply: (messages) =>
@@ -1425,16 +1496,20 @@ describeTui(SUITE, () => {
     (scenario) => renderer === 'ink' || !scenario.laterTurns,
   );
 
-  // The byte-count case pins the constant; this pins the scenario's use of
+  // The byte-count case pins the constant; this pins each scenario's use of
   // it, which the parity run alone only notices when the two pids differ in
   // width.
   it('uses the normalizer the byte-count case pins', () => {
-    const scenario = allScenarios.find(
+    const background = allScenarios.find(
       (candidate) =>
         candidate.name ===
         'a background shell whose result starts a notification turn',
     );
-    expect(scenario?.volatile).toBe(BACKGROUND_SHELL_VOLATILE);
+    expect(background?.volatile).toBe(BACKGROUND_SHELL_VOLATILE);
+    const queued = allScenarios.find(
+      (candidate) => candidate.name === 'input queued while a tool runs',
+    );
+    expect(queued?.volatile).toBe(FOREGROUND_SHELL_VOLATILE);
   });
 
   it.each(scenarios)('$name', PARITY_CASE_OPTIONS, async (scenario) => {

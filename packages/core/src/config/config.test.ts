@@ -41,6 +41,11 @@ import {
   isValidGoalTokenBudget,
   installSessionWorkflowRevisionWriteThrough,
 } from './config.js';
+import {
+  AGENT_LOOP_SURFACES,
+  UNIFIED_SURFACE_DEFAULTS,
+  EVENT_BUS_SURFACE_DEFAULTS,
+} from './agent-loop-rollout.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
 import { Storage } from './storage.js';
 import { ideContextStore } from '../ide/ideContext.js';
@@ -7381,16 +7386,23 @@ describe('Server Config (config.ts)', () => {
       });
       afterEach(() => vi.unstubAllEnvs());
 
-      it('defaults to off', () => {
-        expect(makeConfig().isEventBusAgentLoopEnabled()).toBe(false);
+      it('defaults to off for every surface', () => {
+        for (const surface of AGENT_LOOP_SURFACES) {
+          expect(makeConfig().isEventBusAgentLoopEnabled(surface)).toBe(false);
+        }
       });
 
       it('honors the constructor parameter', () => {
         expect(
           makeConfig({
             eventBusAgentLoopEnabled: true,
-          }).isEventBusAgentLoopEnabled(),
+          }).isEventBusAgentLoopEnabled('headless'),
         ).toBe(true);
+        expect(
+          makeConfig({
+            eventBusAgentLoopEnabled: false,
+          }).isEventBusAgentLoopEnabled('headless'),
+        ).toBe(false);
       });
 
       it('is enabled by QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP=1 even when the parameter is off', () => {
@@ -7398,13 +7410,124 @@ describe('Server Config (config.ts)', () => {
         expect(
           makeConfig({
             eventBusAgentLoopEnabled: false,
-          }).isEventBusAgentLoopEnabled(),
+          }).isEventBusAgentLoopEnabled('headless'),
         ).toBe(true);
       });
 
-      it('ignores other env values', () => {
+      it('is forced off by QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP=0 even when the parameter is on', () => {
         vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', '0');
-        expect(makeConfig().isEventBusAgentLoopEnabled()).toBe(false);
+        expect(
+          makeConfig({
+            eventBusAgentLoopEnabled: true,
+          }).isEventBusAgentLoopEnabled('headless'),
+        ).toBe(false);
+      });
+
+      it('forces only the surfaces named in an env list', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', 'headless,acp=0');
+        const config = makeConfig({ eventBusAgentLoopEnabled: true });
+        expect(config.isEventBusAgentLoopEnabled('headless')).toBe(true);
+        expect(config.isEventBusAgentLoopEnabled('acp')).toBe(false);
+        expect(config.isEventBusAgentLoopEnabled('ink')).toBe(true);
+      });
+    });
+
+    describe('isUnifiedAgentLoopEnabled', () => {
+      beforeEach(() => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
+      });
+      afterEach(() => vi.unstubAllEnvs());
+
+      it('defaults to off for every surface', () => {
+        for (const surface of AGENT_LOOP_SURFACES) {
+          expect(makeConfig().isUnifiedAgentLoopEnabled(surface)).toBe(false);
+        }
+      });
+
+      it('honors the constructor parameter', () => {
+        expect(
+          makeConfig({
+            unifiedAgentLoopEnabled: true,
+          }).isUnifiedAgentLoopEnabled('acp'),
+        ).toBe(true);
+        expect(
+          makeConfig({
+            unifiedAgentLoopEnabled: false,
+          }).isUnifiedAgentLoopEnabled('acp'),
+        ).toBe(false);
+      });
+
+      it('is enabled by QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1 even when the parameter is off', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', '1');
+        expect(
+          makeConfig({
+            unifiedAgentLoopEnabled: false,
+          }).isUnifiedAgentLoopEnabled('acp'),
+        ).toBe(true);
+      });
+
+      it('is forced off by QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=0 even when the parameter is on', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', '0');
+        expect(
+          makeConfig({
+            unifiedAgentLoopEnabled: true,
+          }).isUnifiedAgentLoopEnabled('acp'),
+        ).toBe(false);
+      });
+
+      it('forces only the surfaces named in an env list', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'acp=1,ink=0');
+        const config = makeConfig();
+        expect(config.isUnifiedAgentLoopEnabled('acp')).toBe(true);
+        expect(config.isUnifiedAgentLoopEnabled('ink')).toBe(false);
+        expect(config.isUnifiedAgentLoopEnabled('headless')).toBe(false);
+      });
+
+      it('resolves each surface independently', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'opentui');
+        const config = makeConfig();
+        expect(config.isUnifiedAgentLoopEnabled('opentui')).toBe(true);
+        expect(config.isUnifiedAgentLoopEnabled('agent-core')).toBe(false);
+        expect(config.isUnifiedAgentLoopEnabled('speculation')).toBe(false);
+      });
+    });
+
+    describe('loop-switch default tables are independent', () => {
+      // Snapshot the tables as found so cleanup restores them rather than a
+      // hardcoded false — the first rollout flip must not be erased here.
+      const savedUnified = { ...UNIFIED_SURFACE_DEFAULTS };
+      const savedEventBus = { ...EVENT_BUS_SURFACE_DEFAULTS };
+      afterEach(() => {
+        for (const surface of AGENT_LOOP_SURFACES) {
+          UNIFIED_SURFACE_DEFAULTS[surface] = savedUnified[surface];
+          EVENT_BUS_SURFACE_DEFAULTS[surface] = savedEventBus[surface];
+        }
+        vi.unstubAllEnvs();
+      });
+
+      it('flipping a unified surface default does not flip the event-bus default', () => {
+        // The next rollout step flips one surface's unified default. The kernel
+        // must stay at its own table's value for that surface unless its own
+        // table is flipped — re-merging the two tables reds this case.
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
+        UNIFIED_SURFACE_DEFAULTS.headless = true;
+        const config = makeConfig();
+        expect(config.isUnifiedAgentLoopEnabled('headless')).toBe(true);
+        expect(config.isEventBusAgentLoopEnabled('headless')).toBe(
+          savedEventBus.headless,
+        );
+      });
+
+      it('flipping an event-bus surface default does not flip the unified default', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
+        EVENT_BUS_SURFACE_DEFAULTS.headless = true;
+        const config = makeConfig();
+        expect(config.isEventBusAgentLoopEnabled('headless')).toBe(true);
+        expect(config.isUnifiedAgentLoopEnabled('headless')).toBe(
+          savedUnified.headless,
+        );
       });
     });
 
@@ -12437,6 +12560,103 @@ describe('setApprovalMode with folder trust', () => {
     const fallbackError = () =>
       (vi.mocked(logRipgrepFallback).mock.calls[0][1] as RipgrepFallbackEvent)
         .error;
+
+    it('loads ACP resources while the ripgrep probe is pending and joins it before publishing tools', async () => {
+      let finishResources!: () => void;
+      const resources = new Promise<void>((resolve) => {
+        finishResources = resolve;
+      });
+      let finishProbe!: (available: boolean) => void;
+      const probe = new Promise<boolean>((resolve) => {
+        finishProbe = resolve;
+      });
+      vi.mocked(canUseRipgrep).mockReturnValueOnce(probe);
+      const config = makeConfig({ experimentalZedIntegration: true });
+      const refresh = vi
+        .spyOn(config.getExtensionManager(), 'refreshCache')
+        .mockReturnValueOnce(resources);
+      const createRegistry = vi.spyOn(config, 'createToolRegistry');
+      let initialized = false;
+      const initializing = config.initialize().then(() => {
+        initialized = true;
+      });
+
+      try {
+        await vi.waitFor(() => expect(refresh).toHaveBeenCalled());
+        expect(canUseRipgrep).toHaveBeenCalledOnce();
+        expect(vi.mocked(canUseRipgrep).mock.calls[0]?.[1]).toBeInstanceOf(
+          AbortSignal,
+        );
+        expect(createRegistry).not.toHaveBeenCalled();
+        expect(initialized).toBe(false);
+
+        finishResources();
+        await vi.waitFor(() => expect(createRegistry).toHaveBeenCalled());
+        expect(initialized).toBe(false);
+      } finally {
+        finishResources();
+        finishProbe(true);
+        await initializing;
+      }
+
+      expect(grepRegistrations()).toHaveLength(1);
+    });
+
+    it('cancels and drains an ACP probe when resource initialization fails', async () => {
+      let signal: AbortSignal | undefined;
+      let closeProbe: (() => void) | undefined;
+      vi.mocked(canUseRipgrep).mockImplementationOnce(
+        (_builtin, abortSignal) =>
+          new Promise<boolean>((_resolve, reject) => {
+            signal = abortSignal;
+            closeProbe = () => reject(abortSignal?.reason);
+          }),
+      );
+      const config = makeConfig({ experimentalZedIntegration: true });
+      const failure = new Error('resource load failed');
+      vi.spyOn(
+        config.getExtensionManager(),
+        'refreshCache',
+      ).mockRejectedValueOnce(failure);
+
+      let settled = false;
+      const initializing = config.initialize();
+      void initializing.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+
+      try {
+        await vi.waitFor(() => expect(signal?.aborted).toBe(true));
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        expect(settled).toBe(false);
+      } finally {
+        closeProbe?.();
+        await expect(initializing).rejects.toBe(failure);
+      }
+
+      expect(signal?.aborted).toBe(true);
+      expect(logRipgrepFallback).not.toHaveBeenCalled();
+    });
+
+    it('keeps ACP fallback diagnostics and retries a failed probe when rebuilding tools', async () => {
+      vi.mocked(canUseRipgrep)
+        .mockRejectedValueOnce(new Error('probe failed'))
+        .mockResolvedValueOnce(true);
+      const config = await initConfig({ experimentalZedIntegration: true });
+
+      expect(canUseRipgrep).toHaveBeenCalledOnce();
+      expect(fallbackError()).toBe('probe failed');
+
+      await config.createToolRegistry();
+
+      expect(canUseRipgrep).toHaveBeenCalledTimes(2);
+      expect(logRipgrepFallback).toHaveBeenCalledOnce();
+    });
 
     it('registers the background-agent roster tool', async () => {
       await initConfig();

@@ -1160,6 +1160,7 @@ describe('channel registry', () => {
       'email',
       'wecom',
       'wecom-callback',
+      'wecom-webhook',
       'feishu',
       'feishu-webhook',
       'qq',
@@ -1178,6 +1179,7 @@ describe('channel registry', () => {
       'email',
       'wecom',
       'wecom-callback',
+      'wecom-webhook',
       'feishu',
       'feishu-webhook',
       'qq',
@@ -1274,6 +1276,22 @@ describe('channel registry', () => {
         }),
       ]);
     }
+    expect(
+      catalog.find((entry) => entry.type === 'wecom-webhook'),
+    ).toMatchObject({
+      manageable: true,
+      outboundOnly: true,
+      defaultDeliveryTarget: { type: 'chat', id: 'default' },
+      fields: [
+        {
+          key: 'webhookUrl',
+          label: 'Webhook URL',
+          kind: 'secret',
+          required: true,
+          envResolvable: true,
+        },
+      ],
+    });
     for (const type of ['dingtalk', 'wecom', 'feishu'] as const) {
       const fields = catalog.find((entry) => entry.type === type)?.fields;
       expect(fields).not.toContainEqual(

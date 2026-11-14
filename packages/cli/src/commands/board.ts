@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { commandMetadata } from './command-metadata.js';
 import type { Argv, CommandModule } from 'yargs';
 import {
   answerAsk,
@@ -90,8 +91,7 @@ async function snapshot(board: string, actor?: string): Promise<BoardSnapshot> {
 }
 
 export const boardCommand: CommandModule = {
-  command: 'board',
-  describe: 'Share work with other agents through a board',
+  ...commandMetadata.board,
   builder: (yargs: Argv) =>
     yargs
       .option('board', {
