@@ -129,6 +129,14 @@ function radioItems(): HTMLElement[] {
 }
 
 describe('SessionSortMenu', () => {
+  it('uses the list filter icon for display options', async () => {
+    await renderMenu();
+    const trigger = container.querySelector(
+      'button[aria-label="Display options"] svg',
+    );
+    expect(trigger?.classList.contains('lucide-list-filter')).toBe(true);
+  });
+
   it('keeps session sorting in a submenu and persists it per host', async () => {
     expect(readSessionSort('a')).toBe('updatedAt');
     writeSessionSort('a', 'lastUserPromptAt');

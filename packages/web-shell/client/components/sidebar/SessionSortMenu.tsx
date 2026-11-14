@@ -1,4 +1,4 @@
-import { ArrowDownWideNarrowIcon } from 'lucide-react';
+import { ListFilterIcon } from 'lucide-react';
 import type { DaemonWorkspaceCapability } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
 import { workspaceLabel } from '../../utils/workspace';
@@ -107,7 +107,7 @@ export function SessionSortMenu({
           aria-label={t('sidebar.sessionDisplay')}
           title={t('sidebar.sessionDisplay')}
         >
-          <ArrowDownWideNarrowIcon size={18} strokeWidth={1.5} />
+          <ListFilterIcon size={18} strokeWidth={1.5} />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-56">
