@@ -5067,7 +5067,19 @@ describe('Session', () => {
       _host: unknown,
       { requests }: { requests: core.ToolCallRequestInfo[] },
     ) {
-      const results = [];
+      const results: Array<{
+        request: core.ToolCallRequestInfo;
+        executionRequest: core.ToolCallRequestInfo;
+        response: {
+          callId: string;
+          responseParts: Part[];
+          resultDisplay?: unknown;
+          executionStatus: string;
+          errorType?: core.ToolErrorType;
+        };
+        status: 'success' | 'error';
+        origin: 'executed';
+      }> = [];
       for (const request of requests) {
         const tool = mockToolRegistry.getTool(request.name);
         // The shared scheduler's cut-off guard: a truncated response never
@@ -5470,11 +5482,7 @@ describe('Session', () => {
         id: 'call-cut',
         name: 'write_file',
         args: { file_path: '/tmp/notes.txt', content: 'p' },
-      }) as {
-        type: core.LlmEventType;
-        value: core.ToolCallRequestInfo;
-        functionCall: FunctionCall;
-      };
+      });
       // The client marks the cut response's pending calls truncated; the
       // mocked model stream omits that step, so mark the request here.
       cutCall.value.wasOutputTruncated = true;

@@ -35,6 +35,7 @@ import {
   createSchedulerExecutor,
   type AgentLoopDuplicateState,
   type AgentLoopStopReason,
+  type AgentLoopToolExecutor,
   type AgentLoopToolResult,
 } from '@qwen-code/qwen-code-core/core/agent-loop.js';
 import type {
@@ -578,32 +579,69 @@ export async function runAcpToolBatch(
 
   const results = new Map<ToolCallRequestInfo, AgentLoopToolResult>();
   try {
+    // The shared loop's `beforeToolLaunch` hook is synchronous, so the Agent
+    // Host invocation guard — which is async — runs inside the executor
+    // wrapper at the launch boundary instead.
+    const invocationGuard = host.invocationGuard;
+    const baseExecutor = createSchedulerExecutor(config, {
+      onToolCallsUpdate,
+      outputUpdateHandler,
+      onToolExecutionStarted: started,
+      onToolExecutionSettled: (callId, status, durationMs) => {
+        const state = states.get(callId);
+        if (state) state.execution = { status, durationMs };
+      },
+      onToolResultFullTurnModel: options.onFullTurnModel,
+      refuseToolCall: (request) => {
+        const sessionRefusal = host.refuseToolCall(request);
+        if (sessionRefusal !== undefined) return sessionRefusal;
+        const directTool = host.getTool(canonicalToolName(request.name));
+        return directTool === undefined &&
+          resolvedTargets.get(request.callId) === undefined
+          ? `Tool "${request.name}" is not registered in this session.`
+          : undefined;
+      },
+      onPermissionPromptTerminalSequence: (sequence) => {
+        if (!closed) host.sendTerminalSequence(sequence);
+      },
+    });
+    const executor: AgentLoopToolExecutor = invocationGuard
+      ? {
+          run: (requests, signal, hooks) =>
+            baseExecutor.run(requests, signal, {
+              ...hooks,
+              beforeLaunch: (request, settled) => {
+                if (!hooks.beforeLaunch(request, settled)) return false;
+                const tool =
+                  resolvedTargets.get(request.callId) ??
+                  host.getTool(canonicalToolName(request.name));
+                if (host.isTrustedLiveTool(tool)) return true;
+                return evaluateToolInvocationGuard(invocationGuard, {
+                  callId: request.callId,
+                  toolName: canonicalToolName(request.name),
+                  args: request.args as Record<string, unknown>,
+                  signal,
+                  permissionChecked: true,
+                  sessionId: config.getSessionId(),
+                  cwd: config.getTargetDir(),
+                }).then((decision) => {
+                  if (signal.aborted) return false;
+                  if (!decision.allowed) {
+                    debugLogger.debug(
+                      `Invocation guard denied ${request.name}: ${decision.reason}`,
+                    );
+                  }
+                  return decision.allowed;
+                });
+              },
+            }),
+        }
+      : baseExecutor;
     const batch = await options.loop.runBatch({
       ...options.duplicates,
       toolSignal: tools.signal,
-      executor: createSchedulerExecutor(config, {
-        onToolCallsUpdate,
-        outputUpdateHandler,
-        onToolExecutionStarted: started,
-        onToolExecutionSettled: (callId, status, durationMs) => {
-          const state = states.get(callId);
-          if (state) state.execution = { status, durationMs };
-        },
-        onToolResultFullTurnModel: options.onFullTurnModel,
-        refuseToolCall: (request) => {
-          const sessionRefusal = host.refuseToolCall(request);
-          if (sessionRefusal !== undefined) return sessionRefusal;
-          const directTool = host.getTool(canonicalToolName(request.name));
-          return directTool === undefined &&
-            resolvedTargets.get(request.callId) === undefined
-            ? `Tool "${request.name}" is not registered in this session.`
-            : undefined;
-        },
-        onPermissionPromptTerminalSequence: (sequence) => {
-          if (!closed) host.sendTerminalSequence(sequence);
-        },
-      }),
-      beforeToolLaunch: async (request) => {
+      executor,
+      beforeToolLaunch: (request) => {
         const approval = states.get(request.callId)?.todoPlanApproval;
         if (approval && host.isTodoPlanApprovalStale(approval)) {
           stopBatch();
@@ -616,27 +654,6 @@ export async function runAcpToolBatch(
           if (host.readOnlyRefusalMessage !== undefined) {
             stopBatch();
             return false;
-          }
-          if (host.invocationGuard) {
-            const decision = await evaluateToolInvocationGuard(
-              host.invocationGuard,
-              {
-                callId: request.callId,
-                toolName: canonicalToolName(request.name),
-                args: request.args as Record<string, unknown>,
-                signal: tools.signal,
-                permissionChecked: true,
-                sessionId: config.getSessionId(),
-                cwd: config.getTargetDir(),
-              },
-            );
-            if (tools.signal.aborted) return false;
-            if (!decision.allowed) {
-              debugLogger.debug(
-                `Invocation guard denied ${request.name}: ${decision.reason}`,
-              );
-              return false;
-            }
           }
         }
         return true;
