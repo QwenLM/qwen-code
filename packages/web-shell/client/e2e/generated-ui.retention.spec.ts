@@ -93,13 +93,15 @@ test.afterAll(async () => {
   await sandbox?.close();
 });
 
-// The session timeline rail overlays the transcript's left gutter and its
-// ticks take pointer events, so a wheel aimed there scrolls the rail instead
-// of the transcript. Aim at the right edge, where the list is the pointer
-// target, rather than at the centre, which lands on a message row.
+// The session timeline rail is a sibling of the transcript, not a child, and
+// its buttons take pointer events over the left gutter. A hover there fails
+// Playwright's actionability check, so it is never dispatched and retries
+// until the test times out — no wheel is ever sent. Aim inside the list's own
+// right padding, below the conversation-search trigger's 32px box, so the
+// list itself is the hit target.
 async function hoverForTranscriptWheel(scroll: Locator) {
   const width = await scroll.evaluate((element) => element.clientWidth);
-  await scroll.hover({ position: { x: width - 10, y: 10 } });
+  await scroll.hover({ position: { x: width - 10, y: 40 } });
 }
 
 async function observeRuntime(page: Page, holdInit = false) {
