@@ -712,6 +712,46 @@ describe('CronScheduler', () => {
         await fs.rm(dir, { recursive: true, force: true });
       }
     });
+
+    it('getPendingWakeup returns null on an empty scheduler', () => {
+      expect(scheduler.getPendingWakeup()).toBeNull();
+    });
+
+    it('getPendingWakeup returns the pending wakeup with its scheduling fields', () => {
+      const w = scheduler.scheduleWakeup(300, 'continue the loop');
+
+      const pending = scheduler.getPendingWakeup();
+      expect(pending).not.toBeNull();
+      expect(pending!.id).toBe(w.id);
+      expect(pending!.fireAtMs).toBe(Date.parse(w.scheduledFor));
+      expect(pending!.createdAt).toBeLessThanOrEqual(
+        Date.parse(w.scheduledFor),
+      );
+      expect(pending!.prompt).toBe('continue the loop');
+      expect(pending!.todoWorkChainId).toBeUndefined();
+    });
+
+    it('getPendingWakeup passes through todoWorkChainId', () => {
+      scheduler.scheduleWakeup(300, 'chained', 'todo-chain-1');
+
+      expect(scheduler.getPendingWakeup()!.todoWorkChainId).toBe(
+        'todo-chain-1',
+      );
+    });
+
+    it('getPendingWakeup returns null after the wakeup is cancelled', () => {
+      const w = scheduler.scheduleWakeup(300, 'p');
+      scheduler.cancelWakeup(w.id);
+
+      expect(scheduler.getPendingWakeup()).toBeNull();
+    });
+
+    it('getPendingWakeup returns null after cancelAllWakeups', () => {
+      scheduler.scheduleWakeup(120, 'a');
+      scheduler.cancelAllWakeups();
+
+      expect(scheduler.getPendingWakeup()).toBeNull();
+    });
   });
 
   describe('destroy', () => {
