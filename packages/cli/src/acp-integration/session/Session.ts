@@ -91,7 +91,7 @@ import { Buffer } from 'node:buffer';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   getStartupContextLength,
-  isWrappedSystemReminderPart,
+  isReplayedTurnReminderPart,
   markCompressedHistory,
 } from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import { realpathSync, statSync } from 'node:fs';
@@ -7942,10 +7942,11 @@ export class Session implements SessionContext {
               // user run can already carry the reminders that were prepended on
               // the original send. Re-inserting would show the model duplicate
               // (and, if approval mode changed since, conflicting) reminders, so
-              // skip when one is already present — mirrors the
+              // skip when one is already present. Recalled memory shares the
+              // envelope but is not one of these reminders. Mirrors the
               // `hasSystemReminderPart` guard in nonInteractiveCli.ts.
               const alreadyHasReminder =
-                isContinue && parts.some(isWrappedSystemReminderPart);
+                isContinue && parts.some(isReplayedTurnReminderPart);
               if (!alreadyHasReminder) {
                 // Insert after any leading functionResponse parts so a
                 // tool-result continuation (interrupted_turn) keeps tool_result

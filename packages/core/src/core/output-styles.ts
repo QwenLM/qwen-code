@@ -185,6 +185,9 @@ export function renderOutputStyleSection(style: OutputStyleDefinition): string {
   return `# Output Style: ${style.name}\n${style.prompt.trim()}`;
 }
 
+/** Text that follows the style name in {@link getOutputStyleTurnReminder}. */
+export const OUTPUT_STYLE_REMINDER_MARKER = ' output style is active. ';
+
 /**
  * The per-turn reminder line for an active style.
  *
@@ -195,7 +198,7 @@ export function renderOutputStyleSection(style: OutputStyleDefinition): string {
 export function getOutputStyleTurnReminder(
   style: OutputStyleDefinition,
 ): string {
-  return `${style.name} output style is active. ${
+  return `${style.name}${OUTPUT_STYLE_REMINDER_MARKER}${
     style.turnReminder || DEFAULT_OUTPUT_STYLE_TURN_REMINDER
   }`;
 }

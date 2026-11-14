@@ -36,6 +36,7 @@ import { SchemaValidator } from '../../utils/schemaValidator.js';
 import { convertGeminiContentsToResponsesInput } from '../openaiResponsesContentGenerator/responses-converter.js';
 import type { ResponsesTextPart } from '../../utils/responses-message.js';
 import { appendAutoMemoryContext } from '../../memory/request-context.js';
+import { buildLegacyRelevantAutoMemoryPrompt } from '../../memory/recall.js';
 import {
   content,
   fnCall,
@@ -1964,6 +1965,48 @@ describe('OpenAIContentConverter', () => {
         ...toolReply('call_1'),
         content: '',
       });
+    });
+
+    it('preserves recalled legacy context after the adjacent tool response', () => {
+      const prompt = buildLegacyRelevantAutoMemoryPrompt([
+        {
+          scope: 'project',
+          type: 'feedback',
+          filePath: '/tmp/feedback.md',
+          relativePath: 'feedback.md',
+          filename: 'feedback.md',
+          title: 'URL constraints',
+          description: 'Use supplied URLs only',
+          category: 'uncategorized',
+          keywords: [],
+          usageScenarios: [],
+          body: '- Do not invent URLs.',
+          mtimeMs: 1,
+        },
+      ]);
+      const messages = toMessages(
+        content('model', fnCall('read_file', { path: 'a.txt' }, 'call_a')),
+        content('user', fnResponse('read_file', { output: 'A' }, 'call_a'), {
+          text: prompt,
+        }),
+      );
+
+      expect(messages.map((message) => message.role)).toEqual([
+        'assistant',
+        'tool',
+        'user',
+      ]);
+      expect(callIdsOf(messages[0])).toEqual(['call_a']);
+      expect(messages[1]).toMatchObject(toolReply('call_a'));
+      expect(messages[2]?.content).toEqual([{ type: 'text', text: prompt }]);
+      const memory = textsOf(wireParts(messages[2])).join('');
+      expect(memory).toMatch(/^<system-reminder>\n/);
+      expect(memory).toMatch(/\n<\/system-reminder>$/);
+      expect(memory).toContain(
+        'Automatically recalled saved context, not a new user request.',
+      );
+      expect(memory).toContain('Do not acknowledge these memories separately.');
+      expect(memory).toContain('- Do not invent URLs.');
     });
 
     it('should drop tool responses that are not adjacent to their assistant tool call', () => {

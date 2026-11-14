@@ -5,7 +5,7 @@
  */
 
 import { t } from './i18n/index.js';
-import { isWrappedSystemReminderPart } from '@qwen-code/qwen-code-core/core/environmentContext.js';
+import { isReplayedTurnReminderPart } from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import { getLastApiPromptCancellation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import {
@@ -1347,7 +1347,7 @@ export async function runNonInteractive(
         if (reminderParts.length > 0 && initialPartList) {
           const continuationParts = normalizePartList(initialPartList);
           const hasSystemReminderPart = continuationParts.some(
-            isWrappedSystemReminderPart,
+            isReplayedTurnReminderPart,
           );
           if (!hasSystemReminderPart) {
             initialPartList = insertAfterFunctionResponses(

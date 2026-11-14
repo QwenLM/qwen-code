@@ -59,6 +59,10 @@ import {
   LlmClient,
 } from '@qwen-code/qwen-code-core';
 import { getAutoMemorySnapshot } from '@qwen-code/qwen-code-core/memory/request-context.js';
+import { buildLegacyRelevantAutoMemoryPrompt } from '@qwen-code/qwen-code-core/memory/recall.js';
+import { formatOmniMemorySideQueryReminder } from '@qwen-code/qwen-code-core/omni/memory-side-query.js';
+import { getPlanModeSystemReminder } from '@qwen-code/qwen-code-core/core/prompts.js';
+import type { ScannedAutoMemoryDocument } from '@qwen-code/qwen-code-core/memory/structured-scan.js';
 import type { Content, Part } from '@google/genai';
 import { LlmChat } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import { LoopEventBus } from '@qwen-code/qwen-code-core/event-bus/bus.js';
@@ -3274,9 +3278,21 @@ describe('runNonInteractive', () => {
         withSnapshot: true,
         withReminder: true,
       },
+      {
+        name: 'recalled memory only',
+        withSnapshot: false,
+        withReminder: false,
+        withMemory: true,
+      },
+      {
+        name: 'omni media memory only',
+        withSnapshot: false,
+        withReminder: false,
+        withOmniMemory: true,
+      },
     ])(
       'adds or deduplicates plan reminders on interrupted replay: $name',
-      async ({ withSnapshot, withReminder }) => {
+      async ({ withSnapshot, withReminder, withMemory, withOmniMemory }) => {
         setupMetricsMock();
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
         mockLlmClient.stripOrphanedUserEntriesFromHistory = vi.fn();
@@ -3291,7 +3307,31 @@ describe('runNonInteractive', () => {
         }
         if (withReminder) {
           parts.unshift({
-            text: '<system-reminder>Existing plan reminder</system-reminder>',
+            text: getPlanModeSystemReminder(),
+          });
+        }
+        if (withMemory) {
+          parts.push({
+            text: buildLegacyRelevantAutoMemoryPrompt([
+              {
+                filePath: '/memory/notes.md',
+                relativePath: 'notes.md',
+                title: 'Notes',
+                description: 'Saved notes',
+                body: 'Prefer pnpm.',
+                mtimeMs: Date.now(),
+              } as ScannedAutoMemoryDocument,
+            ]),
+          });
+        }
+        if (withOmniMemory) {
+          parts.push({
+            text: formatOmniMemorySideQueryReminder({
+              status: 'miss',
+              files: [],
+              entries: [],
+              gaps: [],
+            }),
           });
         }
         mockLlmClient.getChat = vi.fn(() => ({
