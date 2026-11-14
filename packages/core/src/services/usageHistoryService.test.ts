@@ -897,6 +897,83 @@ describe('loadUsageHistoryWithLive — replay cache + selective scan', () => {
     // nothing and must not be mistaken for telemetry.
     expect(tokensOf(merged, sessionId)).toBe(1000);
   });
+
+  it('uses the regex-extracted timestamp when the trailing line is corrupt', async () => {
+    const sessionId = 'sess-corrupt-tail';
+    const dir = path.join(
+      process.env['QWEN_HOME']!,
+      'projects',
+      'cache-project',
+      'chats',
+    );
+    fs.mkdirSync(dir, { recursive: true });
+    const base = { sessionId, cwd: '/cache/project' };
+    const records = [
+      {
+        ...base,
+        uuid: 'u1',
+        parentUuid: null,
+        timestamp: '2026-06-11T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', content: 'hi' },
+      },
+      {
+        ...base,
+        uuid: 'u2',
+        parentUuid: 'u1',
+        timestamp: '2026-06-11T00:01:00.000Z',
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: {
+          uiEvent: {
+            'event.name': 'qwen-code.api_response',
+            'event.timestamp': '2026-06-11T00:01:00.000Z',
+            response_id: 'r1',
+            model: 'qwen-max',
+            duration_ms: 1200,
+            input_token_count: 600,
+            output_token_count: 300,
+            cached_content_token_count: 0,
+            thoughts_token_count: 100,
+            total_token_count: 1000,
+            prompt_id: 'p1',
+          },
+        },
+      },
+    ];
+    // A truncated append: the final physical line is unparseable but still
+    // carries its own timestamp. The scan must keep the session and use that
+    // trailing timestamp (not drop the record, not reuse the earlier one).
+    const body =
+      records.map((r) => JSON.stringify(r)).join('\n') +
+      '\n' +
+      '{"timestamp":"2026-06-11T00:02:00.000Z","type":"assis';
+    fs.writeFileSync(path.join(dir, `${sessionId}.jsonl`), body);
+
+    const merged = await loadUsageHistoryWithLive();
+    const r = merged.find((x) => x.sessionId === sessionId);
+    expect(r).toBeDefined();
+    expect(tokensOf(merged, sessionId)).toBe(1000);
+    expect(r!.timestamp).toBe(new Date('2026-06-11T00:02:00.000Z').getTime());
+  });
+
+  it('returns every session when candidates exceed the scan concurrency', async () => {
+    // More transcripts than REBUILD_CONCURRENCY (8) so the worker pool must
+    // hand off indices; none may be lost or duplicated by the parallel pass.
+    const n = 12;
+    const expected = new Map<string, number>();
+    for (let i = 0; i < n; i++) {
+      const sid = `sess-many-${String(i).padStart(2, '0')}`;
+      plant(sid, 100 + i);
+      expected.set(sid, 100 + i);
+    }
+
+    const merged = await loadUsageHistoryWithLive();
+    expect(merged.length).toBe(n);
+    for (const [sid, tokens] of expected) {
+      expect(tokensOf(merged, sid)).toBe(tokens);
+    }
+  });
 });
 
 // Regression for #7384: deleting a session erased its usage from the
