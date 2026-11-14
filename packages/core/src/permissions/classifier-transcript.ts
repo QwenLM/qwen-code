@@ -51,6 +51,12 @@ const MCP_TOOL_NAME_PREFIX = 'mcp__';
 export interface PendingAction {
   toolName: string;
   toolParams: Record<string, unknown>;
+  /**
+   * The scheduler's id for this call. History is read after the model turn
+   * that issued the call was recorded, so the `functionCall` carrying this
+   * id is the pending call itself, not an action that already ran.
+   */
+  callId?: string;
 }
 
 /**
@@ -97,7 +103,9 @@ export const MAX_HISTORICAL_ACTIONS_TOTAL_CHARS = 40_000;
  *
  * - Keeps user text (user intent is essential context).
  * - Renders each historical model functionCall as a user-role text turn
- *   (projected through `toAutoClassifierInput`).
+ *   (projected through `toAutoClassifierInput`), except the pending call
+ *   itself, matched by `pendingAction.callId`: it has not run yet, and
+ *   listing it as a prior action tells the classifier it has.
  * - Strips model text parts (anti-self-injection).
  * - Strips tool result parts (anti-untrusted-content-injection).
  * - Truncates to the most recent {@link MAX_TRANSCRIPT_MESSAGES} messages
@@ -166,6 +174,9 @@ export function buildClassifierContents(
       for (const part of msg.parts ?? []) {
         const fc = (part as Part).functionCall;
         if (fc && typeof fc.name === 'string') {
+          if (pendingAction.callId && fc.id === pendingAction.callId) {
+            continue;
+          }
           if (
             fc.name === ToolNames.ASK_USER_QUESTION &&
             typeof fc.id === 'string'

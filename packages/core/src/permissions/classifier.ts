@@ -62,6 +62,8 @@ export interface ClassifierUsage {
 export interface ClassifierInput {
   toolName: string;
   toolParams: Record<string, unknown>;
+  /** Scheduler id of the call; see `PendingAction.callId`. */
+  callId?: string;
   /** Main session history. Transcript construction strips assistant text and
    *  tool results — see classifier-transcript module. Forwarded by reference
    *  (read-only). */
@@ -156,7 +158,11 @@ export async function classifyAction(
     contents = buildClassifierContents(
       input.messages,
       input.config.getToolRegistry(),
-      { toolName: input.toolName, toolParams: input.toolParams },
+      {
+        toolName: input.toolName,
+        toolParams: input.toolParams,
+        callId: input.callId,
+      },
       input.trustedUserAnswers,
     );
     baseSystemPrompt = buildClassifierSystemPrompt(input.config);
