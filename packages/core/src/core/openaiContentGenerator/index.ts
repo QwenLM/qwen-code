@@ -17,6 +17,7 @@ import {
   ModelScopeOpenAICompatibleProvider,
   MiMoOpenAICompatibleProvider,
   MiniMaxOpenAICompatibleProvider,
+  OllamaOpenAICompatibleProvider,
   MistralOpenAICompatibleProvider,
   CerebrasOpenAICompatibleProvider,
   FireworksOpenAICompatibleProvider,
@@ -69,6 +70,19 @@ export function determineProvider(
   // Check for DashScope provider
   if (DashScopeOpenAICompatibleProvider.isDashScopeProvider(config)) {
     return new DashScopeOpenAICompatibleProvider(
+      contentGeneratorConfig,
+      cliConfig,
+    );
+  }
+
+  // Ollama comes before the model-name fallbacks below: a localhost:11434
+  // endpoint serving a `deepseek-*` / `glm-*` / `mimo-*` model would otherwise
+  // be claimed by that provider's broad check (which matches on the model name
+  // alone), so the empty-schema injection for zero-argument tools never runs.
+  // isOllamaProvider only matches a local Ollama backend, so real DeepSeek /
+  // Zai / MiMo hostnames still fall through to their own providers.
+  if (OllamaOpenAICompatibleProvider.isOllamaProvider(config)) {
+    return new OllamaOpenAICompatibleProvider(
       contentGeneratorConfig,
       cliConfig,
     );
