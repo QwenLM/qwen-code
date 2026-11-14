@@ -152,7 +152,22 @@ it.each([false, true])(
         () => expect(ui.lastFrame()).toContain('› Use another account'),
         { timeout: WAIT_FOR_TIMEOUT },
       );
-      ui.stdin.write('\u001b[13u');
+      // Let the input handler's closure pick up the new selection, then land
+      // Enter. Under the extreme macOS nightly load a single keypress can be
+      // starved or its escape sequence split across stdin reads (dispatch
+      // 43584714730 cli 2/3: spy 0 calls after 15s). Re-send Enter until the
+      // handler fires, with a real settle between attempts so an in-flight
+      // keypress is processed before the next; stop the instant it fires so
+      // the exactly-once assertion below stays meaningful.
+      await settle(150);
+      for (
+        let i = 0;
+        i < 30 && flow.switchAccount.mock.calls.length === 0;
+        i++
+      ) {
+        ui.stdin.write('\u001b[13u');
+        await settle(500);
+      }
       await vi.waitFor(
         () => expect(flow.switchAccount).toHaveBeenCalledOnce(),
         { timeout: WAIT_FOR_TIMEOUT },
