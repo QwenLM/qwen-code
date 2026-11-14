@@ -608,7 +608,8 @@ export class HostedContextCompression {
         systemPayload: {
           info: candidate.info,
           compressedHistory: candidate.newHistory,
-          summaryPrefixLength: candidate.newHistory.length,
+          summaryPrefixLength:
+            candidate.info.summaryPrefixLength ?? candidate.newHistory.length,
           completedToolCallIds: request.completedToolCallIds,
           promptIds: candidate.promptIds,
           contextPrefixLength: candidate.contextPrefixLength,

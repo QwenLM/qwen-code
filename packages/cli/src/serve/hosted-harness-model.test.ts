@@ -1584,9 +1584,13 @@ describe('Hosted Harness model boundary', () => {
     expect(JSON.stringify(restored)).not.toContain('cancelled secret');
   });
 
-  it.each([false, true])(
-    'preserves compression around a recovered tool round without duplicating its pending response (current snapshot=%s)',
-    async (currentSnapshot) => {
+  it.each([
+    { currentSnapshot: false, retainedOperation: false },
+    { currentSnapshot: true, retainedOperation: false },
+    { currentSnapshot: true, retainedOperation: true },
+  ])(
+    'preserves compression around a recovered tool round without duplicating its pending response (%j)',
+    async ({ currentSnapshot, retainedOperation }) => {
       const model = config([{ type: LlmEventType.Finished }]);
       state.config['getEffectiveInputModalities'] = () => ({ image: true });
       const response: Part = {
@@ -1662,7 +1666,7 @@ describe('Hosted Harness model boundary', () => {
                 },
               ]
             : prefix,
-          summaryPrefixLength: prefix.length,
+          summaryPrefixLength: prefix.length - (retainedOperation ? 1 : 0),
           completedToolCallIds: ['old-call'],
         },
       };
@@ -1672,6 +1676,11 @@ describe('Hosted Harness model boundary', () => {
         ...input,
         history,
         resumeFromToolResults: [response],
+        toolTurn: {
+          execute: vi.fn(),
+          consumeResults: vi.fn(),
+          declarations: vi.fn().mockResolvedValue([]),
+        },
       });
       const restored = model.setHistory.mock.calls[0]![0] as Content[];
       expect(restored).toEqual(
