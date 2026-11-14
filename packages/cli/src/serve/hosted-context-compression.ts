@@ -93,6 +93,9 @@ interface CompressionOptions {
     operationId: string,
     fields: HookInput,
   ) => Promise<unknown>;
+  /** A route-driven compaction is fresh context too: the loop resolver must
+   * re-deliver the full guidance on the next fire, not a dangling reminder. */
+  onCompactionCommitted?: () => void;
 }
 
 export interface HostedCompressionStatus {
@@ -640,6 +643,7 @@ export class HostedContextCompression {
             .map((event) => event.payload['messageId'] as string),
         },
       );
+      this.options.onCompactionCommitted?.();
     } catch (cause) {
       if (this.options.session.authority.writesStopped) throw cause;
       const actual = this.record(current.operationId);

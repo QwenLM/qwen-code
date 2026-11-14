@@ -21,6 +21,8 @@ import { captureManagedContext } from '@qwen-code/qwen-code-core/managed-runtime
 
 import type { Content, Part } from '@google/genai';
 import { classifyAction } from '@qwen-code/qwen-code-core/permissions/classifier.js';
+import type { ClassifierResult } from '@qwen-code/qwen-code-core/permissions/classifier.js';
+import type { HostedLoopClassifier } from './hosted-loop-session.js';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   runWithRuntimeContentGenerator,
@@ -257,12 +259,136 @@ export function hostedToolOutputBudget(cwd: string): number {
   );
 }
 
+/**
+ * A fire-time classifier for loop sentinel re-review (decision 5). The
+ * arm-time classifier reviewed the sentinel constant, not the resolved file
+ * text, so a full (first/changed) fire is re-reviewed before it runs. Unlike
+ * the arm-time review there is no active turn at delivery time, so this
+ * builds a short-lived Hosted config (the same trust-pinned construction the
+ * model turn uses) per fire, classifies the resolved content as a
+ * `loop_wakeup` continuation, and shuts the config down. Loop fires are
+ * clamped to >= 60 s, so the per-fire config cost is bounded. Fail closed: an
+ * unavailable classifier reports `unavailable`, and the fire delivers a no-op
+ * re-arm tick (withholding the unreviewed guidance) rather than running it;
+ * only an explicit denial settles the loop dead.
+ */
+export function createHostedLoopFireClassifier(deps: {
+  cwd: string;
+  sessionId: string;
+  modelConfig?: HostedModelConfigReader;
+  /** The Session's definition model pin, used when there is no
+   * modelConfigDigest — the same fallback the model turn resolves (R9-1). */
+  model?: HostedAgentDefinition['model'];
+}): HostedLoopClassifier {
+  return async ({ delaySeconds, prompt, reason }) => {
+    let config: Awaited<ReturnType<typeof loadCliConfig>> | undefined;
+    try {
+      // Wire the Session's own model, exactly as the model turn does, so the
+      // re-review classifies with the model the Session actually runs rather
+      // than an ambient default that may have no credentials.
+      const sessionModelConfig = await deps.modelConfig?.();
+      const settings = loadSettings(deps.cwd, {
+        skipLoadEnvironment: true,
+        skipWorkspaceSettings: true,
+        workspaceTrusted: false,
+      });
+      const argv = {
+        acp: true,
+        safeMode: true,
+        chatRecording: false,
+        sessionId: deps.sessionId,
+        sessionIdGenerated: true,
+      } as CliArgs;
+      config = await loadCliConfig(
+        settings.merged,
+        argv,
+        deps.cwd,
+        undefined,
+        getSeparatedHookSettings(settings),
+        undefined,
+        undefined,
+        undefined,
+        true,
+        {
+          toolInvocationGuard: () => ({ allowed: false }),
+          lspDisabled: true,
+          ...(sessionModelConfig
+            ? { modelConfiguration: sessionModelConfig }
+            : {}),
+        },
+      );
+      // With no digest the turn falls back to the definition model pin; the
+      // fire must pin the same model, not leave the ambient default (R9-1).
+      if (!sessionModelConfig) await applyHostedModelPin(config, deps.model);
+      // loadCliConfig only constructs the Config; the classifier's side query
+      // reads config.getBaseLlmClient(), whose content generator is created
+      // only by initialize()+refreshAuth() (D1). Without them every fire
+      // reported unavailable and the loop never delivered guidance. Mirror the
+      // model turn's trust-pinned sequence so the re-review actually runs.
+      const fireAbort = new AbortController();
+      await config.initialize({
+        signal: fireAbort.signal,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+        lenientToolWarmup: true,
+      });
+      const authType = config.getModelsConfig().getCurrentAuthType();
+      if (!authType) {
+        throw new Error(
+          'Loop fire-time classifier authentication is unavailable.',
+        );
+      }
+      await config.refreshAuth(authType, true);
+      const result = await classifyAction({
+        toolName: 'loop_wakeup',
+        toolParams: { delaySeconds, prompt, reason },
+        messages: [{ role: 'user', parts: [{ text: prompt }] }],
+        config,
+        signal: fireAbort.signal,
+      });
+      return {
+        allowed: !result.shouldBlock && !result.unavailable,
+        reason: result.reason || null,
+        // A transient outage is not a denial: the fire delivers a no-op re-arm
+        // tick and the loop survives to retry, instead of settling dead.
+        unavailable: result.unavailable,
+      };
+    } catch (cause) {
+      // Fail closed without throwing into the pump's pick, but treat a
+      // classifier that cannot be built as a transient outage (no-op re-arm),
+      // not a permanent denial that would end the loop. Surface the cause so a
+      // persistent config/auth failure is diagnosable instead of silently
+      // looping on no-op ticks (N-3).
+      writeStderrLineSafe(
+        'qwen serve: Loop fire-time classifier unavailable for Session ' +
+          deps.sessionId +
+          ': ' +
+          String(cause),
+      );
+      return {
+        allowed: false,
+        unavailable: true,
+        reason: 'Loop fire-time classifier unavailable.',
+      };
+    } finally {
+      await config
+        ?.shutdown({ shutdownTelemetry: false })
+        .catch(() => undefined);
+    }
+  };
+}
+
 export async function runHostedHarnessTextTurn(input: {
   sessionId: string;
   cwd: string;
   history: readonly ChatRecord[];
   excludedPromptIds?: ReadonlySet<string>;
   classifierUserText?: () => Promise<ReadonlyMap<string, string>>;
+  /** Publishes this turn's permission classifier, adapted for loop arming,
+   * to the Session; cleared when the turn ends. */
+  setLoopClassifier?: (classify: HostedLoopClassifier | undefined) => void;
   commitCompression?: (payload: ChatCompressionRecordPayload) => Promise<void>;
   prompt: string;
   attachmentParts?: readonly Part[];
@@ -784,7 +910,10 @@ async function runPreparedHostedHarnessTextTurn(
     }
     let originalUserText: Promise<ReadonlyMap<string, string>> | undefined;
     const classifierActions: Content[] = [];
-    input.toolTurn?.setPermissionClassifier?.(async (call, signal) => {
+    const permissionClassifier = async (
+      call: ToolCallRequestInfo,
+      signal: AbortSignal,
+    ): Promise<ClassifierResult> => {
       originalUserText ??=
         input.classifierUserText?.() ??
         Promise.resolve(new Map([[input.promptId, input.prompt]]));
@@ -849,6 +978,26 @@ async function runPreparedHostedHarnessTextTurn(
         ],
       });
       return result;
+    };
+    input.toolTurn?.setPermissionClassifier?.(permissionClassifier);
+    // Loop arming rides the same classifier: a wakeup is future model input,
+    // so it is vetted like the turn's other side-effectful tools. Fail closed
+    // when the classifier blocks or is unavailable.
+    input.setLoopClassifier?.(async ({ delaySeconds, prompt, reason }) => {
+      const result = await permissionClassifier(
+        {
+          callId: randomUUID(),
+          name: 'loop_wakeup',
+          args: { delaySeconds, prompt, reason },
+          isClientInitiated: false,
+          prompt_id: input.promptId,
+        },
+        input.signal,
+      );
+      return {
+        allowed: !result.shouldBlock && !result.unavailable,
+        reason: result.reason || null,
+      };
     });
     // Safe mode stays on; the Session's Workspace instructions arrive through
     // the context slot instead of the Harness host's filesystem. The loop below
@@ -1434,6 +1583,10 @@ async function runPreparedHostedHarnessTextTurn(
     throw cause;
   } finally {
     input.hooks?.setMessagesProvider(undefined);
+    // The loop classifier is only valid for this turn; clear it so a later
+    // turn cannot arm against a finished turn's closure (and the funnel's
+    // "no active classifier" refusal stays reachable).
+    input.setLoopClassifier?.(undefined);
     try {
       await config.shutdown({
         shutdownTelemetry: false,

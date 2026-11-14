@@ -30,13 +30,15 @@ import type { ManagedHookDispatcher } from '@qwen-code/qwen-code-core/hooks/hook
 import type { HostedHookSession } from './hosted-hook-session.js';
 import { HostedHookRecoveryRequiredError } from './hosted-hook-session.js';
 import { SendMessageType } from '@qwen-code/qwen-code-core/core/client.js';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { loadCliConfig } from '../config/config.js';
+import * as stdioHelpers from '../utils/stdioHelpers.js';
 import {
   HostedModelRoundLimitError,
   applyHostedPublicChildModelPin,
   HostedImageInputUnsupportedError,
   runHostedHarnessTextTurn,
+  createHostedLoopFireClassifier,
 } from './hosted-harness-model.js';
 import { HostedModelUnavailableError } from './hosted-agent-definition.js';
 import { HostedSkillCatalog } from './hosted-skill-catalog.js';
@@ -497,6 +499,94 @@ describe('Hosted Harness model boundary', () => {
         input.signal,
       );
       expect(result).toMatchObject({ shouldBlock: true, unavailable: true });
+      expect(classify).not.toHaveBeenCalled();
+    } finally {
+      classify.mockRestore();
+    }
+  });
+
+  it('vets a loop arm on a tick whose prompt is in the classifier user-text map', async () => {
+    config([
+      { type: LlmEventType.Content, value: 'done' },
+      { type: LlmEventType.Finished },
+    ]);
+    const classify = vi.spyOn(classifier, 'classifyAction').mockResolvedValue({
+      shouldBlock: false,
+      reason: '',
+      model: 'classifier',
+      stage: 'fast',
+      durationMs: 1,
+    });
+    let loopClassify:
+      | import('./hosted-loop-session.js').HostedLoopClassifier
+      | undefined;
+    let cleared = false;
+    try {
+      await runHostedHarnessTextTurn({
+        ...input,
+        prompt: '/loop check the deploy',
+        // The fired tick's own prompt, as the host user-text map now carries
+        // it for a loop input.
+        classifierUserText: async () =>
+          new Map([[input.promptId, '/loop check the deploy']]),
+        setLoopClassifier: (value) => {
+          if (value === undefined) cleared = true;
+          else loopClassify = value;
+        },
+        toolTurn: {
+          declarations: async () => [],
+          execute: async () => [],
+          consumeResults: async () => undefined,
+          setPermissionClassifier: () => {},
+        },
+      });
+      expect(loopClassify).toBeDefined();
+      const verdict = await loopClassify!({
+        delaySeconds: 60,
+        prompt: '/loop next tick',
+        reason: '',
+      });
+      expect(verdict.allowed).toBe(true);
+      expect(classify).toHaveBeenCalled();
+      // The classifier is cleared when the turn ends, so a later turn cannot
+      // arm against this finished turn's closure.
+      expect(cleared).toBe(true);
+    } finally {
+      classify.mockRestore();
+    }
+  });
+
+  it('refuses a loop arm when the tick prompt is absent from the user-text map', async () => {
+    config([
+      { type: LlmEventType.Content, value: 'done' },
+      { type: LlmEventType.Finished },
+    ]);
+    const classify = vi.spyOn(classifier, 'classifyAction');
+    let loopClassify:
+      | import('./hosted-loop-session.js').HostedLoopClassifier
+      | undefined;
+    try {
+      await runHostedHarnessTextTurn({
+        ...input,
+        prompt: '/loop check the deploy',
+        classifierUserText: async () => new Map(),
+        setLoopClassifier: (value) => {
+          if (value !== undefined) loopClassify = value;
+        },
+        toolTurn: {
+          declarations: async () => [],
+          execute: async () => [],
+          consumeResults: async () => undefined,
+          setPermissionClassifier: () => {},
+        },
+      });
+      expect(loopClassify).toBeDefined();
+      const verdict = await loopClassify!({
+        delaySeconds: 60,
+        prompt: '/loop next tick',
+        reason: '',
+      });
+      expect(verdict.allowed).toBe(false);
       expect(classify).not.toHaveBeenCalled();
     } finally {
       classify.mockRestore();
@@ -3585,4 +3675,140 @@ it('uses saved Skill results on continuation without loading the selection again
   });
   expect(toolTurn.execute).not.toHaveBeenCalled();
   expect(mocks.requests[0]).toEqual(result);
+});
+
+describe('createHostedLoopFireClassifier', () => {
+  const initialize = vi.fn(async () => undefined);
+  const refreshAuth = vi.fn(async () => undefined);
+  beforeEach(() => {
+    vi.clearAllMocks();
+    state.config = {
+      initialize,
+      getModelsConfig: () => ({ getCurrentAuthType: () => 'test-auth' }),
+      refreshAuth,
+      shutdown: vi.fn(async () => undefined),
+    } as unknown as typeof state.config;
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  const fireInput = {
+    delaySeconds: 0,
+    prompt: '# Autonomous loop check\nthe guidance',
+    reason: 'loop fire-time sentinel re-review',
+  };
+
+  it('classifies on the Session model (M6)', async () => {
+    const classify = vi.spyOn(classifier, 'classifyAction').mockResolvedValue({
+      shouldBlock: false,
+      reason: '',
+      model: 'classifier',
+      stage: 'fast',
+      durationMs: 1,
+    });
+    const sessionModelConfig = { model: 'session-model' };
+    const classifyFire = createHostedLoopFireClassifier({
+      cwd: '/workspace',
+      sessionId: input.sessionId,
+      modelConfig: async () => sessionModelConfig as never,
+    });
+    const verdict = await classifyFire(fireInput);
+    expect(verdict.allowed).toBe(true);
+    expect(vi.mocked(loadCliConfig).mock.calls.at(-1)?.[9]).toMatchObject({
+      modelConfiguration: sessionModelConfig,
+    });
+    expect(classify).toHaveBeenCalledOnce();
+  });
+
+  it('initializes and refreshes auth so the side query has a live model (D1)', async () => {
+    vi.spyOn(classifier, 'classifyAction').mockResolvedValue({
+      shouldBlock: false,
+      reason: '',
+      model: 'classifier',
+      stage: 'fast',
+      durationMs: 1,
+    });
+    const classifyFire = createHostedLoopFireClassifier({
+      cwd: '/workspace',
+      sessionId: input.sessionId,
+    });
+    const verdict = await classifyFire(fireInput);
+    expect(verdict.allowed).toBe(true);
+    // loadCliConfig alone leaves no content generator; without initialize +
+    // refreshAuth the side query always reports unavailable (the dead gate).
+    expect(initialize).toHaveBeenCalledOnce();
+    expect(refreshAuth).toHaveBeenCalledWith('test-auth', true);
+  });
+
+  it('pins the definition model when there is no modelConfig digest (R9-1)', async () => {
+    const switchModel = vi.fn(async () => undefined);
+    state.config['getAllConfiguredModels'] = () => [
+      { id: 'definition-model', authType: 'test-auth', isRuntimeModel: false },
+    ];
+    state.config['switchModel'] = switchModel;
+    vi.spyOn(classifier, 'classifyAction').mockResolvedValue({
+      shouldBlock: false,
+      reason: '',
+      model: 'classifier',
+      stage: 'fast',
+      durationMs: 1,
+    });
+    const classifyFire = createHostedLoopFireClassifier({
+      cwd: '/workspace',
+      sessionId: input.sessionId,
+      model: { id: 'definition-model' },
+    });
+    const verdict = await classifyFire(fireInput);
+    expect(verdict.allowed).toBe(true);
+    // With no digest the fire must pin the definition model exactly like the
+    // turn does; reverting the pin to undefined leaves switchModel uncalled.
+    expect(switchModel).toHaveBeenCalledWith(
+      'test-auth',
+      'definition-model',
+      expect.objectContaining({ requireCachedCredentials: true }),
+    );
+  });
+
+  it('a classifier that cannot be built reports unavailable, not a denial (M12)', async () => {
+    vi.mocked(loadCliConfig).mockRejectedValueOnce(new Error('config boom'));
+    const classifyFire = createHostedLoopFireClassifier({
+      cwd: '/workspace',
+      sessionId: input.sessionId,
+    });
+    const verdict = await classifyFire(fireInput);
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.unavailable).toBe(true);
+  });
+
+  it('logs the cause when the fire classifier cannot be built (N-3)', async () => {
+    const log = vi
+      .spyOn(stdioHelpers, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
+    vi.mocked(loadCliConfig).mockRejectedValueOnce(new Error('config boom'));
+    const classifyFire = createHostedLoopFireClassifier({
+      cwd: '/workspace',
+      sessionId: input.sessionId,
+    });
+    const verdict = await classifyFire(fireInput);
+    expect(verdict.unavailable).toBe(true);
+    // A persistent build/auth failure must be diagnosable, not silent (N-3).
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('config boom'));
+  });
+
+  it('forwards the classifier unavailable flag on the success path (M13)', async () => {
+    vi.spyOn(classifier, 'classifyAction').mockResolvedValue({
+      shouldBlock: false,
+      unavailable: true,
+      reason: '',
+      model: 'classifier',
+      stage: 'fast',
+      durationMs: 1,
+    });
+    const classifyFire = createHostedLoopFireClassifier({
+      cwd: '/workspace',
+      sessionId: input.sessionId,
+    });
+    const verdict = await classifyFire(fireInput);
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.unavailable).toBe(true);
+  });
 });
