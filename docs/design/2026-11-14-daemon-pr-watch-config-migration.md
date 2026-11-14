@@ -315,9 +315,9 @@ increment promises not to make more expensive.
 `connect()` accepts `prWatchEvents`, the `watch:*` keys, and the now-inert
 `prWatchLimit` / `prWatchBudgetReserve`, logs exactly one warning naming
 `sessionPrWatch` and all four keys, and runs no state detection. The validation that
-throws today (`normalizePrWatchEvents`, `GithubAdapter.ts:882-914`, reached
-through `:982-987` and `:2093-2096`) becomes a warning for these keys only; the
-notification-reason keys keep their current validation.
+threw at that commit (`normalizePrWatchEvents`, `GithubAdapter.ts:882-914`, reached
+through `:982-987` and `:2093-2096`) became a warning for these keys only; the
+notification-reason keys kept their validation.
 
 Because the descriptor has no deprecated field, the deprecation is expressed in
 the field description and a type-level `@deprecated`, and the Web Shell editor

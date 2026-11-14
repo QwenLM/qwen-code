@@ -37,7 +37,7 @@
 - `run-qwen-serve.ts` 中 daemon 级 watch/drain deps 填充（allowed-hosts 发现、锁 registry 与 watch 目录、准入/restore deps、以及 listing→watch 写入 + `listedKeys`）：启用增量。drain 暴露 deps 接缝，在被填充且开关打开前惰性。
 - 从 `restoreSessionHandler` 抽取共享 restore、resume-后 drain 钩子、serve lifecycle close 重排：这些只在 drain 启用后才运行，故随启用增量落地以便端到端验证。本增量把 `wakeSession` 作为依赖注入并据此测试 drain 的 restore 处理；路由不改动。
 - 对交互式写入者的隔离（fencing，主 §4「Dormant sessions」）：session-writer-lease 暴露面是 channel 今天的现状，仍排除在外。
-- 手动 push 账本（母设计中仍开放）：只记录经 autofix-pr helper 的 push。
+- 手动 push 账本（主设计中仍开放）：只记录经 autofix-pr helper 的 push。
 
 ## 拟议改动
 
