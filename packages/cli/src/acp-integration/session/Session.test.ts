@@ -4829,6 +4829,127 @@ describe('Session', () => {
       expect(execute).toHaveBeenCalledTimes(1);
     });
 
+    it('reports the turn as max_tokens when the output limit left the answer truncated', async () => {
+      useTool(core.Kind.Read, 'read_file');
+      mockChat.sendMessageStream = vi.fn().mockResolvedValueOnce(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [
+                {
+                  content: { parts: [{ text: 'Half an ans' }] },
+                  finishReason: FinishReason.MAX_TOKENS,
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      const result = await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'write it' }],
+      });
+
+      expect(result.stopReason).toBe('max_tokens');
+    });
+
+    it('reports a Stop-hook continuation that completes the answer as end_turn', async () => {
+      // The MAX_TOKENS finish belonged to the round the Stop hook supersedes;
+      // the continuation's own STOP finish must decide the stop reason.
+      const messageBus = {
+        request: vi.fn().mockResolvedValue({
+          success: true,
+          output: { decision: 'block', reason: 'Finish the answer' },
+        }),
+      };
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+      mockConfig.hasHooksForEvent = vi
+        .fn()
+        .mockImplementation((name: string) => name === 'Stop');
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  {
+                    content: { parts: [{ text: 'Half an ans' }] },
+                    finishReason: FinishReason.MAX_TOKENS,
+                  },
+                ],
+              },
+            },
+          ]),
+        )
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  {
+                    content: { parts: [{ text: 'The rest of the answer.' }] },
+                    finishReason: FinishReason.STOP,
+                  },
+                ],
+              },
+            },
+          ]),
+        )
+        .mockResolvedValue(createEmptyStream());
+
+      const result = await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'write it' }],
+      });
+
+      expect(result.stopReason).toBe('end_turn');
+    });
+
+    it('keeps a failed-recovery rollback truncated as max_tokens', async () => {
+      // Core's synthetic terminal chunk after a failed recovery attempt
+      // carries MAX_TOKENS: the user-visible response is still the cut-off
+      // text, so the turn must not resolve end_turn (issue #12113's symptom).
+      mockChat.sendMessageStream = vi.fn().mockResolvedValueOnce(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [
+                {
+                  content: { parts: [{ text: 'Half an ans' }] },
+                  finishReason: FinishReason.MAX_TOKENS,
+                },
+              ],
+            },
+          },
+          { type: core.StreamEventType.RETRY, isContinuation: true },
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [
+                {
+                  content: { role: 'model', parts: [] },
+                  finishReason: FinishReason.MAX_TOKENS,
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      const result = await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'write it' }],
+      });
+
+      expect(result.stopReason).toBe('max_tokens');
+    });
+
     it('runs the edit a retry produces after a cut-off attempt', async () => {
       const execute = useTool(core.Kind.Edit, 'write_file');
 
@@ -5694,6 +5815,63 @@ describe('Session', () => {
       const result = await prompt();
 
       expect(result.stopReason).toBe(stopReason);
+    });
+
+    it('reports a turn whose exhausted output recovery stayed truncated as max_tokens', async () => {
+      // Bounded recovery gives the response up when it runs out of attempts,
+      // so the round ends with the response still cut off and the client
+      // would otherwise read the partial answer as complete.
+      useSharedRounds([text('Half an ans'), finished(FinishReason.MAX_TOKENS)]);
+
+      const result = await prompt();
+
+      expect(result.stopReason).toBe('max_tokens');
+    });
+
+    it('reports a completed turn as end_turn', async () => {
+      useSharedRounds([text('Done.'), finished(FinishReason.STOP)]);
+
+      const result = await prompt();
+
+      expect(result.stopReason).toBe('end_turn');
+    });
+
+    it('reports a retried round that completes the answer as end_turn', async () => {
+      // The MAX_TOKENS finish belonged to the abandoned attempt; the retried
+      // round's own STOP finish must decide the stop reason.
+      useSharedRounds([
+        text('Half an ans'),
+        finished(FinishReason.MAX_TOKENS),
+        {
+          type: core.LlmEventType.Retry,
+          isContinuation: false,
+        } as unknown as RoundEvent,
+        text('The whole answer, redone.'),
+        finished(FinishReason.STOP),
+      ]);
+
+      const result = await prompt();
+
+      expect(result.stopReason).toBe('end_turn');
+    });
+
+    it('keeps a failed-continuation rollback truncated as max_tokens', async () => {
+      // A continuation retry that fails rolls back with a synthetic terminal
+      // MAX_TOKENS (core emits the truthful reason): the user-visible answer
+      // is still cut off, so the turn must not resolve end_turn.
+      useSharedRounds([
+        text('Half an ans'),
+        finished(FinishReason.MAX_TOKENS),
+        {
+          type: core.LlmEventType.Retry,
+          isContinuation: true,
+        } as unknown as RoundEvent,
+        finished(FinishReason.MAX_TOKENS),
+      ]);
+
+      const result = await prompt();
+
+      expect(result.stopReason).toBe('max_tokens');
     });
 
     it('rejects a prompt whose model round the client stopped as a loop', async () => {
@@ -34490,6 +34668,56 @@ describe('Session', () => {
         expect(capture.writeToSpan).toHaveBeenCalledWith(agentTelemetry.span);
       });
 
+      it('still delivers the partial answer a truncated channel turn produced', async () => {
+        // The turn outcome stays `end_turn` inside the package, so the
+        // delivery gate keeps running; only the ACP reply says the answer is
+        // incomplete. Rewriting the stop reason here instead would swallow the
+        // partial answer: the user gets neither the text nor an error.
+        vi.useFakeTimers();
+        agentTelemetry.getActiveInteractionSpan.mockReturnValue(
+          agentTelemetry.span,
+        );
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  {
+                    content: { parts: [{ text: 'Half an ans' }] },
+                    finishReason: FinishReason.MAX_TOKENS,
+                  },
+                ],
+              },
+            },
+          ]),
+        );
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+            _meta: {
+              'qwen.daemon.channelDelivery': {
+                deliveryId: 'prompt-1',
+                target: {
+                  channelName: 'dingtalk',
+                  type: 'user',
+                  id: 'user-1',
+                },
+              },
+            },
+          }),
+        ).resolves.toMatchObject({ stopReason: 'max_tokens' });
+
+        await vi.runOnlyPendingTimersAsync();
+        vi.useRealTimers();
+        expect(mockClient.extMethod).toHaveBeenCalledWith(
+          'qwen/control/channel-delivery',
+          expect.objectContaining({ text: 'Half an ans' }),
+        );
+      });
+
       it('does not apply the turn-result limit to channel delivery text', async () => {
         // Multi-chunk on purpose: the accumulation cap must never apply to
         // delivery turns, and a single chunk would pass even if it did (the
@@ -39894,6 +40122,45 @@ describe('Session', () => {
             });
           });
           expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
+        });
+
+        it('does not pause a Goal whose answer the output limit cut off', async () => {
+          const permit: core.GoalTurnPermit = {
+            goalId: 'goal-1',
+            revision: 1,
+            turnId: 'turn-output-limit',
+          };
+          const turnKey = 'goal-runtime:turn-output-limit';
+          mockGoalRuntime.getSnapshot.mockReturnValue(
+            activeGoalSnapshot('running'),
+          );
+          mockGoalRuntime.permitForTurn.mockImplementation((key: string) =>
+            key === turnKey ? permit : undefined,
+          );
+          sharedRounds(() => [
+            { type: core.LlmEventType.Content, value: 'half an answer' },
+            {
+              type: core.LlmEventType.Finished,
+              value: { reason: FinishReason.MAX_TOKENS },
+            },
+          ]);
+
+          await boundGoalHost!.startGoalTurn({
+            permit,
+            continuationContext: 'check weather',
+          });
+
+          await vi.waitFor(() => {
+            expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+          });
+          // An output cap is not the session token limit: pausing would stop
+          // the Goal until /goal resume with a reason that never applied.
+          expect(mockGoalRuntime.dispatch).not.toHaveBeenCalledWith(
+            expect.objectContaining({
+              reason: core.GOAL_PAUSE_REASON_SESSION_TOKEN_LIMIT,
+            }),
+          );
+          expect(mockGoalRuntime.dispatch).not.toHaveBeenCalled();
         });
 
         it('hands back a runtime continuation whose request never went out', async () => {

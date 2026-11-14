@@ -5765,16 +5765,19 @@ export class LlmChat {
               );
               // Emit a synthetic finish-reason chunk so the UI gets a
               // terminal signal (Finished event) instead of a partial
-              // response with no end marker. Uses STOP because partial
-              // chunks from prior successful iterations are already in
-              // the transcript and represent the user-visible response.
+              // response with no end marker. Carries MAX_TOKENS because the
+              // partial chunks from prior successful iterations are already
+              // in the transcript and represent the user-visible response:
+              // the answer is still cut off, so ending it as a clean STOP
+              // would hide the truncation from consumers deciding what the
+              // client sees.
               yield {
                 type: StreamEventType.CHUNK,
                 value: {
                   candidates: [
                     {
                       content: { role: 'model', parts: [] },
-                      finishReason: FinishReason.STOP,
+                      finishReason: FinishReason.MAX_TOKENS,
                     },
                   ],
                 } as unknown as GenerateContentResponse,
