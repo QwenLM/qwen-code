@@ -393,10 +393,21 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
     const count = (line: RegExp) => log.match(line)?.length ?? 0;
     // AgentCore's rounds on the kernel are `runAgentLoop` calls too.
     const kernelSubagentRounds = count(KERNEL_SUBAGENT_ROUND);
+    const readIds = new Map<string, string>();
+    const normalizeReadReferences = (value: unknown[]): unknown[] =>
+      JSON.parse(
+        JSON.stringify(value).replace(
+          /\brd_[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\b/g,
+          (id: string) => {
+            if (!readIds.has(id)) readIds.set(id, `<READ_ID_${readIds.size}>`);
+            return readIds.get(id)!;
+          },
+        ),
+      );
     return {
       exitCode,
-      requests: modelRequests(server, dir),
-      frames: streamFrames(stdout, dir),
+      requests: normalizeReadReferences(modelRequests(server, dir)),
+      frames: normalizeReadReferences(streamFrames(stdout, dir)),
       stderr,
       approvals,
       subagentRequests,

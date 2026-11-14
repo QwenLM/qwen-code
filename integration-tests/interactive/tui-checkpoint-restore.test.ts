@@ -476,7 +476,7 @@ it(`H11a real model edit creates, hot-restores and cold-resumes its product chec
     expect(initialToolResults).toHaveLength(1);
     expect(restoredToolResults).toHaveLength(1);
     // The real PostToolUse hook distinguishes initial and local replay output.
-    // Normalizing that one marker must preserve every other actual payload field.
+    // Each execution also issues a fresh read reference; preserve all other fields.
     expect(JSON.stringify(initialToolResults[0].content)).toContain(
       `The file: ${file} has been updated.`,
     );
@@ -486,9 +486,19 @@ it(`H11a real model edit creates, hot-restores and cold-resumes its product chec
     expect(initialContent).not.toContain(newMarker);
     expect(replayContent.split(newMarker)).toHaveLength(2);
     expect(replayContent).not.toContain(oldMarker);
-    expect(JSON.parse(replayContent.replace(newMarker, oldMarker))).toEqual(
-      initialToolResults[0].content,
-    );
+    const readIdPattern = /\brd_[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\b/g;
+    const initialReadIds = initialContent.match(readIdPattern) ?? [];
+    const replayReadIds = replayContent.match(readIdPattern) ?? [];
+    expect(initialReadIds).toHaveLength(1);
+    expect(replayReadIds).toHaveLength(1);
+    expect(replayReadIds[0]).not.toBe(initialReadIds[0]);
+    expect(
+      JSON.parse(
+        replayContent
+          .replace(newMarker, oldMarker)
+          .replace(replayReadIds[0]!, initialReadIds[0]!),
+      ),
+    ).toEqual(initialToolResults[0].content);
     const observedHooks = hookEvents();
     expect(observedHooks).toHaveLength(2);
     expect(observedHooks.map((event) => [event.count, event.marker])).toEqual([
