@@ -5157,6 +5157,13 @@ describe('Session', () => {
       ).mock.calls;
       expect(loopCalls.length).toBeGreaterThan(0);
       expect(loopCalls.every(([surface]) => surface === 'acp')).toBe(true);
+      // The kernel getter's ACP reads must pass 'acp' too, so a wrong
+      // label at any of the three ACP kernel sites is also caught.
+      const kernelCalls = (
+        mockConfig.isEventBusAgentLoopEnabled as ReturnType<typeof vi.fn>
+      ).mock.calls;
+      expect(kernelCalls.length).toBeGreaterThan(0);
+      expect(kernelCalls.every(([surface]) => surface === 'acp')).toBe(true);
       expect(send.mock.calls[0][3]).toMatchObject({
         type: core.SendMessageType.UserQuery,
         userTurn: {
@@ -6545,6 +6552,13 @@ describe('Session', () => {
         ).mock.calls;
         expect(loopCalls.length).toBeGreaterThan(0);
         expect(loopCalls.every(([surface]) => surface === 'acp')).toBe(true);
+        // The kernel getter's ACP reads must pass 'acp' too, so a wrong
+        // label at any of the three ACP kernel sites is also caught.
+        const kernelCalls = (
+          mockConfig.isEventBusAgentLoopEnabled as ReturnType<typeof vi.fn>
+        ).mock.calls;
+        expect(kernelCalls.length).toBeGreaterThan(0);
+        expect(kernelCalls.every(([surface]) => surface === 'acp')).toBe(true);
       });
 
       it('records a cron prompt before the response its round records', async () => {
@@ -6800,6 +6814,13 @@ describe('Session', () => {
         ).mock.calls;
         expect(loopCalls.length).toBeGreaterThan(0);
         expect(loopCalls.every(([surface]) => surface === 'acp')).toBe(true);
+        // The kernel getter's ACP reads must pass 'acp' too, so a wrong
+        // label at any of the three ACP kernel sites is also caught.
+        const kernelCalls = (
+          mockConfig.isEventBusAgentLoopEnabled as ReturnType<typeof vi.fn>
+        ).mock.calls;
+        expect(kernelCalls.length).toBeGreaterThan(0);
+        expect(kernelCalls.every(([surface]) => surface === 'acp')).toBe(true);
       });
 
       it('ends a notification turn that loop protection stopped as partial', async () => {
