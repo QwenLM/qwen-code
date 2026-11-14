@@ -51,6 +51,16 @@ import { hasVerifiableInode } from '../utils/file-identity.js';
  * invariant maintained by the surrounding code.
  */
 
+/** Line range key (`offset` / `limit`) for deduplicating identical ranged reads. */
+export interface FileReadRange {
+  offset?: number;
+  limit?: number;
+}
+
+export function formatFileReadRangeKey(range: FileReadRange): string {
+  return `${range.offset ?? ''}:${range.limit ?? ''}`;
+}
+
 /** A single tracked file. Mutated in place by {@link FileReadCache}. */
 export interface FileReadEntry {
   /** `${stats.dev}:${stats.ino}` — the canonical identity. */
@@ -138,6 +148,12 @@ export interface FileReadEntry {
    * issue #4239 false-block this whole marker exists to avoid.
    */
   readResidentInHistory: boolean;
+  /**
+   * Formatted keys (`${offset ?? ''}:${limit ?? ''}`) for explicit text ranged
+   * reads currently still in history. One-shot consumed on fast-path hit and
+   * cleared on content drift, writes, or history eviction.
+   */
+  residentRanges: Set<string>;
 }
 
 /** Result of {@link FileReadCache.check}. */
@@ -209,14 +225,25 @@ export class FileReadCache {
   recordRead(
     absPath: string,
     stats: Stats,
-    opts: { full: boolean; cacheable: boolean },
+    opts: { full: boolean; cacheable: boolean; range?: FileReadRange },
   ): FileReadEntry {
+    const validRange =
+      !opts.full &&
+      opts.cacheable &&
+      opts.range !== undefined &&
+      (opts.range.offset !== undefined || opts.range.limit !== undefined)
+        ? opts.range
+        : undefined;
+
     if (!FileReadCache.hasVerifiableIdentity(stats)) {
       const entry = FileReadCache.createEntry(absPath, stats);
       entry.lastReadAt = Date.now();
       entry.readResidentInHistory = opts.full;
       entry.lastReadWasFull = opts.full;
       entry.lastReadCacheable = opts.cacheable;
+      if (validRange) {
+        entry.residentRanges.add(formatFileReadRangeKey(validRange));
+      }
       return entry;
     }
 
@@ -254,6 +281,10 @@ export class FileReadCache {
       // by the `opts.full` branch above.
       entry.lastReadWasFull = opts.full;
       entry.lastReadCacheable = opts.cacheable;
+      entry.residentRanges.clear();
+    }
+    if (validRange) {
+      entry.residentRanges.add(formatFileReadRangeKey(validRange));
     }
     return entry;
   }
@@ -292,6 +323,7 @@ export class FileReadCache {
     // The model authored the current bytes and that result is in
     // history, so the fast-path may serve a placeholder again.
     entry.readResidentInHistory = true;
+    entry.residentRanges.clear();
     return entry;
   }
 
@@ -353,6 +385,7 @@ export class FileReadCache {
     const entry = this.byInode.get(FileReadCache.inodeKey(stats));
     if (entry) {
       entry.readResidentInHistory = false;
+      entry.residentRanges.clear();
       return true;
     }
     return false;
@@ -362,7 +395,38 @@ export class FileReadCache {
   markAllReadsEvictedFromHistory(): void {
     for (const entry of this.byInode.values()) {
       entry.readResidentInHistory = false;
+      entry.residentRanges.clear();
     }
+  }
+
+  /** Check whether an identical explicit ranged read is still resident for current bytes. */
+  isRangeResident(stats: Stats, range: FileReadRange): boolean {
+    if (range.offset === undefined && range.limit === undefined) {
+      return false;
+    }
+    const status = this.check(stats);
+    return (
+      status.state === 'fresh' &&
+      status.entry.lastReadAt !== undefined &&
+      status.entry.lastReadCacheable &&
+      status.entry.residentRanges.has(formatFileReadRangeKey(range)) &&
+      (status.entry.lastWriteAt === undefined ||
+        status.entry.lastReadAt >= status.entry.lastWriteAt)
+    );
+  }
+
+  /** Consume a resident range entry (one-shot escape hatch before an immediate re-read). */
+  consumeResidentRange(stats: Stats, range: FileReadRange): boolean {
+    if (
+      !FileReadCache.hasVerifiableIdentity(stats) ||
+      (range.offset === undefined && range.limit === undefined)
+    ) {
+      return false;
+    }
+    const entry = this.byInode.get(FileReadCache.inodeKey(stats));
+    return entry
+      ? entry.residentRanges.delete(formatFileReadRangeKey(range))
+      : false;
   }
 
   /** Remove the entry for the given Stats, if any. */
@@ -481,6 +545,7 @@ export class FileReadCache {
       lastReadWasFull: false,
       lastReadCacheable: false,
       readResidentInHistory: false,
+      residentRanges: new Set(),
     };
   }
 }

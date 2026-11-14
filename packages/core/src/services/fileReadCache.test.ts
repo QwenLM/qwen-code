@@ -704,4 +704,119 @@ describe('FileReadCache', () => {
       expect(cache.size()).toBe(1);
     });
   });
+
+  describe('residentRanges / isRangeResident / consumeResidentRange', () => {
+    it('tracks explicit cacheable partial ranges independently from full reads', () => {
+      const stats = makeStats();
+      read('/x/file.ts', stats, { full: true, cacheable: true });
+      expect(cache.isRangeResident(stats, { offset: 0, limit: 10 })).toBe(
+        false,
+      );
+
+      cache.recordRead('/x/file.ts', stats, {
+        full: false,
+        cacheable: true,
+        range: { offset: 0, limit: 10 },
+      });
+      cache.recordRead('/x/file.ts', stats, {
+        full: false,
+        cacheable: true,
+        range: { offset: 20, limit: 5 },
+      });
+
+      expect(cache.isRangeResident(stats, { offset: 0, limit: 10 })).toBe(true);
+      expect(cache.isRangeResident(stats, { offset: 20, limit: 5 })).toBe(true);
+      expect(cache.isRangeResident(stats, { offset: 10, limit: 10 })).toBe(
+        false,
+      );
+      expect(cache.isRangeResident(stats, {})).toBe(false);
+    });
+
+    it('consumes a resident range cleanly as a one-shot escape hatch', () => {
+      const stats = makeStats();
+      const range = { offset: 10, limit: 25 };
+      cache.recordRead('/x/file.ts', stats, {
+        full: false,
+        cacheable: true,
+        range,
+      });
+      cache.recordRead('/x/file.ts', stats, {
+        full: false,
+        cacheable: true,
+        range: { offset: 50, limit: 10 },
+      });
+
+      expect(cache.consumeResidentRange(stats, range)).toBe(true);
+      expect(cache.consumeResidentRange(stats, range)).toBe(false);
+      expect(cache.isRangeResident(stats, range)).toBe(false);
+      expect(cache.isRangeResident(stats, { offset: 50, limit: 10 })).toBe(
+        true,
+      );
+      expect(cache.consumeResidentRange(makeStats({ ino: 0 }), range)).toBe(
+        false,
+      );
+    });
+
+    it('clears residentRanges on fingerprint drift, recordWrite, and history eviction', () => {
+      const statsV1 = makeStats({ mtimeMs: 1000, size: 100 });
+      const rangeA = { offset: 0, limit: 10 };
+      const rangeB = { offset: 10, limit: 10 };
+
+      cache.recordRead('/x/file.ts', statsV1, {
+        full: false,
+        cacheable: true,
+        range: rangeA,
+      });
+      expect(cache.isRangeResident(statsV1, rangeA)).toBe(true);
+
+      // Fingerprint drift clears old ranges while recording the new read's range.
+      const statsV2 = makeStats({ mtimeMs: 2000, size: 120 });
+      expect(cache.isRangeResident(statsV2, rangeA)).toBe(false);
+      cache.recordRead('/x/file.ts', statsV2, {
+        full: false,
+        cacheable: true,
+        range: rangeB,
+      });
+      expect(cache.isRangeResident(statsV2, rangeA)).toBe(false);
+      expect(cache.isRangeResident(statsV2, rangeB)).toBe(true);
+
+      // markReadEvictedFromHistory and markAllReadsEvictedFromHistory clear ranges.
+      expect(cache.markReadEvictedFromHistory(statsV2)).toBe(true);
+      expect(cache.isRangeResident(statsV2, rangeB)).toBe(false);
+
+      cache.recordRead('/x/file.ts', statsV2, {
+        full: false,
+        cacheable: true,
+        range: rangeA,
+      });
+      cache.markAllReadsEvictedFromHistory();
+      expect(cache.isRangeResident(statsV2, rangeA)).toBe(false);
+
+      // recordWrite clears previously resident ranges, while a later range read re-arms.
+      cache.recordRead('/x/file.ts', statsV2, {
+        full: false,
+        cacheable: true,
+        range: rangeA,
+      });
+      cache.recordWrite('/x/file.ts', statsV2);
+      expect(cache.isRangeResident(statsV2, rangeA)).toBe(false);
+      cache.recordRead('/x/file.ts', statsV2, {
+        full: false,
+        cacheable: true,
+        range: rangeA,
+      });
+      expect(cache.isRangeResident(statsV2, rangeA)).toBe(true);
+    });
+
+    it('never marks non-cacheable ranged reads as resident', () => {
+      const stats = makeStats();
+      const range = { offset: 0, limit: 10 };
+      cache.recordRead('/x/file.bin', stats, {
+        full: false,
+        cacheable: false,
+        range,
+      });
+      expect(cache.isRangeResident(stats, range)).toBe(false);
+    });
+  });
 });
