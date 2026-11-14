@@ -313,7 +313,8 @@ export function MemoryMessage({
           <pre className={styles.content}>
             {contentLoading
               ? t('memory.loadingFile')
-              : content || (editable ? t('memory.noFiles') : '')}
+              : content ||
+                (editable && !selectedEntry?.file ? t('memory.noFiles') : '')}
           </pre>
         )}
       </section>
