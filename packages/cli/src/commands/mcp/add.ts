@@ -221,7 +221,10 @@ export const addCommand: CommandModule = {
         'parse-positional-numbers': false,
       })
       .strict(false)
+      .strictOptions()
       .strictCommands(false)
+      // A returning parent failure handler must not allow a settings write.
+      .fail(false)
       .positional('name', {
         describe: 'Name of the server',
         type: 'string',

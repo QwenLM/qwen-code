@@ -208,6 +208,39 @@ describe('mcp add command', () => {
   );
 
   it.each([
+    ['--env-file', '.env', 'image'],
+    ['--env-file=.env', 'image'],
+    ['--timeout-secs', '5', 'image'],
+    ['--header-x=y', 'image'],
+    ['--trust-all', 'image'],
+    ['--description-x', 'value', 'image'],
+    ['--scope-x', 'value', 'image'],
+  ])('rejects ambiguous server flags without saving (%j)', async (...args) => {
+    parser.exitProcess(false).showHelpOnFail(false).fail(vi.fn());
+
+    await expect(
+      Promise.resolve().then(() =>
+        parser.parseAsync(['add', 'test-server', 'docker', 'run', ...args]),
+      ),
+    ).rejects.toThrow('Unknown arguments');
+
+    expect(mockSetValue).not.toHaveBeenCalled();
+  });
+
+  it('keeps both server argument tails under a strict parent', async () => {
+    parser.strict().strictCommands();
+
+    await parser.parseAsync('add my-server npx infix -- dash --env-file .env');
+
+    expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
+      'my-server': {
+        command: 'npx',
+        args: ['infix', 'dash', '--env-file', '.env'],
+      },
+    });
+  });
+
+  it.each([
     { args: ['add', 'test-server'], error: 'Not enough non-option arguments' },
     {
       args: ['add', 'test-server', 'npx', '--transport', 'invalid'],

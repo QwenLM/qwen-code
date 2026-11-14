@@ -547,6 +547,8 @@ An explicit `--` immediately after `mcp` disables global-option prefix parsing. 
 
 #### Adding a server (`qwen mcp add`)
 
+Put server-only options after `--` to preserve them literally; for example, `qwen mcp add srv docker run -- --env-file .env image` retains the env-file option and its value. Before that separator, ambiguous options such as `--env-file` are rejected before settings are written.
+
 ```bash
 qwen mcp add [options] <name> <commandOrUrl> [args...]
 ```
