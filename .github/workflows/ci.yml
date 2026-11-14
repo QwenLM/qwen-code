@@ -198,8 +198,10 @@ jobs:
       # In-repo PRs, fork PRs whose author has write access
       # (OWNER/MEMBER/COLLABORATOR association), the merge queue (base-repo
       # context) and a push to `main` run the Linux jobs on ECS; other fork
-      # PRs stay hosted. Disable via repo var
-      # MAINTAINER_ECS_RUNNER_DISABLED=true.
+      # PRs stay hosted. Self-hosted labels require THIS repository: a fork
+      # named `qwen-code` satisfies SAME_REPO on its own PRs, so without the
+      # name check its runs would queue forever on labels it cannot reach.
+      # Disable via repo var MAINTAINER_ECS_RUNNER_DISABLED=true.
       #
       # Keep push routing aligned with the classifier above so a hosted queue
       # does not delay the downstream ECS jobs.
@@ -210,6 +212,7 @@ jobs:
         id: 'pick_runner'
         env:
           SAME_REPO: '${{ github.event.pull_request.head.repo.full_name == github.repository }}'
+          REPO_NAME: '${{ github.repository }}'
           AUTHOR_ASSOCIATION: '${{ github.event.pull_request.author_association }}'
           ECS_DISABLED: '${{ vars.MAINTAINER_ECS_RUNNER_DISABLED }}'
           # Optional fleet selector: 'hosted' forces github.com-hosted runners,
@@ -224,6 +227,12 @@ jobs:
           case "${AUTHOR_ASSOCIATION}" in
             OWNER|MEMBER|COLLABORATOR) trusted_author=true ;;
           esac
+          # The fleet lives in THIS repository only: a fork named `qwen-code`
+          # satisfies SAME_REPO on its own PRs, so the name — not the
+          # same-repo comparison — decides whether self-hosted labels are
+          # reachable at all. Every self-hosted branch below requires it.
+          canonical_repo=false
+          [[ "${REPO_NAME}" == "QwenLM/qwen-code" ]] && canonical_repo=true
           # Resolve fleet labels once; both outputs assign from this.
           fleet_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
           if [[ "${LINUX_RUNNER_FLEET}" == "arm64" ]]; then
@@ -231,7 +240,7 @@ jobs:
           fi
           # Dispatch input wins over the fleet variable; MAINTAINER_ECS_RUNNER_
           # DISABLED=true still hard-forces hosted runners everywhere.
-          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+          if [[ "${canonical_repo}" == "true" && "${EVENT_NAME}" == "workflow_dispatch" ]]; then
             if [[ "${ECS_DISABLED}" != "true" && "${DISPATCH_LINUX_RUNNER}" == "self-hosted" ]]; then
               ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
             elif [[ "${ECS_DISABLED}" != "true" && "${DISPATCH_LINUX_RUNNER}" == "self-hosted-arm64" ]]; then
@@ -242,14 +251,14 @@ jobs:
             fi
           elif [[ "${ECS_DISABLED}" == "true" || "${LINUX_RUNNER_FLEET}" == "hosted" ]]; then
             ubuntu_runner='["ubuntu-latest"]'
-          elif [[ "${SAME_REPO}" == "true" || "${trusted_author}" == "true" || "${EVENT_NAME}" == "merge_group" || "${EVENT_NAME}" == "push" ]]; then
+          elif [[ "${canonical_repo}" == "true" && ( "${SAME_REPO}" == "true" || "${trusted_author}" == "true" || "${EVENT_NAME}" == "merge_group" || "${EVENT_NAME}" == "push" ) ]]; then
             ubuntu_runner="${fleet_runner}"
           fi
           echo "ubuntu_runner=${ubuntu_runner}" >> "${GITHUB_OUTPUT}"
           echo "Selected Linux runner: ${ubuntu_runner}"
           pr_test_runner="${ubuntu_runner}"
           lint_runner="${ubuntu_runner}"
-          if [[ "${ECS_DISABLED}" != "true" && "${LINUX_RUNNER_FLEET}" != "hosted" && "${EVENT_NAME}" == "pull_request" && "${SAME_REPO}" == "false" && "${trusted_author}" == "false" ]]; then
+          if [[ "${canonical_repo}" == "true" && "${ECS_DISABLED}" != "true" && "${LINUX_RUNNER_FLEET}" != "hosted" && "${EVENT_NAME}" == "pull_request" && "${SAME_REPO}" == "false" && "${trusted_author}" == "false" ]]; then
             pr_test_runner='["self-hosted", "ecs-qwen-ephemeral"]'
             lint_runner="${pr_test_runner}"
           fi
