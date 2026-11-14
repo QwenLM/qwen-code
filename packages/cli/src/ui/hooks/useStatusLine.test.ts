@@ -6,16 +6,27 @@
 // @vitest-environment jsdom
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import chalk from 'chalk';
 import { renderHook, act } from '@testing-library/react';
 import * as child_process from 'child_process';
 import { StreamingState } from '../types.js';
-import type { StatusLinePresetReasoning } from '../statusLinePresets.js';
+import type {
+  StatusLinePresetConfig,
+  StatusLinePresetReasoning,
+} from '../statusLinePresets.js';
 import { useStatusLine } from './use-ink-status-line.js';
+import { theme } from '../semantic-colors.js';
 
 const debugLogMock = vi.hoisted(() => ({
   log: vi.fn(),
   error: vi.fn(),
   warn: vi.fn(),
+}));
+vi.mock('../semantic-colors.js', () => ({
+  theme: {
+    text: { accent: '', link: '', secondary: '' },
+    status: { success: '', warning: '' },
+  },
 }));
 
 // --- Mock child_process (auto-mock, then override exec in beforeEach) ---
@@ -48,6 +59,7 @@ const mockUIState = {
   branchName: 'main' as string | undefined,
   streamingState: StreamingState.Idle,
   statusLineSettingsVersion: 0,
+  statusLinePreviewConfig: undefined as StatusLinePresetConfig | undefined,
   statusLineConfigOverride: undefined as
     | {
         type: 'preset';
@@ -155,9 +167,11 @@ function setStatusLineConfig(
 }
 
 describe('useStatusLine', () => {
+  const originalChalkLevel = chalk.level;
   beforeEach(() => {
     vi.useFakeTimers();
     vi.clearAllMocks();
+    theme.text.accent = '';
     mockConfig.getShellExecutionSandbox.mockReturnValue(undefined);
     lastExecCommand = undefined;
     stdinWrittenData = '';
@@ -199,6 +213,7 @@ describe('useStatusLine', () => {
     mockUIState.branchName = 'main';
     mockUIState.statusLineSettingsVersion = 0;
     mockUIState.statusLineConfigOverride = undefined;
+    mockUIState.statusLinePreviewConfig = undefined;
     mockUIState.sessionStats.metrics.tools.totalCalls = 0;
     mockUIState.sessionStats.metrics.files.totalLinesAdded = 0;
     mockUIState.sessionStats.metrics.files.totalLinesRemoved = 0;
@@ -212,6 +227,7 @@ describe('useStatusLine', () => {
   });
 
   afterEach(() => {
+    chalk.level = originalChalkLevel;
     vi.useRealTimers();
   });
 
@@ -451,6 +467,64 @@ describe('useStatusLine', () => {
   });
 
   describe('preset status line', () => {
+    it('repaints semantic colors on theme changes and removes them in a plain preview', () => {
+      chalk.level = 3;
+      setStatusLineConfig({
+        type: 'preset',
+        items: ['model'],
+        useThemeColors: true,
+      });
+      theme.text.accent = 'red';
+      const { result, rerender } = renderHook(() => useStatusLine());
+      expect(result.current.lines).toEqual(['\x1b[31mTest Model\x1b[39m']);
+      theme.text.accent = 'blue';
+      rerender();
+      expect(result.current.lines).toEqual(['\x1b[34mTest Model\x1b[39m']);
+      mockUIState.statusLinePreviewConfig = {
+        type: 'preset',
+        items: ['model'],
+        useThemeColors: false,
+      };
+      rerender();
+      expect(result.current.lines).toEqual(['Test Model']);
+      expect(result.current.useThemeColors).toBe(false);
+    });
+    it.each([null, undefined, { type: 'command', command: 'echo saved' }])(
+      'previews over %j and restores it without writing settings',
+      async (savedConfig) => {
+        setStatusLineConfig(savedConfig);
+        const before = structuredClone(mockSettings.merged);
+        const { result, rerender } = renderHook(() => useStatusLine());
+        mockUIState.statusLinePreviewConfig = {
+          type: 'preset',
+          items: ['model'],
+          useThemeColors: false,
+        };
+        rerender();
+        expect(result.current.lines).toEqual(['Test Model']);
+        mockUIState.statusLinePreviewConfig = {
+          type: 'preset',
+          items: [],
+          useThemeColors: false,
+        };
+        rerender();
+        expect(result.current.lines).toEqual([]);
+        mockUIState.statusLinePreviewConfig = undefined;
+        rerender();
+        if (savedConfig?.type === 'command') {
+          expect(lastExecCommand).toBe('echo saved');
+          await act(async () => {
+            execCallback(null, 'saved\n', '');
+          });
+          expect(result.current.lines).toEqual(['saved']);
+        } else if (savedConfig === null) {
+          expect(result.current.lines).toEqual([]);
+        } else {
+          expect(result.current.lines[0]).toContain('git:(main)');
+        }
+        expect(mockSettings.merged).toEqual(before);
+      },
+    );
     it('returns the preset theme color preference', () => {
       setStatusLineConfig({
         type: 'preset',

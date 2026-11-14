@@ -6,21 +6,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useKeyboard, useTerminalDimensions } from '@opentui/react';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
-import type { StatusLineState } from '../hooks/useStatusLine.js';
 import {
   buildInitialSelectedKeys,
   buildConfigFromKeys,
   getEffectiveStatusLineScope,
-  getPreviewData,
   STATUS_LINE_OPTIONS,
   STATUS_LINE_DIALOG_FIXED_ROWS,
+  STATUS_LINE_DIALOG_SEARCH_ROWS,
+  STATUS_LINE_DIALOG_MIN_ITEMS,
 } from '../status-line-model.js';
-import { buildStatusLinePresetLines } from '../statusLinePresets.js';
+import type { StatusLinePresetConfig } from '../statusLinePresets.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
 import { truncateToWidth } from '../utils/textUtils.js';
 import {
@@ -36,20 +36,25 @@ import { C } from './theme.js';
 export function OpenTuiStatusLineDialog({
   config,
   settings,
-  state,
   addItem,
   onClose,
+  onPreviewChange,
   availableTerminalHeight = 18,
 }: {
   config: Config;
   settings: LoadedSettings;
-  state?: StatusLineState;
   addItem: UseHistoryManagerReturn['addItem'];
   onClose: () => void;
+  onPreviewChange?: (config: StatusLinePresetConfig | undefined) => void;
   availableTerminalHeight?: number;
 }) {
   const { width } = useTerminalDimensions();
-  const full = availableTerminalHeight >= STATUS_LINE_DIALOG_FIXED_ROWS + 1;
+  const full =
+    availableTerminalHeight >=
+    STATUS_LINE_DIALOG_FIXED_ROWS + STATUS_LINE_DIALOG_MIN_ITEMS;
+  const hasSearch =
+    availableTerminalHeight >=
+    STATUS_LINE_DIALOG_SEARCH_ROWS + STATUS_LINE_DIALOG_MIN_ITEMS;
   const budget = Math.max(
     0,
     full ? dialogContentWidth(width) : dialogAreaWidth(width) - 2,
@@ -61,36 +66,35 @@ export function OpenTuiStatusLineDialog({
   const selectedRef = useRef(selected);
   const items = useMemo(() => {
     const search = query.trim().toLowerCase();
-    return !full || !search
+    return !hasSearch || !search
       ? STATUS_LINE_OPTIONS
       : STATUS_LINE_OPTIONS.filter(
           (item) =>
             !item.separator &&
             `${item.label} ${item.key}`.toLowerCase().includes(search),
         );
-  }, [query, full]);
-  const preset = useMemo(() => buildConfigFromKeys(selected), [selected]);
-  const preview = state
-    ? buildStatusLinePresetLines(preset, getPreviewData(config, state))
-    : [];
+  }, [query, hasSearch]);
+  const preset = useMemo(
+    () => buildConfigFromKeys(selected, settings),
+    [selected, settings],
+  );
+  useEffect(() => {
+    onPreviewChange?.(preset);
+  }, [onPreviewChange, preset]);
+  useEffect(() => () => onPreviewChange?.(undefined), [onPreviewChange]);
   const maxItemsToShow = Math.max(
     1,
     Math.min(
       10,
       full
         ? availableTerminalHeight - STATUS_LINE_DIALOG_FIXED_ROWS
-        : availableTerminalHeight,
+        : availableTerminalHeight -
+            (hasSearch ? STATUS_LINE_DIALOG_SEARCH_ROWS : 0),
     ),
   );
   const save = () => {
     const scope = getEffectiveStatusLineScope(settings);
-    const old = settings.forScope(scope).settings.ui?.statusLine;
-    const saved = {
-      ...buildConfigFromKeys(selectedRef.current),
-      ...(typeof old?.hideContextIndicator === 'boolean'
-        ? { hideContextIndicator: old.hideContextIndicator }
-        : {}),
-    };
+    const saved = buildConfigFromKeys(selectedRef.current, settings);
     settings.setValue(scope, 'ui.statusLine', saved);
     const feedback: HistoryItemWithoutId & Record<string, unknown> = {
       type: MessageType.INFO,
@@ -123,14 +127,17 @@ export function OpenTuiStatusLineDialog({
   useKeyboard((event) => {
     const key = toOriginalKey(event);
     if (key.name === 'escape') {
-      if (full && query) setQuery('');
+      if (hasSearch && query) setQuery('');
       else onClose();
     } else if (key.name === 'space' || key.sequence === ' ') {
       toggle(list.activeIndexRef.current);
-    } else if (full && (key.name === 'backspace' || key.name === 'delete')) {
+    } else if (
+      hasSearch &&
+      (key.name === 'backspace' || key.name === 'delete')
+    ) {
       setQuery((value) => value.slice(0, -1));
     } else if (
-      full &&
+      hasSearch &&
       !['j', 'k', 'up', 'down', 'return'].includes(key.name) &&
       !key.ctrl &&
       !key.meta &&
@@ -154,11 +161,13 @@ export function OpenTuiStatusLineDialog({
               budget,
             )}
           </text>
-          <box marginTop={1} flexDirection="column">
-            <text fg={C.dim}>{truncateToWidth('Type to search', budget)}</text>
-            <text>{truncateToWidth(query ? `> ${query}` : '>', budget)}</text>
-          </box>
         </>
+      )}
+      {hasSearch && (
+        <box marginTop={1} flexDirection="column">
+          <text fg={C.dim}>{truncateToWidth('Type to search', budget)}</text>
+          <text>{truncateToWidth(query ? `> ${query}` : '>', budget)}</text>
+        </box>
       )}
       <box marginTop={full ? 1 : 0} flexDirection="column">
         {items.length ? (
@@ -209,27 +218,6 @@ export function OpenTuiStatusLineDialog({
       </box>
       {full && (
         <>
-          <box marginTop={1} flexDirection="column">
-            <text fg={C.dim}>{truncateToWidth('Preview', budget)}</text>
-            {preview.length ? (
-              preview.map((line, index) => (
-                <text
-                  key={index}
-                  fg={preset.useThemeColors ? C.accent : undefined}
-                  attributes={preset.useThemeColors ? 0 : 2}
-                >
-                  {truncateToWidth(line, budget)}
-                </text>
-              ))
-            ) : (
-              <text fg={C.dim}>
-                {truncateToWidth(
-                  'Select at least one item to show a status line.',
-                  budget,
-                )}
-              </text>
-            )}
-          </box>
           <box marginTop={1}>
             <text fg={C.dim}>
               {truncateToWidth(

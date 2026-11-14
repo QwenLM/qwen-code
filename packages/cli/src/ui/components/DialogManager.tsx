@@ -62,17 +62,21 @@ import { BackgroundTasksDialog } from './background-view/BackgroundTasksDialog.j
 import { useBackgroundTaskViewState } from '../contexts/BackgroundTaskViewContext.js';
 import { t } from '../../i18n/index.js';
 import { getDialogMaxHeight } from '../utils/layoutUtils.js';
+import { STATUS_LINE_COMPOSER_ROWS } from '../status-line-model.js';
+import { isStatusLineDialogActive } from '../status-line-dialog-active.js';
 import { getReasoningEffortsForConfig } from '../../acp-integration/model-configuration.js';
 
 interface DialogManagerProps {
   addItem: UseHistoryManagerReturn['addItem'];
   terminalWidth: number;
+  statusLineReservedRows?: number;
 }
 
 // Props for DialogManager
 export const DialogManager = ({
   addItem,
   terminalWidth,
+  statusLineReservedRows = STATUS_LINE_COMPOSER_ROWS,
 }: DialogManagerProps) => {
   const config = useConfig();
   const settings = useSettings();
@@ -330,16 +334,20 @@ export const DialogManager = ({
       </Box>
     );
   }
-  if (uiState.isStatusLineDialogOpen) {
+  if (isStatusLineDialogActive(uiState)) {
     return (
       <StatusLineDialog
         settings={settings}
         config={config}
-        uiState={uiState}
         addItem={addItem}
         onSaved={uiActions.notifyStatusLineSettingsChanged}
+        onPreviewChange={uiActions.setStatusLinePreviewConfig}
         onClose={uiActions.closeStatusLineDialog}
-        availableTerminalHeight={listDialogHeight}
+        availableTerminalHeight={Math.max(
+          1,
+          listDialogHeight -
+            (uiState.constrainHeight ? statusLineReservedRows : 0),
+        )}
       />
     );
   }

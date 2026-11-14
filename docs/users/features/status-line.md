@@ -37,9 +37,9 @@ The easiest way to configure a status line is the `/statusline` command. It open
 /statusline
 ```
 
-This opens the preset mode configurator. Use arrow keys to navigate, space to toggle items, and enter to confirm. Your selection is saved to settings automatically.
+This opens the preset mode configurator above the input area. Use arrow keys to navigate and space to toggle items or theme colors. The real footer updates immediately, using the same width, wrapping and two-row limit as the saved status line. The input remains visible but inactive while configuring. Enter saves your selection; Esc cancels and restores the saved status line (if a search is active, the first Esc clears it).
 
-When fewer than 16 rows are available, the dialog switches to a compact list-only layout without search or preview.
+When fewer than 16 rows are available to the picker (12 rows of chrome plus 4 item rows), it switches to a compact list-only layout without search. The real footer preview remains visible.
 
 You can also give `/statusline` specific instructions to have it generate a command-mode configuration:
 
@@ -51,7 +51,7 @@ You can also give `/statusline` specific instructions to have it generate a comm
 
 ## Preset mode
 
-Preset mode provides a set of built-in data items that you can pick and combine — no shell commands, no `jq`, no scripting. Items are rendered as `item1 | item2 | item3` in a single line.
+Preset mode provides a set of built-in data items that you can pick and combine — no shell commands, no `jq`, no scripting. Items are rendered as `item1 · item2 · item3` in a single line.
 
 ### Configuration
 
@@ -78,8 +78,8 @@ Add a `statusLine` object under the `ui` key in `~/.qwen/settings.json`:
 | Field                  | Type       | Required | Description                                                                                                                                                                                                                                  |
 | ---------------------- | ---------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `type`                 | `"preset"` | Yes      | Must be `"preset"`                                                                                                                                                                                                                           |
-| `items`                | string[]   | Yes      | Ordered list of preset item IDs to display (see table below). Items are joined with `\|` as the separator.                                                                                                                                   |
-| `useThemeColors`       | boolean    | No       | Apply the active `/theme` color to the status line text. Defaults to `true`.                                                                                                                                                                 |
+| `items`                | string[]   | Yes      | Ordered list of preset item IDs to display (see table below). Items are joined with `·` as the separator.                                                                                                                                    |
+| `useThemeColors`       | boolean    | No       | Use the active `/theme`: success for project/Git, accent for model/reasoning, link for context/tokens, and warning for session metadata. Separators stay neutral. Defaults to `true`.                                                        |
 | `hideContextIndicator` | boolean    | No       | Hide the built-in context usage indicator in the footer right section. When unset, it is hidden automatically if `items` contains `context-used` or `context-remaining`, so context usage is not shown twice. Set `false` to always show it. |
 
 ### Available preset items
@@ -112,7 +112,7 @@ Items marked **Default** are pre-selected when you first open the `/statusline` 
 With the default items, the status line looks like:
 
 ```
-qwen-3-235b high | main | Context 65.7% left | /home/user/project | Context 34.3% used
+qwen-3-235b high · main · Context 65.7% left · /home/user/project · Context 34.3% used
 ```
 
 ### Customizing via the dialog
@@ -134,15 +134,14 @@ Running `/statusline` opens an interactive multi-select dialog:
 │ [x] context-remaining       Percentage of context remaining   │
 │ ...                                                           │
 │                                                               │
-│ Preview                                                       │
-│ qwen-3-235b high | main | Context 65.7% left                 │
-│                                                               │
 │ Use up/down to navigate, space to select, enter to confirm    │
 └───────────────────────────────────────────────────────────────┘
+> Type your message…
+git:(main) · qwen-3-235b high · Context 65.7% left
 ```
 
 - Type to filter items by name or description
-- A live preview updates as you toggle items
+- The real footer below the input updates as you toggle items
 - Press enter to save the configuration
 
 ---
@@ -386,7 +385,7 @@ Then reference it in settings:
 **Preset mode only:**
 
 - **No external dependencies**: Preset items are computed internally — no shell commands, no `jq`, no timeouts.
-- **Theme integration**: When `useThemeColors` is `true` (default), the status line text uses the active `/theme` color. When `false`, dimmed footer styling is applied.
+- **Theme integration**: When `useThemeColors` is `true` (default), project/Git items use the active theme's success color, model/reasoning items its accent color, context/token metrics its link color, and session metadata its warning color. Separators stay neutral. When `false`, dimmed footer styling is applied without these semantic colors.
 - **PR lookup**: The `pull-request-number` item runs `gh pr view` in the background (2s timeout). It only triggers when the branch changes, not on every update.
 
 ## Troubleshooting

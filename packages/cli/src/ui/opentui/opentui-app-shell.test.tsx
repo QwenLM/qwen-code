@@ -46,6 +46,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { act, render, renderHook, screen } from '@testing-library/react';
 import { OpenTuiApp } from './opentui-app-shell.js';
+import { useTerminalDimensions } from '@opentui/react';
+import { STATUS_LINE_COMPOSER_ROWS } from '../status-line-model.js';
 import {
   getDialogMaxHeight,
   STATIC_EXTRA_HEIGHT,
@@ -136,6 +138,7 @@ const mocks = vi.hoisted(() => {
     hooksAddInfo: null as ((text: string) => void) | null,
     bannerProps: null as Record<string, unknown> | null,
     footerProps: null as Record<string, unknown> | null,
+    nativeLayoutProps: new WeakMap<object, Record<string, unknown>>(),
     statusLineState: null as StatusLineState | null,
     statusVimMode: undefined as string | undefined,
     worktree: null as null | {
@@ -186,6 +189,13 @@ const mocks = vi.hoisted(() => {
           {
             ...(key === undefined ? {} : { key }),
             'data-p': captured,
+            ref: (node: object | null) => {
+              if (node)
+                state.nativeLayoutProps.set(
+                  node,
+                  props as Record<string, unknown>,
+                );
+            },
           },
           children,
         );
@@ -208,7 +218,7 @@ vi.mock('@opentui/react', () => ({
   useKeyboard: (handler: (key: unknown) => void) => {
     mocks.state.keyboardHandlers.push(handler);
   },
-  useTerminalDimensions: () => ({ width: 120, height: 40 }),
+  useTerminalDimensions: vi.fn(() => ({ width: 120, height: 40 })),
   useRenderer: () => ({
     addInputHandler: () => {},
     removeInputHandler: () => {},
@@ -1251,9 +1261,17 @@ describe('OpenTuiApp shell wiring', () => {
       request: { dialog: 'statusline' },
     };
     await submit('/statusline');
-    expect(mocks.state.dialogProps?.['statusLineState']).toMatchObject({
-      sessionStats: current,
-      branchName: 'current-branch',
+    expect(screen.getByText('footer')).toBeTruthy();
+    expect(mocks.state.inputProps?.['focus']).toBe(false);
+    const onPreviewChange = mocks.state.dialogProps?.[
+      'onStatusLinePreviewChange'
+    ] as (config: { type: 'preset'; items: string[] }) => void;
+    await act(async () =>
+      onPreviewChange({ type: 'preset', items: ['model'] }),
+    );
+    expect(mocks.state.statusLineState?.statusLinePreviewConfig).toEqual({
+      type: 'preset',
+      items: ['model'],
     });
   });
 
@@ -3915,6 +3933,99 @@ describe('OpenTuiApp shell wiring', () => {
     );
   });
 
+  it('restores refused queued input while the status-line composer stays mounted', async () => {
+    mocks.state.deferDuringStreaming = true;
+    mocks.state.handleResults.push(
+      { kind: 'refused' },
+      { kind: 'open_dialog', request: { dialog: 'statusline' } },
+    );
+    const restoreSubmission = vi.fn();
+    const composerHandle: OpenTuiComposerSlot = {
+      current: { getText: () => '', setText: vi.fn(), restoreSubmission },
+    };
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+      streaming: true,
+      composerHandle,
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+
+    await submit('?compress now');
+    await submit('/statusline');
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} streaming={false} />);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(screen.getByText('dialog:statusline')).toBeTruthy(),
+    );
+    expect(mocks.state.handledTexts).toEqual(['?compress now', '/statusline']);
+    expect(screen.getByText('input-prompt')).toBeTruthy();
+    expect(restoreSubmission).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ text: '?compress now' }),
+    );
+    expect(composerHandle.returned).toBeUndefined();
+  });
+
+  it('parks refused input when approval replaces the status-line composer during a drain', async () => {
+    mocks.state.deferDuringStreaming = true;
+    mocks.state.holdHandleOn = '/statusline';
+    mocks.state.handleResults.push(
+      { kind: 'refused' },
+      { kind: 'open_dialog', request: { dialog: 'statusline' } },
+    );
+    const restoreSubmission = vi.fn();
+    const composerHandle: OpenTuiComposerSlot = {
+      current: { getText: () => '', setText: vi.fn(), restoreSubmission },
+    };
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+      streaming: true,
+      composerHandle,
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+    await submit('?compress now');
+    await submit('/statusline');
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} streaming={false} />);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(mocks.state.releaseHandle).not.toBeNull());
+    await act(async () => {
+      mocks.state.mcpQueue.push({ name: 'acceptance-server' });
+      view.rerender(<OpenTuiApp {...props} streaming={false} />);
+      await Promise.resolve();
+    });
+    expect(screen.getByText('mcp-approval')).toBeTruthy();
+    expect(screen.queryByText('input-prompt')).toBeNull();
+    await act(async () => {
+      mocks.state.releaseHandle?.();
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(mocks.state.handledTexts).toEqual([
+        '?compress now',
+        '/statusline',
+      ]),
+    );
+    expect(screen.getByText('mcp-approval')).toBeTruthy();
+    expect(screen.queryByText('input-prompt')).toBeNull();
+    expect(restoreSubmission).not.toHaveBeenCalled();
+    expect(composerHandle.returned).toEqual(
+      expect.objectContaining({ text: '?compress now' }),
+    );
+  });
+
   it('keeps ?-form input the Mods refused at once in the composer', async () => {
     mocks.state.handleResults.push({ kind: 'refused' });
     renderApp({ streaming: false });
@@ -5420,6 +5531,52 @@ describe('OpenTuiApp transcript scroll region', () => {
     expect(mocks.state.dialogProps?.['availableTerminalHeight']).toBe(
       regionHeight,
     );
+  });
+
+  it('reserves the live footer when the status-line picker opens at 80x24', async () => {
+    vi.mocked(useTerminalDimensions).mockReturnValue({ width: 80, height: 24 });
+    try {
+      const regionHeight =
+        getDialogMaxHeight(24, STATIC_EXTRA_HEIGHT) - STATUS_LINE_COMPOSER_ROWS;
+      await renderWithTranscript();
+      mocks.state.handleResult = {
+        kind: 'open_dialog',
+        request: { dialog: 'statusline' },
+      } satisfies OpenTuiDispatchOutcome;
+      await submit('/statusline');
+      const { column, chrome } = readLayout();
+      expect(layoutOf(column)).toMatchObject({ height: 24 });
+      expect(layoutOf(screen.getByText('dialog:statusline'))).toMatchObject({
+        height: regionHeight,
+        overflow: 'hidden',
+      });
+      expect(mocks.state.dialogProps?.['availableTerminalHeight']).toBe(
+        regionHeight,
+      );
+      expect(chrome?.textContent).toContain('input-prompt');
+      expect(chrome?.textContent).toContain('footer');
+      expect(mocks.state.footerProps).not.toBeNull();
+      const measureChrome = async (height: number) => {
+        const props = mocks.state.nativeLayoutProps.get(readLayout().chrome!)!;
+        await act(async () => {
+          (props['ref'] as (node: { height: number }) => void)({ height });
+          (props['onSizeChange'] as () => void)();
+        });
+      };
+      await measureChrome(regionHeight + 13);
+      expect(mocks.state.dialogProps?.['availableTerminalHeight']).toBe(
+        getDialogMaxHeight(24, STATIC_EXTRA_HEIGHT) - 13,
+      );
+      await measureChrome(6 + STATUS_LINE_COMPOSER_ROWS);
+      expect(mocks.state.dialogProps?.['availableTerminalHeight']).toBe(
+        regionHeight,
+      );
+    } finally {
+      vi.mocked(useTerminalDimensions).mockReturnValue({
+        width: 120,
+        height: 40,
+      });
+    }
   });
 
   it('shows queued prompts in the chrome, above the composer itself', async () => {

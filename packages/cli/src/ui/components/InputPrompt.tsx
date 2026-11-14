@@ -2211,10 +2211,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           scrollOffset: activeCompletion.visibleStartIndex,
         };
   const shouldShowSuggestions =
-    (shouldUseExportSuggestions && exportCompletion.shouldShowSuggestions) ||
-    (!isHistoryRestoredText || commandSearchActive || reverseSearchActive
-      ? activeCompletion.showSuggestions
-      : false);
+    !uiState.isStatusLineDialogOpen &&
+    ((shouldUseExportSuggestions && exportCompletion.shouldShowSuggestions) ||
+      (!isHistoryRestoredText || commandSearchActive || reverseSearchActive
+        ? activeCompletion.showSuggestions
+        : false));
 
   // Mouse hover/select must target the SAME completion source that builds
   // suggestionDisplayProps. For reverse/command search, selecting also resets
@@ -2458,7 +2459,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         prefixWidth={prefixWidth}
         borderColor={borderColor}
         topRightLabel={voiceStatusLabel ?? uiState.sessionName ?? undefined}
-        isActive={!isEmbeddedShellFocused}
+        isActive={!isEmbeddedShellFocused && !uiState.isStatusLineDialogOpen}
         renderLine={renderLineWithHighlighting}
         mouseEnabled={mouseInteractionsEnabled}
       />
