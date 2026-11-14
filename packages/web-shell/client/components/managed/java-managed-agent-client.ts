@@ -65,6 +65,8 @@ export type JavaAgentEvent = Schemas['WebShellEvent'];
 
 export type JavaAgentResyncRequired = Schemas['WebShellResyncRequired'];
 
+export type JavaAgentTerminalTicket = Schemas['WebShellTerminalTicket'];
+
 const RESYNC_REQUIRED = 'agent.session.resync_required';
 
 // Corrupt frames tolerated in a row before the stream resyncs past the
@@ -152,6 +154,28 @@ export class JavaManagedAgentClient {
 
   getSession(sessionId: string, signal?: AbortSignal) {
     return this.post<JavaAgentSession>('/sessions/get', { sessionId }, signal);
+  }
+
+  terminalTicket(
+    sessionId: string,
+    terminalId: string,
+    signal?: AbortSignal,
+  ): Promise<JavaAgentTerminalTicket> {
+    return this.post(
+      '/sessions/terminal-ticket',
+      { sessionId, terminalId },
+      signal,
+    );
+  }
+
+  terminalWebSocketUrl(sessionId: string, terminalId: string): string {
+    const url = new URL(
+      `${this.baseUrl}${API_PREFIX}/sessions/${encodeURIComponent(sessionId)}/terminal`,
+    );
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    url.searchParams.set('terminalId', terminalId);
+    url.searchParams.set('replay', '1');
+    return url.toString();
   }
 
   getRecovery(sessionId: string, signal?: AbortSignal) {
@@ -558,6 +582,40 @@ export class JavaManagedAgentClient {
       { sessionId },
       signal,
     );
+  }
+
+  /**
+   * The transport the client filesystem bridge drives: the WebShell API base
+   * plus a fetch that attaches the provider's auth headers (resolved per call
+   * so token refresh is honoured) and credentials. The bridge owns the
+   * register/SSE/response exchange; this only supplies the authenticated pipe.
+   */
+  clientFilesTransport(): {
+    baseUrl: string;
+    fetch: import('../../local-files/managed-client-files-bridge.js').ManagedFetch;
+  } {
+    return {
+      baseUrl: `${this.baseUrl}${API_PREFIX}`,
+      fetch: async (url, init) => {
+        const supplied = await this.options.getHeaders?.();
+        const headers = new Headers(supplied);
+        if (init?.headers) {
+          for (const [key, value] of Object.entries(init.headers)) {
+            headers.set(key, value);
+          }
+        }
+        if (!headers.has('content-type')) {
+          headers.set('content-type', 'application/json');
+        }
+        return this.fetchImpl(url, {
+          method: init?.method,
+          headers,
+          body: init?.body,
+          signal: init?.signal,
+          credentials: this.credentials,
+        });
+      },
+    };
   }
 
   listExtensionPackages(workspaceId: string, signal?: AbortSignal) {

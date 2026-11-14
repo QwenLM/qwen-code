@@ -441,7 +441,7 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
     '让 headless 会话（`-p` 与 stream-json）和 ACP 会话（Zed、VS Code、Web Shell、channel）运行在共享的 agent loop 上（实验性）。Ink TUI 和 OpenTUI 的轮次也运行在它上面，子代理的模型请求和工具调用也经由它运行。也可通过 QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1 环境变量启用。',
   'settings.label.experimental.eventBusAgentLoop': '事件总线 Agent Loop',
   'settings.description.experimental.eventBusAgentLoop':
-    '让共享 agent loop 运行在事件总线架构上（实验性）。仅对同时开启了 experimental.unifiedAgentLoop 的 headless 会话（`-p` 与 stream-json）生效；其他 surface 保留现有的 loop 内部实现。也可通过 QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP=1 环境变量启用。',
+    '让共享 agent loop 运行在事件总线架构上（实验性）。同时开启 experimental.unifiedAgentLoop 时，对 headless 会话（`-p` 与 stream-json）、ACP 会话（Zed、VS Code、Web Shell、channel）、Ink TUI、OpenTUI 和子代理生效。也可通过 QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP=1 环境变量启用。',
   'settings.label.experimental.artifact': '启用 Artifacts',
   'settings.description.experimental.artifact':
     '启用 artifact 工具，默认开启。在交互式非 SDK 会话中，模型可以把自包含 HTML 页面发布为交互式 Artifact 并在浏览器中打开；非 SDK 的 daemon 会话可使用仅记录元数据的 record_artifact 工具。设为 false 或用 QWEN_CODE_DISABLE_ARTIFACT=1 可同时禁用两者。',
