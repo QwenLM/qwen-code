@@ -130,3 +130,22 @@ it('rejects an invalid envelope or broken JSON without making a command', () => 
     expect(restoreManagedMcpCommand(target)).toBeUndefined();
   }
 });
+
+it('accepts a server revision at the legal ceiling', () => {
+  // MAX_SAFE_INTEGER itself is rejected; the bound is < MAX_SAFE_INTEGER, so
+  // the largest legal revision must survive the round-trip. Pinning the
+  // accepted side keeps the ceiling from quietly tightening: a bound one
+  // below the legal maximum would drop this command.
+  const ceiling: ManagedMcpCommandAttempt = {
+    ...attempt,
+    command: {
+      ...attempt.command,
+      server: {
+        ...attempt.command.server,
+        serverRevision: Number.MAX_SAFE_INTEGER - 1,
+      },
+    },
+  };
+  saveManagedMcpCommand(target, ceiling);
+  expect(restoreManagedMcpCommand(target)).toEqual(ceiling);
+});

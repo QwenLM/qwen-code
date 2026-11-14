@@ -6418,7 +6418,17 @@ export function registerHostedHarnessSessionRoutes(
             definition?.['mcpServers'] !== undefined)) &&
         mcpServers === undefined
       ) {
-        mcpServers = parseHostedMcpServers(definition?.['mcpServers']);
+        // A definition persisted under an older admission bound can fail the
+        // current parser; the re-parse must not fall through to the generic
+        // 503 handler, so answer the same declared error the create path
+        // uses for this parser.
+        try {
+          mcpServers = parseHostedMcpServers(definition?.['mcpServers']);
+        } catch {
+          await managed.close();
+          error(res, 400, 'invalid_hosted_mcp_servers');
+          return;
+        }
       }
       if (!create && hookCatalog === undefined && definition?.['hookCatalog']) {
         try {
