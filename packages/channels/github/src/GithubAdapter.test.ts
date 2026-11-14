@@ -21253,6 +21253,50 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
         expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
       });
 
+      it('retires a watch task left by a failed retirement on recovery', async () => {
+        // The connect-time retirement is the normal path; this is its safety
+        // net for the window where that retirement could not write the
+        // dead-letter and kept the task.
+        await initChannel(commentConfig, { boundSessions });
+        const messageId = 'watch:ci_failure:42:sha-1:1';
+        writeInboundTasks([
+          makeInboundTaskRecord({
+            envelope: {
+              channelName: 'test-github',
+              senderId: 'github',
+              senderName: 'GitHub',
+              chatId: 'owner/repo',
+              threadId: 'pr:42',
+              messageId,
+              text: 'CI failed on head sha-1.',
+              isGroup: true,
+              isMentioned: true,
+              isReplyToBot: false,
+              metadata: 'Event: ci_failure.',
+            },
+            source: {
+              chatId: 'owner/repo',
+              threadId: 'pr:42',
+              messageId,
+            },
+            delivery: {
+              kind: 'bound-session',
+              sessionId: 'bound-session',
+            },
+          }),
+        ]);
+        routeCommentPaginate();
+        await pollOnce();
+        expect(
+          existsSync(inboundTaskPath()) ? readInboundTasks() : [],
+        ).toHaveLength(0);
+        expect(readFileSync(boundDeadLetterPath(), 'utf-8')).toContain(
+          messageId,
+        );
+        expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      });
+
       it('renders the last observed title for a comment template (%title%)', async () => {
         await initChannel(
           {
