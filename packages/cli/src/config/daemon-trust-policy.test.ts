@@ -203,6 +203,28 @@ describe('daemon trust policy', () => {
     });
   });
 
+  it('honors the dead folder-trust key on a file the migration already stamped', async () => {
+    installFiles({
+      '/config/user.json': JSON.stringify({
+        $version: 4,
+        security: { folderTrust: { featureEnabled: true } },
+      }),
+      '/config/trusted.json': JSON.stringify({
+        '/work': TrustLevel.TRUST_FOLDER,
+      }),
+    });
+
+    const snapshot = await readDaemonTrustPolicySnapshot();
+    expect(snapshot.folderTrustEnabled).toBe(true);
+    expect(
+      evaluateDaemonWorkspaceTrust(snapshot, '/work/project'),
+    ).toMatchObject({
+      state: 'trusted',
+      targetTrusted: true,
+      source: 'file',
+    });
+  });
+
   it('uses system folder trust to enable over user', async () => {
     installFiles({
       '/config/user.json': JSON.stringify({

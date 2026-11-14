@@ -573,6 +573,15 @@ function pickFastPathSettings(
       }
       if (enabled !== undefined) {
         out.security = { folderTrust: { enabled } };
+      } else {
+        // A file a V1 file was migrated into before that target was known to be
+        // wrong still holds the dead nested key. The interactive CLI repairs it
+        // on load, but this reader runs first and treats a missing `enabled` as
+        // untrusted-off, admitting every workspace.
+        const legacy = folderTrust['featureEnabled'];
+        if (typeof legacy === 'boolean') {
+          out.security = { folderTrust: { enabled: legacy } };
+        }
       }
     }
   }
