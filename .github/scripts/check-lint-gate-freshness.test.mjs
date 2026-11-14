@@ -880,9 +880,11 @@ test('a base ref containing a hash is URI-encoded in the tree path', async () =>
 test('a base ref containing a percent is URI-encoded in the tree path', async () => {
   // The hash case's comment names '%' alongside '#', so '%' needs its own
   // witness: an encoder narrowed to '#' and '/' alone stays green without it.
-  // 'fix%201' is a legal ref; unencoded it is requested verbatim and decodes
-  // server-side to the DIFFERENT ref 'fix 1'. The fixture keys trees by the
-  // raw ref, so the case must pass 'fix%201', never the decoded 'fix 1'.
+  // 'fix%201' is a legal ref; unencoded it is requested verbatim and the server
+  // decodes it to 'fix 1', which is NOT a legal ref, so the lookup 404s and the
+  // narrowing fails closed — a stuck stale verdict, not a wrong-ref read. The
+  // wrong-ref read needs '&'; see the all-hazards sample below. The fixture
+  // keys trees by the raw ref, so pass 'fix%201', never the decoded form.
   const calls = [];
   const stale = await findStaleGateFiles({
     ...PRETTIER_OPTS,
@@ -909,6 +911,60 @@ test('a base ref containing a percent is URI-encoded in the tree path', async ()
     calls.filter((c) => c.includes('fix%201')),
     [],
     'every URL embedding the base ref must encode it',
+  );
+});
+
+// One sample carrying every URL-hazardous character that git still allows in a
+// ref ('&', '#', '%', '+', '=', ';', '@' — all pass git check-ref-format; '?'
+// and space do not), asserted per site. Adding a row per character is what kept
+// regenerating findings: '#' and '%' each got a case while '&' — the one
+// character that makes an unencoded query value name a DIFFERENT EXISTING ref —
+// had none, so an encoder narrowed to '%'/'#'/'/' passed the whole suite.
+// Measured live: contents/.prettierignore?ref=main&x answers 200 with main's
+// file, ?ref=main%26x answers 404. A raw-ref scan cannot
+// stand in for these: once '#' and '%' are escaped the full raw needle is gone,
+// and the query-value sites are exactly where '&' changes meaning.
+const HAZARD_REF = 'a&b#c%d+e=f;g@h';
+const HAZARD_ENC = 'a%26b%23c%25d%2Be%3Df%3Bg%40h';
+
+test('every prettier-path URL encodes a ref carrying every hazardous character', async () => {
+  const calls = [];
+  const stale = await findStaleGateFiles({
+    ...PRETTIER_OPTS,
+    baseRef: HAZARD_REF,
+    ...prettierFetch(
+      {
+        basePi: ['node_modules', 'packages/live-host/'],
+        headPi: ['node_modules'],
+        baseRef: HAZARD_REF,
+      },
+      calls,
+    ),
+  });
+  assert.deepEqual(stale, []);
+  for (const wire of [
+    `/git/trees/${HAZARD_ENC}?recursive=1`,
+    `/contents/.prettierignore?ref=${HAZARD_ENC}`,
+    `&sha=${HAZARD_ENC}&per_page=1`,
+  ]) {
+    assert.ok(
+      calls.some((c) => c.includes(wire)),
+      `expected ${wire}, got ${JSON.stringify(calls)}`,
+    );
+  }
+});
+
+test('the ci.yml URL encodes a ref carrying every hazardous character', async () => {
+  const calls = [];
+  const stale = await findStaleGateFiles({
+    ...CI_OPTS,
+    baseRef: HAZARD_REF,
+    ...ciFetch(realCi, realCi, calls, MERGE_BASE_SHA, HAZARD_REF),
+  });
+  assert.deepEqual(stale, []);
+  assert.ok(
+    calls.some((c) => c.includes(`?ref=${HAZARD_ENC}`)),
+    `expected an encoded contents ref, got ${JSON.stringify(calls)}`,
   );
 });
 
