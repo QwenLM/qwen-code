@@ -9,6 +9,7 @@
  */
 import { SyntaxStyle } from '@opentui/core';
 import { createTestRenderer } from '@opentui/core/testing';
+import { getComponentCatalogue } from '@opentui/react';
 import remend from 'remend';
 import { StableMarkdownRenderable } from '../src/ui/opentui/stable-markdown.js';
 
@@ -29,6 +30,14 @@ const TEXT = [
 ].join('\n');
 const STEP = 4;
 
+// The app renders `<markdown>`, so fail when the `extend` registration
+// stops pointing at the subclass even though the class itself still works.
+if (getComponentCatalogue()['markdown'] !== StableMarkdownRenderable) {
+  console.error(
+    'MARKDOWN STREAMING FAIL: <markdown> is not StableMarkdownRenderable',
+  );
+  process.exit(1);
+}
 const setup = await createTestRenderer({ width: 70, height: 40 });
 const markdown = new StableMarkdownRenderable(setup.renderer, {
   content: '',
