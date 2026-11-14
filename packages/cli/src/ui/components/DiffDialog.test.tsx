@@ -9,7 +9,7 @@ import { render as inkRender } from 'ink';
 import { EventEmitter } from 'node:events';
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { waitFor } from '@testing-library/react';
-import type { Hunk } from 'diff';
+import type { StructuredPatchHunk as Hunk } from 'diff';
 import type { GitDiffResult } from '@qwen-code/qwen-code-core';
 import { DiffDialog } from './DiffDialog.js';
 import { KeypressProvider } from '../contexts/KeypressContext.js';

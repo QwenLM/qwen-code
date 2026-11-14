@@ -16,7 +16,7 @@ import {
   unlink,
 } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { diffLines, structuredPatch, type Hunk } from 'diff';
+import { diffLines, structuredPatch, type StructuredPatchHunk as Hunk } from 'diff';
 import { Storage } from '../config/storage.js';
 import { renameWithRetry } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
