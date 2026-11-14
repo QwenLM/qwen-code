@@ -4364,12 +4364,28 @@ describe('ChatEditor toolbar popovers', () => {
           controls?.querySelectorAll('[data-web-shell-effort]') ?? [],
         ).map((button) => button.getAttribute('data-web-shell-effort')),
       ).toEqual(efforts);
+      expect(
+        controls?.querySelector('[data-web-shell-effort="high"]')?.className,
+      ).toContain('reasoningEffortRowActive');
+      expect(
+        controls?.querySelector('[data-web-shell-effort="max"]')?.className,
+      ).not.toContain('reasoningEffortRowActive');
       await act(async () =>
         controls
           ?.querySelector<HTMLButtonElement>('[data-web-shell-effort="max"]')
           ?.click(),
       );
       expect(onSelectReasoningEffort).toHaveBeenLastCalledWith('max');
+      rerenderChatEditor(container, {
+        ...props,
+        reasoning: { ...props.reasoning!, effort: 'max' },
+      });
+      expect(
+        controls?.querySelector('[data-web-shell-effort="max"]')?.className,
+      ).toContain('reasoningEffortRowActive');
+      expect(
+        controls?.querySelector('[data-web-shell-effort="high"]')?.className,
+      ).not.toContain('reasoningEffortRowActive');
       await act(async () =>
         controls
           ?.querySelector<HTMLButtonElement>('[data-web-shell-thinking-toggle]')
