@@ -48,14 +48,17 @@ export class LlmHandler {
     round: number,
   ): Promise<void> {
     const { client, signal, host = {} } = state.input;
+    const isFinished = () =>
+      state.finished !== undefined || this.store.get(state.runId) !== state;
     const { turn, calls, stop } = await runModelRound(
       client,
       send,
       signal,
       host,
+      isFinished,
     );
     // A late round (the run already moved on or finished) writes nothing.
-    if (this.store.get(state.runId) !== state || state.round !== round) return;
+    if (isFinished() || state.round !== round) return;
     state.model = { turn, calls, stop };
     publishFor(this.bus, state, 'llm.settled', { round }, round);
   }
