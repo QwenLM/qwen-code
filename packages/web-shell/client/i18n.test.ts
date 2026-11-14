@@ -191,7 +191,7 @@ describe('web-shell i18n catalog', () => {
         'channels.editor.field.webhook.signingSecret.description',
       ]) {
         expect(t(key)).not.toBe(key);
-        expect(t(key)).not.toMatch(/DingTalk|钉钉|Feishu|飞书/i);
+        expect(t(key)).not.toMatch(/DingTalk|钉钉|Feishu|飞书|WeCom|企业微信/i);
       }
       for (const key of [
         'channels.method.title',
@@ -217,6 +217,7 @@ describe('web-shell i18n catalog', () => {
   it.each([
     { type: 'dingtalk', english: 'DingTalk', chinese: '钉钉' },
     { type: 'feishu', english: 'Feishu', chinese: '飞书' },
+    { type: 'wecom', english: 'WeCom', chinese: '企业微信' },
   ])('localizes $type in the connection chooser', (platform) => {
     for (const language of ['en', 'zh-CN'] as const) {
       const t = getTranslator(language);
