@@ -4,6 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { HookProgress } from '@qwen-code/qwen-code-core/confirmation-bus/types.js';
+import { parseHookLifecycle } from '@qwen-code/qwen-code-core/telemetry/hook-lifecycle-contract.js';
+import {
+  createTranscriptHookLifecycleUpdate,
+  createAgentRecordTranscriptUpdate,
+  createTranscriptExecutionLifecycleUpdate,
+} from '@qwen-code/acp-bridge/transcriptReplay';
 import { removeFileHistorySnapshots } from '@qwen-code/qwen-code-core/utils/file-history-snapshots.js';
 import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
 import { resolveWorkflowIntent } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
@@ -26,6 +33,7 @@ import {
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import { FinishReason } from '@qwen-code/qwen-code-core/core/genai-compat.js';
 import {
+  runAgentLoop,
   runModelRound,
   type AgentLoopStopReason,
 } from '@qwen-code/qwen-code-core/core/agent-loop.js';
@@ -67,6 +75,7 @@ import {
 import type { LoopReminderInput } from '@qwen-code/qwen-code-core/services/loop-protection.js';
 import {
   captureHookExecutionOwner,
+  enterHookExecutionOwner,
   runWithHookExecutionOwner,
   type HookExecutionOwner,
 } from '@qwen-code/qwen-code-core/hooks/hook-execution-context.js';
@@ -379,10 +388,6 @@ import {
   INTERRUPTED_PROMPT_ABORT_REASON,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { isReservedStandaloneSessionSourceType } from '@qwen-code/acp-bridge/sessionSource';
-import {
-  createAgentRecordTranscriptUpdate,
-  createTranscriptExecutionLifecycleUpdate,
-} from '@qwen-code/acp-bridge/transcriptReplay';
 import type { SessionAttachmentReference } from '@qwen-code/acp-bridge/sessionAttachments';
 import {
   SERVE_CONTROL_EXT_METHODS,
@@ -466,6 +471,10 @@ import {
 } from '../../ui/commands/types.js';
 import { extractAtPathCommands } from '../../ui/hooks/atCommandProcessor.js';
 import {
+  startSharedLoopRound,
+  type SharedLoopRound,
+} from '../../ui/hooks/shared-loop-round.js';
+import {
   ACP_ROUTE_ID_PREFIX,
   buildAcpModelOptions,
   getCurrentAcpModelId,
@@ -539,7 +548,11 @@ import {
   unrestorableGoalStatus,
 } from './recovered-goal-update.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
-import { runAcpToolBatch, type AcpToolBatchHost } from './acp-tool-batch.js';
+import {
+  deferredToolUpdateContext,
+  runAcpToolBatch,
+  type AcpToolBatchHost,
+} from './acp-tool-batch.js';
 import {
   buildPermissionRequestContent,
   interactionMetaFields,
@@ -986,6 +999,11 @@ interface SharedRound {
   modelOverride?: string;
   stopPolicies?: StopPolicy[];
   sharedToolBatch: boolean;
+  /**
+   * Takes the `runAgentLoop` call a round on the shared batch runs in with
+   * its batch: the turn hands it the batch, or closes it when it leaves.
+   */
+  onLoop: (loop: SharedLoopRound) => void;
   /** The turn's signal. */
   signal: AbortSignal;
   /**
@@ -2848,6 +2866,8 @@ export class Session implements SessionContext {
   private availableCommandsUpdateTail: Promise<void> = Promise.resolve();
   private lastSuccessfulAvailableCommandsHash?: string;
   private unsubscribeRequestLifecycle?: () => void;
+  private unsubscribeHookBusChange?: () => void;
+  private unsubscribeHookProgress?: () => void;
   private requestLifecycleSessionId: string;
   private readonly requestLifecycleExecutions = new Set<string>();
   /** The exact status-change callback this Session installed, so dispose can
@@ -3075,6 +3095,24 @@ export class Session implements SessionContext {
     this.planEmitter = new PlanEmitter(this);
     this.historyReplayer = new HistoryReplayer(this);
     this.messageEmitter = new MessageEmitter(this);
+    this.unsubscribeHookBusChange = this.config.onMessageBusChange?.((bus) => {
+      this.unsubscribeHookProgress?.();
+      const listener = (message: HookProgress) => {
+        const event = parseHookLifecycle(message.hookLifecycle);
+        if (
+          this.disposed ||
+          !event ||
+          event.sessionId !== this.requestLifecycleSessionId
+        )
+          return;
+        void this.sendUpdate(createTranscriptHookLifecycleUpdate(event)).catch(
+          () => debugLogger.warn('Failed to send hook lifecycle'),
+        );
+      };
+      bus.subscribe(MessageBusType.HOOK_PROGRESS, listener);
+      this.unsubscribeHookProgress = () =>
+        bus.unsubscribe(MessageBusType.HOOK_PROGRESS, listener);
+    });
     this.unsubscribeRequestLifecycle = this.config.onRequestLifecycle?.(
       (event) => {
         if (this.disposed) return;
@@ -5359,6 +5397,10 @@ export class Session implements SessionContext {
     this.unsubscribeWorkflowModeChange = undefined;
     this.unsubscribeApprovalModeChange?.();
     this.unsubscribeApprovalModeChange = undefined;
+    this.unsubscribeHookBusChange?.();
+    this.unsubscribeHookBusChange = undefined;
+    this.unsubscribeHookProgress?.();
+    this.unsubscribeHookProgress = undefined;
     this.unsubscribeRequestLifecycle?.();
     this.unsubscribeRequestLifecycle = undefined;
     this.requestLifecycleExecutions.clear();
@@ -7137,6 +7179,14 @@ export class Session implements SessionContext {
         promptIdContext.enterWith(promptId);
         const parentContext = extractDaemonTraceContext(params);
 
+        const hookOwner = captureHookExecutionOwner(this.config);
+        if (hookOwner)
+          enterHookExecutionOwner(
+            Object.freeze({
+              ...hookOwner,
+              historyPromptId: responseCapture.turnId,
+            }),
+          );
         return await withInteractionSpan(
           this.config,
           {
@@ -7602,9 +7652,14 @@ export class Session implements SessionContext {
                 });
               if (promptAdmission.blocked) {
                 // The first round reports the block without sending anything.
-                await runModelRound(
-                  this.config.getLlmClient(),
-                  {
+                debugLogger.debug(
+                  `model round on the shared agent loop (prompt ${promptId})`,
+                );
+                await runAgentLoop({
+                  client: this.config.getLlmClient(),
+                  config: this.config,
+                  signal: pendingSend.signal,
+                  first: {
                     parts,
                     promptId,
                     options: {
@@ -7614,8 +7669,10 @@ export class Session implements SessionContext {
                       interactionSpan: getActiveInteractionSpan(promptId),
                     },
                   },
-                  pendingSend.signal,
-                  {
+                  maxRounds: 1,
+                  useEventBus:
+                    this.config.isEventBusAgentLoopEnabled?.() === true,
+                  host: {
                     onModelEvent: async (event) => {
                       if (event.type === LlmEventType.UserPromptSubmitBlocked) {
                         await this.messageEmitter.emitAgentMessage(
@@ -7624,7 +7681,7 @@ export class Session implements SessionContext {
                       }
                     },
                   },
-                );
+                });
                 return { stopReason: 'end_turn' };
               }
             } else if (
@@ -8104,6 +8161,8 @@ export class Session implements SessionContext {
             // rather than by gating this loop), so unlike the CLI reference
             // (use-llm-stream.ts, which only emits in YOLO) this is
             // intentionally emitted for every mode.
+            // The loop call of the turn's latest round on the shared batch.
+            let roundLoop: SharedLoopRound | undefined;
             try {
               if (isRestoreAskUserQuestion) {
                 const restorable = findRestorableAskUserQuestion(
@@ -8372,6 +8431,9 @@ export class Session implements SessionContext {
                     modelOverride: fullTurnModelOverride,
                     stopPolicies,
                     sharedToolBatch,
+                    onLoop: (loop) => {
+                      roundLoop = loop;
+                    },
                     signal: pendingSend.signal,
                     responseCapture,
                     responseInterrupt,
@@ -8675,6 +8737,7 @@ export class Session implements SessionContext {
                             pendingSend.signal,
                             promptId,
                             toolRequests,
+                            roundLoop!,
                             toolLoopState,
                             onFullTurnModel,
                           )
@@ -8796,6 +8859,9 @@ export class Session implements SessionContext {
               );
               return { stopReason: result.stopReason };
             } finally {
+              // A turn that left before handing its round the batch ends the
+              // round's loop call.
+              void roundLoop?.close();
               logConversationFinishedEvent(
                 this.config,
                 new ConversationFinishedEvent(
@@ -8918,13 +8984,36 @@ export class Session implements SessionContext {
       usageMetadata = null;
     };
     round.onOpen?.({ requestUnsent, emitResponseUsage });
+    // A round on the shared batch runs with its batch in one `runAgentLoop`
+    // call, which the turn takes to hand the batch over.
+    const sendRound: typeof runModelRound = round.sharedToolBatch
+      ? (_client, request, roundSignal, host) => {
+          debugLogger.debug(
+            `model round on the shared agent loop (prompt ${request.promptId})`,
+          );
+          const loop = startSharedLoopRound(
+            this.config.getLlmClient(),
+            request,
+            {
+              config: this.config,
+              signal: roundSignal,
+              // Each result is recorded as the batch settles it.
+              deferRecording: false,
+              useEventBus: this.config.isEventBusAgentLoopEnabled?.() === true,
+              onModelEvent: host.onModelEvent!,
+            },
+          );
+          round.onLoop(loop);
+          return loop.model;
+        }
+      : runModelRound;
     // Open from the send, as `watch` is open once the request is
     // out: input sent before the model answers cuts the wait.
     responseInterrupt.begin();
     // Whether the round's request reached history, on every exit.
     let pushed = false;
     try {
-      ({ stop: roundStop } = await runModelRound(
+      ({ stop: roundStop } = await sendRound(
         this.config.getLlmClient(),
         {
           parts: message.parts ?? [],
@@ -9290,6 +9379,8 @@ export class Session implements SessionContext {
     };
     let nextMessage: Content | null = turn.message;
     let rounds = 0;
+    // The loop call of the turn's latest round on the shared batch.
+    let roundLoop: SharedLoopRound | undefined;
     try {
       while (nextMessage !== null) {
         rounds++;
@@ -9328,6 +9419,9 @@ export class Session implements SessionContext {
           },
           stopPolicies,
           sharedToolBatch,
+          onLoop: (loop) => {
+            roundLoop = loop;
+          },
           signal,
           signalAbortedBySession: true,
           responseCapture,
@@ -9377,6 +9471,7 @@ export class Session implements SessionContext {
               signal,
               promptId,
               toolRequests,
+              roundLoop!,
               toolLoopState,
             )
           : await this.runToolCalls(
@@ -9425,6 +9520,9 @@ export class Session implements SessionContext {
       await this.messageRewriter?.waitForPendingRewrites();
       return { stopReason: getAbortAwareEndTurnStopReason(signal) };
     } finally {
+      // A turn that left before handing its round the batch ends the round's
+      // loop call.
+      void roundLoop?.close();
       // The client started a cron turn's memory recall.
       if (turn.type === SendMessageType.Cron) {
         this.config.getLlmClient().finishManagedAutoMemoryRecall();
@@ -10783,15 +10881,34 @@ export class Session implements SessionContext {
 
   async sendUpdate(update: SessionUpdate): Promise<void> {
     const execution = backgroundTurnContext.getStore();
+    const deferredToolUpdate =
+      update.sessionUpdate === 'tool_call_update' &&
+      deferredToolUpdateContext.getStore();
+    if (deferredToolUpdate && (this.closing || this.disposed)) return;
     if (
-      execution?.active &&
-      execution.sessionId === this.sessionId &&
+      execution?.sessionId === this.sessionId &&
+      (execution.active || deferredToolUpdate) &&
       update._meta?.['source'] !== 'background_task_completed' &&
       update._meta?.['backgroundWorkflowApproval'] !== true
     ) {
       update = {
         ...update,
         _meta: { ...update._meta, backgroundTurn: { ...execution.turn } },
+      };
+    } else if (deferredToolUpdate) {
+      const invocation = getInvocationContext();
+      const owner =
+        invocation?.sessionId === this.sessionId ? invocation : undefined;
+      const promptId = owner?.promptId ?? promptIdContext.getStore();
+      update = {
+        ...update,
+        _meta: {
+          ...update._meta,
+          ...(promptId ? { promptId } : {}),
+          ...(owner?.originatorClientId
+            ? { originatorClientId: owner.originatorClientId }
+            : {}),
+        },
       };
     }
     const projectedUpdate = projectAcpToolResultUpdate(update);
@@ -15785,7 +15902,8 @@ export class Session implements SessionContext {
   }
 
   /**
-   * A fresh prompt's tool batch on the shared loop's batch. The client checks
+   * A fresh prompt's tool batch on the shared loop's batch, in the
+   * `runAgentLoop` call of the round that requested it. The client checks
    * the tool-call patterns, the per-turn cap and the exploration budget; ACP
    * keeps its repeated parameter-error and partial-edit stops, per turn.
    */
@@ -15793,6 +15911,7 @@ export class Session implements SessionContext {
     abortSignal: AbortSignal,
     promptId: string,
     requests: ToolCallRequestInfo[],
+    loop: SharedLoopRound,
     toolLoopState: DaemonToolLoopState,
     onFullTurnModel?: (model: string) => boolean,
   ): Promise<RunToolResult> {
@@ -15802,6 +15921,7 @@ export class Session implements SessionContext {
     );
     const batch = await runAcpToolBatch(this.#toolBatchHost(), {
       requests,
+      loop,
       signal: abortSignal,
       onFullTurnModel,
       duplicates: {
