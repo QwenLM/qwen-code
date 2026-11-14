@@ -354,6 +354,67 @@ describe('subagent plan tool policy', () => {
     expect(
       toolConfigAllowsSkill({ tools: ['*'] }, false, true, false, true, true),
     ).toBe(true);
+    // A finite list naming only the two bridge halves reaches the demoted
+    // Skill: AgentCore.canInvokeSkill answers true for this shape.
+    expect(
+      toolConfigAllowsSkill(
+        {
+          tools: [ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL],
+          executionAllowedTools: [
+            ToolNames.SKILL,
+            ToolNames.TOOL_SEARCH,
+            ToolNames.TOOL_CALL,
+          ],
+        },
+        false,
+        true,
+        false,
+        true,
+        true,
+      ),
+    ).toBe(true);
+  });
+
+  it('vetoes an eager-hidden Skill the bridge cannot invoke', () => {
+    const bridgeConfig = {
+      tools: [ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL],
+      executionAllowedTools: [
+        ToolNames.SKILL,
+        ToolNames.TOOL_SEARCH,
+        ToolNames.TOOL_CALL,
+      ],
+    };
+    // The per-agent blocklist still filters the resolved target.
+    expect(
+      toolConfigAllowsSkill(
+        { ...bridgeConfig, disallowedTools: [ToolNames.SKILL] },
+        false,
+        true,
+        false,
+        true,
+        true,
+      ),
+    ).toBe(false);
+    // Without an explicit execution allowlist the finite tools list is the
+    // allowlist, so a bridge-only list does not admit the resolved Skill.
+    expect(
+      toolConfigAllowsSkill(
+        { tools: [ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL] },
+        false,
+        true,
+        false,
+        true,
+        true,
+      ),
+    ).toBe(false);
+    // The bridge cannot invoke a Skill the registry never registered.
+    expect(
+      toolConfigAllowsSkill(bridgeConfig, false, true, false, false, true),
+    ).toBe(false);
+    // CodeModeOnly hides and refuses tool_call, so the bridge is no route.
+    expect(
+      toolConfigAllowsSkill(bridgeConfig, false, true, true, true, true),
+    ).toBe(false);
   });
 
   it('vetoes an eager-hidden Skill the bridge cannot reach', () => {

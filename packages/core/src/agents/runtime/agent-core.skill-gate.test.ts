@@ -482,6 +482,47 @@ describe('AgentCore skill-gate inputs', () => {
       expect(gate(core, declared)).toBe(true);
     });
 
+    it('keeps an eager-hidden Skill reachable for an agent declaring only the bridge', async () => {
+      // A finite list naming both halves reaches the demoted Skill exactly as
+      // the wildcard does; withholding the listing and the Skill factory here
+      // would take away a capability the activation gate still opens.
+      const config = makeFakeConfig({ toolMode: ToolMode.CodeMode });
+      const registry = new ToolRegistry(config);
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+      registry.registerTool(new ExecTool(config));
+      registry.registerPermissionDeferredFactory(
+        ToolNames.SKILL,
+        async () => new MockTool({ name: ToolNames.SKILL }),
+      );
+      registry.registerTool(new ToolSearchTool(config));
+      registry.registerTool(new ToolCallTool(registry));
+      const core = new AgentCore(
+        'skill-eager-bridge-finite',
+        config,
+        { systemPrompt: '' },
+        { model: 'test-model' },
+        { max_turns: 1 },
+        {
+          tools: [ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL],
+          executionAllowedTools: [
+            ToolNames.SKILL,
+            ToolNames.TOOL_SEARCH,
+            ToolNames.TOOL_CALL,
+          ],
+        },
+      );
+      expect(
+        (
+          core as unknown as { willHaveSkillTool: () => boolean }
+        ).willHaveSkillTool(),
+      ).toBe(true);
+      const declared = await declaredNames(core);
+      expect(declared.has(ToolNames.TOOL_SEARCH)).toBe(true);
+      expect(declared.has(ToolNames.TOOL_CALL)).toBe(true);
+      expect(declared.has(ToolNames.SKILL)).toBe(false);
+      expect(gate(core, declared)).toBe(true);
+    });
+
     it('refuses the bridge route under CodeModeOnly, where tool_call is hidden', () => {
       const config = makeFakeConfig({ toolMode: ToolMode.CodeModeOnly });
       const registry = new ToolRegistry(config);

@@ -267,11 +267,20 @@ export function toolConfigAllowsSkill(
           toolConfig.executionAllowedTools.includes(toolName)) &&
         (inheritsRegistry || names.includes(toolName)),
       (toolName) =>
-        toolConfig?.executionAllowedTools === undefined ||
-        toolConfig.executionAllowedTools.includes(toolName),
+        skillRegistered &&
+        !matchesAgentToolBlocklist(toolConfig?.disallowedTools, toolName) &&
+        // Without an explicit execution allowlist the finite `tools` list is
+        // the allowlist, exactly as `AgentCore.isToolExecutionAllowed` reads
+        // it; a wildcard or absent config inherits the registry.
+        (toolConfig?.executionAllowedTools !== undefined
+          ? toolConfig.executionAllowedTools.includes(toolName)
+          : inheritsRegistry || names.includes(toolName)),
     );
-  if (skillEagerHidden && !bridgeReachesSkill) {
-    return false;
+  if (skillEagerHidden) {
+    // Outside CodeModeOnly both bridge halves keep an eager-hidden Skill
+    // loadable. CodeModeOnly hides and refuses `tool_call`, so the bridge is
+    // not a route there.
+    return bridgeReachesSkill && !codeModeOnly;
   }
   // exec binds only registered tools, so a registry without the Skill
   // factory (a deny rule or a legacy coreTools allowlist keeps it out, or a
