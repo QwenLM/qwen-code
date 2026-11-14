@@ -37,6 +37,12 @@ export type VirtualizedListProps<T> = {
   renderStatic?: boolean;
   isStaticItem?: (item: T, index: number) => boolean;
   width?: number | string;
+  /**
+   * Maximum viewport height in rows. A host that derives this from the
+   * terminal can pass `0` when the surrounding chrome fills it; `0` means "no
+   * room this frame", not "size to content", so the last positive value keeps
+   * bounding the root box and the scroll math.
+   */
   containerHeight?: number;
   showScrollbar?: boolean;
   measureAtFullHeight?: boolean;
@@ -245,7 +251,31 @@ function VirtualizedList<T>(
   const { width: measuredContainerWidth, height: measuredContainerHeight } =
     useBoxMetrics(containerRef as React.RefObject<DOMElement>);
 
-  const containerHeight = props.containerHeight ?? measuredContainerHeight;
+  // A host that derives the viewport from the terminal legitimately hands down
+  // 0: AppContainer computes
+  // `Math.max(0, terminalHeight - controlsHeight - mainContentHeightReservation
+  // - tabBarHeight)`, which MainContent and AgentChatContent forward unchanged.
+  // `0` is a steady state, not only a settling frame: the controls region can
+  // fill a short terminal for as long as it stays open. The component's own
+  // measurement cannot stand in for the viewport — the root box sits under
+  // auto-height ancestors, so its height is the content's, and feeding that
+  // back would make the render window cover every row and `maxScroll` collapse
+  // to 0. Hold the last height the host actually constrained to for the scroll
+  // math instead. A host that has never constrained to a positive height has
+  // nothing to hold: keep the host's `0` so a fresh mount at zero stays
+  // collapsed instead of falling through to the component's own measurement.
+  const lastConstrainedHeight = useRef<number | undefined>(undefined);
+  if (props.containerHeight !== undefined && props.containerHeight > 0) {
+    lastConstrainedHeight.current = props.containerHeight;
+  }
+  const hostHeight =
+    props.containerHeight === undefined
+      ? undefined
+      : props.containerHeight > 0
+        ? props.containerHeight
+        : (lastConstrainedHeight.current ?? 0);
+
+  const containerHeight = hostHeight ?? measuredContainerHeight;
   const containerWidth = measuredContainerWidth;
 
   const [heights, setHeights] = useState<Record<string, number>>({});
@@ -982,12 +1012,17 @@ function VirtualizedList<T>(
   // the new content before it is measured. The root collapses again after the
   // measurement so short content does not leave a gap above the composer.
   // `scrollableContainerHeight` (the scroll math) still uses the full
-  // `containerHeight`, so scrolling is unaffected.
+  // `containerHeight`, so scrolling is unaffected. The painted root, though,
+  // follows the budget the host granted *this* frame: when the host drops to 0
+  // while a positive height is held for the scroll math, painting the held
+  // value would write more rows than the terminal has room for and Ink takes
+  // the clear-and-redraw path. The frame paints nothing and the rows come back
+  // with the next positive host height.
   const rootHeight =
     props.containerHeight !== undefined
       ? fullHeightMeasurementPending
-        ? props.containerHeight
-        : Math.min(props.containerHeight, totalHeight)
+        ? Math.max(0, props.containerHeight)
+        : Math.min(Math.max(0, props.containerHeight), totalHeight)
       : '100%';
 
   return (

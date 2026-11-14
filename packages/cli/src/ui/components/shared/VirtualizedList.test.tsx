@@ -1409,3 +1409,135 @@ describe('<VirtualizedList /> VP collapsed thought groups', () => {
     );
   });
 });
+
+describe('<VirtualizedList /> zero-height host measurement', () => {
+  // The host derives the viewport as
+  // `Math.max(0, terminalHeight - controlsHeight - tabBarHeight)`, so it can
+  // legitimately hand down 0 for a frame. A host height of 0 must not be
+  // treated as a measured viewport: `rootHeight` would resolve to the content
+  // height, the render window would cover every row and the scroll math would
+  // collapse. A mount that has never seen a positive host height has nothing
+  // to hold, so the host's 0 is kept and the root stays collapsed.
+  it('keeps a fresh mount at host height 0 collapsed instead of measuring', () => {
+    const { lastFrame } = render(
+      <Box flexDirection="column">
+        <VirtualizedList<Item>
+          data={makeItems(500)}
+          renderItem={renderItem}
+          estimatedItemHeight={estimatedItemHeight}
+          keyExtractor={keyExtractor}
+          containerHeight={0}
+          showScrollbar={false}
+        />
+      </Box>,
+    );
+
+    const frame = lastFrame() ?? '';
+    // Falling through to the component's own measurement would size the root
+    // to the content (the ancestors are auto-height), mount every row and
+    // paint the whole history; the collapsed root paints nothing.
+    expect(frame).not.toMatch(/item-499/);
+    expect(frame.split('\n').length).toBeLessThanOrEqual(1);
+  });
+
+  // A zero from the host is a steady state while the controls region fills a
+  // short terminal, so the scroll math keeps the last height the host actually
+  // constrained to. Sizing from the component's own measurement does not work
+  // here: the root box sits under auto-height ancestors, so that measurement
+  // is the content's, and using it renders every row. The painted root still
+  // follows the host's 0 for that frame — painting the held rows would write
+  // past the terminal, which Ink answers with clear-and-redraw.
+  it('holds the last constrained viewport when the host drops to 0', () => {
+    const list = (height: number) => (
+      <Box flexDirection="column">
+        <VirtualizedList<Item>
+          data={makeItems(200)}
+          renderItem={renderItem}
+          estimatedItemHeight={estimatedItemHeight}
+          keyExtractor={keyExtractor}
+          containerHeight={height}
+          showScrollbar={false}
+          initialScrollIndex={SCROLL_TO_ITEM_END}
+        />
+      </Box>
+    );
+
+    const { lastFrame, rerender } = render(list(10));
+    expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(11);
+
+    // The hold lives in the scroll math; the painted root follows the host's
+    // 0, so the settling frame paints nothing instead of the held 10 rows.
+    rerender(list(0));
+    expect(lastFrame() ?? '').not.toMatch(/item-\d+/);
+
+    // Release: the host's live value wins again, and because the hold kept
+    // `maxScroll` from collapsing, the tail window comes back instead of the
+    // top of the history. A hold lost to the measured box would re-stick to a
+    // zero `maxScroll` and paint item-0 here.
+    rerender(list(3));
+    const frame = lastFrame() ?? '';
+    expect(frame).toMatch(/item-199/);
+    expect(frame.split('\n').length).toBeLessThanOrEqual(4);
+  });
+
+  // The host re-derives its height every frame, so the hold has to be the
+  // latest positive value, not the largest ever seen: after a legitimate
+  // shrink, a zero frame must not resurrect the old, larger viewport.
+  it('holds the latest constrained viewport, not the largest', () => {
+    const list = (height: number) => (
+      <Box flexDirection="column">
+        <VirtualizedList<Item>
+          data={makeItems(200)}
+          renderItem={renderItem}
+          estimatedItemHeight={estimatedItemHeight}
+          keyExtractor={keyExtractor}
+          containerHeight={height}
+          showScrollbar={false}
+        />
+      </Box>
+    );
+
+    const { lastFrame, rerender } = render(list(40));
+    rerender(list(12));
+    rerender(list(0));
+    // The painted root follows the host's 0 regardless of the hold.
+    expect(lastFrame() ?? '').not.toMatch(/item-\d+/);
+  });
+
+  // A one-step positive → 0 shrink keeps the positive height held for the
+  // scroll math; if the painted root followed the held value, the frame would
+  // write held rows past a terminal that has no room for them. The rows come
+  // back with the next positive host height.
+  it('paints nothing on a zero frame while the hold keeps the scroll math', () => {
+    const list = (height: number) => (
+      <Box height={12} flexDirection="column">
+        <Box flexShrink={0}>
+          <Text>controls</Text>
+        </Box>
+        <VirtualizedList<Item>
+          data={makeItems(200)}
+          renderItem={renderItem}
+          estimatedItemHeight={estimatedItemHeight}
+          keyExtractor={keyExtractor}
+          containerHeight={height}
+          showScrollbar={false}
+          initialScrollIndex={SCROLL_TO_ITEM_END}
+        />
+      </Box>
+    );
+
+    const { lastFrame, rerender } = render(list(10));
+    expect(lastFrame() ?? '').toMatch(/item-199/);
+
+    // Settling frame: the controls block stays, the list paints nothing.
+    rerender(list(0));
+    const frame = lastFrame() ?? '';
+    expect(frame).toMatch(/controls/);
+    expect(frame).not.toMatch(/item-\d+/);
+    expect(frame.split('\n').length).toBeLessThanOrEqual(12);
+
+    // The rows come back when the host returns a positive height.
+    rerender(list(10));
+    expect(lastFrame() ?? '').toMatch(/item-199/);
+  });
+});
