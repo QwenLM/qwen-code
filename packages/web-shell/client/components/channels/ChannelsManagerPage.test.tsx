@@ -25,6 +25,7 @@ const {
         type: string;
         displayName: string;
         manageable: boolean;
+        outboundOnly?: boolean;
         fields: Array<{
           key: string;
           label: string;
@@ -124,6 +125,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
 
 const { ChannelsManagerPage } = await import('./ChannelsManagerPage');
 const { I18nProvider } = await import('../../i18n');
+const { CHANNEL_METHOD_PLATFORMS } = await import('./channel-platform');
 
 let container: HTMLDivElement;
 let root: Root;
@@ -142,11 +144,14 @@ function channel(
   };
 }
 
-async function renderPage() {
+async function renderPage(
+  language: 'en' | 'zh-CN' = 'en',
+  props: { clientId?: string; sessionWorkspaceCwd?: string } = {},
+) {
   await act(async () => {
     root.render(
-      <I18nProvider language="en">
-        <ChannelsManagerPage onClose={vi.fn()} />
+      <I18nProvider language={language}>
+        <ChannelsManagerPage onClose={vi.fn()} {...props} />
       </I18nProvider>,
     );
   });
@@ -258,6 +263,287 @@ afterEach(() => {
 });
 
 describe('ChannelsManagerPage', () => {
+  const webhookType = {
+    type: 'dingtalk-webhook',
+    displayName: 'DingTalk Webhook',
+    manageable: true,
+    outboundOnly: true,
+    fields: [
+      {
+        key: 'webhookUrl',
+        label: 'Webhook URL',
+        kind: 'secret' as const,
+        required: true,
+      },
+    ],
+  };
+
+  it('groups DingTalk methods and opens an outbound editor without receive policies', async () => {
+    channelState.current.catalog.push(webhookType);
+    await renderPage();
+    expect(
+      container.querySelectorAll('[data-testid^="channel-platform-"]'),
+    ).toHaveLength(3);
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="channel-platform-dingtalk"]',
+        )
+        ?.click();
+    });
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+      'Choose a DingTalk connection',
+    );
+    expect(document.body.textContent).toContain('Application bot');
+    const webhookMethod = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Webhook (send only)'),
+    );
+    await act(async () => {
+      webhookMethod?.click();
+    });
+    expect(inputByLabel('Webhook URL')).not.toBeNull();
+    expect(
+      document.querySelector('[role="dialog"]')?.textContent,
+    ).not.toContain('Access control');
+    expect(
+      document.querySelector('[role="dialog"]')?.textContent,
+    ).not.toContain('Conversation management');
+  });
+
+  it('describes outbound readiness without claiming remote credential validation', async () => {
+    channelState.current.catalog.push(webhookType);
+    channelState.current.channels = {
+      webhook: channel('webhook', 'dingtalk-webhook', 'connected'),
+    };
+    await renderPage();
+    expect(container.textContent).toContain('Ready to send');
+    expect(container.textContent).toContain(
+      'Remote credentials are checked when sending',
+    );
+  });
+
+  it.each(['stopped', 'starting', 'partial', 'error'] as const)(
+    'does not claim outbound readiness while %s',
+    async (state) => {
+      channelState.current.catalog.push(webhookType);
+      channelState.current.channels = {
+        webhook: channel('webhook', 'dingtalk-webhook', state),
+      };
+      await renderPage();
+      expect(container.textContent).toContain(
+        'Not ready to send notifications.',
+      );
+      expect(container.textContent).not.toContain(
+        'Sends notifications to the configured destination.',
+      );
+      expect(container.textContent).not.toContain('Ready to send');
+    },
+  );
+
+  it('opens the application bot editor from the DingTalk method chooser', async () => {
+    channelState.current.catalog.push(webhookType);
+    await renderPage();
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="channel-platform-dingtalk"]',
+        )!
+        .click();
+    });
+    const appMethod = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Application bot'),
+    )!;
+    expect(appMethod).toBeDefined();
+    await act(async () => appMethod.click());
+    expect(inputByLabel('Client ID (AppKey)')).not.toBeNull();
+    expect(inputByLabel('Webhook URL')).toBeNull();
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+      'Access control',
+    );
+  });
+
+  it.each([false, true])(
+    'groups Feishu methods and preserves the application editor (webhook first: %s)',
+    async (webhookFirst) => {
+      const feishu = channelState.current.catalog.find(
+        (entry) => entry.type === 'feishu',
+      )!;
+      feishu.displayName = 'Feishu application bot';
+      feishu.fields = [
+        { key: 'clientId', label: 'App ID', kind: 'string', required: true },
+        {
+          key: 'clientSecret',
+          label: 'App Secret',
+          kind: 'secret',
+          required: true,
+        },
+      ];
+      const webhook = {
+        ...webhookType,
+        type: 'feishu-webhook',
+        displayName: 'Feishu Webhook',
+      };
+      if (webhookFirst) {
+        channelState.current.catalog.unshift(webhook);
+      } else {
+        channelState.current.catalog.push(webhook);
+      }
+      channelState.current.channels = {
+        notices: channel('Feishu notices', 'feishu-webhook', 'connected'),
+      };
+      await renderPage();
+      expect(container.textContent).toContain('Feishu notices');
+      expect(container.textContent).toContain('Ready to send');
+      expect(container.textContent).toContain(
+        'Remote credentials are checked when sending',
+      );
+      expect(
+        container.querySelectorAll('[data-testid="channel-platform-feishu"]'),
+      ).toHaveLength(1);
+      expect(
+        container.querySelector(
+          '[data-testid="channel-platform-feishu-webhook"]',
+        ),
+      ).toBeNull();
+      const platform = container.querySelector<HTMLButtonElement>(
+        '[data-testid="channel-platform-feishu"]',
+      )!;
+      expect(platform.getAttribute('aria-label')).toBe('Configure Feishu');
+      await act(async () => platform.click());
+      const dialog = document.querySelector('[role="dialog"]')!;
+      expect(
+        document.getElementById(dialog.getAttribute('aria-labelledby')!)
+          ?.textContent,
+      ).toBe('Choose a Feishu connection');
+      expect(dialog.textContent).toContain(
+        'Choose how this Channel connects to Feishu.',
+      );
+      expect(dialog.textContent).not.toContain('DingTalk');
+      const appMethod = Array.from(dialog.querySelectorAll('button')).find(
+        (button) => button.textContent?.includes('Application bot'),
+      )!;
+      await act(async () => appMethod.click());
+      expect(inputByLabel('App ID')).not.toBeNull();
+      expect(inputByLabel('App Secret')).not.toBeNull();
+      expect(inputByLabel('Webhook URL')).toBeNull();
+      expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+        'Access control',
+      );
+    },
+  );
+
+  it.each([
+    { type: 'dingtalk', english: 'DingTalk', chinese: '钉钉' },
+    { type: 'feishu', english: 'Feishu', chinese: '飞书' },
+  ])(
+    'localizes the open $type chooser when language changes',
+    async (platform) => {
+      channelState.current.catalog.push({
+        ...webhookType,
+        type: `${platform.type}-webhook`,
+        displayName: `${platform.english} Webhook`,
+      });
+      await renderPage('zh-CN');
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(
+            `[data-testid="channel-platform-${platform.type}"]`,
+          )!
+          .click();
+      });
+      const dialog = document.querySelector('[role="dialog"]')!;
+      for (const language of ['zh-CN', 'en', 'zh-CN'] as const) {
+        await renderPage(language);
+        const card = container.querySelector<HTMLButtonElement>(
+          `[data-testid="channel-platform-${platform.type}"]`,
+        )!;
+        expect(card.textContent).toContain(
+          language === 'zh-CN' ? platform.chinese : platform.english,
+        );
+        expect(card.getAttribute('aria-label')).toBe(
+          language === 'zh-CN'
+            ? `配置${platform.chinese}`
+            : `Configure ${platform.english}`,
+        );
+        expect(document.querySelector('[role="dialog"]')).toBe(dialog);
+        expect(
+          document.getElementById(dialog.getAttribute('aria-labelledby')!)
+            ?.textContent,
+        ).toBe(
+          language === 'zh-CN'
+            ? `选择${platform.chinese}的连接方式`
+            : `Choose a ${platform.english} connection`,
+        );
+        expect(
+          document.getElementById(dialog.getAttribute('aria-describedby')!)
+            ?.textContent,
+        ).toBe(
+          language === 'zh-CN'
+            ? `选择此频道连接${platform.chinese}的方式。`
+            : `Choose how this Channel connects to ${platform.english}.`,
+        );
+      }
+    },
+  );
+
+  it('uses the group name when a platform translation is missing', async () => {
+    const previous = { ...CHANNEL_METHOD_PLATFORMS };
+    const platform = {
+      type: 'test-untranslated-platform',
+      displayName: 'Example platform',
+    };
+    try {
+      CHANNEL_METHOD_PLATFORMS['wecom'] = platform;
+      CHANNEL_METHOD_PLATFORMS['wecom-callback'] = platform;
+      channelState.current.catalog.unshift({
+        type: 'wecom-callback',
+        displayName: 'Example callback',
+        manageable: true,
+        fields: [],
+      });
+      await renderPage('zh-CN');
+      const card = container.querySelector<HTMLButtonElement>(
+        '[data-testid="channel-platform-test-untranslated-platform"]',
+      )!;
+      await act(async () => card.click());
+      const dialog = document.querySelector('[role="dialog"]')!;
+      for (const language of ['zh-CN', 'en'] as const) {
+        await renderPage(language);
+        expect(card.textContent).toContain('Example platform');
+        expect(card.getAttribute('aria-label')).toBe(
+          language === 'zh-CN'
+            ? '配置Example platform'
+            : 'Configure Example platform',
+        );
+        expect(document.querySelector('[role="dialog"]')).toBe(dialog);
+        expect(
+          document.getElementById(dialog.getAttribute('aria-labelledby')!)
+            ?.textContent,
+        ).toBe(
+          language === 'zh-CN'
+            ? '选择Example platform的连接方式'
+            : 'Choose a Example platform connection',
+        );
+        expect(
+          document.getElementById(dialog.getAttribute('aria-describedby')!)
+            ?.textContent,
+        ).toBe(
+          language === 'zh-CN'
+            ? '选择此频道连接Example platform的方式。'
+            : 'Choose how this Channel connects to Example platform.',
+        );
+      }
+    } finally {
+      for (const type of ['wecom', 'wecom-callback']) {
+        if (previous[type]) {
+          CHANNEL_METHOD_PLATFORMS[type] = previous[type];
+        } else {
+          delete CHANNEL_METHOD_PLATFORMS[type];
+        }
+      }
+    }
+  });
+
   it('shows only the three enabled platforms and configured instances', async () => {
     await renderPage();
 
@@ -274,6 +560,24 @@ describe('ChannelsManagerPage', () => {
     expect(container.textContent).toContain('Feishu');
     expect(container.textContent).not.toContain('Telegram');
   });
+
+  it.each(['en', 'zh-CN'] as const)(
+    'names WeChat in the empty state in %s',
+    async (language) => {
+      // The platform tiles are filtered by capability, but this sentence is a
+      // fixed list: it named every supported platform except WeChat.
+      channelState.current.channels = {};
+      channelState.current.snapshot = { revision: '1', instances: {} };
+
+      await renderPage(language);
+
+      expect(container.textContent).toContain(
+        language === 'zh-CN'
+          ? '配置微信、钉钉、企业微信、飞书、GitHub、GitLab 或 Email'
+          : 'Configure WeChat, DingTalk, WeCom, Feishu, GitHub, GitLab, or Email',
+      );
+    },
+  );
 
   it('lists a configured Email channel and offers its editor', async () => {
     channelState.current.catalog = [
@@ -408,6 +712,65 @@ describe('ChannelsManagerPage', () => {
       autoLoad: true,
       enabled: true,
       workspaceCwd: '/workspace/secondary',
+    });
+  });
+
+  it('attributes QR logins only on the workspace this tab session lives on', async () => {
+    // The client id is registered with the session workspace's bridge, and the
+    // daemon validates the header against the TARGET workspace's bridge. A
+    // foreign id is a hard 400, so it must be withheld rather than sent.
+    workspaceState.current = {
+      ...workspaceState.current,
+      capabilities: {
+        features: ['channel_management'],
+        workspaces: [
+          {
+            id: 'primary',
+            cwd: '/workspace/main',
+            displayName: 'Main repo',
+            primary: true,
+            trusted: true,
+          },
+          {
+            id: 'secondary',
+            cwd: '/workspace/secondary',
+            displayName: 'Secondary repo',
+            primary: false,
+            trusted: true,
+          },
+        ],
+      },
+    };
+    await renderPage('en', {
+      clientId: 'tab-a',
+      sessionWorkspaceCwd: '/workspace/main',
+    });
+
+    expect(useChannelsMock).toHaveBeenLastCalledWith({
+      autoLoad: true,
+      enabled: true,
+      workspaceCwd: '/workspace/main',
+      clientId: 'tab-a',
+    });
+
+    const trigger = document.querySelector<HTMLElement>(
+      '[aria-label="Workspace"]',
+    );
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const secondary = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ).find((item) => item.textContent?.trim() === 'Secondary repo');
+    await act(async () => {
+      secondary?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(useChannelsMock).toHaveBeenLastCalledWith({
+      autoLoad: true,
+      enabled: true,
+      workspaceCwd: '/workspace/secondary',
+      clientId: undefined,
     });
   });
 
