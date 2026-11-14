@@ -556,6 +556,142 @@ afterEach(() => {
 });
 
 describe('ChannelEditorDialog', () => {
+  it.each([
+    {
+      language: 'en' as const,
+      nameLabel: 'Instance name',
+      urlLabel: 'Webhook URL',
+      secretLabel: 'Signing secret',
+      description: 'The secret webhook address of your custom bot.',
+      saveLabel: 'Save',
+      hidden: ['Access control', 'Conversation management', 'Pairing'],
+    },
+    {
+      language: 'zh-CN' as const,
+      nameLabel: '实例名称',
+      urlLabel: 'Webhook 地址',
+      secretLabel: '加签密钥',
+      description: '自定义机器人的私密 Webhook 地址。',
+      saveLabel: '保存',
+      hidden: ['访问控制', '会话管理', '配对'],
+    },
+  ])('saves a localized send-only Feishu editor in $language', async (copy) => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      type: 'feishu-webhook',
+      displayName: 'Feishu Webhook',
+      manageable: true,
+      outboundOnly: true,
+      fields: [
+        {
+          key: 'webhookUrl',
+          label: 'Endpoint (descriptor)',
+          kind: 'secret',
+          required: true,
+          envResolvable: true,
+        },
+        {
+          key: 'signingSecret',
+          label: 'Signature (descriptor)',
+          kind: 'secret',
+          envResolvable: true,
+        },
+      ],
+    };
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor, language: copy.language, onSave });
+    expect(document.body.textContent).toContain(copy.description);
+    expect(document.body.textContent).not.toContain('(descriptor)');
+    for (const hidden of copy.hidden) {
+      expect(
+        document.querySelector('[role="dialog"]')?.textContent,
+      ).not.toContain(hidden);
+    }
+    expect(inputByLabel(copy.urlLabel)?.type).toBe('password');
+    expect(inputByLabel(copy.secretLabel)?.type).toBe('password');
+    await act(async () => {
+      setInputValue(inputByLabel(copy.nameLabel)!, 'feishu-notices');
+      setInputValue(inputByLabel(copy.urlLabel)!, '$FEISHU_WEBHOOK_URL');
+      setInputValue(inputByLabel(copy.secretLabel)!, '$FEISHU_SIGNING_SECRET');
+    });
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === copy.saveLabel,
+    )!;
+    await act(async () => save.click());
+    expect(onSave).toHaveBeenCalledWith('feishu-notices', {
+      expectedRevision: 'revision-1',
+      config: { type: 'feishu-webhook' },
+      secrets: {
+        webhookUrl: { operation: 'replace', value: '$FEISHU_WEBHOOK_URL' },
+        signingSecret: {
+          operation: 'replace',
+          value: '$FEISHU_SIGNING_SECRET',
+        },
+      },
+    });
+  });
+
+  it.each([
+    {
+      language: 'en' as const,
+      name: 'Instance name',
+      url: 'Webhook URL',
+      save: 'Save',
+      secret: 'Signing secret',
+      hidden: ['Access control', 'Conversation management', 'Pairing'],
+    },
+    {
+      language: 'zh-CN' as const,
+      name: '实例名称',
+      url: 'Webhook 地址',
+      save: '保存',
+      secret: '加签密钥',
+      hidden: ['访问控制', '会话管理', '配对'],
+    },
+  ])('saves a URL-only WeCom webhook editor in $language', async (copy) => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      type: 'wecom-webhook',
+      displayName: 'WeCom Webhook',
+      manageable: true,
+      outboundOnly: true,
+      fields: [
+        {
+          key: 'webhookUrl',
+          label: 'Endpoint (descriptor)',
+          kind: 'secret',
+          required: true,
+          envResolvable: true,
+        },
+      ],
+    };
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor, language: copy.language, onSave });
+    expect(inputByLabel(copy.url)?.type).toBe('password');
+    expect(inputByLabel(copy.secret)).toBeNull();
+    expect(inputByLabel('Bot ID')).toBeNull();
+    expect(inputByLabel('Bot Secret')).toBeNull();
+    expect(document.body.textContent).not.toContain('(descriptor)');
+    for (const hidden of copy.hidden) {
+      expect(
+        document.querySelector('[role="dialog"]')?.textContent,
+      ).not.toContain(hidden);
+    }
+    await act(async () => {
+      setInputValue(inputByLabel(copy.name)!, 'wecom-notices');
+      setInputValue(inputByLabel(copy.url)!, '$WECOM_WEBHOOK_URL');
+    });
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === copy.save,
+    )!;
+    await act(async () => save.click());
+    expect(onSave).toHaveBeenCalledWith('wecom-notices', {
+      expectedRevision: 'revision-1',
+      config: { type: 'wecom-webhook' },
+      secrets: {
+        webhookUrl: { operation: 'replace', value: '$WECOM_WEBHOOK_URL' },
+      },
+    });
+  });
+
   it('shows the default output mode for an existing unconfigured channel and saves a changed mode', async () => {
     const descriptor: DaemonChannelTypeDescriptor = {
       ...DINGTALK,
@@ -907,7 +1043,10 @@ describe('ChannelEditorDialog', () => {
       descriptionOf(fieldByLabel('Deliver To PR-Bound Sessions')),
     ).toContain('instead of a channel-owned session');
     expect(descriptionOf(fieldByLabel('PR Watch Events'))).toContain(
-      'Leave empty to disable',
+      'Deprecated',
+    );
+    expect(descriptionOf(fieldByLabel('PR Watch Events'))).toContain(
+      'configure serve.sessionPrWatch',
     );
   });
 
@@ -931,9 +1070,9 @@ describe('ChannelEditorDialog', () => {
     expect(descriptionOf(fieldByLabel('投递到 PR 绑定会话'))).toContain(
       '以 prompt 形式投递进该会话，而不是频道自有会话',
     );
-    expect(descriptionOf(fieldByLabel('PR 状态监视事件'))).toContain(
-      '为绑定 PR 监视的状态转换',
-    );
+    // The field no longer watches; the copy must say so and point at the
+    // daemon setting, or the editor advertises a control that does nothing.
+    expect(descriptionOf(fieldByLabel('PR 状态监视事件'))).toContain('已弃用');
   });
 
   it('frames both bound-session fields in one panel', async () => {
@@ -1146,7 +1285,10 @@ describe('ChannelEditorDialog', () => {
     );
   });
 
-  it('names the delivery dependency when a stored selection lacks it', async () => {
+  it('saves the deprecated watch selection while delivery is off', async () => {
+    // The adapter no longer watches: the daemon reads the key as a per-host
+    // alias only when delivery is on, and it warns rather than rejects, so the
+    // editor must not block a save the authority takes.
     const onSave = vi.fn().mockResolvedValue(undefined);
     const instance: DaemonChannelInstanceSnapshot = {
       name: 'github-bot',
@@ -1164,8 +1306,6 @@ describe('ChannelEditorDialog', () => {
       '[role="group"][aria-label="PR Watch Events"] input[type="checkbox"]',
     );
     expect(box!.checked).toBe(true);
-    // The stored selection stays clearable even while the gate is closed.
-    expect(box!.disabled).toBe(false);
 
     const save = Array.from(document.querySelectorAll('button')).find(
       (button) => button.textContent?.trim() === 'Save',
@@ -1174,21 +1314,12 @@ describe('ChannelEditorDialog', () => {
       save?.click();
     });
 
-    expect(onSave).not.toHaveBeenCalled();
-    expect(document.body.textContent).toContain(
-      'Enable "Deliver To PR-Bound Sessions" to save the selected watch events.',
-    );
-
-    // Following the instruction must retire the instruction: turning the
-    // switch on clears the stale dependency error without another Save.
-    await act(async () => {
-      document
-        .querySelector<HTMLButtonElement>('button[role="switch"]')!
-        .click();
-    });
-    expect(document.body.textContent).not.toContain(
-      'to save the selected watch events.',
-    );
+    expect(onSave).toHaveBeenCalledTimes(1);
+    const request = onSave.mock.calls[0][1] as {
+      config: Record<string, unknown>;
+    };
+    expect(request.config['prWatchEvents']).toEqual(['ci_failure']);
+    expect(request.config['deliverToBoundSessions']).toBe(false);
   });
 
   it('lets a stored selection be cleared while delivery is off', async () => {
@@ -1248,163 +1379,6 @@ describe('ChannelEditorDialog', () => {
     expect(request.config['deliverToBoundSessions']).toBe(false);
   });
 
-  it('keeps the invalid-option message when delivery is switched on', async () => {
-    const instance: DaemonChannelInstanceSnapshot = {
-      name: 'github-bot',
-      config: {
-        type: 'github',
-        prWatchEvents: ['bogus_event'],
-      },
-      secrets: { token: { present: true, source: 'literal' } },
-      startsWithServe: false,
-      runtime: { state: 'stopped' },
-    };
-    await renderDialog({ descriptor: GITHUB_BOUND, instance });
-
-    const save = Array.from(document.querySelectorAll('button')).find(
-      (button) => button.textContent?.trim() === 'Save',
-    );
-    await act(async () => {
-      save?.click();
-    });
-    expect(document.body.textContent).toContain(
-      "Remove values that aren't in the allowed list.",
-    );
-
-    // Switching delivery on remedies the dependency, not the unknown value:
-    // the higher-precedence invalidOption message must survive.
-    await act(async () => {
-      document
-        .querySelector<HTMLButtonElement>('button[role="switch"]')!
-        .click();
-    });
-    expect(document.body.textContent).toContain(
-      "Remove values that aren't in the allowed list.",
-    );
-    expect(document.body.textContent).not.toContain(
-      'to save the selected watch events.',
-    );
-  });
-
-  it('clears the dependency message when the last event is unticked', async () => {
-    const instance: DaemonChannelInstanceSnapshot = {
-      name: 'github-bot',
-      config: {
-        type: 'github',
-        prWatchEvents: ['ci_failure'],
-      },
-      secrets: { token: { present: true, source: 'literal' } },
-      startsWithServe: false,
-      runtime: { state: 'stopped' },
-    };
-    await renderDialog({ descriptor: GITHUB_BOUND, instance });
-
-    const save = Array.from(document.querySelectorAll('button')).find(
-      (button) => button.textContent?.trim() === 'Save',
-    );
-    await act(async () => {
-      save?.click();
-    });
-    expect(document.body.textContent).toContain(
-      'to save the selected watch events.',
-    );
-
-    // Unticking the last event is the other remedy; the alert must retire
-    // without another Save.
-    const box = Array.from(
-      document.querySelectorAll<HTMLInputElement>(
-        '[role="group"][aria-label="PR Watch Events"] input[type="checkbox"]',
-      ),
-    ).find((b) => b.closest('label')?.textContent?.includes('ci_failure'))!;
-    await act(async () => {
-      box.click();
-    });
-    expect(document.body.textContent).not.toContain(
-      'to save the selected watch events.',
-    );
-  });
-
-  it('retires the invalid-option message when the offending value is unticked', async () => {
-    const instance: DaemonChannelInstanceSnapshot = {
-      name: 'github-bot',
-      config: {
-        type: 'github',
-        prWatchEvents: ['bogus_event'],
-      },
-      secrets: { token: { present: true, source: 'literal' } },
-      startsWithServe: false,
-      runtime: { state: 'stopped' },
-    };
-    await renderDialog({ descriptor: GITHUB_BOUND, instance });
-
-    await act(async () => {
-      (
-        Array.from(document.querySelectorAll('button')).find(
-          (button) => button.textContent?.trim() === 'Save',
-        ) as HTMLButtonElement
-      ).click();
-    });
-    expect(document.body.textContent).toContain(
-      "Remove values that aren't in the allowed list.",
-    );
-
-    // Unticking the offending value is the remedy the message asks for; it
-    // must retire the message without a second Save.
-    const bogus = Array.from(
-      document.querySelectorAll<HTMLInputElement>(
-        '[role="group"][aria-label="PR Watch Events"] input[type="checkbox"]',
-      ),
-    ).find((b) => b.closest('label')?.textContent?.includes('bogus_event'))!;
-    await act(async () => {
-      bogus.click();
-    });
-    expect(document.body.textContent).not.toContain(
-      "Remove values that aren't in the allowed list.",
-    );
-  });
-
-  it('replaces the invalid-option message with the dependency one when a valid event remains', async () => {
-    const instance: DaemonChannelInstanceSnapshot = {
-      name: 'github-bot',
-      config: {
-        type: 'github',
-        prWatchEvents: ['ci_failure', 'bogus_event'],
-      },
-      secrets: { token: { present: true, source: 'literal' } },
-      startsWithServe: false,
-      runtime: { state: 'stopped' },
-    };
-    await renderDialog({ descriptor: GITHUB_BOUND, instance });
-
-    await act(async () => {
-      (
-        Array.from(document.querySelectorAll('button')).find(
-          (button) => button.textContent?.trim() === 'Save',
-        ) as HTMLButtonElement
-      ).click();
-    });
-    expect(document.body.textContent).toContain(
-      "Remove values that aren't in the allowed list.",
-    );
-
-    const bogus = Array.from(
-      document.querySelectorAll<HTMLInputElement>(
-        '[role="group"][aria-label="PR Watch Events"] input[type="checkbox"]',
-      ),
-    ).find((b) => b.closest('label')?.textContent?.includes('bogus_event'))!;
-    await act(async () => {
-      bogus.click();
-    });
-    // The remaining value is allowed, so the invalid-option instruction is
-    // gone; the still-unsatisfied dependency takes over the slot.
-    expect(document.body.textContent).not.toContain(
-      "Remove values that aren't in the allowed list.",
-    );
-    expect(document.body.textContent).toContain(
-      'to save the selected watch events.',
-    );
-  });
-
   it('does not surface validation before the first submit', async () => {
     const instance: DaemonChannelInstanceSnapshot = {
       name: 'github-bot',
@@ -1432,52 +1406,6 @@ describe('ChannelEditorDialog', () => {
     expect(document.querySelectorAll('[role="alert"]').length).toBe(0);
   });
 
-  it('keeps a shown invalid-option message when delivery is switched off', async () => {
-    const instance: DaemonChannelInstanceSnapshot = {
-      name: 'github-bot',
-      config: {
-        type: 'github',
-        deliverToBoundSessions: true,
-        prWatchEvents: ['bogus_event'],
-      },
-      secrets: { token: { present: true, source: 'literal' } },
-      startsWithServe: false,
-      runtime: { state: 'stopped' },
-    };
-    await renderDialog({ descriptor: GITHUB_BOUND, instance });
-    const clickSave = async () => {
-      await act(async () => {
-        (
-          Array.from(document.querySelectorAll('button')).find(
-            (button) => button.textContent?.trim() === 'Save',
-          ) as HTMLButtonElement
-        ).click();
-      });
-    };
-    const clickSwitch = async () => {
-      await act(async () => {
-        document
-          .querySelector<HTMLButtonElement>('button[role="switch"]')!
-          .click();
-      });
-    };
-
-    await clickSave();
-    expect(document.body.textContent).toContain(
-      "Remove values that aren't in the allowed list.",
-    );
-    // The mirror case: a shown instruction survives the switch moving off
-    // (re-derived, not silently dropped), in both directions.
-    await clickSwitch();
-    expect(document.body.textContent).toContain(
-      "Remove values that aren't in the allowed list.",
-    );
-    await clickSwitch();
-    expect(document.body.textContent).toContain(
-      "Remove values that aren't in the allowed list.",
-    );
-  });
-
   it('renders no bound-session panel for channels without the fields', async () => {
     await renderDialog({ descriptor: DINGTALK });
     expect(document.body.textContent).not.toContain('PR-bound sessions');
@@ -1488,12 +1416,12 @@ describe('ChannelEditorDialog', () => {
     expect(document.body.textContent).not.toContain('PR 绑定会话');
   });
 
-  it('scrolls a non-advanced watch-events error into view on save', async () => {
+  it('scrolls a non-advanced watch-gate error into view on save', async () => {
     const instance: DaemonChannelInstanceSnapshot = {
       name: 'github-bot',
       config: {
         type: 'github',
-        prWatchEvents: ['ci_failure'],
+        requireBoundWatch: true,
       },
       secrets: { token: { present: true, source: 'literal' } },
       startsWithServe: false,
@@ -1514,7 +1442,7 @@ describe('ChannelEditorDialog', () => {
       });
       expect(scrollIntoView).toHaveBeenCalledWith({ block: 'center' });
       const target = scrollIntoView.mock.instances[0] as HTMLElement;
-      expect(target.id.endsWith('-prWatchEvents')).toBe(true);
+      expect(target.id.endsWith('-requireBoundWatch')).toBe(true);
     } finally {
       Element.prototype.scrollIntoView = originalScrollIntoView;
     }

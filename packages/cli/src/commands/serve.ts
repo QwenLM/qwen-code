@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { commandMetadata } from './command-metadata.js';
 import { parseJoinLink } from '../serve/agent-host-join.js';
 import { listExplicitCandidates } from '../serve/local-control/lan-interfaces.js';
 import type { Argv, CommandModule } from 'yargs';
@@ -353,9 +354,7 @@ function primaryWorkspaceArg(
 }
 
 export const serveCommand: CommandModule<unknown, ServeArgs> = {
-  command: 'serve',
-  describe:
-    'Run Qwen Code as a local HTTP daemon (Stage 1 experimental: --http-bridge)',
+  ...commandMetadata.serve,
   builder: (yargs: Argv) =>
     yargs
       .option('port', {
