@@ -3,6 +3,7 @@ import type { Message, TurnCollapseHead } from '../adapters/types';
 import {
   attachTurnOutputs,
   applyTurnCollapse,
+  collectFinalAssistantTurnIds,
   findDisplayItemIndex,
   findTurnIdForIndex,
   getSessionTimelineEntries,
@@ -3041,6 +3042,46 @@ it('retains a complete main reply when a later background tool-only execution en
   ).toBe(false);
 });
 
+it('keeps the deliverable when two background results land in one turn', () => {
+  // #13998 run twice: two markers, each followed by its own notice. Folding to
+  // the single-marker rule would answer the turn with the second notice (or,
+  // with a raw scan, with the `<task-notification>` bubble) and hide the reply.
+  const notice = (id: string) => ({
+    id,
+    role: 'system' as const,
+    variant: 'info' as const,
+    source: 'background_notification' as const,
+    content: 'Task finished',
+  });
+  const marker = (id: string) => ({
+    id,
+    role: 'system' as const,
+    variant: 'info' as const,
+    source: 'background_notification_turn_started' as const,
+    content: 'Background result',
+  });
+  const messages: Message[] = [
+    makeUserMessage('u1'),
+    makeAssistantMessage('report'),
+    marker('marker-a'),
+    notice('notice-a'),
+    makeAssistantMessage('ack-a'),
+    marker('marker-b'),
+    notice('notice-b'),
+    makeAssistantMessage('ack-b'),
+  ];
+  const collapsed = collapseItems(groupParallelAgents(messages));
+  expect(rowIds(collapsed)).toEqual(['u1', 'tc-u1', 'report']);
+  // The footer must key on the same row the collapse kept: a reply folded out
+  // of the turn must not own its copy/rating/branch controls.
+  const footerIds = collectFinalAssistantTurnIds(collapsed, {
+    isResponding: false,
+    latestTurnAwaitsAgentSummary: false,
+    gateBackgroundAgentStatus: true,
+  });
+  expect(footerIds).toMatchObject(new Map([['report', 'u1']]));
+});
+
 describe('background completion markers', () => {
   it.each(['agent', 'shell', 'peer'] as const)(
     'folds a %s result marker even when it is the only step',
@@ -3399,4 +3440,136 @@ describe('completion during a streamed final answer', () => {
       }
     },
   );
+});
+
+describe('turn collapse with a background notification ack', () => {
+  // Repro from #13998: a background task completes 8 ms after the turn's real
+  // answer, its notification is injected into the still-active turn, and the
+  // model ack lands after the marker. The collapsed turn must keep the real
+  // answer, not the ack, as its final answer.
+  function notificationAckShape(): DisplayItem[] {
+    return groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      {
+        id: 'report',
+        role: 'assistant',
+        content: 'the deliverable report',
+      },
+      {
+        id: 'marker',
+        role: 'system',
+        variant: 'info',
+        source: 'background_notification_turn_started',
+        content: 'Background result',
+        backgroundTurn: {
+          turnId: 'auto-task',
+          taskId: 'task',
+          kind: 'shell',
+          startedAt: 100,
+        },
+      },
+      {
+        id: 'notice',
+        role: 'system',
+        variant: 'info',
+        source: 'background_notification',
+        content: '<task-notification>done</task-notification>',
+      },
+      {
+        id: 'ack',
+        role: 'assistant',
+        content: 'acknowledged',
+      },
+    ]);
+  }
+
+  it('collapses an interior turn to the deliverable when only a notice follows the marker', () => {
+    // No assistant ack here: the primary scan elects the `background_notification`
+    // row and only the marker unwind puts the deliverable back. Restricting the
+    // unwind to assistant answers would render `<task-notification>` as the
+    // answer.
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      {
+        id: 'report',
+        role: 'assistant',
+        content: 'the deliverable report',
+      },
+      {
+        id: 'marker',
+        role: 'system',
+        variant: 'info',
+        source: 'background_notification_turn_started',
+        content: 'Background result',
+        backgroundTurn: {
+          turnId: 'auto-task',
+          taskId: 'task',
+          kind: 'shell',
+          startedAt: 100,
+        },
+      },
+      {
+        id: 'notice',
+        role: 'system',
+        variant: 'info',
+        source: 'background_notification',
+        content: '<task-notification>done</task-notification>',
+      },
+    ]);
+    const rows = collapseItems(items, { backgroundSummaryGraceActive: false });
+    expect(rowIds(rows)).toEqual(['u1', 'tc-u1', 'report']);
+    expect(collapseOf(rows, 'u1')).toMatchObject({
+      collapsed: true,
+      hiddenCount: 3,
+    });
+  });
+
+  it('collapses the turn instead of waiting for a summary the ack already gave', () => {
+    // Pins only that the ack never becomes the collapsed answer: the turn
+    // already collapsed pre-change, with the ack visible, so the summary-wait
+    // path (`turnAwaitsBackgroundSummary` reads the raw resolver) is untouched.
+    const rows = collapseItems(notificationAckShape());
+    expect(rowIds(rows)).toEqual(['u1', 'tc-u1', 'report']);
+  });
+
+  it('keeps the real answer visible and folds the ack', () => {
+    const rows = collapseItems(notificationAckShape(), {
+      backgroundSummaryGraceActive: false,
+    });
+    expect(rowIds(rows)).toEqual(['u1', 'tc-u1', 'report']);
+    expect(collapseOf(rows, 'u1')).toMatchObject({
+      collapsed: true,
+      hiddenCount: 4,
+    });
+  });
+
+  it('restores the ack as a step when the turn is expanded', () => {
+    const rows = collapseItems(notificationAckShape(), {
+      backgroundSummaryGraceActive: false,
+      overrides: new Map([['u1', true]]),
+    });
+    // An expanded turn keeps its execution steps; the ack comes back after the
+    // real answer instead of replacing it.
+    expect(rowIds(rows)).toEqual([
+      'u1',
+      'tc-u1',
+      'g1',
+      'report',
+      'marker',
+      'notice',
+      'ack',
+    ]);
+    // The row inventory above is the same whichever row the collapse resolves,
+    // so assert the effect: the real answer carries the collapse payload.
+    const answerRows = rows.filter(
+      (item) => item.type === 'message' && item.turnCollapse !== undefined,
+    );
+    expect(
+      answerRows.map(
+        (item) => (item as { message: { id: string } }).message.id,
+      ),
+    ).toEqual(['report']);
+  });
 });

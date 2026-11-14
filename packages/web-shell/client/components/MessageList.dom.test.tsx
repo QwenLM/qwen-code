@@ -1151,6 +1151,48 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(virtualizerTestState.scrollToIndex).not.toHaveBeenCalled();
   });
 
+  it('puts the assistant actions on the answer an interior collapsed turn keeps', () => {
+    const c = mount(
+      [
+        userMsg('u1'),
+        asstMsg('a1'),
+        userMsg('u2'),
+        toolMsg('g2'),
+        { ...asstMsg('report'), content: 'the deliverable report' },
+        {
+          id: 'marker',
+          role: 'system',
+          variant: 'info',
+          content: 'Background result',
+          source: 'background_notification_turn_started',
+          backgroundTurn: {
+            turnId: 'auto-task',
+            taskId: 'task',
+            kind: 'shell',
+            startedAt: 100,
+          },
+        } as SystemMessage,
+        backgroundNotificationMsg('notice'),
+        { ...asstMsg('ack'), content: 'acknowledged' },
+        userMsg('u3'),
+        asstMsg('a3'),
+      ],
+      undefined,
+      { frozenViewport: true },
+    );
+
+    // The collapse keeps `report`; the footer controls must follow it rather
+    // than sitting on the folded acknowledgement.
+    expect(toggleRow(c, 'u2').getAttribute('aria-expanded')).toBe('false');
+    expect(has(c, 'report')).toBe(true);
+    expect(has(c, 'ack')).toBe(false);
+    expect(assistantActions(c, 'report')).toBe('true');
+    click(toggleRow(c, 'u2'));
+    expect(has(c, 'ack')).toBe(true);
+    expect(assistantActions(c, 'report')).toBe('true');
+    expect(assistantActions(c, 'ack')).toBe('false');
+  });
+
   it('keeps historical edge fragments expanded while collapsing complete interior turns', () => {
     const c = mount(
       [
