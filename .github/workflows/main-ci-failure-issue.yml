@@ -20,9 +20,12 @@ on:
     # Daily Java and Desktop checks report main regressions through the same
     # routing as the nightly CLI checks.
     # The Managed Agent gate's post-merge fast tier rides the push arm.
+    # The Managed loop verification lane covers the same agent loop end to end
+    # on push and nightly, so both of its main-side runs report here too.
     workflows:
       - 'E2E Tests'
       - 'Managed Agent gate'
+      - 'Managed Agent loop verification'
       - 'SDK Java'
       - 'SDK Python'
       - 'Qwen Code CI'
@@ -45,13 +48,16 @@ jobs:
     # A job that hits its execution cap concludes `cancelled`, so a
     # failure-only gate let timed-out main runs hide for weeks (#16214);
     # the live step keeps a plain concurrency supersede out (#16272).
+    # The schedule arm below is name-scoped, so a watched workflow with a
+    # cron trigger has to appear in its fromJSON list as well — being in
+    # `workflow_run.workflows` alone gets its nightly red filtered out here.
     if: >-
       ${{ github.repository == 'QwenLM/qwen-code' &&
       contains(fromJSON('["failure","cancelled"]'), github.event.workflow_run.conclusion) &&
       ((github.event.workflow_run.head_branch == 'main' &&
       (github.event.workflow_run.event == 'push' ||
       (github.event.workflow_run.event == 'schedule' &&
-      contains(fromJSON('["Qwen Code CI","SDK Java","Desktop Checks","tui-parity"]'), github.event.workflow.name)))) ||
+      contains(fromJSON('["E2E Tests","Qwen Code CI","SDK Java","Desktop Checks","tui-parity","Managed Agent loop verification"]'), github.event.workflow.name)))) ||
       (github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow.name == 'SDK Java') ||
       (github.event.workflow.name == 'Managed Agent gate' &&
       contains(fromJSON('["pull_request","pull_request_review"]'), github.event.workflow_run.event))) }}
