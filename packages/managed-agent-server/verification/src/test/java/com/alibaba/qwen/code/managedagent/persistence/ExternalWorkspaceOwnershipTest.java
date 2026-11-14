@@ -44,6 +44,7 @@ class ExternalWorkspaceOwnershipTest {
     private JdbcRuntimeBindingRepository bindings;
     private JdbcRuntimeSessionRepository sessions;
     private JdbcToolExecutionRepository executions;
+    private ExternalStorageRegistrationStore registrations;
     private RuntimeBindingRecord binding;
     private RuntimeSessionRecord session;
     private ContextBinding context;
@@ -59,7 +60,7 @@ class ExternalWorkspaceOwnershipTest {
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         var manager = new DataSourceTransactionManager(source);
-        var registrations = new ExternalStorageRegistrationStore(jdbc, manager);
+        registrations = new ExternalStorageRegistrationStore(jdbc, manager);
         registrations.registerExternalStorage("tenant", "register", new ExternalStorageRegistration(
                 new ExternalStorageRegistration.ExternalStorageIdentity("provider", "physical", 7),
                 new ExternalStorageRegistration.StorageAlias("workspace", "/aliases/workspace", "/remote/workspace")));
@@ -74,9 +75,14 @@ class ExternalWorkspaceOwnershipTest {
         sessions = new JdbcRuntimeSessionRepository(source);
         executions = new JdbcToolExecutionRepository(source);
         ownership = new JdbcWorkspaceExecutionStore(jdbc, manager);
+        prepareBinding("session", "harness", "runtime-session");
+    }
+
+    /** The attested binding and its first READY Runtime Session, for either isolation class. */
+    private void prepareBinding(String isolationClass, String isolationKey, String runtimeSessionId) throws Exception {
         var scope = new RuntimeScope("tenant", "workspace", "1", "/remote/workspace",
-                WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session");
-        var request = new RuntimeProvisionRequest(scope, "harness", ExternalWorkspaceProvisioner.KIND, "workspace");
+                WorkspaceExecutionProfile.CAPABILITY_DIGEST, isolationClass);
+        var request = new RuntimeProvisionRequest(scope, isolationKey, ExternalWorkspaceProvisioner.KIND, "workspace");
         var created = bindings.findOrCreate(request);
         created = bindings.claimOperation(created.getBindingId(), "provisioner", Duration.ofMinutes(1));
         ExternalRuntimeClient noNetwork = new ExternalRuntimeClient() {
@@ -103,10 +109,16 @@ class ExternalWorkspaceOwnershipTest {
             binding = bindings.compareAndSet(created, created.withAttestation(lease, handle, Instant.now(), Instant.now()));
         }
         binding = bindings.releaseOperation(binding.getBindingId(), binding.getOperationOwner(), binding.getOperationGeneration());
-        session = sessions.findOrCreate(new RuntimeSessionRecord(new RuntimeSession("harness", "runtime-session", "bootstrap", scope),
-                binding.getBindingId(), binding.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
-        session = sessions.compareAndSet(session, session.withState(RuntimeSessionRecord.State.READY, Instant.now()));
+        session = readyMember(runtimeSessionId);
         context = new ContextBinding("tenant", "workspace", 1, "workspace", ".", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
+    }
+
+    /** A second READY Runtime Session on the same binding, under the same Harness Session. */
+    private RuntimeSessionRecord readyMember(String runtimeSessionId) {
+        var member = sessions.findOrCreate(new RuntimeSessionRecord(new RuntimeSession("harness", runtimeSessionId,
+                "bootstrap", binding.getRequest().getScope()), binding.getBindingId(), binding.getGeneration(),
+                RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
+        return sessions.compareAndSet(member, member.withState(RuntimeSessionRecord.State.READY, Instant.now()));
     }
 
     @Test
@@ -233,6 +245,61 @@ class ExternalWorkspaceOwnershipTest {
         session = bindings.beginSessionRelease(sessions, executions, session);
         binding = bindings.compareAndSet(binding,
                 binding.withState(RuntimeBindingRecord.State.LOST, binding.getLease(), Instant.now()));
+    }
+
+    /**
+     * Storage retirement is the only admission for a shared binding, and it has to
+     * reach the member release: each Session gives up its membership and only the
+     * last one clears the shared holder. A blanket shared refusal here strands the
+     * provider worker forever, because every retry repeats the same non-retryable
+     * 409 — and the retirement service's own path never calls this code, so its
+     * green suite does not cover it.
+     */
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void sharedRetirementReleasesEveryMemberAndClearsTheHolderOnlyForTheLast(boolean throughBroker) throws Exception {
+        prepareBinding("workspace", null, "shared-member-1");
+        var first = session;
+        var second = readyMember("shared-member-2");
+        ownership.claim(context, first, binding, bindings);
+        ownership.claim(context, second, binding, bindings);
+        assertThat(jdbc.queryForObject("SELECT runtime_session_id FROM ma_storage_owner", String.class)).isNull();
+        // drainBinding and completeStoppedSessionRelease admit a shared binding
+        // only once its storage is fenced.
+        jdbc.update("UPDATE ma_storage SET fence_operation_id = ?", "retire");
+        binding = bindings.claimOperation(binding.getBindingId(), "drainer", Duration.ofMinutes(1));
+        binding = bindings.compareAndSet(binding, binding.withDrainRequested(true, Instant.now())
+                .withState(RuntimeBindingRecord.State.DRAINING, binding.getLease(), Instant.now()));
+        first = bindings.beginSessionRelease(sessions, executions, first);
+        second = bindings.beginSessionRelease(sessions, executions, second);
+        binding = bindings.compareAndSet(binding,
+                binding.withState(RuntimeBindingRecord.State.LOST, binding.getLease(), Instant.now()));
+        binding = bindings.compareAndSet(binding, binding.withDrainReceipt(new RuntimeDrainReceipt(
+                binding.getBindingId(), binding.getGeneration(), binding.getProvisionSeed().getProvisionRequestId(),
+                binding.getResourceHandle(), Instant.now())));
+
+        releaseStoppedMember(throughBroker, first);
+        assertThat(memberStorageKey(first)).isNull();
+        assertThat(memberStorageKey(second)).isNotNull();
+        assertThat(jdbc.queryForObject("SELECT holder_key FROM ma_storage_owner", String.class)).isNotNull();
+
+        releaseStoppedMember(throughBroker, second);
+        assertThat(memberStorageKey(second)).isNull();
+        assertThat(jdbc.queryForMap("SELECT holder_key, binding_id, runtime_generation, runtime_session_id"
+                + " FROM ma_storage_owner").values()).containsOnlyNulls();
+    }
+
+    private void releaseStoppedMember(boolean throughBroker, RuntimeSessionRecord member) {
+        if (throughBroker) {
+            bindings.completeStoppedSessionRelease(sessions, executions, member, binding);
+        } else {
+            ownership.releaseStopped(context, member, binding, bindings);
+        }
+    }
+
+    private String memberStorageKey(RuntimeSessionRecord member) {
+        return jdbc.queryForObject("SELECT execution_storage_key FROM ma_runtime_session WHERE runtime_session_id = ?",
+                String.class, member.getRuntimeSessionId());
     }
 
     @Test

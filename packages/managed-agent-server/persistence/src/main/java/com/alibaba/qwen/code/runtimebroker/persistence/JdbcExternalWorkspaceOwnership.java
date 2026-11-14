@@ -360,15 +360,22 @@ public final class JdbcExternalWorkspaceOwnership {
             return;
         }
         releaseMember(connection, owner, current, session);
-        if (!owner.empty()) {
+        boolean shared = HarnessOwnership.sharesRuntimeSessions(current.getRequest());
+        // A shared holder outlives each member: only the last release clears it,
+        // and its row carries no Session id. A sole owner has exactly one member
+        // (requireDrainMembers), so for it this is the same unconditional clear.
+        if (!owner.empty() && (!shared || !hasMembers(connection, owner))) {
             try (var statement = connection.prepareStatement("UPDATE ma_storage_owner SET holder_key = NULL, binding_id = NULL,"
                     + " runtime_generation = NULL, runtime_session_id = NULL WHERE storage_key = ? AND holder_key = ?"
-                    + " AND binding_id = ? AND runtime_generation = ? AND runtime_session_id = ?")) {
+                    + " AND binding_id = ? AND runtime_generation = ? AND runtime_session_id "
+                    + (shared ? "IS NULL" : "= ?"))) {
                 statement.setString(1, owner.registration().ownerKey());
                 statement.setString(2, holderKey(current, session));
                 JdbcRepositorySupport.setIdentity(statement, 3, current.getBindingId());
                 statement.setLong(4, current.getGeneration());
-                JdbcRepositorySupport.setIdentity(statement, 5, session.getRuntimeSessionId());
+                if (!shared) {
+                    JdbcRepositorySupport.setIdentity(statement, 5, session.getRuntimeSessionId());
+                }
                 if (statement.executeUpdate() != 1) {
                     throw unavailable();
                 }
@@ -458,13 +465,15 @@ public final class JdbcExternalWorkspaceOwnership {
     }
 
     public static void requireDrainMembers(Connection connection, Owner owner, RuntimeBindingRecord binding) throws SQLException {
-        if (HarnessOwnership.sharesRuntimeSessions(binding.getRequest())) {
-            throw new RuntimeBrokerException(409,
-                    "external_workspace_recovery_required",
-                    "A resident Workspace requires explicit physical runtime recovery",
-                    false);
-        }
-        if (hasHolder(connection, owner, binding)) {
+        boolean shared = HarnessOwnership.sharesRuntimeSessions(binding.getRequest());
+        // A shared holder row carries no Session id, so hasHolder's shared-key
+        // proof is the whole holder check; only a sole owner has a holder Session
+        // to re-read. The scan is the shared twin of requireSoleMember: every
+        // member must belong to this binding generation, and a shared storage
+        // legitimately has several. Retirement is gated upstream (drainBinding
+        // and completeStoppedSessionRelease both require the storage fence), so
+        // refusing every shared binding here also refused the retirement itself.
+        if (hasHolder(connection, owner, binding) && !shared) {
             var session = JdbcRuntimeSessionRepository.selectSession(connection, binding.getRequest().getScope(), owner.sessionId(), true);
             if (session == null) {
                 throw unavailable();
@@ -478,10 +487,21 @@ public final class JdbcExternalWorkspaceOwnership {
                 while (row.next()) {
                     if (owner.empty() || !binding.getBindingId().equals(row.getString("binding_id"))
                             || binding.getGeneration() != row.getLong("runtime_generation")
-                            || !owner.sessionId().equals(row.getString("runtime_session_id"))) {
+                            || !shared && !owner.sessionId().equals(row.getString("runtime_session_id"))) {
                         throw unavailable();
                     }
                 }
+            }
+        }
+    }
+
+    /** Whether any Session still holds membership of this physical storage. */
+    private static boolean hasMembers(Connection connection, Owner owner) throws SQLException {
+        try (var statement = connection.prepareStatement("SELECT binding_id FROM ma_runtime_session"
+                + " WHERE execution_storage_key = ? FOR UPDATE")) {
+            statement.setString(1, owner.registration().ownerKey());
+            try (var row = statement.executeQuery()) {
+                return row.next();
             }
         }
     }
