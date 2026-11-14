@@ -60,6 +60,107 @@ describe('terminalSupportsSynchronizedOutput', () => {
   ])('detects support for %j', (env, expected) => {
     expect(terminalSupportsSynchronizedOutput(env)).toBe(expected);
   });
+
+  it('does not consult the Windows build for a native Windows Terminal', () => {
+    // #11929 was filed from build 22631 on Windows Terminal 1.12, which does
+    // not implement DECSET 2026; the reporter upgraded to 1.24 in a follow-up
+    // comment but the retest result was not recorded. The same OS build
+    // cannot distinguish the two, so a build gate withheld the wrappers from
+    // the upgraded host. A terminal without the mode ignores the sequences,
+    // so there is nothing to withhold.
+    expect(terminalSupportsSynchronizedOutput({ WT_SESSION: 'abc' })).toBe(
+      true,
+    );
+  });
+
+  it('does not gate WSL sessions on WT_SESSION', () => {
+    // WT_SESSION is set on the Windows side and does not reach a stock WSL
+    // shell, so a WSL session carries WSL_DISTRO_NAME and no WT_SESSION.
+    expect(
+      terminalSupportsSynchronizedOutput({ WSL_DISTRO_NAME: 'Ubuntu' }),
+    ).toBe(false);
+  });
+
+  it('keeps a non-Windows-Terminal host when WT_SESSION is inherited', () => {
+    // A WezTerm tab launched from Windows Terminal inherits WT_SESSION; the
+    // allow-list below must still decide, since TERM_PROGRAM names the
+    // terminal actually painting the frames.
+    expect(
+      terminalSupportsSynchronizedOutput({
+        TERM_PROGRAM: 'WezTerm',
+        WT_SESSION: 'abc',
+      }),
+    ).toBe(true);
+  });
+
+  it('keeps the wrappers off when Windows Terminal is behind tmux', () => {
+    // The multiplexer in between decides whether DECSET 2026 reaches the host.
+    expect(
+      terminalSupportsSynchronizedOutput({
+        WT_SESSION: 'abc',
+        TMUX: '/tmp/tmux-1000/default,123,0',
+      }),
+    ).toBe(false);
+  });
+
+  it('honours the disable switch on Windows Terminal', () => {
+    expect(
+      terminalSupportsSynchronizedOutput(
+        {
+          WT_SESSION: 'abc',
+          QWEN_CODE_SYNCHRONIZED_OUTPUT: '0',
+        },
+      ),
+    ).toBe(false);
+    expect(terminalSupportsSynchronizedOutput({ WT_SESSION: 'abc' })).toBe(
+      true,
+    );
+  });
+
+  it('detects a stock Windows Terminal session by WT_SESSION alone', () => {
+    // Windows Terminal sets WT_SESSION and no TERM_PROGRAM, so a gate keyed on
+    // TERM_PROGRAM is unreachable on the host #11929 was filed from.
+    expect(terminalSupportsSynchronizedOutput({ WT_SESSION: 'abc' })).toBe(
+      true,
+    );
+  });
+
+  it('takes a WSLENV-forwarded WT_SESSION inside WSL as Windows Terminal', () => {
+    // A WSL shell on a Windows Terminal tab carries WT_SESSION only when
+    // WSLENV forwards it — a stock WSL shell does not (see
+    // terminalRedrawOptimizer.ts). The tab's terminal is the one painting the
+    // frames, so it takes the same branch.
+    expect(
+      terminalSupportsSynchronizedOutput({
+        WT_SESSION: 'abc',
+        WSL_DISTRO_NAME: 'Ubuntu',
+      }),
+    ).toBe(true);
+  });
+
+  it('vetoes a non-allow-listed TERM_PROGRAM on an inherited WT_SESSION', () => {
+    // The !TERM_PROGRAM conjunct decides the inherited-WT_SESSION case: a
+    // terminal that names itself must keep the allow-list in charge, whether
+    // or not the host also sets WT_SESSION.
+    expect(
+      terminalSupportsSynchronizedOutput({
+        TERM_PROGRAM: 'vscode',
+        WT_SESSION: 'abc',
+      }),
+    ).toBe(false);
+    expect(
+      terminalSupportsSynchronizedOutput({
+        TERM_PROGRAM: 'Apple_Terminal',
+        WT_SESSION: 'abc',
+      }),
+    ).toBe(false);
+    expect(
+      terminalSupportsSynchronizedOutput({
+        TERM_PROGRAM: 'JetBrains-JediTerm',
+        WT_SESSION: 'abc',
+      }),
+    ).toBe(false);
+  });
 });
 
 describe('installSynchronizedOutput', () => {

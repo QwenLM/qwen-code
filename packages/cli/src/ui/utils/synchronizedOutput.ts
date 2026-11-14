@@ -7,6 +7,19 @@
 export const BEGIN_SYNCHRONIZED_UPDATE = '\u001B[?2026h';
 export const END_SYNCHRONIZED_UPDATE = '\u001B[?2026l';
 
+/**
+ * Windows Terminal sets `WT_SESSION` on every session it launches and,
+ * unlike the allow-listed terminals below, sets no `TERM_PROGRAM` at all. A
+ * process started from a Windows Terminal tab inherits that tab's
+ * `WT_SESSION`, so a `TERM_PROGRAM` that names a different terminal wins —
+ * that is the host painting the frames. The `TERM_PROGRAM` tie-break is local
+ * to this predicate; `osc8.ts` and `useTerminalProgress.ts` key on
+ * `WT_SESSION` alone.
+ */
+function isWindowsTerminal(env: NodeJS.ProcessEnv): boolean {
+  return Boolean(env['WT_SESSION']) && !env['TERM_PROGRAM'];
+}
+
 export interface SynchronizedOutputStatsSnapshot {
   synchronizedOutputFrameCount: number;
   synchronizedOutputBeginCount: number;
@@ -48,11 +61,18 @@ export function terminalSupportsSynchronizedOutput(
     return true;
   }
 
+  // A multiplexer or SSH hop can drop DECSET 2026 even when the outer host
+  // supports it, so those exclusions win over the host detection below.
   if (env['TMUX'] || env['SSH_TTY'] || env['SSH_CLIENT']) {
     return false;
   }
 
   const termProgram = env['TERM_PROGRAM'];
+
+  if (isWindowsTerminal(env)) {
+    return true;
+  }
+
   // Warp's DECRQM 2026 probe answers status 2 (recognized, reset), so
   // synchronized updates are available there; without them Warp renders the
   // erase-then-rewrite pattern as flicker (issue #8557). Ghostty implements
