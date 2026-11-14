@@ -805,12 +805,18 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // Proxy-hosted Claude: a non-DeepSeek backend on a non-native base URL.
     // Its wire shape is Anthropic's, while its history may carry thinking
     // blocks recorded by another provider without a signature.
-    const isProxyHostedClaude =
-      !isDeepSeek && !isAnthropicNativeBaseUrl(this.contentGeneratorConfig);
-    const dropUnsignedAssistantThinking =
+    const isNativeAnthropic = isAnthropicNativeBaseUrl(
+      this.contentGeneratorConfig,
+    );
+    const isProxyHostedClaude = !isDeepSeek && !isNativeAnthropic;
+    const demoteForeignThoughtToText =
       isProxyHostedClaude &&
       !!thinking &&
       this.modelSupportsAdaptiveThinking(true);
+    // Native signature requirements apply to replayed history even when the
+    // current request disables thinking or uses a non-adaptive model.
+    const dropUnsignedAssistantThinking =
+      (!isDeepSeek && isNativeAnthropic) || demoteForeignThoughtToText;
     // Strict Anthropic-compatible proxies (verified against SGLang v0.5.19,
     // #11772; llama.cpp/vLLM expected to behave the same but untested)
     // reject a `thinking` block with no `signature` field at all (HTTP 400,
@@ -824,8 +830,8 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // the native API's opaque signature), and the two passes must stay
     // disjoint so the 4.6+ wire shape never changes. Unknown or unversioned
     // model ids parse as non-adaptive and keep the fill — that is exactly
-    // what a custom SGLang model id needs. The native API's history is left
-    // untouched.
+    // what a custom SGLang model id needs. Native requests use the separate
+    // unsigned-thinking cleanup.
     // https://github.com/QwenLM/qwen-code/issues/11772
     const fillUnsignedThinkingSignature =
       isProxyHostedClaude && !this.modelSupportsAdaptiveThinking(true);
@@ -873,6 +879,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
         normalizeAssistantThinkingSignature: deepseekThinkingOn,
         injectThinkingOnToolUseTurns: deepseekThinkingOn,
         dropUnsignedAssistantThinking,
+        demoteForeignThoughtToText,
         fillUnsignedThinkingSignature,
         stripAssistantThinking,
         stripTrailingAssistantPrefill,
