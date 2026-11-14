@@ -248,6 +248,18 @@ included — settling the Turn FAILED as `managed_runtime_recovery_blocked`
 without the reconcile/park detour, which removes it from both recovery
 sweeps permanently.
 
+Like `checkpoint_blocked`, this reason fires only on positive durable
+evidence: the connector's admission-shaped capability probe folds an
+unreachable daemon (and a pooled placement) into "unsupported", which is
+safe for refusing new launches but would terminally fail Turns on a
+transient outage. The decline therefore requires a completed capabilities
+read that proves the feature absent; an unreadable capability surface
+keeps the ordinary transient refusal. After the fenced terminal write,
+the cached-attachment discard is best-effort: its failure is logged and
+never holds the terminal back, because the terminal row already keeps
+every sweep from re-offering the Turn and the next process drops the
+cache anyway.
+
 `checkpoint_blocked` fires only on durable verdicts (`opaque_state`,
 `invalid_state`, `identity_mismatch`). A transient Managed Session Store
 failure erased into `missing_state` / `missing_checkpoint` by the

@@ -1567,13 +1567,25 @@ public class HarnessCoordinator {
     private boolean abandonUnsupportedRecovery(TurnRecord turn,
             AtomicBoolean leaseLost,
             HostedHarnessRecoveryDeclinedException error) {
-        harness.discardManagedRecovery(turn.tenantId(), turn.sessionId());
         requireLease(leaseLost);
+        // The durable verdict is already decided, so only the terminal
+        // write is fenced. A cache eviction failure must not hold the
+        // terminal back: the next process drops the attachment anyway,
+        // and the terminal row keeps every sweep from re-offering the
+        // Turn meanwhile.
         store.failTurn(turn.tenantId(), turn.sessionId(), turn.turnId(),
                 owner, "managed_runtime_recovery_blocked",
                 "The Hosted Harness can no longer open this Session's"
                         + " public child topology; the parked Turn was"
                         + " abandoned without replay.");
+        try {
+            harness.discardManagedRecovery(turn.tenantId(), turn.sessionId());
+        } catch (RuntimeException unavailable) {
+            LOG.warn("Managed unsupported recovery cache discard deferred"
+                            + " tenant={} session={} turn={}",
+                    turn.tenantId(), turn.sessionId(), turn.turnId(),
+                    unavailable);
+        }
         LOG.warn("Managed Turn recovery abandoned as unsupported tenant={}"
                         + " session={} turn={} reason={}",
                 turn.tenantId(), turn.sessionId(), turn.turnId(),

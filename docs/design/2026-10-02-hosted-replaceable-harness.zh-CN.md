@@ -215,6 +215,15 @@ Harness 服务，或保存的审批续跑档案的 public-child profile 与当�
 直接把 Turn 以 `managed_runtime_recovery_blocked` 结算为 FAILED，
 使其永久离开两条恢复扫描。
 
+与 `checkpoint_blocked` 一样，这个 reason 只在拿到正向耐久证据时触发：
+connector 面向准入的能力探测会把不可达的 daemon（以及 pooled 部署）
+折叠成「不支持」，用于拒绝新启动是安全的，但照搬到恢复会在一次瞬态
+故障中把 Turn 终态掉。因此 decline 要求一次完整完成、且证明该能力
+确实缺席的 capabilities 读取；能力面读不到时保持普通的瞬态拒绝。
+围栏终态写入之后，缓存附件的丢弃是尽力而为：其失败只记日志，绝不
+拖住终态——终态行已经让所有扫描不再投递该 Turn，而下一个进程本来
+就会丢掉缓存。
+
 `checkpoint_blocked` 只对耐久判定触发（`opaque_state`、
 `invalid_state`、`identity_mismatch`）。被 authorization 层抹平成
 `missing_state` / `missing_checkpoint` 的瞬时 Managed Session Store

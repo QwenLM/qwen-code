@@ -41,6 +41,7 @@ import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -360,6 +361,27 @@ class RecoverySettlementTest {
                 anyString(), anyString(), anyLong(), anyBoolean());
         verify(fixture.harness, never()).recoverManagedFailureCancellation(anyString(),
                 anyString(), anyString(), anyString(), anyString());
+    }
+
+    // The terminal write is the durable act; the cache discard after it is
+    // best-effort hygiene. An unreachable owner must not throw the
+    // abandonment back into the retry lane it exists to close.
+    @Test
+    void aFailedCacheDiscardCannotUndoTheUnsupportedRecoveryTerminal() {
+        Fixture fixture = new Fixture(0, "CANCELLING", false);
+        fixture.failRecovery(new HostedHarnessRecoveryDeclinedException(
+                HostedHarnessRecoveryDeclinedException.REASON_PUBLIC_CHILD_UNSUPPORTED));
+        doThrow(new IllegalStateException("owner unreachable"))
+                .when(fixture.harness).discardManagedRecovery("tenant", "session");
+
+        fixture.dispatch();
+
+        verify(fixture.store).failTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("managed_runtime_recovery_blocked"), anyString());
+        verify(fixture.store, never()).scheduleTurnRetry(anyString(), anyString(),
+                anyString(), anyString(), anyLong(), anyBoolean());
+        verify(fixture.store, never()).parkTurnForRuntimeRecovery(anyString(),
+                anyString(), anyString(), anyString(), anyString(), anyLong());
     }
 
     private static RecoveryStatus ready() {

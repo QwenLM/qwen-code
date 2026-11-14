@@ -3710,6 +3710,39 @@ class QwenHostedHarnessConnectorTest {
         verify(client, never()).close();
     }
 
+    // The structural decline ends a Turn on its first drive, so an
+    // unreachable daemon must NOT produce it: without a completed
+    // capabilities read the refusal stays the ordinary transient one and
+    // the coordinator retries.
+    @Test
+    void anUnreachableDaemonKeepsTheUnsupportedPublicChildRefusalTransient() {
+        var session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code",
+                null, null, "ACTIVE", BOOT_ID, "epoch-old", 4, 4, 0, 1, 1,
+                null, 1, new ContextBinding("tenant-a", "ws-a", 1, "storage-a",
+                        ".", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1),
+                "default", "hosted-workspace-shell/1", null, 1);
+        var sessions = sessions();
+        when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
+        var actions = mock(JdbcManagedActionStore.class);
+        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
+        var execution = mock(JdbcWorkspaceExecutionStore.class);
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        when(client.capabilities())
+                .thenThrow(new IllegalStateException("daemon unreachable"));
+        var settings = properties();
+        settings.getHarness().setWorkspaceFilesEnabled(true);
+        var connector = new QwenHostedHarnessConnector(settings, sessions,
+                execution, actions);
+        ReflectionTestUtils.setField(connector, "client", client);
+
+        assertThatThrownBy(() -> connector.createOrLoad(
+                "tenant-a", SESSION_ID, true))
+                .isInstanceOf(IllegalStateException.class)
+                .isNotInstanceOf(HostedHarnessRecoveryDeclinedException.class)
+                .hasMessageContaining("public child recovery is unsupported");
+        verify(client, never()).loadSession(any());
+    }
+
     @Test
     void otherTakeoverConflictsStayOpaqueToErrorCodes() {
         HostedHarnessClient client = mock(HostedHarnessClient.class);

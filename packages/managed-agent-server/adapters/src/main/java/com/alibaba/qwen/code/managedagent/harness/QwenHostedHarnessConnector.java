@@ -490,7 +490,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         SessionRecord session = sessions.requireSession(tenantId, sessionId);
         requireShellApproval(session);
         if (session.publicChildAgentsVersion() == 1 && !supportsPublicChildAgents()) {
-            throw publicChildRecoveryUnsupported();
+            throw publicChildRecoveryUnavailable();
         }
         if (session.workspace() != null) {
             if (!isWorkspaceFilesAvailable()) {
@@ -2211,7 +2211,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             return null;
         }
         if (!supportsPublicChildAgents()) {
-            throw publicChildRecoveryUnsupported();
+            throw publicChildRecoveryUnavailable();
         }
         var lineage = sessions.findChildLineage(session.tenantId(), session.sessionId());
         if (lineage == null) {
@@ -2237,9 +2237,25 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     // property of the Session's durable shape, not a transient outage, so
     // the typed decline ends the recovery instead of the generic
     // IllegalStateException feeding the coordinator's retry lane forever.
-    private static HostedHarnessRecoveryDeclinedException publicChildRecoveryUnsupported() {
-        return new HostedHarnessRecoveryDeclinedException(
-                HostedHarnessRecoveryDeclinedException.REASON_PUBLIC_CHILD_UNSUPPORTED);
+    // The decline demands positive evidence: supportsPublicChildAgents()
+    // folds an unreachable daemon (and a pooled placement) into false,
+    // which is safe for admission but here would terminally fail Turns on
+    // a transient outage. Only a completed capabilities read that proves
+    // the feature absent declines; anything else keeps the ordinary
+    // transient refusal.
+    private RuntimeException publicChildRecoveryUnavailable() {
+        try {
+            var capabilities = client().capabilities();
+            boolean advertised = HarnessFeature.PUBLIC_CHILD_AGENTS.in(capabilities.getFeatures())
+                    && capabilities.getLifecycleV2Profiles().contains(WorkspaceToolProfiles.SHELL);
+            if (poolEndpoint == null && !advertised) {
+                return new HostedHarnessRecoveryDeclinedException(
+                        HostedHarnessRecoveryDeclinedException.REASON_PUBLIC_CHILD_UNSUPPORTED);
+            }
+        } catch (DaemonException | IllegalStateException unreachable) {
+            // Fall through to the transient refusal below.
+        }
+        return new IllegalStateException("Hosted Harness public child recovery is unsupported");
     }
 
     private Map<String, Object> publicChildExtensionAgent(SessionRecord session) {
