@@ -31,6 +31,8 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   // OpenAI — image by default for all gpt/o-series models
   // -------------------
   [/^gpt-5/, { image: true }],
+  // gpt-oss is a text-only open-weight family.
+  [/^gpt-oss/, {}],
   [/^gpt-/, { image: true }],
   [/^o\d/, { image: true }],
 
