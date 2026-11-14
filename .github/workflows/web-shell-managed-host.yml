@@ -65,8 +65,20 @@ jobs:
   build:
     name: 'Managed host bundle (Node 22.x)'
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
-    runs-on: '${{ (github.event_name == ''pull_request'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "ecs-qwen-ephemeral"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    timeout-minutes: "${{ (github.event_name == 'pull_request' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') && 90 || 20 }}"
+    # Same credential-free boundary on either arm, but the disposable pool is
+    # sized for untrusted forks. Trusted PRs (same repo, or authored by
+    # OWNER/MEMBER/COLLABORATOR) join the persistent x64 fleet the rest of
+    # their CI already uses; only untrusted fork PRs keep the disposable pool.
+    # Push and manual runs stay GitHub-hosted. Mirrors ci.yml's classify_pr
+    # trust rule, and keeps the warm pnpm store the persistent fleet has.
+    runs-on: '${{ (github.event_name == ''pull_request'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && ((github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association)) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["self-hosted", "ecs-qwen-ephemeral"]'')) || fromJSON(''["ubuntu-latest"]'') }}'
+    # The 90-minute ceiling prices a cold container install on the disposable
+    # pool, so it must follow that arm only: the persistent fleet keeps a warm
+    # store and takes the same 20-minute ceiling as push and dispatch. This
+    # repeats the selector's own trust terms because runner.environment is not
+    # available here, and spells them identically so the routing matrix models
+    # both expressions with the same substitutions.
+    timeout-minutes: '${{ (github.event_name == ''pull_request'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && !(github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && 90 || 20 }}'
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3

@@ -41,7 +41,12 @@ jobs:
   managed-loop:
     name: 'Managed loop (${{ matrix.loop }})'
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
-    runs-on: '${{ (github.event_name == ''pull_request'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "ecs-qwen-ephemeral"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # The disposable pool is sized for untrusted forks, which have no other
+    # self-hosted home. Same-repo PRs and PRs authored by OWNER/MEMBER/
+    # COLLABORATOR already run the rest of CI on the persistent x64 fleet, so
+    # they belong there too instead of queueing ahead of fork jobs that cannot
+    # be routed anywhere else. Mirrors ci.yml's classify_pr trust rule.
+    runs-on: '${{ (github.event_name == ''pull_request'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && ((github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association)) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["self-hosted", "ecs-qwen-ephemeral"]'')) || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 45
     strategy:
       fail-fast: false
