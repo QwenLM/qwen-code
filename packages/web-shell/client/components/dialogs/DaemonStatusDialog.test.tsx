@@ -218,6 +218,14 @@ const workspaceState = {
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspace: () => workspaceState,
   useWorkspaceActions: () => workspaceActionsState,
+  // The Usage tab mounts UsageDashboardTab, which calls useUsageDashboard; a
+  // missing mock would throw into the tab's ErrorBoundary on tab-switch.
+  useUsageDashboard: () => ({
+    dashboard: undefined,
+    loading: false,
+    error: undefined,
+    reload: vi.fn(async () => undefined),
+  }),
   useStatusReport: (options: { autoLoad?: boolean; detail?: string } = {}) => {
     seenDetails.push(options.detail);
     seenAutoLoads.push(options.autoLoad);
@@ -385,6 +393,21 @@ describe('DaemonStatusDialog', () => {
     } finally {
       availability.dispose();
     }
+  });
+
+  it('swallows a prefetch rejection so it never becomes an unhandled error', async () => {
+    usagePrefetch.mockRejectedValueOnce(new Error('usage load failed'));
+    mount();
+    expect(usagePrefetch).toHaveBeenCalledTimes(1);
+    // Let the rejected prefetch settle; the effect's .catch must absorb it.
+    // Without the .catch this is an unhandled rejection, which fails the run
+    // on Linux (dangerouslyIgnoreUnhandledErrors is false there).
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(container!.querySelectorAll('[role="tab"]').length).toBeGreaterThan(
+      0,
+    );
   });
 
   it('rejects a mixed-content target before passing its token to navigation', () => {

@@ -16,7 +16,7 @@ import type { ChatRecord } from './chatRecordingService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   extractJsonStringField,
-  extractLastJsonStringField,
+  unescapeJsonString,
 } from '../utils/sessionStorageUtils.js';
 
 const debugLogger = createDebugLogger('USAGE_HISTORY');
@@ -249,6 +249,70 @@ export function metricsToUsageRecord(
 const MAX_TRAILING_PARSE_CHARS = 64 * 1024;
 
 /**
+ * Extracts the LAST top-level record's own `timestamp` from a raw JSONL line
+ * without JSON-parsing it, for trailing lines too large to parse. Walks the
+ * line with a brace/string/escape state machine and accepts a `timestamp` key
+ * only at depth 1 (a direct child of a top-level object), so a nested
+ * `timestamp` inside the record's payload (e.g. a tool_result's
+ * `functionResponse.response`) can never hijack the record's own end time.
+ * For a `}{`-glued line the last top-level fragment's timestamp wins. Returns
+ * undefined when no well-formed top-level timestamp is present (corrupt tail),
+ * letting the caller fall back.
+ */
+function extractLastTopLevelTimestamp(line: string): string | undefined {
+  const KEY = '"timestamp"';
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  let last: string | undefined;
+  const n = line.length;
+  for (let i = 0; i < n; i++) {
+    const c = line[i];
+    if (inString) {
+      if (escape) escape = false;
+      else if (c === '\\') escape = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') {
+      if (depth === 1 && line.startsWith(KEY, i)) {
+        let j = i + KEY.length;
+        while (j < n && (line[j] === ' ' || line[j] === '\t')) j++;
+        if (line[j] === ':') {
+          j++;
+          while (j < n && (line[j] === ' ' || line[j] === '\t')) j++;
+          if (line[j] === '"') {
+            let k = j + 1;
+            let esc = false;
+            let closed = false;
+            while (k < n) {
+              const vc = line[k];
+              if (esc) esc = false;
+              else if (vc === '\\') esc = true;
+              else if (vc === '"') {
+                closed = true;
+                break;
+              }
+              k++;
+            }
+            if (closed) {
+              last = unescapeJsonString(line.slice(j + 1, k));
+              i = k; // resume after the value's closing quote
+              continue;
+            }
+          }
+        }
+      }
+      inString = true;
+      continue;
+    }
+    if (c === '{' || c === '[') depth++;
+    else if (c === '}' || c === ']') depth--;
+  }
+  return last;
+}
+
+/**
  * Replays a session transcript's `ui_telemetry` records into a usage
  * summary. Returns null for an empty transcript; `record` is null when the
  * transcript has no telemetry events (or unparseable timestamps) — the
@@ -338,9 +402,9 @@ async function summarizeTranscriptFile(
 
   // Only parse a small trailing line (cheap `}{`-glued recovery). A large
   // trailing line is exactly the payload this scan exists to skip, so it is
-  // never JSON-parsed; take its LAST top-level timestamp as raw text so a
-  // glued large tail still ends at the later record (first-match would pick
-  // the earlier one). Escaped payload occurrences are rejected by the helper.
+  // never JSON-parsed; take its last TOP-LEVEL timestamp via a depth-aware raw
+  // scan so a glued large tail ends at the later record while a nested payload
+  // timestamp can never hijack the record's own end time.
   let endTs: string | undefined;
   if (lastLine.length <= MAX_TRAILING_PARSE_CHARS) {
     const lastRecs = jsonl.parseLineTolerant<ChatRecord>(lastLine, filePath);
@@ -349,7 +413,7 @@ async function summarizeTranscriptFile(
         ? lastRecs[lastRecs.length - 1]!.timestamp
         : lastTsFallback;
   } else {
-    endTs = extractLastJsonStringField(lastLine, 'timestamp') ?? lastTsFallback;
+    endTs = extractLastTopLevelTimestamp(lastLine) ?? lastTsFallback;
   }
   const startTime = new Date(header.timestamp).getTime();
   const endTime = endTs ? new Date(endTs).getTime() : NaN;

@@ -1327,6 +1327,96 @@ describe('loadUsageHistoryWithLive — replay cache + selective scan', () => {
     }
   });
 
+  it('ignores a nested payload timestamp on a large trailing tool_result', async () => {
+    const sessionId = 'sess-nested-ts';
+    const dir = path.join(
+      process.env['QWEN_HOME']!,
+      'projects',
+      'cache-project',
+      'chats',
+    );
+    fs.mkdirSync(dir, { recursive: true });
+    const base = { sessionId, cwd: '/cache/project' };
+    const u1 = {
+      ...base,
+      uuid: 'u1',
+      parentUuid: null,
+      timestamp: '2026-06-11T00:00:00.000Z',
+      type: 'user',
+      message: { role: 'user', content: 'hi' },
+    };
+    const u2 = {
+      ...base,
+      uuid: 'u2',
+      parentUuid: 'u1',
+      timestamp: '2026-06-11T00:01:00.000Z',
+      type: 'system',
+      subtype: 'ui_telemetry',
+      systemPayload: {
+        uiEvent: {
+          'event.name': 'qwen-code.api_response',
+          'event.timestamp': '2026-06-11T00:01:00.000Z',
+          response_id: 'r1',
+          model: 'qwen-max',
+          duration_ms: 1200,
+          input_token_count: 600,
+          output_token_count: 300,
+          cached_content_token_count: 0,
+          thoughts_token_count: 100,
+          total_token_count: 1000,
+          prompt_id: 'p1',
+        },
+      },
+    };
+    // A >64KB final tool_result whose own timestamp is 00:05 but whose payload
+    // (functionResponse.response) carries a much LATER nested timestamp. The
+    // depth-aware scan must keep the record's own 00:05, not the nested 2035.
+    const recA = {
+      ...base,
+      uuid: 'u3',
+      parentUuid: 'u2',
+      timestamp: '2026-06-11T00:05:00.000Z',
+      type: 'tool_result',
+      message: {
+        role: 'user',
+        content: [
+          {
+            functionResponse: {
+              name: 'read_file',
+              response: {
+                timestamp: '2035-01-01T00:00:00.000Z',
+                output: 'x'.repeat(100 * 1024),
+              },
+            },
+          },
+        ],
+      },
+    };
+    const body =
+      [u1, u2].map((r) => JSON.stringify(r)).join('\n') +
+      '\n' +
+      JSON.stringify(recA) +
+      '\n';
+    fs.writeFileSync(path.join(dir, `${sessionId}.jsonl`), body);
+
+    const parseInputLengths: number[] = [];
+    const origParse = JSON.parse;
+    const spy = vi.spyOn(JSON, 'parse').mockImplementation((text: string) => {
+      parseInputLengths.push(text.length);
+      return origParse(text);
+    });
+    try {
+      const merged = await loadUsageHistoryWithLive();
+      const r = merged.find((x) => x.sessionId === sessionId);
+      expect(r).toBeDefined();
+      expect(tokensOf(merged, sessionId)).toBe(1000);
+      expect(r!.timestamp).toBe(new Date('2026-06-11T00:05:00.000Z').getTime());
+      expect(Math.max(...parseInputLengths)).toBeLessThan(10_000);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('bounds the replay scan concurrency instead of one worker per candidate', async () => {
     const paths: string[] = [];
     for (let i = 0; i < 12; i++) paths.push(plant(`sess-conc-${i}`, 100));
