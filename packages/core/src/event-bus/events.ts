@@ -5,10 +5,7 @@
  */
 
 import type { AgentLoopResult, AgentLoopRound } from '../core/agent-loop.js';
-import type {
-  ServerLlmStreamEvent,
-  ToolCallRequestInfo,
-} from '../core/turn.js';
+import type { ToolCallRequestInfo } from '../core/turn.js';
 
 /** The handlers that publish and consume loop events. */
 export type HandlerName = 'conversation' | 'llm' | 'tool' | 'loop';
@@ -28,8 +25,8 @@ export interface ToolSettledData {
  */
 export interface LoopBusEventMap {
   'loop.started': { promptId: string };
-  'loop.output': { event: ServerLlmStreamEvent };
-  'loop.cancelled': { reason: string };
+  /** The caller aborted the run's signal. */
+  'loop.cancelled': { reason: 'abort' };
   'loop.finished': { result: AgentLoopResult };
   'llm.request': { round: number; send: AgentLoopRound };
   'llm.tool_call': { call: ToolCallRequestInfo };

@@ -96,6 +96,10 @@ public interface AutomationLedgerStore {
     public SchedulePage listReadableSchedules(String tenantId, String actorId,
             ScheduleCursor cursor, int limit);
 
+    /** Session-scoped page for the internal writer-binding routes. */
+    public SchedulePage listSessionSchedules(String tenantId, String sessionId,
+            ScheduleCursor cursor, int limit);
+
     public int countLive(String tenantId, String sessionId);
 
     public List<ScheduleRow> findArmed(long now, int limit);

@@ -29,7 +29,7 @@ public final class RuntimeToolMeasurements {
 
     public static void requireProfile(RuntimeSession session) {
         if (session == null
-                || !WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST.equals(
+                || !WorkspaceExecutionProfile.isMeasured(
                         session.getScope().getCapabilityDigest())) {
             throw new RuntimeBrokerException(
                     501,

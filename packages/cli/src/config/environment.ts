@@ -718,6 +718,26 @@ function reportRejectedSettingsEnv(
       `qwen: ${source} cannot set ${entry[0]}; ignored. Set verifyPr.${setting} at user scope in settings.json, or export it in the launch environment.`,
     );
   }
+  // The loop-rollout switches are operator-only. The merged settings.env map
+  // carries a workspace entry indistinguishably from an operator one, so they
+  // are dropped at every settings scope (a home-scoped .env still applies).
+  // Say so instead of dropping the entry silently, and name the channel that
+  // works. The gate folds case, so report whichever spelling was written.
+  for (const key of [
+    'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
+    'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP',
+  ]) {
+    const entry = Object.entries(env).find(
+      ([candidate, value]) =>
+        candidate.toUpperCase() === key &&
+        typeof value === 'string' &&
+        value.trim() !== '',
+    );
+    if (!entry) continue;
+    writeStderrLineSafe(
+      `qwen: ${source} cannot set ${entry[0]}; ignored. Export it in the launch environment instead.`,
+    );
+  }
 }
 
 export function buildRuntimeEnvironment(

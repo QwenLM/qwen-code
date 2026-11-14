@@ -42,18 +42,16 @@ describe('installEnvironmentProxy', () => {
 
   it('rejects a malformed proxy environment value via the real dispatcher', async () => {
     const { installEnvironmentProxy } = await import('./proxy.js');
-    const previous = process.env['HTTP_PROXY'];
-    process.env['HTTP_PROXY'] = 'not a URL';
+    // Undici prefers the lowercase variable, so an inherited value must not
+    // shadow the malformed uppercase one this test provides.
+    vi.stubEnv('http_proxy', undefined);
+    vi.stubEnv('HTTP_PROXY', 'not a URL');
     try {
       expect(() => installEnvironmentProxy()).toThrow(
         'Proxy environment configuration is invalid. Check HTTP_PROXY, HTTPS_PROXY, and NO_PROXY.',
       );
     } finally {
-      if (previous === undefined) {
-        delete process.env['HTTP_PROXY'];
-      } else {
-        process.env['HTTP_PROXY'] = previous;
-      }
+      vi.unstubAllEnvs();
     }
   });
 });
