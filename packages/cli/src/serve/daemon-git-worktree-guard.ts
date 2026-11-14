@@ -1175,14 +1175,15 @@ function shellArgvArmsLastpipe(run: GuardToken[], start: number): boolean {
     const token = run[index]!;
     if (token.text === '-c') break;
     if (token.text === '-O' || token.text === '-o') {
-      const value = run[index + 1];
+      const valueIndex = nextArgvIndex(run, index + 1);
+      const value = run[valueIndex];
       if (value === undefined || value.dynamic) return true;
       if (value.text === 'lastpipe') return true;
-      index++;
+      index = valueIndex;
       continue;
     }
     if (token.dynamic) return true;
-    if (token.text.startsWith('-') && token.text.includes('c')) break;
+    if (shellBundleRequestsCommand(token.text)) break;
   }
   return false;
 }
@@ -1510,16 +1511,29 @@ function analyzeRun(
   const state: PrefixState = { relocations: [], unresolved: false };
   let index = 0;
   let assignments = 0;
-  while (index < run.length && LEADING_SHELL_KEYWORDS.has(run[index]!.text)) {
+  while (index < run.length) {
+    index = nextArgvIndex(run, index);
+    const keyword = run[index]?.text;
+    if (keyword === 'case') return { kind: 'undecidable' };
+    if (keyword === undefined || !LEADING_SHELL_KEYWORDS.has(keyword)) break;
     index++;
+    if (keyword === 'time') {
+      while (run[index]?.text === '-p' || run[index]?.text === '--') index++;
+    }
   }
   while (index < run.length) {
+    index = nextArgvIndex(run, index);
+    if (index >= run.length) break;
+    if (state.armsLastpipe) return { kind: 'undecidable' };
     const token = run[index]!;
     if (leadingEnvAssignmentKey(token.text) !== null) {
       recordEnvAssignment(token, state);
       assignments++;
       index++;
       continue;
+    }
+    if (BRACE_EXPANSION_PATTERN.test(token.text)) {
+      return { kind: 'undecidable' };
     }
     if (token.dynamic) {
       return { kind: 'dynamic-program', rest: run.slice(index), state };
@@ -1601,7 +1615,9 @@ function analyzeRun(
     }
     if (program === 'env') {
       const scan = consumeEnvWrapper(run, index, state);
-      if (scan.undecidable) return { kind: 'undecidable' };
+      if (scan.undecidable || state.armsLastpipe) {
+        return { kind: 'undecidable' };
+      }
       if (scan.payload !== undefined) {
         return {
           kind: 'payload',
@@ -2913,8 +2929,8 @@ function expansionCanExecute(text: string): boolean {
     if (character !== '$') continue;
     if (next === '(') {
       if (text[index + 2] !== '(') return true;
-      // `$((…))` arithmetic runs no command itself, but an array subscript
-      // inside it can hold one — scan the inside.
+      // Bash re-parses variable values in arithmetic, including command
+      // substitutions hidden in array subscripts. Only literal math is inert.
       let depth = 0;
       let cursor = index + 1;
       while (cursor < text.length) {
@@ -2931,7 +2947,10 @@ function expansionCanExecute(text: string): boolean {
         cursor++;
       }
       if (depth !== 0) return true;
-      if (expansionCanExecute(text.slice(index + 3, cursor))) return true;
+      const literal = text
+        .slice(index + 3, cursor)
+        .replace(/\b0[xX][0-9a-fA-F]+\b|\b[0-9]+#[0-9A-Za-z@_]+\b/g, '0');
+      if (!/^[0-9\s()+*/%<>=!&|^~?:-]*$/.test(literal)) return true;
       index = cursor;
       continue;
     }
@@ -3537,7 +3556,9 @@ async function evaluateCommandWithCwd(
     : stripBashComments(normalizedCommand);
   const segments = splitCommands(commentStripped);
   const separators = readTopLevelSeparators(commentStripped, false);
-  const separatorsMatch = separators.length === segments.length - 1;
+  const separatorsMatch =
+    separators.length === segments.length - 1 ||
+    (separators.length === segments.length && separators.at(-1) === '&');
   if (
     !windowsNative &&
     !separatorsMatch &&

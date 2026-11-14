@@ -783,6 +783,15 @@ describe('createDaemonToolGuard', () => {
       `env BASHOPTS=lastpipe bash -c 'true | cd OUTSIDE; git reset --hard'`,
       `env SHELLOPTS=lastpipe bash -c 'true | cd OUTSIDE; git reset --hard'`,
       `bash -O "$OPT" -c 'true | cd OUTSIDE; git reset --hard'`,
+      `bash --norc -O lastpipe -c 'true | cd OUTSIDE; git reset --hard'`,
+      `bash --noprofile --norc -O lastpipe -c 'true | cd OUTSIDE; git reset --hard'`,
+      `bash -O 2>/dev/null lastpipe -c 'true | cd OUTSIDE; git reset --hard'`,
+      `env BASHOPTS=lastpipe -S 'bash -c "true | cd OUTSIDE; git reset --hard"'`,
+      `env SHELLOPTS=lastpipe --split-string 'bash -c "true | cd OUTSIDE; git reset --hard"'`,
+      `env BASHOPTS=lastpipe nice bash -c 'true | cd OUTSIDE; git reset --hard'`,
+      `{shopt,-s,lastpipe}; true | cd OUTSIDE; git reset --hard`,
+      `> /dev/null shopt -s lastpipe; true | cd OUTSIDE; git reset --hard`,
+      `time -p shopt -s lastpipe; true | cd OUTSIDE; git reset --hard`,
     ])(
     'fails closed on lastpipe arriving through argv or environment: %s',
     async (template) => {
@@ -791,6 +800,41 @@ describe('createDaemonToolGuard', () => {
 
       await expect(guard(request(command))).resolves.toMatchObject({
         allowed: false,
+      });
+    },
+  );
+
+  it
+    .runIf(bashSemanticsLane)
+    .each(['sleep 1 &', 'git status &', 'echo $(( (1) | 2 )) | cat'])(
+    'allows modelled background and arithmetic boundaries: %s',
+    async (command) => {
+      await expect(createDaemonToolGuard()(request(command))).resolves.toEqual({
+        allowed: true,
+      });
+    },
+  );
+
+  it.runIf(bashSemanticsLane).each(['a|b', 'a'])(
+    'does not certify an unmodelled case branch: %s',
+    async (pattern) => {
+      const command = `case a in ${pattern}) cd ${cmdPath(outsideRepo)};; esac; git reset --hard`;
+      await expect(
+        createDaemonToolGuard()(request(command)),
+      ).resolves.toMatchObject({
+        allowed: false,
+      });
+    },
+  );
+
+  it.runIf(bashSemanticsLane).each(['x', '$x', '${x}'])(
+    'refuses variable-borne arithmetic in an expanding heredoc: %s',
+    async (operand) => {
+      await expect(
+        createDaemonToolGuard()(request(`cat <<EOF\n$(( ${operand} ))\nEOF`)),
+      ).resolves.toMatchObject({
+        allowed: false,
+        reason: expect.stringContaining('unquoted heredoc body'),
       });
     },
   );
