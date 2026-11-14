@@ -684,7 +684,8 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
         const meta = data?.update?._meta as Record<string, unknown> | undefined;
         if (
           hasDiscreteMessageMeta(data?.update?._meta) ||
-          meta?.['executionLifecycle'] !== undefined
+          meta?.['executionLifecycle'] !== undefined ||
+          meta?.['hookLifecycle'] !== undefined
         ) {
           this.slots.push({ kind: 'misc', event });
           break;

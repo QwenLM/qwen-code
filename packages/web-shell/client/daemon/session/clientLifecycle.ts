@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { randomUUID } from '../../utils/random-uuid.js';
 import { createDaemonRestRequest } from '../rest-request.js';
 
 // Keep the persisted key stable across the WebUI-to-Web-Shell migration.
@@ -81,11 +82,7 @@ export async function detachDaemonClient(opts: {
 }
 
 function createWebShellClientId(): string {
-  const random =
-    typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-      ? crypto.randomUUID()
-      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-  return `webui_${random}`;
+  return `webui_${randomUUID()}`;
 }
 
 function sessionClientIdKey(sessionId: string): string {
