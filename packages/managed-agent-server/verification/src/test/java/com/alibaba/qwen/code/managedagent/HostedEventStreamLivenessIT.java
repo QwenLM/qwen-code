@@ -239,6 +239,7 @@ class HostedEventStreamLivenessIT {
                 "--qwen.managed-agent.session-store.base-url=http://127.0.0.1:"
                         + springPort,
                 "--qwen.managed-agent.session-store.workspace-id=hosted-liveness-workspace",
+                "--qwen.managed-agent.trusted-actor-header=X-Qwen-Actor-Id",
                 "--qwen.managed-agent.harness.enabled=true",
                 "--qwen.managed-agent.harness.base-url=http://127.0.0.1:"
                         + relay.port(),
@@ -351,6 +352,11 @@ class HostedEventStreamLivenessIT {
                     URI.create("http://127.0.0.1:" + springPort + path))
                     .timeout(Duration.ofSeconds(10))
                     .header("X-Qwen-Tenant-Id", tenant)
+                // The ownership migration refuses actorless Session creation;
+                // the in-process stand-in supplies the trusted actor header,
+                // so this lane authenticates the way the packaged-HTTP lanes
+                // do.
+                .header("X-Qwen-Actor-Id", "liveness-gate")
                     .header("Accept", "application/json")
                     .method(method, body == null
                             ? HttpRequest.BodyPublishers.noBody()
