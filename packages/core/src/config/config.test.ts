@@ -7508,6 +7508,51 @@ describe('Server Config (config.ts)', () => {
       });
     });
 
+    describe('getAgentLoopPath', () => {
+      beforeEach(() => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
+      });
+      afterEach(() => vi.unstubAllEnvs());
+
+      it('defaults to legacy for every surface', () => {
+        for (const surface of AGENT_LOOP_SURFACES) {
+          expect(makeConfig().getAgentLoopPath(surface)).toBe('legacy');
+        }
+      });
+
+      it('is shared when unified is on and the kernel is off', () => {
+        expect(
+          makeConfig({ unifiedAgentLoopEnabled: true }).getAgentLoopPath('acp'),
+        ).toBe('shared');
+      });
+
+      it('is kernel when both switches are on', () => {
+        expect(
+          makeConfig({
+            unifiedAgentLoopEnabled: true,
+            eventBusAgentLoopEnabled: true,
+          }).getAgentLoopPath('acp'),
+        ).toBe('kernel');
+      });
+
+      it('stays legacy when only the kernel switch is on', () => {
+        expect(
+          makeConfig({ eventBusAgentLoopEnabled: true }).getAgentLoopPath(
+            'acp',
+          ),
+        ).toBe('legacy');
+      });
+
+      it('follows the env overrides that drive the switches', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'headless');
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', 'headless');
+        const config = makeConfig();
+        expect(config.getAgentLoopPath('headless')).toBe('kernel');
+        expect(config.getAgentLoopPath('acp')).toBe('legacy');
+      });
+    });
+
     describe('bundled review workflow activation', () => {
       beforeEach(() => {
         vi.stubEnv('QWEN_CODE_ENABLE_WORKFLOWS', undefined);

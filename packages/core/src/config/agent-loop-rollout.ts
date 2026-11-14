@@ -141,3 +141,27 @@ export function resolveAgentLoopSwitch(options: {
   if (options.setting !== undefined) return options.setting;
   return options.surfaceDefault;
 }
+
+/**
+ * The loop path a surface resolves to: its own legacy loop, the shared agent
+ * loop, or the event-bus kernel. Derived from the same two switches the
+ * surface reads, so the reported path cannot drift from the path taken.
+ */
+export type AgentLoopPath = 'legacy' | 'shared' | 'kernel';
+
+const entryLogger = createDebugLogger('LOOP');
+
+/**
+ * Records the loop path a surface resolved to at its loop entry (once per
+ * turn), including the legacy path, which otherwise logs nothing. The
+ * wording is deliberately distinct from the shared-loop round/batch markers
+ * the parity suites count, so this line cannot inflate their counts.
+ */
+export function logAgentLoopEntry(
+  config: { getAgentLoopPath?: (surface: AgentLoopSurface) => AgentLoopPath },
+  surface: AgentLoopSurface,
+): void {
+  const path = config.getAgentLoopPath?.(surface);
+  if (path === undefined) return;
+  entryLogger.debug(`${surface} ${path}`);
+}

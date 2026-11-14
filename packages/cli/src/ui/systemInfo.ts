@@ -18,7 +18,9 @@ import {
   formatMemoryUsage,
   type LspStatusSnapshot,
 } from '@qwen-code/qwen-code-core';
+import type { AgentLoopSurface } from '@qwen-code/qwen-code-core/config/agent-loop-rollout.js';
 import { GIT_COMMIT_INFO } from '../generated/git-commit.js';
+import { selectTuiRenderer } from './opentui/renderer-selection.js';
 
 const debugLogger = createDebugLogger('STATUS');
 
@@ -31,6 +33,12 @@ const debugLogger = createDebugLogger('STATUS');
  */
 type SystemInfoContext = {
   services: Partial<Pick<CommandContext['services'], 'config' | 'settings'>>;
+  /**
+   * Present for command invocations; absent for the Settings dialog, which
+   * has no execution mode and therefore omits the agent-loop line rather
+   * than guessing a surface.
+   */
+  executionMode?: CommandContext['executionMode'];
 };
 
 /**
@@ -63,6 +71,8 @@ export interface ExtendedSystemInfo extends SystemInfo {
   proxy?: string;
   fastModel?: string;
   lspStatus?: string;
+  /** The current surface and the loop path it resolves to, e.g. `ink: legacy`. */
+  agentLoop?: string;
 }
 
 // `execFile` (not the shell-spawning `exec`) so a hostile binary on PATH
@@ -242,6 +252,7 @@ export async function getExtendedSystemInfo(
     ? formatAuxModelSelectorForDisplay(fastModelSetting)
     : undefined;
   const lspStatus = getLspStatus(context);
+  const agentLoop = getAgentLoopInfo(context);
 
   return {
     ...baseInfo,
@@ -252,7 +263,47 @@ export async function getExtendedSystemInfo(
     gitCommit,
     fastModel,
     lspStatus,
+    agentLoop,
   };
+}
+
+/**
+ * The current surface and the loop path it resolves to, for /about and /bug.
+ * The surface comes from the execution mode; the interactive surface is the
+ * renderer of record, re-derived with the same gate the entry uses. Returns
+ * undefined when there is no execution mode (Settings dialog) or no config,
+ * so the line is omitted rather than guessed. Read-only: never throws.
+ */
+function getAgentLoopInfo(context: SystemInfoContext): string | undefined {
+  const config = context.services.config;
+  if (!config) return undefined;
+
+  let surface: AgentLoopSurface;
+  switch (context.executionMode) {
+    case 'non_interactive':
+      surface = 'headless';
+      break;
+    case 'acp':
+      surface = 'acp';
+      break;
+    case 'interactive':
+      try {
+        surface = selectTuiRenderer(
+          undefined,
+          undefined,
+          process.env,
+          config.getScreenReader(),
+        ).renderer;
+      } catch {
+        surface = 'ink';
+      }
+      break;
+    default:
+      return undefined;
+  }
+
+  const path = config.getAgentLoopPath?.(surface);
+  return path === undefined ? undefined : `${surface}: ${path}`;
 }
 
 function getLspStatus(context: SystemInfoContext): string | undefined {
