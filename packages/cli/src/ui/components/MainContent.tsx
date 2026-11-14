@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { Box, Static, type DOMElement } from 'ink';
+import { Box, Static, Text, type DOMElement } from 'ink';
 import {
   memo,
   useCallback,
@@ -35,6 +35,16 @@ import {
   type MarkdownSourceCopyIndexOffsets,
 } from '../utils/MarkdownDisplay.js';
 import { buildThoughtHeadIdMap } from '../utils/historyUtils.js';
+import { buildVirtualItems, type VpItem } from '../utils/virtual-items.js';
+import {
+  anchorOrdinal,
+  countAnchors,
+  createTranscriptNavCursor,
+  findAdjacentAnchor,
+  type AnchorDirection,
+  type TranscriptAnchorKind,
+} from '../utils/transcript-navigation.js';
+import { theme } from '../semantic-colors.js';
 import {
   ScrollableList,
   SCROLL_TO_ITEM_END,
@@ -108,14 +118,6 @@ function initialReplayCount(length: number): number {
 // stable completed items when unrelated UIState fields change during streaming.
 const VirtualHistoryItem = memo(HistoryItemDisplay);
 
-// Banner sentinel injected as the first virtual-scroll item so it scrolls with
-// content instead of being pinned at the top (saves vertical space on small
-// terminals).
-type VpBannerItem = { type: 'vp-banner'; id: number };
-type VpItem = HistoryItem | VpBannerItem;
-const VP_BANNER_ID = Number.MIN_SAFE_INTEGER;
-const VP_BANNER_ITEM: VpBannerItem = { type: 'vp-banner', id: VP_BANNER_ID };
-
 // Pure functions with no closure deps — defined outside the component so they
 // are stable references and never trigger useMemo/useCallback invalidation.
 // index 0 is always the banner sentinel (VP_BANNER_ITEM is prepended first).
@@ -170,6 +172,20 @@ export const MainContent = ({
   const selectionQueryRef = useRef<SelectionQuery | null>(null);
   const { menu: contextMenuOpen } = useContextMenu();
 
+  // Structure-navigation cursor. The viewport's scroll anchor clamps at the
+  // end of the transcript, so deriving repeated jumps from it would replay
+  // the same target forever; the cursor records the requested target instead
+  // and is reset whenever the reading position changes for another reason.
+  // Declared before the scroll-actions effect whose dependency list and
+  // callbacks reference it.
+  const navCursorRef = useRef<ReturnType<
+    typeof createTranscriptNavCursor
+  > | null>(null);
+  navCursorRef.current ??= createTranscriptNavCursor();
+  const resetNavCursor = useCallback(() => {
+    navCursorRef.current?.reset();
+  }, []);
+
   // Expose the transcript's scroll controls to sibling components (e.g.
   // InputPrompt) so bare Up/Down keys can scroll the conversation in VP mode
   // when the input is empty. The ref is populated here but the
@@ -178,7 +194,12 @@ export const MainContent = ({
   useEffect(() => {
     if (!scrollActionsRef) return;
     scrollActionsRef.current = {
-      scrollBy: (delta: number) => scrollRef.current?.scrollBy(delta),
+      scrollBy: (delta: number) => {
+        // Any scroll not caused by a structure jump moves the reading
+        // position, so the next jump starts from there.
+        resetNavCursor();
+        scrollRef.current?.scrollBy(delta);
+      },
       hasScrollableTranscript: () => {
         const state = scrollRef.current?.getScrollState();
         // innerHeight is 0 until the viewport has been measured.
@@ -188,11 +209,31 @@ export const MainContent = ({
           state.scrollHeight > state.innerHeight
         );
       },
+      // Item addressing only exists on the virtual viewport. The legacy
+      // <Static> path must report "unsupported" rather than pretend a jump
+      // happened, so search / structure navigation can surface a hint.
+      scrollToIndex: (index: number) => {
+        if (!useVirtualScroll) return false;
+        const list = scrollRef.current;
+        if (!list) return false;
+        // Search-driven jumps also move the reading position.
+        resetNavCursor();
+        list.scrollToIndex({ index });
+        return true;
+      },
+      scrollToEnd: () => {
+        resetNavCursor();
+        scrollRef.current?.scrollToEnd();
+      },
+      getScrollIndex: () => {
+        if (!useVirtualScroll) return null;
+        return scrollRef.current?.getScrollIndex() ?? null;
+      },
     };
     return () => {
       scrollActionsRef.current = null;
     };
-  }, [scrollActionsRef]);
+  }, [scrollActionsRef, useVirtualScroll, resetNavCursor]);
 
   const { historyItemsWithSourceCopyOffsets, pendingStartSourceCopyOffsets } =
     useMemo(() => {
@@ -324,57 +365,107 @@ export const MainContent = ({
       : historyItemsWithSourceCopyOffsets.slice(0, replayCount);
 
   // Combine completed history + live pending items for the virtualized list.
-  // The banner sentinel is prepended so it scrolls with content (not pinned).
-  // Pending items get negative IDs (-(i+1)) so renderItem can tell them apart.
-  const allVirtualItems = useMemo((): VpItem[] => {
-    const combined: VpItem[] = [
-      VP_BANNER_ITEM,
-      ...visibleHistory,
-      ...pendingHistoryItems.map((item, i) => ({ ...item, id: -(i + 1) })),
-    ];
-    // Collapse duplicate tool_group rows (#9420): the same in-flight batch
-    // renders from both committed history and the live pending list between
-    // the onComplete commit and the scheduler clearing its display state.
-    // Continuation thought/content items can land between the copies, so
-    // match across the whole list — never by adjacency — on the scheduler-
-    // minted batchId stamped on both copies of one batch, and only when a
-    // live pending counterpart exists (it keeps updating, so it wins).
-    // callIds are NOT an identity (ids are re-minted after core-history
-    // compaction and providers can reuse wire ids), so unrelated batches
-    // whose callIds collide keep rendering. Groups without a batchId
-    // (adapters) are never collapsed; restored-history ids are unique per
-    // mount, so they can never match a live pending batch either.
-    const livePendingBatchIds = new Set<string>();
-    for (const item of pendingHistoryItems) {
-      if (item.type === 'tool_group' && item.batchId !== undefined) {
-        livePendingBatchIds.add(item.batchId);
-      }
+  // buildVirtualItems is shared with transcript search and structure
+  // navigation, so an index computed by those features addresses the exact
+  // row this list renders (banner sentinel first, then committed history,
+  // then pending items with duplicate in-flight batches collapsed).
+  const allVirtualItems = useMemo(
+    () => buildVirtualItems(visibleHistory, pendingHistoryItems),
+    [visibleHistory, pendingHistoryItems],
+  );
+
+  // Structure navigation (turn / tool output). Read the item array through a
+  // ref so the key handler keeps a stable identity while history streams.
+  const allVirtualItemsRef = useRef(allVirtualItems);
+  allVirtualItemsRef.current = allVirtualItems;
+
+  // New output moves the reading position only when auto-follow actually
+  // re-anchors it. Resetting on EVERY append would instead replay a clamped
+  // jump mid-stream: the next keypress would fall back to the live anchor and
+  // choose the same target again. So compare the anchor before/after.
+  const navLastSeenAnchorRef = useRef<number | null>(null);
+  useEffect(() => {
+    const anchor = scrollRef.current?.getScrollIndex() ?? null;
+    if (anchor !== navLastSeenAnchorRef.current) {
+      navLastSeenAnchorRef.current = anchor;
+      resetNavCursor();
     }
-    if (livePendingBatchIds.size === 0) return combined;
-    const dropped = new Set<VpItem>();
-    const committedByBatchId = new Map<string, VpItem>();
-    // Same batch twice within the pending list: keep the latest copy only.
-    const keptPendingByBatchId = new Map<string, VpItem>();
-    for (const item of combined) {
-      if (
-        item.type !== 'tool_group' ||
-        item.batchId === undefined ||
-        !livePendingBatchIds.has(item.batchId)
-      ) {
-        continue;
-      }
-      if (item.id > 0) {
-        committedByBatchId.set(item.batchId, item);
-      } else {
-        const kept = keptPendingByBatchId.get(item.batchId);
-        if (kept) dropped.add(kept);
-        keptPendingByBatchId.set(item.batchId, item);
-      }
+  }, [allVirtualItems.length, resetNavCursor]);
+
+  // Transient "Turn 12/48" / "At first turn" notice shown under the viewport.
+  const [navNotice, setNavNotice] = useState<string | null>(null);
+  const navNoticeTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const showNavNotice = useCallback((text: string) => {
+    if (navNoticeTimerRef.current) {
+      clearTimeout(navNoticeTimerRef.current);
     }
-    for (const item of committedByBatchId.values()) dropped.add(item);
-    if (dropped.size === 0) return combined;
-    return combined.filter((item) => !dropped.has(item));
-  }, [visibleHistory, pendingHistoryItems]);
+    setNavNotice(text);
+    navNoticeTimerRef.current = setTimeout(() => {
+      setNavNotice(null);
+      navNoticeTimerRef.current = null;
+    }, 3000);
+  }, []);
+  useEffect(
+    () => () => {
+      if (navNoticeTimerRef.current) {
+        clearTimeout(navNoticeTimerRef.current);
+      }
+    },
+    [],
+  );
+
+  const navigateTranscript = useCallback(
+    (direction: AnchorDirection, kind: TranscriptAnchorKind) => {
+      const list = scrollRef.current;
+      if (!list) return;
+      const items = allVirtualItemsRef.current;
+      const label = kind === 'turn' ? 'turn' : 'output';
+      const cursor = navCursorRef.current;
+      const target = findAdjacentAnchor(
+        items,
+        // Start from the recorded navigation target when there is one (the
+        // live scroll anchor cannot be trusted after a clamped jump), and
+        // otherwise from the current reading position.
+        cursor ? cursor.origin(list.getScrollIndex()) : list.getScrollIndex(),
+        direction,
+        kind,
+      );
+      if (target === -1) {
+        if (direction === 'next') {
+          // Running off the newest anchor means "back to the live tail":
+          // scrollToEnd re-arms auto-follow, matching scroll-to-bottom.
+          cursor?.reset();
+          list.scrollToEnd();
+          showNavNotice(`At latest ${label}`);
+        } else {
+          showNavNotice(`At first ${label}`);
+        }
+        return;
+      }
+      cursor?.record(target);
+      list.scrollToIndex({ index: target });
+      showNavNotice(
+        `${kind === 'turn' ? 'Turn' : 'Output'} ${anchorOrdinal(
+          items,
+          target,
+          kind,
+        )}/${countAnchors(items, kind)}`,
+      );
+    },
+    [showNavNotice],
+  );
+
+  const btwPanelOwnsViewport =
+    uiState.btwItem !== null && !uiState.btwItem.btw.isPending;
+  const viewportInteractive =
+    useVirtualScroll &&
+    !uiState.dialogsVisible &&
+    contextMenuOpen === null &&
+    !btwPanelOwnsViewport;
+
+  // Structure-navigation keys are handled inside ScrollableList (which owns
+  // every other scroll keybinding) and call back into navigateTranscript, so
+  // this component adds no keypress subscription of its own.
 
   // Source-copy index offsets propagation. The legacy <Static> path threads
   // per-item offsets so `/copy mermaid N` / `/copy latex N` hints under each
@@ -543,12 +634,8 @@ export const MainContent = ({
     // keypress and wheel tick. A pending answer has no viewport yet — the
     // panel only mounts its scroller once the answer arrives — so during that
     // window the transcript keeps the keys instead of nothing owning them.
-    const btwPanelOwnsViewport =
-      uiState.btwItem !== null && !uiState.btwItem.btw.isPending;
-    const viewportInteractive =
-      !uiState.dialogsVisible &&
-      contextMenuOpen === null &&
-      !btwPanelOwnsViewport;
+    // btwPanelOwnsViewport / viewportInteractive are computed above the hooks
+    // so the structure-navigation keys obey the same ownership rules.
 
     return (
       <OverflowProvider>
@@ -566,6 +653,8 @@ export const MainContent = ({
           containerHeight={scrollContainerHeight}
           measureAtFullHeight={hasPendingPlainTextConfirmation}
           showScrollbar={showScrollbar}
+          onNavigateStructure={navigateTranscript}
+          onUserScroll={resetNavCursor}
         />
         <TextSelectionController
           isActive={!uiState.dialogsVisible}
@@ -596,6 +685,13 @@ export const MainContent = ({
           }
           selectionQueryRef={selectionQueryRef}
         />
+        {navNotice !== null && (
+          <Box>
+            <Text color={theme.text.secondary} wrap="truncate">
+              {navNotice}
+            </Text>
+          </Box>
+        )}
         <ShowMoreLines constrainHeight={uiState.constrainHeight} />
       </OverflowProvider>
     );

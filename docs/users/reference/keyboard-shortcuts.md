@@ -106,6 +106,19 @@ Press `Ctrl+R` to search prompt history, or shell history while shell mode is ac
 | `Enter`                      | Submit the selected entry.                                 |
 | `Esc`                        | Close history search.                                      |
 
+## Transcript Search
+
+Press `Alt/Option+S` to search **inside the current session** instead of the prompt history. The query matches user prompts, assistant replies, thinking blocks, tool arguments and tool output (including text inside structured tool results). It requires `ui.useTerminalBuffer` (Virtualized History); in legacy host-scrollback mode a hint explains that the feature is unavailable.
+
+| Shortcut                  | Description                                                                                  |
+| ------------------------- | -------------------------------------------------------------------------------------------- |
+| `Alt/Option+S`            | Open transcript search. The composer becomes the query field and matches update as you type. |
+| `Up Arrow` / `Down Arrow` | Jump to the previous / next match, anchored at the top of the viewport.                      |
+| `Enter`                   | Close the search and keep the current match on screen.                                       |
+| `Esc`                     | Close the search and restore both the draft text and the viewport position you started from. |
+
+Matches are counted per transcript item (one per prompt, reply or tool group) and shown as `current/total` with a one-line snippet. A new query starts from the match closest above your current viewport position, so the most recent matching command output is usually one keystroke away.
+
 ## Radio Button Select
 
 | Shortcut                      | Description                                                                                                   |
@@ -128,7 +141,13 @@ Active when `ui.useTerminalBuffer` is enabled (Settings → UI → Virtualized H
 | `PgDn`          | Scroll history down one page (viewport height).                                 |
 | `Ctrl+Home`     | Jump to the top of the conversation.                                            |
 | `Ctrl+End`      | Jump to the bottom (and re-engage live auto-follow).                            |
+| `Alt+PgUp`      | Jump to the previous turn (your previous prompt), anchored at the top.          |
+| `Alt+PgDn`      | Jump to the next turn, or back to live output when there is no later turn.      |
+| `Ctrl+Alt+Up`   | Jump to the previous tool output block, anchored at the top.                    |
+| `Ctrl+Alt+Down` | Jump to the next tool output block.                                             |
 | **Mouse wheel** | Scroll history (3 lines per tick). Requires `ui.mouseTracking` (on by default). |
+
+Structure jumps move by conversation structure rather than by distance: a turn starts at your own prompt, and a tool output block is one `Tool:` group. Each jump shows a transient `Turn 12/48` (or `Output 3/9`) indicator under the viewport, and jumping past the newest one returns to live auto-follow.
 
 When `ui.useTerminalBuffer` is on and `ui.mouseTracking` is enabled (the default), the terminal forwards mouse events to qwen-code so the wheel can drive the in-app viewport. As a side effect, native click-and-drag text selection is consumed by the program, so qwen-code provides its own: **drag to select text in the history viewport, double-click to select a word, triple-click to select a line.** The selection is highlighted and copied to the clipboard when you release the mouse (works locally, over SSH via OSC 52, and inside tmux). A single click clears the selection; scrolling or new output clears it too. Selection is limited to the visible viewport for now. You can still fall back to the terminal's own selection by holding `Shift` (or `Option` on macOS Terminal / iTerm) while dragging.
 
