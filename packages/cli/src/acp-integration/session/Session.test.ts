@@ -5069,6 +5069,38 @@ describe('Session', () => {
     ) {
       const results = [];
       for (const request of requests) {
+        const tool = mockToolRegistry.getTool(request.name);
+        // The shared scheduler's cut-off guard: a truncated response never
+        // builds a partial edit.
+        if (
+          request.wasOutputTruncated === true &&
+          tool.kind === core.Kind.Edit
+        ) {
+          results.push({
+            request,
+            executionRequest: request,
+            response: {
+              callId: request.callId,
+              responseParts: [
+                {
+                  functionResponse: {
+                    id: request.callId,
+                    name: request.name,
+                    response: {
+                      error:
+                        'This file edit was truncated due to max_tokens limit and was not applied',
+                    },
+                  },
+                },
+              ],
+              errorType: core.ToolErrorType.OUTPUT_TRUNCATED,
+              executionStatus: 'not_started',
+            },
+            status: 'error',
+            origin: 'executed',
+          });
+          continue;
+        }
         const output = await mockToolRegistry
           .getTool(request.name)
           .build(request.args)
@@ -5414,27 +5446,35 @@ describe('Session', () => {
       ]);
     });
 
-    it('keeps its own tool step and tool-call guards in a session with live tools', async () => {
+    it('runs the shared tool batch in a session with live tools', async () => {
       const execute = useTool(core.Kind.Edit, 'write_file');
       (
         session as unknown as { liveScreenContextTool: object }
       ).liveScreenContextTool = {};
+      const cutCall = toolCall({
+        id: 'call-cut',
+        name: 'write_file',
+        args: { file_path: '/tmp/notes.txt', content: 'p' },
+      }) as {
+        type: core.LlmEventType;
+        value: core.ToolCallRequestInfo;
+        functionCall: FunctionCall;
+      };
+      // The client marks the cut response's pending calls truncated; the
+      // mocked model stream omits that step, so mark the request here.
+      cutCall.value.wasOutputTruncated = true;
       const send = useSharedRounds([
-        toolCall({
-          id: 'call-cut',
-          name: 'write_file',
-          args: { file_path: '/tmp/notes.txt', content: 'p' },
-        }),
+        cutCall,
         finished(FinishReason.MAX_TOKENS),
       ]);
 
       await prompt();
 
-      expect(runAcpToolBatchSpy).not.toHaveBeenCalled();
-      expect(send.mock.calls[0][3]).toMatchObject({
-        toolLoopGuardsByHost: true,
-      });
-      // The session's own executor refuses the edit the limit cut off.
+      // A live session no longer leaves the shared batch; the shared
+      // scheduler applies the same cut-off refusal as the session's own
+      // executor did.
+      expect(runAcpToolBatchSpy).toHaveBeenCalledOnce();
+      expect(send.mock.calls[0][3]).not.toHaveProperty('toolLoopGuardsByHost');
       expect(execute).not.toHaveBeenCalled();
       expect(JSON.stringify(send.mock.calls[1][0])).toContain(
         'truncated due to max_tokens limit',
@@ -5875,7 +5915,7 @@ describe('Session', () => {
       },
     );
 
-    it('gives a Stop hook continuation a fresh host-owned tool budget with Live tools', async () => {
+    it('gives a Stop hook continuation a fresh tool budget with Live tools on the shared batch', async () => {
       const execute = useTool(core.Kind.Read, 'read_file');
       const registered = new Map<string, core.AnyDeclarativeTool>();
       registered.set('read_file', mockToolRegistry.getTool('read_file'));
@@ -5919,11 +5959,9 @@ describe('Session', () => {
 
       await expect(prompt()).resolves.toEqual({ stopReason: 'end_turn' });
 
-      expect(send.mock.calls[0][3]).toMatchObject({
-        toolLoopGuardsByHost: true,
-      });
+      expect(send.mock.calls[0][3]).not.toHaveProperty('toolLoopGuardsByHost');
       expect(execute).toHaveBeenCalledTimes(2);
-      expect(runAcpToolBatchSpy).not.toHaveBeenCalled();
+      expect(runAcpToolBatchSpy).toHaveBeenCalledTimes(2);
     });
 
     it("leaves the turn's background results that arrive after its response to a notification turn", async () => {
@@ -43483,6 +43521,47 @@ describe('Session', () => {
         .fn()
         .mockReturnValue(permissionManager);
       mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      // The batch host takes the live trust, not the session's own tool
+      // step; drive the batch with the real registry so the live tool runs.
+      runAcpToolBatchSpy.mockImplementationOnce(
+        async (
+          _host: unknown,
+          { requests }: { requests: core.ToolCallRequestInfo[] },
+        ) => {
+          const results = [];
+          for (const request of requests) {
+            const output = await mockToolRegistry
+              .getTool(request.name)
+              .build(request.args)
+              .execute(new AbortController().signal);
+            results.push({
+              request,
+              executionRequest: request,
+              response: {
+                callId: request.callId,
+                responseParts: [
+                  {
+                    functionResponse: {
+                      id: request.callId,
+                      name: request.name,
+                      response: { output: output.llmContent },
+                    },
+                  },
+                ],
+                resultDisplay: output.returnDisplay,
+                executionStatus: 'success',
+              },
+              status: 'success',
+              origin: 'executed',
+            });
+          }
+          return {
+            parts: results.flatMap(({ response }) => response.responseParts),
+            results,
+            stopAfterPermissionCancel: false,
+          };
+        },
+      );
       mockChat.sendMessageStream = vi.fn().mockResolvedValue(
         createStreamWithChunks([
           {
@@ -43555,6 +43634,15 @@ describe('Session', () => {
         .mockReturnValue(ApprovalMode.DEFAULT);
       mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
       mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      // Run the real batch so the ordinary tool keeps its ACP permission
+      // round-trip on the shared step.
+      runAcpToolBatchSpy.mockImplementationOnce(
+        (
+          await vi.importActual<typeof import('./acp-tool-batch.js')>(
+            './acp-tool-batch.js',
+          )
+        ).runAcpToolBatch as never,
+      );
       mockChat.sendMessageStream = vi.fn().mockResolvedValue(
         createStreamWithChunks([
           {

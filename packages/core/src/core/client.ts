@@ -293,7 +293,6 @@ function hostContinuationOptions(
     ...(options?.interactionSpan && {
       interactionSpan: options.interactionSpan,
     }),
-    ...(options?.toolLoopGuardsByHost && { toolLoopGuardsByHost: true }),
     ...(options?.skipMemoryExtraction && { skipMemoryExtraction: true }),
     ...(options?.stopPolicies && { stopPolicies: options.stopPolicies }),
     // A Goal turn's continuation runs under the same permit.
@@ -469,14 +468,6 @@ export interface SendMessageOptions {
    * a caller that passes a span it does not own gets no lifecycle at all.
    */
   interactionSpan?: Span;
-  /**
-   * The host runs its own tool-call guards and exploration budget and builds
-   * the tool-result message with its todo reminder, so this send checks no
-   * tool-call patterns and adds neither reminder. The content and thought
-   * heuristics still run, and a tool-result send still carries their loop
-   * reminder and the memory recall.
-   */
-  toolLoopGuardsByHost?: boolean;
   /** Returns user input waiting to steer the active turn at a model boundary. */
   getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
   /** Steer lease already appended to this request, settled after history push. */
@@ -4833,8 +4824,7 @@ export class LlmClient {
     const ownsExplorationBudget =
       !options?.isConcurrentSideQuery &&
       prompt_id === this.toolExplorationBudgetPromptId;
-    const ownsToolLoopGuards =
-      ownsExplorationBudget && !options?.toolLoopGuardsByHost;
+    const ownsToolLoopGuards = ownsExplorationBudget;
     // The delivery was prepared before the request went out, so commit vs
     // discard rides on whether the model accepted the request (any streamed
     // event). A loop-detection halt after acceptance must commit: the memory
@@ -5455,132 +5445,126 @@ export class LlmClient {
 
       if (messageType === SendMessageType.ToolResult) {
         let carriesAgentToolResult = false;
-        // A host that runs its own tool-call guards also builds the
-        // tool-result message with its own todo reminder.
-        if (!options?.toolLoopGuardsByHost) {
-          // Record executed tool results for stateful read tools (task_list)
-          // so the loop guards can distinguish productive re-polling — the
-          // shared task board changed between identical calls — from a stuck
-          // loop (issue #9450). A detection here (the result-aware global
-          // duplicate count) halts the turn exactly like the event-loop
-          // guards below.
-          for (const part of requestToSend) {
-            if (
-              typeof part !== 'object' ||
-              part === null ||
-              !('functionResponse' in part)
-            ) {
-              continue;
-            }
-            const functionResponseId = (part as Part).functionResponse?.id;
-            if (!functionResponseId) continue;
-            if (
-              this.loopDetector.recordToolResultByCallId(
-                functionResponseId,
-                [part as Part],
-                { queueReminders: ownsExplorationBudget },
-              )
-            ) {
-              for (const goalEvent of await finalizeInterruptedGoalTurn(
-                undefined,
-                'loop detected',
-              )) {
-                yield goalEvent;
-              }
-              const loopType = this.loopDetector.getLastLoopType();
-              yield {
-                type: LlmEventType.LoopDetected,
-                ...(loopType && {
-                  value: { loopType, ...this.loopDetector.getLastLoopDetail() },
-                }),
-              };
-              await arenaAgentClient?.reportError('Loop detected');
-              this.lastApiCompletionTimestamp = Date.now();
-              endCurrentInteraction('error', 'loop detected', 'loop_detected');
-              this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
-              this.fireLoopDetectedStopFailure(loopType);
-              return turn;
-            }
+        // Record executed tool results for stateful read tools (task_list)
+        // so the loop guards can distinguish productive re-polling — the
+        // shared task board changed between identical calls — from a stuck
+        // loop (issue #9450). A detection here (the result-aware global
+        // duplicate count) halts the turn exactly like the event-loop
+        // guards below.
+        for (const part of requestToSend) {
+          if (
+            typeof part !== 'object' ||
+            part === null ||
+            !('functionResponse' in part)
+          ) {
+            continue;
           }
-          // A top-level Agent tool result means a delegated execution just
-          // returned (#10953): real work advanced while the parent earned a
-          // single tool turn, so the turn budget cannot come due on its own.
-          // Force the reminder exactly where the progress information arrives.
-          // A bridged delegation returns under the tool_call envelope (the
-          // scheduler keeps the model-facing request name on the response
-          // part), so also correlate by call id with the functionCall recorded
-          // in history and unwrap the resolved target — the same correlation
-          // seedRecentCompletedToolNamesFromHistory uses. The force stays
-          // specific to calls that actually resolved to Agent: the goal tools
-          // are bridged too, and per-turn injection grows context linearly.
-          let bridgedResponseIds: Set<string> | undefined;
-          for (const part of requestToSend) {
-            if (typeof part !== 'object' || part === null) {
-              continue;
+          const functionResponseId = (part as Part).functionResponse?.id;
+          if (!functionResponseId) continue;
+          if (
+            this.loopDetector.recordToolResultByCallId(
+              functionResponseId,
+              [part as Part],
+              { queueReminders: ownsExplorationBudget },
+            )
+          ) {
+            for (const goalEvent of await finalizeInterruptedGoalTurn(
+              undefined,
+              'loop detected',
+            )) {
+              yield goalEvent;
             }
-            const response = part.functionResponse;
-            if (!response) {
-              continue;
-            }
-            if (canonicalToolName(response.name ?? '') === ToolNames.AGENT) {
-              carriesAgentToolResult = true;
-              break;
-            }
-            if (response.name === ToolNames.TOOL_CALL && response.id) {
-              // The bridge prefixes mark calls that never started. A bridged
-              // Agent that ran before failing or being cancelled carries an
-              // unprefixed error: real work advanced, so force the reminder
-              // like the direct-Agent branch and the history seeding pass.
-              const errorText = (
-                response.response as Record<string, unknown> | undefined
-              )?.['error'];
-              if (
-                typeof errorText === 'string' &&
-                (errorText.startsWith(DEFERRED_TOOL_CALL_REFUSAL_PREFIX) ||
-                  errorText.startsWith(DEFERRED_TOOL_CALL_CANCELLATION_PREFIX))
-              ) {
-                continue;
-              }
-              (bridgedResponseIds ??= new Set<string>()).add(response.id);
-            }
-          }
-          if (!carriesAgentToolResult && bridgedResponseIds) {
-            // Newest-first over raw history: the matching functionCall is the
-            // model message that just ran, so the scan exits at the first
-            // hit instead of cloning and walking the whole history per send.
-            carriesAgentToolResult =
-              this.getChat().findLastHistoryEntry((message) =>
-                (message.parts ?? []).some((historyPart) => {
-                  const call = historyPart.functionCall;
-                  if (
-                    call?.name !== ToolNames.TOOL_CALL ||
-                    !call.id ||
-                    !bridgedResponseIds.has(call.id)
-                  ) {
-                    return false;
-                  }
-                  const bridgedName = (
-                    call.args as Record<string, unknown> | undefined
-                  )?.['name'];
-                  if (typeof bridgedName !== 'string') {
-                    return false;
-                  }
-                  const targetName = canonicalToolName(bridgedName);
-                  return (
-                    (resolveRegisteredToolName(
-                      targetName,
-                      this.config.getToolRegistry().getAllToolNames(),
-                    ) ?? targetName) === ToolNames.AGENT
-                  );
-                }),
-              ) !== undefined;
+            const loopType = this.loopDetector.getLastLoopType();
+            yield {
+              type: LlmEventType.LoopDetected,
+              ...(loopType && {
+                value: { loopType, ...this.loopDetector.getLastLoopDetail() },
+              }),
+            };
+            await arenaAgentClient?.reportError('Loop detected');
+            this.lastApiCompletionTimestamp = Date.now();
+            endCurrentInteraction('error', 'loop detected', 'loop_detected');
+            this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
+            this.fireLoopDetectedStopFailure(loopType);
+            return turn;
           }
         }
-        const activeTodoReminder = options?.toolLoopGuardsByHost
-          ? undefined
-          : carriesAgentToolResult
-            ? this.config.takeActiveTodoReminder(prompt_id, true)
-            : this.config.takeActiveTodoReminder(prompt_id);
+        // A top-level Agent tool result means a delegated execution just
+        // returned (#10953): real work advanced while the parent earned a
+        // single tool turn, so the turn budget cannot come due on its own.
+        // Force the reminder exactly where the progress information arrives.
+        // A bridged delegation returns under the tool_call envelope (the
+        // scheduler keeps the model-facing request name on the response
+        // part), so also correlate by call id with the functionCall recorded
+        // in history and unwrap the resolved target — the same correlation
+        // seedRecentCompletedToolNamesFromHistory uses. The force stays
+        // specific to calls that actually resolved to Agent: the goal tools
+        // are bridged too, and per-turn injection grows context linearly.
+        let bridgedResponseIds: Set<string> | undefined;
+        for (const part of requestToSend) {
+          if (typeof part !== 'object' || part === null) {
+            continue;
+          }
+          const response = part.functionResponse;
+          if (!response) {
+            continue;
+          }
+          if (canonicalToolName(response.name ?? '') === ToolNames.AGENT) {
+            carriesAgentToolResult = true;
+            break;
+          }
+          if (response.name === ToolNames.TOOL_CALL && response.id) {
+            // The bridge prefixes mark calls that never started. A bridged
+            // Agent that ran before failing or being cancelled carries an
+            // unprefixed error: real work advanced, so force the reminder
+            // like the direct-Agent branch and the history seeding pass.
+            const errorText = (
+              response.response as Record<string, unknown> | undefined
+            )?.['error'];
+            if (
+              typeof errorText === 'string' &&
+              (errorText.startsWith(DEFERRED_TOOL_CALL_REFUSAL_PREFIX) ||
+                errorText.startsWith(DEFERRED_TOOL_CALL_CANCELLATION_PREFIX))
+            ) {
+              continue;
+            }
+            (bridgedResponseIds ??= new Set<string>()).add(response.id);
+          }
+        }
+        if (!carriesAgentToolResult && bridgedResponseIds) {
+          // Newest-first over raw history: the matching functionCall is the
+          // model message that just ran, so the scan exits at the first
+          // hit instead of cloning and walking the whole history per send.
+          carriesAgentToolResult =
+            this.getChat().findLastHistoryEntry((message) =>
+              (message.parts ?? []).some((historyPart) => {
+                const call = historyPart.functionCall;
+                if (
+                  call?.name !== ToolNames.TOOL_CALL ||
+                  !call.id ||
+                  !bridgedResponseIds.has(call.id)
+                ) {
+                  return false;
+                }
+                const bridgedName = (
+                  call.args as Record<string, unknown> | undefined
+                )?.['name'];
+                if (typeof bridgedName !== 'string') {
+                  return false;
+                }
+                const targetName = canonicalToolName(bridgedName);
+                return (
+                  (resolveRegisteredToolName(
+                    targetName,
+                    this.config.getToolRegistry().getAllToolNames(),
+                  ) ?? targetName) === ToolNames.AGENT
+                );
+              }),
+            ) !== undefined;
+        }
+        const activeTodoReminder = carriesAgentToolResult
+          ? this.config.takeActiveTodoReminder(prompt_id, true)
+          : this.config.takeActiveTodoReminder(prompt_id);
         const explorationReminder =
           this.loopDetector.isDisabledForSession() || !ownsToolLoopGuards
             ? undefined
@@ -5770,7 +5754,6 @@ export class LlmClient {
           // whether they remind or stop.
           const alwaysOnLoop =
             !duplicateLoopGuardRequest &&
-            !options?.toolLoopGuardsByHost &&
             this.loopDetector.checkAlwaysOnSafeties(event, {
               queueReminders: ownsExplorationBudget,
             });
@@ -5853,7 +5836,7 @@ export class LlmClient {
             !skipLoopDetection &&
             this.loopDetector.addAndCheckHeuristicLoops(event, {
               queueReminders: ownsExplorationBudget,
-              toolCallPatterns: !options?.toolLoopGuardsByHost,
+              toolCallPatterns: true,
             });
           if (heuristicLoop) {
             for (const goalEvent of await finalizeInterruptedGoalTurn(
