@@ -1,0 +1,868 @@
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import {
+  constants,
+  linkSync,
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  QQ_OUTBOUND_FILE_MAX_BYTES,
+  QQ_OUTBOUND_IMAGE_MAX_BYTES,
+  QQ_OUTBOUND_VIDEO_MAX_BYTES,
+  QQ_OUTBOUND_VOICE_MAX_BYTES,
+  buildFileTools,
+  readOutboundFile,
+  type QQFileToolDeps,
+  type QQMediaKind,
+} from './file-tools.js';
+
+// A real file outside both the session workspace and the system temporary
+// directory. It must exist on the platform running these tests — the macOS and
+// Windows lanes would otherwise fail on a missing path before the boundary
+// check gets a chance to refuse it.
+const OUTSIDE_PATH =
+  process.platform === 'win32' ? 'C:\\Windows\\win.ini' : '/etc/hosts';
+
+// Two guards are only observable through the descriptor the module opens, so
+// node:fs is partially mocked: the wrappers delegate to the real functions
+// unless a test replaces them.
+const fsHooks = vi.hoisted(() => ({
+  realOpenSync: undefined as typeof import('node:fs').openSync | undefined,
+  realFstatSync: undefined as typeof import('node:fs').fstatSync | undefined,
+  realLstatSync: undefined as typeof import('node:fs').lstatSync | undefined,
+  realReadlinkSync: undefined as
+    | typeof import('node:fs').readlinkSync
+    | undefined,
+  realExistsSync: undefined as typeof import('node:fs').existsSync | undefined,
+  realConstants: undefined as typeof import('node:fs').constants | undefined,
+  constants: undefined as typeof import('node:fs').constants | undefined,
+  openSync: vi.fn(),
+  fstatSync: vi.fn(),
+  lstatSync: vi.fn(),
+  readlinkSync: vi.fn(),
+  existsSync: vi.fn(),
+}));
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  fsHooks.realOpenSync = actual.openSync;
+  fsHooks.realFstatSync = actual.fstatSync;
+  fsHooks.realLstatSync = actual.lstatSync;
+  fsHooks.realReadlinkSync = actual.readlinkSync;
+  fsHooks.realExistsSync = actual.existsSync;
+  fsHooks.realConstants = actual.constants;
+  fsHooks.constants = actual.constants;
+  // `constants` is read at call time through the proxy, so a test can present
+  // the flag set of a platform without `O_NOFOLLOW`.
+  const constantsProxy = new Proxy({} as typeof actual.constants, {
+    get: (_target, property) =>
+      (fsHooks.constants as unknown as Record<PropertyKey, unknown>)[
+        property
+      ] as never,
+  });
+  return {
+    ...actual,
+    constants: constantsProxy,
+    openSync: fsHooks.openSync,
+    fstatSync: fsHooks.fstatSync,
+    lstatSync: fsHooks.lstatSync,
+    readlinkSync: fsHooks.readlinkSync,
+    existsSync: fsHooks.existsSync,
+  };
+});
+
+// The reported temporary directory is a mockable seam too: one containment case
+// needs a workspace that is outside the process's real temporary directory.
+const osHooks = vi.hoisted(() => ({
+  realTmpdir: undefined as typeof import('node:os').tmpdir | undefined,
+  tmpdir: vi.fn(),
+}));
+
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  osHooks.realTmpdir = actual.tmpdir;
+  return { ...actual, tmpdir: osHooks.tmpdir };
+});
+
+beforeEach(() => {
+  fsHooks.openSync.mockReset();
+  fsHooks.openSync.mockImplementation(fsHooks.realOpenSync as never);
+  fsHooks.fstatSync.mockReset();
+  fsHooks.fstatSync.mockImplementation(fsHooks.realFstatSync as never);
+  fsHooks.lstatSync.mockReset();
+  fsHooks.lstatSync.mockImplementation(fsHooks.realLstatSync as never);
+  fsHooks.readlinkSync.mockReset();
+  fsHooks.readlinkSync.mockImplementation(fsHooks.realReadlinkSync as never);
+  fsHooks.existsSync.mockReset();
+  fsHooks.existsSync.mockImplementation(fsHooks.realExistsSync as never);
+  fsHooks.constants = fsHooks.realConstants;
+  osHooks.tmpdir.mockReset();
+  osHooks.tmpdir.mockImplementation(osHooks.realTmpdir as never);
+});
+
+describe('readOutboundFile', () => {
+  let root: string;
+  let workspace: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'qq-file-tools-'));
+    workspace = join(root, 'workspace');
+    mkdirSync(workspace);
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('reads a file inside the session workspace', () => {
+    const path = join(workspace, 'report.txt');
+    writeFileSync(path, 'hello');
+
+    const file = readOutboundFile(path, workspace);
+
+    expect(file.bytes.toString()).toBe('hello');
+    expect(file.fileName).toBe('report.txt');
+  });
+
+  it('reads a file under the system temporary directory', () => {
+    const path = join(root, 'outside-workspace.txt');
+    writeFileSync(path, 'tmp');
+
+    // root is a mkdtemp under tmpdir(), so it is inside the second root.
+    const file = readOutboundFile(path, workspace);
+
+    expect(file.bytes.toString()).toBe('tmp');
+  });
+
+  it('rejects a relative path', () => {
+    expect(() => readOutboundFile('report.txt', workspace)).toThrow(
+      /must be absolute/,
+    );
+  });
+
+  it('rejects a path outside the workspace and the temporary directory', () => {
+    expect(() => readOutboundFile(OUTSIDE_PATH, workspace)).toThrow(
+      /outside the session workspace/,
+    );
+  });
+
+  it('rejects a symlink that escapes the workspace', () => {
+    const link = join(workspace, 'escape.txt');
+    symlinkSync(OUTSIDE_PATH, link);
+
+    // realpath resolves the link before the root check, so the escape is caught
+    // even though the link itself sits inside the workspace.
+    expect(() => readOutboundFile(link, workspace)).toThrow(
+      /outside the session workspace/,
+    );
+  });
+
+  it('rejects a directory', () => {
+    expect(() => readOutboundFile(workspace, workspace)).toThrow(
+      /not a regular file/,
+    );
+  });
+
+  it('rejects an empty file', () => {
+    const path = join(workspace, 'empty.txt');
+    writeFileSync(path, '');
+
+    expect(() => readOutboundFile(path, workspace)).toThrow(/is empty/);
+  });
+
+  it('rejects a missing file', () => {
+    expect(() =>
+      readOutboundFile(join(workspace, 'nope.txt'), workspace),
+    ).toThrow(/does not exist/);
+  });
+
+  it('rejects a file with more than one hard link', () => {
+    const outside = join(root, 'outside.txt');
+    writeFileSync(outside, 'linked bytes');
+    const link = join(workspace, 'leak.txt');
+    linkSync(outside, link);
+
+    // A hard link has no target for realpath to resolve, so the path check
+    // alone would read the linked contents; the link count is the guard.
+    expect(() => readOutboundFile(link, workspace)).toThrow(
+      /more than one hard link/,
+    );
+  });
+
+  // The post-open re-check reads the kernel-recorded descriptor path through
+  // procfs; macOS and Windows take the documented pre-open-only path.
+  const itLinux = process.platform === 'linux' ? it : it.skip;
+
+  itLinux('refuses a descriptor that procfs reports outside the roots', () => {
+    const path = join(workspace, 'report.txt');
+    writeFileSync(path, 'hello');
+    // Simulate a directory component swapped between realpath() and open(): the
+    // descriptor points outside, and the outside file is unlinked before the
+    // guard runs, so realpath() on the descriptor throws ENOENT and would skip
+    // the check. The path the kernel recorded still names the outside file.
+    fsHooks.readlinkSync.mockImplementationOnce(
+      () => `${OUTSIDE_PATH} (deleted)`,
+    );
+
+    expect(() => readOutboundFile(path, workspace)).toThrow(
+      /outside the session workspace/,
+    );
+  });
+
+  itLinux('refuses a sibling whose literal name is the deletion marker', () => {
+    const path = join(workspace, 'report.txt');
+    writeFileSync(path, 'hello');
+    // A real file may carry the literal name `<workspace> (deleted)` beside the
+    // workspace, and the kernel appends the same text to an unlinked file's
+    // link. Trimming the suffix would collapse this path onto the workspace root
+    // and pass the equality arm, so the recorded path is compared as it is. The
+    // temporary directory is pointed elsewhere so that sibling is outside both
+    // allowed roots, as it is for a workspace outside the system temp dir.
+    osHooks.tmpdir.mockReturnValue(join(root, 'elsewhere'));
+    fsHooks.readlinkSync.mockImplementationOnce(() => `${workspace} (deleted)`);
+
+    expect(() => readOutboundFile(path, workspace)).toThrow(
+      /outside the session workspace/,
+    );
+  });
+
+  itLinux(
+    'fails closed when procfs exists but the descriptor link is gone',
+    () => {
+      const path = join(workspace, 'report.txt');
+      writeFileSync(path, 'hello');
+      fsHooks.readlinkSync.mockImplementationOnce(() => {
+        throw Object.assign(new Error('ENOENT: no such file or directory'), {
+          code: 'ENOENT',
+        });
+      });
+
+      expect(() => readOutboundFile(path, workspace)).toThrow(
+        /could not be identified after opening/,
+      );
+    },
+  );
+
+  itLinux('keeps the pre-open guard alone where procfs is absent', () => {
+    const path = join(workspace, 'report.txt');
+    writeFileSync(path, 'hello');
+    // macOS and Windows expose no `/proc/self/fd`; the same code runs there in
+    // the nightly lanes, where an upload must not start failing.
+    fsHooks.existsSync.mockImplementation(
+      ((p: string) => p !== '/proc/self/fd') as never,
+    );
+    fsHooks.readlinkSync.mockImplementationOnce(() => {
+      throw Object.assign(new Error('ENOENT: no such file or directory'), {
+        code: 'ENOENT',
+      });
+    });
+
+    expect(readOutboundFile(path, workspace).bytes.toString()).toBe('hello');
+  });
+
+  // Windows has neither constant (`fs.constants.O_NOFOLLOW`/`O_NONBLOCK` are
+  // `undefined` there), so `flags & undefined` is 0 and the assertion can never
+  // hold; the suite is red on the Windows lane if it runs. Same skip pattern as
+  // backgroundShellRegistry.test.ts.
+  const itPosixOpenFlags =
+    constants.O_NOFOLLOW === undefined || constants.O_NONBLOCK === undefined
+      ? it.skip
+      : it;
+
+  /** Run with the flag set of a platform that has no `O_NOFOLLOW`. */
+  const withoutNoFollowFlags = <T>(run: () => T): T => {
+    const previous = fsHooks.constants;
+    fsHooks.constants = {
+      ...(fsHooks.realConstants as unknown as Record<string, unknown>),
+      O_NOFOLLOW: undefined,
+      O_NONBLOCK: undefined,
+    } as unknown as typeof import('node:fs').constants;
+    try {
+      return run();
+    } finally {
+      fsHooks.constants = previous;
+    }
+  };
+
+  it('proves the opened identity where O_NOFOLLOW is unavailable', () => {
+    const path = join(workspace, 'report.txt');
+    const other = join(workspace, 'other.txt');
+    writeFileSync(path, 'hello');
+    writeFileSync(other, 'other');
+    // The open lands on a different file than the pre-open lstat saw, as it
+    // would on a platform whose open cannot refuse a swapped symlink.
+    const realOpen = fsHooks.realOpenSync!;
+    fsHooks.openSync.mockImplementation(((p: string, flags: number) =>
+      realOpen(other, flags)) as never);
+
+    expect(() =>
+      withoutNoFollowFlags(() => readOutboundFile(path, workspace)),
+    ).toThrow(/changed between the check and the open/);
+  });
+
+  it('refuses a symlink resurfacing where O_NOFOLLOW is unavailable', () => {
+    const path = join(workspace, 'report.txt');
+    writeFileSync(path, 'hello');
+    fsHooks.lstatSync.mockImplementationOnce((() => ({
+      isSymbolicLink: () => true,
+      dev: 1n,
+      ino: 1n,
+    })) as never);
+
+    expect(() =>
+      withoutNoFollowFlags(() => readOutboundFile(path, workspace)),
+    ).toThrow(/replaced by a symlink/);
+  });
+
+  it('refuses an unprovable identity where O_NOFOLLOW is unavailable', () => {
+    const path = join(workspace, 'report.txt');
+    writeFileSync(path, 'hello');
+    fsHooks.lstatSync.mockImplementationOnce((() => ({
+      isSymbolicLink: () => false,
+      dev: 1n,
+      ino: 0n,
+    })) as never);
+
+    expect(() =>
+      withoutNoFollowFlags(() => readOutboundFile(path, workspace)),
+    ).toThrow(/identity cannot be verified/);
+  });
+
+  itPosixOpenFlags('opens with O_NOFOLLOW and O_NONBLOCK', () => {
+    const path = join(workspace, 'report.txt');
+    writeFileSync(path, 'hello');
+
+    readOutboundFile(path, workspace);
+
+    expect(fsHooks.openSync).toHaveBeenCalledTimes(1);
+    const flags = fsHooks.openSync.mock.calls[0]![1] as number;
+    expect(flags & constants.O_NOFOLLOW).toBe(constants.O_NOFOLLOW);
+    expect(flags & constants.O_NONBLOCK).toBe(constants.O_NONBLOCK);
+  });
+
+  it('reports a file rewritten between the two stat calls', () => {
+    const path = join(workspace, 'report.txt');
+    writeFileSync(path, 'hello');
+    const real = fsHooks.realFstatSync!;
+    fsHooks.fstatSync
+      .mockImplementationOnce(real as never)
+      .mockImplementationOnce(((fd: number) => {
+        const stat = real(fd);
+        return { ...stat, mtimeMs: stat.mtimeMs + 1 };
+      }) as never);
+
+    expect(() => readOutboundFile(path, workspace)).toThrow(
+      /changed while it was being read/,
+    );
+  });
+
+  it('rejects a file above the size cap', () => {
+    const path = join(workspace, 'big.bin');
+    writeFileSync(path, Buffer.alloc(QQ_OUTBOUND_FILE_MAX_BYTES + 1));
+
+    expect(() => readOutboundFile(path, workspace)).toThrow(
+      /larger than 20 MiB/,
+    );
+  });
+
+  it('accepts a file at exactly the size cap', () => {
+    const path = join(workspace, 'cap.bin');
+    writeFileSync(path, Buffer.alloc(QQ_OUTBOUND_FILE_MAX_BYTES));
+
+    expect(readOutboundFile(path, workspace).bytes.length).toBe(
+      QQ_OUTBOUND_FILE_MAX_BYTES,
+    );
+  });
+
+  it('still allows the temporary directory when the workspace is unknown', () => {
+    const path = join(root, 'no-workspace.txt');
+    writeFileSync(path, 'x');
+
+    expect(readOutboundFile(path, undefined).bytes.toString()).toBe('x');
+  });
+});
+
+describe('buildFileTools', () => {
+  let root: string;
+  let workspace: string;
+
+  interface Sent {
+    sessionId: string;
+    chatId: string;
+    kind: QQMediaKind;
+    fileName: string;
+    bytes: Buffer;
+  }
+
+  function harness(
+    overrides: Partial<QQFileToolDeps> = {},
+    result: { ok: true } | { ok: false; message: string } = { ok: true },
+  ) {
+    const sent: Sent[] = [];
+    const logs: string[] = [];
+    const deps: QQFileToolDeps = {
+      resolveChat: () => ({ chatId: 'CHAT' }),
+      sessionCwd: () => workspace,
+      sendMedia: async (input) => {
+        sent.push(input);
+        return result;
+      },
+      log: (message) => logs.push(message),
+      ...overrides,
+    };
+    const tools = buildFileTools(deps);
+    const tool = tools[0]!;
+    const byName = (name: string) => {
+      const found = tools.find((entry) => entry.name === name);
+      if (!found) throw new Error(`${name} was not registered`);
+      return found;
+    };
+    const call = (args: Record<string, unknown>, sessionId = 'S1') =>
+      tool.handler(args, { sessionId });
+    const callTool = (
+      name: string,
+      args: Record<string, unknown>,
+      sessionId = 'S1',
+    ) => byName(name).handler(args, { sessionId });
+    return { tool, tools, call, callTool, sent, logs };
+  }
+
+  function textOf(value: unknown): string {
+    return typeof value === 'string' ? value : (value as { text: string }).text;
+  }
+
+  function isError(value: unknown): boolean {
+    return (
+      typeof value === 'object' &&
+      value !== null &&
+      (value as { isError?: boolean }).isError === true
+    );
+  }
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), 'qq-file-tool-'));
+    workspace = join(root, 'workspace');
+    mkdirSync(workspace);
+  });
+
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('exposes the four media tools, with file_name only on qq_send_file', () => {
+    const { tools } = harness();
+
+    expect(tools.map((entry) => entry.name)).toEqual([
+      'qq_send_file',
+      'qq_send_image',
+      'qq_send_video',
+      'qq_send_voice',
+    ]);
+    for (const entry of tools) {
+      expect(entry.inputSchema['required']).toEqual(['path']);
+    }
+    expect(tools[0]!.inputSchema['properties']).toHaveProperty('file_name');
+    for (const entry of tools.slice(1)) {
+      expect(entry.inputSchema['properties']).not.toHaveProperty('file_name');
+    }
+  });
+
+  it('sends the file bytes with its own name', async () => {
+    const path = join(workspace, 'report.txt');
+    writeFileSync(path, 'payload');
+    const { call, sent } = harness();
+
+    const result = await call({ path });
+
+    expect(isError(result)).toBe(false);
+    expect(textOf(result)).toBe('File sent (report.txt).');
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.chatId).toBe('CHAT');
+    expect(sent[0]!.kind).toBe('file');
+    expect(sent[0]!.fileName).toBe('report.txt');
+    expect(sent[0]!.bytes.toString()).toBe('payload');
+  });
+
+  it('uses a sanitized display name when one is given', async () => {
+    const path = join(workspace, 'report.txt');
+    writeFileSync(path, 'payload');
+    const { call, sent } = harness();
+
+    await call({ path, file_name: '../evil/name.txt' });
+
+    expect(sent[0]!.fileName).toBe('..evilname.txt');
+    expect(sent[0]!.fileName).not.toContain('/');
+  });
+
+  it('truncates a display name by code point, not by UTF-16 unit', async () => {
+    const path = join(workspace, 'report.txt');
+    writeFileSync(path, 'payload');
+    const { call, sent } = harness();
+
+    await call({ path, file_name: `${'a'.repeat(100)}😀` });
+
+    expect(sent[0]!.fileName).toBe('a'.repeat(100));
+    expect([...sent[0]!.fileName]).toHaveLength(100);
+    // A UTF-16 slice would leave a lone high surrogate at the end.
+    expect(sent[0]!.fileName).not.toMatch(/[\uD800-\uDBFF]$/);
+  });
+
+  it('strips bidi overrides from a display name', async () => {
+    const path = join(workspace, 'report.txt');
+    writeFileSync(path, 'payload');
+    const { call, sent } = harness();
+
+    await call({ path, file_name: 'invoice\u202Egnp.exe\u200F' });
+
+    expect(sent[0]!.fileName).toBe('invoicegnp.exe');
+  });
+
+  it('strips every Unicode bidi control, not just enumerated ranges', async () => {
+    const path = join(workspace, 'report.txt');
+    writeFileSync(path, 'payload');
+    const { call, sent } = harness();
+    // The full Bidi_Control property: an enumerated range list missed U+061C.
+    const bidiControls = [
+      0x061c, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066,
+      0x2067, 0x2068, 0x2069,
+    ];
+
+    for (const code of bidiControls) {
+      await call({
+        path,
+        file_name: `invoice${String.fromCodePoint(code)}gnp.exe`,
+      });
+    }
+
+    expect(sent.map((entry) => entry.fileName)).toEqual(
+      bidiControls.map(() => 'invoicegnp.exe'),
+    );
+  });
+
+  it('strips C1 controls and the line and paragraph separators', async () => {
+    const path = join(workspace, 'report.txt');
+    writeFileSync(path, 'payload');
+    const { call, sent } = harness();
+
+    await call({ path, file_name: 'a\u0085b\u009fc\u2028d\u2029e.txt' });
+
+    expect(sent[0]!.fileName).toBe('abcde.txt');
+  });
+
+  it('falls back to the sanitized basename when the display name sanitizes away', async () => {
+    const path = join(workspace, 'invoice\u202Egnp.exe');
+    writeFileSync(path, 'payload');
+    const { call, sent } = harness();
+
+    await call({ path, file_name: '\u200E\u202E' });
+
+    expect(sent[0]!.fileName).toBe('invoicegnp.exe');
+  });
+
+  it('uses a fixed placeholder when every character of the name is stripped', async () => {
+    const path = join(workspace, '\u200E\u202E');
+    writeFileSync(path, 'payload');
+    const { call, sent } = harness();
+
+    const result = await call({ path });
+
+    expect(sent[0]!.fileName).toBe('file');
+    expect(textOf(result)).toBe('File sent (file).');
+  });
+
+  it('strips invisible format characters from a display name', async () => {
+    const path = join(workspace, 'report.txt');
+    writeFileSync(path, 'payload');
+    const { call, sent } = harness();
+
+    await call({
+      path,
+      file_name: 'invoice\u200B\u200C\u200D\u2060\u00ADgnp.exe',
+    });
+
+    expect(sent[0]!.fileName).toBe('invoicegnp.exe');
+  });
+
+  it('treats a name of invisible or blank-rendering characters as empty', async () => {
+    const path = join(workspace, 'invoice\u202Egnp.exe');
+    writeFileSync(path, 'payload');
+    const { call, sent } = harness();
+    const blankCodePoints = [0x200b, 0x2800, 0x115f, 0x3164, 0xffa0];
+
+    for (const code of blankCodePoints) {
+      await call({ path, file_name: String.fromCodePoint(code) });
+    }
+
+    expect(sent.map((entry) => entry.fileName)).toEqual(
+      blankCodePoints.map(() => 'invoicegnp.exe'),
+    );
+  });
+
+  it('sanitizes the on-disk basename when no display name is given', async () => {
+    // The default path reaches the platform card and the tool result verbatim,
+    // so an on-disk name carrying a bidi override spoofs the card exactly as an
+    // explicit file_name would.
+    const path = join(workspace, 'invoice\u202Egnp.exe');
+    writeFileSync(path, 'payload');
+    const { call, sent } = harness();
+
+    const result = await call({ path });
+
+    expect(sent[0]!.fileName).toBe('invoicegnp.exe');
+    expect(textOf(result)).toBe('File sent (invoicegnp.exe).');
+  });
+
+  it('sanitizes the on-disk basename for a media kind too', async () => {
+    // The three media tools have no display name, so the basename is the only
+    // name source; the card still renders it, so it gets the same filter.
+    const path = join(workspace, 'char\u200Bt\u202E.png');
+    writeFileSync(path, PNG);
+    const { callTool, sent } = harness();
+
+    const result = await callTool('qq_send_image', { path });
+
+    expect(isError(result)).toBe(false);
+    expect(sent[0]!.fileName).toBe('chart.png');
+    expect(textOf(result)).toBe('Image sent (chart.png).');
+  });
+
+  it('uses the fixed placeholder for a media-kind basename that sanitizes away', async () => {
+    // The kind is decided by magic bytes, not by the name, so a file whose
+    // whole basename is invisible is still a valid image.
+    const path = join(workspace, '\u200B\u202E');
+    writeFileSync(path, PNG);
+    const { callTool, sent } = harness();
+
+    const result = await callTool('qq_send_image', { path });
+
+    expect(isError(result)).toBe(false);
+    expect(sent[0]!.fileName).toBe('file');
+    expect(textOf(result)).toBe('Image sent (file).');
+  });
+
+  it('strips a lone surrogate from a display name', async () => {
+    const path = join(workspace, 'report.txt');
+    writeFileSync(path, 'payload');
+    const { call, sent } = harness();
+
+    // Both halves of the surrogate range: a high-only predicate would leave a
+    // lone low surrogate (also category Cs) in the name.
+    await call({ path, file_name: 'report\uD83D.txt' });
+    await call({ path, file_name: 'report\uDC00.txt' });
+
+    expect(sent.map((entry) => entry.fileName)).toEqual([
+      'report.txt',
+      'report.txt',
+    ]);
+  });
+
+  it('fails as a tool result when no chat is bound', async () => {
+    const { call, sent } = harness({ resolveChat: () => undefined });
+
+    const result = await call({ path: OUTSIDE_PATH });
+
+    expect(isError(result)).toBe(true);
+    expect(textOf(result)).toContain('No QQ chat is bound');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('fails as a tool result when path is missing', async () => {
+    const { call, sent } = harness();
+
+    const result = await call({});
+
+    expect(isError(result)).toBe(true);
+    expect(textOf(result)).toContain('path is required');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('fails as a tool result when the path escapes the workspace', async () => {
+    const { call, sent } = harness();
+
+    const result = await call({ path: OUTSIDE_PATH });
+
+    expect(isError(result)).toBe(true);
+    expect(textOf(result)).toContain('outside the session workspace');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('reports a send failure from the adapter', async () => {
+    const path = join(workspace, 'report.txt');
+    writeFileSync(path, 'payload');
+    const { call, logs } = harness({}, { ok: false, message: 'upload failed' });
+
+    const result = await call({ path });
+
+    expect(isError(result)).toBe(true);
+    expect(textOf(result)).toBe('upload failed');
+    expect(logs.some((line) => line.includes('upload failed'))).toBe(true);
+  });
+
+  // --- image / video / voice -------------------------------------------------
+
+  const PNG = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.from('body'),
+  ]);
+  const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46]);
+  const MP4 = Buffer.concat([
+    Buffer.from([0x00, 0x00, 0x00, 0x18]),
+    Buffer.from('ftypisom'),
+    Buffer.alloc(8),
+  ]);
+  const SILK = Buffer.from('#!SILK_V3payload');
+  const SILK_WITH_FORMAT_BYTE = Buffer.from('\x02#!SILK_V3payload');
+  const MP3 = Buffer.from('ID3\x04\x00payload');
+  const WAV = Buffer.concat([
+    Buffer.from('RIFF'),
+    Buffer.from([0x24, 0x00, 0x00, 0x00]),
+    Buffer.from('WAVEfmt '),
+  ]);
+  const OGG = Buffer.from('OggS\x00\x02payload');
+
+  /** Report a size the real file does not have, without writing it to disk. */
+  function reportSize(size: number): void {
+    const real = fsHooks.realFstatSync!;
+    fsHooks.fstatSync.mockImplementationOnce(((fd: number) => {
+      const stat = real(fd);
+      // Keep the Stats prototype: spreading drops isFile() and friends.
+      return Object.assign(
+        Object.create(Object.getPrototypeOf(stat)) as object,
+        stat,
+        { size },
+      );
+    }) as never);
+  }
+
+  it('sends a PNG as an image', async () => {
+    const path = join(workspace, 'chart.png');
+    writeFileSync(path, PNG);
+    const { callTool, sent } = harness();
+
+    const result = await callTool('qq_send_image', { path });
+
+    expect(isError(result)).toBe(false);
+    expect(textOf(result)).toBe('Image sent (chart.png).');
+    expect(sent).toHaveLength(1);
+    expect(sent[0]!.kind).toBe('image');
+    expect(sent[0]!.bytes.toString('latin1', 0, 4)).toBe('\x89PNG');
+  });
+
+  it('sends a JPEG as an image', async () => {
+    const path = join(workspace, 'photo.jpg');
+    writeFileSync(path, JPEG);
+    const { callTool } = harness();
+
+    const result = await callTool('qq_send_image', { path });
+
+    expect(isError(result)).toBe(false);
+    expect(textOf(result)).toBe('Image sent (photo.jpg).');
+  });
+
+  it('rejects a GIF as an image and points at qq_send_file', async () => {
+    const path = join(workspace, 'page.gif');
+    writeFileSync(path, Buffer.from('GIF89a-payload'));
+    const { callTool, sent } = harness();
+
+    const result = await callTool('qq_send_image', { path });
+
+    expect(isError(result)).toBe(true);
+    expect(textOf(result)).toContain('qq_send_image:');
+    expect(textOf(result)).toContain('PNG or JPEG');
+    expect(textOf(result)).toContain('qq_send_file');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('sends an MP4 as a video', async () => {
+    const path = join(workspace, 'clip.mp4');
+    writeFileSync(path, MP4);
+    const { callTool, sent } = harness();
+
+    const result = await callTool('qq_send_video', { path });
+
+    expect(isError(result)).toBe(false);
+    expect(textOf(result)).toBe('Video sent (clip.mp4).');
+    expect(sent[0]!.kind).toBe('video');
+  });
+
+  it('rejects a non-MP4 file as a video', async () => {
+    const path = join(workspace, 'clip.webm');
+    writeFileSync(path, Buffer.from('webm-payload'));
+    const { callTool, sent } = harness();
+
+    const result = await callTool('qq_send_video', { path });
+
+    expect(isError(result)).toBe(true);
+    expect(textOf(result)).toContain('an MP4 video');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('sends SILK, MP3, WAV and OGG as voice', async () => {
+    const samples: Array<[string, Buffer]> = [
+      ['a.silk', SILK],
+      ['b.silk', SILK_WITH_FORMAT_BYTE],
+      ['c.mp3', MP3],
+      ['d.wav', WAV],
+      ['e.ogg', OGG],
+    ];
+
+    for (const [name, bytes] of samples) {
+      const path = join(workspace, name);
+      writeFileSync(path, bytes);
+      const { callTool, sent } = harness();
+
+      const result = await callTool('qq_send_voice', { path });
+
+      expect(isError(result)).toBe(false);
+      expect(textOf(result)).toBe(`Voice sent (${name}).`);
+      expect(sent[0]!.kind).toBe('voice');
+    }
+  });
+
+  it('rejects a text file as voice', async () => {
+    const path = join(workspace, 'notes.txt');
+    writeFileSync(path, 'not audio');
+    const { callTool, sent } = harness();
+
+    const result = await callTool('qq_send_voice', { path });
+
+    expect(isError(result)).toBe(true);
+    expect(textOf(result)).toContain('SILK, MP3, WAV or OGG');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('rejects an image above the platform soft limit', () => {
+    const path = join(workspace, 'big.png');
+    writeFileSync(path, PNG);
+    reportSize(QQ_OUTBOUND_IMAGE_MAX_BYTES + 1);
+
+    expect(() => readOutboundFile(path, workspace, 'image')).toThrow(
+      /larger than 20 MB/,
+    );
+  });
+
+  it('rejects a video above the platform soft limit', () => {
+    const path = join(workspace, 'big.mp4');
+    writeFileSync(path, MP4);
+    reportSize(QQ_OUTBOUND_VIDEO_MAX_BYTES + 1);
+
+    expect(() => readOutboundFile(path, workspace, 'video')).toThrow(
+      /larger than 30 MB/,
+    );
+  });
+
+  it('rejects a voice message above the platform soft limit', () => {
+    const path = join(workspace, 'big.wav');
+    writeFileSync(path, WAV);
+    reportSize(QQ_OUTBOUND_VOICE_MAX_BYTES + 1);
+
+    expect(() => readOutboundFile(path, workspace, 'voice')).toThrow(
+      /larger than 20 MB/,
+    );
+  });
+});
