@@ -19603,6 +19603,53 @@ describe('App session callbacks', () => {
       );
     });
 
+    it('opens a terminal tab when crypto.randomUUID is unavailable (non-secure context)', async () => {
+      setupDraft();
+      mockConnection.capabilities.features = ['web_terminal'];
+      testState.captureArtifactPanelOnly = true;
+      const { container } = renderApp({
+        rightPanel: { items: ['files', 'terminal'] },
+      });
+      await flush();
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle right panel"]',
+          )
+          ?.click(),
+      );
+      // Plain-HTTP remote origins are not secure contexts: randomUUID is
+      // simply not exposed there, and opening a tab must still work.
+      const cryptoObject = globalThis.crypto;
+      const descriptor = Object.getOwnPropertyDescriptor(
+        cryptoObject,
+        'randomUUID',
+      );
+      Object.defineProperty(cryptoObject, 'randomUUID', {
+        value: undefined,
+        configurable: true,
+      });
+      try {
+        expect(typeof cryptoObject.randomUUID).toBe('undefined');
+        act(() => testState.latestArtifactPanelProps?.onOpenTerminal?.());
+        await flush();
+      } finally {
+        if (descriptor) {
+          Object.defineProperty(cryptoObject, 'randomUUID', descriptor);
+        } else {
+          delete (cryptoObject as { randomUUID?: unknown }).randomUUID;
+        }
+      }
+      expect(testState.latestArtifactPanelProps?.tabs).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: 'terminal',
+            id: expect.stringMatching(/^terminal:/),
+          }),
+        ]),
+      );
+    });
+
     it('retains twenty real session panel states while adding a workspace draft', async () => {
       setupDraft();
       const sessions = Object.fromEntries(
