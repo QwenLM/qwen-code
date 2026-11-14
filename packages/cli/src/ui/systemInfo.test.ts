@@ -88,6 +88,17 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   };
 });
 
+const { mockSelectTuiRenderer } = vi.hoisted(() => ({
+  mockSelectTuiRenderer: vi.fn(() => ({
+    renderer: 'ink',
+    reason: 'test',
+    strict: false,
+  })),
+}));
+vi.mock('./opentui/renderer-selection.js', () => ({
+  selectTuiRenderer: mockSelectTuiRenderer,
+}));
+
 describe('systemInfo', () => {
   let mockContext: CommandContext;
   const originalPlatform = process.platform;
@@ -558,5 +569,75 @@ describe('systemInfo', () => {
         expect(extendedInfo.lspStatus).toBe(expected);
       },
     );
+  });
+
+  describe('agentLoop line', () => {
+    beforeEach(() => {
+      vi.mocked(IdeClient.getInstance).mockResolvedValue({
+        getDetectedIdeDisplayName: vi.fn().mockReturnValue(''),
+      } as unknown as IdeClient);
+      setExecFileStdout('10.0.0');
+      mockContext.services.config = {
+        ...(mockContext.services.config ?? {}),
+        getScreenReader: vi.fn().mockReturnValue(false),
+        getAgentLoopPath: vi.fn().mockReturnValue('legacy'),
+      } as unknown as CommandContext['services']['config'];
+    });
+
+    it('reports headless for non_interactive mode', async () => {
+      mockContext.executionMode = 'non_interactive';
+      const info = await getExtendedSystemInfo(mockContext);
+      expect(info.agentLoop).toBe('headless: legacy');
+    });
+
+    it('reports acp for acp mode', async () => {
+      mockContext.executionMode = 'acp';
+      const info = await getExtendedSystemInfo(mockContext);
+      expect(info.agentLoop).toBe('acp: legacy');
+    });
+
+    it('reports the renderer of record for interactive mode', async () => {
+      mockContext.executionMode = 'interactive';
+      mockSelectTuiRenderer.mockReturnValueOnce({
+        renderer: 'opentui',
+        reason: 'test',
+        strict: false,
+      });
+      const info = await getExtendedSystemInfo(mockContext);
+      expect(info.agentLoop).toBe('opentui: legacy');
+    });
+
+    it('falls back to ink when renderer selection throws', async () => {
+      mockContext.executionMode = 'interactive';
+      mockSelectTuiRenderer.mockImplementationOnce(() => {
+        throw new Error('strict mode forbids the fallback');
+      });
+      const info = await getExtendedSystemInfo(mockContext);
+      expect(info.agentLoop).toBe('ink: legacy');
+    });
+
+    it('reflects the resolved path', async () => {
+      mockContext.executionMode = 'non_interactive';
+      (mockContext.services.config as unknown as Record<string, unknown>)[
+        'getAgentLoopPath'
+      ] = vi.fn().mockReturnValue('kernel');
+      const info = await getExtendedSystemInfo(mockContext);
+      expect(info.agentLoop).toBe('headless: kernel');
+    });
+
+    it('omits the line when there is no execution mode (Settings dialog)', async () => {
+      mockContext.executionMode = undefined;
+      const info = await getExtendedSystemInfo(mockContext);
+      expect(info.agentLoop).toBeUndefined();
+    });
+
+    it('omits the line when config lacks getAgentLoopPath', async () => {
+      mockContext.executionMode = 'non_interactive';
+      delete (
+        mockContext.services.config as unknown as Record<string, unknown>
+      )['getAgentLoopPath'];
+      const info = await getExtendedSystemInfo(mockContext);
+      expect(info.agentLoop).toBeUndefined();
+    });
   });
 });

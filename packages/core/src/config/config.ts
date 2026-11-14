@@ -170,6 +170,7 @@ import {
   UNIFIED_SURFACE_DEFAULTS,
   EVENT_BUS_SURFACE_DEFAULTS,
   type AgentLoopSurface,
+  type AgentLoopPath,
 } from './agent-loop-rollout.js';
 import { ApprovalMode } from './approval-mode.js';
 
@@ -10885,6 +10886,17 @@ export class Config {
       surfaceDefault: EVENT_BUS_SURFACE_DEFAULTS[surface],
       variable: 'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP',
     });
+  }
+
+  /**
+   * The loop path a surface runs, derived from the same two switches the
+   * surface reads so the reported path cannot drift from the path taken:
+   * unified off -> legacy; unified on with the kernel on -> kernel; else
+   * shared.
+   */
+  getAgentLoopPath(surface: AgentLoopSurface): AgentLoopPath {
+    if (!this.isUnifiedAgentLoopEnabled(surface)) return 'legacy';
+    return this.isEventBusAgentLoopEnabled(surface) ? 'kernel' : 'shared';
   }
 
   /**

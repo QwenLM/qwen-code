@@ -112,4 +112,51 @@ describe('getAboutSystemInfoFields', () => {
     const proxyField = fields.find((f) => f.label === 'Proxy');
     expect(proxyField?.value).toBe('no proxy');
   });
+
+  it('includes the Agent Loop field after Fast Model when present', () => {
+    const info: ExtendedSystemInfo = {
+      cliVersion: '1.0.0',
+      osPlatform: 'darwin',
+      osArch: 'arm64',
+      osRelease: '23.0.0',
+      nodeVersion: 'v22.0.0',
+      npmVersion: '10.0.0',
+      sandboxEnv: 'no sandbox',
+      modelVersion: 'test-model',
+      selectedAuthType: 'test-auth',
+      ideClient: '',
+      sessionId: 'test-session-id',
+      memoryUsage: '100 MB',
+      agentLoop: 'ink: legacy',
+    };
+
+    const fields = getSystemInfoFields(info);
+    const labels = fields.map((f) => f.label);
+    expect(labels.indexOf(t('Agent Loop'))).toBe(
+      labels.indexOf(t('Fast Model')) + 1,
+    );
+    expect(fields.find((f) => f.label === t('Agent Loop'))?.value).toBe(
+      'ink: legacy',
+    );
+  });
+
+  it('omits the Agent Loop field when absent', () => {
+    const info: ExtendedSystemInfo = {
+      cliVersion: '1.0.0',
+      osPlatform: 'darwin',
+      osArch: 'arm64',
+      osRelease: '23.0.0',
+      nodeVersion: 'v22.0.0',
+      npmVersion: '10.0.0',
+      sandboxEnv: 'no sandbox',
+      modelVersion: 'test-model',
+      selectedAuthType: 'test-auth',
+      ideClient: '',
+      sessionId: 'test-session-id',
+      memoryUsage: '100 MB',
+    };
+
+    const fields = getSystemInfoFields(info);
+    expect(fields.find((f) => f.label === t('Agent Loop'))).toBeUndefined();
+  });
 });
