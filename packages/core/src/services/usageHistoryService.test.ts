@@ -36,6 +36,7 @@ import {
   persistUsageBeforeTranscriptDeletion,
   prepareUsageBeforeTranscriptDeletion,
   commitUsageBeforeTranscriptDeletion,
+  _resetReplayCacheForTest,
 } from './usageHistoryService.js';
 import { ToolCallDecision } from '../telemetry/tool-call-decision.js';
 import type { SessionMetrics } from '../telemetry/uiTelemetry.js';
@@ -742,6 +743,160 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
       );
     },
   );
+});
+
+// The live merge rescans only transcripts whose mtime/size changed and serves
+// the rest from an in-process replay cache; the scan itself JSON-parses just
+// the header and telemetry lines, skipping the large tool-result payloads.
+describe('loadUsageHistoryWithLive — replay cache + selective scan', () => {
+  useTempQwenHome('qwen-usage-replay-cache-');
+  beforeEach(() => {
+    _resetReplayCacheForTest();
+  });
+
+  const plant = (sessionId: string, tokens: number) =>
+    writeTranscript('cache-project', sessionId, {
+      cwd: '/cache/project',
+      day: '2026-06-11',
+      durationMs: 1200,
+      tokens,
+      assistant: true,
+    });
+
+  const tokensOf = (records: UsageSummaryRecord[], sessionId: string) => {
+    const r = records.find((x) => x.sessionId === sessionId);
+    return r
+      ? Object.values(r.models).reduce((sum, m) => sum + m.totalTokens, 0)
+      : undefined;
+  };
+
+  it('returns identical records on a repeated load of unchanged transcripts', async () => {
+    plant('sess-stable', 1000);
+    const first = await loadUsageHistoryWithLive();
+    const second = await loadUsageHistoryWithLive();
+    expect(second).toEqual(first);
+    expect(tokensOf(second, 'sess-stable')).toBe(1000);
+  });
+
+  it('rescans a transcript when it grows so active sessions stay current', async () => {
+    const filePath = plant('sess-grow', 1000);
+    const before = await loadUsageHistoryWithLive();
+    expect(tokensOf(before, 'sess-grow')).toBe(1000);
+
+    // Append a second api_response worth 500 tokens (size + mtime change).
+    fs.appendFileSync(
+      filePath,
+      JSON.stringify({
+        sessionId: 'sess-grow',
+        cwd: '/cache/project',
+        uuid: 'u-grow',
+        parentUuid: 'u3',
+        timestamp: '2026-06-11T00:03:00.000Z',
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: {
+          uiEvent: {
+            'event.name': 'qwen-code.api_response',
+            'event.timestamp': '2026-06-11T00:03:00.000Z',
+            response_id: 'r2',
+            model: 'qwen-max',
+            duration_ms: 800,
+            input_token_count: 300,
+            output_token_count: 150,
+            cached_content_token_count: 0,
+            thoughts_token_count: 50,
+            total_token_count: 500,
+            prompt_id: 'p2',
+          },
+        },
+      }) + '\n',
+    );
+
+    const after = await loadUsageHistoryWithLive();
+    expect(tokensOf(after, 'sess-grow')).toBe(1500);
+  });
+
+  it('drops a transcript from the cache once the file is deleted', async () => {
+    plant('sess-keep', 1000);
+    const removed = plant('sess-remove', 500);
+    const before = await loadUsageHistoryWithLive();
+    expect(before.map((r) => r.sessionId).sort()).toEqual([
+      'sess-keep',
+      'sess-remove',
+    ]);
+
+    fs.rmSync(removed);
+    const after = await loadUsageHistoryWithLive();
+    expect(after.map((r) => r.sessionId)).toEqual(['sess-keep']);
+  });
+
+  it('skips large non-telemetry payloads, even ones whose text mentions ui_telemetry', async () => {
+    const sessionId = 'sess-bigline';
+    const dir = path.join(
+      process.env['QWEN_HOME']!,
+      'projects',
+      'cache-project',
+      'chats',
+    );
+    fs.mkdirSync(dir, { recursive: true });
+    const base = { sessionId, cwd: '/cache/project' };
+    // A ~1MB tool_result that also carries a top-level `subtype:"ui_telemetry"`
+    // (so the cheap substring pre-filter matches it): the scanner must parse
+    // it, then the `type === 'system'` guard must reject it — a non-system
+    // record is never telemetry, no matter how large or what it is tagged.
+    const bigText = 'x'.repeat(1024 * 1024);
+    const records = [
+      {
+        ...base,
+        uuid: 'u1',
+        parentUuid: null,
+        timestamp: '2026-06-11T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', content: 'hi' },
+      },
+      {
+        ...base,
+        uuid: 'u2',
+        parentUuid: 'u1',
+        timestamp: '2026-06-11T00:01:00.000Z',
+        type: 'tool_result',
+        subtype: 'ui_telemetry',
+        message: { role: 'user', content: bigText },
+      },
+      {
+        ...base,
+        uuid: 'u3',
+        parentUuid: 'u2',
+        timestamp: '2026-06-11T00:02:00.000Z',
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: {
+          uiEvent: {
+            'event.name': 'qwen-code.api_response',
+            'event.timestamp': '2026-06-11T00:02:00.000Z',
+            response_id: 'r1',
+            model: 'qwen-max',
+            duration_ms: 1200,
+            input_token_count: 600,
+            output_token_count: 300,
+            cached_content_token_count: 0,
+            thoughts_token_count: 100,
+            total_token_count: 1000,
+            prompt_id: 'p1',
+          },
+        },
+      },
+    ];
+    fs.writeFileSync(
+      path.join(dir, `${sessionId}.jsonl`),
+      records.map((r) => JSON.stringify(r)).join('\n') + '\n',
+    );
+
+    const merged = await loadUsageHistoryWithLive();
+    // Only the real telemetry record counts; the big tool_result contributes
+    // nothing and must not be mistaken for telemetry.
+    expect(tokensOf(merged, sessionId)).toBe(1000);
+  });
 });
 
 // Regression for #7384: deleting a session erased its usage from the

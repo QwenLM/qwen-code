@@ -206,6 +206,10 @@ let fullState: HookState = {
 };
 const seenDetails: Array<string | undefined> = [];
 const seenAutoLoads: Array<boolean | undefined> = [];
+const usagePrefetch = vi.fn(async () => undefined);
+const workspaceActionsState = {
+  loadUsageDashboard: usagePrefetch,
+};
 const workspaceState = {
   baseUrl: 'http://localhost:4170',
   status: 'connected' as const,
@@ -213,6 +217,7 @@ const workspaceState = {
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspace: () => workspaceState,
+  useWorkspaceActions: () => workspaceActionsState,
   useStatusReport: (options: { autoLoad?: boolean; detail?: string } = {}) => {
     seenDetails.push(options.detail);
     seenAutoLoads.push(options.autoLoad);
@@ -312,6 +317,8 @@ beforeEach(() => {
   summaryReload.mockImplementation(async () => undefined);
   fullReload.mockReset();
   fullReload.mockImplementation(async () => undefined);
+  usagePrefetch.mockReset();
+  usagePrefetch.mockImplementation(async () => undefined);
 });
 
 afterEach(() => {
@@ -349,6 +356,35 @@ describe('DaemonStatusDialog', () => {
     act(() => vi.advanceTimersByTime(15_000));
     expect(summaryReload).not.toHaveBeenCalled();
     expect(fullReload).not.toHaveBeenCalled();
+    expect(usagePrefetch).not.toHaveBeenCalled();
+  });
+
+  it('prefetches the usage aggregate once on open so the Usage tab is warm', () => {
+    mount();
+
+    // Fired in the background on open (range-independent server-side), before
+    // the operator ever clicks the Usage tab.
+    expect(usagePrefetch).toHaveBeenCalledTimes(1);
+    expect(usagePrefetch).toHaveBeenCalledWith({ range: 'today' });
+
+    // A real re-render (switching tabs) must not re-fire it: the effect deps
+    // are stable for the life of the connection target.
+    const tabs = container!.querySelectorAll('[role="tab"]');
+    act(() => {
+      tabs[1]!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(usagePrefetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not prefetch usage while the daemon is unavailable', async () => {
+    const { availability } = offlineDaemon();
+    try {
+      await availability.check(true);
+      mount('en', undefined, true, availability);
+      expect(usagePrefetch).not.toHaveBeenCalled();
+    } finally {
+      availability.dispose();
+    }
   });
 
   it('rejects a mixed-content target before passing its token to navigation', () => {

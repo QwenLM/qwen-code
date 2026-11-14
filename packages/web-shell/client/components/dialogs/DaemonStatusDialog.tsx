@@ -13,6 +13,7 @@ import { StandaloneContext } from '../../config/standalone';
 import {
   useStatusReport,
   useWorkspace,
+  useWorkspaceActions,
   type DaemonMetricsSeriesBucket,
   type DaemonStatusReport,
   type DaemonStatusReportLevel,
@@ -716,6 +717,7 @@ function DaemonStatusDialogInner({
     autoLoad: !connectionsOnly,
     detail: 'full',
   });
+  const workspaceActions = useWorkspaceActions();
   // `reload` is a stable callback; depend on it (not the hook object, which is
   // a fresh spread each render) so the poll interval is installed once rather
   // than torn down and reinstalled on every data update.
@@ -751,6 +753,18 @@ function DaemonStatusDialogInner({
   const loading = summary.loading || full.loading;
   const availability = useDaemonAvailability();
   const unavailable = availability !== 'available';
+
+  // Warm the usage aggregate in the background as soon as the dialog opens so
+  // the first click on the Usage tab doesn't pay the cold transcript-replay
+  // latency. Fire-and-forget: the daemon route coalesces this with the tab's
+  // own load and caches the records, and a prefetch failure is harmless (the
+  // tab retries on mount). Range-independent on the server, so `today` is fine.
+  useEffect(() => {
+    if (connectionsOnly || availability !== 'available') return;
+    void workspaceActions
+      .loadUsageDashboard({ range: 'today' })
+      .catch(() => {});
+  }, [connectionsOnly, availability, workspaceActions]);
   const error = unavailable
     ? new Error(
         t(
