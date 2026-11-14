@@ -102,6 +102,7 @@ export function useExtensionAcquisition(context?: ExtensionCatalogContext) {
     source: string,
     scope: 'user' | 'project',
     rememberScope: boolean,
+    reloadAfterInstall = true,
   ): Promise<ExtensionsStatusMessage> => {
     const captured = latest.current;
     if (!captured || !captured.isCurrent() || operation.current)
@@ -227,10 +228,12 @@ export function useExtensionAcquisition(context?: ExtensionCatalogContext) {
           warnings.push(getErrorMessage(error));
         }
       }
-      try {
-        await captured.reload();
-      } catch (error) {
-        warnings.push(getErrorMessage(error));
+      if (reloadAfterInstall) {
+        try {
+          await captured.reload();
+        } catch (error) {
+          warnings.push(getErrorMessage(error));
+        }
       }
       check();
       return {

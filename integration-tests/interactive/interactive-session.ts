@@ -71,6 +71,25 @@ export async function sendAboutUntilRendered(
   }
 }
 
+type SessionExitStatus = { exitCode: number; signal?: number };
+type SessionLifecycleDetail =
+  | { type: 'spawn' | 'ready' }
+  | { type: 'output'; data: string }
+  | { type: 'exit'; status: SessionExitStatus }
+  | { type: 'startup-failure' | 'close-error'; error: string }
+  | {
+      type: 'close-action';
+      action: 'pty-default' | 'pty-SIGKILL' | 'group-SIGKILL';
+      result: 'attempt' | 'returned' | 'error';
+      error?: string;
+    }
+  | { type: 'close-complete'; status: SessionExitStatus | null };
+export type InteractiveSessionLifecycleEvent = SessionLifecycleDetail & {
+  pid: number;
+  observerPid: number;
+  hrtimeNs: string;
+};
+
 export interface InteractiveSessionOptions {
   /** Terminal columns, default 100 */
   cols?: number;
@@ -93,6 +112,8 @@ export interface InteractiveSessionOptions {
   inheritEnv?: boolean;
   /** Preserve raw startup evidence when no session can be returned. */
   onStartupFailure?: (output: string) => void;
+  /** Observe data only; start() still owns cleanup when startup fails. */
+  onLifecycle?: (event: InteractiveSessionLifecycleEvent) => void;
 }
 
 export class InteractiveSession {
@@ -104,18 +125,26 @@ export class InteractiveSession {
   private readonly exited: Promise<void>;
   private exitStatus: { exitCode: number; signal?: number } | undefined;
 
-  private constructor(ptyProcess: pty.IPty, terminal: Terminal) {
+  private constructor(
+    ptyProcess: pty.IPty,
+    terminal: Terminal,
+    private readonly onLifecycle?: (
+      event: InteractiveSessionLifecycleEvent,
+    ) => void,
+  ) {
     this.ptyProcess = ptyProcess;
     this.terminal = terminal;
     this.exited = new Promise((resolve) => {
       ptyProcess.onExit((status) => {
         this.exitStatus = status;
+        this.emitLifecycle({ type: 'exit', status: { ...status } });
         resolve();
       });
     });
 
     ptyProcess.onData((data) => {
       this.rawOutput += data;
+      this.emitLifecycle({ type: 'output', data });
       // Chain writes so flush() can await all pending data
       this.pendingWrite = this.pendingWrite.then(
         () =>
@@ -124,6 +153,20 @@ export class InteractiveSession {
           }),
       );
     });
+    this.emitLifecycle({ type: 'spawn' });
+  }
+
+  private emitLifecycle(detail: SessionLifecycleDetail): void {
+    try {
+      this.onLifecycle?.({
+        ...detail,
+        pid: this.ptyProcess.pid,
+        observerPid: process.pid,
+        hrtimeNs: process.hrtime.bigint().toString(),
+      });
+    } catch {
+      // Observation cannot replace the startup or cleanup result.
+    }
   }
 
   /** Wait for all pending PTY data to be processed by xterm. */
@@ -193,7 +236,11 @@ export class InteractiveSession {
       env: env as Record<string, string>,
     });
 
-    const session = new InteractiveSession(ptyProcess, terminal);
+    const session = new InteractiveSession(
+      ptyProcess,
+      terminal,
+      options?.onLifecycle,
+    );
     // A child that dies during startup fails fast with its exit code instead
     // of waiting the budget out; only a live-but-slow boot (#13552) pays the
     // full readyPromptBudgetMs window. The tail reuses waitFor's spelling so
@@ -226,8 +273,10 @@ export class InteractiveSession {
         exited,
       ]);
       startupUndecided = false;
+      session.emitLifecycle({ type: 'ready' });
     } catch (err) {
       startupUndecided = false;
+      session.emitLifecycle({ type: 'startup-failure', error: String(err) });
       // start() must not orphan the child, pty, and terminal it refuses to
       // hand out.
       try {
@@ -392,9 +441,25 @@ export class InteractiveSession {
     // race stops at its next tick instead of re-scanning a dead pty's output
     // until its own budget expires.
     this.closed = true;
+    this.emitLifecycle({
+      type: 'close-action',
+      action: 'pty-default',
+      result: 'attempt',
+    });
     try {
       this.ptyProcess.kill();
-    } catch {
+      this.emitLifecycle({
+        type: 'close-action',
+        action: 'pty-default',
+        result: 'returned',
+      });
+    } catch (error) {
+      this.emitLifecycle({
+        type: 'close-action',
+        action: 'pty-default',
+        result: 'error',
+        error: String(error),
+      });
       // Process may have already exited
     }
     const waitForExit = async (milliseconds: number) => {
@@ -422,12 +487,39 @@ export class InteractiveSession {
         if (!this.exitStatus) {
           try {
             if (process.platform === 'win32') {
+              this.emitLifecycle({
+                type: 'close-action',
+                action: 'pty-SIGKILL',
+                result: 'attempt',
+              });
               this.ptyProcess.kill('SIGKILL');
+              this.emitLifecycle({
+                type: 'close-action',
+                action: 'pty-SIGKILL',
+                result: 'returned',
+              });
             } else {
               // forkpty owns a session/process group, including its children.
+              this.emitLifecycle({
+                type: 'close-action',
+                action: 'group-SIGKILL',
+                result: 'attempt',
+              });
               process.kill(-this.ptyProcess.pid, 'SIGKILL');
+              this.emitLifecycle({
+                type: 'close-action',
+                action: 'group-SIGKILL',
+                result: 'returned',
+              });
             }
           } catch (killError) {
+            this.emitLifecycle({
+              type: 'close-action',
+              action:
+                process.platform === 'win32' ? 'pty-SIGKILL' : 'group-SIGKILL',
+              result: 'error',
+              error: String(killError),
+            });
             if ((killError as NodeJS.ErrnoException).code !== 'ESRCH') {
               throw killError;
             }
@@ -440,8 +532,15 @@ export class InteractiveSession {
         });
       }
       await this.flush();
+    } catch (error) {
+      this.emitLifecycle({ type: 'close-error', error: String(error) });
+      throw error;
     } finally {
       this.terminal.dispose();
+      this.emitLifecycle({
+        type: 'close-complete',
+        status: this.exitStatus ? { ...this.exitStatus } : null,
+      });
     }
   }
 }

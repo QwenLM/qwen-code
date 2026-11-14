@@ -69,3 +69,19 @@ Linux 为 NOT_RUN。Windows 为 SETUP_NQ，因为此 Git HTTP fixture 尚未完�
 修正后的 fixture SHA256 为 `a8beb92c168c9f1d72c03f31f03058aba3aa97c2c2883d6ecac4b5be5d542a97`。spawn 或 stdin 错误后，它仍持有 CGI child，直到真实 close 事件。独立 owned backend 故障 probe 观察到旧版在 child 仍存活时提前返回，新 helper 则等待 child 消失。该 probe 仅验证 fixture 清理所有权，不证明 transport、应用根因或 Bun 修复。上面的纯矩阵是其实际应用观察，不再列为尚待验证。
 
 所有探索性的 CLI/Core 日志、wrapper 实验及原生采样均排除。本测试/设计贡献不修改 Core 或 CLI 生产代码。
+
+## 就绪与冷启动证据补充
+
+后续生产候选 `b6ec1bb9` 已完成 Native 热态部分安装、重试、命令流程与一次自然退出，但冷启动未到提示符。其 Bun+Ink 在来源详情前失败；保存帧显示 Added 提示可能与仍忙的添加表单并存。Node+Ink 完整通过。这些观察不关闭 Source 门槛，也不替代更早候选的结果。
+
+下一版 driver 强化原 source-added 条件：同一 viewport 必须同时包含成功提示、Sources 列表、聚焦的 Add marketplace 操作及已注册 URL 行，且没有 Adding。仍发送原有按键，使用原期限与重试策略。
+
+可选测试 helper 生命周期观察记录 PTY PID、observer PID、原始字节、就绪、退出状态与清理尝试/结果。单调时间戳属于 observer 进程；PTY PID 不证明叶进程或 GC owner。回调错误不得替代原启动/清理结果，发出的状态使用副本，不暴露内部可变状态。既有启动失败回调仍只调用一次，在清理前保留原始 ANSI。start 方法继续拥有启动失败的清理责任，保留本地 30 秒首屏与 10+5 秒清理期限。
+
+Source fixture 在每次 start 前固定 attempt index，分开冷热证据。观察可能影响调度；缺记录仍未知，强制退出不能算自然退出。helper 测试使用受控 PTY 事件及真实终端解析器，并非实际应用或原生进程。OS 采样必须独立核实进程身份及仍在等待启动的窗口。功能验收与整体迁移仍需原有证据。
+
+## 完整 composer prefix 准入
+
+新的仅 driver 候选保留原 completion 名称断言，并要求同一新鲜 viewport 的真实 composer 同时显示完整请求 prefix。识别最后两条完整水平边框之间的单行 `>` 输入区域，不把历史记录或下拉候选名称当成已输入文本。当前整案固定 120×42，使用能放入一行的短 ASCII prefix；多行 composer、其他布局和平台不在此 recognizer 的已证范围，缺失或不符合区域直接拒绝。
+
+七份未改的已保存帧均缺少当时请求的完整 prefix，尽管旧名称 predicate 可放行；这是 observer 过早准入的保存证据，不证明持续丢键或 Core/renderer 缺陷。旧 83221 clear 失败及原矩阵保持，不由新的 predicate 倒改。新候选只等待相同业务条件变为可证，不增加输入、重试、按键、sleep 或整案120s/local15s/CI45s预算。须经类型/正常检查及新 driver 实际验收后才能作为最终发布树；当前尚未执行。

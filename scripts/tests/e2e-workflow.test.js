@@ -169,6 +169,51 @@ describe('TUI product evidence', () => {
       ['component', 'integration'],
     ],
     ['packages/cli/src/dualOutput/index.ts', ['component', 'integration']],
+    [
+      'packages/cli/src/ui/opentui/MemoryDialog.tsx',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/opentui/dialogs-memory-status.tsx',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/opentui/opentui-dialog-mount.tsx',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/components/MemoryDialog.tsx',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/hooks/useLaunchEditor.ts',
+      ['component', 'input', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/commands/memoryCommand.ts',
+      ['component', 'integration'],
+    ],
+    ['packages/core/src/memory/paths.ts', ['component', 'integration']],
+    [
+      'packages/core/src/utils/memory-constants.ts',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/core/src/utils/editor.ts',
+      ['component', 'input', 'integration'],
+    ],
+    [
+      'integration-tests/interactive/tui-memory-manager.test.ts',
+      ['component', 'integration'],
+    ],
+    [
+      'integration-tests/interactive/tui-extension-partial-acquisition.test.ts',
+      ['component', 'integration'],
+    ],
+    [
+      'integration-tests/interactive/extension-http-git-fixture.ts',
+      ['component', 'integration'],
+    ],
     ['packages/core/src/core/coreToolScheduler.ts', lanes.slice(0, -1)],
     ['packages/core/src/core/client.ts', lanes.slice(0, -1)],
     ['packages/cli/src/ui/opentui/live-turn.ts', lanes.slice(0, -1)],
@@ -372,7 +417,9 @@ describe('TUI product evidence', () => {
     integration: [
       'tui-foreground-shell',
       'tui-extension-acquisition',
+      'tui-extension-partial-acquisition',
       'tui-dual-output',
+      'tui-memory-manager',
     ],
   };
   it.each(
@@ -939,6 +986,14 @@ describe('TUI product evidence', () => {
     expect(
       existsSync(
         'integration-tests/interactive/tui-extension-acquisition.test.ts',
+      ),
+    ).toBe(true);
+    expect(commands[0].split(/\s+/)).toContain(
+      'interactive/tui-extension-partial-acquisition.test.ts',
+    );
+    expect(
+      existsSync(
+        'integration-tests/interactive/tui-extension-partial-acquisition.test.ts',
       ),
     ).toBe(true);
   });

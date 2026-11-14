@@ -778,9 +778,10 @@ export function OpenTuiExtensionsDialog(props: OpenTuiExtensionsDialogProps) {
               onLockChange={lockCatalog}
               onStatus={catalog.onStatus}
               onInstalled={catalogChanged}
+              reloadRuntime={catalog.reload}
               onFooter={setCatalogFooter}
               install={(source, scope) =>
-                acquisition.install(source, scope, true)
+                acquisition.install(source, scope, true, false)
               }
             />
           ) : catalog && activeTab === EXTENSIONS_TABS.SOURCES ? (

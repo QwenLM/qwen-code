@@ -62,12 +62,11 @@ vi.mock('node:fs', async (importOriginal) => {
 });
 
 function configWithExtensions(extensions: unknown[]): Config {
+  const manager = { addMutationListener: vi.fn(() => vi.fn()) };
   return {
     getExtensions: () => extensions,
     getActiveExtensions: () => extensions,
-    getExtensionManager: () => ({
-      addMutationListener: vi.fn(() => vi.fn()),
-    }),
+    getExtensionManager: () => manager,
   } as unknown as Config;
 }
 
@@ -121,11 +120,7 @@ describe('ExtensionFileWatcher', () => {
     watcher.startWatching();
 
     expect(mockWatch).toHaveBeenCalledOnce();
-    expect(mockWatchers[0].target).toEqual([
-      extensionsDir,
-      path.join(path.dirname(extensionsDir), 'extension-store', 'state.json'),
-      linkedSource,
-    ]);
+    expect(mockWatchers[0].target).toEqual([extensionsDir, linkedSource]);
     expect(mockWatchers[0].options).toEqual(
       expect.objectContaining({
         ignoreInitial: true,
@@ -506,6 +501,7 @@ describe('ExtensionFileWatcher', () => {
   it('does not watch inactive linked extension sources or context files', () => {
     const activeSource = path.resolve('/tmp/active-linked-extension');
     const inactiveSource = path.resolve('/tmp/inactive-linked-extension');
+    const manager = { addMutationListener: vi.fn(() => vi.fn()) };
     const refreshState = createRefreshState();
     const watcher = new ExtensionFileWatcher(
       {
@@ -531,20 +527,14 @@ describe('ExtensionFileWatcher', () => {
             contextFiles: [`${activeSource}/QWEN.md`],
           },
         ],
-        getExtensionManager: () => ({
-          addMutationListener: vi.fn(() => vi.fn()),
-        }),
+        getExtensionManager: () => manager,
       } as unknown as Config,
       extensionsDir,
       refreshState,
     );
     watcher.startWatching();
 
-    expect(mockWatchers[0].target).toEqual([
-      extensionsDir,
-      path.join(path.dirname(extensionsDir), 'extension-store', 'state.json'),
-      activeSource,
-    ]);
+    expect(mockWatchers[0].target).toEqual([extensionsDir, activeSource]);
 
     fireAllEvent(0, 'change', `${inactiveSource}/QWEN.md`);
     fireAllEvent(0, 'change', `${inactiveSource}/commands/run.toml`);
@@ -590,12 +580,9 @@ describe('ExtensionFileWatcher', () => {
 
     watcher.startWatching();
 
-    expect(mockWatch).toHaveBeenCalledTimes(2);
-    expect(mockWatchers[0].target).toEqual([
-      path.resolve('/home/user/.qwen/extension-store/state.json'),
-    ]);
-    expect(mockWatchers[1].target).toBe(path.resolve('/home/user/.qwen'));
-    expect(mockWatchers[1].options).toEqual(
+    expect(mockWatch).toHaveBeenCalledOnce();
+    expect(mockWatchers[0].target).toBe(path.resolve('/home/user/.qwen'));
+    expect(mockWatchers[0].options).toEqual(
       expect.objectContaining({
         ignoreInitial: true,
         followSymlinks: false,

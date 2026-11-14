@@ -1400,13 +1400,25 @@ describeTui(SUITE, () => {
       recorded: 'The helper says it is sunny.',
       reply: (messages, dir) => {
         if (isHelper(messages)) {
-          // The helper answers once the leader sent its last round, past the
-          // tool boundary that would take the report: that round calls no
-          // tool, so the report waits for the leader's turn to end and starts
-          // a turn of its own on both runs.
-          return leaderWaiting.promise.then(() => ({
-            content: 'HELPER REPORT: it is sunny.',
-          }));
+          // Sending the leader's last request does not order the two replies.
+          // Wait for its recorded answer before releasing the helper so the
+          // strict transcript comparison has a deterministic causal order.
+          return leaderWaiting.promise.then(async () => {
+            await until(
+              () =>
+                files(join(dir, '..', 'runtime'))
+                  .filter(
+                    (file) => file.endsWith('.jsonl') && file.includes('chats'),
+                  )
+                  .some((file) =>
+                    readFileSync(file, 'utf8').includes(
+                      '"text":"Waiting for the helper."',
+                    ),
+                  ),
+              'the leader records its waiting answer',
+            );
+            return { content: 'HELPER REPORT: it is sunny.' };
+          });
         }
         if (JSON.stringify(messages).includes('HELPER REPORT'))
           return toolResults(messages) === 2

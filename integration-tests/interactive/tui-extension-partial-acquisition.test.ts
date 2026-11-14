@@ -203,12 +203,30 @@ it(`partially acquires two HTTP catalog Git plugins with fresh consent and cold 
     session = undefined;
     guard(label + '-exit');
   };
+  const composerHasPrefix = (frame: string, prefix: string) => {
+    const rows = frame.split('\n');
+    const rules = rows.flatMap((row, index) =>
+      /^[ \t]*─{20,}[ \t]*$/.test(row) ? [index] : [],
+    );
+    const top = rules.at(-2);
+    const bottom = rules.at(-1);
+    if (top === undefined || bottom !== top + 2) return false;
+    const input = /^[ \t]*>[ \t]*(.*)$/.exec(rows[top + 1] ?? '');
+    return input?.[1].trimEnd() === prefix;
+  };
   const checkCommands = async (label: string) => {
     for (const name of ['owned-a-proof', 'owned-b-proof']) {
       await key('\x1b');
       await screen(label + name + '-composer', ['Type your message']);
-      await type('/' + name.slice(0, -1));
-      await screen(label + name + '-completion', [name]);
+      const prefix = '/' + name.slice(0, -1);
+      await type(prefix);
+      const completion = label + name + '-completion';
+      await until(async () => {
+        const frame = await session!.viewport();
+        frames[completion] = frame;
+        return frame.includes(name) && composerHasPrefix(frame, prefix);
+      }, completion);
+      guard(completion);
       await key('\x15');
       await screen(label + name + '-clear', ['Type your message']);
       await submit('/extensions manage');
@@ -244,11 +262,37 @@ it(`partially acquires two HTTP catalog Git plugins with fresh consent and cold 
       },
     });
     const start = async () => {
+      const startupIndex = exits.length;
       session = await InteractiveSession.start({
         cwd: workspace,
         cols: 120,
         rows: 42,
         inheritEnv: false,
+        onStartupFailure: (raw) => {
+          fs.writeFileSync(
+            path.join(output, `startup-${startupIndex}-failed.ansi`),
+            raw,
+          );
+        },
+        onLifecycle: (event) => {
+          if (event.type === 'output') {
+            fs.appendFileSync(
+              path.join(output, `session-${startupIndex}.ansi`),
+              event.data,
+            );
+          } else {
+            fs.appendFileSync(
+              path.join(output, `startup-${startupIndex}-lifecycle.jsonl`),
+              JSON.stringify(event) + '\n',
+            );
+            if (event.type === 'spawn') {
+              fs.writeFileSync(
+                path.join(output, `startup-${startupIndex}-spawn.json`),
+                JSON.stringify(event, null, 2) + '\n',
+              );
+            }
+          }
+        },
         env: {
           PATH: bin + ':' + process.env['PATH'],
           HOME: home,
@@ -309,7 +353,27 @@ it(`partially acquires two HTTP catalog Git plugins with fresh consent and cold 
       'Enter marketplace source',
     ]);
     await submit(fixture.catalogURL);
-    await screen('source-added', ['Added marketplace "owned-partial-market".']);
+    await until(async () => {
+      const frame = await session!.viewport();
+      frames['source-added'] = frame;
+      const rows = frame.split('\n');
+      return (
+        frame.includes('Added marketplace "owned-partial-market".') &&
+        frame.includes('Marketplaces (1)') &&
+        rows.some((row) =>
+          /^[ \t│]*[›●][\uFE0E\uFE0F]?[ \t]+\+[ \t]+Add new marketplace(?:[ \t]|$)/.test(
+            row,
+          ),
+        ) &&
+        rows.some(
+          (row) =>
+            row.includes('owned-partial-market') &&
+            row.includes(fixture!.catalogURL),
+        ) &&
+        !frame.includes('Adding...')
+      );
+    }, 'source-added');
+    guard('source-added');
     const registered = JSON.parse(fs.readFileSync(registry, 'utf8'));
     assert.equal(registered.length, 1);
     assert.equal(registered[0].type, 'http');

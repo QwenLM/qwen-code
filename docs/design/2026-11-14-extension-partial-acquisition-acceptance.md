@@ -92,3 +92,19 @@ Linux is NOT_RUN. Windows is SETUP_NQ because this Git HTTP fixture is not quali
 The corrected fixture has SHA256 `a8beb92c168c9f1d72c03f31f03058aba3aa97c2c2883d6ecac4b5be5d542a97`. It retains a CGI child after spawn or stdin errors until its real close event. A separate owned-backend fault probe observed the original early return with the child still alive, and the corrected helper waiting until the child was gone. That probe qualifies fixture cleanup ownership only, not transport, application root cause or a Bun fix. The pure matrix above is its actual application observation; it is no longer listed as pending validation.
 
 All exploratory CLI/Core logging, wrapper experiments and native samples are excluded. There is no Core or CLI production change in this test/design contribution.
+
+## Readiness and cold-start evidence follow-up
+
+The later production candidate `b6ec1bb9` completed the Native hot partial/retry/command flow and one natural exit, but its cold startup did not reach the prompt. Its Bun+Ink case failed before source detail; saved frames showed that an Added status could coexist with the still-busy add form. Node+Ink completed the whole case. These observations do not close the Source gate or replace the earlier candidate results.
+
+The next driver strengthens the existing source-added condition: one viewport must contain the success status, Sources list, focused Add marketplace action and registered URL row, without Adding. It sends the same original keys under the same deadlines and retry policy.
+
+Optional test-helper lifecycle observations record PTY PID, observer PID, raw bytes, readiness, exit status and cleanup attempts/results. Monotonic timestamps belong to the observer process; a PTY PID is not proof of a leaf or GC-owner process. Callback errors cannot replace the original startup/cleanup outcome, and emitted status values are copied rather than exposing internal mutable state. The existing startup-failure callback remains once and preserves raw ANSI before cleanup. The session start method retains ownership of failed startup cleanup, including the original 30-second local readiness and 10+5-second cleanup bounds.
+
+The Source fixture captures the attempt index before each start, keeping hot and cold evidence separate. Observation may affect scheduling; missing records remain unknown, and forced exits are never natural exits. Helper tests use controlled PTY events and the real terminal parser, not an actual application or native process. Any OS sample must independently qualify its process identity and pending startup window. Functional acceptance and final migration still require their original evidence.
+
+## Full composer-prefix admission
+
+The new driver-only candidate keeps the original completion-name assertion and also requires the complete requested prefix inside the real composer in the same fresh viewport. It reads the single `>` input row between the last two complete horizontal rules; history text and dropdown names do not establish that input arrived. The case remains fixed at 120×42 with short ASCII prefixes that fit one row. Multiline composers, other layouts and platforms are outside this recognizer's demonstrated scope; a missing or nonconforming region rejects admission.
+
+Seven unchanged saved frames lacked the full prefix requested at that point even though the old name-only predicate could pass. This is saved evidence of premature observer admission, not proof of persistent input loss or a Core/renderer defect. The earlier 83221 clear failure and original matrix remain unchanged. The candidate waits for the same business condition to become demonstrable without extra input, retries, keys, sleep or changes to case120s/local15s/CI45s budgets. Type/normal checks and actual new-driver acceptance are required before freezing a publication tree; this candidate has not run.

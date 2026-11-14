@@ -395,8 +395,11 @@ describe('no-AK integration CI wiring', () => {
       'interactive/tui-clipboard-source.test.ts': 'Dedicated TUI parity gate',
       'interactive/tui-extension-acquisition.test.ts':
         'Dedicated TUI parity gate',
+      'interactive/tui-extension-partial-acquisition.test.ts':
+        'Dedicated TUI parity gate',
       'interactive/tui-foreground-shell.test.ts': 'Dedicated TUI parity gate',
       'interactive/tui-dual-output.test.ts': 'Dedicated TUI parity gate',
+      'interactive/tui-memory-manager.test.ts': 'Dedicated TUI parity gate',
       'interactive/tui-migration.test.ts': 'Runtime budget',
       'interactive/tui-session-recovery.test.ts': 'Dedicated TUI parity gate',
       'renderer-matrix.test.ts': 'Runtime budget',

@@ -41,6 +41,12 @@ type RefreshAction = 'auto' | 'stale';
 export class ExtensionFileWatcher {
   private watcher?: FSWatcher;
   private bootstrapWatcher?: FSWatcher;
+  private stateWatcher?: fs.FSWatcher;
+  private watcherReady = false;
+  private watcherHealthy = false;
+  private stateWatcherHealthy = false;
+  private watchIdentity?: string;
+  private watchedManager?: ReturnType<Config['getExtensionManager']>;
   private mutationListenerDisposer?: () => void;
   private mutationSuppressionEnds = new Map<number, () => void>();
   private staleFiles = new Set<string>();
@@ -67,12 +73,20 @@ export class ExtensionFileWatcher {
   }
 
   startWatching(): void {
-    this.stopWatching();
+    this.startWatchingResources(false);
+  }
+
+  private startWatchingResources(preserveMutations: boolean): void {
+    this.stopWatchingResources(preserveMutations);
     this.watching = true;
     const generation = ++this.watchGeneration;
     this.subscribeExtensionManagerMutations();
     this.staleFiles = this.getStaleFiles();
     const roots = this.getWatchRoots();
+    const stateRoot = this.getStateWatchRoot();
+    this.watchIdentity = this.getWatchIdentity(roots, stateRoot);
+    this.watcherReady = roots.length === 0;
+    this.watcherHealthy = true;
 
     if (roots.length > 0) {
       this.watcher = watchFs(roots, {
@@ -85,7 +99,12 @@ export class ExtensionFileWatcher {
         ignored: (filePath: string) => this.isIgnored(filePath),
       })
         .on('all', (event: string, changedPath: string) => {
-          if (generation !== this.watchGeneration) return;
+          if (
+            generation !== this.watchGeneration ||
+            !this.watching ||
+            this.watchedManager !== this.config.getExtensionManager()
+          )
+            return;
           const resolvedPath = path.resolve(changedPath);
           const action = this.getRefreshAction(
             event as WatchEvent,
@@ -108,11 +127,27 @@ export class ExtensionFileWatcher {
             marked,
           });
         })
+        .on('ready', () => {
+          if (
+            generation === this.watchGeneration &&
+            this.watching &&
+            this.watchedManager === this.config.getExtensionManager()
+          )
+            this.watcherReady = true;
+        })
         .on('error', (error: unknown) => {
+          if (
+            generation !== this.watchGeneration ||
+            !this.watching ||
+            this.watchedManager !== this.config.getExtensionManager()
+          )
+            return;
+          this.watcherHealthy = false;
           debugLogger.warn('Extension file watcher error:', error);
         });
     }
 
+    this.watchStoreParent(stateRoot, generation);
     if (!fs.existsSync(this.extensionsDir)) {
       this.watchExtensionsParent();
     }
@@ -120,27 +155,164 @@ export class ExtensionFileWatcher {
   }
 
   stopWatching(): void {
+    this.stopWatchingResources(false);
+  }
+
+  private stopWatchingResources(preserveMutations: boolean): void {
     const watcher = this.watcher;
     const bootstrapWatcher = this.bootstrapWatcher;
+    const stateWatcher = this.stateWatcher;
     this.watcher = undefined;
     this.bootstrapWatcher = undefined;
+    this.stateWatcher = undefined;
+    this.watchIdentity = undefined;
+    this.watchedManager = undefined;
+    this.watcherReady = false;
+    this.watcherHealthy = false;
+    this.stateWatcherHealthy = false;
     this.watching = false;
     this.watchGeneration++;
     if (this.generationPoller) clearInterval(this.generationPoller);
     this.generationPoller = undefined;
     this.mutationListenerDisposer?.();
     this.mutationListenerDisposer = undefined;
-    this.endPendingMutationSuppressions();
+    if (!preserveMutations) this.endPendingMutationSuppressions();
     closeFileWatcher(watcher).catch((error: unknown) => {
       debugLogger.warn('Extension file watcher close error:', error);
     });
     closeFileWatcher(bootstrapWatcher).catch((error: unknown) => {
       debugLogger.warn('Extension bootstrap watcher close error:', error);
     });
+    closeFileWatcher(stateWatcher).catch((error: unknown) => {
+      debugLogger.warn('Extension store watcher close error:', error);
+    });
   }
 
   restartWatching(): void {
-    this.startWatching();
+    const roots = this.getWatchRoots();
+    const identity = this.getWatchIdentity(roots, this.getStateWatchRoot());
+    if (
+      this.watching &&
+      this.watcherReady &&
+      this.watcherHealthy &&
+      this.stateWatcherHealthy &&
+      identity !== undefined &&
+      identity === this.watchIdentity &&
+      this.watchedManager === this.config.getExtensionManager()
+    ) {
+      this.staleFiles = this.getStaleFiles();
+      this.pollStoreGeneration();
+      return;
+    }
+    this.startWatchingResources(
+      this.watching &&
+        this.watchedManager === this.config.getExtensionManager(),
+    );
+  }
+
+  private getStateWatchRoot(): string | undefined {
+    let directory = path.dirname(this.storeStatePath);
+    while (!fs.existsSync(directory)) {
+      const parent = path.dirname(directory);
+      if (parent === directory) return undefined;
+      directory = parent;
+    }
+    try {
+      return fs.statSync(directory).isDirectory() ? directory : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private getWatchIdentity(
+    roots: string[],
+    stateRoot?: string,
+  ): string | undefined {
+    if (!stateRoot) return undefined;
+    const directories = new Set([...roots, stateRoot]);
+    if (!fs.existsSync(this.extensionsDir))
+      directories.add(path.dirname(this.extensionsDir));
+    try {
+      return JSON.stringify(
+        [...directories].sort().map((directory) => {
+          const stat = fs.lstatSync(directory);
+          if (
+            !stat.isDirectory() ||
+            !Number.isSafeInteger(stat.dev) ||
+            !Number.isSafeInteger(stat.ino) ||
+            stat.ino <= 0
+          )
+            throw new Error('Watch root identity unavailable');
+          return [
+            directory,
+            fs.realpathSync(directory),
+            stat.dev,
+            stat.ino,
+            stat.mode,
+          ];
+        }),
+      );
+    } catch {
+      return undefined;
+    }
+  }
+
+  private watchStoreParent(
+    directory: string | undefined,
+    generation: number,
+  ): void {
+    if (!directory) return;
+    try {
+      this.stateWatcher = fs.watch(directory, (_event, filename) => {
+        if (
+          generation !== this.watchGeneration ||
+          !this.watching ||
+          this.watchedManager !== this.config.getExtensionManager()
+        )
+          return;
+        const nextRoot = this.getStateWatchRoot();
+        if (
+          nextRoot !== directory ||
+          this.getWatchIdentity(this.getWatchRoots(), nextRoot) !==
+            this.watchIdentity
+        ) {
+          const hadBaseline = this.observedStoreGeneration !== undefined;
+          this.restartWatching();
+          if (hadBaseline || this.readStoreGeneration() === undefined)
+            this.getRefreshAction('change', path.resolve(this.storeStatePath));
+          return;
+        }
+        if (directory !== path.dirname(this.storeStatePath)) return;
+        if (
+          filename !== null &&
+          filename.toString() !== path.basename(this.storeStatePath)
+        )
+          return;
+        this.getRefreshAction('change', path.resolve(this.storeStatePath));
+      });
+      this.stateWatcherHealthy = true;
+      this.stateWatcher.on('error', (error: unknown) => {
+        if (
+          generation !== this.watchGeneration ||
+          !this.watching ||
+          this.watchedManager !== this.config.getExtensionManager()
+        )
+          return;
+        this.stateWatcherHealthy = false;
+        debugLogger.warn('Extension store watcher error:', error);
+      });
+      this.stateWatcher.on('close', () => {
+        if (
+          generation === this.watchGeneration &&
+          this.watching &&
+          this.watchedManager === this.config.getExtensionManager()
+        )
+          this.stateWatcherHealthy = false;
+      });
+    } catch (error) {
+      this.stateWatcherHealthy = false;
+      debugLogger.warn('Extension store watcher error:', error);
+    }
   }
 
   private getWatchRoots(): string[] {
@@ -148,7 +320,6 @@ export class ExtensionFileWatcher {
     if (fs.existsSync(this.extensionsDir)) {
       roots.add(this.extensionsDir);
     }
-    roots.add(this.storeStatePath);
     for (const extension of this.config.getActiveExtensions()) {
       if (extension.installMetadata?.type === 'link') {
         const rawSource = extension.installMetadata.source;
@@ -209,7 +380,7 @@ export class ExtensionFileWatcher {
     const parentDir = path.dirname(this.extensionsDir);
     const dirBasename = path.basename(this.extensionsDir);
     const generation = this.watchGeneration;
-    this.bootstrapWatcher = watchFs(parentDir, {
+    const bootstrapWatcher: FSWatcher = watchFs(parentDir, {
       ignoreInitial: true,
       followSymlinks: false,
       depth: 0,
@@ -217,19 +388,39 @@ export class ExtensionFileWatcher {
         filePath !== parentDir && path.basename(filePath) !== dirBasename,
     })
       .on('all', (_event: string, changedPath: string) => {
-        if (generation !== this.watchGeneration) return;
+        if (
+          generation !== this.watchGeneration ||
+          !this.watching ||
+          this.watchedManager !== this.config.getExtensionManager() ||
+          this.bootstrapWatcher !== bootstrapWatcher
+        )
+          return;
         if (path.basename(changedPath) !== dirBasename) return;
         if (!fs.existsSync(this.extensionsDir)) return;
         this.refreshState.markExtensionsChanged('extension directory created');
         queueMicrotask(() => {
-          if (this.watching) {
+          if (
+            generation === this.watchGeneration &&
+            this.watching &&
+            this.watchedManager === this.config.getExtensionManager() &&
+            this.bootstrapWatcher === bootstrapWatcher
+          ) {
             this.restartWatching();
           }
         });
       })
       .on('error', (error: unknown) => {
+        if (
+          generation !== this.watchGeneration ||
+          !this.watching ||
+          this.watchedManager !== this.config.getExtensionManager() ||
+          this.bootstrapWatcher !== bootstrapWatcher
+        )
+          return;
+        this.watcherHealthy = false;
         debugLogger.warn('Extension bootstrap watcher error:', error);
       });
+    this.bootstrapWatcher = bootstrapWatcher;
   }
 
   private getRefreshAction(
@@ -332,8 +523,16 @@ export class ExtensionFileWatcher {
 
   private subscribeExtensionManagerMutations(): void {
     const manager = this.config.getExtensionManager();
+    this.watchedManager = manager;
+    const generation = this.watchGeneration;
     this.mutationListenerDisposer = manager.addMutationListener(
       (event: ExtensionMutationEvent) => {
+        if (
+          generation !== this.watchGeneration ||
+          !this.watching ||
+          this.watchedManager !== this.config.getExtensionManager()
+        )
+          return;
         if (event.phase === 'start') {
           this.mutationSuppressionEnds.set(
             event.id,
@@ -378,14 +577,19 @@ export class ExtensionFileWatcher {
   private startGenerationPolling(): void {
     if (this.generationPoller) clearInterval(this.generationPoller);
     this.pollStoreGeneration();
-    this.generationPoller = setInterval(
-      () => this.pollStoreGeneration(),
-      30_000,
-    );
+    const generation = this.watchGeneration;
+    this.generationPoller = setInterval(() => {
+      if (generation === this.watchGeneration) this.pollStoreGeneration();
+    }, 30_000);
     this.generationPoller.unref?.();
   }
 
   private pollStoreGeneration(): void {
+    if (
+      !this.watching ||
+      this.watchedManager !== this.config.getExtensionManager()
+    )
+      return;
     const generation = this.readStoreGeneration();
     if (generation === undefined) return;
     this.markStoreGenerationChanged(generation);
