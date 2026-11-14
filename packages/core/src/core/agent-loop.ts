@@ -37,6 +37,9 @@ import {
 } from './turn.js';
 import type { LlmChat } from './llm-chat.js';
 import { runAgentLoopOnBus } from '../event-bus/adapter.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('AGENT_LOOP');
 
 type SchedulerOptions = ConstructorParameters<typeof CoreToolScheduler>[0];
 
@@ -406,6 +409,12 @@ export async function runModelRound(
   calls: ToolCallRequestInfo[];
   stop?: AgentLoopStopReason;
 }> {
+  // Execution marker: with QWEN_DEBUG_LOG_FILE on, this line proves a round
+  // ran on the shared agent loop rather than a surface's legacy loop. The
+  // wording is deliberately distinct from the TUI surfaces' own "model round
+  // on the shared agent loop" marker so the TUI parity's count of that marker
+  // is not doubled by this one.
+  debugLogger.debug('runModelRound on the shared agent loop');
   const calls: ToolCallRequestInfo[] = [];
   let stop: AgentLoopStopReason | undefined;
   const stream: AsyncIterator<ServerLlmStreamEvent, Turn | undefined> =

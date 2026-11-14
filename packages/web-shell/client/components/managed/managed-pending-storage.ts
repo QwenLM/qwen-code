@@ -1,3 +1,4 @@
+import { randomUUID } from '../../utils/random-uuid.js';
 import {
   runIndexedDbRequest,
   type IndexedDbSchema,
@@ -72,7 +73,7 @@ export async function saveManagedPending(
       if (new TextEncoder().encode(encoded).byteLength <= INLINE_BYTES) {
         sessionStorage.setItem(key, encoded);
       } else {
-        id = crypto.randomUUID();
+        id = randomUUID();
         await request('readwrite', (store) => store.put({ key, value }, id));
         sessionStorage.setItem(
           key,
