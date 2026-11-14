@@ -15,24 +15,28 @@ describe('parseBackgroundResponseContext', () => {
   // A context this parser rejects is delivered to the channel without one,
   // which costs the message its header and its turn grouping. Every kind a
   // session can produce has to be listed here as well as in the type.
-  it.each(['agent', 'monitor', 'shell', 'workflow', 'peer'] as const)(
-    'carries a %s context through',
-    (kind) => {
-      expect(
-        parseBackgroundResponseContext({
-          taskId: 'k1',
-          status: 'completed',
-          kind,
-          label: 'a label',
-        }),
-      ).toEqual({
+  it.each([
+    'agent',
+    'monitor',
+    'shell',
+    'workflow',
+    'peer',
+    'teammate',
+  ] as const)('carries a %s context through', (kind) => {
+    expect(
+      parseBackgroundResponseContext({
         taskId: 'k1',
         status: 'completed',
         kind,
         label: 'a label',
-      });
-    },
-  );
+      }),
+    ).toEqual({
+      taskId: 'k1',
+      status: 'completed',
+      kind,
+      label: 'a label',
+    });
+  });
 
   // A workflow result is delivered only to the chat that launched it, so a
   // workflow context must keep its origin; an origin that fails to parse

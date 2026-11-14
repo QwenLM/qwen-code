@@ -3065,6 +3065,7 @@ export class DingtalkChannel extends ChannelBase {
       monitor: 'Monitor',
       workflow: 'Workflow',
       peer: 'Cross-session message',
+      teammate: 'Teammate report',
     }[delivery.kind];
     return `## ${icon} ${kind} · ${label}${delivery.partial ? `${chinese ? '' : ' '}${partialLabel}` : ''}`;
   }

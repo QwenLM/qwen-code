@@ -63,7 +63,6 @@ import {
   buildSessionRecoveryPlanFromApiHistory,
   restoreWorktreeContext,
   TeamEventType,
-  ApprovalMode,
   ToolConfirmationOutcome,
   createDuplicateProviderToolCallResponse,
   findPlanModeEntryBatchBoundaryIndex,
@@ -121,6 +120,10 @@ import {
 } from './utils/errors.js';
 import { RunBudgetEnforcer } from './utils/runBudget.js';
 import {
+  decideTeammateApprovalFallback,
+  type TeammateApprovalHostCopy,
+} from './utils/teammate-approval-fallback.js';
+import {
   settleChatRecording,
   subscribeToHeadlessChatRecordingFailures,
 } from './nonInteractive/chat-recording-failure.js';
@@ -128,6 +131,13 @@ import { registerCleanup } from './utils/cleanup.js';
 import { cleanupReviewWorktreeLeases } from './services/review-worktree-lease.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
+
+const HEADLESS_TEAMMATE_APPROVAL_COPY: TeammateApprovalHostCopy = {
+  surface: 'non-stream-json mode',
+  explicitApprovalHint:
+    'Use --input-format stream-json --output-format stream-json to review it.',
+  allowHint: 'Use --yolo or stream-json to allow teammate tool calls.',
+};
 
 export class TurnInterruptedError extends Error {
   constructor() {
@@ -1158,14 +1168,12 @@ export async function runNonInteractive(
           // listener, the event has no subscriber and the teammate
           // hangs until its 600s stall timeout fires.
           approvalListener = (event) => {
-            const mode = config.getApprovalMode();
-            const confirmationDetails = event.confirmationDetails;
-            const requiresExplicitHostApproval =
-              confirmationDetails?.type !== 'plan' &&
-              confirmationDetails !== undefined &&
-              'hideAlwaysAllow' in confirmationDetails &&
-              confirmationDetails.hideAlwaysAllow === true;
-            if (mode === ApprovalMode.YOLO && !requiresExplicitHostApproval) {
+            const decision = decideTeammateApprovalFallback(
+              event,
+              config.getApprovalMode(),
+              HEADLESS_TEAMMATE_APPROVAL_COPY,
+            );
+            if (decision.action === 'proceed') {
               // `respond` may reject if the teammate terminates between the
               // approval request and our response — catch it so it doesn't
               // become an unhandledRejection that can crash the process.
@@ -1179,13 +1187,9 @@ export async function runNonInteractive(
                 });
               return;
             }
+            const { reason } = decision;
             // Surface a clear reason on stderr — otherwise the
             // failure looks like the teammate gave up for no reason.
-            const reason = requiresExplicitHostApproval
-              ? mode === ApprovalMode.YOLO
-                ? `Auto-cancelling tool ${event.toolName} requested by teammate "${event.teammateName}": this request requires an explicit interactive approval surface and cannot be bypassed by YOLO mode.`
-                : `Auto-cancelling tool ${event.toolName} requested by teammate "${event.teammateName}": this request requires an explicit interactive approval surface, which is unavailable in non-stream-json mode with the current approval mode (${mode}). Use --input-format stream-json --output-format stream-json to review it.`
-              : `Auto-cancelling tool ${event.toolName} requested by teammate "${event.teammateName}": current approval mode (${mode}) cannot prompt in non-stream-json mode. Use --yolo or stream-json to allow teammate tool calls.`;
             process.stderr.write(`[team] ${reason}\n`);
             // Also surface to the leader's LLM, otherwise it just
             // sees the teammate fail without any signal that an

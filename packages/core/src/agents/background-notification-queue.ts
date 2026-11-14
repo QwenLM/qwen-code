@@ -41,7 +41,9 @@ export type BackgroundNotificationKind =
   | 'workflow'
   | 'cron'
   /** A message from another session, accepted by this one's inbound gate. */
-  | 'peer';
+  | 'peer'
+  /** A team member's report to the leader; `taskId` is `team:<teamName>`. */
+  | 'teammate';
 
 /** The slice of a queued notification the admission rule looks at. */
 export interface AdmissibleNotification {
@@ -140,9 +142,11 @@ function droppedNoun(
             ? 'scheduled prompt'
             : kind === 'peer'
               ? 'cross-session message'
-              : interim
-                ? 'monitor pulse'
-                : 'monitor result';
+              : kind === 'teammate'
+                ? 'teammate report'
+                : interim
+                  ? 'monitor pulse'
+                  : 'monitor result';
   return count === 1 ? singular : `${singular}s`;
 }
 
@@ -154,6 +158,7 @@ const GROUP_ORDER = {
   monitor: [false, true],
   cron: [false],
   peer: [false],
+  teammate: [false],
 } as const satisfies Record<BackgroundNotificationKind, readonly boolean[]>;
 
 /** At most this many task ids are named per group before eliding the rest. */
@@ -226,6 +231,7 @@ export class DroppedNotificationTally {
     let hasInspectableLoss = false;
     let hasCronLoss = false;
     let hasPeerLoss = false;
+    let hasTeammateLoss = false;
     for (const kind of Object.keys(
       GROUP_ORDER,
     ) as BackgroundNotificationKind[]) {
@@ -247,11 +253,13 @@ export class DroppedNotificationTally {
             supersededPulseClause = `${group.count} superseded ${noun}${names} ${group.count === 1 ? 'was' : 'were'} not delivered`;
           } else {
             clauses.push(`${group.count} ${noun}${names}`);
-            // A cron prompt and a peer message are not tasks: neither has
-            // an entry in the task registry for the model to go and read.
-            hasInspectableLoss ||= kind !== 'cron' && kind !== 'peer';
+            // A cron prompt, a peer message and a teammate report are not
+            // tasks: none has an entry in the task registry to go and read.
+            hasInspectableLoss ||=
+              kind !== 'cron' && kind !== 'peer' && kind !== 'teammate';
             hasCronLoss ||= kind === 'cron';
             hasPeerLoss ||= kind === 'peer';
+            hasTeammateLoss ||= kind === 'teammate';
           }
         }
       }
@@ -307,6 +315,11 @@ export class DroppedNotificationTally {
     if (hasPeerLoss) {
       summaryParts.push(
         'The cross-session messages were not delivered and will not be redelivered.',
+      );
+    }
+    if (hasTeammateLoss) {
+      summaryParts.push(
+        'The teammate reports were not delivered and are no longer in the leader inbox.',
       );
     }
     const summary = summaryParts.join(' ');

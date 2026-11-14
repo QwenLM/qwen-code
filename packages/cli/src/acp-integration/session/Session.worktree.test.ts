@@ -194,6 +194,8 @@ describe('Session.pendingWorktreeNotice', () => {
       getStopHookBlockingCap: vi.fn().mockReturnValue(0),
       // Session constructor registers background-notification callbacks on
       // these registries; provide no-op stubs so construction succeeds.
+      getTeamManager: vi.fn().mockReturnValue(null),
+      onTeamManagerChange: vi.fn(),
       getBackgroundTaskRegistry: vi.fn().mockReturnValue({
         setNotificationCallback: vi.fn(),
         setStatusChangeCallback: vi.fn(),

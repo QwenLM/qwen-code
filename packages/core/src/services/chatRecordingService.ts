@@ -635,8 +635,9 @@ export interface NotificationRecordPayload {
   backgroundTask?: {
     taskId: string;
     status: string;
-    /** `peer`: a message from another session; `taskId` is the message id. */
-    kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'peer';
+    /** `peer`: a message from another session; `taskId` is the message id.
+     * `teammate`: a team member's report; `taskId` is `team:<teamName>`. */
+    kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'peer' | 'teammate';
     toolUseId?: string;
     sourceTurnId?: string;
     /** Structured fields for i18n rendering (persisted for page refresh). */

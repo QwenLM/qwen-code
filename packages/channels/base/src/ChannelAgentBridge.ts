@@ -182,7 +182,7 @@ export interface BackgroundResponseContext {
   taskId: string;
   status: string;
   /** `peer`: a message from another session; `taskId` is the message id. */
-  kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'peer';
+  kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'peer' | 'teammate';
   toolUseId?: string;
   label?: string;
   turnId?: string;
@@ -210,7 +210,8 @@ export function parseBackgroundResponseContext(
       kind !== 'monitor' &&
       kind !== 'shell' &&
       kind !== 'workflow' &&
-      kind !== 'peer')
+      kind !== 'peer' &&
+      kind !== 'teammate')
   ) {
     return undefined;
   }

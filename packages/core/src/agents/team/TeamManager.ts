@@ -1188,6 +1188,10 @@ export class TeamManager {
     );
   }
 
+  isLeaderInboxPolling(): boolean {
+    return this.pollingInterval !== null;
+  }
+
   /**
    * Stop polling the leader inbox.
    */
@@ -1221,12 +1225,17 @@ export class TeamManager {
     if (!callback) {
       return;
     }
+    // Snapshot terminal state before reading: a teammate may write its final
+    // report and exit between the read and the check, and stopping on a
+    // post-read check would strand that report in the inbox.
+    const terminated = this.allTeammatesTerminated();
     const newMessages = await this.consumeLeaderInbox();
 
     if (newMessages.length === 0) {
-      // No new messages — check if all teammates are done.
-      const terminated = this.allTeammatesTerminated();
-      if (terminated) {
+      // Stop only when the team was terminated both before and after the read:
+      // the pre-read snapshot covers write-then-exit, the re-check covers a
+      // teammate spawned during the read.
+      if (terminated && this.allTeammatesTerminated()) {
         this.stopLeaderInboxPolling();
         this.teamEventEmitter.emit(TeamEventType.ALL_TEAMMATES_TERMINATED, {
           timestamp: Date.now(),

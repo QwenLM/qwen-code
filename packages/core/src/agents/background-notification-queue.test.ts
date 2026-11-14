@@ -349,6 +349,18 @@ describe('DroppedNotificationTally', () => {
     expect(summary?.modelText).not.toContain('/tasks');
   });
 
+  it('names a lost teammate report without sending the model to /tasks', () => {
+    const summary = tallyOf({ kind: 'teammate', taskId: 'team:crew' }).take();
+    expect(summary?.displayText).toBe(
+      'Dropped 1 background notification (queue full): 1 teammate report ' +
+        '(team:crew).',
+    );
+    expect(summary?.modelText).toContain(
+      'The teammate reports were not delivered and are no longer in the leader inbox.',
+    );
+    expect(summary?.modelText).not.toContain('/tasks');
+  });
+
   it('still points at /tasks when a task was lost alongside a peer message', () => {
     const summary = tallyOf(
       { kind: 'peer', taskId: 'msg_1' },

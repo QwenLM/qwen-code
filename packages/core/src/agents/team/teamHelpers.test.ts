@@ -30,6 +30,7 @@ import {
   getTasksDir,
 } from './teamHelpers.js';
 import { TEAMMATE_COLORS } from './types.js';
+import { writeMessage } from './mailbox.js';
 import { Storage } from '../../config/storage.js';
 
 vi.mock('../../config/storage.js', async (importOriginal) => {
@@ -480,7 +481,7 @@ describe('file I/O', () => {
     it('reclaims a team whose lead process is dead', async () => {
       await writeTeamFile('stale', makeTeamFile({ leadPid: deadPid() }));
 
-      await expect(tryReclaimStaleTeam('stale')).resolves.toBe(true);
+      await expect(tryReclaimStaleTeam('stale')).resolves.toBe('reclaimed');
       expect(await readTeamFile('stale')).toBeUndefined();
     });
 
@@ -490,7 +491,7 @@ describe('file I/O', () => {
       // is stale by definition.
       await writeTeamFile('own', makeTeamFile({ leadPid: process.pid }));
 
-      await expect(tryReclaimStaleTeam('own')).resolves.toBe(true);
+      await expect(tryReclaimStaleTeam('own')).resolves.toBe('reclaimed');
       expect(await readTeamFile('own')).toBeUndefined();
     });
 
@@ -498,14 +499,51 @@ describe('file I/O', () => {
       // The test runner's parent process is alive for the duration.
       await writeTeamFile('live', makeTeamFile({ leadPid: process.ppid }));
 
-      await expect(tryReclaimStaleTeam('live')).resolves.toBe(false);
+      await expect(tryReclaimStaleTeam('live')).resolves.toBe('live-owner');
       expect(await readTeamFile('live')).toBeDefined();
+    });
+
+    it('does not reclaim a stale team with unread leader mail', async () => {
+      await writeTeamFile('unread', makeTeamFile({ leadPid: deadPid() }));
+      await writeMessage('unread', 'leader', {
+        from: 'worker',
+        text: 'final report',
+        timestamp: new Date().toISOString(),
+        read: false,
+      });
+
+      await expect(tryReclaimStaleTeam('unread')).resolves.toBe('unread-mail');
+      expect(await readTeamFile('unread')).toBeDefined();
+    });
+
+    it('reclaims a stale team whose leader mail is all read', async () => {
+      await writeTeamFile('read', makeTeamFile({ leadPid: deadPid() }));
+      await writeMessage('read', 'leader', {
+        from: 'worker',
+        text: 'old report',
+        timestamp: new Date().toISOString(),
+        read: true,
+      });
+
+      await expect(tryReclaimStaleTeam('read')).resolves.toBe('reclaimed');
+    });
+
+    it('does not reclaim when the leader inbox is unreadable', async () => {
+      await writeTeamFile('badbox', makeTeamFile({ leadPid: deadPid() }));
+      await fs.mkdir(getInboxesDir('badbox'), { recursive: true });
+      await fs.writeFile(
+        path.join(getInboxesDir('badbox'), 'leader.json'),
+        '{ torn',
+      );
+
+      await expect(tryReclaimStaleTeam('badbox')).resolves.toBe('unread-mail');
+      expect(await readTeamFile('badbox')).toBeDefined();
     });
 
     it('does not reclaim a pre-leadPid team file', async () => {
       await writeTeamFile('legacy', makeTeamFile());
 
-      await expect(tryReclaimStaleTeam('legacy')).resolves.toBe(false);
+      await expect(tryReclaimStaleTeam('legacy')).resolves.toBe('unverifiable');
       expect(await readTeamFile('legacy')).toBeDefined();
     });
 
@@ -513,7 +551,7 @@ describe('file I/O', () => {
       const tasksDir = getTasksDir('ghost');
       await fs.mkdir(tasksDir, { recursive: true });
 
-      await expect(tryReclaimStaleTeam('ghost')).resolves.toBe(true);
+      await expect(tryReclaimStaleTeam('ghost')).resolves.toBe('reclaimed');
       await expect(fs.access(tasksDir)).rejects.toThrow();
     });
 
@@ -529,7 +567,9 @@ describe('file I/O', () => {
       });
       await writeTeamFile('other-user', makeTeamFile({ leadPid: 424242 }));
 
-      await expect(tryReclaimStaleTeam('other-user')).resolves.toBe(false);
+      await expect(tryReclaimStaleTeam('other-user')).resolves.toBe(
+        'live-owner',
+      );
       expect(await readTeamFile('other-user')).toBeDefined();
     });
 
@@ -545,7 +585,9 @@ describe('file I/O', () => {
       await fs.writeFile(path.join(tasksDir, 'marker.json'), '{}');
       await fs.writeFile(getTeamFilePath('nullcfg'), 'null');
 
-      await expect(tryReclaimStaleTeam('nullcfg')).resolves.toBe(false);
+      await expect(tryReclaimStaleTeam('nullcfg')).resolves.toBe(
+        'unverifiable',
+      );
       expect(await fs.readFile(getTeamFilePath('nullcfg'), 'utf-8')).toBe(
         'null',
       );
@@ -561,7 +603,9 @@ describe('file I/O', () => {
       await fs.writeFile(path.join(tasksDir, 'marker.json'), '{}');
       await fs.writeFile(getTeamFilePath('corrupt'), '{ "name": ');
 
-      await expect(tryReclaimStaleTeam('corrupt')).resolves.toBe(false);
+      await expect(tryReclaimStaleTeam('corrupt')).resolves.toBe(
+        'unverifiable',
+      );
       expect(await fs.readFile(getTeamFilePath('corrupt'), 'utf-8')).toBe(
         '{ "name": ',
       );
@@ -579,7 +623,8 @@ describe('file I/O', () => {
       await fs.writeFile(path.join(tasksDir, 'marker.json'), '{}');
 
       let readCount = 0;
-      __setReadFileHook(() => {
+      __setReadFileHook((file: unknown) => {
+        if (String(file) !== getTeamFilePath('flaky')) return undefined;
         readCount += 1;
         if (readCount === 2) {
           // The re-read before the delete fails with ENOENT.
@@ -592,7 +637,9 @@ describe('file I/O', () => {
         return undefined;
       });
       try {
-        await expect(tryReclaimStaleTeam('flaky')).resolves.toBe(false);
+        await expect(tryReclaimStaleTeam('flaky')).resolves.toBe(
+          'unverifiable',
+        );
       } finally {
         __setReadFileHook(undefined);
       }
@@ -600,6 +647,33 @@ describe('file I/O', () => {
       await expect(
         fs.access(getTeamFilePath('flaky')),
       ).resolves.toBeUndefined();
+    });
+
+    it('keeps a newer generation created while the leader inbox is read', async () => {
+      // The unread-mail check reads a file, so it must run before the
+      // byte-identity re-read: a concurrent creator that lands its new
+      // generation during that read is then caught by the re-read instead
+      // of being deleted by name.
+      await writeTeamFile('race', makeTeamFile({ leadPid: deadPid() }));
+      const leaderInbox = path.join(getInboxesDir('race'), 'leader.json');
+      __setReadFileHook((file: unknown) => {
+        if (String(file) !== leaderInbox) return undefined;
+        return (async () => {
+          await writeTeamFile(
+            'race',
+            makeTeamFile({ leadPid: process.ppid, description: 'newer' }),
+          );
+          throw Object.assign(new Error('ENOENT: no such file or directory'), {
+            code: 'ENOENT',
+          });
+        })();
+      });
+      try {
+        await expect(tryReclaimStaleTeam('race')).resolves.toBe('live-owner');
+      } finally {
+        __setReadFileHook(undefined);
+      }
+      expect((await readTeamFile('race'))?.description).toBe('newer');
     });
   });
 });

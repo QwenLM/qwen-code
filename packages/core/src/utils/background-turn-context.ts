@@ -13,9 +13,10 @@ export interface BackgroundNotificationTurn {
    * What produced the turn. `peer` is a message another session sent to
    * this one, which the cross-session gate accepted; it is not a task, so
    * its `taskId` is the message id and nothing in the task registry
-   * answers to it.
+   * answers to it. `teammate` is a report from an in-process team member to
+   * the leader; its `taskId` is `team:<teamName>`.
    */
-  kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'peer';
+  kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'peer' | 'teammate';
   toolUseId?: string;
   sourceTurnId?: string;
   label?: string;

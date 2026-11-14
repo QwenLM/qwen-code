@@ -1439,9 +1439,10 @@ export interface DaemonBackgroundTurn {
    * What produced the turn. `peer` is a message another session sent to
    * this one, which the receiving session's cross-session gate accepted.
    * It is not a task: its `taskId` is the message id, and `tasks/cancel`
-   * does not answer to it.
+   * does not answer to it. `teammate` is a team member's report to the
+   * leader, with `team:<teamName>` as its `taskId`.
    */
-  kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'peer';
+  kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'peer' | 'teammate';
   toolUseId?: string;
   sourceTurnId?: string;
   label?: string;
@@ -1463,7 +1464,8 @@ export function parseDaemonBackgroundTurn(
       record['kind'] !== 'monitor' &&
       record['kind'] !== 'shell' &&
       record['kind'] !== 'workflow' &&
-      record['kind'] !== 'peer') ||
+      record['kind'] !== 'peer' &&
+      record['kind'] !== 'teammate') ||
     typeof record['startedAt'] !== 'number' ||
     !Number.isFinite(record['startedAt']) ||
     record['startedAt'] < 0 ||

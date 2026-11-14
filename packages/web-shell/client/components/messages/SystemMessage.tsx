@@ -245,7 +245,9 @@ export const SystemMessage = memo(function SystemMessage({
               ? 'background.agent'
               : turn?.kind === 'peer'
                 ? 'background.peer'
-                : 'background.task',
+                : turn?.kind === 'teammate'
+                  ? 'background.teammate'
+                  : 'background.task',
           )}
         </span>
         <span aria-hidden="true" className="text-muted-foreground">
@@ -270,19 +272,22 @@ export const SystemMessage = memo(function SystemMessage({
               {t('background.source')}
             </Button>
           )}
-          {/* A peer turn has no task behind it to show the details of. */}
-          {backgroundDetails && turn && turn.kind !== 'peer' && (
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="h-auto gap-1 p-0 font-normal text-muted-foreground hover:bg-transparent hover:text-foreground"
-              onClick={() => backgroundDetails(turn)}
-            >
-              <FileTextIcon size={12} aria-hidden="true" />
-              {t('background.details')}
-            </Button>
-          )}
+          {/* A peer or teammate turn has no task behind it to show the details of. */}
+          {backgroundDetails &&
+            turn &&
+            turn.kind !== 'peer' &&
+            turn.kind !== 'teammate' && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-auto gap-1 p-0 font-normal text-muted-foreground hover:bg-transparent hover:text-foreground"
+                onClick={() => backgroundDetails(turn)}
+              >
+                <FileTextIcon size={12} aria-hidden="true" />
+                {t('background.details')}
+              </Button>
+            )}
         </span>
       </div>
     );
