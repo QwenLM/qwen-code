@@ -50,21 +50,28 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
   one consumer, so a second watch on the same PR would take the head moves and
   `stop` the first one needs.
 - Dedupe lives in a state file (`.qwen/tmp/verify-pr-watch-<n>.json`), owned
-  by `scripts/verify-pr-watch-state.mjs` (`--start` / `--complete`) since
-  PR #17185 — rounds no longer hand-write the JSON, whose completion write
-  two consecutive rounds on PR #16866 skipped, leaving the file two heads
-  stale. The file holds two lists, `verifiedHeads` and `inFlightHeads`, each
-  entry carrying its own head, round, artifact directory and timestamp; the
-  top-level `verifiedHead`/`previousHead` fields are a compatibility view
-  over the most recent completions. Dedup is **per head over the whole
-  list**: a fire for any sha already verified, or for any sha whose round is
-  in flight, is ignored without a model turn; a fire for a _new_ head starts
-  its own round even while another head's round is running, because per-head
-  dedup guarantees every head gets a round where global suppression can
-  strand one. Neither a start nor a completion erases another head's entry —
-  a single in-flight slot let starting Y erase X's marker, so a redelivered
-  X started a second concurrent round — and the bound-delivery design dedupes
-  redelivered head-change events against these lists. `--complete` removes
+  by `scripts/verify-pr-watch-state.mjs` (`--start` / `--complete` /
+  `--release`) since PR #17185 — rounds no longer hand-write the JSON, whose
+  completion write two consecutive rounds on PR #16866 skipped, leaving the
+  file two heads stale. The file holds two lists, `verifiedHeads` and
+  `inFlightHeads`, each entry carrying its own head, round, artifact
+  directory and timestamp; the top-level `verifiedHead`/`previousHead`
+  fields are a compatibility view over the most recent completions.
+  Verified heads dedupe **as a list**: a fire for any sha already verified
+  is ignored without a model turn, not just the most recent one, and the
+  bound-delivery design dedupes redelivered head-change events against it.
+  **One round runs per PR at a time**: while any round is in flight, a fire
+  for any head — including a new one — is skipped until the running round
+  completes or is released. The local recipe's clone, base copy, proxy
+  files and container name are per PR, so overlapping rounds would clobber
+  each other; the CI lane serialises the same way with its per-PR
+  concurrency group. Every read-modify-write holds an exclusive lock file
+  beside the state file, so two concurrent invocations cannot each build
+  state from the same pre-existing file and erase each other's entry; a
+  killed invocation's `.lock` is removed manually, never reclaimed by
+  timestamp. The state root resolves from the script's own clone (its main
+  worktree), not the caller's cwd, so a round whose session directory is
+  its PR clone still writes the trusted clone's state. `--complete` removes
   only its own head's in-flight entry and upserts its verified entry; a late
   completion by an older round changes the top-level view but erases no
   verification. `--start` writes the sha **before** the round begins, so a

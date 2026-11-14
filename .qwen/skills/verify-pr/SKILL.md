@@ -515,15 +515,18 @@ authority to certify the round.
    expected head both come from outside the round tree. The host built the
    boundary, so the host declares it — the inner round runs the CI entry
    path and does not write `boundary.json` itself. Stop the container
-   **before** declaring, and unlink any existing `boundary.json` before
-   writing: `<round-dir>` lives inside the PR clone the container mounts
-   read-write, so PR code can plant a symlink there (a plain redirect would
-   follow it and truncate the target on the host) and a live container could
-   rewrite the declaration between the write and the checker's read:
+   **before** declaring, refuse a symlinked round dir, and clear any planted
+   `boundary.json` before writing: `<round-dir>` lives inside the PR clone
+   the container mounts read-write, so PR code can plant a symlink at the
+   file **or at the directory itself** (a plain redirect would follow it and
+   truncate the target on the host), plant a directory under the reserved
+   name, and a live container could rewrite the declaration between the
+   write and the checker's read:
 
    ```bash
    docker rm -f qwen-verify-<n>
-   rm -f -- <round-dir>/boundary.json
+   [ -L <round-dir> ] && { echo "round dir is a symlink" >&2; exit 1; }
+   rm -rf -- <round-dir>/boundary.json
    printf '%s\n' '{"mode":"container","detail":"<image, network policy, credential-free mount>"}' > <round-dir>/boundary.json
    node <trusted-clone>/scripts/verify-pr-check.mjs \
      --context ~/.cache/qwen-verify/pr<n>/pr.json <round-dir>
@@ -755,7 +758,9 @@ ambiguous rather than verify a guessed PR. Then, in order:
    recover the marker with
    `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <H>`
    and start again — the release keeps `verifiedHead` and refuses a marker
-   belonging to another head. The write happens
+   belonging to another head. If the killed invocation left a `.lock` file
+   beside the state file, remove that lock file first — never the state
+   file itself. The write happens
    **before** the round starts — the same write-before-start rule the watch
    prompt follows, so a watch fire during the manual round skips `H`. Once
    the round completes, record it with

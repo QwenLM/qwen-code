@@ -65,20 +65,28 @@ A second recipe in the skill, selected when the delta touches
    `maven:3.9.11-eclipse-temurin-21`. Verify the exact tag exists at
    implementation time and pin by digest (the JS recipe references
    `node:22-bookworm` by tag; the Java recipe should be stricter).
-2. **Offline Maven repository.** The host (trusted side) seeds a per-round
-   repository with `mvn dependency:go-offline` against the PR head's poms,
-   using the host's normal mirror settings. The seed must also install the
-   PR's `packages/sdk-java` reactor artifacts into that repository
-   (`mvn install` on the SDK modules): the managed-agent build resolves them
-   from the local repo, so a fresh seed without them cannot resolve, and a
-   reused seed with stale ones compiles against the wrong jar — re-install
-   whenever the SDK poms or sources change, under the same built-for-this-head
-   reuse rule. Strip the `_remote.repositories` tracking files afterwards
-   (or seed with `-Dmaven.legacyLocalRepo=true`): they record which mirror
-   served each artifact, and offline resolution against a different repo id
-   otherwise re-resolves and fails. The container mounts that repository
-   directory only — never `settings.xml`, which can carry mirror
-   credentials. The battery container runs with
+2. **Offline Maven repository, seeded inside a boundary.** No host step runs
+   a Maven goal against the PR's poms: `mvn install` walks the whole default
+   lifecycle, so any plugin execution the PR binds to `compile` or `test`
+   would run on the maintainer's machine — the strip list below covers
+   project-model extensions, not lifecycle-bound `<build><plugins>`
+   executions. Instead, the host prepares a sanitized copy of the PR tree
+   (strip list below) and the **seed runs inside a credential-free container
+   whose egress is limited to the configured mirror**, with a
+   credential-free mirror configuration; the resulting repository is copied
+   out. The seed runs `mvn dependency:go-offline` and installs the PR's
+   `packages/sdk-java` reactor artifacts (`mvn install -DskipTests
+-Dgpg.skip=true -Dmaven.javadoc.skip=true` on the SDK modules, as the CI
+   lane does inside its own job boundary): the managed-agent build resolves
+   them from the local repo, so a fresh seed without them cannot resolve,
+   and a reused seed with stale ones compiles against the wrong jar —
+   re-seed whenever the SDK poms or sources change, under the same
+   built-for-this-head reuse rule. Strip the `_remote.repositories`
+   tracking files afterwards (or seed with `-Dmaven.legacyLocalRepo=true`):
+   they record which mirror served each artifact, and offline resolution
+   against a different repo id otherwise re-resolves and fails. The battery
+   container mounts that repository directory only — never `settings.xml`,
+   which can carry mirror credentials — and runs with
    `-Dmaven.repo.local=/m2 --network none` — stricter than the JS recipe,
    which keeps network for the model proxy, because the Java battery needs
    no model access. Offline resolution keeps the credential-free boundary
@@ -97,15 +105,16 @@ A second recipe in the skill, selected when the delta touches
 
 ## Design decisions and rationale
 
-- **Offline seeding over restricted egress.** Allowing only Maven mirrors
-  sounds simpler, but egress allowlists are a second trust surface (DNS,
-  redirects, mirror compromise) and the CI lane's mirror script is host-side
-  configuration. A seeded repository plus `--network none` reuses the JS
-  recipe's already-reviewed credential-free boundary shape and tightens it
-  to offline, which the model-proxy-dependent JS recipe cannot do. Cost: a
-  seed step per round (minutes, cached across rounds of the same PR by
-  reusing the repository directory when the pom set is unchanged — the same
-  reuse rule the skill already applies to installs and builds).
+- **Seed inside a boundary, battery offline.** The seed needs the mirror,
+  so it runs in a credential-free container with mirror-only egress — an
+  egress allowlist is a second trust surface (DNS, redirects, mirror
+  compromise), which is why it is confined to the seed and the battery
+  itself runs with `--network none` against the copied-out repository. The
+  host never runs a goal against PR poms: lifecycle-bound plugin executions
+  are PR code too, and no strip list can enumerate them. Cost: a seed step
+  per round (minutes, cached across rounds of the same PR by reusing the
+  repository directory when the pom set is unchanged — the same reuse rule
+  the skill already applies to installs and builds).
 - **Bundled image over JDK-on-node.** Layering a JDK onto `node:22-bookworm`
   would serve mixed PRs in one container, but drifts from the CI lane's
   runtime and grows the image the round must trust. Mixed rounds can run the
@@ -118,20 +127,20 @@ A second recipe in the skill, selected when the delta touches
   dependency jars only.
 - `--require-isolation` must exit 0 inside; a container marker alone does not
   pass (existing rule).
-- The seed step runs on the host with the maintainer's normal Maven settings
-  and is a trusted operation; it must not execute PR code (resolution only).
-  The seed copy must remove the **whole `.mvn/` directory**: the launcher
+- No host step executes PR code — not even "resolution only": the host
+  prepares the sanitized copy and copies the repository out, and every
+  Maven goal against the PR's poms runs inside the seed container. The
+  sanitized copy removes the **whole `.mvn/` directory**: the launcher
   honours core extensions, `jvm.config` (concatenated into `MAVEN_OPTS`
   before the JVM starts — a `-javaagent:` there runs during the seed), and
-  `maven.config` alike. On top of that, refuse pom-declared build extensions
+  `maven.config` alike. It also refuses pom-declared build extensions
   (`<build><extensions>`, and any `<plugin>` with
   `<extensions>true</extensions>`, in the root and every module pom), which
   resolve and load while the project model is built — before any goal runs.
-  The alternative is to drop the strip option entirely and run the seed
-  inside a credential-free container whose egress is limited to the
-  configured mirror, with the resulting repository copied out. The trusted
-  mirror settings stay host-side either way (the container never mounts
-  `settings.xml`).
+  Lifecycle-bound `<build><plugins>` executions cannot be enumerated, which
+  is why the seed runs inside the boundary rather than on the host. The
+  trusted mirror settings stay host-side; the seed container gets a
+  credential-free mirror configuration, never the host's `settings.xml`.
 
 ## Risks
 
@@ -153,8 +162,9 @@ A second recipe in the skill, selected when the delta touches
   (the recipe changes the boundary, not the measurements).
 - Negative control: `--require-isolation` still exits 4 outside the boundary.
 - Negative control (seed): a fixture pom whose build extension writes a
-  marker file when loaded; the documented seed procedure must leave no
-  marker on the host.
+  marker file when loaded, and a second fixture whose `<build><plugins>`
+  execution bound to `compile` writes one; the documented seed procedure
+  must leave no marker on the host for either.
 
 ## Acceptance criteria
 

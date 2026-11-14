@@ -6741,14 +6741,19 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('carries no JDK or Maven');
     expect(flat).toContain('never a silent host fallback');
     // The local container recipe's host check step declares the container
-    // it built — after stopping the container and unlinking any planted
-    // boundary.json, before the checker runs on the round dir.
+    // it built — after stopping the container, refusing a symlinked round
+    // dir, and clearing any planted boundary.json (any node type), before
+    // the checker runs on the round dir.
     expect(flat).toContain('> <round-dir>/boundary.json');
-    expect(flat).toContain('rm -f -- <round-dir>/boundary.json');
+    expect(flat).toContain('rm -rf -- <round-dir>/boundary.json');
+    expect(flat).toContain('[ -L <round-dir> ]');
+    // Presence guards first: indexOf returns -1 for a deleted line, and -1
+    // is less than any positive index, so the ordering alone is vacuous.
+    expect(flat).toContain('docker rm -f qwen-verify-<n>');
     expect(flat.indexOf('docker rm -f qwen-verify-<n>')).toBeLessThan(
-      flat.indexOf('rm -f -- <round-dir>/boundary.json'),
+      flat.indexOf('rm -rf -- <round-dir>/boundary.json'),
     );
-    expect(flat.indexOf('rm -f -- <round-dir>/boundary.json')).toBeLessThan(
+    expect(flat.indexOf('rm -rf -- <round-dir>/boundary.json')).toBeLessThan(
       flat.indexOf('> <round-dir>/boundary.json'),
     );
     // The report carries the boundary for human readers too.
@@ -7118,14 +7123,14 @@ describe('qwen-triage verify publish fidelity', () => {
       expect(body).toContain('merge-ready');
       const script = publishScript();
       expect(script.indexOf('CI verify lane')).toBeGreaterThan(-1);
-      // The unlink must precede the write, and the write the checker: a
+      // The clear must precede the write, and the write the checker: a
       // plain redirect into the PR-writable artifact tree would follow a
       // planted symlink instead of replacing it.
       expect(
-        script.indexOf('rm -f -- "$(dirname "$REPORT")/boundary.json"'),
+        script.indexOf('rm -rf -- "$(dirname "$REPORT")/boundary.json"'),
       ).toBeGreaterThan(-1);
       expect(
-        script.indexOf('rm -f -- "$(dirname "$REPORT")/boundary.json"'),
+        script.indexOf('rm -rf -- "$(dirname "$REPORT")/boundary.json"'),
       ).toBeLessThan(script.indexOf('CI verify lane'));
       expect(script.indexOf('CI verify lane')).toBeLessThan(
         script.indexOf('VERIFY_PR_CHECK'),
@@ -7153,6 +7158,32 @@ describe('qwen-triage verify publish fidelity', () => {
       expect(lstatSync(join(art, 'boundary.json')).isSymbolicLink()).toBe(
         false,
       );
+      expect(
+        JSON.parse(readFileSync(join(art, 'boundary.json'), 'utf8')),
+      ).toEqual({
+        mode: 'container',
+        detail: 'CI verify lane (credential-free container)',
+      });
+      expect(body).toContain('merge-ready');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // A directory named boundary.json survives the artifact staging (find
+  // -type f recreates it) and the scrub (links and specials only). rm -f
+  // aborts on it under set -euo pipefail, killing the verdict with no
+  // report; rm -rf clears the reserved name whatever node type was planted.
+  it('clears a planted boundary.json directory and still posts the verdict', () => {
+    const dir = fixture();
+    try {
+      const art = join(dir, 'work', 'verify-results', 'prA-verify-1');
+      mkdirSync(join(art, 'boundary.json', 'x'), { recursive: true });
+      const body = render(dir, {
+        NAME: 'planted-dir',
+        AGENT_VERDICT: 'merge-ready',
+      });
+      expect(lstatSync(join(art, 'boundary.json')).isDirectory()).toBe(false);
       expect(
         JSON.parse(readFileSync(join(art, 'boundary.json'), 'utf8')),
       ).toEqual({

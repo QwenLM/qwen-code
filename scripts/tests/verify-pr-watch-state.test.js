@@ -4,8 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import {
+  cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -14,7 +15,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -151,7 +152,10 @@ describe('startRound', () => {
     expect(result.duplicate).toBe('in-flight');
   });
 
-  it('lets a new head start while another is in flight', () => {
+  // One round per PR: the local recipe's clone, base copy, proxy files and
+  // container name are per PR, so a second concurrent round would clobber
+  // the first (the CI lane serialises with its per-PR concurrency group).
+  it('refuses a new head while another round is in flight', () => {
     const root = makeRoot();
     startRound(root, { pr: 1, head: PREV, round: 10, artifactDir: 'r10' });
     const result = startRound(root, {
@@ -160,28 +164,29 @@ describe('startRound', () => {
       round: 11,
       artifactDir: 'r11',
     });
-    expect(result.duplicate).toBeUndefined();
-    expect(readState(root, 1).inFlightHead).toBe(HEAD);
+    expect(result.duplicate).toBe('in-flight');
+    expect(result.blockedBy).toBe(PREV);
+    const state = readState(root, 1);
+    expect(state.inFlightHeads.map((e) => e.head)).toEqual([PREV]);
+    // The running head stays dedupable too.
+    expect(
+      startRound(root, { pr: 1, head: PREV, round: 12, artifactDir: 'r12' })
+        .duplicate,
+    ).toBe('in-flight');
   });
 
-  // R2-1 witness: with a single slot, starting Y erased X's marker and a
-  // redelivered X started a second concurrent round. Every in-flight head
-  // must stay recorded.
-  it('keeps every in-flight head dedupable after another head starts', () => {
+  it('starts the next head once the running round completes', () => {
     const root = makeRoot();
-    startRound(root, { pr: 1, head: HEAD, round: 10, artifactDir: 'r10' });
-    startRound(root, { pr: 1, head: PREV, round: 11, artifactDir: 'r11' });
-    const redelivered = startRound(root, {
+    startRound(root, { pr: 1, head: PREV, round: 10, artifactDir: 'r10' });
+    completeRound(root, { pr: 1, head: PREV, round: 10, verdict: 'findings' });
+    const result = startRound(root, {
       pr: 1,
       head: HEAD,
-      round: 12,
-      artifactDir: 'r12',
+      round: 11,
+      artifactDir: 'r11',
     });
-    expect(redelivered.duplicate).toBe('in-flight');
-    expect(readState(root, 1).inFlightHeads.map((e) => e.head)).toEqual([
-      HEAD,
-      PREV,
-    ]);
+    expect(result.duplicate).toBeUndefined();
+    expect(readState(root, 1).inFlightHead).toBe(HEAD);
   });
 
   it('dedupes a head verified one round back, not just the latest', () => {
@@ -297,11 +302,26 @@ describe('completeRound', () => {
 
   // The bound-delivery design dedupes redelivered head-change events against
   // the in-flight marker, so completing one head must not wipe another
-  // head's still-running marker.
+  // head's marker (a migrated state can carry one while a completion for a
+  // different head arrives).
   it('keeps a foreign in-flight marker when completing another head', () => {
     const root = makeRoot();
-    startRound(root, { pr: 1, head: HEAD, round: 10, artifactDir: 'r10' });
-    startRound(root, { pr: 1, head: PREV, round: 11, artifactDir: 'r11' });
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({
+        pr: 1,
+        verifiedHeads: [],
+        inFlightHeads: [
+          {
+            head: PREV,
+            round: 11,
+            artifactDir: 'r11',
+            startedAt: '2026-11-14T02:00:00.000Z',
+          },
+        ],
+      }),
+    );
     completeRound(
       root,
       { pr: 1, head: HEAD, round: 10, verdict: 'findings' },
@@ -328,13 +348,13 @@ describe('completeRound', () => {
   // erase no verification: both heads stay dedupable.
   it('a late completion keeps the newer verification in the list', () => {
     const root = makeRoot();
-    startRound(root, { pr: 1, head: HEAD, round: 10, artifactDir: 'r10' });
     startRound(root, { pr: 1, head: PREV, round: 11, artifactDir: 'r11' });
     completeRound(
       root,
       { pr: 1, head: PREV, round: 11, verdict: 'merge-ready' },
       new Date('2026-11-14T03:00:00.000Z'),
     );
+    startRound(root, { pr: 1, head: HEAD, round: 10, artifactDir: 'r10' });
     completeRound(
       root,
       { pr: 1, head: HEAD, round: 10, verdict: 'findings' },
@@ -352,9 +372,24 @@ describe('completeRound', () => {
 
   it('each in-flight entry keeps its own artifact directory', () => {
     const root = makeRoot();
-    startRound(root, { pr: 1, head: HEAD, round: 10, artifactDir: 'dirX' });
-    startRound(root, { pr: 1, head: PREV, round: 11, artifactDir: 'dirY' });
-    completeRound(root, { pr: 1, head: HEAD, round: 10, verdict: 'findings' });
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({
+        pr: 1,
+        verifiedHeads: [],
+        inFlightHeads: [
+          { head: PREV, round: 11, artifactDir: 'dirY', startedAt: null },
+        ],
+      }),
+    );
+    completeRound(root, {
+      pr: 1,
+      head: HEAD,
+      round: 10,
+      verdict: 'findings',
+      artifactDir: 'dirX',
+    });
     const state = readState(root, 1);
     expect(state.inFlightHeads).toEqual([
       expect.objectContaining({ head: PREV, artifactDir: 'dirY' }),
@@ -446,6 +481,10 @@ describe('duplicateHead', () => {
     expect(duplicateHead({ inFlightHead: HEAD }, HEAD)).toBeNull();
     expect(duplicateHead(null, HEAD)).toBeNull();
     expect(duplicateHead({ verifiedHead: PREV }, HEAD)).toBeNull();
+    // One round per PR: any in-flight entry blocks a different head too.
+    expect(duplicateHead({ inFlightHeads: [{ head: PREV }] }, HEAD)).toBe(
+      'in-flight',
+    );
   });
 });
 
@@ -619,15 +658,15 @@ describe('CLI', () => {
     expect(readState(root, 16866).inFlight).toBe(true);
   });
 
-  // The state lives in the clone's main worktree, not the arm the round
-  // runs in — the same place the watch gate keeps its cursor. Every other
-  // CLI test passes --state-root; this one exercises the default resolution
-  // from inside a real linked worktree.
-  it('defaults the state root to the main worktree from a linked worktree', () => {
-    const root = makeRoot();
+  // The default root resolves from the script's own clone, not the caller's
+  // cwd: a round whose session directory is its PR clone (or a linked arm)
+  // must still write the trusted clone's state, or a later fire sees no
+  // marker and starts a second round for the same head.
+  it('defaults the state root to the script clone, not the caller cwd', () => {
+    const trusted = makeRoot();
     const gitEnv = {
       ...process.env,
-      HOME: root,
+      HOME: trusted,
       GIT_CONFIG_NOSYSTEM: '1',
       GIT_AUTHOR_NAME: 't',
       GIT_AUTHOR_EMAIL: 't@t',
@@ -636,10 +675,110 @@ describe('CLI', () => {
     };
     const git = (args, cwd) =>
       execFileSync('git', args, { cwd, env: gitEnv, stdio: 'pipe' });
-    git(['init', '--quiet', '.'], root);
-    git(['commit', '--allow-empty', '--quiet', '-m', 'base'], root);
-    const arm = join(root, 'arm');
-    git(['worktree', 'add', '--quiet', '--detach', arm, 'HEAD'], root);
+    git(['init', '--quiet', '.'], trusted);
+    git(['commit', '--allow-empty', '--quiet', '-m', 'base'], trusted);
+    // Ship the helper and its import chain inside the trusted clone.
+    mkdirSync(join(trusted, 'scripts', 'lib'), { recursive: true });
+    for (const f of [
+      'verify-pr-watch-state.mjs',
+      'verify-pr-watch-gate.mjs',
+      'verify-pr-check.mjs',
+    ]) {
+      cpSync(join(dirname(SCRIPT), f), join(trusted, 'scripts', f));
+    }
+    cpSync(
+      join(dirname(SCRIPT), 'lib', 'entry-point.js'),
+      join(trusted, 'scripts', 'lib', 'entry-point.js'),
+    );
+    const script = join(trusted, 'scripts', 'verify-pr-watch-state.mjs');
+    const arm = join(trusted, 'arm');
+    git(['worktree', 'add', '--quiet', '--detach', arm, 'HEAD'], trusted);
+    const prclone = makeRoot();
+    git(['init', '--quiet', '.'], prclone);
+    git(['commit', '--allow-empty', '--quiet', '-m', 'pr'], prclone);
+    const args = [
+      script,
+      '16866',
+      '--start',
+      '--head',
+      HEAD,
+      '--round',
+      '11',
+      '--artifact-dir',
+      'r11',
+    ];
+    const fromArm = spawnSync(process.execPath, args, {
+      cwd: arm,
+      env: gitEnv,
+      encoding: 'utf8',
+    });
+    expect(fromArm.status).toBe(0);
+    // From an independent PR clone the same head must dedup against the
+    // trusted clone's state — not start a second round in a new file.
+    const fromPrClone = spawnSync(process.execPath, args, {
+      cwd: prclone,
+      env: gitEnv,
+      encoding: 'utf8',
+    });
+    expect(fromPrClone.status).toBe(3);
+    expect(existsSync(statePath(trusted, 16866))).toBe(true);
+    expect(existsSync(statePath(arm, 16866))).toBe(false);
+    expect(existsSync(statePath(prclone, 16866))).toBe(false);
+    expect(readState(trusted, 16866).inFlight).toBe(true);
+  });
+
+  it('refuses to write while another invocation holds the state lock', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(`${statePath(root, 16866)}.lock`, '99999\n');
+    const res = run(root, [...START, '--artifact-dir', 'r11']);
+    expect(res.status).toBe(3);
+    expect(res.stderr).toMatch(/state lock/);
+    expect(existsSync(statePath(root, 16866))).toBe(false);
+  });
+
+  it('serialises concurrent starts: one wins, the other is refused', async () => {
+    const root = makeRoot();
+    const exit = (p) => new Promise((resolve) => p.on('exit', resolve));
+    const p1 = spawn(process.execPath, [
+      SCRIPT,
+      '16866',
+      '--start',
+      '--head',
+      HEAD,
+      '--round',
+      '1',
+      '--artifact-dir',
+      'r1',
+      '--state-root',
+      root,
+    ]);
+    const p2 = spawn(process.execPath, [
+      SCRIPT,
+      '16866',
+      '--start',
+      '--head',
+      PREV,
+      '--round',
+      '2',
+      '--artifact-dir',
+      'r2',
+      '--state-root',
+      root,
+    ]);
+    const codes = await Promise.all([exit(p1), exit(p2)]);
+    expect(codes.filter((c) => c === 0)).toHaveLength(1);
+    expect(codes.filter((c) => c === 3)).toHaveLength(1);
+    const state = readState(root, 16866);
+    expect(state.inFlightHeads).toHaveLength(1);
+    // The lock is released when the call returns.
+    expect(existsSync(`${statePath(root, 16866)}.lock`)).toBe(false);
+  });
+
+  it('rejects a trailing --state-root with no value as usage', () => {
+    const root = makeRoot();
+    // Direct spawn: the run() helper appends its own --state-root, which
+    // would mask a trailing valueless flag.
     const res = spawnSync(
       process.execPath,
       [
@@ -649,15 +788,15 @@ describe('CLI', () => {
         '--head',
         HEAD,
         '--round',
-        '11',
+        '1',
         '--artifact-dir',
-        'r11',
+        'r',
+        '--state-root',
       ],
-      { cwd: arm, env: gitEnv, encoding: 'utf8' },
+      { encoding: 'utf8', cwd: root },
     );
-    expect(res.status).toBe(0);
-    expect(existsSync(statePath(root, 16866))).toBe(true);
-    expect(existsSync(statePath(arm, 16866))).toBe(false);
-    expect(readState(root, 16866).inFlight).toBe(true);
+    expect(res.status).toBe(2);
+    expect(res.stderr).toMatch(/--state-root must not be empty/);
+    expect(existsSync(statePath(root, 16866))).toBe(false);
   });
 });
