@@ -2811,7 +2811,8 @@ const SessionTimeline = memo(function SessionTimeline({
       return {
         entry,
         top: rect.top + rect.height / 2,
-        left: rect.right + 8,
+        // Anchor to the 28px hovered tick, not the full-width button.
+        left: rect.left + 28 + 8,
         clamped: false,
         themeVars: Object.fromEntries(
           SESSION_TIMELINE_TOOLTIP_THEME_VARS.map((name) => [
