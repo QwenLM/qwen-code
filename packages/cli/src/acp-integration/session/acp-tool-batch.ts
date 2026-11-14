@@ -19,12 +19,17 @@ import {
   canonicalToolName,
   ToolNames,
 } from '@qwen-code/qwen-code-core/tools/tool-names.js';
+import {
+  evaluateToolInvocationGuard,
+  type ToolInvocationGuard,
+} from '@qwen-code/qwen-code-core/core/tool-invocation-guard.js';
 import { enforceFunctionResponseBudget } from '@qwen-code/qwen-code-core/tools/tool-response-finalizer.js';
 import {
   isShellProgressData,
   ToolConfirmationOutcome,
 } from '@qwen-code/qwen-code-core/tools/tools.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import { resolveDeferredToolCall } from '@qwen-code/qwen-code-core/tools/tool-call.js';
 import { USER_CANCEL_ABORT_REASON } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
   createSchedulerExecutor,
@@ -34,6 +39,7 @@ import {
 } from '@qwen-code/qwen-code-core/core/agent-loop.js';
 import type {
   ToolCall,
+  ScheduledToolCall,
   WaitingToolCall,
 } from '@qwen-code/qwen-code-core/core/coreToolScheduler.js';
 import type { ToolExecutionStatus } from '@qwen-code/qwen-code-core/core/turn.js';
@@ -44,6 +50,7 @@ import type {
   SessionUpdate,
 } from '@agentclientprotocol/sdk';
 import type { Part } from '@google/genai';
+import type { AnyDeclarativeTool } from '@qwen-code/qwen-code-core/tools/tools.js';
 import type { SharedLoopRound } from '../../ui/hooks/shared-loop-round.js';
 import type { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import type { MessageEmitter } from './emitters/MessageEmitter.js';
@@ -72,6 +79,24 @@ export interface AcpToolBatchHost {
   readonly client: AgentSideConnection;
   readonly toolCallEmitter: ToolCallEmitter;
   readonly messageEmitter: MessageEmitter;
+  /** The session's three trusted live tool instances, trusted by identity. */
+  isTrustedLiveTool(tool: unknown): boolean;
+  /**
+   * The session's read-only response to a request that reached approval:
+   * the call is refused with this message; no `session/request_permission`
+   * leaves the session. Omit for ordinary sessions.
+   */
+  readonly readOnlyRefusalMessage?: string;
+  /**
+   * Evaluated at the batch's execution boundary after build, before execute;
+   * a denial becomes `not_started`. Omit for ordinary sessions.
+   */
+  readonly invocationGuard?: ToolInvocationGuard;
+  /**
+   * Registry lookup the batch uses to bind a canonical name to its tool
+   * instance; trusted-live checks ride on it.
+   */
+  getTool(name: string): unknown;
   sendUpdate(update: SessionUpdate): Promise<void>;
   /** `session/request_permission`, one at a time. */
   requestPermission(
@@ -204,6 +229,21 @@ export async function runAcpToolBatch(
   // The scheduler runs the batch from the last answer's `onConfirm`, so an
   // approval runs beside the updates, not in their queue.
   const approvals = new Set<Promise<void>>();
+
+  const resolvedTargets = new Map<string, AnyDeclarativeTool>();
+  await Promise.all(
+    options.requests.map(async (request) => {
+      if (canonicalToolName(request.name) !== ToolNames.TOOL_CALL) return;
+      const resolution = await resolveDeferredToolCall(
+        config.getToolRegistry(),
+        request.args,
+        { maxSubagentDepth: config.getMaxSubagentDepth() },
+      );
+      if ('tool' in resolution) {
+        resolvedTargets.set(request.callId, resolution.tool);
+      }
+    }),
+  );
 
   const trackAgent = (call: ToolCall, state: CallState) => {
     if (
@@ -551,16 +591,63 @@ export async function runAcpToolBatch(
           if (state) state.execution = { status, durationMs };
         },
         onToolResultFullTurnModel: options.onFullTurnModel,
-        refuseToolCall: (request) => host.refuseToolCall(request),
+        refuseToolCall: (request) => {
+          const sessionRefusal = host.refuseToolCall(request);
+          if (sessionRefusal !== undefined) return sessionRefusal;
+          const directTool = host.getTool(canonicalToolName(request.name));
+          return directTool === undefined &&
+            resolvedTargets.get(request.callId) === undefined
+            ? `Tool "${request.name}" is not registered in this session.`
+            : undefined;
+        },
         onPermissionPromptTerminalSequence: (sequence) => {
           if (!closed) host.sendTerminalSequence(sequence);
         },
+        // The loop-level `beforeToolLaunch` hook is synchronous, so the
+        // async Agent Host invocation guard runs here, at the scheduler's
+        // launch boundary; a denial settles the call as `not_started`.
+        ...(host.invocationGuard && {
+          beforeToolLaunch: async (call: ScheduledToolCall) => {
+            const tool =
+              resolvedTargets.get(call.request.callId) ??
+              host.getTool(canonicalToolName(call.request.name));
+            if (host.isTrustedLiveTool(tool)) return true;
+            const decision = await evaluateToolInvocationGuard(
+              host.invocationGuard!,
+              {
+                callId: call.request.callId,
+                toolName: canonicalToolName(call.request.name),
+                args: call.request.args as Record<string, unknown>,
+                signal: tools.signal,
+                permissionChecked: true,
+                sessionId: config.getSessionId(),
+                cwd: config.getTargetDir(),
+              },
+            );
+            if (tools.signal.aborted) return false;
+            if (!decision.allowed) {
+              debugLogger.debug(
+                `Invocation guard denied ${call.request.name}: ${decision.reason}`,
+              );
+            }
+            return decision.allowed;
+          },
+        }),
       }),
       beforeToolLaunch: (request) => {
         const approval = states.get(request.callId)?.todoPlanApproval;
         if (approval && host.isTodoPlanApprovalStale(approval)) {
           stopBatch();
           return false;
+        }
+        const tool =
+          resolvedTargets.get(request.callId) ??
+          host.getTool(canonicalToolName(request.name));
+        if (!host.isTrustedLiveTool(tool)) {
+          if (host.readOnlyRefusalMessage !== undefined) {
+            stopBatch();
+            return false;
+          }
         }
         return true;
       },

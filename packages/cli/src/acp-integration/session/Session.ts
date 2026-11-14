@@ -7628,10 +7628,10 @@ export class Session implements SessionContext {
             const pauseGoalForLoopStop = () => {
               if (sharedModelRound && goalTurn) goalTurn.loopStopped = true;
             };
-            // Its tool batches run on the shared loop's batch, and the
-            // client then runs its own tool-call guards.
-            const sharedToolBatch =
-              sharedModelRound && this.#runsToolsOnSharedBatch();
+            // Every session's tool batches run on the shared loop's batch;
+            // the batch host carries live-tool trust, read-only refusal, and
+            // the Agent Host invocation guard.
+            const sharedToolBatch = sharedModelRound;
             let promptAdmission: UserPromptAdmission | undefined;
             // A continue, a restore or a runtime continuation runs no
             // UserPromptSubmit hook.
@@ -8910,9 +8910,6 @@ export class Session implements SessionContext {
    * turn around it runs the tool batch and decides what is sent next.
    */
   async #runSharedRound(round: SharedRound): Promise<SharedRoundResult> {
-    debugLogger.debug(
-      `[ACP] model round on the shared agent loop (prompt ${round.promptId})`,
-    );
     const {
       message,
       promptId,
@@ -9026,9 +9023,6 @@ export class Session implements SessionContext {
             type: roundType,
             modelOverride: round.modelOverride,
             stopPolicies: round.stopPolicies,
-            ...(!round.sharedToolBatch && {
-              toolLoopGuardsByHost: true,
-            }),
             toolCallPreparations: true,
             ...round.options,
           },
@@ -9360,7 +9354,7 @@ export class Session implements SessionContext {
     stoppedShort?: boolean;
   }> {
     const { promptId, signal, responseCapture } = turn;
-    const sharedToolBatch = this.#runsToolsOnSharedBatch();
+    const sharedToolBatch = true;
     let toolLoopState = createDaemonToolLoopState('off');
     const resetToolLoopState = () => {
       toolLoopState = createDaemonToolLoopState('off');
@@ -15751,21 +15745,6 @@ export class Session implements SessionContext {
    * sequential batch to preserve the implicit ordering the model may rely
    * on. Response-part ordering matches the original `functionCalls` order.
    */
-  /**
-   * Whether a fresh prompt's tool batches run on the shared loop's batch.
-   * Live tools, which ACP trusts without the permission flow, and a
-   * read-only Agent Host session, which refuses approvals, keep ACP's own
-   * tool step.
-   */
-  #runsToolsOnSharedBatch(): boolean {
-    return (
-      !this.liveScreenContextTool &&
-      this.liveTaskTools.length === 0 &&
-      !this.liveSpeakToUserTool &&
-      this.config.getSessionSourceType?.() !== 'agent-host'
-    );
-  }
-
   /** The calls a loop stop left unrun, shown as skipped. */
   async #emitLoopSkippedToolCalls(
     requests: ReadonlyArray<{ callId: string; name: string }>,
@@ -15797,6 +15776,27 @@ export class Session implements SessionContext {
       client: this.client,
       toolCallEmitter: this.toolCallEmitter,
       messageEmitter: this.messageEmitter,
+      getTool: (name) => this.config.getToolRegistry().getTool(name),
+      isTrustedLiveTool: (tool) =>
+        tool !== undefined &&
+        (tool === this.liveScreenContextTool ||
+          this.liveTaskTools.some((live) => live === tool) ||
+          tool === this.liveSpeakToUserTool),
+      readOnlyRefusalMessage:
+        this.config.getSessionSourceType?.() === 'agent-host'
+          ? 'Tool "__name__" requires approval, which is unavailable on this read-only Agent Host.'
+          : undefined,
+      invocationGuard:
+        this.config.getSessionSourceType?.() === 'agent-host'
+          ? createAgentHostToolInvocationGuard(
+              undefined,
+              this.config.getTargetDir(),
+              (candidate) =>
+                this.config
+                  .getWorkspaceContext()
+                  .isPathWithinWorkspace(candidate),
+            )
+          : undefined,
       sendUpdate: (update) => this.sendUpdate(update),
       requestPermission: (params, signal) =>
         this.#requestPermissionQueued(params, signal),
@@ -15919,9 +15919,6 @@ export class Session implements SessionContext {
     toolLoopState: DaemonToolLoopState,
     onFullTurnModel?: (model: string) => boolean,
   ): Promise<RunToolResult> {
-    debugLogger.debug(
-      `[ACP] tool batch on the shared agent loop (prompt ${promptId}, ${requests.length} call(s))`,
-    );
     promptIdContext.enterWith(promptId);
     todoWorkChainContext.enterWith(
       this.config.getActiveTodoWorkChainOwner(promptId),
