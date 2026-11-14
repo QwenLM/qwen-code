@@ -81,6 +81,7 @@ import type { UiEvent } from '../telemetry/uiTelemetry.js';
 import type { AttributionSnapshot } from './commitAttribution.js';
 import type { FileHistorySnapshot } from './fileHistoryService.js';
 import { SessionFileHistoryAccumulator } from './session-file-history-state.js';
+import { buildSessionRecoveryPlanFromApiHistory } from '../core/session-recovery.js';
 import {
   SessionExecutionEngineAccumulator,
   type SessionExecutionEngine,
@@ -418,8 +419,12 @@ function buildManagedSessionRestoreProjection(
   const goalRecovery = selectGoalRecoveryFromRecords(goalRecords);
   const restoredTokenCounts = resumeTokenCounts.finish();
   const restoredFileHistory = fileHistory.finish();
-  const runtime: SessionRuntimeResumeState = {
+  const recoveredApiHistory = buildSessionRecoveryPlanFromApiHistory({
+    sessionId: input.sessionId,
     apiHistory: apiHistory.finish(),
+  }).apiHistory;
+  const runtime: SessionRuntimeResumeState = {
+    apiHistory: recoveredApiHistory,
     ...(restoredTokenCounts ? { resumeTokenCounts: restoredTokenCounts } : {}),
     uiTelemetryEvents,
     ...(attributionSnapshot ? { attributionSnapshot } : {}),
@@ -3969,8 +3974,15 @@ export class SessionTranscriptReader {
     const restoredFileHistory = fileHistory.finish();
     const artifactSnapshot = artifacts.finish();
     const completedToolCallIds = apiHistory.getCompletedToolCallIds();
+    const rawApiHistory = apiHistory.finish();
+    const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
+      sessionId,
+      apiHistory: rawApiHistory,
+      completedToolCallIds,
+      historyGaps: index.gaps,
+    });
     const runtime: SessionRuntimeResumeState = {
-      apiHistory: apiHistory.finish(),
+      apiHistory: recoveryPlan.apiHistory,
       ...(completedToolCallIds.length > 0 ? { completedToolCallIds } : {}),
       ...(restoredTokenCounts
         ? { resumeTokenCounts: restoredTokenCounts }

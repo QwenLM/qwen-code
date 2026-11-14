@@ -2222,6 +2222,32 @@ interface ScanResult {
   adjacentIdx: number;
 }
 
+/**
+ * RESUME-ONLY EXTENSION — when recovering a persisted transcript, look past
+ * the first non-user turn for real responses that already landed later in
+ * history. The inline repair path must keep its narrower adjacency contract:
+ * rewriting history that the active model has already seen can change the
+ * meaning of the current turn.
+ */
+function extendScanWithLaterResponses(
+  history: Content[],
+  scan: ScanResult,
+): void {
+  for (let turnIdx = scan.scanEnd; turnIdx < history.length; turnIdx++) {
+    if (history[turnIdx]?.role !== 'user') continue;
+    for (const [partIdx, part] of (history[turnIdx].parts ?? []).entries()) {
+      const id = part.functionResponse?.id;
+      if (!id || !scan.expected.has(id)) continue;
+      const list = scan.matched.get(id);
+      if (list) list.push({ turnIdx, partIdx, part });
+      else scan.matched.set(id, [{ turnIdx, partIdx, part }]);
+    }
+  }
+  // Include the widened search window so applyRepair can remove user turns
+  // that became empty after their real response was relocated.
+  scan.scanEnd = history.length;
+}
+
 /** Decision-phase output: exact mutations the next phase will apply. */
 interface RepairPlan {
   modelIdx: number;
@@ -2389,6 +2415,8 @@ function applyRepair(
 
 export interface RepairOrphanedToolUseOptions {
   preserveCallIds?: ReadonlySet<string>;
+  /** Search later user turns for real results during session recovery. */
+  hoistNonAdjacentResponses?: boolean;
 }
 
 /**
@@ -2418,6 +2446,9 @@ export function repairOrphanedToolUseTurns(
 
     const scan = scanModelTurn(history, i);
     if (scan.expected.size === 0) continue;
+    if (options?.hoistNonAdjacentResponses) {
+      extendScanWithLaterResponses(history, scan);
+    }
 
     const plan = planRepair(scan);
     if (preserveCallIds && preserveCallIds.size > 0) {
