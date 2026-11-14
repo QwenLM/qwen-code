@@ -72,9 +72,10 @@ export interface PrWatchDepsSources {
   workspaceRegistry: WorkspaceRegistry;
   /**
    * The effective subscription (master §6): the operator's explicit setting,
-   * or the deprecated per-host channel alias when none was set. The caller
-   * builds no deps at all when it subscribes nothing, so `anyEvents` is the
-   * single enablement gate both the tick and the on-demand drain read.
+   * or the deprecated per-host channel alias when none was set. `anyEvents`
+   * is the single enablement gate: this constructor returns undefined when it
+   * is false, and deps presence is what both the tick and the on-demand drain
+   * read, so the two entries cannot disagree.
    */
   subscription: PrWatchSubscription;
   /** Applies to both the setting and the alias. */
@@ -164,7 +165,10 @@ export function resolveGithubChannelWatchHost(
  * `gh` configuration cannot be read — never to an empty set, which would
  * silently disable every view.
  */
-export function createPrWatchDeps(sources: PrWatchDepsSources): PrWatchDeps {
+export function createPrWatchDeps(
+  sources: PrWatchDepsSources,
+): PrWatchDeps | undefined {
+  if (!sources.subscription.anyEvents) return undefined;
   const log = sources.log ?? (() => {});
   const watchDir = defaultPrWatchDir();
   const locks = sources.locks ?? new PathMutexRegistry();

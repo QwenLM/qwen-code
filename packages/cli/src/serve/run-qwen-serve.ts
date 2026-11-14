@@ -7707,19 +7707,15 @@ async function runQwenServeImpl(
             }
             prWatchBuildResolved = true;
             prWatchHostsSignature = signature;
-            // No subscribed event means no deps, and no deps is the single
-            // enablement gate both the tick and the on-demand drain read. An
-            // operator who configures nothing gets no view, no watch file and
-            // no ownership claim.
+            // createPrWatchDeps returns undefined when the subscription has
+            // no event; deps presence is the single gate both the tick and
+            // the on-demand drain read, so an operator who configures nothing
+            // gets no view, no watch file and no ownership claim.
             const subscription = resolvePrWatchSubscription(
               sessionPrWatchConfig,
               channels,
               (message) => daemonLog.warn(message),
             );
-            if (!subscription.anyEvents) {
-              prWatchDeps = undefined;
-              return undefined;
-            }
             prWatchDeps = createPrWatchDeps({
               ...prWatchSources,
               subscription,

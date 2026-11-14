@@ -163,7 +163,7 @@ describe('createPrWatchDeps', () => {
       wakeDormant: true,
       actions: undefined,
     };
-    return createPrWatchDeps({
+    const deps = createPrWatchDeps({
       workspaceRegistry: { listAll: () => runtimes } as never,
       subscription: resolvePrWatchSubscription(config, overrides.hosted ?? []),
       wakeDormant: config.wakeDormant,
@@ -176,7 +176,31 @@ describe('createPrWatchDeps', () => {
         ? { promptDeadlineMs: overrides.deadline }
         : {}),
     });
+    if (!deps) throw new Error('expected watch deps for this fixture');
+    return deps;
   }
+
+  it('returns undefined when the subscription subscribes nothing', () => {
+    // The single enablement gate: no event means no deps, so neither the tick
+    // nor the drain can claim the watch directory or spend gh.
+    const deps = createPrWatchDeps({
+      workspaceRegistry: { listAll: () => [runtime()] } as never,
+      subscription: resolvePrWatchSubscription(
+        {
+          events: new Set(),
+          explicit: true,
+          wakeDormant: true,
+          actions: undefined,
+        },
+        [],
+      ),
+      wakeDormant: true,
+      archiveCoordinator: () => coordinator,
+      restore: restore as never,
+      hostedGithubChannels: () => [],
+    });
+    expect(deps).toBeUndefined();
+  });
 
   it('maps a channel base URL to the bare web host', () => {
     // The channel's REST root is not the host its PRs live on: github.com's is
@@ -271,7 +295,7 @@ describe('createPrWatchDeps', () => {
       wakeDormant: true,
       actions: undefined,
     };
-    const { watch, drain } = createPrWatchDeps({
+    const deps = createPrWatchDeps({
       workspaceRegistry: { listAll: () => [runtime()] } as never,
       subscription: resolvePrWatchSubscription(config, []),
       wakeDormant: config.wakeDormant,
@@ -280,6 +304,8 @@ describe('createPrWatchDeps', () => {
       hostedGithubChannels: () => [],
       locks,
     });
+    if (!deps) throw new Error('expected watch deps for this fixture');
+    const { watch, drain } = deps;
     expect(watch.locks).toBe(locks);
     expect(drain.locks).toBe(locks);
   });

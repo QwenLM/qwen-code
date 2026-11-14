@@ -166,8 +166,9 @@ function parseWakeDormant(
 /**
  * Resolve the effective configuration. `actions` validation throws, so a
  * template typo refuses the boot rather than silently disabling delivery;
- * `events` and `wakeDormant` warn and fall back, since a bad value there only
- * narrows the watch.
+ * an unrecognized `events` member or a bad `wakeDormant` value warns and
+ * narrows the watch, because neither can disable a delivery the operator
+ * asked for.
  */
 export function resolveSessionPrWatchConfig(
   rawSetting: unknown,
