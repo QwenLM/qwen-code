@@ -10459,6 +10459,59 @@ describe('DaemonSessionProvider', () => {
     expect(promptStatus).toBe('streaming');
   });
 
+  it('ignores name-only tool lifecycle events after a turn completes', async () => {
+    const turnCompleteDelivered = createDeferred<void>();
+    const releaseNameOnly = createDeferred<void>();
+    const nameOnlyDelivered = createDeferred<void>();
+    const session = createMockSession({
+      events: async function* completedTurnThenToolLifecycle(opts = {}) {
+        yield {
+          id: 1,
+          v: 1,
+          type: 'turn_complete',
+          data: { promptId: 'completed-prompt', stopReason: 'end_turn' },
+        } satisfies DaemonEvent;
+        turnCompleteDelivered.resolve();
+        await releaseNameOnly.promise;
+        if (opts.signal?.aborted) return;
+        yield lifecycleFrame(2, 'started');
+        nameOnlyDelivered.resolve();
+        await new Promise<void>((resolve) => {
+          if (opts.signal?.aborted) resolve();
+          else
+            opts.signal?.addEventListener('abort', () => resolve(), {
+              once: true,
+            });
+        });
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let promptStatus: ReturnType<typeof useDaemonPromptStatus> = 'idle';
+
+    function Harness() {
+      promptStatus = useDaemonPromptStatus();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await turnCompleteDelivered.promise;
+      await flushPromises();
+    });
+    expect(promptStatus).toBe('idle');
+
+    await act(async () => {
+      releaseNameOnly.resolve();
+      await nameOnlyDelivered.promise;
+      await flushPromises();
+    });
+    expect(promptStatus).toBe('idle');
+  });
+
   it('keeps local prompts active when a restored prompt completes', async () => {
     const accepted = createDeferred<NonBlockingPromptAccepted>();
     const releaseRestoredComplete = createDeferred<void>();
