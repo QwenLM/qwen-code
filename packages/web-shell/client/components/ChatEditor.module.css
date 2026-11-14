@@ -427,6 +427,75 @@
   -webkit-line-clamp: 2;
 }
 
+:global(
+  [data-web-shell-toolbar-popover][data-web-shell-mode-popover]:not(
+      [data-web-shell-compact-overlay]
+    )
+) {
+  box-sizing: border-box;
+  width: min(400px, var(--radix-popover-content-available-width));
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover]) {
+  padding: 6px;
+  font-size: 13px;
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownList {
+  gap: 1px;
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownRich
+  .dropdownItem {
+  grid-template-columns: 20px minmax(0, 1fr) 18px;
+  gap: 8px;
+  padding: 5px 7px;
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownItem {
+  font-size: 13px;
+  line-height: 18px;
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownItemContent {
+  gap: 1px;
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownItemLabel {
+  font-size: 13px;
+  line-height: 18px;
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownItemDesc {
+  font-size: 13px;
+  line-height: 16px;
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownItemIcon
+  svg {
+  width: 16px;
+  height: 16px;
+}
+
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownItemDanger
+  .dropdownItemIcon,
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownItemDanger
+  .dropdownItemLabel,
+:global([data-web-shell-toolbar-popover][data-web-shell-mode-popover])
+  .dropdownItemDanger
+  .dropdownItemDesc {
+  color: var(--destructive);
+}
+
 :global([data-web-shell-reasoning-popover]) {
   overflow-x: hidden;
   overflow-y: auto;
@@ -517,7 +586,7 @@
   width: 100%;
   min-width: 0;
   grid-template-columns:
-    minmax(0, 220px)
+    minmax(0, max-content)
     minmax(0, 1fr);
   column-gap: 8px;
   align-items: baseline;
@@ -637,7 +706,7 @@
   font-size: 12px;
   font-weight: 400;
   line-height: 20px;
-  text-align: right;
+  text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1745,6 +1814,19 @@
   gap: 2px;
 }
 
+.dropdownItem.modelPickerRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 18px;
+  gap: 10px;
+  align-items: center;
+}
+
+.modelPickerContent {
+  min-width: 0;
+  width: 100%;
+  white-space: normal;
+}
+
 .dropdownItemLabel {
   overflow: hidden;
   color: var(--foreground);
@@ -1869,6 +1951,20 @@
 .toolBtn:not(:disabled):not([data-disabled]):hover {
   background: var(--chat-editor-bg-tertiary);
   color: var(--chat-editor-text-primary);
+}
+
+/* The trigger names the active mode, so Full Access stays dangerous after it
+   is selected, not only inside the picker. Hover tiles the generic rule above
+   on specificity and would otherwise drop the warning color. */
+.toolBtn.modeToolBtnDanger,
+.toolBtn.modeToolBtnDanger .toolBtnText {
+  color: var(--destructive);
+}
+
+.toolBtn.modeToolBtnDanger:not(:disabled):not([data-disabled]):hover,
+.toolBtn.modeToolBtnDanger:not(:disabled):not([data-disabled]):hover
+  .toolBtnText {
+  color: var(--destructive);
 }
 
 .planControl {

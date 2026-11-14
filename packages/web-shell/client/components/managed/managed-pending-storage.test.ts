@@ -32,6 +32,36 @@ describe('managed-pending-storage', () => {
     expect(await readManagedPending('draft')).toEqual(value);
   });
 
+  it('spills a large payload without crypto.randomUUID (non-secure context)', async () => {
+    const cryptoObject = globalThis.crypto;
+    const descriptor = Object.getOwnPropertyDescriptor(
+      cryptoObject,
+      'randomUUID',
+    );
+    Object.defineProperty(cryptoObject, 'randomUUID', {
+      value: undefined,
+      configurable: true,
+    });
+    try {
+      const fake = createFakeIndexedDB();
+      vi.stubGlobal('indexedDB', fake.factory);
+      const value = { text: 'x'.repeat(200 * 1024) };
+
+      expect(await saveManagedPending('draft', value)).toBe(true);
+      const reference = JSON.parse(sessionStorage.getItem('draft')!);
+      expect(reference.pendingId).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      );
+      expect(await readManagedPending('draft')).toEqual(value);
+    } finally {
+      if (descriptor) {
+        Object.defineProperty(cryptoObject, 'randomUUID', descriptor);
+      } else {
+        delete (cryptoObject as { randomUUID?: unknown }).randomUUID;
+      }
+    }
+  });
+
   it('refuses a stored request that belongs to another key', async () => {
     const fake = createFakeIndexedDB();
     vi.stubGlobal('indexedDB', fake.factory);
