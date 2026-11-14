@@ -274,6 +274,10 @@ async function fixture(
     path.join(projectMemory, AUTO_MEMORY_INDEX_FILENAME),
   ];
   const externalScript = `#!${process.execPath}\nconst fs=require('node:fs'),path=require('node:path');const kind=path.basename(process.argv[1]);const args=process.argv.slice(2);fs.appendFileSync(process.env.QWEN_OWNED_MEMORY_EXEC_LOG,JSON.stringify({kind,argv:args,cwd:process.cwd(),pid:process.pid,ppid:process.ppid})+'\\n');if(args.length!==1||!JSON.parse(process.env.QWEN_OWNED_MEMORY_ALLOWED_TARGETS).includes(args[0]))process.exit(91);if(kind==='vim'){if(process.env.QWEN_OWNED_MEMORY_EDITOR_FAILURE==='1')process.exit(7);fs.appendFileSync(args[0],${JSON.stringify(editMarker)});}process.exit(0);\n`;
+  // Without QWEN_TUI_ACCEPTANCE_OUT this directory lands under the repo, whose
+  // root package.json declares "type": "module"; the extensionless fixture
+  // scripts are CommonJS, so scope them out of that module type.
+  writeJSON(path.join(bin, 'package.json'), { type: 'commonjs' });
   for (const name of ['vim', 'open', 'xdg-open'])
     fs.writeFileSync(path.join(bin, name), externalScript, { mode: 0o700 });
   const events = (): ExecEvent[] =>
