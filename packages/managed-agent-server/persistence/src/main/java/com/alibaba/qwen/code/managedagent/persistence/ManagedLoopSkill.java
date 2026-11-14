@@ -63,18 +63,30 @@ final class ManagedLoopSkill {
 
     /**
      * Append the caller skills and the profile's loop variant to the admission
-     * catalog. The loop variant is a server contribution added even when the
-     * caller supplies no skills (the built-in qwen-code case); a caller-imported
-     * local "loop" skill then conflicts on the duplicate name when the catalog
-     * is validated. Kept here so the admission class does not grow.
+     * catalog, returning whether the variant was injected. The variant is a
+     * server contribution added even when the caller supplies no skills (the
+     * built-in qwen-code case). It is authoritative: a caller-imported "loop"
+     * skill (the Web Shell imports the bundled one verbatim from the daemon
+     * snapshot) is replaced, not refused, so the default creation path is not
+     * broken by a duplicate name. The injection is gated on the negotiated
+     * Session Skills capability so a Harness without it keeps the creation-time
+     * refusal rather than failing later at dispatch. Kept here so the admission
+     * class does not grow.
      */
-    static void mergeInto(List<Map<String, Object>> merged,
-            List<Map<String, Object>> callerSkills, String profile) {
+    static boolean mergeInto(List<Map<String, Object>> merged,
+            List<Map<String, Object>> callerSkills, String profile,
+            boolean sessionSkillsSupported) {
         merged.addAll(callerSkills);
-        Map<String, Object> loop = forProfile(profile);
-        if (loop != null) {
-            merged.add(loop);
+        if (!sessionSkillsSupported) {
+            return false;
         }
+        Map<String, Object> loop = forProfile(profile);
+        if (loop == null) {
+            return false;
+        }
+        merged.removeIf(skill -> NAME.equals(skill.get("name")));
+        merged.add(loop);
+        return true;
     }
 
     private static String readBody(String asset) {

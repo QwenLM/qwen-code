@@ -183,7 +183,7 @@ export function buildManagedLoopBody(
 ): string {
   const substituted = applyWording(bundledBody);
   if (profile === 'union') {
-    return substituted;
+    return substituted.replace(/^\n+/, '');
   }
   const { preamble, sections } = splitSections(substituted);
   const getSection = (name: string): string => {
@@ -225,5 +225,5 @@ export function buildManagedLoopBody(
       `Managed ${profile} loop body names a creator the profile lacks.`,
     );
   }
-  return body;
+  return body.replace(/^\n+/, '');
 }

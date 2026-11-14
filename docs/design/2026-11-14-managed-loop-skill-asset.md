@@ -195,11 +195,22 @@ the profile, preserving replay under the idempotency key.
 
 **D5 — Naming.** The variant keeps the skill name `loop` so `/loop` invocation
 and the `allowedTools` source property are unchanged; only the body wording and
-the profile-conditional sections differ. A caller who imports a local `loop`
-skill in the same creation conflicts on the duplicate name — the admission
-already rejects duplicate names (`AgentDefinitionExtensions.java` names set);
-the design treats the server variant as authoritative and documents that a
-managed-bound creation should not also import the local `loop` body.
+the profile-conditional sections differ. The server variant is authoritative:
+the Web Shell imports the bundled `loop` skill verbatim from the daemon snapshot,
+so a caller catalog already contains a `loop` entry on the default creation path.
+`mergeInto` therefore **replaces** any existing `loop` entry rather than refusing
+the request — rejecting would 409 every Web Shell creation on a loop-bearing
+profile. The override is pinned by an admission test (a caller-imported local
+`loop` body is replaced by the server variant, not refused).
+
+The injection is gated on the negotiated Session Skills capability
+(`sessionSkillsSupported`, threaded through `SessionCreationCommand` like the
+other capability flags): a Harness that does not advertise `session-skills/2`
+gets no server row, keeping the failure at creation time rather than at dispatch.
+The save guard writes a row when the caller sent skills OR the variant was
+injected; a pinned definition's stored skills are merged whenever a definition
+is pinned, so an injected row carries the definition's skills plus `loop` and
+never shadows the definition catalog on the consumer side.
 
 ### Files affected
 
@@ -208,16 +219,25 @@ managed-bound creation should not also import the local `loop` body.
 - `packages/core/src/skills/bundled/loop/managed-loop-skill.ts` — the
   `buildManagedLoopBody(profile)` generator (wording substitutions + section
   selection); a collocated parity test binds the generated assets to `SKILL.md`
-  (no change to `SKILL.md` itself).
+  and pins the shared steward prose across every profile (no change to `SKILL.md`
+  itself). `regenerate-managed-loop-assets.ts` is the committed regeneration
+  entry point.
+- `packages/managed-agent-server/persistence/.../ManagedLoopSkill.java` — the
+  pure profile-to-asset selector and `mergeInto` (override + capability gate);
+  reads the classpath body, no string composition.
 - `packages/managed-agent-server/persistence/.../AgentSessionAdmissions.java` —
-  inject the variant by profile; widen the save guard.
-- `packages/managed-agent-server/persistence/.../JdbcManagedSessionSkills.java`
-  — select and read the classpath asset for the profile (no string composition).
-- `packages/managed-agent-server/contracts/.../WorkspaceToolProfiles.java` —
-  loop-creator predicate helpers if not already present.
-- Verification: admission tests for each profile shape, the empty-caller-skills
-  case, gate-off behavior, replay determinism, duplicate-name conflict, and the
-  READ/no-creator empty contribution.
+  merge the pinned definition's skills, call `mergeInto`, and write the row when
+  the caller sent skills or the variant was injected.
+- `packages/managed-agent-server/contracts/.../SessionCreationCommand.java` and
+  `control-plane/.../ManagedAgentService.java` — thread the
+  `sessionSkillsSupported` capability flag from the negotiated Harness.
+- `packages/managed-agent-server/contracts/pom.xml` — copy the generated bodies
+  onto the Java classpath.
+- Verification: a selector unit test across every profile (including null and
+  no-creator), and admission tests for the empty-caller injection, the
+  caller-imported `loop` override, the pinned-definition-with-skills no-shadowing
+  case, gate-off behavior, replay determinism, and the no-creator empty
+  contribution — on H2 and real MySQL 8.4.
 
 ## Constraints
 

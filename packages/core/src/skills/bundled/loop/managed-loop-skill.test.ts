@@ -44,8 +44,10 @@ describe('managed loop skill parity', () => {
   it.each(['union', 'cron', 'wakeup'] as const)(
     'the committed %s asset equals the generator output byte-for-byte',
     (profile) => {
-      // Regenerate the assets with: tsx the generator against SKILL.md. A drift
-      // in either the bundled source or the committed asset reddens this case.
+      // Regenerate the assets after editing SKILL.md:
+      //   npx tsx packages/core/src/skills/bundled/loop/regenerate-managed-loop-assets.ts
+      // A drift in either the bundled source or the committed asset reddens
+      // this case.
       expect(asset(profile)).toBe(buildManagedLoopBody(profile, body));
     },
   );
@@ -96,6 +98,22 @@ describe('managed loop skill parity', () => {
       expect(buildManagedLoopBody(profile, body)).toContain(
         subcommands.trimEnd(),
       );
+    }
+  });
+
+  it('pins the shared steward prose across every profile body', () => {
+    // The cron/wakeup bodies rewrite the path-specific sections but reproduce
+    // the shared "steward" paragraph verbatim. Pin it to the live source so
+    // editing it in SKILL.md reddens the cron/wakeup cases too, not just union
+    // (the hardcoded prose would otherwise drift silently).
+    const start = body.indexOf('The first immediate check');
+    const endMarker = 'say so in one sentence and stop.';
+    const end = body.indexOf(endMarker, start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const steward = body.slice(start, end + endMarker.length);
+    for (const profile of ['union', 'cron', 'wakeup'] as const) {
+      expect(buildManagedLoopBody(profile, body)).toContain(steward);
     }
   });
 });

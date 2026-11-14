@@ -233,11 +233,11 @@ final class AgentSessionAdmissions {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
         List<Map<String, Object>> merged = new ArrayList<>();
-        if (!skills.isEmpty() && pin.digest() != null) {
+        if (pin.digest() != null) {
             merged.addAll(AgentDefinitionExtensions.skills(storeRows.readMap(definitions.find(tenantId, agentId,
                     Long.parseLong(pin.revision())).orElseThrow().definitionJson()).get("skills"), true));
         }
-        ManagedLoopSkill.mergeInto(merged, skills, pin.toolProfile());
+        boolean loopInjected = ManagedLoopSkill.mergeInto(merged, skills, pin.toolProfile(), command.sessionSkillsSupported());
         var effectiveSkills = AgentDefinitionExtensions.sessionSkills(merged);
         if (worktree != null && sessionWorktrees == null) {
             throw new ManagedAgentException(409, "worktree_unavailable", "Session worktrees are unavailable.");
@@ -259,7 +259,7 @@ final class AgentSessionAdmissions {
             jdbc.update("UPDATE ma_session SET public_child_agents_version=1 WHERE tenant_id=? AND session_id=?",
                     tenantId, admission.sessionId());
         }
-        if (!effectiveSkills.isEmpty()) {
+        if (!skills.isEmpty() || loopInjected) {
             creationSkills.save(tenantId, admission.sessionId(), effectiveSkills);
         }
         if (extensionPins != null) {

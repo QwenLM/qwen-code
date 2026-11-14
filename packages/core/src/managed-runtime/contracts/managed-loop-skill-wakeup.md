@@ -1,4 +1,3 @@
-
 # /loop — run a prompt repeatedly
 
 ## Subcommands

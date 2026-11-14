@@ -73,16 +73,19 @@ skill 发布有两个生产者、一个消费者；Harness 只是消费者。
 
 **D4 — 冻结、重放安全、容量受限。** 注入的变体搭乘现有不可变 receipt 与 digest；无新资源 kind、无 schema 版本 bump。loop body 约 7 KiB，远低于 512 KiB 单 body / 2 MiB 目录上限（`AgentDefinitionExtensions.java:42-81`）。注入对 profile 确定，保持幂等键下的重放。
 
-**D5 — 命名。** 变体保持 skill 名 `loop`，使 `/loop` 调用与 `allowedTools` 源属性不变；只有 body 措辞与 profile 条件章节不同。同一次创建中导入本地 `loop` skill 的 caller 会因重名冲突——准入已拒绝重名（`AgentDefinitionExtensions.java` 的 names 集合）；设计视服务端变体为权威，并文档化 managed-bound 创建不应同时导入本地 `loop` body。
+**D5 — 命名。** 变体保持 skill 名 `loop`，使 `/loop` 调用与 `allowedTools` 源属性不变；只有 body 措辞与 profile 条件章节不同。服务端变体是权威的：Web Shell 从 daemon 快照原样导入 bundled `loop` skill，故默认创建路径的 caller 目录已含一个 `loop` 项。因此 `mergeInto` **替换**任何已有 `loop` 项而非拒绝请求——拒绝会使所有携带 loop 的 profile 上的 Web Shell 创建都 409。覆盖由准入测试钉住（caller 导入的本地 `loop` body 被服务端变体替换，而非被拒）。
+
+注入按协商的 Session Skills 能力门控（`sessionSkillsSupported`，循其他能力标志经 `SessionCreationCommand` 传入）：不通告 `session-skills/2` 的 Harness 得不到服务端行，使失败留在创建期而非派发期。save 守卫在 caller 传了 skills 或注入了变体时写行；pinned definition 的存储 skills 只要有 pinned definition 就合并，故注入的行携带 definition 的 skills 加 `loop`，绝不在消费端遮蔽 definition 目录。
 
 ### 涉及文件
 
 - `packages/core/src/managed-runtime/contracts/` — 三个生成的 managed loop body（union / cron-only / wakeup-only），拷贝到 Java。
-- `packages/core/src/skills/bundled/loop/managed-loop-skill.ts` — `buildManagedLoopBody(profile)` 生成器（措辞替换 + 章节选择）；同址一致性测试把生成资产绑回 `SKILL.md`（不改 `SKILL.md` 本身）。
-- `packages/managed-agent-server/persistence/.../AgentSessionAdmissions.java` — 按 profile 注入变体；放宽 save 守卫。
-- `packages/managed-agent-server/persistence/.../JdbcManagedSessionSkills.java` — 按 profile 选择并读 classpath 资产（不做字符串组合）。
-- `packages/managed-agent-server/contracts/.../WorkspaceToolProfiles.java` — loop-creator 谓词 helper（若尚不存在）。
-- 验证：每个 profile 形状的准入测试、空 caller-skills 情形、门无关性、重放确定性、重名冲突、READ/无 creator 的空贡献。
+- `packages/core/src/skills/bundled/loop/managed-loop-skill.ts` — `buildManagedLoopBody(profile)` 生成器（措辞替换 + 章节选择）；同址一致性测试把生成资产绑回 `SKILL.md` 并在每个 profile 间钉住共享 steward 段（不改 `SKILL.md` 本身）。`regenerate-managed-loop-assets.ts` 是提交的再生成入口。
+- `packages/managed-agent-server/persistence/.../ManagedLoopSkill.java` — 纯 profile-到-资产选择器与 `mergeInto`（覆盖 + 能力门）；读 classpath body，不做字符串组合。
+- `packages/managed-agent-server/persistence/.../AgentSessionAdmissions.java` — 合并 pinned definition 的 skills、调用 `mergeInto`、在 caller 传了 skills 或注入了变体时写行。
+- `packages/managed-agent-server/contracts/.../SessionCreationCommand.java` 与 `control-plane/.../ManagedAgentService.java` — 从协商的 Harness 传入 `sessionSkillsSupported` 能力标志。
+- `packages/managed-agent-server/contracts/pom.xml` — 把生成 body 拷贝到 Java classpath。
+- 验证：跨每个 profile 的选择器单测（含 null 与无 creator），以及准入测试——空 caller 注入、caller 导入 `loop` 的覆盖、pinned-definition-带-skills 的不遮蔽、门关闭行为、重放确定性、无 creator 的空贡献——在 H2 与真实 MySQL 8.4 上。
 
 ## 约束
 
