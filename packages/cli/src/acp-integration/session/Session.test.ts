@@ -22,6 +22,7 @@ import {
   resolveHomeLoopResolverRoots,
   Session,
 } from './Session.js';
+import { deferredToolUpdateContext } from './acp-tool-batch.js';
 import {
   getStartupContextLength,
   markCompressedHistory,
@@ -30,6 +31,7 @@ import { detectTurnInterruption } from '@qwen-code/qwen-code-core/core/turn-inte
 import { FinishReason } from '@qwen-code/qwen-code-core/core/genai-compat.js';
 import type { UserTurnInput } from '@qwen-code/qwen-code-core/core/client.js';
 import { markToolCallArgumentsIncomplete } from '@qwen-code/qwen-code-core/core/incomplete-tool-call-args.js';
+import { runAgentLoop } from '@qwen-code/qwen-code-core/core/agent-loop.js';
 import { ManagedRuntimeOutcomeUnknownError } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import {
   getApiHistoryPromptId,
@@ -149,9 +151,22 @@ const structuredErrorCauses = vi.hoisted(() => new WeakMap<object, unknown>());
 const runAcpToolBatchSpy = vi.hoisted(() => vi.fn());
 
 // The shared tool batch has its own tests; here it runs each call's tool.
-vi.mock('./acp-tool-batch.js', () => ({
+vi.mock('./acp-tool-batch.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./acp-tool-batch.js')>()),
   runAcpToolBatch: (...args: unknown[]) => runAcpToolBatchSpy(...args),
 }));
+
+// The shared loop runs as it is; the spy sees each `runAgentLoop` call.
+vi.mock(
+  '@qwen-code/qwen-code-core/core/agent-loop.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/core/agent-loop.js')
+      >();
+    return { ...actual, runAgentLoop: vi.fn(actual.runAgentLoop) };
+  },
+);
 
 // Session imports getStructuredErrorCause from the turn module, not the barrel.
 vi.mock('@qwen-code/qwen-code-core/core/turn.js', async (importOriginal) => {
@@ -646,6 +661,7 @@ describe('Session', () => {
   let mockLlmClient: {
     getChat: ReturnType<typeof vi.fn>;
     getHistoryTail: ReturnType<typeof vi.fn>;
+    getHistoryToolCallFingerprints: ReturnType<typeof vi.fn>;
     getTrustedUserAnswers: ReturnType<typeof vi.fn>;
     recordTrustedUserAnswers: ReturnType<typeof vi.fn>;
     setHistory: ReturnType<typeof vi.fn>;
@@ -911,6 +927,9 @@ describe('Session', () => {
     mockLlmClient = {
       getChat: vi.fn().mockReturnValue(mockChat),
       getHistoryTail: vi.fn().mockReturnValue([]),
+      getHistoryToolCallFingerprints: vi.fn(() =>
+        mockChat.getHistoryToolCallFingerprints(),
+      ),
       getTrustedUserAnswers: vi.fn().mockReturnValue([]),
       recordTrustedUserAnswers: vi.fn(),
       setHistory: vi.fn((history: Content[]) => mockChat.setHistory(history)),
@@ -2311,6 +2330,49 @@ describe('Session', () => {
       'Unable to reload model-provider settings from disk.',
     );
     expect(mockConfig.reloadModelProvidersConfig).not.toHaveBeenCalled();
+  });
+
+  it('keeps a deferred tool update on its original prompt or background turn', async () => {
+    const update = {
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'old-tool',
+      status: 'completed',
+    } as const;
+    const owner = {
+      version: 1,
+      sessionId: 'test-session-id',
+      promptId: 'old-prompt',
+      originatorClientId: 'old-client',
+    } as const;
+    await core.runWithInvocationContext(owner, () =>
+      deferredToolUpdateContext.run(true, () => session.sendUpdate(update)),
+    );
+    expect(mockClient.sessionUpdate).toHaveBeenLastCalledWith({
+      sessionId: owner.sessionId,
+      update: {
+        ...update,
+        _meta: {
+          promptId: owner.promptId,
+          originatorClientId: owner.originatorClientId,
+        },
+      },
+    });
+
+    const turn = {
+      turnId: 'old-background-turn',
+      taskId: 'task',
+      kind: 'agent',
+      startedAt: 1,
+    } as const;
+    await core.backgroundTurnContext.run(
+      { sessionId: owner.sessionId, active: false, turn },
+      () =>
+        deferredToolUpdateContext.run(true, () => session.sendUpdate(update)),
+    );
+    expect(mockClient.sessionUpdate).toHaveBeenLastCalledWith({
+      sessionId: owner.sessionId,
+      update: { ...update, _meta: { backgroundTurn: turn } },
+    });
   });
 
   it('bounds textual tool results at the live ACP delivery boundary', async () => {
@@ -4940,12 +5002,24 @@ describe('Session', () => {
     });
   });
 
-  describe('shared agent loop round (experimental.unifiedAgentLoop)', () => {
+  describe.each([false, true])('shared loop round (kernel=%s)', (kernel) => {
     type RoundEvent = core.ServerLlmStreamEvent;
+
+    beforeEach(() => {
+      vi.mocked(runAgentLoop).mockClear();
+    });
+
+    afterEach(() => {
+      // Each round ran in its own `runAgentLoop` call, on the kernel when on.
+      for (const [options] of vi.mocked(runAgentLoop).mock.calls) {
+        expect(options).toMatchObject({ maxRounds: 1, useEventBus: kernel });
+      }
+    });
 
     /** Streams each round's events from LlmClient, then empty rounds. */
     function useSharedRounds(...rounds: RoundEvent[][]) {
       mockConfig.isUnifiedAgentLoopEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.isEventBusAgentLoopEnabled = vi.fn().mockReturnValue(kernel);
       agentTelemetry.getActiveInteractionSpan.mockReturnValue(
         agentTelemetry.span,
       );
@@ -5293,6 +5367,30 @@ describe('Session', () => {
       expect(
         (parts as Part[]).map((part) => part.functionResponse?.id),
       ).toContain('call-read');
+    });
+
+    it('ends the loop call of a round whose turn left before its batch', async () => {
+      useTool(core.Kind.Read, 'read_file');
+      const send = useSharedRounds();
+      send.mockImplementationOnce(() =>
+        (async function* () {
+          yield toolCall({
+            id: 'call-read',
+            name: 'read_file',
+            args: { file_path: '/tmp/a.txt' },
+          });
+          await session.cancelPendingPrompt();
+          yield finished();
+        })(),
+      );
+
+      const result = await prompt();
+
+      expect(result.stopReason).toBe('cancelled');
+      expect(runAcpToolBatchSpy).not.toHaveBeenCalled();
+      await expect(
+        vi.mocked(runAgentLoop).mock.results[0].value,
+      ).resolves.toMatchObject({ reason: 'surface_ended' });
     });
 
     it("skips memory extraction on every round of a channel's turn", async () => {
@@ -6353,6 +6451,7 @@ describe('Session', () => {
         > = [];
         let pushCount = 0;
         mockConfig.isUnifiedAgentLoopEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.isEventBusAgentLoopEnabled = vi.fn().mockReturnValue(kernel);
         agentTelemetry.getActiveInteractionSpan.mockReturnValue(
           agentTelemetry.span,
         );
@@ -6568,6 +6667,36 @@ describe('Session', () => {
 
         expect(fireStopFailureEvent).not.toHaveBeenCalled();
         expect(agentText()).not.toContain('cron error');
+      });
+
+      it('ends the loop call of a cron round whose turn left before its batch', async () => {
+        fireCron('nightly report');
+        useTool(core.Kind.Read, 'read_file');
+        const sends = automaticRounds(
+          (index) =>
+            index === 1
+              ? [
+                  toolCall({
+                    id: 'call-read',
+                    name: 'read_file',
+                    args: { file_path: '/tmp/a.txt' },
+                  }),
+                ]
+              : [finished()],
+          () => true,
+          async (index) => {
+            if (index === 1) await session.cancelPendingPrompt();
+          },
+        );
+
+        await prompt();
+        await vi.waitFor(() => expect(sends).toHaveLength(2));
+
+        // The cron round's loop call ends without a batch.
+        await expect(
+          vi.mocked(runAgentLoop).mock.results[1].value,
+        ).resolves.toMatchObject({ reason: 'surface_ended' });
+        expect(runAcpToolBatchSpy).not.toHaveBeenCalled();
       });
 
       it('keeps a cron prompt whose request never went out out of the record', async () => {
@@ -31541,7 +31670,21 @@ describe('Session', () => {
           ]);
         });
 
-        describe('on the shared agent loop round', () => {
+        describe.each([false, true])('shared round (kernel=%s)', (kernel) => {
+          beforeEach(() => {
+            mockConfig.isEventBusAgentLoopEnabled = vi
+              .fn()
+              .mockReturnValue(kernel);
+            vi.mocked(runAgentLoop).mockClear();
+          });
+
+          afterEach(() => {
+            // Each round ran on the kernel when it is on.
+            for (const [options] of vi.mocked(runAgentLoop).mock.calls) {
+              expect(options).toMatchObject({ useEventBus: kernel });
+            }
+          });
+
           /** Streams `plan A`, then holds the response until it is cut. */
           function openSharedResponse(endsWithError = false) {
             let markStreaming!: () => void;
@@ -39448,7 +39591,21 @@ describe('Session', () => {
         expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
       });
 
-      describe('on the shared agent loop round', () => {
+      describe.each([false, true])('shared round (kernel=%s)', (kernel) => {
+        beforeEach(() => {
+          mockConfig.isEventBusAgentLoopEnabled = vi
+            .fn()
+            .mockReturnValue(kernel);
+          vi.mocked(runAgentLoop).mockClear();
+        });
+
+        afterEach(() => {
+          // Each round ran on the kernel when it is on.
+          for (const [options] of vi.mocked(runAgentLoop).mock.calls) {
+            expect(options).toMatchObject({ useEventBus: kernel });
+          }
+        });
+
         const activeGoalSnapshot = (activity: 'idle' | 'running') => ({
           v: 2,
           activity,
