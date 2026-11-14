@@ -642,8 +642,8 @@ importers:
         specifier: 6.0.0
         version: 6.0.0
       undici:
-        specifier: ^7.28.0
-        version: 7.29.0
+        specifier: 7.30.2
+        version: 7.30.2
     devDependencies:
       typescript:
         specifier: 5.8.3
