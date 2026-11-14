@@ -56,6 +56,14 @@ This guide provides solutions to common issues and debugging tips, including top
     - Note: unlike the flag, an exported `QWEN_CODE_SAFE_MODE` is inherited by child processes. A `qwen serve` daemon or an editor started from that shell hosts every one of its sessions in safe mode, so those sessions are suppressed too: they write no session record, and other sessions can neither list nor message them. Unset the variable for the daemon rather than leaving it exported in the shell that starts it.
     - Note: "MCP servers" here means servers configured in `settings.json` / project `.mcp.json` — local, ambient state that safe mode is meant to isolate against. MCP servers you explicitly supply for the current invocation (an embedding ACP client's `session/new` `mcpServers`, or `--mcp-config`) are not local/ambient state and are still honored under safe mode.
 
+## Windows standalone update fails with `Expand-Archive`
+
+Windows standalone updates use Windows PowerShell 5.1 (`powershell.exe`) to extract ZIP archives, including when Qwen Code is launched from PowerShell 7. An inherited `PSModulePath` can cause it to load an incompatible PowerShell 7 Archive module and fail during extraction.
+
+The updater clears the inherited module path for the extraction subprocess so Windows PowerShell can resolve its compatible module. This does not change your terminal's environment or system-wide execution policy. Extraction errors stop the update and include available PowerShell error details, decoded as UTF-8 and limited in length. An extraction failure leaves the existing installation in place.
+
+If an older version reports only `Expand-Archive exited with code 1` when updating from PowerShell 7, retry `qwen update` from Windows PowerShell 5.1. Alternatively, rerun the Windows standalone installer from the [Quickstart](../quickstart). If extraction still fails, include the full update error and your Windows, Qwen Code, and PowerShell versions in a bug report; the exit code alone does not identify the cause.
+
 ## Attachment upload returns HTTP 413 behind a reverse proxy
 
 A proxy may reject a request before it reaches `qwen serve`, even when the attachment is within the daemon's 8 MiB file limit. Raising only a daemon body limit does not change the proxy limit.
