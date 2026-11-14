@@ -26,11 +26,13 @@ const WORKSPACE_CWD = process.cwd();
 // replay can outlast a flat 15s watchdog even though that pool's suite ceiling
 // is 60s. Keep the fast arm for idle hosts.
 const WAIT_TIMEOUT_MS = slowHostBudgetMs(15_000, 45_000);
-// The replay case chains three watchdog windows: attach's connect and echo,
-// then the reconnect (whose replay listener must exist before 'open' resolves,
-// so the handshake and replay share one window). Derive the file ceiling from
-// those waits, on the same host predicate, so vitest never decides first.
-const TEST_TIMEOUT_MS = WAIT_TIMEOUT_MS * 3;
+// The heaviest case chains MAX_MANAGED_SESSION_TERMINALS + 2 attaches (a
+// connect wait and an echo wait each) plus the refused connect. One extra
+// window keeps setup outside those waits from racing the ceiling. Size the
+// file ceiling from that chain, on the same host predicate, so vitest never
+// decides first.
+const MAX_CHAIN_WINDOWS = (MAX_MANAGED_SESSION_TERMINALS + 2) * 2 + 1;
+const TEST_TIMEOUT_MS = WAIT_TIMEOUT_MS * (MAX_CHAIN_WINDOWS + 1);
 vi.setConfig({ testTimeout: TEST_TIMEOUT_MS, hookTimeout: TEST_TIMEOUT_MS });
 
 const AUTH_HEADERS = {
@@ -321,7 +323,12 @@ describe('ManagedRuntimeTerminals', () => {
   });
 
   it('replays scrollback on reconnect of the same Session', async () => {
-    expect(TEST_TIMEOUT_MS).toBeGreaterThanOrEqual(WAIT_TIMEOUT_MS * 3);
+    // Pins the derivation: the ceiling must cover every window in the
+    // heaviest chain plus headroom, or vitest can kill a slow healthy run
+    // before any watchdog reports.
+    expect(TEST_TIMEOUT_MS).toBeGreaterThan(
+      WAIT_TIMEOUT_MS * MAX_CHAIN_WINDOWS,
+    );
     const port = await start();
     const first = await attachAndEcho(port, 'replay', 'session-a');
     first.terminate();
