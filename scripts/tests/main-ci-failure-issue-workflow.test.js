@@ -97,6 +97,7 @@ describe('main CI failure issue workflow', () => {
     const watchedFiles = {
       'E2E Tests': 'e2e',
       'Managed Agent gate': 'managed-agent-gate',
+      'Managed Agent loop verification': 'managed-agent-loop',
       'SDK Java': 'sdk-java',
       'SDK Python': 'sdk-python',
       'Qwen Code CI': 'ci',
@@ -138,7 +139,7 @@ describe('main CI failure issue workflow', () => {
         "((github.event.workflow_run.head_branch == 'main' && " +
         "(github.event.workflow_run.event == 'push' || " +
         "(github.event.workflow_run.event == 'schedule' && " +
-        'contains(fromJSON(\'["Qwen Code CI","SDK Java","Desktop Checks","tui-parity"]\'), github.event.workflow.name)))) || ' +
+        'contains(fromJSON(\'["E2E Tests","Qwen Code CI","SDK Java","Desktop Checks","tui-parity","Managed Agent loop verification"]\'), github.event.workflow.name)))) || ' +
         "(github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow.name == 'SDK Java') || " +
         "(github.event.workflow.name == 'Managed Agent gate' && " +
         'contains(fromJSON(\'["pull_request","pull_request_review"]\'), github.event.workflow_run.event))) }}',
@@ -156,6 +157,22 @@ describe('main CI failure issue workflow', () => {
     for (const name of scheduledNames) {
       expect(Object.keys(watchedFiles), name).toContain(name);
     }
+    // Nothing above reads the other direction: a watched workflow with a cron
+    // must be in that arm, or its nightly red is filtered out here while this
+    // suite stays green (how `E2E Tests` went unlisted since #5859). YAML 1.2
+    // keeps `on` a key; a 1.1 parser reads `on` as `true` and empties this.
+    const cronWatched = Object.entries(watchedFiles)
+      .filter(
+        ([, f]) =>
+          parse(readFileSync(`.github/workflows/${f}.yml`, 'utf8')).on
+            ?.schedule,
+      )
+      .map(([name]) => name);
+    expect(cronWatched.length, 'watched with a cron').toBeGreaterThan(0);
+    expect(
+      cronWatched.filter((name) => !scheduledNames.includes(name)),
+      `watched-with-cron: ${cronWatched.join(', ')}`,
+    ).toEqual([]);
   });
 
   // This matrix pins the TRIGGER gate only. A cancelled run now passes the
@@ -170,6 +187,11 @@ describe('main CI failure issue workflow', () => {
     ['tui-parity', 'schedule', 'main', 'success', false],
     ['tui-parity', 'schedule', 'main', 'cancelled', true],
     ['E2E Tests', 'push', 'main', 'cancelled', true],
+    // A nightly red arrives as a `schedule` event, which the push arm cannot
+    // carry by definition — not because the push arm stopped watching this
+    // lane: `e2e.yml` still declares `push: main`, and the row above is that
+    // path. Both arms matter here; neither row may be dropped for the other.
+    ['E2E Tests', 'schedule', 'main', 'failure', true],
     ['tui-parity', 'schedule', 'main', 'skipped', false],
     ['tui-parity', 'schedule', 'main', 'timed_out', false],
     ['tui-parity', 'schedule', 'feature', 'failure', false],
