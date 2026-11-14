@@ -398,6 +398,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
             const a = (c.args ?? {}) as {
               __cancelled?: boolean;
               __cancelApproval?: boolean;
+              __error?: boolean;
               __modOutput?: string;
               __restoreResult?: Record<string, unknown>;
               __rewritten?: boolean;
@@ -418,7 +419,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
               status:
                 a.__cancelled === true || a.__cancelApproval === true
                   ? 'cancelled'
-                  : 'success',
+                  : a.__error
+                    ? 'error'
+                    : 'success',
               response: {
                 responseParts: [
                   {
@@ -427,9 +430,11 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
                       id: c.callId,
                       response:
                         a.__restoreResult ??
-                        (a.__modOutput !== undefined
-                          ? { output: a.__modOutput }
-                          : { ok: true }),
+                        (a.__error
+                          ? { error: 'Owned tool failure' }
+                          : a.__modOutput !== undefined
+                            ? { output: a.__modOutput }
+                            : { ok: true }),
                     },
                   },
                 ],
@@ -529,6 +534,8 @@ function createFakeConfig(
   };
   const client = {
     sendMessageStream,
+    recordCompletedToolCall: vi.fn(),
+    consumePendingMemoryTaskPromises: vi.fn(() => []),
     isInitialized,
     // R5-4/R6-5: an abort at the sampling boundary still writes the
     // completed batch's function responses to history before returning.
@@ -583,6 +590,104 @@ async function drain<T>(gen: AsyncGenerator<T>): Promise<T[]> {
 }
 
 describe('livePromptEvents', () => {
+  it('consumes background notifications once without waiting for their workers', async () => {
+    let release!: (value: number) => void;
+    const worker = new Promise<number>((resolve) => {
+      release = resolve;
+    });
+    const stream = oneToolBatchStream({
+      callId: 'background-notification',
+      name: 'read_file',
+      args: {},
+    });
+    const config = createFakeConfig(stream);
+    const consume = vi
+      .mocked(config.getGeminiClient().consumePendingMemoryTaskPromises)
+      .mockReturnValue([worker]);
+    let settled = false;
+    const run = drain(livePromptEvents(config, 'read')).then(() => {
+      settled = true;
+    });
+    try {
+      await vi.waitFor(() => expect(settled).toBe(true));
+      expect(consume).toHaveBeenCalledOnce();
+      expect(stream).toHaveBeenCalledTimes(2);
+    } finally {
+      release(0);
+      await run;
+    }
+  });
+
+  it('counts twenty completed default-path tools before sending their results', async () => {
+    const requests = Array.from({ length: 20 }, (_, index) => ({
+      callId: `default-read-${index}`,
+      name: 'read_file',
+      args: { file_path: `/owned/read-${index}.txt` },
+    }));
+    const recordCompletedToolCall = vi.fn();
+    let sends = 0;
+    const send = vi.fn(function* () {
+      if (++sends === 1) {
+        for (const value of requests)
+          yield { type: 'tool_call_request', value };
+      } else {
+        expect(recordCompletedToolCall.mock.calls).toEqual(
+          requests.map(({ name, args }) => [name, args]),
+        );
+      }
+    });
+    const config = createFakeConfig(send);
+    Object.assign(config, { isUnifiedAgentLoopEnabled: () => false });
+    Object.assign(config.getGeminiClient(), { recordCompletedToolCall });
+    await drain(livePromptEvents(config, 'start'));
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(recordCompletedToolCall).toHaveBeenCalledTimes(20);
+  });
+
+  it.each(['rewritten', 'error'] as const)(
+    'records a completed default-path %s tool with the scheduler arguments',
+    async (mode) => {
+      const args = mode === 'error' ? { __error: true } : { __rewritten: true };
+      const stream = oneToolBatchStream({
+        callId: `completed-${mode}`,
+        name: 'write_file',
+        args,
+      });
+      const config = createFakeConfig(stream);
+      const events = await drain(livePromptEvents(config, 'write'));
+      expect(
+        config.getGeminiClient().recordCompletedToolCall,
+      ).toHaveBeenCalledExactlyOnceWith(
+        'write_file',
+        mode === 'rewritten' ? { ...args, modified_by_user: true } : args,
+      );
+      expect(events).toContainEqual({
+        type: 'tool-end',
+        id: `completed-${mode}`,
+        success: mode !== 'error',
+        summary: mode === 'error' ? 'error' : 'ok',
+      });
+    },
+  );
+
+  it('counts only the completed tool in a mixed cancelled default-path batch', async () => {
+    const requests = [
+      { callId: 'completed', name: 'read_file', args: { owned: true } },
+      { callId: 'cancelled', name: 'write_file', args: { __cancelled: true } },
+    ];
+    let sends = 0;
+    const stream = vi.fn(function* () {
+      if (++sends === 1)
+        for (const value of requests)
+          yield { type: 'tool_call_request', value };
+    });
+    const config = createFakeConfig(stream);
+    await drain(livePromptEvents(config, 'read'));
+    expect(
+      config.getGeminiClient().recordCompletedToolCall,
+    ).toHaveBeenCalledExactlyOnceWith('read_file', { owned: true });
+  });
+
   it('records a native model result once using the same finalized response sent to the model', async () => {
     const request = { callId: 'native-recorded', name: 'read_file', args: {} };
     const stream = oneToolBatchStream(request);
@@ -637,6 +742,12 @@ describe('livePromptEvents', () => {
       }
       expect(invalidated).toBe(true);
       expect(recordToolResult).not.toHaveBeenCalled();
+      expect(
+        config.getGeminiClient().recordCompletedToolCall,
+      ).not.toHaveBeenCalled();
+      expect(
+        config.getGeminiClient().consumePendingMemoryTaskPromises,
+      ).not.toHaveBeenCalled();
     },
   );
 
@@ -853,6 +964,9 @@ describe('livePromptEvents', () => {
     Object.assign(config, { getToolOutputBatchBudget: () => 1000 });
     await drain(livePromptEvents(config, 'read', new AbortController().signal));
     expect(recordToolResult).toHaveBeenCalledOnce();
+    expect(
+      config.getGeminiClient().recordCompletedToolCall,
+    ).not.toHaveBeenCalled();
     const [parts, metadata] = recordToolResult.mock.calls[0];
     expect(metadata.responseParts).toBeUndefined();
     expect(metadata.executionStatus).toBe('not_started');
@@ -1281,6 +1395,7 @@ describe('livePromptEvents', () => {
       getGeminiClient: () => ({
         sendMessageStream,
         isInitialized: () => chatExists,
+        consumePendingMemoryTaskPromises: vi.fn(() => []),
         getChat: () => ({ getGenerationConfig: () => ({ tools }) }),
       }),
     } as unknown as Config;
@@ -1524,6 +1639,9 @@ describe('livePromptEvents', () => {
     );
     expect(recordToolResult).not.toHaveBeenCalled();
     expect(sendMessageStream).not.toHaveBeenCalled();
+    expect(
+      config.getGeminiClient().recordCompletedToolCall,
+    ).not.toHaveBeenCalled();
     expect(events.filter((event) => event.type === 'tool-start')).toHaveLength(
       1,
     );
@@ -2762,6 +2880,7 @@ describe('livePromptEvents', () => {
       getGeminiClient: () => ({
         sendMessageStream,
         addHistory,
+        recordCompletedToolCall: vi.fn(),
         isInitialized: () => true,
         getChat: () => ({
           getGenerationConfig: () => ({
@@ -3921,11 +4040,13 @@ describe('livePromptEvents', () => {
       args: { __cancelled: true },
     });
     const addHistory = vi.fn();
+    const consumePendingMemoryTaskPromises = vi.fn(() => []);
     const config = {
       ...createFakeConfig(sendMessageStream),
       getGeminiClient: () => ({
         sendMessageStream,
         addHistory,
+        consumePendingMemoryTaskPromises,
         isInitialized: () => true,
         getChat: () => ({ getGenerationConfig: () => ({ tools: [] }) }),
       }),
@@ -3936,6 +4057,7 @@ describe('livePromptEvents', () => {
     // ink use-llm-stream parity: cancelled responses go to history only,
     // so the model is never asked to continue the turn.
     expect(sendMessageStream).toHaveBeenCalledTimes(1);
+    expect(consumePendingMemoryTaskPromises).not.toHaveBeenCalled();
     expect(addHistory).toHaveBeenCalledTimes(1);
     const content = addHistory.mock.calls[0][0] as {
       role: string;

@@ -2167,6 +2167,8 @@ export const AppContainer = (props: AppContainerProps) => {
   const [isSkillReviewDialogOpen, setIsSkillReviewDialogOpen] = useState(false);
   const [skillReviewPending, setSkillReviewPending] =
     useState<UIState['skillReviewPending']>(null);
+  const skillReviewOpenedPendingRef =
+    useRef<UIState['skillReviewPending']>(null);
   // Batches the user dismissed via Esc ("decide later"), so the idle effect
   // doesn't immediately reopen them. A Set (not a single value) so dismissing
   // batch B can't accidentally re-arm a still-dismissed batch A.
@@ -2713,7 +2715,16 @@ export const AppContainer = (props: AppContainerProps) => {
         dismissedTaskIds: skillReviewDismissedTaskIdsRef.current,
       })
     ) {
+      skillReviewOpenedPendingRef.current = skillReviewPending;
       setIsSkillReviewDialogOpen(true);
+    } else {
+      skillReviewOpenedPendingRef.current = null;
+      if (
+        !skillReviewPending ||
+        skillReviewDismissedTaskIdsRef.current.has(skillReviewPending.taskId)
+      ) {
+        setIsSkillReviewDialogOpen(false);
+      }
     }
   }, [skillReviewPending, streamingState, isMemoryDialogOpen, config]);
 
@@ -5392,12 +5403,23 @@ export const AppContainer = (props: AppContainerProps) => {
     config,
   ]);
 
+  // Reserve the review's idle turn before its opening effect paints.
+  const skillReviewWillOpen =
+    skillReviewOpenedPendingRef.current !== skillReviewPending &&
+    shouldAutoOpenSkillReview({
+      pending: skillReviewPending,
+      streamingState,
+      isMemoryDialogOpen,
+      autoSkillEnabled: config.getAutoSkillEnabled(),
+      dismissedTaskIds: skillReviewDismissedTaskIdsRef.current,
+    });
+
   useQueuedSubmissionDrain({
     config,
     isConfigInitialized,
     streamingState,
     isProcessing,
-    dialogsVisible,
+    dialogsVisible: dialogsVisible || skillReviewWillOpen,
     pendingSubmissionCount,
     getPendingSubmissionCount,
     popNextSubmission,

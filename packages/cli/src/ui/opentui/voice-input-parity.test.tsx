@@ -273,6 +273,9 @@ vi.mock('./commands-dispatch.js', () => ({
     cancel() {}
   },
 }));
+vi.mock('./SkillReviewDialog.js', () => ({
+  OpenTuiSkillReviewDialog: () => null,
+}));
 vi.mock('../hooks/useMcpApproval.js', () => ({
   useMcpApproval: () => ({
     isMcpApprovalDialogOpen: false,

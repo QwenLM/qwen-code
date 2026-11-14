@@ -46,6 +46,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { act, render, renderHook, screen } from '@testing-library/react';
 import { OpenTuiApp } from './opentui-app-shell.js';
+import type { NativeSkillReviewBatch } from './use-skill-review.js';
 import {
   getDialogMaxHeight,
   STATIC_EXTRA_HEIGHT,
@@ -120,6 +121,8 @@ const mocks = vi.hoisted(() => {
     cancelCommand: vi.fn(),
     inputProps: null as Record<string, unknown> | null,
     dialogProps: null as Record<string, unknown> | null,
+    pendingSkillReview: null as NativeSkillReviewBatch | null,
+    skillReviewProps: null as Record<string, unknown> | null,
     toolConfirmProps: null as Record<string, unknown> | null,
     extensionSettingProps: null as Record<string, unknown> | null,
     extensionChoiceProps: null as Record<string, unknown> | null,
@@ -399,6 +402,12 @@ vi.mock('./ExtensionAcquisition.js', () => ({
     return <span>{`extension-setting:${permission.setting.name}`}</span>;
   },
 }));
+vi.mock('./SkillReviewDialog.js', () => ({
+  OpenTuiSkillReviewDialog: (props: Record<string, unknown>) => {
+    mocks.state.skillReviewProps = props;
+    return 'skill-review';
+  },
+}));
 vi.mock('../hooks/useMcpApproval.js', () => ({
   useMcpApproval: () => ({
     isMcpApprovalDialogOpen: mocks.state.mcpQueue.length > 0,
@@ -477,9 +486,19 @@ const SETTINGS = { merged: {} } as unknown as LoadedSettings;
 const getSessionStats = () => ({}) as unknown as SessionStatsState;
 
 type AppProps = Parameters<typeof OpenTuiApp>[0];
+function reviewController() {
+  return {
+    setUiBlocked: () => {},
+    pending: mocks.state.pendingSkillReview,
+    canDrain: () =>
+      !mocks.state.pendingSkillReview ||
+      mocks.state.pendingSkillReview.isDismissed(),
+  };
+}
 function renderApp(overrides: Partial<AppProps> = {}) {
   const props: AppProps = {
     config: CONFIG,
+    skillReview: reviewController(),
     settings: SETTINGS,
     logger: null,
     commands: [] as readonly SlashCommand[],
@@ -538,6 +557,8 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.cancelCommand.mockClear();
     mocks.state.inputProps = null;
     mocks.state.dialogProps = null;
+    mocks.state.pendingSkillReview = null;
+    mocks.state.skillReviewProps = null;
     mocks.state.toolConfirmProps = null;
     mocks.state.shellConfirmProps = null;
     mocks.state.actionConfirmProps = null;
@@ -561,6 +582,219 @@ describe('OpenTuiApp shell wiring', () => {
 
   afterEach(() => {
     mocks.state.executeUserShell.mockImplementation(() => Promise.resolve());
+  });
+
+  function pendingReview(config: Config = CONFIG) {
+    const dismissed = { value: false };
+    const batch = {
+      config,
+      generation: 0,
+      task: { id: 'review-task' },
+      skills: [
+        {
+          name: 'alpha',
+          description: 'A',
+          stagedManifestPath: '/pending/alpha/SKILL.md',
+        },
+      ],
+      isCurrent: () => true,
+      isDismissed: () => dismissed.value,
+      dismiss: () => {
+        dismissed.value = true;
+      },
+    } as unknown as NativeSkillReviewBatch;
+    mocks.state.pendingSkillReview = batch;
+    return batch;
+  }
+  it('opens an eligible review in the real shell slot and hides composer, update notice and footer', async () => {
+    const config = { ...CONFIG, getAutoSkillEnabled: () => true } as Config;
+    const batch = pendingReview(config);
+    renderApp({ config, updateNotice: 'update-marker' });
+    await settle();
+    expect(screen.getByText('skill-review')).toBeTruthy();
+    expect(screen.queryByText('input-prompt')).toBeNull();
+    expect(screen.queryByText('footer')).toBeNull();
+    expect(screen.queryByText('update-marker')).toBeNull();
+    expect(mocks.state.skillReviewProps?.['batch']).toBe(batch);
+    expect(mocks.state.skillReviewProps?.['host']).toBe(mocks.state.host);
+    act(() => (mocks.state.skillReviewProps?.['onDismiss'] as () => void)());
+    expect(batch.isDismissed()).toBe(true);
+    expect(screen.getByText('input-prompt')).toBeTruthy();
+  });
+  it('refuses retained composer submissions while review owns input and resumes after dismissal', async () => {
+    mocks.state.handleResult = false;
+    const config = { ...CONFIG, getAutoSkillEnabled: () => true } as Config;
+    const onSubmitPrompt = vi.fn(() => true);
+    const props = {
+      config,
+      settings: SETTINGS,
+      logger: null,
+      commands: [],
+      getSessionStats,
+      onSubmitPrompt,
+    };
+    const view = render(
+      <OpenTuiApp skillReview={reviewController()} {...props} />,
+    );
+    await settle();
+    const retained = mocks.state.inputProps?.['onSubmit'] as (
+      text: string,
+    ) => Promise<boolean>;
+    pendingReview(config);
+    view.rerender(<OpenTuiApp skillReview={reviewController()} {...props} />);
+    await settle();
+    await act(async () => {
+      expect(await retained('must wait')).toBe(false);
+    });
+    expect(onSubmitPrompt).not.toHaveBeenCalled();
+    act(() => (mocks.state.skillReviewProps?.['onDismiss'] as () => void)());
+    await settle();
+    await act(async () => {
+      expect(await retained('now allowed')).toBe(true);
+    });
+    expect(onSubmitPrompt).toHaveBeenCalledWith(
+      'now allowed',
+      undefined,
+      expect.any(Object),
+    );
+  });
+  it('preserves command and approval precedence without dismissing the pending batch', async () => {
+    const config = { ...CONFIG, getAutoSkillEnabled: () => true } as Config;
+    const batch = pendingReview(config);
+    const view = renderApp({ config, initialDialog: { dialog: 'help' } });
+    await settle();
+    expect(screen.queryByText('skill-review')).toBeNull();
+    expect(mocks.state.dialogProps?.['request']).toEqual({ dialog: 'help' });
+    act(() => (mocks.state.dialogProps?.['onClose'] as () => void)());
+    await settle();
+    expect(screen.getByText('skill-review')).toBeTruthy();
+    mocks.state.mcpQueue.push({ name: 'approval' });
+    view.rerender(
+      <OpenTuiApp
+        skillReview={reviewController()}
+        config={config}
+        settings={SETTINGS}
+        logger={null}
+        commands={[]}
+        getSessionStats={getSessionStats}
+      />,
+    );
+    expect(screen.getByText('mcp-approval')).toBeTruthy();
+    expect(screen.queryByText('skill-review')).toBeNull();
+    expect(batch.isDismissed()).toBe(false);
+    mocks.state.mcpQueue.length = 0;
+    view.rerender(
+      <OpenTuiApp
+        skillReview={reviewController()}
+        config={config}
+        settings={SETTINGS}
+        logger={null}
+        commands={[]}
+        getSessionStats={getSessionStats}
+      />,
+    );
+    await settle();
+    expect(screen.getByText('skill-review')).toBeTruthy();
+  });
+  it('pauses an existing deferred-command drain for review and re-arms the slot after its in-flight command settles', async () => {
+    const config = { ...CONFIG, getAutoSkillEnabled: () => true } as Config;
+    mocks.state.deferDuringStreaming = true;
+    const props = {
+      config,
+      settings: SETTINGS,
+      logger: null,
+      commands: [],
+      getSessionStats,
+    };
+    const view = render(
+      <OpenTuiApp {...props} skillReview={reviewController()} streaming />,
+    );
+    await settle();
+    await submit('/slow');
+    await submit('/after');
+    mocks.state.holdHandleOn = '/slow';
+    view.rerender(<OpenTuiApp {...props} skillReview={reviewController()} />);
+    await settle();
+    expect(mocks.state.releaseHandle).not.toBeNull();
+    pendingReview(config);
+    view.rerender(<OpenTuiApp {...props} skillReview={reviewController()} />);
+    await settle();
+    await act(async () => {
+      mocks.state.releaseHandle?.();
+      await Promise.resolve();
+    });
+    await settle();
+    expect(mocks.state.handledTexts).toEqual(['/slow']);
+    expect(screen.getByText('skill-review')).toBeTruthy();
+    act(() => (mocks.state.skillReviewProps?.['onDismiss'] as () => void)());
+    await settle();
+    expect(mocks.state.handledTexts).toEqual(['/slow', '/after']);
+  });
+  it('keeps queue release blocked by a physical command dialog after the pending review disappears', async () => {
+    const config = { ...CONFIG, getAutoSkillEnabled: () => true } as Config;
+    pendingReview(config);
+    const controller = { ...reviewController(), setUiBlocked: vi.fn() };
+    const onReviewReleased = vi.fn();
+    const props = {
+      config,
+      settings: SETTINGS,
+      logger: null,
+      commands: [],
+      getSessionStats,
+      skillReview: controller,
+      onReviewReleased,
+    };
+    const view = render(
+      <OpenTuiApp {...props} initialDialog={{ dialog: 'memory' }} />,
+    );
+    await settle();
+    expect(controller.setUiBlocked).toHaveBeenLastCalledWith(true);
+    expect(onReviewReleased).not.toHaveBeenCalled();
+    controller.pending = null;
+    mocks.state.pendingSkillReview = null;
+    view.rerender(<OpenTuiApp {...props} />);
+    await settle();
+    expect(controller.setUiBlocked).toHaveBeenLastCalledWith(true);
+    expect(onReviewReleased).not.toHaveBeenCalled();
+    act(() => (mocks.state.dialogProps?.['onClose'] as () => void)());
+    await settle();
+    expect(controller.setUiBlocked).toHaveBeenLastCalledWith(false);
+    expect(onReviewReleased).toHaveBeenCalledOnce();
+  });
+  it('waits for idle and live re-enablement after Memory closes', async () => {
+    let enabled = false;
+    const config = { ...CONFIG, getAutoSkillEnabled: () => enabled } as Config;
+    pendingReview(config);
+    const props = {
+      config,
+      settings: SETTINGS,
+      logger: null,
+      commands: [],
+      getSessionStats,
+    };
+    const view = render(
+      <OpenTuiApp
+        skillReview={reviewController()}
+        {...props}
+        streaming
+        initialDialog={{ dialog: 'memory' }}
+      />,
+    );
+    await settle();
+    expect(screen.queryByText('skill-review')).toBeNull();
+    enabled = true;
+    view.rerender(
+      <OpenTuiApp
+        skillReview={reviewController()}
+        {...props}
+        initialDialog={{ dialog: 'memory' }}
+      />,
+    );
+    await settle();
+    expect(screen.queryByText('skill-review')).toBeNull();
+    act(() => (mocks.state.dialogProps?.['onClose'] as () => void)());
+    await settle();
+    expect(screen.getByText('skill-review')).toBeTruthy();
   });
 
   it('keeps subscription commands working without the composer hint row', async () => {
@@ -5048,6 +5282,8 @@ describe('OpenTuiApp approval-mode cycling (F-2)', () => {
     mocks.state.dispatcherConstructions = 0;
     mocks.state.inputProps = null;
     mocks.state.dialogProps = null;
+    mocks.state.pendingSkillReview = null;
+    mocks.state.skillReviewProps = null;
     mocks.state.footerProps = null;
     mocks.state.exitInProgress = false;
     mocks.state.emitAutoModeEntryNotices.mockClear();
@@ -5314,6 +5550,8 @@ describe('OpenTuiApp transcript scroll region', () => {
     mocks.state.dispatcherConstructions = 0;
     mocks.state.inputProps = null;
     mocks.state.dialogProps = null;
+    mocks.state.pendingSkillReview = null;
+    mocks.state.skillReviewProps = null;
     mocks.state.footerProps = null;
     mocks.state.exitInProgress = false;
     mocks.state.emitAutoModeEntryNotices.mockClear();

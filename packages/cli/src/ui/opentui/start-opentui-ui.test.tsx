@@ -86,6 +86,8 @@ const mocks = vi.hoisted(() => {
       renderMain?: () => unknown;
       onQuit?: (messages: readonly HistoryItem[]) => void;
       slashGateway?: OpenTuiSlashGateway;
+      skillReview?: { pending: unknown; canDrain: () => boolean };
+      onReviewReleased?: () => void;
       onToggleVim?: () => Promise<boolean>;
       vimMode?: string;
       vim?: InputPromptProps['vim'];
@@ -200,6 +202,13 @@ vi.mock('./transcript-view.js', () => ({
   OpenTuiTranscriptView: ({ items }: { items: readonly LiveHistoryItem[] }) =>
     items.map((item) => ('text' in item ? item.text : '')).join('\n'),
 }));
+vi.mock('./use-skill-review.js', () => ({
+  useSkillReview: () => ({
+    pending: null,
+    canDrain: () => true,
+    setUiBlocked: () => {},
+  }),
+}));
 vi.mock('./live-turn.js', async (importOriginal) => ({
   foldBatch: (await importOriginal<typeof import('./live-turn.js')>())
     .foldBatch,
@@ -215,6 +224,7 @@ vi.mock('./live-turn.js', async (importOriginal) => ({
       waitingCalls: mocks.state.waitingCalls,
       messageQueue: [],
       popQueue: () => null,
+      resumeQueuedPrompts: () => {},
       submit: () => {},
       interrupt: mocks.state.interrupt,
       resetTranscript: (events: OpenTuiStreamEvent[]) => {
@@ -389,7 +399,13 @@ describe('startOpenTuiUI fallback contract', () => {
     await withEntryApp(() => {
       expect(mocks.state.appProps).toMatchObject({
         foregroundShellControl: mocks.state.foregroundShellControl,
+        skillReview: { pending: null, canDrain: expect.any(Function) },
+        onReviewReleased: expect.any(Function),
       });
+      expect(
+        (mocks.state.liveOptions as { canDrainQueuedPrompts: () => boolean })
+          .canDrainQueuedPrompts,
+      ).toBe(mocks.state.appProps?.skillReview?.canDrain);
     });
   });
 

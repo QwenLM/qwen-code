@@ -45,6 +45,7 @@ import {
   useRenderer,
 } from '@opentui/react';
 import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
+import { useSkillReview } from './use-skill-review.js';
 import { modBandInput } from '../utils/mod-band-tree.js';
 import type { PartListUnion } from '@google/genai';
 import {
@@ -171,13 +172,19 @@ function OpenTuiEntryApp({
   // the slot's `returned`.
   const composerHandle: OpenTuiComposerSlot =
     useRef<OpenTuiComposerSlot['current']>(null);
+  const skillReview = useSkillReview(config);
   const live = useOpenTuiLiveTurn({
     config,
     logger,
     dualOutput: runtime.dualOutputBridge,
+    canDrainQueuedPrompts: skillReview.canDrain,
     onPromptReturned: (submission) =>
       returnToComposer(composerHandle, submission),
   });
+  const { resumeQueuedPrompts } = live;
+  useEffect(() => {
+    resumeQueuedPrompts();
+  }, [skillReview.pending, resumeQueuedPrompts]);
   const {
     applyEvent,
     submit,
@@ -512,6 +519,8 @@ function OpenTuiEntryApp({
   return (
     <OpenTuiApp
       config={config}
+      skillReview={skillReview}
+      onReviewReleased={resumeQueuedPrompts}
       settings={settings}
       logger={logger}
       startupHistory={startupHistory}

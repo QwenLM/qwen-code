@@ -261,7 +261,9 @@ export const SkillReviewDialog = ({
 
   useKeypress(
     (key) => {
-      if (key.ctrl || key.meta) return;
+      // Readline marks a bare Escape as meta.
+      const bareEscape = key.name === 'escape' && key.sequence === '\x1b';
+      if (key.ctrl || (key.meta && !bareEscape)) return;
       if (key.name === 'escape') {
         onDismiss();
         return;

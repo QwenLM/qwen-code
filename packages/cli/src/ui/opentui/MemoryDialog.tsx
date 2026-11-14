@@ -13,24 +13,16 @@ import {
   useRef,
   useState,
 } from 'react';
-import {
-  useKeyboard,
-  useRenderer,
-  useTerminalDimensions,
-} from '@opentui/react';
+import { useKeyboard, useTerminalDimensions } from '@opentui/react';
 import type { ScrollBoxRenderable } from '@opentui/core';
 import fs from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { getAllMemoryFilenames } from '@qwen-code/qwen-code-core/utils/memory-constants.js';
-import {
-  getEditorExecutable,
-  type EditorType,
-} from '@qwen-code/qwen-code-core/utils/editor.js';
 import {
   getAutoMemoryRoot,
   getAutoMemoryProjectStateDir,
@@ -41,16 +33,13 @@ import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import { formatRelativeTime } from '../utils/formatters.js';
 import { sanitizeTerminalText, truncateToWidth } from '../utils/textUtils.js';
-import {
-  releaseProgramStatus,
-  restoreProgramStatus,
-} from '../../utils/program-status.js';
 import type { OpenTuiAppHost } from './opentui-host.js';
 import { DialogFrame, dialogContentWidth } from './dialogs-shared.js';
 import { scrollDialogLayout, wrappedRows } from './dialogs-core.js';
 import { toOriginalKey, Command } from './key-map.js';
 import { keyMatchers } from '../keyMatchers.js';
 import { C } from './theme.js';
+import { useNativeFileEditor } from './use-native-file-editor.js';
 
 const keys = [
   'enableManagedAutoMemory',
@@ -234,7 +223,6 @@ function MemoryView({
   availableTerminalHeight?: number;
 }) {
   const { config, settings } = owner;
-  const renderer = useRenderer();
   const { width, height } = useTerminalDimensions();
   const [values, setValues] = useState<Values>(
     () =>
@@ -330,46 +318,7 @@ function MemoryView({
   }, [error]);
   const canAct = bodyRows > 0 && contentWidth >= 4;
 
-  const launchEditor = (file: string) => {
-    const preferred = settings.merged.general?.preferredEditor as
-      | EditorType
-      | undefined;
-    const editor = preferred
-      ? getEditorExecutable(preferred)
-      : process.platform === 'darwin'
-        ? 'open -t'
-        : process.platform === 'win32'
-          ? 'notepad'
-          : process.env['VISUAL'] || process.env['EDITOR'] || 'vi';
-    if (!editor)
-      throw new Error(
-        `No available editor found for ${preferred}. Please install a supported editor or set a different preferredEditor in settings.`,
-      );
-    assertOwner();
-    let suspended = false;
-    try {
-      suspended = true;
-      renderer.suspend();
-      releaseProgramStatus();
-      const command = editor === 'open -t' ? 'open' : editor;
-      const args = editor === 'open -t' ? ['-t', file] : [file];
-      const result = spawnSync(command, args, {
-        stdio: 'inherit',
-        shell: process.platform === 'win32' && /\.(cmd|bat)$/.test(command),
-      });
-      if (result.error) throw result.error;
-      if (result.signal)
-        throw new Error(`Editor was killed by signal ${result.signal}`);
-      if (typeof result.status === 'number' && result.status !== 0)
-        throw new Error(`Editor exited with status ${result.status}`);
-    } finally {
-      try {
-        restoreProgramStatus();
-      } finally {
-        if (suspended) renderer.resume();
-      }
-    }
-  };
+  const launchEditor = useNativeFileEditor(settings, assertOwner);
   const ensureFile = async (file: string) => {
     assertOwner();
     await fs.mkdir(path.dirname(file), { recursive: true });

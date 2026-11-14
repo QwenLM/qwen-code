@@ -557,6 +557,23 @@ describe('SkillReviewDialog', () => {
     expect(onDismiss).toHaveBeenCalledTimes(1);
   });
 
+  it('accepts the meta-marked bare Escape produced by readline', () => {
+    const onDismiss = vi.fn();
+    renderDialog(skills, { onDismiss });
+    pressKey('escape', { sequence: '\x1b', meta: true });
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { ctrl: true, sequence: '\x1b[27;5u' },
+    { meta: true, sequence: '\x1b\x1b' },
+  ])('does not dismiss on modified Escape %j', (key) => {
+    const onDismiss = vi.fn();
+    renderDialog(skills, { onDismiss });
+    pressKey('escape', key);
+    expect(onDismiss).not.toHaveBeenCalled();
+  });
+
   it('refreshes the preview with the saved edits after the editor closes', async () => {
     const editedPath = skills[0]!.stagedManifestPath;
     // Simulate the user editing and saving the file inside the editor.

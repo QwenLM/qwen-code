@@ -174,6 +174,18 @@ describe('TUI product evidence', () => {
       ['component', 'integration'],
     ],
     [
+      'packages/cli/src/ui/opentui/SkillReviewDialog.tsx',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/opentui/use-skill-review.ts',
+      ['component', 'integration'],
+    ],
+    [
+      'packages/cli/src/ui/opentui/use-native-file-editor.ts',
+      ['component', 'input', 'integration'],
+    ],
+    [
       'packages/cli/src/ui/opentui/dialogs-memory-status.tsx',
       ['component', 'integration'],
     ],
@@ -186,6 +198,10 @@ describe('TUI product evidence', () => {
       ['component', 'integration'],
     ],
     [
+      'packages/cli/src/ui/components/SkillReviewDialog.tsx',
+      ['component', 'integration'],
+    ],
+    [
       'packages/cli/src/ui/hooks/useLaunchEditor.ts',
       ['component', 'input', 'integration'],
     ],
@@ -194,6 +210,8 @@ describe('TUI product evidence', () => {
       ['component', 'integration'],
     ],
     ['packages/core/src/memory/paths.ts', ['component', 'integration']],
+    ['packages/core/src/agents/forkedAgent.ts', ['component', 'integration']],
+    ['packages/core/src/skills/skill-paths.ts', ['component', 'integration']],
     [
       'packages/core/src/utils/memory-constants.ts',
       ['component', 'integration'],
@@ -204,6 +222,10 @@ describe('TUI product evidence', () => {
     ],
     [
       'integration-tests/interactive/tui-memory-manager.test.ts',
+      ['component', 'integration'],
+    ],
+    [
+      'integration-tests/interactive/tui-skill-review.test.ts',
       ['component', 'integration'],
     ],
     ['packages/core/src/core/coreToolScheduler.ts', lanes.slice(0, -1)],
@@ -411,6 +433,7 @@ describe('TUI product evidence', () => {
       'tui-extension-acquisition',
       'tui-dual-output',
       'tui-memory-manager',
+      'tui-skill-review',
     ],
   };
   it.each(

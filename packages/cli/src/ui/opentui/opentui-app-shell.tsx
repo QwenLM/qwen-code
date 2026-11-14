@@ -145,6 +145,11 @@ import {
   OpenTuiToolConfirmation,
 } from './dialogs-confirm.js';
 import { useMcpApproval } from '../hooks/useMcpApproval.js';
+import type {
+  NativeSkillReviewController,
+  NativeSkillReviewBatch,
+} from './use-skill-review.js';
+import { OpenTuiSkillReviewDialog } from './SkillReviewDialog.js';
 import { useProjectHooksApproval } from '../hooks/use-project-hooks-approval.js';
 import { dialogAreaWidth } from './dialogs-shared.js';
 import { sanitizeTerminalText } from '../utils/textUtils.js';
@@ -162,6 +167,8 @@ const debugLogger = createDebugLogger('OPEN_TUI_APP');
 
 export interface OpenTuiAppProps {
   config: Config;
+  skillReview?: NativeSkillReviewController;
+  onReviewReleased?: () => void;
   settings: LoadedSettings;
   logger: Logger | null;
   startupHistory?: HistoryItem[];
@@ -765,6 +772,27 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   );
 
   const activeToolCall = waitingToolCalls?.[0] ?? null;
+  const pendingSkillReview = props.skillReview?.pending ?? null;
+  const [openedReview, setOpenedReview] =
+    useState<NativeSkillReviewBatch | null>(null);
+  const reviewEligible = Boolean(
+    pendingSkillReview &&
+      !pendingSkillReview.isDismissed() &&
+      config.getAutoSkillEnabled(),
+  );
+  const review =
+    reviewEligible &&
+    !streaming &&
+    openedReview &&
+    pendingSkillReview &&
+    openedReview.task === pendingSkillReview.task &&
+    openedReview.generation === pendingSkillReview.generation &&
+    openedReview.config === pendingSkillReview.config
+      ? pendingSkillReview
+      : null;
+  const reviewBlocked = Boolean(review || (reviewEligible && !streaming));
+  const reviewBlockedRef = useRef(reviewBlocked);
+  reviewBlockedRef.current = reviewBlocked;
 
   // ink drives the gated-server approval queue from a renderer-agnostic hook at
   // app level; without it a `.mcp.json` checked into the project is never
@@ -781,6 +809,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   );
   const shellBlocked = Boolean(
     dialog ||
+      reviewBlocked ||
       activeModal ||
       activeToolCall ||
       mcpApproval.isMcpApprovalDialogOpen ||
@@ -888,6 +917,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       key.eventType !== 'release' &&
       !streaming &&
       !dialog &&
+      !reviewBlocked &&
       !activeModal &&
       !activeToolCall &&
       !mcpApproval.isMcpApprovalDialogOpen &&
@@ -1352,6 +1382,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       imagePaths?: readonly string[],
       options?: OpenTuiSubmitOptions,
     ): Promise<boolean> => {
+      if (reviewBlockedRef.current) return false;
       const sessionId = config.getSessionId();
       const hasImages = !!imagePaths?.length;
       if (hasImages && shellModeActive) {
@@ -1397,7 +1428,11 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           blockedByRunningShell ||
           (!hasImages && (await gateway.mustDeferDuringStreaming(submission)))
         ) {
-          if (isExitInProgress() || sessionId !== config.getSessionId())
+          if (
+            reviewBlockedRef.current ||
+            isExitInProgress() ||
+            sessionId !== config.getSessionId()
+          )
             return false;
           if (shellEntry && !props.onTranscriptEvent) {
             notify('The shell command owner is not wired in this shell.');
@@ -1425,7 +1460,11 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           return true;
         }
       }
-      if (isExitInProgress() || sessionId !== config.getSessionId())
+      if (
+        reviewBlockedRef.current ||
+        isExitInProgress() ||
+        sessionId !== config.getSessionId()
+      )
         return false;
       const settlement = hasImages
         ? { kind: 'settled' as const, outcome: false as const }
@@ -1437,6 +1476,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             },
             notePersonPrompt,
           );
+      if (reviewBlockedRef.current) return false;
       if (settlement.kind === 'rejected') {
         notify(settlement.reason);
         return false;
@@ -1479,7 +1519,11 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         // The raw typed text is both the prompt and the `UserPromptSubmit`
         // provenance; `@path` expansion happens where the prompt enters the
         // stream (live-session), so text queued mid-turn expands too.
-        if (isExitInProgress() || sessionId !== config.getSessionId())
+        if (
+          reviewBlockedRef.current ||
+          isExitInProgress() ||
+          sessionId !== config.getSessionId()
+        )
           return false;
         return onSubmitPrompt(query, imagePaths, {
           ...options,
@@ -1508,6 +1552,42 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   // registry and the dispatch before any turn starts, so a Mod's prompt must
   // not take the idle moment from under them.
   const submittingRef = useRef(0);
+  const otherUiBlocked = Boolean(
+    dialog ||
+      activeModal ||
+      activeToolCall ||
+      mcpApproval.isMcpApprovalDialogOpen ||
+      hooksApproval.isProjectHooksApprovalDialogOpen ||
+      shellControllersRef.current.size > 0 ||
+      submittingRef.current > 0 ||
+      drainingRef.current ||
+      gateway.isBusy() ||
+      isExitInProgress(),
+  );
+  props.skillReview?.setUiBlocked(otherUiBlocked);
+  const onReviewReleased = props.onReviewReleased;
+  useEffect(() => {
+    if (!reviewBlocked && !otherUiBlocked) onReviewReleased?.();
+  }, [reviewBlocked, otherUiBlocked, onReviewReleased]);
+
+  useEffect(() => {
+    if (
+      !pendingSkillReview ||
+      !reviewEligible ||
+      streaming ||
+      otherUiBlocked ||
+      drainingRef.current
+    )
+      return;
+    setOpenedReview(pendingSkillReview);
+  }, [
+    pendingSkillReview,
+    reviewEligible,
+    streaming,
+    otherUiBlocked,
+    deferredRevision,
+  ]);
+
   // Re-runs the drain of the Mods' prompts below.
   const [modPromptRevision, setModPromptRevision] = useState(0);
   const onSubmit = useCallback(
@@ -1517,16 +1597,18 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       options?: OpenTuiSubmitOptions,
     ): Promise<boolean> => {
       submittingRef.current += 1;
+      props.skillReview?.setUiBlocked(true);
       try {
         return await submitInput(text, imagePaths, options);
       } finally {
         submittingRef.current -= 1;
+        setDeferredRevision((revision) => revision + 1);
         // Only a Mod's prompt waiting on this submission needs the re-run.
         if (getInteractiveModSession(config)?.hasSubmittedPrompts)
           setModPromptRevision((revision) => revision + 1);
       }
     },
-    [config, submitInput],
+    [config, submitInput, props.skillReview],
   );
 
   // Runs the commands the mid-turn gate held back, in submission order, once
@@ -1544,6 +1626,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     if (
       streaming ||
       dialog ||
+      reviewBlocked ||
       shellControllersRef.current.size > 0 ||
       deferredCommandsRef.current.length === 0
     ) {
@@ -1577,6 +1660,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           if (
             streamingRef.current ||
             dialogRef.current ||
+            reviewBlockedRef.current ||
             shellControllersRef.current.size > 0
           ) {
             deferredCommandsRef.current.unshift(...pending.slice(i));
@@ -1672,12 +1756,14 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
         // the drain (the queue is a ref; a push alone triggers nothing) — but
         // a holdsUi pause must not re-arm, or the remainder runs before the
         // turn/dialog it waits for even starts (R5-6).
-        if (!paused) setDeferredRevision((revision) => revision + 1);
+        if (!paused || reviewBlockedRef.current)
+          setDeferredRevision((revision) => revision + 1);
       }
     })();
   }, [
     streaming,
     dialog,
+    reviewBlocked,
     deferredRevision,
     gateway,
     notify,
@@ -1720,6 +1806,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
       isExitInProgress() ||
       streaming ||
       dialog ||
+      reviewBlocked ||
       shellControllersRef.current.size > 0 ||
       deferredCommandsRef.current.length > 0 ||
       drainingRef.current ||
@@ -1736,6 +1823,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   }, [
     streaming,
     dialog,
+    reviewBlocked,
     deferredRevision,
     modPromptRevision,
     gateway,
@@ -1808,6 +1896,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               })
             : null}
           {!dialog &&
+          !reviewBlocked &&
           !activeModal &&
           !activeToolCall &&
           !mcpApproval.isMcpApprovalDialogOpen &&
@@ -1953,6 +2042,43 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 onRewind={(turn, option) => rewind(turn.id, option)}
               />
             </box>
+          ) : review ? (
+            <box
+              key="skill-review-area"
+              flexDirection="column"
+              marginLeft={2}
+              width={dialogAreaWidth(terminalWidth)}
+              height={dialogRegionHeight}
+              overflow="hidden"
+            >
+              <OpenTuiSkillReviewDialog
+                key={`${review.generation}:${review.task.id}`}
+                batch={review}
+                settings={settings}
+                host={host}
+                availableTerminalHeight={dialogRegionHeight}
+                onClose={() => {
+                  if (review.isCurrent())
+                    setOpenedReview((open) =>
+                      open?.task === review.task &&
+                      open.generation === review.generation
+                        ? null
+                        : open,
+                    );
+                }}
+                onDismiss={() => {
+                  if (review.isCurrent()) {
+                    review.dismiss();
+                    setOpenedReview((open) =>
+                      open?.task === review.task &&
+                      open.generation === review.generation
+                        ? null
+                        : open,
+                    );
+                  }
+                }}
+              />
+            </box>
           ) : (
             <box key="composer" flexDirection="column" marginTop={1}>
               <OpenTuiLoadingIndicator
@@ -2034,6 +2160,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             returns just that row, so nothing else appears. */}
           {exitHint ||
           (!dialog &&
+            !reviewBlocked &&
             !activeModal &&
             !activeToolCall &&
             !mcpApproval.isMcpApprovalDialogOpen &&

@@ -10147,6 +10147,255 @@ describe('AppContainer State Management', () => {
     });
   });
 
+  describe('Skill review queue reservation at the AppContainer call site', () => {
+    it('reserves the first idle turn, then releases an unchanged pending batch after a failed decision closes', async () => {
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'getToolRegistry').mockReturnValue({
+        getMcpClientManager: () => ({
+          getDiscoveryState: () => MCPDiscoveryState.COMPLETED,
+        }),
+      } as unknown as ReturnType<Config['getToolRegistry']>);
+      vi.spyOn(mockConfig, 'getAutoSkillEnabled').mockReturnValue(true);
+      const pendingSkill = {
+        name: 'auto-skill-owned-queue',
+        description: 'Owned queued review',
+        stagedManifestPath: '/tmp/owned-queue/SKILL.md',
+      };
+      const listTasksByType = vi.fn(() => [
+        {
+          id: 'owned-review-queue-task',
+          metadata: { pendingSkills: [pendingSkill] },
+        },
+      ]);
+      let notifyReview: (() => void) | undefined;
+      const unsubscribe = vi.fn();
+      const accept = vi.fn().mockRejectedValue(new Error('disk is read-only'));
+      vi.spyOn(mockConfig, 'getMemoryManager').mockReturnValue({
+        listTasksByType,
+        subscribe: vi.fn((listener: () => void) => {
+          notifyReview = listener;
+          return unsubscribe;
+        }),
+        acceptPendingSkillFromTask: accept,
+      } as unknown as ReturnType<Config['getMemoryManager']>);
+
+      let popped = false;
+      let setQueuedCount!: (count: number) => void;
+      const popNextSubmission = vi.fn(() => {
+        if (popped) return null;
+        popped = true;
+        setQueuedCount(0);
+        return {
+          kind: 'user' as const,
+          modelText: 'owned queued user turn',
+          turnKey: 'owned-review-queued-turn',
+        };
+      });
+      const queue = mockedUseMessageQueue();
+      const getPendingSubmissionCount = () => (popped ? 0 : 1);
+      mockedUseMessageQueue.mockImplementation(() => {
+        const [count, setCount] = useState(1);
+        setQueuedCount = setCount;
+        return {
+          ...queue,
+          pendingSubmissionCount: count,
+          getPendingSubmissionCount,
+          popNextSubmission,
+        };
+      });
+      const submitQuery = vi.fn().mockResolvedValue(undefined);
+      const stream = { ...mockedUseLlmStream(), submitQuery };
+      let setStreaming!: (state: StreamingState) => void;
+      mockedUseLlmStream.mockImplementation(() => {
+        const [streamingState, setStreamingState] = useState(
+          StreamingState.Responding,
+        );
+        setStreaming = setStreamingState;
+        return { ...stream, streamingState };
+      });
+      const view = render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      try {
+        await flushConfigInitialization();
+        await vi.waitFor(() =>
+          expect(capturedUIState.skillReviewPending?.taskId).toBe(
+            'owned-review-queue-task',
+          ),
+        );
+        expect(capturedUIState.isSkillReviewDialogOpen).toBe(false);
+        expect(popNextSubmission).not.toHaveBeenCalled();
+        await act(async () => {
+          setStreaming(StreamingState.Idle);
+        });
+        await vi.waitFor(() =>
+          expect(capturedUIState.streamingState).toBe(StreamingState.Idle),
+        );
+        await vi.waitFor(() =>
+          expect(capturedUIState.isSkillReviewDialogOpen).toBe(true),
+        );
+        expect(popNextSubmission).not.toHaveBeenCalled();
+        expect(submitQuery).not.toHaveBeenCalled();
+
+        const samePending = capturedUIState.skillReviewPending;
+        await act(async () => {
+          capturedUIActions.acceptPendingSkill(pendingSkill.name);
+        });
+        expect(accept).toHaveBeenCalledWith(
+          'owned-review-queue-task',
+          pendingSkill.name,
+        );
+        await act(async () => {
+          notifyReview?.();
+        });
+        expect(capturedUIState.skillReviewPending).toBe(samePending);
+        expect(submitQuery).not.toHaveBeenCalled();
+        await act(async () => {
+          capturedUIActions.closeSkillReviewDialog();
+        });
+        await vi.waitFor(() => expect(submitQuery).toHaveBeenCalledOnce());
+        expect(submitQuery).toHaveBeenCalledWith(
+          'owned queued user turn',
+          SendMessageType.UserQuery,
+          undefined,
+          expect.objectContaining({
+            userAdmission: { turnKey: 'owned-review-queued-turn' },
+          }),
+        );
+        expect(popNextSubmission).toHaveBeenCalledOnce();
+        expect(capturedUIState.skillReviewPending).toBe(samePending);
+        expect(capturedUIState.isSkillReviewDialogOpen).toBe(false);
+      } finally {
+        view.unmount();
+      }
+      expect(unsubscribe).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe('Skill review removal at the AppContainer call site', () => {
+    it('keeps a dismissed old task closed after a new task resolves, then releases the last pending task', async () => {
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'getToolRegistry').mockReturnValue({
+        getMcpClientManager: () => ({
+          getDiscoveryState: () => MCPDiscoveryState.COMPLETED,
+        }),
+      } as unknown as ReturnType<Config['getToolRegistry']>);
+      vi.spyOn(mockConfig, 'getAutoSkillEnabled').mockReturnValue(true);
+      const task = {
+        id: 'owned-review-last-task',
+        metadata: {
+          pendingSkills: [
+            {
+              name: 'auto-skill-owned-last',
+              description: 'Owned final pending skill',
+              stagedManifestPath: '/tmp/owned-last/SKILL.md',
+            },
+          ],
+        },
+      };
+      const newTask = {
+        id: 'owned-review-new-task',
+        metadata: {
+          pendingSkills: [
+            {
+              name: 'auto-skill-owned-new',
+              description: 'Owned successor pending skill',
+              stagedManifestPath: '/tmp/owned-new/SKILL.md',
+            },
+          ],
+        },
+      };
+      let tasks = [task];
+      let notifyReview: (() => void) | undefined;
+      const unsubscribe = vi.fn();
+      vi.spyOn(mockConfig, 'getMemoryManager').mockReturnValue({
+        listTasksByType: vi.fn(() => tasks),
+        subscribe: vi.fn((listener: () => void) => {
+          notifyReview = listener;
+          return unsubscribe;
+        }),
+      } as unknown as ReturnType<Config['getMemoryManager']>);
+      const view = render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      try {
+        await flushConfigInitialization();
+        await vi.waitFor(() =>
+          expect(capturedUIState.isSkillReviewDialogOpen).toBe(true),
+        );
+        expect(capturedUIState.skillReviewPending?.taskId).toBe(
+          'owned-review-last-task',
+        );
+        expect(capturedUIState.dialogsVisible).toBe(true);
+        expect(notifyReview).toBeTypeOf('function');
+        await act(async () => {
+          capturedUIActions.dismissSkillReviewDialog();
+        });
+        await vi.waitFor(() =>
+          expect(capturedUIState.isSkillReviewDialogOpen).toBe(false),
+        );
+        expect(capturedUIState.skillReviewPending?.taskId).toBe(task.id);
+        await act(async () => {
+          tasks = [newTask, task];
+          notifyReview!();
+        });
+        await vi.waitFor(() =>
+          expect(capturedUIState.skillReviewPending?.taskId).toBe(newTask.id),
+        );
+        await vi.waitFor(() =>
+          expect(capturedUIState.isSkillReviewDialogOpen).toBe(true),
+        );
+        await act(async () => {
+          tasks = [task];
+          notifyReview!();
+        });
+        await vi.waitFor(() =>
+          expect(capturedUIState.skillReviewPending?.taskId).toBe(task.id),
+        );
+        await vi.waitFor(() =>
+          expect(capturedUIState.isSkillReviewDialogOpen).toBe(false),
+        );
+        expect(capturedUIState.dialogsVisible).toBe(false);
+        const finalTask = { ...newTask, id: 'owned-review-final-task' };
+        await act(async () => {
+          tasks = [finalTask];
+          notifyReview!();
+        });
+        await vi.waitFor(() =>
+          expect(capturedUIState.skillReviewPending?.taskId).toBe(finalTask.id),
+        );
+        await vi.waitFor(() =>
+          expect(capturedUIState.isSkillReviewDialogOpen).toBe(true),
+        );
+        expect(capturedUIState.dialogsVisible).toBe(true);
+        await act(async () => {
+          tasks = [];
+          notifyReview!();
+        });
+        await vi.waitFor(() =>
+          expect(capturedUIState.skillReviewPending).toBeNull(),
+        );
+        await vi.waitFor(() =>
+          expect(capturedUIState.isSkillReviewDialogOpen).toBe(false),
+        );
+        expect(capturedUIState.dialogsVisible).toBe(false);
+      } finally {
+        view.unmount();
+      }
+      expect(unsubscribe).toHaveBeenCalledOnce();
+    });
+  });
+
   describe('Skill review auto-open gating (shouldAutoOpenSkillReview)', () => {
     const pending = {
       taskId: 'skill-task-1',

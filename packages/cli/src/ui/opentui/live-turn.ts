@@ -76,6 +76,7 @@ import {
   modPromptRow,
 } from '../../services/mod-prompt-frame.js';
 import type { ModQueuedPrompt } from '@qwen-code/qwen-code-core/mods/types.js';
+import { isExitInProgress } from './exit-lifecycle.js';
 import {
   livePromptEvents,
   nextLivePromptId,
@@ -135,6 +136,8 @@ export function imagePathsToParts(imagePaths: readonly string[]): {
 
 export interface UseOpenTuiLiveTurnOptions {
   config: Config;
+  /** Stable for one selected UI owner; replacement revokes its queued input. */
+  canDrainQueuedPrompts?: () => boolean;
   dualOutput?: DualOutputBridge | null;
   logger?: Logger | null;
   /**
@@ -219,6 +222,7 @@ export interface OpenTuiLiveTurn {
   messageQueue: readonly string[];
   /** Pops composer submissions back together; generated turns stay queued. */
   popQueue(): OpenTuiInputSubmission | null;
+  resumeQueuedPrompts(): void;
   /**
    * Submits a prompt (or queues it when a turn is in flight). A
    * `submit_prompt` outcome's per-turn options travel in `options`.
@@ -321,6 +325,11 @@ export function useOpenTuiLiveTurn(
   options: UseOpenTuiLiveTurnOptions,
 ): OpenTuiLiveTurn {
   const { config, dualOutput, logger } = options;
+  const latestConfig = useRef(config);
+  latestConfig.current = config;
+  const canDrainRef = useRef(options.canDrainQueuedPrompts);
+  canDrainRef.current = options.canDrainQueuedPrompts;
+  const resumeQueueRef = useRef<() => void>(() => {});
   const onPromptReturnedRef = useRef(options.onPromptReturned);
   onPromptReturnedRef.current = options.onPromptReturned;
   const [items, setItems] = useState<readonly LiveHistoryItem[]>([]);
@@ -333,6 +342,24 @@ export function useOpenTuiLiveTurn(
   // queueRef stays the synchronous source — a turn drains and restores within
   // one tick, before any render. This mirror only exists to be displayed.
   const [queue, setQueue] = useState<readonly string[]>([]);
+  const queueOwner = useRef({
+    config,
+    canDrain: options.canDrainQueuedPrompts,
+  });
+  if (
+    queueOwner.current.config !== config ||
+    queueOwner.current.canDrain !== options.canDrainQueuedPrompts
+  ) {
+    const selectedOwner =
+      queueOwner.current.canDrain !== undefined ||
+      options.canDrainQueuedPrompts !== undefined;
+    queueOwner.current = { config, canDrain: options.canDrainQueuedPrompts };
+    if (selectedOwner) {
+      queueRef.current = [];
+      setQueue([]);
+    }
+  }
+
   const syncQueue = useCallback(
     () =>
       setQueue(
@@ -1029,39 +1056,8 @@ export function useOpenTuiLiveTurn(
               }
             }
           } else {
-            // A declined read consumes only its own queued submission.
-            // Explicit aborts above never start another turn.
-            const rest = queueRef.current;
-            if (rest.length > 0) {
-              const [entry, ...remaining] = rest;
-              queueRef.current = remaining;
-              syncQueue();
-              const promptId =
-                entry.turnOptions?.promptId ?? nextLivePromptId(config);
-              const heldEntry = !entry.generated && hooksHear(entry);
-              if (!entry.turnOptions?.invocationEchoed && !heldEntry) {
-                apply(userRow(entry, promptId));
-              }
-              // ink keeps provenance for a queued submission, and the raw text
-              // is what the stream layer expands `@path` mentions from.
-              void runTurn(
-                entry.content,
-                promptId,
-                entry.generated
-                  ? entry.turnOptions
-                  : {
-                      ...entry.turnOptions,
-                      humanInput: entry.humanInput,
-                      displayText: entry.displayText,
-                      hasUnknownInput: entry.hasUnknownInput,
-                      pasteExpansions: entry.pasteExpansions,
-                      submittedPrompt: entry.submittedPrompt ?? entry.text,
-                    },
-                entry.generated ? undefined : entry,
-                undefined,
-                heldEntry,
-              );
-            }
+            // The selected review controller samples the manager before React paints.
+            resumeQueueRef.current();
           }
         }
       }
@@ -1078,9 +1074,59 @@ export function useOpenTuiLiveTurn(
       syncQueue,
       popQueue,
       updateExecutingShells,
-      hooksHear,
     ],
   );
+
+  const resumeQueuedPrompts = useCallback(() => {
+    if (
+      !mountedRef.current ||
+      latestConfig.current !== config ||
+      canDrainRef.current !== options.canDrainQueuedPrompts ||
+      streamingRef.current ||
+      waitingCallsRef.current.length > 0 ||
+      isExitInProgress() ||
+      canDrainRef.current?.() === false
+    )
+      return;
+    const rest = queueRef.current;
+    if (rest.length > 0) {
+      const [entry, ...remaining] = rest;
+      queueRef.current = remaining;
+      syncQueue();
+      const promptId = entry.turnOptions?.promptId ?? nextLivePromptId(config);
+      const heldEntry = !entry.generated && hooksHear(entry);
+      if (!entry.turnOptions?.invocationEchoed && !heldEntry) {
+        apply(userRow(entry, promptId));
+      }
+      // ink keeps provenance for a queued submission, and the raw text
+      // is what the stream layer expands `@path` mentions from.
+      void runTurn(
+        entry.content,
+        promptId,
+        entry.generated
+          ? entry.turnOptions
+          : {
+              ...entry.turnOptions,
+              humanInput: entry.humanInput,
+              displayText: entry.displayText,
+              hasUnknownInput: entry.hasUnknownInput,
+              pasteExpansions: entry.pasteExpansions,
+              submittedPrompt: entry.submittedPrompt ?? entry.text,
+            },
+        entry.generated ? undefined : entry,
+        undefined,
+        heldEntry,
+      );
+    }
+  }, [
+    config,
+    options.canDrainQueuedPrompts,
+    apply,
+    hooksHear,
+    runTurn,
+    syncQueue,
+  ]);
+  resumeQueueRef.current = resumeQueuedPrompts;
 
   const submit = useCallback(
     (
@@ -1205,6 +1251,7 @@ export function useOpenTuiLiveTurn(
       !mountedRef.current ||
       streamingRef.current ||
       modPromptHeldRef.current ||
+      canDrainRef.current?.() === false ||
       goalOwnsSessionTurns(config)
     )
       return false;
@@ -1391,6 +1438,7 @@ export function useOpenTuiLiveTurn(
     scrollShell,
     messageQueue: queue,
     popQueue,
+    resumeQueuedPrompts,
     submit,
     runModPrompt,
     interrupt,

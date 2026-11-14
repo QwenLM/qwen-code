@@ -57,6 +57,8 @@ import { rewindBoundaryHistory } from './live-session-model.js';
 import { markApiHistoryPrompt } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import type { Content } from '@google/genai';
 import { injectCapturedInput } from './early-input.js';
+import { useSkillReview } from './use-skill-review.js';
+import type { MemoryTaskRecord } from '@qwen-code/qwen-code-core/memory/manager.js';
 import { ShellExecutionService } from '@qwen-code/qwen-code-core/services/shellExecutionService.js';
 import {
   foldBatch,
@@ -224,6 +226,125 @@ describe('useOpenTuiLiveTurn submit paths', () => {
   function park(turn: number, call: WaitingCallInfo) {
     (live.turns[turn - 1].options as LivePromptOptions).onWaitingCall?.(call);
   }
+
+  it.each(['complete', 'dismiss', 'turnOff'] as const)(
+    'holds queued human prompts before React paints review and resumes in order on %s',
+    async (release) => {
+      const tasks: MemoryTaskRecord[] = [];
+      let enabled = true;
+      let notify = () => {};
+      const manager = {
+        listTasksByType: () => tasks,
+        getTask: (id: string) => tasks.find((task) => task.id === id),
+        subscribe: (listener: () => void) => {
+          notify = listener;
+          return () => {};
+        },
+      };
+      const config = {
+        getMemoryManager: () => manager,
+        getSessionId: () => 'A',
+        getProjectRoot: () => '/project',
+        getWorkingDir: () => '/project',
+        getAutoSkillEnabled: () => enabled,
+      } as unknown as Config;
+      const hook = renderHook(() => {
+        const review = useSkillReview(config);
+        const turn = useOpenTuiLiveTurn({
+          config,
+          canDrainQueuedPrompts: review.canDrain,
+        });
+        return { review, turn };
+      });
+      await act(async () => {
+        hook.result.current.review.setUiBlocked(true);
+        expect(hook.result.current.turn.submit('first')).toBe(true);
+        hook.result.current.review.setUiBlocked(false);
+        hook.result.current.turn.submit('second', undefined, {
+          deferUntilIdle: true,
+        });
+        hook.result.current.turn.submit('third', undefined, {
+          deferUntilIdle: true,
+        });
+      });
+      tasks.push({
+        id: 'actual-unit-task',
+        projectRoot: '/project',
+        metadata: {
+          pendingSkills: [
+            {
+              name: 'alpha',
+              description: 'A',
+              stagedManifestPath: '/pending/alpha/SKILL.md',
+            },
+          ],
+        },
+      } as unknown as MemoryTaskRecord);
+      await act(async () => live.waiters.shift()?.());
+      expect(live.turns).toHaveLength(1);
+      expect(hook.result.current.turn.messageQueue).toEqual([
+        'second',
+        'third',
+      ]);
+      act(() => notify());
+      expect(hook.result.current.review.pending?.task.id).toBe(
+        'actual-unit-task',
+      );
+      act(() => hook.result.current.turn.resumeQueuedPrompts());
+      expect(live.turns).toHaveLength(1);
+      act(() => {
+        if (release === 'complete') tasks.length = 0;
+        else if (release === 'dismiss')
+          hook.result.current.review.pending!.dismiss();
+        else enabled = false;
+      });
+      await act(async () => {
+        hook.result.current.turn.resumeQueuedPrompts();
+        hook.result.current.turn.resumeQueuedPrompts();
+      });
+      expect(live.turns.map((turn) => turn.prompt)).toEqual([
+        'first',
+        'second',
+        'third',
+      ]);
+      expect(hook.result.current.turn.messageQueue).toEqual([]);
+      hook.unmount();
+    },
+  );
+  it('revokes old resume callbacks and never transfers an old queue to a replacement owner', async () => {
+    let blocked = false;
+    const a = () => !blocked;
+    const b = () => true;
+    const config = {} as Config;
+    const hook = renderHook(
+      ({ gate }) => useOpenTuiLiveTurn({ config, canDrainQueuedPrompts: gate }),
+      { initialProps: { gate: a } },
+    );
+    await act(async () => {
+      hook.result.current.submit('first');
+      hook.result.current.submit('old queued', undefined, {
+        deferUntilIdle: true,
+      });
+    });
+    blocked = true;
+    await act(async () => live.waiters.shift()?.());
+    const oldResume = hook.result.current.resumeQueuedPrompts;
+    hook.rerender({ gate: b });
+    expect(hook.result.current.messageQueue).toEqual([]);
+    act(() => oldResume());
+    expect(live.turns).toHaveLength(1);
+    await act(async () => {
+      hook.result.current.submit('new owner');
+    });
+    expect(live.turns.map((turn) => turn.prompt)).toEqual([
+      'first',
+      'new owner',
+    ]);
+    const resume = hook.result.current.resumeQueuedPrompts;
+    hook.unmount();
+    act(() => resume());
+    expect(live.turns).toHaveLength(2);
+  });
 
   it('controls only the current unique executing shell and promotes without cancelling its turn', async () => {
     const write = vi
