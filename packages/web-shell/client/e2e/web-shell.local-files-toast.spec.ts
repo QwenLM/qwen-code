@@ -88,8 +88,8 @@ test('local files needs-gesture grant raises a one-time toast on restore @smoke'
   await expect(toast).toContainText('reconnected');
   await expect(toast).toHaveCount(1);
 
-  // The trigger reflects needs-gesture with the amber dot, and the panel offers
-  // Reconnect — the state the toast is announcing.
+  // The trigger reflects needs-gesture with the warning-token dot, and the
+  // panel offers Reconnect — the state the toast is announcing.
   const more = page.getByRole('button', { name: 'More', exact: true });
   if (await more.count()) {
     await more.click();
@@ -99,7 +99,9 @@ test('local files needs-gesture grant raises a one-time toast on restore @smoke'
     exact: true,
   });
   await expect(trigger).toBeVisible({ timeout: 15_000 });
-  await expect(trigger.locator('span.bg-amber-500')).toHaveCount(1);
+  await expect(
+    trigger.locator('span[class*="var(--warning-color)"]'),
+  ).toHaveCount(1);
   await trigger.click();
   const panel = page.locator('[data-web-shell-local-files-panel]');
   await expect(panel.getByRole('button', { name: 'Reconnect' })).toBeVisible({

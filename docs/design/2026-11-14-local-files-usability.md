@@ -54,8 +54,8 @@ works, but several everyday interactions are harder than they need to be:
   `useActions().newSession()` (daemon-react-sdk).
 - The panel's degradation matrix and affordances are pinned by
   `LocalFilesPanel.test.tsx`; control wiring by `LocalFilesControl.test.tsx`
-  and `WebShellSidebar.local-files-footer.test.tsx`; the Managed browser path
-  by `client/e2e/managed-local-files.spec.ts`.
+  and `sidebar/WebShellSidebar.local-files-footer.test.tsx`; the Managed
+  browser path by `client/e2e/managed-local-files.spec.ts`.
 
 ## 3. Goals and non-goals
 
@@ -77,25 +77,29 @@ Non-goals (unchanged from the bridge design):
 
 A shared helper maps `LocalFilesStatus` to a dot color and a tooltip:
 
-| Phase                                         | Dot                   |
-| --------------------------------------------- | --------------------- |
-| `connected`                                   | `bg-primary`          |
-| `held-elsewhere`, `connecting`, `registering` | `bg-muted-foreground` |
-| `reconnecting`, `needs-gesture`               | `bg-amber-500`        |
-| `failed`                                      | `bg-destructive`      |
-| others                                        | none                  |
+| Phase                                         | Dot                         |
+| --------------------------------------------- | --------------------------- |
+| `connected`                                   | `bg-primary`                |
+| `held-elsewhere`, `connecting`, `registering` | `bg-muted-foreground`       |
+| `reconnecting`, `needs-gesture`               | `bg-[var(--warning-color)]` |
+| `failed`                                      | `bg-destructive`            |
+| others                                        | none                        |
 
 `held-elsewhere` is deliberately muted rather than primary: the bridge is live
 but owned by another tab, so this tab must not read the dot as "I have a
 working bridge here" — this preserves the distinction the pre-change trigger
-made. `bg-amber-500` is a raw palette color because the global theme defines no
-warning token (only `primary`/`muted`/`accent`/`destructive`); it matches the
-existing warning usage in `add-runtime-dialog.tsx`, and introducing a new global
-warning token is out of scope for this change.
+made. The warning dot uses the theme-aware `--warning-color` token (defined
+per theme in `App.module.css`: `#ecc94b` dark, `#9a6a00` light), which the rest
+of the app already uses for warnings; a raw palette color such as `amber-500`
+would not adapt to the light theme.
 
 The tooltip becomes `Local files — <status>` plus ` (<rootName>)` when a
-directory is named, instead of the static label. The `aria-label` stays the
-base label so existing entry assertions and screen-reader naming are stable.
+directory is named, instead of the static label; a transient
+`workspace-resolving` blocker reads as "Resolving…" rather than the permanent
+unavailable copy. The same string is exposed to screen readers through
+`aria-describedby` pointing at a visually hidden span. The `aria-label` stays
+the base label so existing entry assertions and screen-reader naming are
+stable.
 
 ### 4.2 Change directory while connected
 
@@ -106,15 +110,26 @@ base label so existing entry assertions and screen-reader naming are stable.
   bridge would overwrite the peer's grant.
 - Both hooks' `connect()` accept `options?: { forcePicker?: boolean }`. With
   `forcePicker`, the stored-handle reuse branch is skipped and the native
-  picker opens directly; the picked handle is saved over the old record and
-  the bridge is rebuilt with the existing `startBridge(handle, { force: true })`
-  path. All existing generation/in-flight guards apply unchanged.
+  picker opens directly, and the picked handle is saved over the old record.
+  The daemon hook then rebuilds the bridge through its existing
+  `startBridge(handle, { force: true })` path; the Managed hook has no
+  `startBridge` — it re-runs its registration via `bridge.connect()` after the
+  save. All existing generation/in-flight guards apply unchanged in both.
 - Picker outcomes under `forcePicker` keep the running bridge truthful:
   - cancelled → no status write (the old bridge keeps running);
   - failed/unavailable → the pre-connect status is preserved instead of
     writing `failed`, because the old bridge is still connected and a `failed`
     write would both misreport state and strand a later retry on the
-    same-entry short-circuit.
+    same-entry short-circuit. The hook returns a `repick-failed` result and
+    the control surfaces it as an error toast, so the click is not silent;
+  - re-picking the already-bound entry (identity via `isSameEntry`, not
+    basename) saves the refreshed grant but keeps the live bridge instead of
+    tearing it down for a rebuild.
+- If the Managed save soft-fails (quota/eviction), the change is served
+  in-memory and this mount's stale record is cleared — but only while it still
+  holds the previous entry (same identity guard as teardown), so a reload does
+  not bind the directory the user changed away from, and a peer's different
+  record is left alone.
 
 ### 4.3 Re-authorization notice
 
@@ -122,7 +137,7 @@ When the daemon control's status transitions into `needs-gesture` (from any
 other phase, including on mount after a reload), it fires one
 `requestToast('warning', …)` naming the directory and pointing at the Local
 files entry. A ref dedupes per transition so re-renders do not re-toast. The
-persistent affordance remains the amber trigger dot plus the panel's
+persistent affordance remains the warning-colored trigger dot plus the panel's
 Reconnect button; the toast only solves the "never opened the popover" gap.
 The Managed hook has no `needs-gesture` phase today, so this notice is
 daemon-only.
@@ -134,10 +149,12 @@ daemon-only.
 - `LocalFilesPanel` gains an optional `onNewSession` prop; in `needs-session`
   it renders a "New session" button when the prop is present.
 - The daemon control passes `sessionName = displayName` and
-  `onNewSession = () => actions.newSession()` (via `useActions()`), toasting on
-  rejection. The Managed control passes `sessionName = currentSummary.title`
-  (omitted when the title is just the session id) and no `onNewSession` —
-  Managed session creation belongs to the page, not this control.
+  `onNewSession = () => actions.newSession()` (via `useActions()`);
+  `newSession` reports its own failures through the notice system, so the
+  control attaches an empty catch only to avoid an unhandled rejection. The
+  Managed control passes `sessionName = currentSummary.title` (omitted when
+  the title is just the session id) and no `onNewSession` — Managed session
+  creation belongs to the page, not this control.
 
 ### 4.5 Actionable blockers
 
@@ -145,8 +162,11 @@ daemon-only.
   `QWEN_SERVE_CLIENT_MCP_OVER_WS=1 qwen serve`.
 - `insecure-context`: when the control can derive an absolute daemon URL, a
   "Copy SSH tunnel command" button copies
-  `ssh -L <port>:localhost:<port> <hostname>` (port from the URL, defaulting
-  by protocol). The existing explanatory copy stays.
+  `ssh -L <localPort>:localhost:<remotePort> <hostname>` — the remote port
+  comes from the URL (defaulting by protocol), and a privileged remote port
+  (<1024) maps to `remotePort + 8000` locally so the tunnel does not need a
+  privileged local bind. The explanatory copy now points at the
+  `http://localhost` address inside the copied command.
 - `workspace-ineligible`: copy rewritten to state the next step — use a
   session in a trusted, regular workspace — instead of only naming the
   internal condition.
@@ -154,11 +174,12 @@ daemon-only.
   a grant it stays "Connect a directory…". Both call the same `onConnect`.
 
 Copy buttons are prop-driven: the panel receives `onCopyCommand(command)` and
-an optional `tunnelCommand`, and stays hook-free. The control performs
-`navigator.clipboard.writeText` and reports success/failure via
-`requestToast`. The daemon startup command is a module constant; the Managed
-control passes no copy affordances (its blockers are browser-level and its
-base URL is a relative API path).
+an optional `tunnelCommand`, and stays hook-free. The control copies through
+the shared `writeClipboardText` helper (async Clipboard API with an
+`execCommand('copy')` fallback for non-secure contexts) and reports
+success/failure via `requestToast`. The daemon startup command is a module
+constant; the Managed control passes no copy affordances (its blockers are
+browser-level and its base URL is a relative API path).
 
 ## 5. Design decisions and rationale
 
@@ -166,13 +187,17 @@ base URL is a relative API path).
   optional prop, so the existing degradation-matrix tests keep their shape and
   the new affordances are testable without a daemon provider.
 - **`forcePicker` is an opt-in argument, not a new method.** It reuses the
-  entire existing picker/save/rebuild path and its race guards; the default
-  (no argument) behavior is byte-for-byte the old flow.
+  entire existing picker/save/rebuild path and its race guards. The default
+  (no argument) flow is unchanged except for one shared fix: a transient
+  `workspace-resolving` blip no longer withholds a live, correctly-routed
+  bridge at the connect entry guard (mirroring the rebind effect's existing
+  exemption), so both plain connect and Change directory survive the blip.
 - **Toast instead of a chat-area banner for `needs-gesture`.** A banner would
   require lifting the bridge state out of the always-mounted sidebar control
   into the session view, changing the hook's mount/restore lifetime. The
   existing toast mechanism delivers the active notice with zero new plumbing;
-  the amber dot keeps the state discoverable after the toast dismisses.
+  the warning-colored dot keeps the state discoverable after the toast
+  dismisses.
 - **No change-directory under `held-elsewhere`.** The IndexedDB record is
   shared per origin; re-picking from a non-owner tab would silently replace
   the owner's grant.
@@ -190,11 +215,12 @@ base URL is a relative API path).
 - `packages/web-shell/client/local-files/useManagedLocalFilesBridge.ts` —
   `connect({ forcePicker })`.
 - `packages/web-shell/client/components/managed/ManagedSessionsPage.tsx` —
-  pass the session title into the Managed control.
+  pass the session title into the Managed control, suppressed when the title
+  is just the session id.
 - `packages/web-shell/client/i18n.tsx` — new EN/ZH keys (both locales).
 - Tests: `LocalFilesPanel.test.tsx`, `LocalFilesControl.test.tsx`,
-  `ManagedLocalFilesControl.test.tsx`, hook tests,
-  `client/e2e/managed-local-files.spec.ts`, and
+  `ManagedLocalFilesControl.test.tsx`, `ManagedSessionsPage.test.tsx`,
+  `i18n.test.ts`, hook tests, `client/e2e/managed-local-files.spec.ts`, and
   `client/e2e/web-shell.local-files-toast.spec.ts`.
 
 ## 7. Constraints and risks
@@ -207,6 +233,11 @@ base URL is a relative API path).
   is extended to cover every new string.
 - The toast fires from an always-mounted control; the dedupe ref must prevent
   re-firing on unrelated re-renders.
+- Copy relies on `writeClipboardText`: in a non-secure context the async
+  Clipboard API is absent and the `execCommand('copy')` fallback runs inside
+  the click's user activation. If a secure-context permission prompt consumes
+  that activation before rejecting, the fallback can still fail; the control
+  then reports the failure via toast instead of claiming success.
 
 ## 8. Validation plan
 
@@ -228,9 +259,9 @@ base URL is a relative API path).
 
 ## 9. Acceptance criteria
 
-- A failed bridge shows a red dot; a grant needing re-authorization shows an
-  amber dot and a one-time warning toast; tooltips name the state and
-  directory.
+- A failed bridge shows a red dot; a grant needing re-authorization shows a
+  warning-colored dot and a one-time warning toast; tooltips name the state
+  and directory.
 - A connected panel offers Change directory… which opens the picker directly
   and rebuilds the bridge on a new grant; cancelling leaves the old bridge
   running.

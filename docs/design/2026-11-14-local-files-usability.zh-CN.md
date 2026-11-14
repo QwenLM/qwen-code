@@ -23,7 +23,7 @@ Web Shell 侧边栏的**本地文件**入口（客户端文件系统桥）功能
 - `packages/web-shell/client/local-files/useLocalFilesBridge.ts`（daemon）与 `useManagedLocalFilesBridge.ts`（Managed）持有授权生命周期。两者的 `connect()` 都复用存储句柄，只要存在授权就绝不重新打开选择器。
 - `packages/web-shell/client/components/ToastHost.tsx` 提供 `requestToast(tone, message)`，是全应用使用的窗口事件 toast。
 - 会话标题可取 `useConnection().displayName`（daemon）与 `currentSummary.title`（Managed 页）。创建会话为 `useActions().newSession()`（daemon-react-sdk）。
-- 面板的降级矩阵与可供性由 `LocalFilesPanel.test.tsx` 钉住；控制接线由 `LocalFilesControl.test.tsx` 与 `WebShellSidebar.local-files-footer.test.tsx`；Managed 浏览器路径由 `client/e2e/managed-local-files.spec.ts`。
+- 面板的降级矩阵与可供性由 `LocalFilesPanel.test.tsx` 钉住；控制接线由 `LocalFilesControl.test.tsx` 与 `sidebar/WebShellSidebar.local-files-footer.test.tsx`；Managed 浏览器路径由 `client/e2e/managed-local-files.spec.ts`。
 
 ## 3. 目标与非目标
 
@@ -42,50 +42,52 @@ Web Shell 侧边栏的**本地文件**入口（客户端文件系统桥）功能
 
 一个共享 helper 把 `LocalFilesStatus` 映射为圆点颜色与 tooltip：
 
-| 阶段                                          | 圆点                  |
-| --------------------------------------------- | --------------------- |
-| `connected`                                   | `bg-primary`          |
-| `held-elsewhere`、`connecting`、`registering` | `bg-muted-foreground` |
-| `reconnecting`、`needs-gesture`               | `bg-amber-500`        |
-| `failed`                                      | `bg-destructive`      |
-| 其他                                          | 无                    |
+| 阶段                                          | 圆点                        |
+| --------------------------------------------- | --------------------------- |
+| `connected`                                   | `bg-primary`                |
+| `held-elsewhere`、`connecting`、`registering` | `bg-muted-foreground`       |
+| `reconnecting`、`needs-gesture`               | `bg-[var(--warning-color)]` |
+| `failed`                                      | `bg-destructive`            |
+| 其他                                          | 无                          |
 
-`held-elsewhere` 刻意用 muted 而非 primary：桥虽在运行但由另一个标签页持有，本标签页不能把圆点读作「我这里有一个可用的桥」——这保留了改动前触发器所做的区分。`bg-amber-500` 是调色板颜色，因为全局主题没有 warning token（只有 `primary`/`muted`/`accent`/`destructive`）；它与 `add-runtime-dialog.tsx` 既有的警告用法一致，而为本改动新增一个全局 warning token 超出范围。
+`held-elsewhere` 刻意用 muted 而非 primary：桥虽在运行但由另一个标签页持有，本标签页不能把圆点读作「我这里有一个可用的桥」——这保留了改动前触发器所做的区分。警告圆点使用随主题变化的 `--warning-color` token（在 `App.module.css` 按主题定义：暗色 `#ecc94b`、亮色 `#9a6a00`），应用其余部分的警告已在用它；`amber-500` 之类的裸调色板颜色无法适应亮色主题。
 
-tooltip 变为 `本地文件 — <状态>`，在有目录名时追加 `（<rootName>）`，取代固定标签。`aria-label` 保持基础标签，使既有入口断言与读屏命名稳定。
+tooltip 变为 `本地文件 — <状态>`，在有目录名时追加 `（<rootName>）`，取代固定标签；瞬态的 `workspace-resolving` 阻断读作「解析中…」，而非永久不可用文案。同一字符串还经 `aria-describedby` 指向一个视觉隐藏 span 暴露给读屏器。`aria-label` 保持基础标签，使既有入口断言与读屏命名稳定。
 
 ### 4.2 已连接时更换目录
 
 - `LocalFilesPanel` 新增可选 `onChangeDirectory` prop；当阶段为 `connected` 且该 prop 存在时，在「断开」旁渲染「更换目录…」按钮。`held-elsewhere` 刻意不提供：存储记录跨标签页共享，在对端持有桥时重新选择会覆盖对端的授权。
-- 两个 hook 的 `connect()` 接受 `options?: { forcePicker?: boolean }`。带 `forcePicker` 时跳过存储句柄复用分支，直接打开原生选择器；选中的句柄覆盖旧记录保存，桥经既有 `startBridge(handle, { force: true })` 路径重建。所有既有的 generation/in-flight 守卫原样适用。
+- 两个 hook 的 `connect()` 接受 `options?: { forcePicker?: boolean }`。带 `forcePicker` 时跳过存储句柄复用分支，直接打开原生选择器，选中的句柄覆盖旧记录保存。daemon hook 随后经既有 `startBridge(handle, { force: true })` 路径重建桥；Managed hook 没有 `startBridge`——它在保存后经 `bridge.connect()` 重跑注册。两者所有既有的 generation/in-flight 守卫原样适用。
 - `forcePicker` 下的选择器结果保持运行中桥的真实性：
   - 取消 → 不写状态（旧桥继续运行）；
-  - 失败/不可用 → 保留连接前状态而非写 `failed`，因为旧桥仍连接，写 `failed` 既误报状态，又会让后续重试卡在同条目短路上。
+  - 失败/不可用 → 保留连接前状态而非写 `failed`，因为旧桥仍连接，写 `failed` 既误报状态，又会让后续重试卡在同条目短路上。hook 返回 `repick-failed` 结果，控制将其呈现为错误 toast，使这次点击不静默；
+  - 重选已绑定的条目（经 `isSameEntry` 判同一性，而非 basename）会保存刷新后的授权，但保留运行中的桥，不拆掉重建。
+- 若 Managed 保存软失败（配额/驱逐），变更在内存中生效，并清除本挂载的旧记录——但仅当记录仍持有旧条目时（与拆卸路径同一的同一性守卫），使刷新不会绑定用户已换走的目录，且对端的不同记录不被触碰。
 
 ### 4.3 重新授权提示
 
-当 daemon 控制的状态转入 `needs-gesture`（从任何其他阶段，包括刷新后挂载时），触发一次 `requestToast('warning', …)`，点名目录并指向本地文件入口。用一个 ref 按转移去重，使重渲染不会重复 toast。持久可供性仍是琥珀色触发器圆点加面板的「重新连接」按钮；toast 只解决「从未打开 popover」的缺口。Managed hook 目前没有 `needs-gesture` 阶段，故此提示仅 daemon。
+当 daemon 控制的状态转入 `needs-gesture`（从任何其他阶段，包括刷新后挂载时），触发一次 `requestToast('warning', …)`，点名目录并指向本地文件入口。用一个 ref 按转移去重，使重渲染不会重复 toast。持久可供性仍是警告色触发器圆点加面板的「重新连接」按钮；toast 只解决「从未打开 popover」的缺口。Managed hook 目前没有 `needs-gesture` 阶段，故此提示仅 daemon。
 
 ### 4.4 绑定会话与创建会话
 
 - `LocalFilesPanel` 新增可选 `sessionName` prop；已连接且有名时，在目录行旁渲染「会话：<name>」行。
 - `LocalFilesPanel` 新增可选 `onNewSession` prop；在 `needs-session` 且该 prop 存在时渲染「新建会话」按钮。
-- daemon 控制传 `sessionName = displayName` 与 `onNewSession = () => actions.newSession()`（经 `useActions()`），失败时 toast。Managed 控制传 `sessionName = currentSummary.title`（当标题就是会话 id 时省略），不传 `onNewSession`——Managed 的会话创建属于页面，而非此控制。
+- daemon 控制传 `sessionName = displayName` 与 `onNewSession = () => actions.newSession()`（经 `useActions()`）；`newSession` 经通知系统自行报告失败，控制只挂一个空 catch 以避免未处理的 rejection。Managed 控制传 `sessionName = currentSummary.title`（当标题就是会话 id 时省略），不传 `onNewSession`——Managed 的会话创建属于页面，而非此控制。
 
 ### 4.5 可执行的阻断文案
 
 - `unsupported-daemon`：「复制启动命令」按钮复制 `QWEN_SERVE_CLIENT_MCP_OVER_WS=1 qwen serve`。
-- `insecure-context`：当控制能推导出绝对 daemon URL 时，「复制 SSH 隧道命令」按钮复制 `ssh -L <port>:localhost:<port> <hostname>`（端口取自 URL，缺省按协议）。既有解释文案保留。
+- `insecure-context`：当控制能推导出绝对 daemon URL 时，「复制 SSH 隧道命令」按钮复制 `ssh -L <localPort>:localhost:<remotePort> <hostname>`——远端端口取自 URL（缺省按协议），特权远端端口（<1024）本地映射为 `remotePort + 8000`，使隧道无需特权本地绑定。解释文案改为指向所复制命令中的 `http://localhost` 地址。
 - `workspace-ineligible`：文案改写为给出下一步——在受信任的普通工作区会话中使用——而非只点名内部条件。
 - 带有名授权的 `failed`：连接按钮标「重试」；无授权时仍标「连接目录…」。两者都调用同一 `onConnect`。
 
-复制按钮是 prop 驱动的：面板接收 `onCopyCommand(command)` 与可选 `tunnelCommand`，保持无 hook。控制执行 `navigator.clipboard.writeText` 并经 `requestToast` 报告成功/失败。daemon 启动命令是模块常量；Managed 控制不传复制可供性（其阻断是浏览器级的，且其 base URL 是相对 API 路径）。
+复制按钮是 prop 驱动的：面板接收 `onCopyCommand(command)` 与可选 `tunnelCommand`，保持无 hook。控制经共享的 `writeClipboardText` helper 复制（异步 Clipboard API，非安全上下文回退 `execCommand('copy')`），并经 `requestToast` 报告成功/失败。daemon 启动命令是模块常量；Managed 控制不传复制可供性（其阻断是浏览器级的，且其 base URL 是相对 API 路径）。
 
 ## 5. 设计决策与理由
 
 - **面板保持 prop 驱动、无 hook。** 每个新可供性都是可选 prop，使既有降级矩阵测试保持形状，新可供性无需 daemon provider 即可测试。
-- **`forcePicker` 是可选参数，不是新方法。** 它复用整条既有选择/保存/重建路径及其竞态守卫；缺省（无参数）行为与旧流程逐字节一致。
-- **`needs-gesture` 用 toast 而非聊天区 banner。** banner 需要把桥状态从常驻挂载的侧边栏控制提升到会话视图，改变 hook 的挂载/恢复生命周期。既有 toast 机制以零新接线交付主动提示；琥珀色圆点在 toast 消失后仍保持状态可发现。
+- **`forcePicker` 是可选参数，不是新方法。** 它复用整条既有选择/保存/重建路径及其竞态守卫。缺省（无参数）流程不变，只有一处共享修复：瞬态 `workspace-resolving` 抖动不再在 connect 入口守卫处扣留一个运行中、路由正确的桥（与 rebind effect 既有的豁免一致），因此普通连接与更换目录都能扛过抖动。
+- **`needs-gesture` 用 toast 而非聊天区 banner。** banner 需要把桥状态从常驻挂载的侧边栏控制提升到会话视图，改变 hook 的挂载/恢复生命周期。既有 toast 机制以零新接线交付主动提示；警告色圆点在 toast 消失后仍保持状态可发现。
 - **`held-elsewhere` 下不提供更换目录。** IndexedDB 记录按源共享；从非 owner 标签页重新选择会悄悄替换 owner 的授权。
 - **`aria-label` 不变。** 状态放在 tooltip 与面板；入口的可访问名称对既有消费者与测试保持稳定。
 
@@ -95,15 +97,16 @@ tooltip 变为 `本地文件 — <状态>`，在有目录名时追加 `（<rootN
 - `packages/web-shell/client/components/ManagedLocalFilesControl.tsx` — 触发器 helper、会话名、更换目录接线。
 - `packages/web-shell/client/local-files/useLocalFilesBridge.ts` — `connect({ forcePicker })`。
 - `packages/web-shell/client/local-files/useManagedLocalFilesBridge.ts` — `connect({ forcePicker })`。
-- `packages/web-shell/client/components/managed/ManagedSessionsPage.tsx` — 向 Managed 控制传入会话标题。
+- `packages/web-shell/client/components/managed/ManagedSessionsPage.tsx` — 向 Managed 控制传入会话标题，当标题就是会话 id 时抑制。
 - `packages/web-shell/client/i18n.tsx` — 新增 EN/ZH 键（两种语言）。
-- 测试：`LocalFilesPanel.test.tsx`、`LocalFilesControl.test.tsx`、`ManagedLocalFilesControl.test.tsx`、hook 测试、`client/e2e/managed-local-files.spec.ts`，以及 `client/e2e/web-shell.local-files-toast.spec.ts`。
+- 测试：`LocalFilesPanel.test.tsx`、`LocalFilesControl.test.tsx`、`ManagedLocalFilesControl.test.tsx`、`ManagedSessionsPage.test.tsx`、`i18n.test.ts`、hook 测试、`client/e2e/managed-local-files.spec.ts`，以及 `client/e2e/web-shell.local-files-toast.spec.ts`。
 
 ## 7. 约束与风险
 
 - 桥 hook 对竞态敏感（generation 计数、in-flight 闩、revoke 仲裁）。`forcePicker` 只跳过存储句柄复用；不得绕过任何守卫。hook 测试钉住带运行中桥时的取消/失败行为。
 - 新 i18n 键必须同时落在 EN 与 ZH；面板的中文渲染矩阵扩展以覆盖每个新字符串。
 - toast 从常驻挂载的控制触发；去重 ref 必须防止在无关重渲染时重复触发。
+- 复制依赖 `writeClipboardText`：非安全上下文没有异步 Clipboard API，`execCommand('copy')` 回退在点击的用户激活内运行。若安全上下文的权限弹窗在拒绝前耗尽了该激活，回退仍可能失败；控制此时经 toast 报告失败，而非声称成功。
 
 ## 8. 验证计划
 
@@ -113,7 +116,7 @@ tooltip 变为 `本地文件 — <状态>`，在有目录名时追加 `（<rootN
 
 ## 9. 验收标准
 
-- 失败的桥显示红点；需重新授权的授权显示琥珀点与一次性警告 toast；tooltip 点名状态与目录。
+- 失败的桥显示红点；需重新授权的授权显示警告色点与一次性警告 toast；tooltip 点名状态与目录。
 - 已连接面板提供「更换目录…」，直接打开选择器并在新授权上重建桥；取消则旧桥继续运行。
 - 已连接面板点名绑定会话；`needs-session` 提供「新建会话」（daemon）。
 - `unsupported-daemon` 与 `insecure-context` 提供具体命令的一键复制；`workspace-ineligible` 给出下一步；带授权的失败桥提供「重试」。

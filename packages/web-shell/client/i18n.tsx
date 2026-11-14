@@ -2345,7 +2345,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'localFiles.needsSessionHint':
     'Start a session first. The bridge binds to exactly one session, so no other session can reach your files.',
   'localFiles.blocker.insecureContext':
-    'This page is not a secure context, so the browser will not grant local file access. Serve the Web Shell over https, or forward the daemon port with SSH and open http://localhost:<port>.',
+    'This page is not a secure context, so the browser will not grant local file access. Serve the Web Shell over https, or forward the daemon port with SSH and open the http://localhost address in the copied tunnel command.',
   'localFiles.blocker.crossOriginFrame':
     'Local file access is blocked inside a cross-origin frame. Open the Web Shell in its own browser tab to connect a directory.',
   'localFiles.blocker.unsupportedBrowser':
@@ -2364,6 +2364,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'localFiles.copyTunnelCommand': 'Copy SSH tunnel command',
   'localFiles.copied': 'Command copied',
   'localFiles.copyFailed': 'Could not copy the command',
+  'localFiles.changeDirectoryFailed':
+    'Could not change the directory. The current directory is still connected.',
   'localFiles.gestureToast': (v) =>
     v?.name
       ? `Local directory "${v.name}" needs to be reconnected. Open Local files to grant access again.`
@@ -7502,7 +7504,7 @@ const ZH: Messages = {
   'localFiles.needsSessionHint':
     '请先创建一个会话。桥只绑定一个会话，因此其他会话无法访问你的文件。',
   'localFiles.blocker.insecureContext':
-    '当前页面不是安全上下文，浏览器不会授予本地文件访问权。请通过 https 访问 Web Shell，或用 SSH 转发 daemon 端口后打开 http://localhost:<port>。',
+    '当前页面不是安全上下文，浏览器不会授予本地文件访问权。请通过 https 访问 Web Shell，或用 SSH 转发 daemon 端口后打开所复制隧道命令中的 http://localhost 地址。',
   'localFiles.blocker.crossOriginFrame':
     '跨源 iframe 中本地文件访问被禁用。请在独立的浏览器标签页中打开 Web Shell 再连接目录。',
   'localFiles.blocker.unsupportedBrowser':
@@ -7520,6 +7522,7 @@ const ZH: Messages = {
   'localFiles.copyTunnelCommand': '复制 SSH 隧道命令',
   'localFiles.copied': '命令已复制',
   'localFiles.copyFailed': '复制命令失败',
+  'localFiles.changeDirectoryFailed': '无法更换目录。当前目录仍保持连接。',
   'localFiles.gestureToast': (v) =>
     v?.name
       ? `本地目录「${v.name}」需要重新连接。打开「本地文件」即可重新授权。`

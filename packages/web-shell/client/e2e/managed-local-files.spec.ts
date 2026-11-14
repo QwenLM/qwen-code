@@ -299,7 +299,10 @@ test('Managed local files entry connects a directory through the relay peer @smo
     await expect(trigger).toBeVisible();
     await trigger.click();
     await page.getByRole('button', { name: 'Connect a directory…' }).click();
-    await expect(page.getByText('my-dir')).toBeVisible();
+    // Exact match: the trigger's sr-only state description also names the
+    // directory ("Local files — Connected (my-dir)"), so a substring match
+    // resolves to two elements.
+    await expect(page.getByText('my-dir', { exact: true })).toBeVisible();
     await expect(page.getByText('1 tools')).toBeVisible();
     await expect(
       page.getByRole('button', { name: 'Disconnect' }),

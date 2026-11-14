@@ -68,7 +68,9 @@ export function useManagedLocalFilesBridge(
   options: UseManagedLocalFilesBridgeOptions,
 ): {
   status: LocalFilesStatus;
-  connect: (options?: { forcePicker?: boolean }) => Promise<void>;
+  connect: (options?: {
+    forcePicker?: boolean;
+  }) => Promise<{ kind: 'repick-failed' } | undefined>;
   disconnect: () => Promise<void>;
 } {
   const { sessionId, baseUrl, fetch } = options;
@@ -241,12 +243,13 @@ export function useManagedLocalFilesBridge(
           if (stale()) return;
           if (picked.kind === 'cancelled') return;
           // A failed re-pick must not misreport the still-running bridge; leave
-          // the connected status and the old grant untouched.
+          // the connected status and the old grant untouched. Report the outcome
+          // so the Change-directory handler can surface it (R1-5).
           if (
             forcePicker &&
             (picked.kind === 'unavailable' || picked.kind === 'failed')
           ) {
-            return;
+            return { kind: 'repick-failed' } as const;
           }
           if (picked.kind === 'unavailable') {
             setStatus({ phase: 'unavailable', blocker: picked.blocker });
@@ -260,10 +263,27 @@ export function useManagedLocalFilesBridge(
             });
             return;
           }
+          const previousHandle = handleRef.current;
           handle = picked.handle;
           handleRef.current = handle;
-          await storeRef.current?.save(handle);
+          const saved = (await storeRef.current?.save(handle)) ?? false;
           if (stale()) return;
+          if (forcePicker && !saved) {
+            // The change is served in-memory but was not persisted (quota /
+            // eviction). Clear this mount's stale record so a reload does not
+            // silently bind the directory the user changed away from; use the
+            // same entry-identity guard as the teardown path (R2-3).
+            const stored = await storeRef.current?.load();
+            if (stored && previousHandle) {
+              let same = false;
+              try {
+                same = await previousHandle.isSameEntry(stored);
+              } catch {
+                same = false;
+              }
+              if (same) await storeRef.current?.clear();
+            }
+          }
         }
         if (stale()) return;
         const server = new LocalFilesMcpServer(new LocalDirectory(handle));
@@ -292,7 +312,13 @@ export function useManagedLocalFilesBridge(
             ...(state.phase === 'failed' ? { message: state.message } : {}),
           });
         });
-        await bridge.connect();
+        // Do not await the drain loop: it stays pending for the bridge's whole
+        // connected lifetime, and awaiting it would hold the re-entrancy guard
+        // for that entire span, making a later "Change directory" click return
+        // at the guard before the picker opens. The guard only needs to cover
+        // grant acquisition; connect() publishes its outcome (including
+        // failure) through onState, so nothing is lost by not awaiting it.
+        void bridge.connect();
       } finally {
         connectingRef.current = false;
       }

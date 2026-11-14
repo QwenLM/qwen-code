@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { createPortal } from 'react-dom';
 import { FolderOpenIcon } from 'lucide-react';
 import type {
@@ -72,7 +79,9 @@ export const LOCAL_FILES_DAEMON_COMMAND =
  * get distinct colors so a broken or re-authorization-pending bridge is not
  * invisible the way a plain busy dot made it. `held-elsewhere` stays muted
  * (not primary): the bridge is live but owned by another tab, so this tab must
- * not read the dot as "I have a working bridge here".
+ * not read the dot as "I have a working bridge here". The warning states use
+ * the theme-aware `--warning-color` token (App.module.css) rather than a fixed
+ * palette color, so the dot keeps contrast in the light theme too.
  */
 export function getLocalFilesDotClass(status: LocalFilesStatus): string | null {
   switch (status.phase) {
@@ -84,7 +93,7 @@ export function getLocalFilesDotClass(status: LocalFilesStatus): string | null {
       return 'bg-muted-foreground';
     case 'reconnecting':
     case 'needs-gesture':
-      return 'bg-amber-500';
+      return 'bg-[var(--warning-color)]';
     case 'failed':
       return 'bg-destructive';
     default:
@@ -98,7 +107,37 @@ export function getLocalFilesTooltip(
   t: (key: string) => string,
 ): string {
   const name = status.rootName ? ` (${status.rootName})` : '';
-  return `${t('localFiles.trigger')} — ${t(STATUS_KEY[status.phase])}${name}`;
+  // Mirror the panel's transient predicate: a resolving blip is "still
+  // resolving", not the permanent "Unavailable here" the raw phase key names.
+  const statusKey =
+    status.blocker === 'workspace-resolving'
+      ? 'localFiles.status.resolving'
+      : STATUS_KEY[status.phase];
+  return `${t('localFiles.trigger')} — ${t(statusKey)}${name}`;
+}
+
+/**
+ * Derive the SSH tunnel command for the insecure-context blocker. The local
+ * bind port must be unprivileged (a non-root user cannot bind 80/443), so a
+ * privileged remote port is mapped to a high local port; the remote port stays
+ * the daemon's. IPv6 hostnames are unbracketed because ssh takes a bare host.
+ * Returns undefined for a relative/base-less URL (no tunnel to derive).
+ */
+export function deriveLocalFilesTunnelCommand(
+  baseUrl: string,
+): string | undefined {
+  try {
+    const url = new URL(baseUrl);
+    if (!url.hostname) return undefined;
+    const remotePort = Number(
+      url.port || (url.protocol === 'https:' ? '443' : '80'),
+    );
+    const localPort = remotePort < 1024 ? remotePort + 8000 : remotePort;
+    const host = url.hostname.replace(/^\[|\]$/g, '');
+    return `ssh -L ${localPort}:localhost:${remotePort} ${host}`;
+  } catch {
+    return undefined;
+  }
 }
 
 export interface LocalFilesPanelProps {
@@ -513,18 +552,17 @@ export function LocalFilesControl({
 
   // Concrete SSH tunnel for the insecure-context blocker, when the daemon URL
   // is absolute. A relative base (same-origin) yields no command.
-  const tunnelCommand = useMemo(() => {
-    try {
-      const url = new URL(baseUrl);
-      if (!url.hostname) return undefined;
-      const port = url.port || (url.protocol === 'https:' ? '443' : '80');
-      return `ssh -L ${port}:localhost:${port} ${url.hostname}`;
-    } catch {
-      return undefined;
-    }
-  }, [baseUrl]);
+  const tunnelCommand = useMemo(
+    () => deriveLocalFilesTunnelCommand(baseUrl),
+    [baseUrl],
+  );
 
   const dotClass = getLocalFilesDotClass(status);
+  // The state is colour + a native tooltip, both invisible to assistive tech.
+  // Expose it as a description (the accessible name stays the stable trigger
+  // label so name-based queries and screen-reader naming are unchanged).
+  const stateDescription = getLocalFilesTooltip(status, t);
+  const stateDescriptionId = useId();
 
   const control = (
     <Popover open={open} onOpenChange={setOpen}>
@@ -533,9 +571,13 @@ export function LocalFilesControl({
           type="button"
           className={cn('relative', triggerClassName)}
           aria-label={t('localFiles.trigger')}
-          title={getLocalFilesTooltip(status, t)}
+          aria-describedby={stateDescriptionId}
+          title={stateDescription}
         >
           <FolderOpenIcon size={16} strokeWidth={1.2} aria-hidden="true" />
+          <span id={stateDescriptionId} className="sr-only">
+            {stateDescription}
+          </span>
           {dotClass ? (
             <span
               aria-hidden="true"
@@ -561,7 +603,15 @@ export function LocalFilesControl({
             // top-level document this one is framed inside.
             window.open(window.location.href, '_blank', 'noopener');
           }}
-          onChangeDirectory={() => void connect({ forcePicker: true })}
+          onChangeDirectory={() => {
+            void connect({ forcePicker: true }).then((result) => {
+              // A failed re-pick keeps the running bridge connected, but the
+              // click must not be silent (R1-5).
+              if (result?.kind === 'repick-failed') {
+                requestToast('error', t('localFiles.changeDirectoryFailed'));
+              }
+            });
+          }}
           sessionName={displayName}
           onNewSession={() => {
             // newSession reports its own failures through the notice system.

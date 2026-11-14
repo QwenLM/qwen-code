@@ -13,7 +13,6 @@ import { I18nProvider } from '../i18n';
 import type { LocalFilesStatus } from '../local-files/useLocalFilesBridge';
 import {
   LocalFilesPanel,
-  LOCAL_FILES_DAEMON_COMMAND,
   type LocalFilesPanelProps,
 } from './LocalFilesControl';
 
@@ -403,7 +402,11 @@ describe('LocalFilesPanel usability affordances', () => {
     act(() => {
       button!.click();
     });
-    expect(onCopyCommand).toHaveBeenCalledWith(LOCAL_FILES_DAEMON_COMMAND);
+    // Pin the literal, not the exported constant (R1-12): a command that does
+    // not enable the reverse channel must make this go red.
+    expect(onCopyCommand).toHaveBeenCalledWith(
+      'QWEN_SERVE_CLIENT_MCP_OVER_WS=1 qwen serve',
+    );
   });
 
   it('copies the tunnel command for insecure-context when provided', () => {

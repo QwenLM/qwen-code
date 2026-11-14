@@ -809,17 +809,28 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
   const connect = useCallback(
     async (options?: { forcePicker?: boolean }) => {
       if (capability.blocker !== null) {
-        // Preserve a name restore() supplied: the revoke path must stay
-        // reachable over a stored grant even while the entry is withheld.
-        setStatus((prev) => {
-          const rootName = recordRootName(prev.rootName);
-          return {
-            phase: 'unavailable',
-            blocker: capability.blocker,
-            ...(rootName === undefined ? {} : { rootName }),
-          };
-        });
-        return;
+        // A transient resolving blip must not withhold a live, correctly-routed
+        // bridge (mirrors the rebind effect's exemption): the panel stays
+        // connected and a Change-directory click still reaches the picker
+        // instead of overwriting the live status with `unavailable`. Hard
+        // verdicts — ineligible, unsupported — still withhold.
+        const transientLiveBridge =
+          capability.blocker === 'workspace-resolving' &&
+          bridgeRef.current !== undefined &&
+          bridgeSessionRef.current === sessionId;
+        if (!transientLiveBridge) {
+          // Preserve a name restore() supplied: the revoke path must stay
+          // reachable over a stored grant even while the entry is withheld.
+          setStatus((prev) => {
+            const rootName = recordRootName(prev.rootName);
+            return {
+              phase: 'unavailable',
+              blocker: capability.blocker,
+              ...(rootName === undefined ? {} : { rootName }),
+            };
+          });
+          return;
+        }
       }
       // One picker at a time: a double click would otherwise open two native
       // dialogs and race two bridges for the same grant.
@@ -917,12 +928,13 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         if (result.kind === 'cancelled') return;
         // A re-pick that fails must not misreport the still-running bridge as
         // failed, nor strand a later retry on the same-entry short-circuit:
-        // leave the connected status (and the old grant) untouched.
+        // leave the connected status (and the old grant) untouched. Report the
+        // outcome so the Change-directory handler can surface it (R1-5).
         if (
           forcePicker &&
           (result.kind === 'unavailable' || result.kind === 'failed')
         ) {
-          return;
+          return { kind: 'repick-failed' } as const;
         }
         if (result.kind === 'unavailable') {
           // Name the record-backed grant: the failure write must not hide the
@@ -976,6 +988,29 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         detachedRef.current = false;
         releasedRecordRef.current = false;
         connectWroteStatusRef.current = true;
+        // Re-picking the already-bound entry must not tear down the live bridge:
+        // the picker reopens the last choice, so confirming without navigating
+        // lands here. Identity, not basename — a same-named folder elsewhere is
+        // a different directory and still rebuilds.
+        if (forcePicker && (await sameBoundEntry(result.handle))) {
+          if (stale()) return;
+          handleRef.current = result.handle;
+          return;
+        }
+        // During a transient resolving blip, do not tear down the live,
+        // correctly-routed bridge for the forced rebuild; keep the fresh grant
+        // and let the rebind effect rebuild once the verdict settles. Hard
+        // verdicts still withhold through startBridge below.
+        if (
+          forcePicker &&
+          capabilityRef.current.blocker === 'workspace-resolving' &&
+          bridgeRef.current !== undefined &&
+          bridgeSessionRef.current === sessionId
+        ) {
+          handleRef.current = result.handle;
+          handleEpochRef.current += 1;
+          return;
+        }
         startBridge(result.handle, { force: true });
       } finally {
         connectInFlightRef.current = false;
@@ -992,6 +1027,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       capability.blocker,
       recordRootName,
       sameBoundEntry,
+      sessionId,
       startBridge,
       store,
       win,

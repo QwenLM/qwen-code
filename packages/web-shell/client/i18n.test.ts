@@ -289,6 +289,41 @@ describe('web-shell i18n catalog', () => {
     );
   });
 
+  it('keeps every local files translation in both locales (R1-11)', () => {
+    const en = getTranslator('en');
+    const zh = getTranslator('zh-CN');
+    const keys = [
+      'localFiles.changeDirectory',
+      'localFiles.session',
+      'localFiles.newSession',
+      'localFiles.retry',
+      'localFiles.copyStartupCommand',
+      'localFiles.copyTunnelCommand',
+      'localFiles.copied',
+      'localFiles.copyFailed',
+      'localFiles.changeDirectoryFailed',
+    ];
+    for (const key of keys) {
+      expect(en(key)).not.toBe(key);
+      expect(zh(key)).not.toBe(key);
+      // zh against en, not zh against the key: the translator falls back to EN
+      // per key, so a deleted zh entry (or one pasted with the EN text) would
+      // otherwise pass. Several of these are never rendered by a panel case.
+      expect(zh(key)).not.toBe(en(key));
+    }
+    // The gesture toast is function-valued; pass a name so both locales render.
+    const vars = { name: 'proj' };
+    expect(en('localFiles.gestureToast', vars)).not.toBe(
+      'localFiles.gestureToast',
+    );
+    expect(zh('localFiles.gestureToast', vars)).not.toBe(
+      'localFiles.gestureToast',
+    );
+    expect(zh('localFiles.gestureToast', vars)).not.toBe(
+      en('localFiles.gestureToast', vars),
+    );
+  });
+
   it.each([
     [
       'en',
