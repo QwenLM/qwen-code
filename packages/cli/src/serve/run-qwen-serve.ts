@@ -7881,17 +7881,33 @@ async function runQwenServeImpl(
               // block, and the hosted channels commit even later, so the check
               // is deferred to the listen path below.
               warnPrWatchWithoutTimer = () => {
-                if (sessionPrRefreshTimer) return;
+                if (sessionPrRefreshTimer) {
+                  // The timer observes; there is nothing to warn about.
+                  warnPrWatchWithoutTimer = undefined;
+                  return;
+                }
+                let deps: ReturnType<typeof resolvePrWatchDeps>;
                 try {
-                  if (!resolvePrWatchDeps()) return;
+                  deps = resolvePrWatchDeps();
                 } catch (error) {
                   daemonLog.warn(
                     `PR watch deps unavailable: ${
                       error instanceof Error ? error.message : String(error)
                     }`,
                   );
+                  warnPrWatchWithoutTimer = undefined;
                   return;
                 }
+                if (!deps) {
+                  // No subscription yet. The alias needs the worker's
+                  // committed groups, which land after listen; keep the check
+                  // armed for that callback instead of consuming it here.
+                  if ((channelWorkspaceGroups?.length ?? 0) > 0) {
+                    warnPrWatchWithoutTimer = undefined;
+                  }
+                  return;
+                }
+                warnPrWatchWithoutTimer = undefined;
                 daemonLog.warn(
                   'PR watch: an effective subscription exists but the session PR refresh timer is not running (QWEN_SESSION_PR_REFRESH_MINUTES=0); no PR-state transition will be observed.',
                 );
@@ -10528,6 +10544,9 @@ async function runQwenServeImpl(
             initialLeaseReserved: channelPidfileReserved,
             onCommittedSelection: (_selection, groups) => {
               channelWorkspaceGroups = groups;
+              // The hosted channels are readable only after this commit, so
+              // the alias-without-timer check has its first real chance here.
+              warnPrWatchWithoutTimer?.();
               channelOwnerHints = new Map([
                 ...bootChannelOwnerHints,
                 ...groups.flatMap((group) =>
@@ -11202,11 +11221,10 @@ async function runQwenServeImpl(
       try {
         const resolved = resolveChannelWorkspaceGroupsAtListen();
         channelWorkspaceGroups = resolved?.groups;
-        // The alias is readable now, and the timer handle already exists (or
-        // is undefined on an interval of 0), so this is the first point where
-        // "a watched PR but nothing observes it" can be judged.
+        // Deferred-runtime listens commit the groups before this point; the
+        // worker path commits later and re-runs the same one-shot check from
+        // its callback.
         warnPrWatchWithoutTimer?.();
-        warnPrWatchWithoutTimer = undefined;
         if (resolved) {
           for (const skip of resolved.skipped) {
             const detail = sanitizeLogText(
