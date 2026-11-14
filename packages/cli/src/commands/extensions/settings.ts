@@ -60,6 +60,7 @@ const setCommand: CommandModule<object, SetArgs> = {
       setting,
       promptForSetting,
       scope as ExtensionSettingScope,
+      process.cwd(),
     );
   },
 };
@@ -100,11 +101,13 @@ const listCommand: CommandModule<object, ListArgs> = {
       extension.config,
       extension.id,
       ExtensionSettingScope.USER,
+      process.cwd(),
     );
     const workspaceSettings = await getScopedEnvContents(
       extension.config,
       extension.id,
       ExtensionSettingScope.WORKSPACE,
+      process.cwd(),
     );
     const mergedSettings = { ...userSettings, ...workspaceSettings };
 
