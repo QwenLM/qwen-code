@@ -41,6 +41,16 @@ function lintStep(name) {
   return value;
 }
 
+// test_build carries the sampling install and then spends its whole timeout
+// building, so it needs the same collector for the same reason.
+function buildStep(name) {
+  const value = ciJobs.test_build.steps.find(
+    (candidate) => candidate.name === name,
+  );
+  assert.ok(value, `missing ${name} step in test_build`);
+  return value;
+}
+
 describe('ci.yml disk-pressure evidence', () => {
   it('starts sampling before the install and preserves those samples for upload', () => {
     const install = step('Install dependencies').run;
@@ -88,13 +98,13 @@ describe('ci.yml disk-pressure evidence', () => {
     );
     assert.match(tests, /hosttests\[\$\{hosttests:-unknown\}\]/);
 
-    // test_macos and test_windows inline the same sampler (plain echo, no
+    // test_macos_shards and test_windows inline the same sampler (plain echo, no
     // DISK_SAMPLES append), and no equality pin reaches them: the cross-leg
     // byte-identity in no-ak-integration-ci.test.js stops at the `( while
     // true` sentinel by design. Pin the sampler expression per leg, or an
     // edit that only touches the pinned test-job copy ships green while
     // these nightly-only lanes silently drop `load`/`hosttests`.
-    for (const jobName of ['test_macos', 'test_windows']) {
+    for (const jobName of ['test_macos_shards', 'test_windows']) {
       const leg = ciJobs[jobName].steps.find(
         (candidate) => candidate.name === 'Run tests and generate reports',
       );
@@ -193,6 +203,55 @@ describe('ci.yml disk-pressure evidence', () => {
     );
   });
 
+  it('gives test_build the same collector, and keeps it last and uniquely named', () => {
+    // test_build samples during install and then builds for up to its whole
+    // timeout, but its sampler dies with the install step's trap … EXIT. It
+    // shipped without a collector, so an ENOSPC build — or the OOM that took
+    // a shard host out mid-run — kept no telemetry at all.
+    const install = buildStep('Install dependencies').run;
+    assert.match(
+      install,
+      /DISK_SAMPLES="\$\{RUNNER_TEMP\}\/disk-pressure-samples\.log"/,
+    );
+
+    const dump = buildStep('Dump disk state on failure');
+    assert.equal(dump.if, '${{ failure() }}');
+    assert.match(dump.run, /tee -a "\$DISK_SAMPLES"/);
+    assert.doesNotMatch(dump.run, /[^>]> "\$DISK_SAMPLES"/);
+
+    const upload = buildStep('Upload disk-pressure samples');
+    assert.equal(upload.if, '${{ failure() }}');
+    assert.equal(upload.with['if-no-files-found'], 'ignore');
+    assert.equal(
+      upload.with.path,
+      '${{ runner.temp }}/disk-pressure-samples.log',
+    );
+
+    // Same position contract as lint_and_static: failure() is evaluated when
+    // the step is reached, so anything parked earlier only ever collects a
+    // prelude failure.
+    const names = ciJobs.test_build.steps.map((candidate) => candidate.name);
+    assert.equal(
+      names.indexOf('Upload disk-pressure samples'),
+      names.length - 1,
+      'the collector must be the last step of test_build',
+    );
+    assert.ok(
+      names.indexOf('Dump disk state on failure') <
+        names.indexOf('Upload disk-pressure samples'),
+    );
+
+    // upload-artifact v4+ rejects duplicate names when several jobs fail in
+    // one run, so all three collectors must stay distinct.
+    assert.ok(
+      ![
+        step('Upload disk-pressure samples').with.name,
+        lintStep('Upload disk-pressure samples').with.name,
+      ].includes(upload.with.name),
+      'test_build collector artifact name collides with another job',
+    );
+  });
+
   it('keeps the failure dump in the job log when the samples file is unwritable', () => {
     // The dump exists to explain an ENOSPC death, so it cannot depend on the
     // filesystem being writable: redirected straight into the samples file, a
@@ -257,7 +316,7 @@ describe('ci.yml disk-pressure evidence', () => {
     // reaches them ('Dump disk state on failure' is this lane's alone). Pin
     // them textually like the sampler loop above — not executed, because
     // test_windows greps /proc/meminfo, which Git Bash lacks.
-    for (const jobName of ['test', 'test_macos', 'test_windows']) {
+    for (const jobName of ['test', 'test_macos_shards', 'test_windows']) {
       const leg = ciJobs[jobName].steps.find(
         (candidate) => candidate.name === 'Run tests and generate reports',
       );
@@ -397,5 +456,70 @@ describe('ci.yml disk-pressure evidence', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+// The disk floor admits a job on free bytes and inodes; CPU contention is a
+// different axis. The load gate is a backstop against an unrunnable host, not a
+// predictor of the RPC flake that turned green shards red on this pool
+// (`Timeout calling "onTaskUpdate"` with 902 of 902 tests passing in main runs
+// 43018456551 and 43016357976) — the measured green and red load bands overlap.
+// Both gates must stay hard failures placed before the work they protect, and
+// the load gate must stay off the lanes that cannot read /proc/loadavg.
+describe('ci.yml host load gate', () => {
+  it('refuses an unrunnable host before the suites, on Linux self-hosted only', () => {
+    const gate = step('Host load gate (self-hosted)');
+
+    assert.match(
+      gate.if,
+      /runner\.environment == 'self-hosted' && runner\.os == 'Linux'/,
+    );
+    assert.match(gate.if, /needs\.test_build\.result == 'success'/);
+    assert.match(gate.if, /steps\.ci_profile\.outputs\.ci_profile == 'full'/);
+    assert.equal(
+      gate.run,
+      'bash .github/scripts/check-host-load.sh',
+      'the gate must run the script, not an inline approximation of it',
+    );
+    // A softened gate admits the host it exists to refuse, and the
+    // job then spends the test step's whole budget failing as a test.
+    assert.equal(gate['continue-on-error'], undefined);
+    assert.doesNotMatch(gate.run, /\|\| true/);
+    // The ceiling is operator-tunable without a PR, like the worker cap and
+    // the retry count beside it.
+    assert.equal(
+      gate.env.HOST_LOAD_MAX_RATIO,
+      "${{ vars.QWEN_CI_HOST_LOAD_MAX_RATIO || '2.0' }}",
+    );
+    // Its own wait must not be able to consume the step budget it protects.
+    assert.ok(gate['timeout-minutes'] <= 3);
+  });
+
+  it('runs after the unpack and before the suites it protects', () => {
+    // The load that matters is the load the suites will run under; a reading
+    // taken before the install is minutes stale by the time they start.
+    //
+    // Order comes from `step()`, which throws when a name is missing, not from
+    // `names.indexOf(...)`: a renamed step made indexOf return -1, every
+    // `gate > -1` comparison true, and the test green with the step gone.
+    const position = (name) => testSteps.indexOf(step(name));
+    // The two provisioning steps are apt/network installs whose duration
+    // follows the contention this gate measures, so a sample taken above them
+    // can be minutes stale when the suites start.
+    assert.ok(
+      position('Unpack the built tree') <
+        position('Host load gate (self-hosted)'),
+      'the load gate must sample after the unpack',
+    );
+    assert.ok(
+      position('Provision linters for real-binary tests') <
+        position('Host load gate (self-hosted)'),
+      'the load gate must sample after the tooling provisioning',
+    );
+    assert.ok(
+      position('Host load gate (self-hosted)') <
+        position('Run tests and generate reports'),
+      'the load gate must sample before the suites it protects',
+    );
   });
 });

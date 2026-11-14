@@ -32,8 +32,8 @@ vi.mock('../contexts/VimModeContext.js', () => ({
     setVimMode: vi.fn(),
   })),
 }));
-import { ApprovalMode } from '@qwen-code/qwen-code-core';
-import { StreamingState } from '../types.js';
+import { ApprovalMode, type Config } from '@qwen-code/qwen-code-core';
+import { MessageType, StreamingState } from '../types.js';
 
 // Mock child components
 vi.mock('./LoadingIndicator.js', () => ({
@@ -127,7 +127,8 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     constrainHeight: false,
     isInputActive: true,
     isConfigInitialized: true,
-    buffer: '',
+    buffer: { text: '' },
+    history: [],
     inputWidth: 80,
     suggestionsWidth: 40,
     userMessages: [],
@@ -176,6 +177,7 @@ const createMockUIActions = (): UIActions =>
   }) as any;
 
 const createMockConfig = (overrides = {}) => ({
+  getAuthType: vi.fn(() => 'openai'),
   getModel: vi.fn(() => 'gemini-1.5-pro'),
   getTargetDir: vi.fn(() => '/test/dir'),
   getDebugMode: vi.fn(() => false),
@@ -186,21 +188,41 @@ const createMockConfig = (overrides = {}) => ({
   ...overrides,
 });
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
+function ComposerOwner({
+  uiState,
+  config,
+  uiActions,
+  showComposer,
+}: {
+  uiState: UIState;
+  config: ReturnType<typeof createMockConfig>;
+  uiActions: UIActions;
+  showComposer: boolean;
+}) {
+  return (
+    <ConfigContext.Provider value={config as unknown as Config}>
+      <UIStateContext.Provider value={uiState}>
+        <UIActionsContext.Provider value={uiActions}>
+          {showComposer ? <Composer /> : <Text>Auth dialog</Text>}
+        </UIActionsContext.Provider>
+      </UIStateContext.Provider>
+    </ConfigContext.Provider>
+  );
+}
+
 const composerElement = (
   uiState: UIState,
   config = createMockConfig(),
   uiActions = createMockUIActions(),
+  showComposer = true,
 ) => (
-  <ConfigContext.Provider value={config as any}>
-    <UIStateContext.Provider value={uiState}>
-      <UIActionsContext.Provider value={uiActions}>
-        <Composer />
-      </UIActionsContext.Provider>
-    </UIStateContext.Provider>
-  </ConfigContext.Provider>
+  <ComposerOwner
+    uiState={uiState}
+    config={config}
+    uiActions={uiActions}
+    showComposer={showComposer}
+  />
 );
-/* eslint-enable @typescript-eslint/no-explicit-any */
 
 const renderComposer = (
   uiState: UIState,
@@ -336,6 +358,18 @@ describe('Composer', () => {
       // The minimal fallback string only appears when the full indicator is
       // suppressed — when LoadingIndicator renders, it owns the cancel hint.
       expect(output).not.toContain('Esc to cancel');
+    });
+
+    it('hides the narrow cancel hint while command cancellation is blocked', () => {
+      const uiState = createMockUIState({
+        streamingState: StreamingState.Responding,
+        terminalWidth: 25,
+        commandCancellationBlocked: true,
+      });
+
+      expect(renderComposer(uiState).lastFrame()).not.toContain(
+        'Esc to cancel',
+      );
     });
 
     it('shows LoadingIndicator when Responding on a 31-col terminal', () => {
@@ -563,3 +597,32 @@ describe('Composer', () => {
     });
   });
 });
+
+it.each<{ history: UIState['history'] }>([
+  { history: [] },
+  { history: [{ id: 1, type: MessageType.USER, text: '/auth' }] },
+])(
+  'keeps the subscription placeholder without the command hint row (%j)',
+  ({ history }) => {
+    const actions = createMockUIActions();
+    const ui = renderComposer(
+      createMockUIState({ history }),
+      createMockConfig({ getAuthType: () => 'qwen-subscription' }),
+      actions,
+    );
+    try {
+      expect(ui.lastFrame()).not.toContain('Try:');
+      expect(ui.lastFrame()).not.toContain(
+        '/usage  /status  /upgrade  /logout',
+      );
+      expect(ui.lastFrame()).toContain('Footer');
+      const props = vi.mocked(InputPrompt).mock.calls.at(-1)![0];
+      expect(props.placeholder).toBe('  Type your request, or /usage');
+      const options = { deferUntilIdle: true, submittedPrompt: '/usage' };
+      props.onSubmit('/usage', options);
+      expect(actions.handleFinalSubmit).toHaveBeenCalledWith('/usage', options);
+    } finally {
+      ui.unmount();
+    }
+  },
+);

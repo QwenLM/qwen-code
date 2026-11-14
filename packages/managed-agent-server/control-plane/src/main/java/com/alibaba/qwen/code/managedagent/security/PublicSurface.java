@@ -1,0 +1,76 @@
+package com.alibaba.qwen.code.managedagent.security;
+
+import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.http.server.PathContainer;
+import org.springframework.web.util.ServletRequestPathUtils;
+
+import java.util.regex.Pattern;
+
+/**
+ * The surface predicates shared by the filters and the exception handler.
+ * Each decides on the path Spring routes with, so a normalized spelling
+ * (percent-encoding, path parameters) cannot slip between them.
+ */
+public final class PublicSurface {
+    private PublicSurface() {
+    }
+
+    public static String pathWithinApplication(HttpServletRequest request) {
+        // The router's own parsed path: segments are UTF-8-decoded and
+        // matrix-stripped regardless of the request's Content-Type charset,
+        // which UrlPathHelper would wrongly honor here. value() is the raw
+        // segment; valueToMatch() is what the router matches on.
+        StringBuilder path = new StringBuilder();
+        for (PathContainer.Element element : ServletRequestPathUtils
+                .parseAndCache(request).pathWithinApplication().elements()) {
+            if (element instanceof PathContainer.PathSegment segment) {
+                path.append('/').append(segment.valueToMatch());
+            }
+        }
+        return path.toString();
+    }
+
+    // The routes the routing filter keeps on the internal listener. The
+    // exception handler asks here too, so what it treats as internal is
+    // what the router serves as internal.
+    public static boolean internal(HttpServletRequest request) {
+        return pathWithinApplication(request).startsWith("/internal/");
+    }
+
+    public static boolean covers(String path) {
+        // The bare collection route (POST /v1/agents) has no trailing slash,
+        // so the prefix alone would let it skip the public surface.
+        return path.equals("/v1/agents") || path.startsWith("/v1/agents/")
+                || path.equals("/v1/agent-automations")
+                || path.startsWith("/v1/agent-automations/")
+                || path.equals("/v1/agent-channels")
+                || path.startsWith("/v1/agent-channels/")
+                || path.startsWith("/api/agent/web-shell/v1/");
+    }
+
+    // Compiled once: both header filters call this on every request, and
+    // String.matches would recompile the pattern each time.
+    /** The terminal upgrade route template (Ant {@code *} wildcard), shared
+     * by the handler registration, the header-filter exemption regex below,
+     * and the handshake interceptor's capture regex, so the three cannot
+     * drift apart. */
+    public static final String TERMINAL_UPGRADE_PATH =
+            "/api/agent/web-shell/v1/sessions/*/terminal";
+
+    private static final Pattern TERMINAL_UPGRADE =
+            Pattern.compile(TERMINAL_UPGRADE_PATH.replace("*", "[^/]+"));
+
+    /**
+     * The terminal WebSocket upgrade authenticates with the single-use ticket
+     * carried in the bearer subprotocol, not the tenant/signature headers a
+     * browser upgrade cannot set. Only a GET on this exact upgrade path is
+     * exempt from the header filters — an upgrade is always a GET, so any
+     * other method keeps the authenticated surface. The ticket-minting POST
+     * stays on the authenticated surface, and the handshake interceptor still
+     * consumes and validates the ticket before the relay opens the worker.
+     */
+    public static boolean terminalUpgrade(HttpServletRequest request) {
+        return "GET".equals(request.getMethod())
+                && TERMINAL_UPGRADE.matcher(pathWithinApplication(request)).matches();
+    }
+}

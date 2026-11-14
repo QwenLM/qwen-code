@@ -117,7 +117,7 @@ export interface ConvertLlmRequestToAnthropicOptions {
    * outgoing `thinking` parameter. The caller gates it off 4.6+ adaptive
    * models (whose unsigned blocks are owned by
    * `dropUnsignedAssistantThinking`) and off native base URLs, so the two
-   * passes stay disjoint and native API history is left untouched.
+   * passes stay disjoint. Native requests remove unsigned thinking instead.
    * https://github.com/QwenLM/qwen-code/issues/11772
    */
   fillUnsignedThinkingSignature?: boolean;
@@ -128,6 +128,10 @@ export interface ConvertLlmRequestToAnthropicOptions {
    * to be passed back complete and unmodified.
    */
   dropUnsignedAssistantThinking?: boolean;
+  /**
+   * Preserve foreign Responses reasoning summaries as text on adaptive proxies.
+   */
+  demoteForeignThoughtToText?: boolean;
   /**
    * On assistant turns containing `tool_use` but lacking any thinking block,
    * prepend a synthetic empty thinking block. Required by DeepSeek's
@@ -285,7 +289,7 @@ export class AnthropicContentConverter {
     this.processContents(
       request.contents,
       messages,
-      !!options.dropUnsignedAssistantThinking,
+      !!options.demoteForeignThoughtToText,
     );
 
     if (options.stripAssistantThinking) {
@@ -320,7 +324,7 @@ export class AnthropicContentConverter {
     // Must run BEFORE dropEmptyTextThinkingBlocks: dropUnsignedThinking...
     // throws when an unsigned thinking block belongs to a turn that's part
     // of an unbroken, still-active tool_use/tool_result chain reaching the
-    // end of history -- a real proxy bug that should fail loudly rather
+    // end of history -- invalid replay that should fail loudly rather
     // than silently continue. An empty-text thinking block with no
     // signature is unsigned by this same definition; if the empty-text
     // guard ran first it would delete the block outright before this
@@ -571,6 +575,12 @@ export class AnthropicContentConverter {
     if (finishReason) {
       candidate.finishReason = finishReason;
     }
+    const finishMessage = this.mapAnthropicStopDetailsToFinishMessage(
+      (response as Anthropic.Message & { stop_details?: unknown }).stop_details,
+    );
+    if (finishMessage) {
+      candidate.finishMessage = finishMessage;
+    }
 
     llmResponse.candidates = [candidate];
     llmResponse.responseId = response.id;
@@ -655,16 +665,13 @@ export class AnthropicContentConverter {
               debugLogger.debug(
                 'Dropping a Responses reasoning replay payload from thoughtSignature',
               );
-              // When the caller asked to drop unsigned thinking
-              // (`dropUnsignedAssistantThinking`), an unsigned `thinking`
-              // block is exactly the shape the pass below treats as a proxy
-              // protocol violation, so do not emit one — keep the visible
-              // summary as plain text when present. Otherwise leave the block
-              // unsigned (never attach the foreign payload as a signature) so
-              // `stripThinkingFromAssistantMessages` removes it under
+              // Adaptive proxies preserve the foreign summary as plain text
+              // when `demoteForeignThoughtToText` is enabled. Otherwise leave
+              // the block unsigned, without the foreign payload as its
+              // signature, so `stripThinkingFromAssistantMessages` removes it under
               // `stripAssistantThinking` and `fillMissingThinkingSignatures`
               // fills `signature: ''` under DeepSeek normalization or on
-              // non-4.6 proxy-hosted Claude.
+              // non-4.6 proxy-hosted Claude, while native cleanup drops it.
               if (demoteForeignThoughtToText) {
                 dropThinkingBlock = true;
                 if (part.text) {
@@ -1017,6 +1024,34 @@ export class AnthropicContentConverter {
     return mapping[reason] || FinishReason.FINISH_REASON_UNSPECIFIED;
   }
 
+  mapAnthropicStopDetailsToFinishMessage(
+    stopDetails?: unknown,
+  ): string | undefined {
+    if (!stopDetails || typeof stopDetails !== 'object') return undefined;
+    const details = stopDetails as Record<string, unknown>;
+    if (details['type'] !== 'refusal') return undefined;
+
+    const messages: Record<string, string> = {
+      cyber: 'Response refused due to cyber-related safety policy.',
+      bio: 'Response refused due to biological safety policy.',
+      frontier_llm:
+        'Response refused due to frontier model development policy.',
+      reasoning_extraction:
+        'Response refused because it requested hidden reasoning.',
+      general_harms: 'Response refused due to a general safety policy.',
+    };
+    const category = details['category'];
+    if (typeof category !== 'string') {
+      return 'Response refused due to safety reasons.';
+    }
+    // `category` is provider text: an own-property check keeps `__proto__` /
+    // `constructor` on the unknown-category fallback instead of returning an
+    // object that would render as `[object Object]`.
+    return Object.prototype.hasOwnProperty.call(messages, category)
+      ? messages[category]
+      : 'Response refused due to safety reasons.';
+  }
+
   private isContentObject(
     content: unknown,
   ): content is { role: string; parts: Part[] } {
@@ -1275,10 +1310,8 @@ export class AnthropicContentConverter {
 
       if (activeToolUseTurns.has(index)) {
         throw new Error(
-          'Anthropic-compatible proxy omitted the thinking signature for a ' +
-            'tool-use turn that is still in progress. Configure the proxy to ' +
-            'preserve thinking signatures, or start a new session with ' +
-            'reasoning disabled.',
+          'Cannot replay a tool-use turn that is still in progress because a ' +
+            'thinking signature is missing. Start a new session to continue.',
         );
       }
 

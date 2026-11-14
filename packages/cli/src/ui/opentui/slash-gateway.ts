@@ -25,6 +25,7 @@ import { hasSlashCommandPathSeparator } from '../utils/commandUtils.js';
 import type {
   OpenTuiDispatchOutcome,
   OpenTuiSlashDispatcher,
+  TypedInput,
 } from './commands-dispatch.js';
 
 // ink's quit family (AppContainer.handleFinalSubmit): `/exit` is quit's own
@@ -58,8 +59,8 @@ export type SlashSettlement =
 
 export class OpenTuiSlashGateway {
   private dispatcher: OpenTuiSlashDispatcher | null = null;
+  private activeDispatcher: OpenTuiSlashDispatcher | null = null;
   private initError: string | null = null;
-  private busy = false;
   private readonly ready: Promise<void>;
   private readonly settleReady: () => void;
 
@@ -122,7 +123,11 @@ export class OpenTuiSlashGateway {
 
   /** True while a dispatched command is still running. */
   isBusy(): boolean {
-    return this.busy;
+    return this.activeDispatcher !== null;
+  }
+
+  isCommitInProgress(): boolean {
+    return this.activeDispatcher?.isCommitInProgress() ?? false;
   }
 
   getInitError(): string | null {
@@ -131,16 +136,22 @@ export class OpenTuiSlashGateway {
 
   /** Esc route: cancel the running command (parity of dispatcher.cancel). */
   cancel(): void {
-    this.dispatcher?.cancel();
+    (this.activeDispatcher ?? this.dispatcher)?.cancel();
   }
 
   /**
    * Waits for readiness, then runs one input through the dispatcher. Rejects
-   * while initialization failed or another command is in flight.
+   * while initialization failed or another command is in flight. `onCommand`
+   * runs when the dispatcher takes the input as a command, before handling it.
    */
-  async dispatch(text: string): Promise<SlashSettlement> {
+  async dispatch(
+    text: string,
+    typed?: TypedInput,
+    onCommand?: () => void,
+  ): Promise<SlashSettlement> {
     await this.ready;
-    if (!this.dispatcher) {
+    const dispatcher = this.dispatcher;
+    if (!dispatcher) {
       return {
         kind: 'rejected',
         reason:
@@ -149,18 +160,19 @@ export class OpenTuiSlashGateway {
           '; slash commands are unavailable.',
       };
     }
-    if (this.busy) {
+    if (this.activeDispatcher) {
       return {
         kind: 'rejected',
         reason: 'A slash command is already running.',
       };
     }
-    this.busy = true;
+    this.activeDispatcher = dispatcher;
     try {
-      const outcome = await this.dispatcher.handle(text);
+      if (onCommand && dispatcher.takesAsSlashCommand(text.trim())) onCommand();
+      const outcome = await dispatcher.handle(text, typed);
       return { kind: 'dispatched', outcome };
     } finally {
-      this.busy = false;
+      this.activeDispatcher = null;
     }
   }
 }

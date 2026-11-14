@@ -16,6 +16,7 @@ import type { ClaudeMarketplaceConfig } from '@qwen-code/qwen-code-core/extensio
 import { redactUrlCredentials } from '@qwen-code/qwen-code-core/extension/redaction.js';
 import { requestConsentOrFail } from '../../commands/extensions/consent.js';
 import { t } from '../../i18n/index.js';
+import { keyMatchers, Command } from '../keyMatchers.js';
 import { getErrorMessage } from '../../utils/errors.js';
 import {
   sanitizeTerminalLine,
@@ -286,7 +287,7 @@ function PermissionText({
   );
 }
 
-function ExtensionSettingInput({
+export function ExtensionSettingInput({
   permission,
   width,
   height,
@@ -322,6 +323,11 @@ function ExtensionSettingInput({
         settled.current = true;
         permission.resolve(state.current.text);
       }
+    } else if (
+      !permission.setting.sensitive &&
+      keyMatchers[Command.CLEAR_INPUT](key)
+    ) {
+      update(endOfLine(''));
     } else if (key.ctrl && key.name === 'u') update(endOfLine(''));
     else {
       const next = applyLineKey(state.current, key);
@@ -341,6 +347,8 @@ function ExtensionSettingInput({
       }
     : state.current;
   const spans = windowLineAtCaret(visible, Math.max(0, width - 3));
+  const before = sanitizeTerminalText(spans.before);
+  const after = sanitizeTerminalText(spans.after);
   return (
     <DialogFrame>
       <text fg={C.accent}>
@@ -361,16 +369,16 @@ function ExtensionSettingInput({
       />
       <box flexDirection="row">
         <text fg={C.accent}>{'> '}</text>
-        <text fg={C.text}>{sanitizeTerminalText(spans.before)}</text>
+        {before ? <text fg={C.text}>{before}</text> : null}
         <text bg={C.accent}>{sanitizeTerminalText(spans.at) || ' '}</text>
-        <text fg={C.text}>{sanitizeTerminalText(spans.after)}</text>
+        {after ? <text fg={C.text}>{after}</text> : null}
       </box>
       <FooterHint text={t('Press Enter to submit, Escape to cancel')} />
     </DialogFrame>
   );
 }
 
-function ExtensionPluginChoice({
+export function ExtensionPluginChoice({
   permission,
   width,
   height,

@@ -1,16 +1,8 @@
 # Qwen Managed Runtime Broker Core
 
-The `com.alibaba.qwen.code.runtimebroker` package defines the state and orchestration core for a
-Managed Agent Runtime Broker. It contains Runtime binding, Runtime Session,
-and Tool execution records; repository contracts; thread-safe in-memory
-and JDBC implementations; and a framework-neutral service that composes
-authoritative scope resolution, Runtime provisioning, and Runtime transport
-adapters.
+The `contracts` module owns `com.alibaba.qwen.code.runtimebroker` values and interfaces. The `runtime-broker` module owns the framework-neutral `runtimebroker.service.RuntimeBrokerService`. JDBC and memory implementations are in the `persistence` module; providers, HTTP clients and credential encryption are in `adapters`. The `server` module composes these implementations through the contracts, hosts HTTP endpoints, and owns resource lifecycle.
 
-Runtime providers and their deployment protocols are in `runtimebroker.provisioning`,
-HTTP adapters and wire protocols in `runtimebroker.transport`, and credential
-encryption in `runtimebroker.security`. The execution and repository core stays
-in the parent package; the application still builds all of them in one Maven module.
+None of the four implementation modules depends on another implementation module. In particular the Broker consumes `NativeCsiExecutionRepository` capability rather than a concrete JDBC class. Memory repositories do not provide private CSI execution capability. Capability checks do not replace transactional admission, same-DataSource identity or generation fencing.
 
 The service acquires operation and dispatch leases, renews them while external
 work is in flight, converges idempotent Tool execution, records cancellation
@@ -29,10 +21,9 @@ which starts the merged Managed Runtime worker and adopts it only after
 attestation; see
 [Managed Runtime process adoption](../../../docs/design/2026-09-23-managed-runtime-process-adoption.md).
 The embedding service still owns the worker command wiring, recovery-capable
-provisioners, and deployment configuration. The experimental Kubernetes provider
-below supports disposable scratch only. The Broker core stays independent of Spring and public Agent resources; the enclosing Managed Agent Server wires its HTTP and application adapters.
+provisioners, and deployment configuration. The Broker core stays independent of Spring and public Agent resources; the enclosing Managed Agent Server wires its HTTP and application adapters.
 
-Broker sources, classpath resources and tests are built as part of `packages/managed-agent-server`, which requires JDK 21 or later and Maven 3.8.9+ (the SpotBugs plugin floor). There is no separate Broker JAR or test JAR. Install the Java SDK first, as described in the [application README](../README.md).
+Broker sources, classpath resources and tests are built as part of `packages/managed-agent-server`, which requires JDK 21 or later and Maven 3.8.9+ (the SpotBugs plugin floor). The Broker has an ordinary reactor JAR; its tests live in `verification`, without a test-JAR dependency. Install the Java SDK first, as described in the [application README](../README.md).
 
 From `packages/managed-agent-server`, build and test with:
 
@@ -51,7 +42,7 @@ the arbiter.
 
 ## JDBC persistence
 
-`JdbcRuntimeBrokerSchema.initialize(DataSource)` initializes or validates the shared 38-table fresh-database baseline used by Broker and Managed Server. It rejects legacy, foreign, partial and system catalogs before mutation; it does not upgrade or copy existing data. The JDBC implementations use `javax.sql.DataSource` for
+`ManagedSchema.initialize(DataSource)` initializes or validates the shared 38-table fresh-database baseline used by Broker and Managed Server. It rejects legacy, foreign, partial and system catalogs before mutation; it does not upgrade or copy existing data. The JDBC implementations use `javax.sql.DataSource` for
 database access and fastjson2 (2.0.65) as the `reference_json`/`result_json`
 codec; the embedding service owns the connection pool and schema lifecycle.
 `JdbcRuntimeBindingRepository` additionally requires a `SecretProtector`
@@ -265,75 +256,6 @@ adds the `EXTERNAL_STORAGE` receipt namespace; existing development catalogs mus
 be recreated under the existing fresh-schema policy. There is no update,
 re-registration, retirement, mount or execution API in this increment.
 
-## Experimental Kubernetes scratch Runtime
-
-`KubernetesRuntimeProvisioner` implements the K1 slice of the
-[Kubernetes Runtime design](../../../docs/design/2026-10-01-managed-kubernetes-runtime.md).
-It creates one bare Pod and immutable boot Secret per persisted provision seed,
-with Session-exclusive `emptyDir` scratch. It rejects managed-context requests
-and mounts no PVC. This is a private SDK adapter for trusted development
-embeddings; Spring selection and public Hosted Workspace admission stay closed.
-
-Construct `KubernetesHttpRuntimeClient` with the HTTPS API origin, service-account
-token file and cluster CA file. Configure the provisioner with a stable cluster
-identifier, existing namespace, SHA-256-pinned worker image and worker command.
-The embedding scope resolver must authorize Session isolation and a container
-scratch directory such as `/workspace`; the Java-host directory is not copied
-into the Pod. Keep the Broker's encrypted seed and resource handle across
-restarts. Custom clients must bound API calls and preserve authoritative-404
-semantics.
-
-The image must include Node.js 22+, the built CLI and runtime dependencies, and
-support UID/GID 1000 with a read-only root filesystem. Broker RBAC needs `get`
-and `create` on Pods and Secrets in the namespace. The Broker must reach the
-API and the Pod's IPv4 port `43190`. Worker HTTP uses the existing bearer/lease
-protocol on a trusted development network; production TLS/workload identity and
-network-policy qualification are later gates.
-
-Recovery observes the original Pod/Secret UIDs and re-attests the same worker.
-Restarted, missing, replaced or mismatched resources block adoption. `release`
-and `close` never delete Kubernetes objects; neither is authorization to stop a
-worker another Broker may use. Budget retained Pods and Secrets: K1 provides no
-automatic garbage collection, persistent Workspace storage or volume handoff.
-
-A lost K1 scratch Pod leaves its binding LOST and blocks new placement in that
-tenant with non-retryable `runtime_placement_recovery_required`. When sharing the
-repository, new local-process and other provisioner kinds are also blocked.
-Existing healthy bindings and other tenants remain usable. K1 never emits the
-stopped-writer proof required by `recoverBinding`, so retries, Pod deletion and Broker restart do
-not recover this tenant. Operators must stop new admission for the affected tenant,
-retain the original binding/seed/UIDs and execution inventory, and escalate for an
-evidence-preserving recovery or placement-policy change. There is no supported
-in-place recovery procedure in this increment; do not delete database rows,
-relabel the binding RELEASED, or invent stop evidence to restore admission.
-This is an outstanding K1 availability gate tracked in #13395.
-
-Each instance reserves at most 1024 retained or pending seeds before Kubernetes
-writes. At capacity, new seeds fail with retryable `runtime_kubernetes_capacity`;
-existing identities remain recoverable. Broker pre-create capacity refusal leaves
-the original binding PROVISIONING with its claim released for retry; an error
-after entering ensure keeps the existing fail-closed policy. The supplied durable
-handle is never shadowed by an empty local entry. `release` does not evict, UNKNOWN retains
-the slot while revoking local endpoint usability, and only that entry's own
-validated reconciliation conflict frees it. Lease lookups use a direct identity
-index and compare the endpoint. This bounds local state; it does not retire Pods,
-Secrets or durable bindings.
-
-After building and bundling the CLI, run the opt-in real-worker test from this
-module with Node.js, a reachable non-loopback IPv4 interface and free port `43190`:
-
-```bash
-mvn -Dtest=KubernetesRuntimeWorkerTest \
-  -Dqwen.kubernetes.worker-test=true \
-  -Dqwen.cli.entry=../../dist/cli.js test
-```
-
-The test uses fake Kubernetes observations and a real Broker/worker for private
-file tools, deduplication and live-worker adoption. It does not qualify scheduling,
-container isolation, NetworkPolicy or CSI. The default suite skips this opt-in
-test; provider and API-client tests run without a cluster. Historical cloud smoke
-results in the design concern an earlier snapshot, not this PR's requalification.
-
 ## Private CSI evidence components
 
 The managed-server private CSI adapter and evidence commands are described in
@@ -343,24 +265,11 @@ They reserve storage before creation, persist API-observed original Pod identity
 seal dispatch and retain original publication/checkpoint/ACK evidence. Public
 Hosted CSI selection and physical holder release remain disabled. ACK success
 keeps the holder DRAINING and does not prove worker stop or NodeUnpublish.
-The K1 scratch adapter above retains its separate no-PVC contract.
 
-The private `KubernetesCsiLogReader` provides bounded native log segments for ACK
-qualification. It corroborates the expected plugin Pod/DaemonSet/Node/container/image
-API identity before and after a current-segment read and refuses changed log
-prefixes, incomplete lines and invalid timestamps. The HTTP client requests
-timestamps without `tailLines` or `limitBytes`, uses strict UTF-8 and rejects
-responses above one MiB. ConfigMap object reads separately allow one MiB plus
-64 KiB for the JSON envelope so the largest admitted base64 worker chunk fits;
-other object reads and request bodies keep their existing one-MiB limit. These are qualification inputs only: the durable
-pre-create collector, image-specific publication/unpublish parser and physical
-retirement coordinator remain gated. Log disappearance, a fresh baseline or a
-diagnostic snapshot never releases a Workspace holder.
-Kubernetes omits rotated log files and may skip malformed CRI records. Kubelet
-chooses the log container from local status asynchronously synchronized to the
-API server; these observations cannot bind log bytes to an exact container ID.
-That additional source-binding contract remains required. RFC3339 offsets are
-accepted without altering the bytes used for prefix and digest verification.
+The Kubernetes HTTP client rejects responses above one MiB. ConfigMap object
+reads separately allow one MiB plus 64 KiB for the JSON envelope so the largest
+admitted base64 worker chunk fits; other object reads and request bodies keep
+their one-MiB limit.
 
 ## Trusted local recovery
 

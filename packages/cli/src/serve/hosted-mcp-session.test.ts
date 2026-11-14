@@ -30,6 +30,8 @@ import {
 import {
   HostedMcpSession,
   HostedMcpRecoveryRequiredError,
+  hostedDurableMcpOwnerId,
+  isHostedDurableMcpOwner,
   parseHostedMcpServers,
 } from './hosted-mcp-session.js';
 import { parseManagedRuntimeProviderRequest } from './managed-runtime-provider-protocol.js';
@@ -41,6 +43,7 @@ import {
   readHostedMcpSettings,
   selectedMcpServers,
   type HostedMcpCommand,
+  type HostedMcpSelection,
 } from './hosted-mcp-settings.js';
 import { LocalJsonlManagedSessionJournalHandle } from '@qwen-code/qwen-code-core/managed-runtime/local-jsonl-managed-session-journal-store.js';
 import { ManagedSessionAppendUnsettledError } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
@@ -221,6 +224,71 @@ afterEach(async () => {
   if (root) await rm(root, { recursive: true, force: true });
 });
 
+it('names its durable owner through the one builder the predicate recognises (R2-7)', () => {
+  const sessionKey = {
+    tenantId: 'tenant',
+    workspaceId: 'workspace',
+    sessionId: 'session',
+  };
+  // No configuration rows exist yet, so the constructor takes the durable
+  // `mcp-<digest>` arm. A reload of the same records recomputes this id, so a
+  // terminal release of it is the tombstone the detach guards refuse.
+  expect(mcp.broker.runtimeSessionId).toBe(
+    hostedDurableMcpOwnerId(
+      session.authority.sessionHeader.sessionKey,
+      undefined,
+    ),
+  );
+  expect(isHostedDurableMcpOwner(mcp.broker.runtimeSessionId)).toBe(true);
+  // The round trip moves builder and predicate together; only a literal sees
+  // a reordered tuple or a renamed prefix (R3-3).
+  expect(hostedDurableMcpOwnerId(sessionKey, undefined)).toBe(
+    'mcp-9aeabdf172eb0e06d87765245fa51542c67f148886b0592dbb747c167dbd28e0',
+  );
+  expect(isHostedDurableMcpOwner('hooks-activation-1')).toBe(false);
+  expect(isHostedDurableMcpOwner('extension-mcp-1')).toBe(false);
+});
+
+it('derives the durable owner from the released configuration ids (R4-3)', async () => {
+  // The arm a reload actually takes: rows exist but are all released, so
+  // `previous` is defined. The literal below is computed outside the repo, so
+  // it pins the id tuple and the 32-char slice that the undefined-arm literal
+  // above cannot see (R4-3). One row does not exercise the sort itself.
+  const configurationId = '11111111-1111-4111-8111-111111111111';
+  await (
+    mcp as unknown as {
+      install: (
+        server: typeof pin,
+        previous: undefined,
+        id: string,
+        revision: number,
+      ) => Promise<void>;
+    }
+  ).install(pin, undefined, configurationId, 1);
+  await mcp.close({ terminal: true });
+  const reloaded = new HostedMcpSession(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    [pin],
+  );
+  const rows = session.authority
+    .extensionRecordsInDomain('mcp_configuration')
+    .map((entry) => parseMcpConfiguration(entry.record));
+  // The arm control: rows exist and every one is released, so the constructor
+  // falls through to the durable builder with `previous` defined.
+  expect(rows.map((row) => row.configurationId)).toEqual([configurationId]);
+  expect(rows.map((row) => row.releaseState)).toEqual(['released']);
+  // sha256(JSON.stringify([configurationId])).slice(0, 32), computed outside
+  // the repo. The session key is a fresh UUID per run, so the literal pins
+  // `previous` — which is where the sorted-id tuple and the slice live.
+  expect(reloaded.broker.runtimeSessionId).toBe(
+    hostedDurableMcpOwnerId(
+      session.authority.sessionHeader.sessionKey,
+      'c2e1405db2f9b352ad9c28f5337c92b9',
+    ),
+  );
+});
+
 it('keeps a server send_message in the MCP namespace and its overflow fatal (#14062)', async () => {
   discoveredToolName = 'send_message';
   await mcp.refresh(new AbortController().signal);
@@ -303,7 +371,7 @@ it('pins discovery, commits raw resource results and replays without another eff
   await expect(
     mcp.invoke(operationId, 'demo', { kind: 'resource_read', uri: 'other' }),
   ).rejects.toThrow('conflicts');
-  await mcp.close();
+  await mcp.close({ terminal: true });
   expect(HostedWorkspaceBroker.prototype.release).toHaveBeenCalledOnce();
 });
 
@@ -450,7 +518,7 @@ it('resumes an unsent operation after a failed dispatch commit and a status quer
       .map((entry) => entry.operationId),
   ).toEqual([operationId]);
   expect(reloaded.hasPendingOperations()).toBe(false);
-  await reloaded.close();
+  await reloaded.close({ terminal: true });
 });
 
 it('cancels an unsent operation durably without invoking it on a later retry', async () => {
@@ -486,7 +554,7 @@ it('cancels an unsent operation durably without invoking it on a later retry', a
     ),
   ).toHaveLength(0);
   expect(reloaded.hasPendingOperations()).toBe(false);
-  await reloaded.close();
+  await reloaded.close({ terminal: true });
 });
 
 it.each([false, true])(
@@ -495,7 +563,7 @@ it.each([false, true])(
     const operationId = randomUUID();
     const request = { kind: 'resource_read' as const, uri: 'memory://blob' };
     const response = await mcp.invoke(operationId, 'demo', request);
-    if (released) await mcp.close();
+    if (released) await mcp.close({ terminal: true });
     const reloaded = new HostedMcpSession(
       { baseUrl: 'http://127.0.0.1:1', token: 'test' },
       session,
@@ -524,7 +592,7 @@ it('commits its owner identity before acquiring and resumes a never-dispatched i
     new Error('store unavailable'),
   );
   await expect(mcp.ensureReady()).rejects.toThrow('store unavailable');
-  await mcp.close();
+  await mcp.close({ terminal: true });
   expect(HostedWorkspaceBroker.prototype.acquire).not.toHaveBeenCalled();
   expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
   vi.mocked(HostedWorkspaceBroker.prototype.acquire).mockRejectedValueOnce(
@@ -543,7 +611,7 @@ it('commits its owner identity before acquiring and resumes a never-dispatched i
       .filter((entry) => entry.kind === 'mcp-configure')
       .map((entry) => entry.operationId),
   ).toEqual([intent.configurationId]);
-  await mcp.close();
+  await mcp.close({ terminal: true });
 });
 
 it('reconciles a temporarily unknown configuration without repeating its effect', async () => {
@@ -569,7 +637,7 @@ it('reconciles a temporarily unknown configuration without repeating its effect'
     requests.filter((entry) => entry.kind === 'mcp-configure'),
   ).toHaveLength(1);
   expect(mcp.getCatalogs()).toHaveLength(1);
-  await mcp.close();
+  await mcp.close({ terminal: true });
 });
 
 it.each(['settled', 'failed'] as const)(
@@ -591,10 +659,12 @@ it.each(['settled', 'failed'] as const)(
     const initialId = requests[0].operationId;
     const original = replies.get(initialId)!;
     replies.set(initialId, { operationId: initialId, state: 'running' });
-    await expect(mcp.close()).rejects.toThrow('reconciliation');
+    await expect(mcp.close({ terminal: true })).rejects.toThrow(
+      'reconciliation',
+    );
     expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
     replies.set(initialId, original);
-    await mcp.close();
+    await mcp.close({ terminal: true });
     expect(
       requests.filter((entry) => entry.kind === 'mcp-configure'),
     ).toHaveLength(1);
@@ -638,7 +708,7 @@ it('reconciles an older unknown configuration during close after a legacy writer
     session,
     [pin],
   );
-  await reloaded.close();
+  await reloaded.close({ terminal: true });
   expect(
     requests.filter((entry) => entry.kind === 'mcp-configure'),
   ).toHaveLength(2);
@@ -679,7 +749,9 @@ it.each([false, true])(
             throw new Error('drain commit interrupted');
           return commit(...args);
         });
-      await expect(mcp.close()).rejects.toThrow('drain commit interrupted');
+      await expect(mcp.close({ terminal: true })).rejects.toThrow(
+        'drain commit interrupted',
+      );
       save.mockRestore();
       mcp = new HostedMcpSession(
         { baseUrl: 'http://127.0.0.1:1', token: 'test' },
@@ -687,7 +759,7 @@ it.each([false, true])(
         [pin],
       );
     }
-    await mcp.close();
+    await mcp.close({ terminal: true });
     const configuration = parseMcpConfiguration(
       session.authority.extensionRecordsInDomain('mcp_configuration')[0].record,
     );
@@ -827,7 +899,7 @@ it('separates effect reconciliation from H1 release and restores the exact v2 ow
   );
   expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
   vi.mocked(HostedWorkspaceBroker.prototype.acquire).mockClear();
-  await restored.closeResources();
+  await restored.closeResources({ terminal: true });
   expect(restored.broker.runtimeSessionId).toBe(owner);
   expect(HostedWorkspaceBroker.prototype.acquire).toHaveBeenCalledWith({
     runtimeBindingId: 'binding',
@@ -858,6 +930,184 @@ it('does not release a v2 owner while a dispatched business result is unknown', 
   expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
 });
 
+it('hands the mount back without tombstoning the owner on a non-terminal close (R14-1)', async () => {
+  await mcp.ensureReady();
+  const owner = mcp.broker.runtimeSessionId;
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+    'mcp-detach-claim',
+  );
+  const releaseMount = vi
+    .spyOn(HostedWorkspaceBroker.prototype, 'releaseMount')
+    .mockResolvedValue();
+  const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+  release.mockClear();
+  // A bare closeResources is a detach: it hands the mount back but must not
+  // terminally release the owner a reload recomputes.
+  await mcp.closeResources();
+  expect(releaseMount).toHaveBeenCalledWith('mcp-detach-claim');
+  expect(release).not.toHaveBeenCalled();
+  // The drained configurations stay short of `released` on purpose: the reload
+  // derives the owner id from the configurations that are not `released`, so
+  // marking them released would recompute a different id and strand this one.
+  expect(
+    session.authority
+      .extensionRecordsInDomain('mcp_configuration')
+      .every(
+        (entry) =>
+          parseMcpConfiguration(entry.record).releaseState !== 'released',
+      ),
+  ).toBe(true);
+  const reloaded = new HostedMcpSession(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    [pin],
+  );
+  expect(reloaded.broker.runtimeSessionId).toBe(owner);
+  // R15-1: the reload must re-initialize the drained configuration, not strand
+  // it. ensureReady succeeds and no drained row lingers to hold recoveryBlocked;
+  // the owner id is unchanged because the row was restarted in place, not
+  // marked released.
+  await reloaded.ensureReady();
+  expect(reloaded.recoveryBlocked).toBe(false);
+  expect(reloaded.broker.runtimeSessionId).toBe(owner);
+  expect(
+    session.authority
+      .extensionRecordsInDomain('mcp_configuration')
+      .some(
+        (entry) =>
+          parseMcpConfiguration(entry.record).releaseState === 'drained',
+      ),
+  ).toBe(false);
+});
+
+it.each([
+  'runtime_session_busy',
+  'runtime_session_conflict',
+  'workspace_writer_unproven',
+  'runtime_admission_closed',
+])(
+  'names a refused non-terminal mount handback as recovery-required (R14-2/R15-2: %s)',
+  async (code) => {
+    // A bare closeResources is a detach: it hands the mount back without
+    // tombstoning the owner. The handback sweeps nothing, so live or unproven
+    // work — and a close/archive/delete racing it (admission_closed) — refuses
+    // it. Name that recovery-required (attached/retryable), never a raw Broker
+    // rejection, and never fall back to a terminal release.
+    await mcp.ensureReady();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+      'mcp-detach-claim',
+    );
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'releaseMount').mockRejectedValue(
+      new HostedWorkspaceBrokerRejection(409, code),
+    );
+    const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
+    release.mockClear();
+    await expect(mcp.closeResources()).rejects.toBeInstanceOf(
+      HostedMcpRecoveryRequiredError,
+    );
+    expect(release).not.toHaveBeenCalled();
+  },
+);
+
+it('re-initializes an extensionView owner across repeated non-terminal close/reload cycles (R15-1 fix-induced)', async () => {
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+    'ext-claim',
+  );
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'releaseMount').mockResolvedValue();
+  const opts = { baseUrl: 'http://127.0.0.1:1', token: 'test' };
+  const ext = new HostedMcpSession(
+    opts,
+    session,
+    [pin],
+    undefined,
+    undefined,
+    true,
+  );
+  await ext.ensureReady();
+  const owner = ext.broker.runtimeSessionId;
+  // Cycle 1: the detach drains the deterministic-id row; the reload advances it
+  // to released and installs a fresh row under a random configurationId.
+  await ext.closeResources();
+  const reload1 = new HostedMcpSession(
+    opts,
+    session,
+    [pin],
+    undefined,
+    undefined,
+    true,
+  );
+  await reload1.ensureReady();
+  expect(reload1.broker.runtimeSessionId).toBe(owner);
+  // Cycle 2: the next reload resolves the deterministic id back to the RELEASED
+  // row left by cycle 1; it must reinstall fresh instead of aborting.
+  await reload1.closeResources();
+  const reload2 = new HostedMcpSession(
+    opts,
+    session,
+    [pin],
+    undefined,
+    undefined,
+    true,
+  );
+  await reload2.ensureReady();
+  expect(reload2.recoveryBlocked).toBe(false);
+  expect(reload2.broker.runtimeSessionId).toBe(owner);
+});
+
+it('clears superseded drained siblings so a multi-revision server reloads unblocked (R16-1)', async () => {
+  await mcp.ensureReady();
+  // A second configuration for the same server leaves two active rows; the
+  // non-terminal close drains both, but the reload only reinstalls the latest.
+  await mcp.configure(randomUUID(), pin, 1);
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+    'mcp-claim',
+  );
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'releaseMount').mockResolvedValue();
+  await mcp.closeResources();
+  const reloaded = new HostedMcpSession(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    [pin],
+  );
+  await reloaded.ensureReady();
+  expect(reloaded.recoveryBlocked).toBe(false);
+  expect(
+    session.authority
+      .extensionRecordsInDomain('mcp_configuration')
+      .some(
+        (entry) =>
+          parseMcpConfiguration(entry.record).releaseState === 'drained',
+      ),
+  ).toBe(false);
+});
+
+it('releaseSupersededDrained spares the active owner and releases superseded drained rows (R15-3)', async () => {
+  await mcp.ensureReady();
+  const ownerA = mcp.broker.runtimeSessionId;
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'mountClaim').mockReturnValue(
+    'mcp-claim',
+  );
+  vi.spyOn(HostedWorkspaceBroker.prototype, 'releaseMount').mockResolvedValue();
+  // A non-terminal discard leaves the row drained under owner A.
+  await mcp.closeResources();
+  const state = () =>
+    parseMcpConfiguration(
+      session.authority.extensionRecordsInDomain('mcp_configuration')[0].record,
+    ).releaseState;
+  expect(state()).toBe('drained');
+  // While owner A is the durable-active owner (a failed apply kept it), its
+  // drained rows must stay for the reload to re-initialize — never stranded.
+  await HostedMcpSession.releaseSupersededDrained(session, ownerA);
+  expect(state()).toBe('drained');
+  // Once a newer bundle (owner B) is durably active, owner A's drained rows are
+  // superseded and must be released so the constructor sees a single owner.
+  await HostedMcpSession.releaseSupersededDrained(
+    session,
+    `extensions-components-${'b'.repeat(64)}`,
+  );
+  expect(state()).toBe('released');
+});
+
 it('restores the original owner before close and uses fresh identities after confirmed release', async () => {
   await mcp.ensureReady();
   const original = mcp.broker.runtimeSessionId;
@@ -867,7 +1117,7 @@ it('restores the original owner before close and uses fresh identities after con
     [pin],
   );
   expect(reloaded.broker.runtimeSessionId).toBe(original);
-  await reloaded.close();
+  await reloaded.close({ terminal: true });
   expect(requests.filter((entry) => entry.kind === 'mcp-release')).toHaveLength(
     1,
   );
@@ -881,7 +1131,7 @@ it('restores the original owner before close and uses fresh identities after con
     expect(identities.has(next.broker.runtimeSessionId)).toBe(false);
     identities.add(next.broker.runtimeSessionId);
     await next.ensureReady();
-    await next.close();
+    await next.close({ terminal: true });
   }
   for (const runtimeSessionId of identities) {
     expect(() =>
@@ -911,7 +1161,9 @@ it('does not bypass durable pending work when a newly loaded Session is closed',
     session,
     [pin],
   );
-  await expect(reloaded.close()).rejects.toThrow('reconciliation');
+  await expect(reloaded.close({ terminal: true })).rejects.toThrow(
+    'reconciliation',
+  );
   expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
 });
 
@@ -920,7 +1172,7 @@ it('confirms a lost Broker release acknowledgement before marking connections re
   vi.mocked(HostedWorkspaceBroker.prototype.release).mockRejectedValueOnce(
     new Error('lost ack'),
   );
-  await expect(mcp.close()).rejects.toThrow('lost ack');
+  await expect(mcp.close({ terminal: true })).rejects.toThrow('lost ack');
   expect(
     parseMcpConfiguration(
       session.authority.extensionRecordsInDomain('mcp_configuration')[0].record,
@@ -939,7 +1191,7 @@ it('confirms a lost Broker release acknowledgement before marking connections re
   vi.mocked(HostedWorkspaceBroker.prototype.control)
     .mockClear()
     .mockRejectedValue(new Error('runtime_session_not_ready'));
-  await reloaded.close();
+  await reloaded.close({ terminal: true });
   expect(HostedWorkspaceBroker.prototype.acquire).not.toHaveBeenCalled();
   expect(HostedWorkspaceBroker.prototype.control).not.toHaveBeenCalled();
   expect(
@@ -967,7 +1219,9 @@ it('does not release the owner until the physical drain receipt is durably commi
         throw new Error('drain receipt commit failed');
       return commit(...args);
     });
-  await expect(mcp.close()).rejects.toThrow('drain receipt commit failed');
+  await expect(mcp.close({ terminal: true })).rejects.toThrow(
+    'drain receipt commit failed',
+  );
   expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
   save.mockRestore();
   const owner = mcp.broker.runtimeSessionId;
@@ -976,7 +1230,7 @@ it('does not release the owner until the physical drain receipt is durably commi
     session,
     [pin],
   );
-  await mcp.close();
+  await mcp.close({ terminal: true });
   expect(mcp.broker.runtimeSessionId).toBe(owner);
   expect(requests.filter((entry) => entry.kind === 'mcp-release')).toHaveLength(
     1,
@@ -1028,7 +1282,9 @@ it.each([
       failure,
     );
     const release = vi.mocked(HostedWorkspaceBroker.prototype.release);
-    await expect(mcp.close()).rejects.toThrow(failure.message);
+    await expect(mcp.close({ terminal: true })).rejects.toThrow(
+      failure.message,
+    );
     expect(mcp.broker.runtimeSessionId).toBe(owner);
     expect(release).not.toHaveBeenCalled();
     expect(
@@ -1067,7 +1323,7 @@ it('keeps advertised calls on their original catalog when a newer definition is 
   await expect(mcp.configure(randomUUID(), pin, 1)).rejects.toThrow(
     'revision conflicts',
   );
-  await mcp.close();
+  await mcp.close({ terminal: true });
   expect(
     requests.filter((request) => request.kind === 'mcp-release'),
   ).toHaveLength(2);
@@ -1110,7 +1366,7 @@ it('advances past a failed replacement revision while retaining the published ca
   );
   await mcp.configure(randomUUID(), pin, 2);
   expect(mcp.getCatalogs()[0].configRevision).toBe(3);
-  await mcp.close();
+  await mcp.close({ terminal: true });
 });
 
 it('keeps unknown effects blocked, records cancellation, and accepts a known late result', async () => {
@@ -1122,7 +1378,7 @@ it('keeps unknown effects blocked, records cancellation, and accepts a known lat
     arguments: {},
   });
   expect(response.state).toBe('outcome_unknown');
-  await expect(mcp.close()).rejects.toThrow('reconciliation');
+  await expect(mcp.close({ terminal: true })).rejects.toThrow('reconciliation');
   await mcp.cancel(operationId);
   const committed = parseMcpOperation(
     session.authority.extensionRecord('mcp_operation', operationId)!.record,
@@ -1150,7 +1406,7 @@ it('keeps unknown effects blocked, records cancellation, and accepts a known lat
   expect(
     requests.filter((request) => request.kind === 'mcp-invoke'),
   ).toHaveLength(1);
-  await mcp.close();
+  await mcp.close({ terminal: true });
 });
 
 it('hands its mount back after a recovery block only once its MCP work settles, then claims it again (#13800)', async () => {
@@ -1190,7 +1446,7 @@ it('hands its mount back after a recovery block only once its MCP work settles, 
     uri: 'memory://blob',
   });
   expect(acquire).toHaveBeenCalled();
-  await mcp.close();
+  await mcp.close({ terminal: true });
 });
 
 it('refuses duplicate servers, unpinned definitions and credentials in Hosted input', () => {
@@ -1295,7 +1551,7 @@ it('does not let a stale cancel intent claim not-started after invocation dispat
   expect(requests.filter((entry) => entry.kind === 'mcp-cancel')).toHaveLength(
     1,
   );
-  await mcp.close();
+  await mcp.close({ terminal: true });
 });
 
 it('stops refresh after cancellation without configuring a changed catalog or polling again', async () => {
@@ -1331,7 +1587,7 @@ it('stops refresh after cancellation without configuring a changed catalog or po
   expect(await refresh).toBe(reason);
   expect(control.mock.calls).toHaveLength(count);
   expect(mcp.getCatalogs()).toEqual([original]);
-  await mcp.close();
+  await mcp.close({ terminal: true });
 });
 
 it.each([
@@ -1375,7 +1631,7 @@ it.each([
       if (drained.size !== count)
         throw new Error('connection still holds its owner');
     });
-    await expect(mcp.close()).rejects.toBeInstanceOf(
+    await expect(mcp.close({ terminal: true })).rejects.toBeInstanceOf(
       HostedMcpRecoveryRequiredError,
     );
     expect(release).not.toHaveBeenCalled();
@@ -1385,7 +1641,7 @@ it.each([
         session,
         pins,
       );
-    await mcp.close();
+    await mcp.close({ terminal: true });
     expect(release).toHaveBeenCalledOnce();
     expect(releases).toHaveLength(count + 1);
     const identities = releases.map((operation) => {
@@ -1441,7 +1697,7 @@ it('discards discovery from a configuration superseded while the request was pen
     expect(
       requests.filter((entry) => entry.kind === 'mcp-configure'),
     ).toHaveLength(2);
-    await mcp.close();
+    await mcp.close({ terminal: true });
   } finally {
     reply({ operationId: operationId!, state: 'outcome_unknown' });
     await refreshing;
@@ -1509,7 +1765,7 @@ it.each(['intent', 'acquire', 'dispatch_started'] as const)(
         timeout: 10_000,
       });
       abort.abort(reason);
-      await expect(mcp.close()).rejects.toBeInstanceOf(
+      await expect(mcp.close({ terminal: true })).rejects.toBeInstanceOf(
         HostedMcpRecoveryRequiredError,
       );
       expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
@@ -1518,7 +1774,7 @@ it.each(['intent', 'acquire', 'dispatch_started'] as const)(
       expect(
         requests.filter((entry) => entry.kind === 'mcp-configure'),
       ).toHaveLength(phase === 'dispatch_started' ? 2 : 1);
-      await mcp.close();
+      await mcp.close({ terminal: true });
       expect(
         requests.filter((entry) => entry.kind === 'mcp-configure'),
       ).toHaveLength(phase === 'dispatch_started' ? 2 : 1);
@@ -1582,7 +1838,7 @@ it.each(['intent', 'acquire', 'dispatch_started'] as const)(
         session.authority.extensionRecordsInDomain('mcp_configuration')[0];
       abort.abort(reason);
       expect(await initializing).toBe(reason);
-      await expect(mcp.close()).rejects.toBeInstanceOf(
+      await expect(mcp.close({ terminal: true })).rejects.toBeInstanceOf(
         HostedMcpRecoveryRequiredError,
       );
       expect(HostedWorkspaceBroker.prototype.release).not.toHaveBeenCalled();
@@ -1614,7 +1870,7 @@ it.each(['intent', 'acquire', 'dispatch_started'] as const)(
       expect(parseMcpConfiguration(after.record).runtimeSessionId).toBe(
         parseMcpConfiguration(before.record).runtimeSessionId,
       );
-      await mcp.close();
+      await mcp.close({ terminal: true });
       if (phase !== 'dispatch_started') expect(requests).toHaveLength(0);
     } finally {
       finish();
@@ -1699,7 +1955,7 @@ it('manages all published selections without changing admission, releasing the s
   }
   await mcp.ensureReady();
   expect(mcp.tools()).toHaveLength(2);
-  await mcp.closeResources();
+  await mcp.closeResources({ terminal: true });
   expect(HostedWorkspaceBroker.prototype.release).toHaveBeenCalledTimes(1);
 });
 
@@ -1755,7 +2011,7 @@ it('persists removal across cold load and Session rename without reviving a serv
   expect(
     requests.filter((entry) => entry.kind === 'mcp-configure'),
   ).toHaveLength(starts);
-  await restored.closeResources();
+  await restored.closeResources({ terminal: true });
   expect(HostedWorkspaceBroker.prototype.release).toHaveBeenCalledTimes(1);
 });
 
@@ -1881,6 +2137,188 @@ it('rejects competing settings revisions atomically before creating another phys
   expect(result.filter((entry) => entry.status === 'rejected')).toHaveLength(1);
   expect(await readHostedMcpSettings(session)).toHaveLength(1);
   expect(requests).toEqual([]);
+});
+
+it('preserves definition revision monotonicity after removal', () => {
+  for (const state of ['removed', 'enabled'] as const) {
+    expect(() =>
+      selectedMcpServers(
+        [{ ...pin, serverRevision: 5, state }],
+        managementCommand(state === 'removed' ? 'add' : 'edit', 'demo', 0, {
+          ...pin,
+          serverRevision: 1,
+        }),
+      ),
+    ).toThrow('MCP definition revision conflicts.');
+  }
+});
+
+it('charges only live MCP selections against the 32-entry capacity', () => {
+  const previous = Array.from({ length: 32 }, (_, index) => ({
+    ...pin,
+    serverId: `server-${index}`,
+    state: (index === 0 ? 'enabled' : 'removed') as 'enabled' | 'removed',
+  }));
+  const added = selectedMcpServers(
+    previous,
+    managementCommand('add', 'server-32', 0, {
+      ...pin,
+      serverId: 'server-32',
+    }),
+  );
+  expect(added).toHaveLength(33);
+  expect(added.filter((entry) => entry.state !== 'removed')).toHaveLength(2);
+
+  // The accepted maximum is 16 enabled: tightening the bound by one must
+  // turn this assertion red while the 17-enabled rejection below stays green.
+  const atEnabledCapacity = previous.map((entry, index) => ({
+    ...entry,
+    state: (index < 15 ? 'enabled' : 'removed') as 'enabled' | 'removed',
+  }));
+  const filled = selectedMcpServers(
+    atEnabledCapacity,
+    managementCommand('add', 'server-32', 0, {
+      ...pin,
+      serverId: 'server-32',
+    }),
+  );
+  expect(filled.filter((entry) => entry.state === 'enabled')).toHaveLength(16);
+
+  const tooManyLive = Array.from({ length: 32 }, (_, index) => ({
+    ...pin,
+    serverId: `server-${index}`,
+    state: 'disabled' as const,
+  }));
+  expect(() =>
+    selectedMcpServers(
+      tooManyLive,
+      managementCommand('add', 'server-32', 0, {
+        ...pin,
+        serverId: 'server-32',
+      }),
+    ),
+  ).toThrow('MCP selection exceeds its capacity.');
+
+  const tooManyEnabled = previous.map((entry, index) => ({
+    ...entry,
+    state: (index < 16 ? 'enabled' : 'removed') as 'enabled' | 'removed',
+  }));
+  expect(() =>
+    selectedMcpServers(
+      tooManyEnabled,
+      managementCommand('add', 'server-32', 0, {
+        ...pin,
+        serverId: 'server-32',
+      }),
+    ),
+  ).toThrow('MCP selection exceeds its capacity.');
+});
+
+it('commits a 32-live-plus-tombstone snapshot that a fresh reader opens', async () => {
+  const previous = Array.from({ length: 32 }, (_, index) => ({
+    ...pin,
+    serverId: `server-${index}`,
+    state: (index === 31 ? 'removed' : 'disabled') as 'removed' | 'disabled',
+  }));
+  const command = managementCommand('add', 'server-32', 0, {
+    ...pin,
+    serverId: 'server-32',
+  });
+  const servers = selectedMcpServers(previous, command);
+  expect(servers).toHaveLength(33);
+  await commitHostedMcpSettings(session, command, servers);
+  // The reader is the only consumer of the record the writer just overfilled;
+  // restoring `body['servers'].length > 32` there must turn this read red.
+  const history = await readHostedMcpSettings(session);
+  expect(history.at(-1)?.servers).toHaveLength(33);
+});
+
+it('refuses a durable record whose live selections exceed the reader capacity', async () => {
+  // commitHostedMcpSettings performs no capacity validation of its own, so
+  // the reader is the only gate on a record at rest: deleting or widening
+  // its non-removed count clause must turn this rejection red.
+  const previous = Array.from({ length: 32 }, (_, index) => ({
+    ...pin,
+    serverId: `live-${index}`,
+    state: 'disabled' as 'disabled' | 'removed',
+  }));
+  const command = managementCommand('add', 'live-32', 0, {
+    ...pin,
+    serverId: 'live-32',
+  });
+  const overfilled = [
+    ...previous,
+    {
+      ...pin,
+      serverId: 'live-32',
+      state: 'disabled' as 'disabled' | 'removed',
+    },
+  ];
+  expect(overfilled.filter((entry) => entry.state !== 'removed')).toHaveLength(
+    33,
+  );
+  await commitHostedMcpSettings(session, command, overfilled);
+  await expect(readHostedMcpSettings(session)).rejects.toThrow(
+    'Invalid MCP settings.',
+  );
+});
+
+it('commits a tombstone-heavy snapshot under the total capacity and reads it back', async () => {
+  const previous = Array.from({ length: 96 }, (_, index) => ({
+    ...pin,
+    serverId: `${index < 32 ? 'live' : 'removed'}-${index}`.padEnd(128, 'x'),
+    serverRevision: Number.MAX_SAFE_INTEGER,
+    state: (index === 0
+      ? 'enabled'
+      : index < 32
+        ? 'disabled'
+        : 'removed') as HostedMcpSelection['state'],
+  }));
+  const command = managementCommand('edit', previous[0].serverId, 0, {
+    serverId: previous[0].serverId,
+    serverRevision: previous[0].serverRevision,
+    definitionDigest: previous[0].definitionDigest,
+  });
+  const servers = selectedMcpServers(previous, command);
+  expect(servers).toHaveLength(96);
+  expect(servers.filter((entry) => entry.state === 'removed')).toHaveLength(64);
+  const body = JSON.stringify({
+    kind: 'hosted-mcp-settings',
+    schemaVersion: 1,
+    servers,
+    command,
+    operationId: command.operationId,
+    revision: 1,
+    previousRecordRef: null,
+  });
+  expect(Buffer.byteLength(body)).toBeLessThan(64 * 1024);
+  await commitHostedMcpSettings(session, command, servers);
+  const history = await readHostedMcpSettings(session);
+  expect(history.at(-1)?.servers).toHaveLength(96);
+  expect(
+    history.at(-1)?.servers.filter((entry) => entry.state === 'removed'),
+  ).toHaveLength(64);
+});
+
+it('refuses a durable record whose retained snapshot exceeds the total capacity', async () => {
+  const overfilled = Array.from({ length: 97 }, (_, index) => ({
+    ...pin,
+    serverId: `${index < 32 ? 'live' : 'removed'}-${index}`.padEnd(128, 'x'),
+    serverRevision: Number.MAX_SAFE_INTEGER,
+    state: (index === 0
+      ? 'enabled'
+      : index < 32
+        ? 'disabled'
+        : 'removed') as HostedMcpSelection['state'],
+  }));
+  const command = managementCommand('disable', overfilled[0].serverId, 0);
+  expect(() => selectedMcpServers(overfilled, command)).toThrow(
+    'MCP selection exceeds its capacity.',
+  );
+  await commitHostedMcpSettings(session, command, overfilled);
+  await expect(readHostedMcpSettings(session)).rejects.toThrow(
+    'Invalid MCP settings.',
+  );
 });
 
 it('adds MCP to an ordinary Session with no initial pins and rejects an unpublished definition before committing', async () => {
