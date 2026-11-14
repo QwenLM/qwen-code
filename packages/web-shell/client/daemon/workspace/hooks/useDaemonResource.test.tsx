@@ -109,6 +109,30 @@ describe('useDaemonResource', () => {
     expect(result?.data).toBeUndefined();
   });
 
+  it.each([
+    { enabled: false, availability: 'available' },
+    { enabled: true, availability: 'unavailable' },
+  ])(
+    'distinguishes an unavailable reload from supersession: %o',
+    async (state) => {
+      availability.state = state.availability;
+      const load = vi.fn().mockResolvedValue('hello');
+      let result: ReturnType<typeof useDaemonResource<string>> | undefined;
+      function TestComponent() {
+        result = useDaemonResource(load, { enabled: state.enabled });
+        return null;
+      }
+      await act(async () => root.render(<TestComponent />));
+
+      await expect(result!.reloadWithOutcome()).resolves.toEqual({
+        data: undefined,
+        superseded: false,
+      });
+      expect(load).not.toHaveBeenCalled();
+      expect(result?.error).toBeUndefined();
+    },
+  );
+
   it('reports error on load failure', async () => {
     const load = vi.fn().mockRejectedValue(new Error('network error'));
     let result: ReturnType<typeof useDaemonResource<string>> | undefined;
@@ -122,8 +146,73 @@ describe('useDaemonResource', () => {
       root.render((<TestComponent />) as ReactNode);
     });
 
+    await act(async () => {
+      await expect(result!.reload()).resolves.toBeUndefined();
+    });
+
     expect(result?.error?.message).toBe('network error');
     expect(result?.loading).toBe(false);
+  });
+
+  it('keeps errors specific to each reload outcome', async () => {
+    const olderRequest = createDeferred<string>();
+    const newerRequest = createDeferred<string>();
+    const load = vi
+      .fn()
+      .mockReturnValueOnce(olderRequest.promise)
+      .mockReturnValueOnce(newerRequest.promise);
+    let result: ReturnType<typeof useDaemonResource<string>> | undefined;
+    function TestComponent() {
+      result = useDaemonResource(load, {});
+      return null;
+    }
+    await act(async () => root.render(<TestComponent />));
+
+    let older: Promise<unknown> | undefined;
+    let newer: Promise<unknown> | undefined;
+    act(() => {
+      older = result!.reloadWithOutcome();
+      newer = result!.reloadWithOutcome();
+    });
+    const latestError = new Error('latest failure');
+
+    try {
+      await act(async () => {
+        newerRequest.reject(latestError);
+        await newer;
+      });
+      expect(await newer).toEqual({
+        data: undefined,
+        superseded: false,
+        error: latestError,
+      });
+
+      await act(async () => {
+        olderRequest.reject(new Error('older failure'));
+        await older;
+      });
+      expect(await older).toEqual({
+        data: undefined,
+        superseded: true,
+        error: undefined,
+      });
+      expect(result?.error).toBe(latestError);
+
+      availability.state = 'unavailable';
+      await act(async () => root.render(<TestComponent />));
+      await expect(result!.reloadWithOutcome()).resolves.toEqual({
+        data: undefined,
+        superseded: false,
+        error: undefined,
+      });
+      expect(load).toHaveBeenCalledTimes(2);
+    } finally {
+      await act(async () => {
+        olderRequest.resolve('cleanup');
+        newerRequest.resolve('cleanup');
+        await Promise.all([older, newer]);
+      });
+    }
   });
 
   it('stale response does not overwrite fresh data', async () => {
