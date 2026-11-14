@@ -1438,6 +1438,14 @@ export function ChatPane({
     ],
   );
   const paneWorkspaceCwd = workspaceCwd ?? connection.workspaceCwd;
+  const modelPickerScope = useMemo(
+    () => ({
+      sessionId: connection.sessionId,
+      workspaceCwd: paneWorkspaceCwd,
+      daemonBaseUrl: workspace.baseUrl,
+    }),
+    [connection.sessionId, paneWorkspaceCwd, workspace.baseUrl],
+  );
   const previewSessionIdRef = useRef(connection.sessionId);
   previewSessionIdRef.current = connection.sessionId;
 
@@ -2155,6 +2163,7 @@ export function ChatPane({
             currentModel={connection.currentModel ?? ''}
             modelRefresh={modelRefresh}
             availableModels={availableModels}
+            modelPickerScope={modelPickerScope}
             unavailableModels={unavailableModels}
             mountUnavailableModelTooltip={mountUnavailableModelTooltip}
             onSelectMode={handleSelectMode}

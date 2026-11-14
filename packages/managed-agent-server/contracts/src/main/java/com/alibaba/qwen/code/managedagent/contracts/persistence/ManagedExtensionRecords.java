@@ -44,7 +44,7 @@ public final class ManagedExtensionRecords {
     public static final List<String> EVENT_KINDS = List.of("input.accepted",
             "wake.requested", "activation.changed", "model.attempt",
             "message.committed", "tool.intent", "action.changed",
-            "tool.receipt", "checkpoint.committed", "context.compacted",
+            "tool.receipt", "tool.measured", "checkpoint.committed", "context.compacted",
             "cancel.requested", "turn.settled", "config.bound",
             "lifecycle.changed", "domain.committed", "message.delta",
             "message.retracted", "operation.replayed", "hosted.batch.planned", "hosted.cleanup");
@@ -52,6 +52,14 @@ public final class ManagedExtensionRecords {
     public static final int MAX_TEXT_BYTES = 4096;
     public static final int MAX_GRANT_PHASES = 16;
     public static final int MAX_PHASE_LENGTH = 64;
+    /**
+     * 96 entries (32 live + 64 tombstones) is the largest total whose worst-case
+     * effective bundle - widest ids, revisions and digests, plus 32 package
+     * views, 32 prepared pins and 16 base pins - stays inside the 64 KiB inline
+     * bound. The bundle carries the retained array once, from
+     * independentMcpSelections.
+     */
+    public static final int MAX_MCP_SELECTION_ENTRIES = 96;
     public static final int MAX_MONITOR_EVENTS = 10_000;
     public static final int MAX_MONITOR_IDLE_TIMEOUT_MS = 600_000;
     public static final int MAX_MONITOR_DEBOUNCE_MS = 600_000;

@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegi
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
@@ -81,7 +82,7 @@ public final class ResidentRetirementFixture {
                 + " config_ref, policy_ref, state) VALUES ('tenant', ?, 1, 'storage', 'resident', ?, ?, 'ACTIVE')",
                 workspaceId, WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
-                + " VALUES ('tenant', ?, ?, 'OWNER')", workspaceId, com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "owner"));
+                + " VALUES ('tenant', ?, ?, 'OWNER')", workspaceId, ManagedWorkspaceRegistry.actorKey("tenant", "owner"));
     }
 
     public ResidentWorkspaceRetirementStore store() {
@@ -90,7 +91,7 @@ public final class ResidentRetirementFixture {
 
     public StoreModels.Admission create(String key) {
         var store = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, JSON, Clock.systemUTC(), mock(CommittedEventPublisher.class),
-                new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         return new TransactionTemplate(manager).execute(status -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
                 .tenantId("tenant")
                 .actorId("owner")

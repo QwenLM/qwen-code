@@ -6,8 +6,8 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
@@ -18,7 +18,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -47,71 +46,37 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 class ToolPublicationControllerTest {
     @ParameterizedTest
-    @CsvSource({"false,1,false", "true,1,true", "true,0,false", "true,,false"})
-    void asyncAdmissionRequiresBothTheFlagAndCapability(boolean enabled, String header, boolean asynchronous)
-            throws Exception {
-        ManagedAgentProperties properties = new ManagedAgentProperties();
-        properties.getToolPublication().setEntryConcurrency(1);
-        properties.getToolPublication().setAsyncVerificationEnabled(enabled);
-        ToolPublicationDataStore data = mock(ToolPublicationDataStore.class);
-        ToolPublicationController controller = new ToolPublicationController(
-                mock(ToolPublicationStore.class), data, mock(ToolPublicationAdmissionStore.class), properties);
-        var result = new ObjectMapper().createObjectNode();
-        if (asynchronous) {
-            result.put("state", "PENDING");
-        } else {
-            result.put("digest", "legacy-receipt");
-        }
-        when(data.publishSegment(any(), eq("publication"), eq("token"), eq("operation"),
-                eq("stdout"), eq(0), any(), eq(null), eq(asynchronous))).thenReturn(result);
-        MockHttpServletRequest request = new MockHttpServletRequest();
-        request.setContent(new byte[] {1});
-        if (header != null) {
-            request.addHeader(ToolPublicationController.ASYNC_HEADER, header);
-        }
-        var response = controller.segment(new TenantContext("tenant", null), "session", "publication",
-                "stdout", 0, "workspace", "token", "operation", null, request);
-        assertThat(response.getStatusCode().value()).isEqualTo(asynchronous ? 202 : 200);
-        assertThat(response.getBody()).isEqualTo(result);
-        assertThat(response.getHeaders().getCacheControl()).isEqualTo("no-store");
-        if (asynchronous) {
-            result.put("state", "SUCCEEDED");
-            assertThat(controller.segment(new TenantContext("tenant", null), "session", "publication",
-                    "stdout", 0, "workspace", "token", "operation", null, request)
-                    .getStatusCode().value()).isEqualTo(200);
-        }
-    }
-
-    @ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(strings = {"resource", "seal", "prefix", "finish"})
-    void allProducerRoutesForwardAsyncCapabilityAndCompletedReplays(String route) throws Exception {
+    @ValueSource(strings = {"segment", "resource", "seal", "prefix", "finish"})
+    void producerRoutesAcceptPendingWorkAndReturnCompletedReplays(String route) throws Exception {
         var properties = new ManagedAgentProperties();
         properties.getToolPublication().setEntryConcurrency(1);
-        properties.getToolPublication().setAsyncVerificationEnabled(true);
         var data = mock(ToolPublicationDataStore.class);
         var controller = new ToolPublicationController(mock(ToolPublicationStore.class), data,
                 mock(ToolPublicationAdmissionStore.class), properties);
         var result = new ObjectMapper().createObjectNode().put("state", "PENDING");
+        when(data.publishSegment(any(), eq("publication"), eq("token"), eq("operation"),
+                eq("stdout"), eq(0), any(), eq(null))).thenReturn(result);
         when(data.publishResource(any(), eq("publication"), eq("token"), eq("operation"),
-                eq("content:test"), eq("managed-tool-result-content"), any(), eq(true))).thenReturn(result);
+                eq("content:test"), eq("managed-tool-result-content"), any())).thenReturn(result);
         when(data.seal(any(), eq("publication"), eq("token"), eq("operation"), eq("stdout"),
-                eq(1), eq(1L), eq("digest"), eq(true))).thenReturn(result);
-        when(data.prefix(any(), eq("publication"), eq("token"), eq("operation"), eq("stdout"), eq(true)))
+                eq(1), eq(1L), eq("digest"))).thenReturn(result);
+        when(data.prefix(any(), eq("publication"), eq("token"), eq("operation"), eq("stdout")))
                 .thenReturn(result);
-        when(data.finish(any(), eq("publication"), eq("token"), eq("operation"), any(), eq(true)))
+        when(data.finish(any(), eq("publication"), eq("token"), eq("operation"), any()))
                 .thenReturn(result);
-        for (String state : new String[] {"PENDING", "SUCCEEDED"}) {
+        for (String state : new String[] {"PENDING", "SUCCEEDED", "FAILED"}) {
             result.put("state", state);
             var request = new MockHttpServletRequest();
-            request.addHeader(ToolPublicationController.ASYNC_HEADER, "1");
             request.setContent("{\"segmentCount\":1,\"byteLength\":1,\"digest\":\"digest\"}"
                     .getBytes(StandardCharsets.UTF_8));
             var tenant = new TenantContext("tenant", null);
             var response = switch (route) {
+                case "segment" -> controller.segment(tenant, "session", "publication", "stdout", 0,
+                        "workspace", "token", "operation", null, request);
                 case "resource" -> controller.resource(tenant, "session", "publication", "managed-tool-result-content",
                         "content:test", "workspace", "token", "operation", request);
                 case "seal" -> controller.seal(tenant, "session", "publication", "stdout", "workspace", "token", "operation", request);
-                case "prefix" -> controller.prefix(tenant, "session", "publication", "stdout", "workspace", "token", "operation", "1");
+                case "prefix" -> controller.prefix(tenant, "session", "publication", "stdout", "workspace", "token", "operation");
                 case "finish" -> controller.finish(tenant, "session", "publication", "workspace", "token", "operation", request);
                 default -> throw new AssertionError(route);
             };
@@ -183,7 +148,7 @@ class ToolPublicationControllerTest {
         properties.getSessionStore().setBindingKey("0123456789abcdef0123456789abcdef");
         properties.getToolPublication().setEntryConcurrency(1);
         WriterCredentialPolicy credentials = new WriterCredentialPolicy(properties);
-        ManagedSessionStore sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc, credentials);
+        JdbcManagedSessionStore sessions = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc, credentials);
         writerToken = credentials.issue(TENANT, WORKSPACE, SESSION);
         var grant = new TransactionTemplate(manager).execute(transaction -> sessions.acquireWriter(
                 TENANT, SESSION, writerToken, new AcquireWriterRequest(WORKSPACE, "writer", 60_000L)));

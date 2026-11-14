@@ -21,7 +21,10 @@ import {
   type ManagedContextBoot,
   type ManagedContextReady,
 } from './managed-context-envelope.js';
-import { CSI_FILES_RETIREMENT_CAPABILITY_DIGEST } from './managed-csi-file-profile.js';
+import {
+  matchesCsiFilesProfile,
+  type CsiFilesProfile,
+} from './managed-csi-file-profile.js';
 import { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url.js';
 
 export const MANAGED_CSI_FILE_PROTOCOL = 'managed-csi/2';
@@ -37,9 +40,9 @@ export const MANAGED_CSI_FILE_ROUTES = Object.freeze(
 );
 
 export interface ManagedCsiFileIdentity {
-  readonly profile: 'csi-files-retirement/1';
+  readonly profile: CsiFilesProfile;
   readonly sessionId: string;
-  readonly capabilityDigest: typeof CSI_FILES_RETIREMENT_CAPABILITY_DIGEST;
+  readonly capabilityDigest: string;
 }
 
 interface ManagedCsiFileBootFields {
@@ -132,8 +135,10 @@ export function parseManagedCsiFileBoot(value: unknown): ManagedCsiFileBoot {
       (finalizationBoot &&
         boot['finalization'] !== CSI_FILE_FINALIZATION_FORMAT) ||
       boot['managedCsi'] !== MANAGED_CSI_FILE_PROTOCOL ||
-      identity['profile'] !== 'csi-files-retirement/1' ||
-      identity['capabilityDigest'] !== CSI_FILES_RETIREMENT_CAPABILITY_DIGEST ||
+      !matchesCsiFilesProfile(
+        identity['profile'],
+        identity['capabilityDigest'],
+      ) ||
       typeof identity['sessionId'] !== 'string' ||
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
         identity['sessionId'],

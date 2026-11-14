@@ -21,6 +21,12 @@ export interface PendingSessionInput {
   readonly source: string;
   readonly sequence: number;
   readonly contentRef: ManagedSessionJsonValue | undefined;
+  /**
+   * The earliest instant this input may start a turn (epoch ms), or null /
+   * undefined for immediate delivery. The wake pump defers a not-yet-due
+   * input rather than polling; see the self-paced loop wakeup design.
+   */
+  readonly notBefore: number | null;
 }
 
 /**
@@ -45,6 +51,7 @@ export function pendingSessionInputs(
     const turnId = event.payload['turnId'];
     if (typeof inputId !== 'string' || typeof turnId !== 'string') continue;
     if (settled.has(turnId)) continue;
+    const notBefore = event.payload['notBefore'];
     pending.push({
       inputId,
       turnId,
@@ -54,6 +61,7 @@ export function pendingSessionInputs(
           : 'unknown',
       sequence: event.sequence,
       contentRef: event.payload['contentRef'],
+      notBefore: typeof notBefore === 'number' ? notBefore : null,
     });
   }
   return pending;
