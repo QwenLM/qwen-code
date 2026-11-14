@@ -4872,8 +4872,11 @@ export function registerSessionRoutes(
           }
           // Same busy gate as worktree-reset: branching reads HEAD and
           // writes a ref, which must not race an in-flight turn.
+          const branchBusySummary =
+            runtime.bridge.getSessionSummary(storageSessionId);
           if (
-            runtime.bridge.getSessionSummary(storageSessionId).hasActivePrompt
+            branchBusySummary.hasActivePrompt ||
+            (branchBusySummary.pendingPromptCount ?? 0) > 0
           ) {
             throw new BranchWhilePromptActiveError(storageSessionId);
           }
@@ -5137,9 +5140,11 @@ export function registerSessionRoutes(
               // the copy and leave its last edits behind. Same gate as the
               // worktree-reset route; changeSessionCwd re-checks at the
               // queue tail for the race window after this read.
+              const localBusySummary =
+                runtime.bridge.getSessionSummary(storageSessionId);
               if (
-                runtime.bridge.getSessionSummary(storageSessionId)
-                  .hasActivePrompt
+                localBusySummary.hasActivePrompt ||
+                (localBusySummary.pendingPromptCount ?? 0) > 0
               ) {
                 throw new CdWhilePromptActiveError(storageSessionId);
               }
@@ -5346,15 +5351,12 @@ export function registerSessionRoutes(
           }
           const releaseOwnership = await acquireWorktreeOwnershipOp(sourceCwd);
           try {
-            // Same busy gate as the to=local direction: the dirty capture
-            // and worktree creation must not race an in-flight turn.
-            if (
-              runtime.bridge.getSessionSummary(storageSessionId).hasActivePrompt
-            ) {
-              throw new CdWhilePromptActiveError(storageSessionId);
-            }
-            // Same admission fence as the to=local direction: no prompt
-            // may be admitted while the capture/creation/relocation runs.
+            // Arm the admission fence FIRST, then read the busy gate: a
+            // prompt admitted between the gate read and the arm would
+            // slip past both. With the barrier armed, sendPrompt fails
+            // closed synchronously, so the gate only has to catch prompts
+            // admitted before the arm (pendingPromptCount covers the
+            // attachment-resolution window where promptActive is false).
             if (
               runtime.bridge.setSessionResetPending === undefined ||
               runtime.bridge.clearSessionResetPending === undefined
@@ -5362,6 +5364,14 @@ export function registerSessionRoutes(
               throw new Error('Bridge does not support handoff serialization');
             }
             runtime.bridge.setSessionResetPending(storageSessionId);
+            const wtBusySummary =
+              runtime.bridge.getSessionSummary(storageSessionId);
+            if (
+              wtBusySummary.hasActivePrompt ||
+              (wtBusySummary.pendingPromptCount ?? 0) > 0
+            ) {
+              throw new CdWhilePromptActiveError(storageSessionId);
+            }
             const sourceService = new GitWorktreeService(sourceCwd);
             await sourceService.migrateLegacyWorktreeGitignore();
             const currentBranch = await sourceService

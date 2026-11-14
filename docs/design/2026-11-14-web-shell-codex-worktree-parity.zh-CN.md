@@ -192,8 +192,10 @@ worktree 会话（`gitSessionId` + 拉取到的 `detached` 状态）且 daemon �
 会话——它排在在途 prompt 之后、prompt 活跃时拒绝——全程持 worktree 键控
 所有权锁，并施加与 D5 相同的 superseded-sidecar 与 marker 所有权守卫
 （作用于被离开的 worktree）。两个方向还在最前面拒绝繁忙会话
-（`cd_while_prompt_active`，与 worktree-reset 同一道门），并在整个移交期间
-武装 bridge 的 reset-pending 准入屏障：快照/建分支/checkout 步骤不在
+（`cd_while_prompt_active`，与 worktree-reset 同一道门）——门同时读
+`hasActivePrompt` 与 `pendingPromptCount`，因为 prompt 在附件解析期间
+已准入（计数同步翻转）但 `promptActive` 尚未置位，单靠屏障围不住这个
+窗口——并在整个移交期间武装 bridge 的 reset-pending 准入屏障：快照/建分支/checkout 步骤不在
 bridge 的 prompt 队列上执行，而队列尾部检查只在队列排空后运行，移交中途
 准入的 prompt 否则会在复制之后继续写文件、丢失最后的编辑。屏障武装期间，
 sendPrompt、cd、workflow 动作与 goal 控制均 fail-closed

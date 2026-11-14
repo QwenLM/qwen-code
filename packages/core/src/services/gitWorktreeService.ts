@@ -3423,6 +3423,17 @@ export class GitWorktreeService {
     return { success: true, branchPreserved: true };
   }
 
+  /**
+   * Remove a prepared (never-attached) worktree. The forced removal is
+   * safe only under the caller guarantees enforced here: the marker names
+   * `expectedOwner` (or is absent for a null owner), HEAD never left
+   * `expectedBaseCommit` (no agent commit exists), and the cleanliness
+   * gate exempts ONLY `carriedPaths` — the exact overlay the creation
+   * carried, which the source checkout still holds. Any other file
+   * refuses the removal. Callers: the branch-worktree route cleanup and
+   * the startup journal recovery, both passing the journal's
+   * `carriedPaths` and `worktreeBranch !== ''` ownership.
+   */
   async removePreparedUserWorktree(
     slug: string,
     expectedOwner: string | null,

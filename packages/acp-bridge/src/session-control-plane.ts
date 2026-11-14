@@ -4561,6 +4561,7 @@ export function createSessionControlPlane(
       ...(entry.sourceId !== undefined ? { sourceId: entry.sourceId } : {}),
       clientCount: entry.clientIds.size,
       hasActivePrompt: hasInFlightPromptActivity(entry),
+      pendingPromptCount: entry.pendingPromptCount,
       activeWorkState: entryActiveWorkState(entry),
       hasRunningBackgroundTasks: entry.hasRunningBackgroundTasks,
       ...(entry.backgroundTurn ? { backgroundTurn: entry.backgroundTurn } : {}),

@@ -225,8 +225,11 @@ and refuses while a prompt is active — under the worktree-keyed ownership
 lock, with the same superseded-sidecar and marker-ownership guards as D5
 (applied to the worktree being left). Both directions additionally refuse
 a busy session up front (`cd_while_prompt_active`, the same gate as
-worktree-reset) and arm the bridge's reset-pending admission barrier for
-the whole transfer: the snapshot/branch/checkout steps do not run on the
+worktree-reset) — the gate reads both `hasActivePrompt` and
+`pendingPromptCount`, because a prompt is admitted (count flipped
+synchronously) before `promptActive` is set while its attachments
+resolve, and the barrier alone would not fence that window — and arm
+the bridge's reset-pending admission barrier for the whole transfer: the snapshot/branch/checkout steps do not run on the
 bridge's prompt queue, and the queue-tail check only runs after the queue
 drains, so a prompt admitted mid-handoff would otherwise write files after
 the copy and lose its last edits. While the barrier is armed, sendPrompt,

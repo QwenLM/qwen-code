@@ -77,9 +77,10 @@ function makeFixture(opts: { subdir?: string } = {}) {
   const runtimeBaseDir = mkdtempSync(path.join(tmpRoot, 'rt-'));
   const sessionService = new SessionService(workspaceDir, { runtimeBaseDir });
   const sessionId = randomUUID();
-  const summaries = new Map<string, { hasActivePrompt: boolean }>([
-    [sessionId, { hasActivePrompt: false }],
-  ]);
+  const summaries = new Map<
+    string,
+    { hasActivePrompt: boolean; pendingPromptCount?: number }
+  >([[sessionId, { hasActivePrompt: false }]]);
   const cdCalls: Array<{ sessionId: string; path: string }> = [];
   const setWorktreeCalls: unknown[][] = [];
   const clearWorktreeCalls: string[] = [];
@@ -410,6 +411,26 @@ describe('POST /session/:id/worktree-handoff', () => {
     fixture.writeTranscript();
     await fixture.createDetachedWorktree();
     fixture.summaries.set(fixture.sessionId, { hasActivePrompt: true });
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'local' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('cd_while_prompt_active');
+    expect(fixture.cdCalls).toHaveLength(0);
+  });
+
+  it('refuses handoff while a prompt is admitted but not yet active', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    await fixture.createDetachedWorktree();
+    // The attachment-resolution window: admitted (pendingPromptCount > 0)
+    // but promptActive still false — hasActivePrompt alone reads quiescent.
+    fixture.summaries.set(fixture.sessionId, {
+      hasActivePrompt: false,
+      pendingPromptCount: 1,
+    });
 
     const res = await request(fixture.app)
       .post(`/session/${fixture.sessionId}/worktree-handoff`)
