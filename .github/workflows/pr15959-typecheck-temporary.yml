@@ -1,0 +1,63 @@
+name: 'PR 15959 isolated typecheck'
+on:
+  push:
+    branches: ['codex/verify-pr-15959-typecheck-20261115']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  typecheck:
+    runs-on: [self-hosted, linux, x64, ecs-qwen]
+    container: node:22-bookworm
+    timeout-minutes: 45
+    env:
+      NODE_OPTIONS: '--max-old-space-size=6144'
+      QWEN_SKIP_PREPARE: '1'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: '0ba1d481cd98f8ea78698ef282767babc555c954'
+          persist-credentials: false
+      - name: Attest source and resource limits
+        run: |
+          mkdir -p .verify-evidence
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          test "$(git rev-parse HEAD)" = '0ba1d481cd98f8ea78698ef282767babc555c954'
+          git rev-parse HEAD | tee .verify-evidence/source-sha.txt
+          node -e 'console.log(JSON.stringify({node:process.version,heapBytes:require("node:v8").getHeapStatistics().heap_size_limit}))' | tee .verify-evidence/runtime.json
+          cat /sys/fs/cgroup/memory.max 2>/dev/null || true
+          free -m
+      - name: Install locked dependencies without rebuilding
+        timeout-minutes: 20
+        run: corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
+      - name: Reuse normal build from this exact head
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: unit-test-tree
+          repository: QwenLM/qwen-code
+          run-id: '43606770112'
+          github-token: ${{ github.token }}
+          path: '.verify-input'
+      - name: Restore built prerequisites
+        run: |
+          tar -xzf .verify-input/unit-test-tree.tgz
+          node scripts/ci-build-cache.mjs host-assets
+          git diff --exit-code
+      - name: Run standalone typecheck sequentially
+        timeout-minutes: 20
+        run: |
+          set +e
+          npm run typecheck 2>&1 | tee .verify-evidence/typecheck.log
+          result=${PIPESTATUS[0]}
+          printf '%s\n' "$result" > .verify-evidence/typecheck.rc
+          exit "$result"
+      - name: Preserve evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pr15959-standalone-typecheck
+          path: .verify-evidence/
+          include-hidden-files: true
