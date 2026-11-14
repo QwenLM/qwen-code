@@ -197,7 +197,7 @@ describe('MemoryMessage refresh with the resource hook', () => {
   });
 
   it.each(['resolve', 'reject'] as const)(
-    'reports a retryable refresh that %ss after a same-path workspace event',
+    'reports a neutral retryable refresh that %ss after a same-path workspace event',
     async (completion) => {
       await renderPanel();
       const oldRefresh = deferred<DaemonWorkspaceMemoryStatus>();
@@ -231,15 +231,87 @@ describe('MemoryMessage refresh with the resource hook', () => {
       expect(harness.outcomes).toEqual([{ data: undefined, superseded: true }]);
       expect(contentReads()).toBe(readsBefore);
       expect(container.textContent).toContain(
-        'Could not refresh memory. Please try again.',
+        'Memory changed while refreshing. Please try again.',
       );
       expect(container.textContent).not.toContain('obsolete');
       expect(container.textContent).not.toContain('Memory refreshed.');
       expect(harness.onMessage).toHaveBeenCalledWith(
-        'Could not refresh memory. Please try again.',
-        'error',
+        'Memory changed while refreshing. Please try again.',
+        'status',
       );
+      expect(
+        harness.onMessage.mock.calls.some(([, type]) => type === 'error'),
+      ).toBe(false);
       expect(harness.writeMemory).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['resolve', 'reject'] as const)(
+    'keeps a newer save confirmation when an older refresh %ss',
+    async (completion) => {
+      await renderPanel();
+      const click = (label: string) => {
+        act(() => {
+          const button = Array.from(container.querySelectorAll('button')).find(
+            (item) => item.textContent === label,
+          );
+          expect(button?.disabled).toBe(false);
+          button!.click();
+        });
+      };
+      click('Edit');
+      await flush();
+      const textarea = container.querySelector('textarea')!;
+      act(() => {
+        const setter = Object.getOwnPropertyDescriptor(
+          HTMLTextAreaElement.prototype,
+          'value',
+        )!.set!;
+        setter.call(textarea, 'saved memory\n');
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      const oldRefresh = deferred<DaemonWorkspaceMemoryStatus>();
+      const save = deferred<{ filePath: string; bytesWritten: number }>();
+      harness.loadMemoryStatus.mockImplementationOnce(() => oldRefresh.promise);
+      harness.writeMemory.mockReturnValueOnce(save.promise);
+      const readsBefore = contentReads();
+
+      await refresh();
+      click('Save Memory');
+      expect(harness.writeMemory).toHaveBeenCalledExactlyOnceWith({
+        scope: 'workspace',
+        mode: 'replace',
+        content: 'saved memory\n',
+      });
+      await act(async () => {
+        save.resolve({ filePath: workspaceFile.path, bytesWritten: 13 });
+      });
+      await flush();
+      const savedMessage = harness.onMessage.mock.calls[0]?.[0];
+      expect(savedMessage).toContain(workspaceFile.path);
+      expect(harness.onMessage).toHaveBeenCalledExactlyOnceWith(
+        savedMessage,
+        'status',
+      );
+      expect(container.textContent).toContain(savedMessage);
+
+      await act(async () => {
+        if (completion === 'resolve') {
+          oldRefresh.resolve(statusWith([workspaceFile]));
+        } else {
+          oldRefresh.reject(new Error('obsolete refresh failure'));
+        }
+      });
+      await flush();
+
+      expect(harness.outcomes).toEqual([{ data: undefined, superseded: true }]);
+      expect(container.textContent).toContain(savedMessage);
+      expect(container.textContent).toContain('saved memory');
+      expect(harness.onMessage).toHaveBeenCalledExactlyOnceWith(
+        savedMessage,
+        'status',
+      );
+      expect(contentReads()).toBe(readsBefore);
     },
   );
 

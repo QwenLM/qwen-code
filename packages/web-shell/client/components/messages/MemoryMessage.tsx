@@ -199,10 +199,14 @@ export function MemoryMessage({
         ) {
           return;
         }
-        if (superseded || !nextStatus) {
-          const text = superseded
-            ? t('memory.refreshFailed')
-            : (refreshError?.message ?? t('memory.refreshFailed'));
+        if (superseded) {
+          const text = t('memory.refreshSuperseded');
+          setMessage(text);
+          onMessage?.(text, 'status');
+          return;
+        }
+        if (!nextStatus) {
+          const text = refreshError?.message ?? t('memory.refreshFailed');
           setMessage(text);
           onMessage?.(text, 'error');
           return;
@@ -242,6 +246,8 @@ export function MemoryMessage({
 
   const handleSave = () => {
     if (!selectedEntry || !canReplace) return;
+    // A newer save owns the feedback, even if an older refresh finishes later.
+    refreshSeqRef.current++;
     if (!draft.trim()) {
       setMessage(t('memory.contentEmpty'));
       return;
