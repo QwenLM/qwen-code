@@ -88,7 +88,7 @@ tooltip 变为 `本地文件 — <状态>`，在有目录名时追加 `（<rootN
 
 `requestToast` 是 `CustomEvent`，daemon 宿主外壳中唯一的文档级监听器在 App。managed-only 启动路径（`ManagedStandaloneApp` → `ManagedAgentWebShell`）现在挂载 `WindowToastHost`——一个自包含宿主，与 App 监听器同一契约：非空 message 校验、tone+message 去重、上限栈、按截止时间自动消失。没有它，「更换目录」失败 toast 会派发进一个没有监听器的文档而被静默丢弃。toast 栈常量放在 `ToastHost.tsx` 并与 App 共享，使两个宿主不会漂移。
 
-通道按 shell 作用域隔离，且归属绝不单靠焦点推断：每个发 toast 的控件与 hook（两个 local-files 控件、`useExternalLinkOpener`、`useReportedArtifactRegistration`）都经 `useWebShellPortalRoot` 把自己的 shell root 作为显式 scope 传入，优先于任何焦点状态。无 scope 时，`requestToast` 沿焦点元素下钻 shadow root（`document.activeElement` 是 shadow 宿主而非聚焦控件）找到其 `[data-web-shell-root]`；再找不到时，唯一挂载的 shell root 仍会收到提示，因此无焦点或 effect 驱动的调用不会丢失。只有没有唯一 shell 的文档才回退到 window。事件带 `bubbles`（App 的 window 监听器仍能收到 shell-root 派发）与 `composed`（跨越 shadow 边界）。每个 `WindowToastHost` 只监听自己的 shell root。`renderManagedAgentWebShell` 是公开嵌入 API，宿主页面可在同一文档挂载多个 shell；不做隔离时，一个 shell 抛出的提示会同时出现在另一个 shell——可能属于另一个租户。
+通道按 shell 作用域隔离，且归属绝不单靠焦点推断：每个发 toast 的控件与 hook（两个 local-files 控件、`useExternalLinkOpener`、`useReportedArtifactRegistration`）都经 `useWebShellPortalRoot` 把自己的 shell root 作为显式 scope 传入，优先于任何焦点状态。artifact 注册由专用的 `ReportedArtifactRegistration` 子组件在 App 的 portal-root Provider 内渲染：App 在自身组件体（它返回的 Provider 之上）调用 `useSessionArtifacts`，注册若留在该 hook 内会读到未填充的 context。无 scope 时，`requestToast` 沿焦点元素下钻 shadow root（`document.activeElement` 是 shadow 宿主而非聚焦控件）找到其 `[data-web-shell-root]`；再找不到时，唯一挂载的 shell root 仍会收到提示，因此无焦点或 effect 驱动的调用不会丢失。只有没有唯一 shell 的文档才回退到 window。事件带 `bubbles`（App 的 window 监听器仍能收到 shell-root 派发）与 `composed`（跨越 shadow 边界）。每个 `WindowToastHost` 只监听自己的 shell root。`renderManagedAgentWebShell` 是公开嵌入 API，宿主页面可在同一文档挂载多个 shell；不做隔离时，一个 shell 抛出的提示会同时出现在另一个 shell——可能属于另一个租户。
 
 ## 5. 设计决策与理由
 
@@ -108,7 +108,10 @@ tooltip 变为 `本地文件 — <状态>`，在有目录名时追加 `（<rootN
 - `packages/web-shell/client/local-files/capabilities.ts` — insecure-context 先于 unsupported-browser 诊断。
 - `packages/web-shell/client/components/ToastHost.tsx` — `WindowToastHost` 与共享 toast 栈常量。
 - `packages/web-shell/client/ManagedAgentWebShell.tsx` — 挂载 toast 宿主。
-- `packages/web-shell/client/App.tsx` — 消费共享 toast 常量。
+- `packages/web-shell/client/components/ReportedArtifactRegistration.tsx` — 在 portal-root Provider 内渲染的注册子组件。
+- `packages/web-shell/client/hooks/useSessionArtifacts.ts` — 注册移出，hook 不再在 Provider 之上读取 toast scope。
+- `packages/web-shell/client/hooks/useExternalLinkOpener.ts` 与 `useReportedArtifactRegistration.ts` — 传入自己的 shell root 作为 toast scope。
+- `packages/web-shell/client/App.tsx` — 消费共享 toast 常量；在 Provider 内渲染注册子组件。
 - `packages/web-shell/client/i18n.tsx` — 新增 EN/ZH 键（两种语言）；insecure-context 指引为带本地端口的函数值。
 - `packages/web-templates/src/export-html/build.mjs` — 导出包字节上限按新增文案的实测增量提升。
 - 测试：`LocalFilesPanel.test.tsx`、`LocalFilesControl.test.tsx`、`ManagedLocalFilesControl.test.tsx`、`ManagedSessionsPage.test.tsx`、`ManagedAgentWebShell.test.tsx`、`ToastHost.test.tsx`、`capabilities.test.ts`、`i18n.test.ts`、hook 测试、`client/e2e/managed-local-files.spec.ts`，以及 `client/e2e/web-shell.local-files-toast.spec.ts`。

@@ -231,7 +231,11 @@ The channel is shell-scoped, and ownership is never inferred from focus
 alone: every toast-raising control and hook (both local-files controls,
 `useExternalLinkOpener`, `useReportedArtifactRegistration`) passes its own
 shell root (via `useWebShellPortalRoot`) as an explicit scope, which wins
-over any focus state. Without a scope,
+over any focus state. The artifact registration runs in a dedicated
+`ReportedArtifactRegistration` child rendered inside App's portal-root
+provider: App calls `useSessionArtifacts` in its own body, above the
+provider it returns, so the registration cannot ride inside that hook
+without reading an unpopulated context. Without a scope,
 `requestToast` walks the focused element through shadow roots
 (`document.activeElement` is the shadow host, not the focused control) to its
 `[data-web-shell-root]`; failing that, a single mounted shell root still
@@ -285,7 +289,15 @@ a different tenant's.
 - `packages/web-shell/client/components/ToastHost.tsx` — `WindowToastHost`
   and the shared toast stack constants.
 - `packages/web-shell/client/ManagedAgentWebShell.tsx` — mount the toast host.
-- `packages/web-shell/client/App.tsx` — consume the shared toast constants.
+- `packages/web-shell/client/components/ReportedArtifactRegistration.tsx` —
+  the registration child rendered inside the portal-root provider.
+- `packages/web-shell/client/hooks/useSessionArtifacts.ts` — registration
+  lifted out so the hook no longer reads the toast scope above the provider.
+- `packages/web-shell/client/hooks/useExternalLinkOpener.ts` and
+  `useReportedArtifactRegistration.ts` — pass their shell root as the toast
+  scope.
+- `packages/web-shell/client/App.tsx` — consume the shared toast constants;
+  render the registration child inside the provider.
 - `packages/web-shell/client/i18n.tsx` — new EN/ZH keys (both locales); the
   insecure-context instruction is function-valued with the local port.
 - `packages/web-templates/src/export-html/build.mjs` — the export bundle byte
