@@ -129,6 +129,19 @@ public class RuntimeBrokerConfiguration {
         return broker.service();
     }
 
+    // The terminal capability hint must resolve placement through the same
+    // authority the Broker uses. Expose the resolver the Broker already built
+    // (null when there is no workspace execution store) so the ObjectProvider
+    // in ManagedAgentService finds it instead of always yielding null and
+    // pinning capabilities.terminal to false.
+    @Bean
+    @ConditionalOnProperty(prefix = "qwen.managed-agent.runtime-broker",
+            name = "enabled", havingValue = "true")
+    public com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRuntimeResolver workspaceRuntimeResolver(
+            EmbeddedRuntimeBroker broker) {
+        return broker.workspaceRuntimeResolver();
+    }
+
     @Bean
     @ConditionalOnMissingBean(RuntimeWarmer.class)
     public RuntimeWarmer runtimeWarmer() {
