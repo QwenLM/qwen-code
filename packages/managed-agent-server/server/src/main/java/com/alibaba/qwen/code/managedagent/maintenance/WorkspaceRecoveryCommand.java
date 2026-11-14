@@ -48,8 +48,8 @@ public final class WorkspaceRecoveryCommand {
                 .require(com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS);
         try (ConfigurableApplicationContext context = new SpringApplicationBuilder(
                 WorkspaceRecoveryApplication.class).web(WebApplicationType.NONE).run(args)) {
-            ManagedAgentSettings.RuntimeBroker options = context.getBean(
-                    ManagedAgentSettings.class).getRuntimeBroker();
+            var settings = context.getBean(ManagedAgentSettings.class);
+            ManagedAgentSettings.RuntimeBroker options = settings.getRuntimeBroker();
             if (!options.isOperatorRecoveryEnabled()
                     || !options.isDurableLocalProcess()
                     || !com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(options.getProvisioner())
@@ -57,11 +57,15 @@ public final class WorkspaceRecoveryCommand {
                 throw new IllegalStateException("Operator recovery requires enabled durable local workers.");
             }
             DataSource dataSource = context.getBean(DataSource.class);
+            var oss = MaintenanceObjectStores.settingsOss(settings);
+            var objects = oss == null ? null : oss.objects(settings.getToolPublication().getOssBucket());
             var bindings = new JdbcRuntimeBindingRepository(dataSource,
                     AesGcmSecretProtector.fromBase64(options.getCredentialKeyId(),
-                            options.getCredentialKey(), options.getPreviousCredentialKeys()));
+                            options.getCredentialKey(), options.getPreviousCredentialKeys()),
+                    MaintenanceObjectStores.readPacks(
+                            new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(dataSource), objects));
             var sessions = new JdbcRuntimeSessionRepository(dataSource);
-            var executions = new JdbcToolExecutionRepository(dataSource);
+            var executions = new JdbcToolExecutionRepository(dataSource, bindings);
             var manager = new JdbcTransactionManager(dataSource);
             var jdbc = new JdbcTemplate(dataSource);
             var ownership = new JdbcWorkspaceExecutionStore(jdbc, manager);
@@ -72,7 +76,8 @@ public final class WorkspaceRecoveryCommand {
                 throw new IllegalStateException("Original Runtime state directory is unavailable.");
             }
             HttpRuntimeTransport http = new HttpRuntimeTransport();
-            try (var local = localFactory.createForMaintenance(options, http)) {
+            try (var ownedOss = oss;
+                    var local = localFactory.createForMaintenance(options, http)) {
                 if ("inspect".equals(args[0]) && args.length == 3) {
                     long generation = Long.parseLong(args[2]);
                     var inspection = operator.inspect(args[1], generation);

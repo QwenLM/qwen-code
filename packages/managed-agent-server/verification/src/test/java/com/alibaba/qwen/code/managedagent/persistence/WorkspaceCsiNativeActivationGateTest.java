@@ -6,13 +6,16 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.maintenance.WorkspaceCsiRuntimeMain;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
+import com.alibaba.qwen.code.runtimebroker.RuntimeRequestKeys;
 import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
@@ -24,6 +27,7 @@ import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingReposit
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
+import com.alibaba.qwen.managedprobes.PublicationProbeWiring;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -40,6 +44,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import javax.sql.DataSource;
 
+import java.lang.reflect.Proxy;
 import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -196,7 +201,7 @@ class WorkspaceCsiNativeActivationGateTest {
         assertThat(journal.restore("tenant", "workspace", sessionId, token).activationLease()).isEqualTo(lease);
         transaction.executeWithoutResult(status -> jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
             var head = com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiActivationAdmission.lockNativeHead(connection,
-                    JdbcCsiFilesRetirementGuard.lockBindingControl(connection, binding.getBindingId()));
+                    JdbcCsiFilesRetirementGuard.lockBindingControl(connection, binding.getBindingId()), null);
             assertThat(head.activation().expiresAt()).isEqualTo(lease.expiresAt());
             assertThat(head.activation().renewalSequence()).isEqualTo(100);
             return null;
@@ -332,11 +337,12 @@ class WorkspaceCsiNativeActivationGateTest {
                     .map(row -> JSON.valueToTree(new TreeMap<>(row)).toString()).sorted().toList());
         }
         assertThat(rows).containsKeys("ma_delivery", "ma_session", "ma_session_head", "ma_request_receipt");
-        // 46 = the 45 baseline tables plus flyway_schema_history; the merged
-        // baseline carries both the PR's ma_session_principal ownership row and
-        // the base's ma_journal_pack, not stray catalog artifacts.
+        // 48 = the 47 baseline tables plus flyway_schema_history. Three entries
+        // were added to V1__managed_schema.sql on the two sides of this merge:
+        // the PR's ma_session_principal ownership row and the base's
+        // ma_client_files_binding and ma_client_files_request.
         assertThat(rows).containsKey("ma_session_principal");
-        assertThat(rows).hasSize(46);
+        assertThat(rows).hasSize(48);
         return rows;
     }
 
@@ -616,9 +622,126 @@ class WorkspaceCsiNativeActivationGateTest {
     }
 
     private ToolExecutionRecord admit(String id) {
-        return bindings.admitExecution(sessions, executions, ToolExecutionRecord.prepared(id, id + "-key", binding.getBindingId(), 1,
+        return admit(id, bindings, executions);
+    }
+
+    private ToolExecutionRecord admit(String id, JdbcRuntimeBindingRepository via, JdbcToolExecutionRepository ledger) {
+        return via.admitExecution(sessions, ledger, ToolExecutionRecord.prepared(id, id + "-key", binding.getBindingId(), 1,
                 sessionId, sessionId, id + "-turn", id + "-tool", "sha256:" + "a".repeat(64),
                 Map.of("dispatchMode", "deferred", "sessionId", sessionId, "promptId", id + "-turn", "callId", id + "-tool", "argsDigest", "sha256:" + "a".repeat(64))));
+    }
+
+    /**
+     * B2' regression: once the journal prefix is packed and its SQL blobs are deleted, the live
+     * broker repositories must resolve the evicted record_bytes through their JdbcJournalPacks
+     * bundle. Each read below fails closed with csi_original_activation_unavailable without the
+     * bundle, and with the bundle reaches the same journal-independent gate it would reach on a
+     * SQL-hot journal (native-resources 501, reservation conflict, legacy-reference continuation
+     * refusal, legacy dispatch refusal). The dispatchCheckpoint/requireRecoveryTail tails need a
+     * pending-batch/cold-recovery fixture this harness does not build; they share the wired
+     * resolver covered here and in CsiPackRecordsTest.
+     */
+    @Test
+    void brokerRepositoriesResolveEvictedJournalBytesFromThePack() throws Exception {
+        ready();
+        insertDeferredExecution("pack-continuation");
+        var packs = new JdbcJournalPacks(jdbc, new PublicationProbeWiring.InMemoryObjectStore(), packSettings());
+        assertThat(packs.compactOnce("tenant", "workspace", sessionId)).isTrue();
+        assertThat(packs.deleteCoveredBlobs()).isGreaterThan(0);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx WHERE record_bytes IS NULL",
+                Integer.class)).isEqualTo(2);
+        var packBindings = new JdbcRuntimeBindingRepository(jdbc.getDataSource(),
+                new AesGcmSecretProtector("test", new byte[32]), packs);
+        var packExecutions = new JdbcToolExecutionRepository(jdbc.getDataSource(), packBindings);
+        var expected = ToolExecutionRecord.prepared("pack-continuation", "pack-continuation-key",
+                binding.getBindingId(), 1, sessionId, sessionId, "pack-continuation-turn", "pack-continuation-tool",
+                "sha256:" + "a".repeat(64),
+                Map.of("dispatchMode", "deferred", "sessionId", sessionId, "promptId", "pack-continuation-turn",
+                        "callId", "pack-continuation-tool", "argsDigest", "sha256:" + "a".repeat(64)))
+                .withDispatch("owner", Instant.now().plusSeconds(60), 1, ToolExecutionRecord.State.DISPATCHING);
+
+        rejected(() -> admit("evicted-admission"), "csi_original_activation_unavailable");
+        rejected(() -> bindings.readCsiBatch(sessions, executions, binding, "prompt", "batch"),
+                "csi_original_activation_unavailable");
+        rejected(() -> executions.claimDispatch("pack-continuation", "owner", Duration.ofSeconds(30)),
+                "csi_original_activation_unavailable");
+        rejected(() -> bindings.authorizeDispatch(sessions, executions, expected, "owner", 1),
+                "csi_original_activation_unavailable");
+
+        rejected(() -> admit("evicted-admission-packed", packBindings, packExecutions), "csi_native_resources_required");
+        rejected(() -> packBindings.readCsiBatch(sessions, packExecutions, binding, "prompt", "batch"),
+                "csi_native_reservation_conflict");
+        rejected(() -> packExecutions.claimDispatch("pack-continuation", "owner", Duration.ofSeconds(30)),
+                "csi_execution_continuation_unavailable");
+        rejected(() -> packBindings.authorizeDispatch(sessions, packExecutions, expected, "owner", 1),
+                "csi_file_dispatch_unavailable");
+    }
+
+    /**
+     * R1-1 regression: the graph is built through {@link WorkspaceCsiRuntimeMain#csiRuntimeGraph},
+     * the exact construction {@code serve()} uses (not a hand-built pack-aware repository). Once the
+     * prefix is packed and its SQL blobs deleted, admission through that graph must resolve the
+     * evicted record_bytes via activeHistoryThrough and reach the same journal-independent gate it
+     * reaches on a SQL-hot journal; with a null object store (the pre-fix serve() wiring, or OSS not
+     * configured) the same read fails closed. This exercises the extracted serve() construction with
+     * an in-memory store, not the full Kubernetes serve() loop.
+     */
+    @Test
+    void serveStyleGraphResolvesEvictedJournalBytesFromThePack() throws Exception {
+        ready();
+        var objects = new PublicationProbeWiring.InMemoryObjectStore();
+        var source = jdbc.getDataSource();
+        var manager = new DataSourceTransactionManager(source);
+        var protector = new AesGcmSecretProtector("test", new byte[32]);
+        var properties = new ManagedAgentProperties();
+        properties.setAgentRevision("reviewed-agent/1");
+        var sweeper = new JdbcJournalPacks(jdbc, objects, packSettings());
+        assertThat(sweeper.compactOnce("tenant", "workspace", sessionId)).isTrue();
+        assertThat(sweeper.deleteCoveredBlobs()).isGreaterThan(0);
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_journal_tx WHERE record_bytes IS NULL",
+                Integer.class)).isEqualTo(2);
+        var graph = WorkspaceCsiRuntimeMain.csiRuntimeGraph(source, jdbc, manager, protector, JSON, properties,
+                registration, sessionId, request.requestKey(), objects);
+        var graphExecutions = new JdbcToolExecutionRepository(source, graph.bindings());
+        rejected(() -> admit("serve-packed", graph.bindings(), graphExecutions), "csi_native_resources_required");
+        var nullGraph = WorkspaceCsiRuntimeMain.csiRuntimeGraph(source, jdbc, manager, protector, JSON, properties,
+                registration, sessionId, request.requestKey(), null);
+        var nullExecutions = new JdbcToolExecutionRepository(source, nullGraph.bindings());
+        rejected(() -> admit("serve-null", nullGraph.bindings(), nullExecutions), "csi_original_activation_unavailable");
+    }
+
+    // A legacy-shape deferred execution row inserted directly: CSI admitExecution refuses native
+    // writers before insert, and the native batch flow that creates qualified rows is not part of
+    // this harness. The row only needs to parse and carry the legacy reference for the
+    // continuation/dispatch gates above.
+    private void insertDeferredExecution(String id) throws Exception {
+        jdbc.update("INSERT INTO ma_tool_execution (execution_call_id_hash, execution_call_id,"
+                + " idempotency_key_hash, idempotency_key, binding_id, runtime_generation,"
+                + " harness_session_id, runtime_session_id, runtime_session_key, turn_id, tool_call_id,"
+                + " request_digest, reference_json, execution_state, last_sequence, is_cancel_requested,"
+                + " dispatch_owner, dispatch_lease_until, dispatch_generation, record_version)"
+                + " VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 'DISPATCHING', 0, 0, 'owner', ?, 1, 1)",
+                RuntimeRequestKeys.valueKey(id), id, RuntimeRequestKeys.valueKey(id + "-key"), id + "-key",
+                binding.getBindingId(), sessionId, sessionId, RuntimeRequestKeys.valueKey(sessionId),
+                id + "-turn", id + "-tool", "sha256:" + "a".repeat(64),
+                JSON.writeValueAsString(Map.of("dispatchMode", "deferred", "sessionId", sessionId,
+                        "promptId", id + "-turn", "callId", id + "-tool", "argsDigest", "sha256:" + "a".repeat(64))),
+                Instant.now().plusSeconds(60).toEpochMilli());
+    }
+
+    private ManagedAgentSettings packSettings() {
+        return (ManagedAgentSettings) Proxy.newProxyInstance(getClass().getClassLoader(),
+                new Class<?>[] {ManagedAgentSettings.class},
+                (proxy, method, args) -> method.getName().equals("getSessionResources")
+                        ? new ManagedAgentSettings.SessionResources() {
+                            @Override public boolean isEnabled() { return true; }
+                            @Override public String getOssKeyPrefix() { return "gate-pack-resources/"; }
+                            @Override public boolean isPackJobEnabled() { return true; }
+                            @Override public boolean isDeletionEnabled() { return true; }
+                            @Override public long getPackTargetBytes() { return 16L * 1024 * 1024; }
+                            @Override public int getPackMaxTransactions() { return 4096; }
+                            @Override public Duration getDeletionGrace() { return Duration.ZERO; }
+                        } : null);
     }
 
     private WorkspaceCsiReservationStore.Retirement retire() {

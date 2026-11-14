@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -178,9 +179,9 @@ class ManagedActionStoreTest {
         // The resurrection arm's evidence that a new delivery must wait.
         jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key,"
                         + " tenant_id, storage_id, fence_operation_id) VALUES (?, ?, ?, ?, ?, ?)",
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey(TENANT, "storage"),
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageFenceKey(TENANT),
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageFenceKey("storage"),
+                RuntimeAdmissionFences.storageAliasKey(TENANT, "storage"),
+                RuntimeAdmissionFences.storageFenceKey(TENANT),
+                RuntimeAdmissionFences.storageFenceKey("storage"),
                 TENANT, "storage", "op-fence");
 
         var replayed = admitAs("owner", "idem", "digest", response("allow"), 20);

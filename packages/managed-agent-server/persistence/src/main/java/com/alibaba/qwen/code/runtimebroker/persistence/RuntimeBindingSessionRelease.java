@@ -6,24 +6,22 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeAdmission;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
-import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.HarnessFence;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.HarnessFence;
 
 import javax.sql.DataSource;
 
 import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.sql.SQLException;
 
-import static com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.fence;
+import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.fence;
+import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.localStorageOwnerKey;
 import static com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.lockPlacementDomain;
-import static com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.requireHarnessAdmission;
-import static com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey;
+import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.requireHarnessAdmission;
+import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.storageAliasKey;
 import static com.alibaba.qwen.code.runtimebroker.persistence.JdbcRepositorySupport.unverifiedWorkspaceHolder;
 
 /**
@@ -163,73 +161,6 @@ final class RuntimeBindingSessionRelease {
         return storage != null
                 && repository.isStorageFenced(
                         claim.getRequest().getScope().getTenantId(), storage, null);
-    }
-
-    private static String localStorageOwnerKey(Connection connection, String tenant, String storage) throws SQLException {
-        return localStorageOwnerKey(connection, tenant, storage, false);
-    }
-
-    private static String localStorageOwnerKey(Connection connection, String tenant, String storage, boolean includeSsh) throws SQLException {
-        if (storage == null) {
-            return null;
-        }
-        try (PreparedStatement statement =
-                connection.prepareStatement(
-                        "SELECT tenant_id, storage_id, storage_kind,"
-                                + " physical_key FROM ma_storage WHERE alias_key = ? FOR UPDATE")) {
-            statement.setString(1, storageAliasKey(tenant, storage));
-            try (ResultSet row = statement.executeQuery()) {
-                if (!row.next()) {
-                    return null;
-                }
-                if (!tenant.equals(row.getString("tenant_id"))
-                        || !storage.equals(row.getString("storage_id"))) {
-                    throw unverifiedWorkspaceHolder();
-                }
-                if (!"LOCAL".equals(row.getString("storage_kind"))
-                        && !(includeSsh && "SSH_LOCAL".equals(row.getString("storage_kind")))) {
-                    return null;
-                }
-                String physical = row.getString("physical_key");
-                if (physical == null) {
-                    throw unverifiedWorkspaceHolder();
-                }
-                return physical;
-            }
-        }
-    }
-
-    static void requirePhysicalStorageAdmission(Connection connection, RuntimeProvisionRequest request) throws SQLException {
-        String key = localStorageOwnerKey(connection, request.getScope().getTenantId(), request.getStorageId());
-        if (key == null) {
-            return;
-        }
-        try (PreparedStatement statement =
-                connection.prepareStatement(
-                        "SELECT registration_state FROM ma_storage WHERE alias_key = ?")) {
-            statement.setString(1, storageAliasKey(request.getScope().getTenantId(), request.getStorageId()));
-            try (ResultSet row = statement.executeQuery()) {
-                if (!row.next() || !"REGISTERED".equals(row.getString("registration_state"))) {
-                    throw new RuntimeBrokerException(
-                            409, "workspace_migrating", "Storage is under maintenance.", false);
-                }
-            }
-        }
-        try (PreparedStatement statement =
-                connection.prepareStatement(
-                        "SELECT physical_key, mount_state, storage_kind"
-                                + " FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE")) {
-            statement.setString(1, key);
-            try (ResultSet row = statement.executeQuery()) {
-                if (!row.next()
-                        || !key.equals(row.getString("physical_key"))
-                        || !"LOCAL".equals(row.getString("storage_kind"))
-                        || !"READY".equals(row.getString("mount_state"))) {
-                    throw new RuntimeBrokerException(
-                            409, "workspace_migrating", "Storage is under maintenance.", false);
-                }
-            }
-        }
     }
 
     RuntimeSessionRecord beginSessionRelease(RuntimeSessionRepository sessions,

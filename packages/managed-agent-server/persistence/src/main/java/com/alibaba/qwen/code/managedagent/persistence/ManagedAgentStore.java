@@ -30,13 +30,13 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationTarget;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
-import com.alibaba.qwen.code.managedagent.model.StoreModels.RenameDelivery;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ReplayFloorTarget;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ReplayWindow;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutation;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationCommand;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SyncRename;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
@@ -239,10 +239,10 @@ public class ManagedAgentStore extends ManagedAgentReadEntries implements AgentS
 
     @Override
     @Transactional
-    public SessionMutationCommand beginSessionRename(String tenantId,
+    public SyncRename settleRenameSync(String tenantId,
             String idempotencyKey, String requestDigest, String sessionId,
             String title, String actorId, SessionPrincipal principal) {
-        return super.beginSessionRename(tenantId, idempotencyKey, requestDigest, sessionId, title, actorId, principal);
+        return super.settleRenameSync(tenantId, idempotencyKey, requestDigest, sessionId, title, actorId, principal);
     }
 
     @Override
@@ -416,56 +416,8 @@ public class ManagedAgentStore extends ManagedAgentReadEntries implements AgentS
 
     @Override
     @Transactional
-    public SessionMutationCommand beginSessionRename(String tenantId, String key,
-            String digest, String sessionId, String title) {
-        return sessionCommands.beginSessionRename(tenantId, key, digest, sessionId, title, (String) null);
-    }
-
-    @Override
-    @Transactional
-    public SessionMutationCommand beginSessionRename(String tenantId, String key, String digest, String sessionId, String title, String actorId) {
-        return sessionCommands.beginSessionRename(tenantId, key, digest, sessionId, title, actorId);
-    }
-
-    @Override
-    @Transactional
-    public SessionRecord completeSessionRename(String tenantId, String key, String sessionId, String title, String bootId, long revision) {
-        return sessionCommands.completeSessionRename(tenantId, key, sessionId, title, bootId, revision);
-    }
-
-    @Override
-    @Transactional
-    public SessionRecord completeSessionRename(RenameDelivery delivery, String owner, String bootId) {
-        return sessionCommands.completeSessionRename(delivery, owner, bootId);
-    }
-
-    @Override
-    @Transactional
-    public void abandonSessionRename(String tenantId, String key, String sessionId, long revision, String owner) {
-        sessionCommands.abandonSessionRename(tenantId, key, sessionId, revision, owner);
-    }
-
-    @Override
-    @Transactional
-    public List<RenameDelivery> deliverableRenames(long now) {
-        return sessionCommands.renameDeliveries().deliverableRenames(now);
-    }
-
-    @Override
-    @Transactional
-    public Optional<RenameDelivery> claimRename(RenameDelivery delivery, String owner, Duration lease) {
-        return sessionCommands.renameDeliveries().claimRename(delivery, owner, lease);
-    }
-
-    @Override
-    public void markRenameSubmitted(RenameDelivery delivery, String owner) {
-        sessionCommands.renameDeliveries().markRenameSubmitted(delivery, owner);
-    }
-
-    @Override
-    @Transactional
-    public void retryRename(RenameDelivery delivery, String owner, long availableAt) {
-        sessionCommands.renameDeliveries().retryRename(delivery, owner, availableAt);
+    public SyncRename settleRenameSync(String tenantId, String key, String digest, String sessionId, String title, String actorId) {
+        return sessionCommands.settleRenameSync(tenantId, key, digest, sessionId, title, actorId);
     }
 
     @Transactional
@@ -551,10 +503,6 @@ public class ManagedAgentStore extends ManagedAgentReadEntries implements AgentS
     static final String SUBMIT_INPUT_UNCONFIRMED = AgentSessionCommands.SUBMIT_INPUT_UNCONFIRMED;
 
     static final String CANCEL_UNCONFIRMED = AgentSessionCommands.CANCEL_UNCONFIRMED;
-
-    static final String SESSION_TITLE_UNCONFIRMED = AgentSessionCommands.SESSION_TITLE_UNCONFIRMED;
-
-    static final String SESSION_TITLE_UNDELIVERED = AgentExecutionOperations.SESSION_TITLE_UNDELIVERED;
 
     @Override
     @Transactional
@@ -670,17 +618,6 @@ public class ManagedAgentStore extends ManagedAgentReadEntries implements AgentS
     @Override
     public AcceptanceVerdict turnInputAcceptance(String tenantId, String sessionId, String operationId) {
         return executionOperations.turnInputAcceptance(tenantId, sessionId, operationId);
-    }
-
-    @Override
-    public Optional<AcceptanceVerdict> renameAcceptance(ParkedOperation parked) {
-        return executionOperations.renameAcceptance(parked);
-    }
-
-    @Override
-    @Transactional
-    public boolean settleParkedRename(ParkedOperation parked, AcceptanceVerdict verdict, long retryAt) {
-        return executionOperations.settleParkedRename(parked, verdict, retryAt);
     }
 
     @Override

@@ -102,8 +102,8 @@ env:
   # step re-runs every suite after `npm ci`, and a push to main always
   # classifies `full` (classify_pr computes a profile only for pull_request),
   # so what the fast lane skips is still re-checked post-merge.
-  HELPER_TESTS_DEP_FREE: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/autofix-check-evidence.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs .github/scripts/ecs-runner/check-font-baseline.test.mjs scripts/ci/ephemeral-runner/manager.test.mjs'
-  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/autofix-check-evidence.test.mjs .github/scripts/assign-pr-owner.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/ci-disk-pressure.test.mjs .github/scripts/e2e-build.test.mjs integration-tests/concurrent-runner/export-html-from-chatrecord-jsonl.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/ecs-runner/review-scratch-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs .github/scripts/ecs-runner/check-font-baseline.test.mjs scripts/ci/ephemeral-runner/manager.test.mjs'
+  HELPER_TESTS_DEP_FREE: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/autofix-check-evidence.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-host-load.test.mjs .github/scripts/ci/reap-isolated-home.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs .github/scripts/ecs-runner/check-font-baseline.test.mjs scripts/ci/ephemeral-runner/manager.test.mjs'
+  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/cap-release-notes.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/ci/classify-platform-sensitivity.test.mjs .github/scripts/ci/classify-pr-profile.test.mjs .github/scripts/upsert-bot-comment.test.mjs .github/scripts/ci/main-failure-signature.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/dsw-swe-verified/make-manifest.test.mjs .github/scripts/dsw-swe-verified/make-terminal-bench-manifest.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/update-ecs-runner-qwen-workflow.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs .github/scripts/serve-ab-drive.test.mjs .github/scripts/qwen-triage-workflow.test.mjs .github/scripts/assign-issue-owner.test.mjs .github/scripts/auto-minimize-spam.test.mjs .github/scripts/ci-runner-routing.test.mjs .github/scripts/autofix-status-heartbeat.test.mjs .github/scripts/autofix-check-evidence.test.mjs .github/scripts/assign-pr-owner.test.mjs .github/scripts/check-disk-floor.test.mjs .github/scripts/check-host-load.test.mjs .github/scripts/ci/reap-isolated-home.test.mjs .github/scripts/check-lint-gate-freshness.test.mjs .github/scripts/ci-disk-pressure.test.mjs .github/scripts/e2e-build.test.mjs integration-tests/concurrent-runner/export-html-from-chatrecord-jsonl.test.mjs .github/scripts/review-runner-schedule.test.mjs .github/scripts/ecs-runner/qwen-docker-cleanup.test.mjs .github/scripts/ecs-runner/review-scratch-cleanup.test.mjs .github/scripts/check-test-growth.test.mjs .github/scripts/check-ci-budget.test.mjs .github/scripts/ecs-runner/check-font-baseline.test.mjs scripts/ci/ephemeral-runner/manager.test.mjs'
   # The growth ratchet and its vitest mirror compare each workflow against
   # the PR's base commit to tell "this PR grew the file" apart from "the
   # baseline went stale on main" (#9904). Wired once here so every lane
@@ -1326,6 +1326,23 @@ jobs:
             console.log("PROVISIONED actionlint + shellcheck into " + tempDir);
           '
 
+      # The disk floor above admits on bytes and inodes; this admits on CPU
+      # contention: a backstop for a host no shard survived, not a predictor of
+      # the RPC flake (the bands overlap; calibration in the script). It runs
+      # immediately before the suites because the tmux/zip and linter
+      # provisioning above are apt/network installs that slow down with the
+      # same contention, so an earlier reading is minutes stale by then. Both
+      # provisioning steps are continue-on-error, so refusing here costs only
+      # their install time.
+      - name: 'Host load gate (self-hosted)'
+        if: "${{ needs.test_build.result == 'success' && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' && runner.os == 'Linux' }}"
+        # tries x seconds (6 x 10 = 60s by default) must stay under this cap, or
+        # GitHub kills the step with no breach annotation to classify.
+        timeout-minutes: 3
+        env:
+          HOST_LOAD_MAX_RATIO: "${{ vars.QWEN_CI_HOST_LOAD_MAX_RATIO || '2.0' }}"
+        run: 'bash .github/scripts/check-host-load.sh'
+
       - name: 'Run tests and generate reports'
         id: 'unit_tests'
         if: "${{ needs.test_build.result == 'success' && needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
@@ -1352,6 +1369,14 @@ jobs:
           # contention flake pass; a real break still fails all three
           # attempts. Operators can retune or disable ('off') without a PR.
           VITEST_RETRY: "${{ vars.QWEN_CI_VITEST_RETRY || '2' }}"
+          # --retry above re-runs a failed TEST. This re-runs a whole workspace
+          # suite whose every test passed and whose only failure was Vitest's
+          # worker->main RPC budget expiring on a contended host: main runs
+          # 43018456551 and 43016357976 went red with 902 of 902 tests passing.
+          # The Linux lanes keep unhandled errors fatal on purpose (#10438), so
+          # the lane script reads the report and re-runs only that shape. '0'
+          # disables it without a PR.
+          QWEN_CI_RPC_RETRY: "${{ vars.QWEN_CI_RPC_RETRY || '1' }}"
           # Coverage is collected only on the post-merge main run: nothing
           # read the pull-request reports, and v8 instrumentation cost about
           # a fifth of the suite's wall time on every push. The vitest configs
@@ -1488,11 +1513,24 @@ jobs:
         # 47232 with "Invalid character in entity name", while both runs'
         # tests had passed. The report is advisory (`fail-on-error: false`),
         # so a broken artifact must not turn a green suite red.
+        # List each workspace depth explicitly instead of excluding
+        # node_modules. Both actions take several patterns, but they compose
+        # them differently: upload-artifact hands the whole multiline input to
+        # `@actions/glob`, where `!**/node_modules/**` negates across the set,
+        # while this action splits `path` on commas and globs each segment on
+        # its own (`src/main.ts` -> `local-file-provider.ts`), so a bare
+        # negation has no positive set to subtract from and matches nothing.
+        # With `followSymbolicLinks` on by default, `packages/**` therefore
+        # counts every pnpm link copy of a workspace report — the badge
+        # multiplies. These four positive patterns cover the declared
+        # workspaces' report locations; the completeness meta-test derives
+        # that set from the workspace declarations and fails if a workspace
+        # is added or one of these patterns is dropped or widened
         continue-on-error: true
         uses: 'dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2' # ratchet:dorny/test-reporter@v3
         with:
           name: 'Test Results (ubuntu-latest, Node 22.x, shard ${{ matrix.shard }})'
-          path: 'packages/*/junit.xml'
+          path: 'packages/*/junit.xml,packages/channels/*/junit.xml,packages/cua-driver/typescript/junit.xml,integrations/*/junit.xml'
           reporter: 'java-junit'
           fail-on-error: 'false'
 
@@ -1502,12 +1540,21 @@ jobs:
         # Advisory like the publisher above: a transient artifact-service
         # failure must not turn a green suite red. `always()` also fires on a
         # run cancelled mid-suite, so a partial report can be retained under
-        # the complete run's name.
+        # the complete run's name. The path keeps the publisher's
+        # reach across both workspace trees, so the raw evidence matches the
+        # badge set the publisher enumerates explicitly above. This action
+        # follows symlinks too, so it needs the node_modules exclusion; unlike
+        # the publisher, this one applies that exclusion across the whole
+        # pattern set. Newline-separated: this action reads `path` as
+        # multiline input.
         continue-on-error: true
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
           name: "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && 'test-results-fork-22.x-ubuntu-latest' || 'test-results-22.x-ubuntu-latest' }}-shard-${{ matrix.shard }}"
-          path: 'packages/*/junit.xml'
+          path: |
+            packages/**/junit.xml
+            integrations/**/junit.xml
+            !**/node_modules/**
           if-no-files-found: 'ignore'
           retention-days: 7
 
@@ -1813,27 +1860,6 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: 'node .github/scripts/check-ci-budget.mjs'
 
-      # A green lane proves the branch passes the gate AS THE BRANCH defines
-      # it — the checkout above is the event PR head by deliberate trade-off —
-      # not as the base defines it. #11117 flipped Prettier --write →
-      # --check on main while #11216's branch still ran --write; it merged
-      # green and reddened every later full-profile PR (#11378 cleaned up).
-      # Fail a branch whose base has since changed a gate-defining file.
-      # PRs only: merge_group validates the prospective merged tree and push
-      # validates the base itself. Every profile runs a lint lane and so needs
-      # this guard: full, docs_only and github_ci_only all run Prettier (a
-      # docs-only formatting break merged green and reddened main, #16872),
-      # and github_ci_only additionally runs actionlint/yamllint in the helper
-      # step below. Seconds of API calls before the expensive steps; details
-      # in the script's header.
-      - name: 'Check lint gate freshness'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' }}"
-        env:
-          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
-          BASE_REF: '${{ github.event.pull_request.base.ref }}'
-          HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
-        run: 'node .github/scripts/check-lint-gate-freshness.mjs'
-
       # Keep the cheap schema guards on PRs and main while Java runs daily.
       - name: 'Check Flyway migration versions are unique'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile != 'docs_only' }}"
@@ -2014,6 +2040,35 @@ jobs:
           fi
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
+      # A green lane proves the branch passes the gate AS THE BRANCH defines
+      # it — the checkout above is the event PR head by deliberate trade-off —
+      # not as the base defines it. #11117 flipped Prettier --write →
+      # --check on main while #11216's branch still ran --write; it merged
+      # green and reddened every later full-profile PR (#11378 cleaned up).
+      # Fail a branch whose base has since changed a gate-defining file.
+      # PRs only: merge_group validates the prospective merged tree and push
+      # validates the base itself. Every profile runs a lint lane and so needs
+      # this guard: full, docs_only and github_ci_only all run Prettier (a
+      # docs-only formatting break merged green and reddened main, #16872),
+      # and github_ci_only additionally runs actionlint/yamllint in the helper
+      # step above. Seconds of API calls before the expensive steps; details
+      # in the script's header.
+      - name: 'Check lint gate freshness'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' }}"
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          BASE_REF: '${{ github.event.pull_request.base.ref }}'
+          HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
+        run: 'node .github/scripts/check-lint-gate-freshness.mjs'
+
+      # The fast lane cannot run this suite before the install: it imports
+      # `yaml`, which only exists after `npm ci`. This is the lane a PR that
+      # edits the script most often gets classified into, so it runs here
+      # rather than staying unexecuted on that profile.
+      - name: 'Run lint gate freshness tests'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'github_ci_only' }}"
+        timeout-minutes: 5
+        run: 'node --test --test-concurrency=1 .github/scripts/check-lint-gate-freshness.test.mjs'
       - name: 'Report npm cache usage (self-hosted)'
         if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && (steps.ci_profile.outputs.ci_profile == 'full' || steps.ci_profile.outputs.ci_profile == 'docs_only' || steps.ci_profile.outputs.ci_profile == 'github_ci_only') && runner.environment == 'self-hosted' }}"
         run: |-
@@ -2041,8 +2096,18 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'node scripts/lint.js --setup'
 
+      # Also run on github_ci_only, for the same reason Run Prettier below
+      # does: the post-merge push lint lints every file, and ESLint's scope
+      # includes `.github/scripts/**/*.{js,mjs,cjs}` — which is where the
+      # whitelisted helpers live. A PR touching only those files used to pass
+      # its required Lint & Static and redden the next main push (#16958 item
+      # 3; #16899/#16920 closed this for Prettier). Not docs_only: a
+      # documentation-only change contains nothing ESLint opens. ESLint comes
+      # from node_modules, so the install prelude above — already widened to
+      # this profile — is all it needs; `Install linters` fetches the external
+      # actionlint/shellcheck/yamllint binaries and stays full-gated.
       - name: 'Run ESLint'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && (steps.ci_profile.outputs.ci_profile == 'full' || steps.ci_profile.outputs.ci_profile == 'github_ci_only') }}"
         run: 'node scripts/lint.js --eslint'
 
       - name: 'Run actionlint'
@@ -2151,9 +2216,13 @@ jobs:
 
       # Reclaim the run-unique HOME (constructed path, never $HOME) before the
       # failure collector, which must stay last.
+      # The helper reaps this run's leftover daemons, then removes the home; its
+      # header records why. `always()` can reach here with no checkout, so a
+      # missing helper falls back to the plain removal, and neither reddens the
+      # job on its own.
       - name: 'Clean isolated HOME'
         if: '${{ always() }}'
-        run: 'rm -rf -- "${RUNNER_TEMP}/qwen-lint-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"'
+        run: 'h="${RUNNER_TEMP}/qwen-lint-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"; { [ -f .github/scripts/ci/reap-isolated-home.sh ] && bash .github/scripts/ci/reap-isolated-home.sh "$h"; } || rm -rf -- "$h" || true'
 
       # State-at-failure dump for the 19 substantive steps after install: the
       # install sampler is reaped by that step's `trap … EXIT`, so a death in
@@ -2486,12 +2555,18 @@ jobs:
       - name: 'Install Playwright Chromium and WebKit (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
         timeout-minutes: 30
+        # A github-hosted runner never runs the pool image, so this guard is
+        # inert here; it keeps every browser-install site one shape.
         run: |-
-          printf '%s\n' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' 'Acquire::Retries "2";' | sudo tee /etc/apt/apt.conf.d/99-qwen-ci-timeouts > /dev/null
-          node node_modules/playwright/cli.js install --with-deps chromium webkit
-          nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'
-          if [ -f "${nested_cli}" ]; then
-            node "${nested_cli}" install chromium webkit
+          if [ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ]; then
+            echo 'browsers baked into the image, skipping install'
+          else
+            printf '%s\n' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' 'Acquire::Retries "2";' | sudo tee /etc/apt/apt.conf.d/99-qwen-ci-timeouts > /dev/null
+            node node_modules/playwright/cli.js install --with-deps chromium webkit
+            nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'
+            if [ -f "${nested_cli}" ]; then
+              node "${nested_cli}" install chromium webkit
+            fi
           fi
 
       - name: 'Install Playwright Chromium and WebKit (self-hosted)'
@@ -2502,18 +2577,27 @@ jobs:
         # validation reports them missing, so each host installs them once and
         # later jobs skip apt. sudo -n fails fast instead of prompting, and the
         # lock timeout waits out another job's apt run on the same host.
+        #
+        # The disposable pool image bakes Chromium and its system libraries and
+        # sets PLAYWRIGHT_BROWSERS_PATH, but it does not bake WebKit. This job
+        # routes to the hosted lane or the persistent ARM64 fleet, never to that
+        # image, so the guard cannot drop WebKit here.
         timeout-minutes: 30
         run: |-
-          install_log="${RUNNER_TEMP}/playwright-install.log"
-          node node_modules/playwright/cli.js install chromium webkit 2>&1 | tee "${install_log}"
-          nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'
-          if [ -f "${nested_cli}" ]; then
-            node "${nested_cli}" install chromium webkit 2>&1 | tee -a "${install_log}"
-          fi
-          if grep -q 'Host system is missing dependencies' "${install_log}"; then
-            apt_config="${RUNNER_TEMP}/apt-playwright.conf"
-            printf '%s\n' 'DPkg::Lock::Timeout "300";' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' 'Acquire::Retries "2";' > "${apt_config}"
-            sudo -n env APT_CONFIG="${apt_config}" "$(command -v node)" node_modules/playwright/cli.js install-deps chromium webkit
+          if [ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ]; then
+            echo 'browsers baked into the image, skipping install'
+          else
+            install_log="${RUNNER_TEMP}/playwright-install.log"
+            node node_modules/playwright/cli.js install chromium webkit 2>&1 | tee "${install_log}"
+            nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'
+            if [ -f "${nested_cli}" ]; then
+              node "${nested_cli}" install chromium webkit 2>&1 | tee -a "${install_log}"
+            fi
+            if grep -q 'Host system is missing dependencies' "${install_log}"; then
+              apt_config="${RUNNER_TEMP}/apt-playwright.conf"
+              printf '%s\n' 'DPkg::Lock::Timeout "300";' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' 'Acquire::Retries "2";' > "${apt_config}"
+              sudo -n env APT_CONFIG="${apt_config}" "$(command -v node)" node_modules/playwright/cli.js install-deps chromium webkit
+            fi
           fi
 
       - name: 'Choose web-shell Playwright port'
@@ -3287,15 +3371,28 @@ jobs:
         run: |-
           mkdir -p "${QWEN_HOME}"
           if [ "${{ matrix.shard }}" = 1 ]; then
-            npm run typecheck:integration
+            # The typecheck has no heap cap of its own, so it inherits Node's
+            # default old-space, which is sized from the container's cgroup
+            # limit: 2096 MB at the 8 GiB this pool ran on 2026-11-11, the
+            # ceiling it died at. This raises it to a measured 4144 MB so
+            # scaling a host back down cannot restore that default. Via `env`,
+            # not the step's env block, whose zero-secrets contract requires
+            # every value but QWEN_HOME to be empty. Measurements:
+            # scripts/tests/no-ak-integration-ci.test.js.
+            typecheck_heap=()
+            case "${RUNNER_NAME:-}" in
+              ecs-qwen-*) typecheck_heap=('NODE_OPTIONS=--max-old-space-size=4096') ;;
+            esac
+            env "${typecheck_heap[@]}" npm run typecheck:integration
           fi
           npm run test:integration:no-ak:sandbox:none -- --shard=${{ matrix.shard }}/2
 
       # Reclaim the run-unique HOME (constructed path, never $HOME) so it
       # does not accumulate in RUNNER_TEMP on this persistent pool.
+      # Same helper and fallback as the lint lane.
       - name: 'Clean isolated HOME'
         if: '${{ always() }}'
-        run: 'rm -rf -- "${RUNNER_TEMP}/qwen-no-ak-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"'
+        run: 'h="${RUNNER_TEMP}/qwen-no-ak-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"; { [ -f .github/scripts/ci/reap-isolated-home.sh ] && bash .github/scripts/ci/reap-isolated-home.sh "$h"; } || rm -rf -- "$h" || true'
 
   # The required check. It passes only when the build and every shard pass,
   # so a failed test_build (whose shards skip their steps) still fails it.

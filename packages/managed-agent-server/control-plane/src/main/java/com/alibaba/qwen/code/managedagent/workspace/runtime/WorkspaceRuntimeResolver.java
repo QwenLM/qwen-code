@@ -29,7 +29,17 @@ public final class WorkspaceRuntimeResolver {
     private final String boundSessionIsolationClass;
     private final boolean local;
     private final boolean measuredTools;
+    private final boolean webTerminal;
     private final ManagedAgentSettings.ManagedExtensions managedExtensions;
+    // Optional: when wired, the capability hint also requires the Session's
+    // recorded binding to already carry the terminal digest, so it never
+    // advertises a terminal the relay's admission would refuse.
+    private volatile com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository bindingRepository;
+
+    public void setBindingRepository(
+            com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository bindingRepository) {
+        this.bindingRepository = bindingRepository;
+    }
 
     public WorkspaceRuntimeResolver(SessionQueryStore sessions, WorkspaceExecutionStore authority,
             ManagedAgentSettings properties) {
@@ -48,8 +58,12 @@ public final class WorkspaceRuntimeResolver {
         this.externalRegistrations = externalRegistrations;
         this.managedExtensions = properties.getManagedExtensions();
         this.measuredTools = properties.getRuntimeBroker().isToolMeasurements();
+        this.webTerminal = properties.getRuntimeBroker().isWebTerminal();
         if (managedExtensions.isEnabled() && !properties.getExtensions().isEnabled()) {
             throw new IllegalStateException("Managed extension execution requires extensions to be enabled");
+        }
+        if (webTerminal && !measuredTools) {
+            throw new IllegalStateException("The Managed web terminal requires tool measurements");
         }
         this.sessions = sessions;
         this.authority = authority;
@@ -58,6 +72,8 @@ public final class WorkspaceRuntimeResolver {
         this.boundSessionIsolationClass = broker.getBoundSessionIsolationClass();
         this.residents = new com.alibaba.qwen.code.managedagent.contracts.workspace.ResidentWorkspaceCatalog(broker.getResidentWorkspaces());
         if (WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST.equals(
+                        properties.getHarness().getCapabilityDigest())
+                || WorkspaceExecutionProfile.TERMINAL_CAPABILITY_DIGEST.equals(
                         properties.getHarness().getCapabilityDigest())
                 || WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(
                 properties.getHarness().getCapabilityDigest())
@@ -157,9 +173,86 @@ public final class WorkspaceRuntimeResolver {
             throw WorkspaceExecutionStore.unavailable();
         }
         verifyMountIntact(mount);
+        String digest = extensionDigest(System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("mac") ? "darwin" : System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT));
+        if (webTerminal && WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST.equals(digest)) {
+            digest = WorkspaceExecutionProfile.TERMINAL_CAPABILITY_DIGEST;
+        }
         return new Resolved(binding, new RuntimeScope(session.tenantId(), binding.getWorkspaceId(),
                 Long.toString(binding.getWorkspaceGeneration()), mount.root().toString(),
-                extensionDigest(System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("mac") ? "darwin" : System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT)), boundSessionIsolationClass).withLifecycleAuthority(lifecycle));
+                digest, boundSessionIsolationClass).withLifecycleAuthority(lifecycle));
+    }
+
+    /**
+     * Whether this Session's placement can actually attach a web terminal. The
+     * terminal digest is only ever substituted on the local-mount measured
+     * path, so ssh, resident and extension placements can never attach; the
+     * capability hint must not advertise a terminal they would always refuse.
+     */
+    public boolean terminalCapable(SessionRecord session) {
+        if (!webTerminal || !measuredTools || managedExtensions.isEnabled()) {
+            return false;
+        }
+        ContextBinding binding = session.workspace();
+        if (binding == null) {
+            return false;
+        }
+        if (ssh != null && ssh.runtimeStorage(binding) != null) {
+            return false;
+        }
+        if (residents.find(binding) != null) {
+            return false;
+        }
+        try {
+            if (mount(binding) == null) {
+                return false;
+            }
+        } catch (com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException error) {
+            // A capability hint must never turn the session list into a 409:
+            // a non-local or unreadable placement is simply not terminal-capable.
+            return false;
+        }
+        // The relay admits only a binding already recorded at the terminal
+        // digest; the hint must not be wider than that admission. Without a
+        // wired repository (isolated unit contexts) the placement check stands.
+        var repository = this.bindingRepository;
+        if (repository == null) {
+            return true;
+        }
+        try {
+            // Page to exhaustion exactly like the relay's admission
+            // (RuntimeBindingRegistry.findLatestBindingByHarnessSession): the
+            // repository caps a page at 100 rows, so a single page would hide
+            // the newest READY binding of a long-lived Session and let the
+            // hint drift from admission in both directions.
+            com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord latest = null;
+            String after = null;
+            for (;;) {
+                var page = repository.findByHarnessSession(
+                        session.tenantId(), session.sessionId(), after, 100);
+                if (page.isEmpty()) {
+                    break;
+                }
+                for (var recorded : page) {
+                    if (recorded.getState()
+                            == com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord.State.READY
+                            && (latest == null
+                                    || recorded.getBindingId().compareTo(latest.getBindingId()) > 0)) {
+                        latest = recorded;
+                    }
+                }
+                if (page.size() < 100) {
+                    break;
+                }
+                after = page.get(page.size() - 1).getBindingId();
+            }
+            return latest != null
+                    && !latest.isDrainRequested()
+                    && latest.getRequest() != null
+                    && WorkspaceExecutionProfile.TERMINAL_CAPABILITY_DIGEST.equals(
+                            latest.getRequest().getScope().getCapabilityDigest());
+        } catch (RuntimeException error) {
+            return false;
+        }
     }
 
     private String extensionDigest(String platform) {
@@ -181,9 +274,12 @@ public final class WorkspaceRuntimeResolver {
         if (resolved.equals(recorded)) {
             return true;
         }
-        // Existing ordinary leases retain their attested profile across a measurement rollout.
+        // Existing ordinary leases retain their attested profile across a measurement
+        // rollout and across the web-terminal opt-in, which substitutes the terminal
+        // digest on the same local-mount measured path.
         var ordinary = java.util.Set.of(WorkspaceExecutionProfile.CAPABILITY_DIGEST,
-                WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST);
+                WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST,
+                WorkspaceExecutionProfile.TERMINAL_CAPABILITY_DIGEST);
         return ordinary.contains(resolved.getCapabilityDigest())
                 && ordinary.contains(recorded.getCapabilityDigest())
                 && resolved.getTenantId().equals(recorded.getTenantId())

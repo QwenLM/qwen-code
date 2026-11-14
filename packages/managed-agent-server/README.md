@@ -229,7 +229,7 @@ See the complete design:
 
 ## Tool publication storage
 
-Tool publication depends on `ToolPublicationObjectStore`; Aliyun OSS is its default implementation. Publication remains disabled unless `qwen.managed-agent.tool-publication.enabled=true`. To use another backend, register one application `@Bean` returning `ToolPublicationObjectStore` from a configuration imported into the Spring server. The default OSS auto-configuration then backs off, and no OSS endpoint, region, bucket or credentials are needed. Common publication service URL, capacities and verification deadlines remain required. Without a custom store, existing OSS configuration and client lifecycle are unchanged.
+Tool publication depends on `ToolPublicationObjectStore`; Aliyun OSS is its default implementation. Publication remains disabled unless `qwen.managed-agent.tool-publication.enabled=true`. The generic OSS object-store auto-configuration is gated on `qwen.managed-agent.object-storage.enabled`, which defaults to follow `tool-publication.enabled`; set it true with `tool-publication.enabled=false` to back Session resources and journal cold storage without enabling publication. To use another backend, register one application `@Bean` returning `ToolPublicationObjectStore` from a configuration imported into the Spring server. The default OSS auto-configuration then backs off, and no OSS endpoint, region, bucket or credentials are needed. Common publication service URL, capacities and verification deadlines remain required. Without a custom store, existing OSS configuration and client lifecycle are unchanged.
 
 Oversized private Session resources and closed-Session journal cold storage use the same object store through `qwen.managed-agent.session-resources.*`. All controls default off: `enabled` admits allocate/upload/finalize for over-cap resources (while off they are refused with HTTP 501 `managed_session_oss_disabled`); `pack-job-enabled` builds and publishes immutable journal packs without deleting SQL bodies; `deletion-enabled` evicts covered SQL bodies only after `deletion-grace` (default 72h, must exceed backup replication lag) and only once pack-only mode is qualified. `oss-key-prefix`, `pack-target-bytes`, `pack-max-transactions` and `scan-delay` tune placement and the background sweeper. Deploy compatible readers before enabling writes, qualify pack-only mode before enabling eviction; rollback disables writes/eviction but keeps readers, hydration and reconciliation.
 
@@ -332,16 +332,17 @@ MariaDB solely by product name or introduce a catalog migration.
 
 MySQL and MariaDB require `STRICT_TRANS_TABLES` or `STRICT_ALL_TABLES` in each
 application connection's session `sql_mode`. Schema admission and validation
-reject non-strict connections before schema writes. The embedded default Managed
-pool adds `STRICT_TRANS_TABLES` when creating every physical connection,
-preserving the other session modes. A non-strict global default is accepted.
+reject non-strict connections before schema writes. Every managed pool —
+standalone, embedded and maintenance — adds `STRICT_TRANS_TABLES` when creating
+every physical connection, preserving the other session modes. A non-strict
+global default is accepted.
 Strict mode prevents ordinary writes to unsigned counters from silently clamping
 negative values to zero; `IGNORE` writes can downgrade these errors to warnings.
-Standalone, maintenance and custom DataSource callers must configure every
-application connection to retain strict mode throughout operation; a startup
-check does not police later administrative or connection-mode changes. The
-application does not change the server's global SQL mode. MariaDB CHECK
-enforcement still requires both global and session settings to be enabled.
+A custom DataSource must configure every application connection to retain strict
+mode throughout operation; a startup check does not police later administrative
+or connection-mode changes. The application does not change the server's global
+SQL mode. MariaDB CHECK enforcement still requires both global and session
+settings to be enabled.
 
 Run the packaged CLI with `qwen serve --profile hosted-harness` as a separate
 process (the credentialed launch is spelled out in the Full WebShell
@@ -436,8 +437,8 @@ Close, archive and delete are durable `ma_operation` execution units. Each answe
 `202` with a command operation that
 `GET /v1/agents/sessions/{id}/operations/{operationId}` reads back, also after a
 delete; the WebShell adapter offers the same routes. The public control plane
-owns lifecycle state and tenant/idempotency checks, while the Hosted Harness
-remains the private title authority and the Runtime Broker owns execution
+owns lifecycle state and tenant/idempotency checks, the public SQL row is the
+Session title's display authority, and the Runtime Broker owns execution
 bindings.
 
 Turn input and cancellation are recorded in the same table as `submit_input`
@@ -516,15 +517,34 @@ journal, so the Session cannot admit a further Turn — close it and start a new
 Session. See "Hosted recovery scope" below for what the first release
 covers. A Harness whose journal writes stopped after a failed commit answers every close with `503` until it restarts. A delete of a closed or archived Session
 needs no Harness. Archive accepts only a closed Session and completes at once;
-unarchive restores it to closed. Rename waits for the Harness to durably commit
-`session_metadata`. When a rename failure is recorded, its `PENDING` command becomes `FAILED`
-while retaining its receipt and request digest. The same
-key retries the same content with the replay flag set; changed content or a
-different Session conflicts. A successful concurrent request can still complete
-the receipt, and a failing sibling cannot overwrite that completed outcome. It
-cannot complete a retired receipt once a later rename has completed either: that
-sibling answers `409 session_mutation_superseded` and the newer public SQL title stays.
-The latest title attempt is now a durable delivery with a monotonically increasing per-Session revision. The Harness checks this revision inside its journal commit and uses a stable command identity per attempt, so a late older versioned write cannot undo a newer versioned title and a lost reply can be replayed without another write. A failed same-key request retried after a later rename receives a new revision and can still win. Pending same-key retries keep their original revision. A recovery worker redelivers the latest unfinished title and completes its public receipt; older completion attempts cannot affect the newer delivery. Both inline requests and recovery workers claim before sending; failure cleanup requires the current unexpired owner. Fresh disabled or unsupported Harness requests are refused before admission. Workspace migration also refuses unfinished title delivery even when the public command is FAILED. Close, archive, delete and cwd changes wait for this delivery to settle, including when its public command is FAILED, so sealing cannot strand a title already accepted by the Harness. A delivery whose submission went unanswered is the exception (D7-2): it parks `recovery_blocked`, is never sent again, and retires its public receipt, so it holds neither later titles nor the lifecycle; the operation reconciler completes it, and shows the title, once the Session journal holds its revision's commit, and fails it once a deleted Session's complete journal lacks it ([design](../../docs/design/2026-10-17-managed-operation-reconciliation.md)). The Harness must advertise title protocol version 1 before the SDK sends a versioned title. Plain private SDK title writes remain supported and preserve the watermark. See [the concurrency design](../../docs/design/2026-10-08-managed-session-rename-delivery.md). If the command store
+unarchive restores it to closed. Rename settles synchronously in one local SQL
+transaction: it locks the Session row, increments `title_revision`, updates
+`ma_session.title`, records a `COMPLETED` `RENAME_SESSION` receipt with the
+request digest, and appends the rename mutation event, then returns the confirmed
+title. The SQL row is the public display authority; there is no `PENDING`
+command, delivery row, claim or lease. The same key replays the recorded outcome
+with the replay flag set; changed content or a different Session conflicts. After
+the transaction commits, the request sends one best-effort journal notification
+carrying the committed revision, so the Harness watermark orders concurrent and
+late notifications and a lost reply is replayed without another write. A failed
+notification (Harness unavailable, generation mismatch, sealed journal, transport
+error) is logged and never fails the rename: the journal copy lags until a later
+rename carries a higher revision, the same divergence the system already tolerates
+for auto titles. The notification is sent only when the Harness advertises title
+protocol version 1 and is skipped otherwise; a rename is no longer refused before
+admission for an unavailable or unsupported Harness. The `rename` capability
+advertisement stays Harness-bound (available and fenced-title support) by design:
+it reports whether the journal copy can stay in sync, not whether the SQL rename
+can succeed. Because rename holds no delivery, it blocks neither close, archive,
+delete and cwd changes nor workspace migration, and no recovery worker redelivers
+or reconciles a title. A same-key retry settles a leftover `PENDING` or `FAILED`
+`RENAME_SESSION` receipt from a pre-upgrade binary under a new revision. Until
+retried, an orphaned `PENDING` receipt still counts toward the MCP-management and
+workspace-migration idle gates (which count any `PENDING` `SESSION_COMMAND`
+receipt), so those operations stay blocked for that Session; rename no longer has
+a background worker to drain it. Plain private SDK title writes remain supported
+and preserve the watermark. See
+[the single-authority design](../../docs/design/2026-11-12-managed-rename-single-authority.md). If the command store
 is unavailable during cleanup, the original API failure is preserved and the
 same key can resume its receipt when storage returns. Only an in-flight
 lifecycle change blocks another one. A retry with the same key from the same
@@ -2121,9 +2141,9 @@ See the [English design](../../docs/design/workspace-storage-migration.md) and [
 
 The current baseline includes the Workspace migration schema. Earlier development catalogs require fresh disposable fixtures; do not edit Flyway history to reuse them.
 
-The private artifact is `qwen-managed-agent-server-0.1.0-alpha-workspace-migration.jar`; the reference distribution runs the same entry as `bin/qwen-managed-agent-admin workspace-migration`. Set `W1_JDBC_URL`, `W1_JDBC_USER`, `W1_JDBC_PASSWORD`, `W1_RUNTIME_CREDENTIAL_KEY_ID`, and `W1_RUNTIME_CREDENTIAL_KEY` to the original deployment database and Broker credential key. The full request file contains `version` (the JSON integer `1`), `migrationOperationId`, `tenantId`, `storageId`, `fenceOperationId`, `captureOperationId`, `mountRevision`, `sourceRoot`, `targetRoot`, `bundleRoot`, `fileHistoryRoot`, `stateDirectory`, `nodeExecutable`, and `cliEntry`. Fence admission is storage-scoped for bound Sessions; unbound legacy Sessions are outside that ownership. Metadata transactions share the tenant placement lock, so other storages of the same tenant may wait until those transactions finish; file scans and physical retirement hold no such lock. Paths must be canonical absolute deployment paths; roots and the durable Runtime state directory cannot overlap. IDs must be distinct UUIDs. Keep this exact request file for retries.
+The reference distribution runs this entry as `bin/qwen-managed-agent-admin workspace-migration` from the executable server jar. Set `W1_JDBC_URL`, `W1_JDBC_USER`, `W1_JDBC_PASSWORD`, `W1_RUNTIME_CREDENTIAL_KEY_ID`, and `W1_RUNTIME_CREDENTIAL_KEY` to the original deployment database and Broker credential key. The full request file contains `version` (the JSON integer `1`), `migrationOperationId`, `tenantId`, `storageId`, `fenceOperationId`, `captureOperationId`, `mountRevision`, `sourceRoot`, `targetRoot`, `bundleRoot`, `fileHistoryRoot`, `stateDirectory`, `nodeExecutable`, and `cliEntry`. Fence admission is storage-scoped for bound Sessions; unbound legacy Sessions are outside that ownership. Metadata transactions share the tenant placement lock, so other storages of the same tenant may wait until those transactions finish; file scans and physical retirement hold no such lock. Paths must be canonical absolute deployment paths; roots and the durable Runtime state directory cannot overlap. IDs must be distinct UUIDs. Keep this exact request file for retries.
 
-Before starting a new operation, the original Runtime state directory and retained history directory must exist at canonical paths, and the unchanged Linux identity reader must prove the history volume, including unambiguous birth time. Run maintenance as the original service user; the Runtime state directory must belong to that UID with exact POSIX `0700` permissions, checked by the same durable provider validator without creating or changing it. Failure returns `migration_state_unavailable` or `migration_history_unverified` before creating a migration row/fence or retiring placements. The target copy is still prepared after retirement. Run `java -jar <migration.jar> retire <request.json> --offline-confirmed` first. Then use the existing registration command to fence the original revision with the request's fence ID, and capture the W1b bundle with the request's capture ID. Prepare the target Workspace through the external offline copy procedure, preserving modes and the copied source marker. Run `prepare` and then `promote` with the same arguments. The first `prepare` and every new `promote` attempt verify sealed content, live source, target, retained history and original physical identities. Replaying `prepare` after PREPARED or any completed operation returns the saved receipt without rescanning; use `promote` for fresh transition verification. `inspect <request.json>` reads progress and the original receipt. `abort <request.json> --offline-confirmed` requires all placements retired and W1a still fenced; it does not restart anything or remove target artifacts. After abort or invalidation, prepare a fresh external target copy matching the new capture before starting a new operation; foreign marker or temporary files are rejected.
+Before starting a new operation, the original Runtime state directory and retained history directory must exist at canonical paths, and the unchanged Linux identity reader must prove the history volume, including unambiguous birth time. Run maintenance as the original service user; the Runtime state directory must belong to that UID with exact POSIX `0700` permissions, checked by the same durable provider validator without creating or changing it. Failure returns `migration_state_unavailable` or `migration_history_unverified` before creating a migration row/fence or retiring placements. The target copy is still prepared after retirement. Run `bin/qwen-managed-agent-admin workspace-migration retire <request.json> --offline-confirmed` first. Then use the existing registration command to fence the original revision with the request's fence ID, and capture the W1b bundle with the request's capture ID. Prepare the target Workspace through the external offline copy procedure, preserving modes and the copied source marker. Run `prepare` and then `promote` with the same arguments. The first `prepare` and every new `promote` attempt verify sealed content, live source, target, retained history and original physical identities. Replaying `prepare` after PREPARED or any completed operation returns the saved receipt without rescanning; use `promote` for fresh transition verification. `inspect <request.json>` reads progress and the original receipt. `abort <request.json> --offline-confirmed` requires all placements retired and W1a still fenced; it does not restart anything or remove target artifacts. After abort or invalidation, prepare a fresh external target copy matching the new capture before starting a new operation; foreign marker or temporary files are rejected.
 
 If the original history root has birth time equal to mtime, including when the first Session backup creates it, preflight conservatively returns `migration_history_unverified`. With all writers stopped, confirm the filesystem exposes a genuine persistent birth time, then update only the original history directory's mtime as the service user and retry `retire` with the same request:
 

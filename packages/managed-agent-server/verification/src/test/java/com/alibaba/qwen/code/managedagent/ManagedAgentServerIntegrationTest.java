@@ -25,6 +25,7 @@ import com.alibaba.qwen.code.managedagent.session.HarnessCoordinator;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.alibaba.qwen.code.managedagent.session.SessionEventHub;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
@@ -470,8 +471,6 @@ class ManagedAgentServerIntegrationTest {
                         .value("managed title"));
         assertThat(harness.renameCount()).isEqualTo(renames + 1);
         assertThat(harness.title(sessionId)).isEqualTo("managed title");
-        assertThat(store.requireSession(tenant, sessionId).harnessBootId())
-                .isNotNull();
 
         mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
@@ -528,8 +527,11 @@ class ManagedAgentServerIntegrationTest {
                 .andExpect(jsonPath("$.error.code")
                         .value("session_not_active"));
         JsonNode closed = awaitOperation(tenant, sessionId, closeId);
+        // The synchronous rename no longer attaches the Harness, so this
+        // empty-input Session was never held: the Harness is asked to close
+        // anyway, but its answer confirms nothing.
         assertThat(closed.get("admission_stage").asText())
-                .isEqualTo("harness_confirmed");
+                .isEqualTo("java_durable");
         assertThat(closed.get("delivery_state").asText())
                 .isEqualTo("confirmed");
         assertThat(closed.get("receipt_id").asText()).startsWith("rcpt_");
@@ -726,7 +728,7 @@ class ManagedAgentServerIntegrationTest {
     }
 
     @Test
-    void retriesAFailedRenameWithTheSameIdempotencyKey() throws Exception {
+    void aFailedTitleNotificationStillCompletesTheRenameAndReplays() throws Exception {
         String tenant = "tenant-rename-retry-" + UUID.randomUUID();
         MvcResult created = mvc.perform(post("/v1/agents/sessions").principal(tenantActor(tenant))
                         .header(TenantContextFilter.HEADER, tenant)
@@ -737,36 +739,44 @@ class ManagedAgentServerIntegrationTest {
         String sessionId = objectMapper.readTree(
                 created.getResponse().getContentAsString()).get("id").asText();
         legacyState(tenant, sessionId);
+        int sends = harness.renameCount();
         harness.failNextRename();
 
+        // The lost journal notification never fails the request: the SQL
+        // title is already durable, so the rename answers 200.
         mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "rename-retry")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"title\":\"retry title\"}"))
-                .andExpect(status().isServiceUnavailable())
-                .andExpect(jsonPath("$.error.code")
-                        .value("hosted_harness_unavailable"));
+                .andExpect(status().isOk())
+                .andExpect(header().string("X-Qwen-Idempotent-Replay", "false"))
+                .andExpect(jsonPath("$.metadata.title").value("retry title"));
+        assertThat(store.requireSession(tenant, sessionId).title()).isEqualTo("retry title");
+        assertThat(harness.renameCount()).isEqualTo(sends + 1);
 
-        // The answered failure retired its command row, so a different key
-        // is admitted instead of wedging on session_operation_active.
+        // The completed command never wedges a later rename on a fresh key.
         mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "another-rename")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"title\":\"blocked\"}"))
-                .andExpect(status().isOk());
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.metadata.title").value("blocked"));
 
-        // An already submitted, superseded identity cannot become a new title revision.
+        // The same-key retry replays the recorded outcome — the current
+        // persisted title — and sends no further notification.
         mvc.perform(patch("/v1/agents/sessions/{id}", sessionId)
                         .header(TenantContextFilter.HEADER, tenant)
                         .header("Idempotency-Key", "rename-retry")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"title\":\"retry title\"}"))
-                .andExpect(status().isConflict())
-                .andExpect(jsonPath("$.error.code").value("session_mutation_superseded"));
+                .andExpect(status().isOk())
+                .andExpect(header().string("X-Qwen-Idempotent-Replay", "true"))
+                .andExpect(jsonPath("$.metadata.title").value("blocked"));
+        assertThat(harness.renameCount()).isEqualTo(sends + 2);
         JsonNode events = objectMapper.readTree(events(tenant, sessionId).getResponse().getContentAsString()).get("data");
-        assertThat(events).filteredOn(event -> "session.updated".equals(event.get("type").asText())).hasSize(1);
+        assertThat(events).filteredOn(event -> "session.updated".equals(event.get("type").asText())).hasSize(2);
     }
 
     @Test
@@ -3225,6 +3235,7 @@ class ManagedAgentServerIntegrationTest {
         private final AtomicInteger renameFailures = new AtomicInteger();
         private final AtomicInteger closeFailures = new AtomicInteger();
         private final Map<String, String> titles = new ConcurrentHashMap<>();
+        private final Map<String, Long> renameRevisions = new ConcurrentHashMap<>();
         private final Map<String, CountDownLatch> gates =
                 new ConcurrentHashMap<>();
         private final Set<String> cancelled =
@@ -3437,11 +3448,15 @@ class ManagedAgentServerIntegrationTest {
 
         @Override
         public boolean supportsFencedTitles() {
-            return true;
+            // An unavailable Harness cannot fence titles, exactly like the
+            // real UnavailableHarnessConnector: the synchronous rename still
+            // succeeds, but its best-effort journal notification is skipped.
+            return available;
         }
 
         @Override
         public void rename(String tenantId, String sessionId, String title, long revision) {
+            renameRevisions.put(sessionId, revision);
             rename(tenantId, sessionId, title);
         }
 
@@ -3492,6 +3507,10 @@ class ManagedAgentServerIntegrationTest {
 
         String title(String sessionId) {
             return titles.get(sessionId);
+        }
+
+        long renameRevision(String sessionId) {
+            return renameRevisions.getOrDefault(sessionId, 0L);
         }
 
         void failNextRename() {
@@ -3574,7 +3593,7 @@ class ManagedAgentServerIntegrationTest {
                 bindings, sessions, executions, "cleanup-probe", Duration.ofMinutes(1), Duration.ofMinutes(1))) {
             var binding = broker.warm(harnessSession).toCompletableFuture().join();
             jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Void>) connection -> {
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.beginHarnessLifecycle(connection, tenant, harnessSession, operation);
+                RuntimeAdmissionFences.beginHarnessLifecycle(connection, tenant, harnessSession, operation);
                 return null;
             });
             jdbc.update("UPDATE ma_session_head SET claim_generation = 7, claim_lease_until = ? WHERE tenant_id = ? AND harness_session_id = ?",

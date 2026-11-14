@@ -99,8 +99,9 @@ export function startEventStream(state: BridgeState, sessionId: string): void {
             const lifecycle =
               typeof meta === 'object' &&
               meta !== null &&
-              Object.hasOwn(meta, 'executionLifecycle');
-            // Lifecycle frames describe one request, not the turn's final chunk.
+              (Object.hasOwn(meta, 'executionLifecycle') ||
+                Object.hasOwn(meta, 'hookLifecycle'));
+            // Lifecycle frames do not mark the turn's final chunk.
             if ('_meta' in update && !lifecycle) {
               collector.resolve();
             }

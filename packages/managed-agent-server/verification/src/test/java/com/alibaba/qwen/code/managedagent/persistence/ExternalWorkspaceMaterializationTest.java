@@ -427,6 +427,107 @@ class ExternalWorkspaceMaterializationTest {
     }
 
     @Test
+    void externalFilesCreationRefusesMemoryStoreBinding() {
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getHarness().setEnabled(true);
+        properties.getSessionStore().setEnabled(true);
+        properties.getRuntimeBroker().setEnabled(true);
+        properties.getRuntimeBroker().setTrustedLocalRebootRecovery(false);
+        properties.getRuntimeBroker().setExternalProviderUrl("http://provider.invalid");
+        properties.getRuntimeBroker().setProvisioner("external-workspace");
+        properties.getRuntimeBroker().setExternalProviderToken("provider-token-for-tests");
+        properties.getRuntimeBroker().setExternalProviderId("provider");
+        properties.getRuntimeBroker().setWorkspaceCwd("/worker/workspace");
+        properties.getRuntimeBroker().setWorkspaceId("workspace");
+        var harness = mock(HarnessConnector.class);
+        when(harness.supportsLifecycle("hosted-workspace-external-files/1")).thenReturn(true);
+        var warmer = mock(com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer.class);
+        when(warmer.supportsWorkspaceClose("hosted-workspace-external-files/1")).thenReturn(true);
+        try (var context = new org.springframework.context.annotation.AnnotationConfigApplicationContext()) {
+            context.registerBean(ManagedAgentProperties.class, () -> properties);
+            context.registerBean(ExternalStorageRegistrationStore.class, () -> registrations);
+            context.registerBean(HarnessConnector.class, () -> harness);
+            context.registerBean(com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer.class, () -> warmer);
+            context.registerBean(com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.class, () -> registry);
+            context.refresh();
+            store.materialize("tenant", "workspace", "Name", "owner", "key");
+            var sessions = new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {}, registry, properties,
+                    new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+            assertThatThrownBy(() -> new TransactionTemplate(manager).execute(status -> sessions.insertWorkspaceSessionCommand(
+                    SessionCreationCommand.builder()
+                            .tenantId("tenant").actorId("owner")
+                            .idempotencyKey("memory-refused").requestDigest("digest")
+                            .agentId("qwen-code").title("Files")
+                            .input(List.of())
+                            .selection(new WorkspaceSelection("workspace", "."))
+                            .memoryStoreId("memory-1")
+                            .build())))
+                    .isInstanceOfSatisfying(
+                            com.alibaba.qwen.code.managedagent.exception.ManagedAgentException.class, error -> {
+                                assertThat(error.getStatus()).isEqualTo(409);
+                                assertThat(error.getCode()).isEqualTo("workspace_unavailable");
+                            });
+            var admitted = new TransactionTemplate(manager).execute(status -> sessions.insertWorkspaceSessionCommand(
+                    SessionCreationCommand.builder()
+                            .tenantId("tenant").actorId("owner")
+                            .idempotencyKey("memory-control").requestDigest("digest")
+                            .agentId("qwen-code").title("Files")
+                            .input(List.of())
+                            .selection(new WorkspaceSelection("workspace", "."))
+                            .build()));
+            assertThat(sessions.requireSession("tenant", admitted.sessionId()).toolProfile())
+                    .isEqualTo("hosted-workspace-external-files/1");
+        }
+    }
+
+    @Test
+    void malformedExternalRegistrationIsANonRetryableApprovalChangeRefusal() {
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getHarness().setEnabled(true);
+        properties.getSessionStore().setEnabled(true);
+        properties.getRuntimeBroker().setEnabled(true);
+        properties.getRuntimeBroker().setTrustedLocalRebootRecovery(false);
+        properties.getRuntimeBroker().setExternalProviderUrl("http://provider.invalid");
+        properties.getRuntimeBroker().setProvisioner("external-workspace");
+        properties.getRuntimeBroker().setExternalProviderToken("provider-token-for-tests");
+        properties.getRuntimeBroker().setExternalProviderId("provider");
+        properties.getRuntimeBroker().setWorkspaceCwd("/worker/workspace");
+        properties.getRuntimeBroker().setWorkspaceId("workspace");
+        var harness = mock(HarnessConnector.class);
+        when(harness.supportsLifecycle("hosted-workspace-external-files/1")).thenReturn(true);
+        var warmer = mock(com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer.class);
+        when(warmer.supportsWorkspaceClose("hosted-workspace-external-files/1")).thenReturn(true);
+        try (var context = new org.springframework.context.annotation.AnnotationConfigApplicationContext()) {
+            context.registerBean(ManagedAgentProperties.class, () -> properties);
+            context.registerBean(ExternalStorageRegistrationStore.class, () -> registrations);
+            context.registerBean(HarnessConnector.class, () -> harness);
+            context.registerBean(com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer.class, () -> warmer);
+            context.registerBean(com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.class, () -> registry);
+            context.refresh();
+            store.materialize("tenant", "workspace", "Name", "owner", "key");
+            var sessions = new ManagedAgentStore(jdbc, json, Clock.systemUTC(), ignored -> {}, registry, properties,
+                    new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+            var admitted = new TransactionTemplate(manager).execute(status -> sessions.insertWorkspaceSessionCommand(
+                    SessionCreationCommand.builder()
+                            .tenantId("tenant").actorId("owner")
+                            .idempotencyKey("approval-lane").requestDigest("digest")
+                            .agentId("qwen-code").title("Files")
+                            .input(List.of())
+                            .selection(new WorkspaceSelection("workspace", "."))
+                            .build()));
+            jdbc.update("UPDATE ma_storage SET registration_json = 'not-json'");
+            assertThatThrownBy(() -> new TransactionTemplate(manager).executeWithoutResult(status ->
+                    sessions.changeSessionApproval("tenant", "owner", admitted.sessionId(),
+                            "approval", "digest", "default", 0, true, true)))
+                    .isInstanceOfSatisfying(
+                            com.alibaba.qwen.code.managedagent.exception.ManagedAgentException.class, error -> {
+                                assertThat(error.getStatus()).isEqualTo(409);
+                                assertThat(error.getCode()).isEqualTo("unsupported_feature");
+                            });
+        }
+    }
+
+    @Test
     void malformedExternalRegistrationOnlyDisablesItsWorkspaceInBatchDiscovery() {
         properties.getHarness().setWorkspaceFilesEnabled(true);
         properties.getHarness().setEnabled(true);

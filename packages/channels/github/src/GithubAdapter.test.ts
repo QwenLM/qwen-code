@@ -25,6 +25,7 @@ import {
   BoundSessionGoneError,
   BoundSessionQueueFullError,
   BoundSessionUnavailableError,
+  BOUND_PROMPT_BODY_MAX_CODE_POINTS,
   channelEventFilePath,
   DEFAULT_BOUND_ROLE_GUIDANCE,
   DEFAULT_BOUND_ROLE_GUIDANCE_BY_LANGUAGE,
@@ -29235,6 +29236,58 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
             'New inline review comment by @test-bot:',
           );
         }
+      });
+
+      it('localizes a genuine comment-watch truncation and preserves the English envelope', async () => {
+        await initChannel(commentWatchConfig, {
+          boundSessions,
+          locale: 'zh',
+        });
+        boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+        seedCommentBaseline();
+        mockPull({});
+        routeCommentPaginate();
+        mockOctokit.rest.issues.listComments.mockResolvedValue([
+          conversationComment({
+            body: 'a'.repeat(BOUND_PROMPT_BODY_MAX_CODE_POINTS + 1),
+          }),
+        ]);
+        mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+        const runner = channel as unknown as {
+          runInboundTask: (task: {
+            envelope: { text: string };
+            boundText?: string;
+          }) => Promise<boolean>;
+        };
+        let taskBeforeDelivery:
+          | { envelope: { text: string }; boundText?: string }
+          | undefined;
+        const originalRun = runner.runInboundTask.bind(channel);
+        // Successful delivery can remove the task before pollOnce returns.
+        vi.spyOn(runner, 'runInboundTask').mockImplementation((task) => {
+          taskBeforeDelivery = structuredClone(task);
+          return originalRun(task);
+        });
+
+        await pollOnce();
+
+        expect(taskBeforeDelivery).toBeDefined();
+        expect(taskBeforeDelivery!.envelope.text).toContain(
+          '… [comment truncated: 1 more characters]',
+        );
+        expect(taskBeforeDelivery!.envelope.text).not.toContain('评论已截断');
+        expect(taskBeforeDelivery!.boundText).toContain(
+          '… [评论已截断：省略了 1 个字符]',
+        );
+
+        expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+        const prompt = boundSessions.deliverPrompt.mock.calls[0]![1];
+        expect(prompt).toContain('@test-bot 的新评论：');
+        // The shared builder caps the whole already-marked body too.
+        expect(prompt).toContain('[提示词已截断：省略了 99 个字符]');
+        expect(prompt).not.toContain(
+          '… [comment truncated: 1 more characters]',
+        );
       });
 
       it('renders the observed PR title in the comment prompt metadata', async () => {

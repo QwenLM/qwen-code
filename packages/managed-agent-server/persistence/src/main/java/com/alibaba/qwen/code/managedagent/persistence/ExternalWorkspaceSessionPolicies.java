@@ -45,6 +45,7 @@ final class ExternalWorkspaceSessionPolicies {
                     || !"qwen-code".equals(command.agentId())
                     || resolvedPin.digest() != null || resolvedPin.hooks() || resolvedPin.mcp()
                     || Boolean.TRUE.equals(command.requestedPlanMode()) || !command.skills().isEmpty() || command.extensionPins() != null
+                    || command.memoryStoreId() != null
                     || command.input().stream().anyMatch(block -> !Set.of("input_text", "text").contains(block.get("type")))) {
                 throw AgentSessionPolicies.workspaceExecutionUnavailable();
             }

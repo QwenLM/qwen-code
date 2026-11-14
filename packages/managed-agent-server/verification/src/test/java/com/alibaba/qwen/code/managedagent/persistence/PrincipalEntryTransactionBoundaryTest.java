@@ -58,7 +58,7 @@ class PrincipalEntryTransactionBoundaryTest {
     private static final Set<String> BOUNDARY_ENTRIES = Set.of(
             "insertSessionCommand", "insertWorkspaceSessionCommand",
             "insertTurnCommand", "insertCancelCommand",
-            "beginSessionRename", "beginSessionMutation",
+            "settleRenameSync", "beginSessionMutation",
             "insertChildSessionCommand", "insertPublicChildSessionCommand",
             "replayChildSessionCommand", "replayWorkspaceSessionCommand");
 
@@ -154,13 +154,13 @@ class PrincipalEntryTransactionBoundaryTest {
                         String.class, String.class, String.class, String.class},
                 new Object[] {"tenant", "cancel", key(), "digest",
                         "missing-session", "turn-1", "actor"});
-        assertBoundary("beginSessionRename",
+        assertBoundary("settleRenameSync",
                 new Class<?>[] {String.class, String.class, String.class,
                         String.class, String.class, String.class,
                         SessionPrincipal.class},
                 new Object[] {"tenant", key(), "digest", "missing-session",
                         "title", "actor", principal});
-        assertBoundary("beginSessionRename",
+        assertBoundary("settleRenameSync",
                 new Class<?>[] {String.class, String.class, String.class,
                         String.class, String.class, String.class},
                 new Object[] {"tenant", key(), "digest", "missing-session",

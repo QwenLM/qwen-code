@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationCommand;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionPage;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SyncRename;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
@@ -105,10 +106,10 @@ class ManagedAgentPrincipalEntries {
     }
 
     @Transactional
-    public SessionMutationCommand beginSessionRename(String tenantId,
+    public SyncRename settleRenameSync(String tenantId,
             String idempotencyKey, String requestDigest, String sessionId,
             String title, String actorId, SessionPrincipal principal) {
-        return sessionCommands.beginSessionRename(tenantId, idempotencyKey, requestDigest, sessionId, title, actorId, principal);
+        return sessionCommands.settleRenameSync(tenantId, idempotencyKey, requestDigest, sessionId, title, actorId, principal);
     }
 
     @Transactional

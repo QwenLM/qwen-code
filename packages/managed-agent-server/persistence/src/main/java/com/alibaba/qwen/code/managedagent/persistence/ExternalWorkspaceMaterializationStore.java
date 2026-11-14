@@ -3,7 +3,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
@@ -53,7 +53,7 @@ public final class ExternalWorkspaceMaterializationStore {
         }
         WorkspaceStorageKindGuard.requireFreshTransaction();
         String digest = ManagedSchemaKeys.key(registeredAliasId, displayName, ownerActorId);
-        String aliasKey = JdbcRuntimeBindingRepository.storageAliasKey(tenant, registeredAliasId);
+        String aliasKey = RuntimeAdmissionFences.storageAliasKey(tenant, registeredAliasId);
         return transaction.execute(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, tenant, 10);
             var prior = ManagedReceipts.find(jdbc, NAMESPACE, tenant, ReceiptScope.TENANT,
@@ -93,8 +93,8 @@ public final class ExternalWorkspaceMaterializationStore {
                     || jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ?"
                             + " AND tenant_key = ? AND storage_key = ? AND physical_key = ?"
                             + " AND registration_revision = ? AND storage_kind = ?",
-                            Long.class, aliasKey, JdbcRuntimeBindingRepository.storageFenceKey(tenant),
-                            JdbcRuntimeBindingRepository.storageFenceKey(registeredAliasId), physical,
+                            Long.class, aliasKey, RuntimeAdmissionFences.storageFenceKey(tenant),
+                            RuntimeAdmissionFences.storageFenceKey(registeredAliasId), physical,
                             revision, registration.storageKind()) != 1
                     || jdbc.queryForList("SELECT storage_key FROM ma_storage_owner WHERE storage_key = ? AND physical_key = ?"
                             + " AND tenant_id = ? AND storage_id = ? AND storage_kind = ?"

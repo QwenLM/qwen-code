@@ -50,6 +50,13 @@ import {
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '../ui/dialog';
+import {
   Card,
   CardAction,
   CardContent,
@@ -94,6 +101,7 @@ import {
 } from './weixin-auth-api';
 import styles from './ChannelsManagerPage.module.css';
 import {
+  CHANNEL_METHOD_PLATFORMS,
   isChannelPlatformAvailable,
   isSupportedChannelType,
   PLATFORM_MARKS,
@@ -102,6 +110,15 @@ import {
 interface ChannelsManagerPageProps {
   onClose?: () => void;
   initialFocusRef?: Ref<HTMLHeadingElement>;
+  /** This tab's daemon-registered client id, for QR-login attribution. */
+  clientId?: string;
+  /**
+   * The workspace this tab's session belongs to. The client id is registered
+   * with that workspace's bridge only, and the daemon validates the header
+   * against the *target* workspace's bridge — so sending it while managing a
+   * different workspace is a hard `400 invalid_client_id`.
+   */
+  sessionWorkspaceCwd?: string;
 }
 
 type ChannelAction = 'start' | 'stop' | 'restart' | 'startup';
@@ -140,6 +157,8 @@ function badgeVariant(
 export function ChannelsManagerPage({
   onClose,
   initialFocusRef,
+  clientId,
+  sessionWorkspaceCwd,
 }: ChannelsManagerPageProps) {
   const { t } = useI18n();
   const workspace = useWorkspace();
@@ -202,6 +221,19 @@ export function ChannelsManagerPage({
     descriptor: DaemonChannelTypeDescriptor;
     instance?: DaemonChannelInstanceSnapshot;
   }>();
+  const [methodChoices, setMethodChoices] = useState<{
+    type: string;
+    displayName: string;
+    methods: DaemonChannelTypeDescriptor[];
+  }>();
+  const getPlatformName = (platform: { type: string; displayName: string }) => {
+    const key = `channels.platform.name.${platform.type}`;
+    const name = t(key);
+    return name === key ? platform.displayName : name;
+  };
+  const methodPlatformVariables = methodChoices && {
+    platform: getPlatformName(methodChoices),
+  };
   const editorRef = useRef(editor);
   useEffect(() => {
     editorRef.current = editor;
@@ -230,6 +262,15 @@ export function ChannelsManagerPage({
     autoLoad: supportsManagement,
     enabled: supportsManagement,
     workspaceCwd: activeWorkspaceCwd,
+    // Attribute only when managing the workspace this tab's session lives on.
+    // Every managed workspace owns its own bridge, and the daemon checks the
+    // header against the target's — a foreign id is a hard 400, which would
+    // break a flow that worked while no header was sent at all.
+    clientId:
+      activeWorkspaceCwd !== undefined &&
+      activeWorkspaceCwd === sessionWorkspaceCwd
+        ? clientId
+        : undefined,
   });
   const canManage =
     supportsManagement &&
@@ -258,6 +299,7 @@ export function ChannelsManagerPage({
   const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
+    setMethodChoices(undefined);
     setDeleteTarget(undefined);
     setDeleteError(undefined);
     setDeleting(false);
@@ -284,6 +326,31 @@ export function ChannelsManagerPage({
     () => catalog.filter(isChannelPlatformAvailable),
     [catalog],
   );
+  const platformGroups = useMemo(() => {
+    const groups = new Map<
+      string,
+      {
+        type: string;
+        displayName: string;
+        methods: DaemonChannelTypeDescriptor[];
+      }
+    >();
+    for (const descriptor of availablePlatforms) {
+      const { type, displayName } =
+        CHANNEL_METHOD_PLATFORMS[descriptor.type] ?? descriptor;
+      const group = groups.get(type);
+      if (group) {
+        group.methods.push(descriptor);
+      } else {
+        groups.set(type, {
+          type,
+          displayName,
+          methods: [descriptor],
+        });
+      }
+    }
+    return [...groups.values()];
+  }, [availablePlatforms]);
   const instances = useMemo(
     () =>
       Object.values(channels)
@@ -638,7 +705,12 @@ export function ChannelsManagerPage({
                               className={styles.runtimeBadge}
                               data-runtime-state={channel.runtime.state}
                             >
-                              {t(STATUS_KEYS[channel.runtime.state])}
+                              {t(
+                                descriptor?.outboundOnly &&
+                                  channel.runtime.state === 'connected'
+                                  ? 'channels.status.readyToSend'
+                                  : STATUS_KEYS[channel.runtime.state],
+                              )}
                             </Badge>
                           </CardTitle>
                           <CardDescription className={styles.channelMeta}>
@@ -646,7 +718,13 @@ export function ChannelsManagerPage({
                             <span aria-hidden="true">·</span>
                             <span>
                               {t(
-                                STATUS_DESCRIPTION_KEYS[channel.runtime.state],
+                                descriptor?.outboundOnly
+                                  ? channel.runtime.state === 'connected'
+                                    ? 'channels.statusDescription.readyToSend'
+                                    : 'channels.statusDescription.notReadyToSend'
+                                  : STATUS_DESCRIPTION_KEYS[
+                                      channel.runtime.state
+                                    ],
                               )}
                             </span>
                           </CardDescription>
@@ -792,7 +870,7 @@ export function ChannelsManagerPage({
               </p>
             </div>
             <div className={styles.platformGrid}>
-              {availablePlatforms.map((platform) => (
+              {platformGroups.map((platform) => (
                 <button
                   key={platform.type}
                   type="button"
@@ -800,14 +878,18 @@ export function ChannelsManagerPage({
                   data-testid={`channel-platform-${platform.type}`}
                   disabled={!canManage || !snapshot}
                   aria-label={t('channels.platform.configureNamed', {
-                    platform: platform.displayName,
+                    platform: getPlatformName(platform),
                   })}
-                  onClick={() =>
-                    setEditor({
-                      workspaceCwd: activeWorkspaceCwd!,
-                      descriptor: platform,
-                    })
-                  }
+                  onClick={() => {
+                    if (platform.methods.length > 1) {
+                      setMethodChoices(platform);
+                    } else {
+                      setEditor({
+                        workspaceCwd: activeWorkspaceCwd!,
+                        descriptor: platform.methods[0],
+                      });
+                    }
+                  }}
                 >
                   <span className={styles.platformMark} aria-hidden="true">
                     {PLATFORM_MARKS[platform.type] ??
@@ -816,7 +898,7 @@ export function ChannelsManagerPage({
                   </span>
                   <span className={styles.platformCopy}>
                     <span className={styles.platformName}>
-                      {platform.displayName}
+                      {getPlatformName(platform)}
                     </span>
                     <span className={styles.platformHint}>
                       {t('channels.platform.add')}
@@ -831,6 +913,52 @@ export function ChannelsManagerPage({
           </section>
         ) : null}
       </div>
+
+      <Dialog
+        open={Boolean(methodChoices)}
+        onOpenChange={(open) => {
+          if (!open) setMethodChoices(undefined);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {t('channels.method.title', methodPlatformVariables)}
+            </DialogTitle>
+            <DialogDescription>
+              {t('channels.method.description', methodPlatformVariables)}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-3">
+            {methodChoices?.methods.map((descriptor) => (
+              <Button
+                key={descriptor.type}
+                variant="outline"
+                className="h-auto flex-col items-start gap-1 whitespace-normal py-3 text-left"
+                onClick={() => {
+                  setEditor({ workspaceCwd: activeWorkspaceCwd!, descriptor });
+                  setMethodChoices(undefined);
+                }}
+              >
+                <span>
+                  {t(
+                    descriptor.outboundOnly
+                      ? 'channels.method.webhook'
+                      : 'channels.method.applicationBot',
+                  )}
+                </span>
+                <span className="text-xs font-normal text-muted-foreground">
+                  {t(
+                    descriptor.outboundOnly
+                      ? 'channels.method.webhook.description'
+                      : 'channels.method.applicationBot.description',
+                  )}
+                </span>
+              </Button>
+            ))}
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {editor ? (
         <ChannelEditorDialog

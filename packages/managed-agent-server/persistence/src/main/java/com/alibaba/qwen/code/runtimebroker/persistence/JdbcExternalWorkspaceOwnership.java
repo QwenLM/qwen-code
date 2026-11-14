@@ -52,7 +52,7 @@ public final class JdbcExternalWorkspaceOwnership {
         JdbcRuntimeBindingRepository.lockPlacementDomain(connection, tenant);
         RegisteredExternalStorage registration;
         try (var statement = connection.prepareStatement("SELECT * FROM ma_storage WHERE alias_key = ? FOR UPDATE")) {
-            statement.setString(1, JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage));
+            statement.setString(1, RuntimeAdmissionFences.storageAliasKey(tenant, storage));
             try (var row = statement.executeQuery()) {
                 if (!row.next() || !tenant.equals(row.getString("tenant_id")) || !storage.equals(row.getString("storage_id"))
                         || !java.util.Set.of("EXTERNAL", "EPHEMERAL")
@@ -410,10 +410,10 @@ public final class JdbcExternalWorkspaceOwnership {
             throw JdbcRepositorySupport.unverifiedWorkspaceHolder();
         }
         boolean shared = HarnessOwnership.sharesRuntimeSessions(request);
-        JdbcRuntimeBindingRepository.requireHarnessAdmission(connection, scope, harnessSessionId,
+        RuntimeAdmissionFences.requireHarnessAdmission(connection, scope, harnessSessionId,
                 scope.getLifecycleAuthority(), cleanup
-                        ? JdbcRuntimeBindingRepository.fence(shared, JdbcRuntimeBindingRepository.HarnessFence.CLEANUP, JdbcRuntimeBindingRepository.HarnessFence.RETIREMENT)
-                        : JdbcRuntimeBindingRepository.fence(shared));
+                        ? RuntimeAdmissionFences.fence(shared, RuntimeAdmissionFences.HarnessFence.CLEANUP, RuntimeAdmissionFences.HarnessFence.RETIREMENT)
+                        : RuntimeAdmissionFences.fence(shared));
     }
 
     /**
@@ -426,7 +426,7 @@ public final class JdbcExternalWorkspaceOwnership {
             return false;
         }
         return jdbc.queryForList("SELECT storage_kind FROM ma_storage WHERE alias_key = ?",
-                        String.class, JdbcRuntimeBindingRepository.storageAliasKey(binding.getTenantId(), binding.getStorageId()))
+                        String.class, RuntimeAdmissionFences.storageAliasKey(binding.getTenantId(), binding.getStorageId()))
                 .stream()
                 .anyMatch(kind -> java.util.Set.of("EXTERNAL", "EPHEMERAL").contains(kind));
     }

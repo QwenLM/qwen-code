@@ -11,14 +11,13 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.fasterxml.jackson.databind.JsonNode;
 
-import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
 /**
  * Session, Turn and command admission: creation, idempotent replay,
- * mutations and rename delivery.
+ * mutations and synchronous rename settlement.
  */
 public interface SessionAdmissionStore {
     public default Admission insertSessionCommand(String tenantId, String operation,
@@ -309,40 +308,21 @@ public interface SessionAdmissionStore {
                 "Principal-scoped Session mutations are unavailable");
     }
 
-    public SessionMutationCommand beginSessionRename(String tenantId, String idempotencyKey,
-            String requestDigest, String sessionId, String title);
+    /**
+     * Synchronous rename settlement: the SQL row is the public display
+     * authority. No delivery row, claim or lease is created; the returned
+     * revision orders the caller's best-effort journal notification.
+     */
+    public StoreModels.SyncRename settleRenameSync(String tenantId, String idempotencyKey,
+            String requestDigest, String sessionId, String title, String actorId);
 
-    /** The actor-carrying twin: the recorded rename answers its recorder. */
-    public default SessionMutationCommand beginSessionRename(String tenantId,
-            String idempotencyKey, String requestDigest, String sessionId,
-            String title, String actorId) {
-        return beginSessionRename(tenantId, idempotencyKey, requestDigest,
-                sessionId, title);
-    }
-
-    public default SessionMutationCommand beginSessionRename(String tenantId,
+    /** The principal-scoped twin: the recorded rename answers its recorder. */
+    public default StoreModels.SyncRename settleRenameSync(String tenantId,
             String idempotencyKey, String requestDigest, String sessionId,
             String title, String actorId, SessionPrincipal principal) {
         throw new UnsupportedOperationException(
                 "Principal-scoped Session renames are unavailable");
     }
-
-    public SessionRecord completeSessionRename(String tenantId, String idempotencyKey,
-            String sessionId, String title, String harnessBootId, long revision);
-
-    public SessionRecord completeSessionRename(StoreModels.RenameDelivery delivery, String owner, String bootId);
-
-    public void abandonSessionRename(String tenantId, String idempotencyKey,
-            String sessionId, long revision, String owner);
-
-    public List<StoreModels.RenameDelivery> deliverableRenames(long now);
-
-    public Optional<StoreModels.RenameDelivery> claimRename(StoreModels.RenameDelivery delivery,
-            String owner, Duration lease);
-
-    public void markRenameSubmitted(StoreModels.RenameDelivery delivery, String owner);
-
-    public void retryRename(StoreModels.RenameDelivery delivery, String owner, long availableAt);
 
     public SessionRecord completeSessionMutation(String tenantId, String operation,
             String idempotencyKey, String sessionId,

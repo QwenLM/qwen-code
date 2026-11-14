@@ -10,19 +10,24 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient;
 import com.sun.net.httpserver.HttpServer;
+import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
+
+import javax.sql.DataSource;
 
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
@@ -236,9 +241,13 @@ class ExternalRuntimeProvisionerTest {
         var api = new Provider();
         try (var provider = provisioner(api)) {
             var request = request(provider);
+            var bindings = new JdbcRuntimeBindingRepository(source(), new AesGcmSecretProtector("test", new byte[32]));
             for (int n = 0; n <= ExternalRuntimeProvisioner.MAX_PLACEMENTS; n++) {
-                var bindings = new InMemoryRuntimeBindingRepository();
-                var binding = bindings.claimOperation(bindings.findOrCreate(request).getBindingId(),
+                // The durable repository dedupes by request, so each abandoned admission
+                // gets its own harness key instead of its own repository.
+                var abandoned = provider.createRequest(new RuntimeScope("tenant", "workspace", "1", "/workspace",
+                        "sha256:" + "a".repeat(64), "session"), "harness-" + n);
+                var binding = bindings.claimOperation(bindings.findOrCreate(abandoned).getBindingId(),
                         "broker", Duration.ofMinutes(1));
                 provider.reserveResource(binding);
             }
@@ -263,7 +272,7 @@ class ExternalRuntimeProvisionerTest {
             assertEquals(0, api.observations);
             // An admitted seed re-admits without rechecking the bound.
             assertEquals(admittedHandle, join(provider.ensureResource(request, seed, admittedHandle)));
-            var bindings = new InMemoryRuntimeBindingRepository();
+            var bindings = new JdbcRuntimeBindingRepository(source(), new AesGcmSecretProtector("test", new byte[32]));
             var fresh = bindings.claimOperation(bindings.findOrCreate(request).getBindingId(),
                     "broker", Duration.ofMinutes(1));
             var failure = assertThrows(RuntimeBrokerException.class, () -> provider.reserveResource(fresh));
@@ -311,10 +320,11 @@ class ExternalRuntimeProvisionerTest {
     @Test
     void brokerPersistsLogicalHandleBeforeLostProvisionReplyAndRetriesSameOperation() throws Exception {
         var api = new Provider();
-        var bindings = new InMemoryRuntimeBindingRepository();
+        var source = source();
+        var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
         var worker = worker(api);
         try (var provider = provisioner(api);
-                var broker = broker(provider, bindings)) {
+                var broker = broker(provider, bindings, source)) {
             api.provisionFailure = new RuntimeBrokerException(503, "timeout", "reply lost", true);
             var lost = (RuntimeBrokerException) assertThrows(CompletionException.class,
                     () -> join(broker.warm("harness"))).getCause();
@@ -347,10 +357,11 @@ class ExternalRuntimeProvisionerTest {
     @Test
     void brokerShutdownDuringConfirmationDoesNotInvalidateTheReadyBinding() throws Exception {
         var api = new Provider();
-        var bindings = new InMemoryRuntimeBindingRepository();
+        var source = source();
+        var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
         var worker = worker(api);
         try (var provider = provisioner(api);
-                var broker = broker(provider, bindings)) {
+                var broker = broker(provider, bindings, source)) {
             var ready = join(broker.warm("harness"));
             api.closing = broker::close;
             var failure = (RuntimeBrokerException) assertThrows(CompletionException.class,
@@ -369,10 +380,11 @@ class ExternalRuntimeProvisionerTest {
     @Test
     void brokerRetriesUncertainConfirmationOnOriginalLeaseAndRejectsEndpointDrift() throws Exception {
         var api = new Provider();
-        var bindings = new InMemoryRuntimeBindingRepository();
+        var source = source();
+        var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
         var worker = worker(api);
         try (var provider = provisioner(api);
-                var broker = broker(provider, bindings)) {
+                var broker = broker(provider, bindings, source)) {
             var ready = join(broker.warm("harness"));
             var lease = ready.getLease();
             api.failure = new RuntimeBrokerException(503, "timeout", "timeout", true);
@@ -418,10 +430,17 @@ class ExternalRuntimeProvisionerTest {
     }
 
     private static RuntimeBrokerService broker(ExternalRuntimeProvisioner provider,
-            InMemoryRuntimeBindingRepository bindings) {
+            JdbcRuntimeBindingRepository bindings, DataSource source) {
         return new RuntimeBrokerService(ignored -> CompletableFuture.completedFuture(request(provider).getScope()),
-                provider, new HttpRuntimeTransport(), bindings, new InMemoryRuntimeSessionRepository(),
-                new InMemoryToolExecutionRepository(), "broker", Duration.ofMinutes(1), Duration.ofMinutes(1));
+                provider, new HttpRuntimeTransport(), bindings, new JdbcRuntimeSessionRepository(source),
+                new JdbcToolExecutionRepository(source), "broker", Duration.ofMinutes(1), Duration.ofMinutes(1));
+    }
+
+    private static JdbcDataSource source() {
+        var source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:external-" + UUID.randomUUID() + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        return source;
     }
 
     private static HttpServer worker(Provider api) throws Exception {

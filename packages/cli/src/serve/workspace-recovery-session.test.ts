@@ -1924,8 +1924,12 @@ describe('verifyRecoverySession', () => {
     { toolProfile: 'hosted-workspace-files/2' },
     { toolProfile: 'hosted-workspace-files/3' },
     { toolProfile: 'hosted-workspace-external-files/1' },
+    { toolProfile: 'hosted-workspace-files/4' },
     { toolProfile: 'hosted-workspace-shell/1', captureBytes: 1024 },
+    { toolProfile: 'hosted-workspace-shell/3', captureBytes: 1024 },
+    { toolProfile: 'hosted-workspace-shell/4', captureBytes: 1024 },
     { toolProfile: 'hosted-workspace-team-lead/1', captureBytes: 1024 },
+    { toolProfile: 'hosted-workspace-team-lead/2', captureBytes: 1024 },
     { toolProfile: 'hosted-workspace-read/1' },
   ])('recovers every saved Workspace profile (%j)', async (definition) => {
     // One refused profile would abort recovery for the whole Workspace,
@@ -1937,7 +1941,6 @@ describe('verifyRecoverySession', () => {
   });
 
   it.each([
-    { toolProfile: 'hosted-workspace-files/4' },
     { toolProfile: 'hosted-workspace-shell/2', captureBytes: 1024 },
     { toolProfile: 'hosted-workspace-files/2', captureBytes: 1024 },
     { toolProfile: 'hosted-workspace-read/1', captureBytes: 1024 },

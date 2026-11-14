@@ -29,6 +29,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -228,9 +229,9 @@ class WorkspaceLifecycleStoreTest {
                 "workspace".getBytes(java.nio.charset.StandardCharsets.UTF_8));
         fixture.jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key,"
                         + " tenant_id, storage_id, storage_kind) VALUES (?, ?, ?, 'tenant', ?, 'EXTERNAL')",
-                JdbcRuntimeBindingRepository.storageAliasKey("tenant", storage),
-                JdbcRuntimeBindingRepository.storageFenceKey("tenant"),
-                JdbcRuntimeBindingRepository.storageFenceKey(storage), storage);
+                RuntimeAdmissionFences.storageAliasKey("tenant", storage),
+                RuntimeAdmissionFences.storageFenceKey("tenant"),
+                RuntimeAdmissionFences.storageFenceKey(storage), storage);
         fixture.jdbc.update("UPDATE ma_session SET tool_profile = ?",
                 WorkspaceToolProfiles.EXTERNAL_FILES);
         var execution = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(

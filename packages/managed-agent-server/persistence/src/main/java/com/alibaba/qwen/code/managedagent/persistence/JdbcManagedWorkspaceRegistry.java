@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceRecord;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceState;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -504,7 +505,7 @@ public class JdbcManagedWorkspaceRegistry
 
     void requireSshNodeAccess(String tenantId, String actorId, String storageId) {
         var remote = jdbc.queryForList("SELECT registration_json FROM ma_storage WHERE alias_key = ? AND storage_kind = 'SSH_LOCAL'",
-                String.class, com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey(tenantId, storageId));
+                String.class, RuntimeAdmissionFences.storageAliasKey(tenantId, storageId));
         if (!remote.isEmpty()) {
             boolean allowed = false;
             if (ssh != null && ssh.isEnabled()) {

@@ -423,7 +423,7 @@ class WorkspaceCsiSessionMainTest {
                 "recordAdmission", "recordRecoveryAdmission", "retractContinuationOutput", "retractHarnessTurnOutput",
                 "recordHarnessEvents", "cancelBeforeAdmission", "failTurn", "appendPublicEventIfAbsent",
                 "appendLiveSessionEventIfAbsent", "beginTaskCancelOperation", "deferMaterializationTarget",
-                "beginSessionRename", "completeSessionRename", "abandonSessionRename");
+                "settleRenameSync");
         assertThat(Arrays.stream(ManagedAgentStore.class.getMethods()).map(Method::getName).distinct()
                 .filter(names::contains).sorted().toList())
                 .containsExactlyElementsOf(names.stream().sorted().toList());
@@ -581,10 +581,6 @@ class WorkspaceCsiSessionMainTest {
             if (type == Map.class) {
                 return Map.of();
             }
-            if (type == StoreModels.RenameDelivery.class) {
-                return new StoreModels.RenameDelivery(
-                                                "tenant", sessionId, "unused", "title", 1, 0);
-            }
             if (type == com.alibaba.qwen.code.managedagent.model.SessionPrincipal.class) {
                 // The principal-carrying overloads must also reach the CSI
                 // guard, which refuses inside requireLegacySessionForUpdate
@@ -599,8 +595,7 @@ class WorkspaceCsiSessionMainTest {
         }
         int sessionIndex = switch (method.getName()) {
             case "insertTurnCommand", "insertCancelCommand", "beginSessionMutation" -> 4;
-            case "completeSessionMutation", "abandonSessionMutation", "beginSessionRename" -> 3;
-            case "completeSessionRename", "abandonSessionRename" -> 2;
+            case "completeSessionMutation", "abandonSessionMutation", "settleRenameSync" -> 3;
             default -> 1;
         };
         if (method.getParameterTypes()[0] == String.class) {
@@ -655,11 +650,12 @@ class WorkspaceCsiSessionMainTest {
                     .sorted(Comparator.comparing(JsonNode::toString)).toList();
             result.put(table, json.valueToTree(rows));
         }
-        // 46 = the 45 baseline tables plus flyway_schema_history; the merged
-        // baseline carries both the PR's ma_session_principal ownership row and
-        // the base's ma_journal_pack, not stray catalog artifacts.
+        // 48 = the 47 baseline tables plus flyway_schema_history. Three entries
+        // were added to V1__managed_schema.sql on the two sides of this merge:
+        // the PR's ma_session_principal ownership row and the base's
+        // ma_client_files_binding and ma_client_files_request.
         assertThat(result).containsKey("ma_session_principal");
-        assertThat(result).hasSize(46);
+        assertThat(result).hasSize(48);
         return result;
     }
 

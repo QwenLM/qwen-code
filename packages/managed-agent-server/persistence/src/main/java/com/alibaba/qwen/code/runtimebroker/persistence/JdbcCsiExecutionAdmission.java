@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker.persistence;
 
+import com.alibaba.qwen.code.managedagent.persistence.JdbcJournalPacks;
 import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -38,29 +39,32 @@ public final class JdbcCsiExecutionAdmission {
                 "dispatchMode", "sessionId", "promptId", "callId", "argsDigest"));
     }
 
-    static void verifyRelated(Connection connection, JdbcCsiFilesRetirementGuard.Original original) throws SQLException {
-        var head = JdbcCsiActivationAdmission.lockNativeHead(connection, original);
+    static void verifyRelated(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
+            JdbcJournalPacks packs) throws SQLException {
+        var head = JdbcCsiActivationAdmission.lockNativeHead(connection, original, packs);
         var members = CsiNativeToolReservation.complete(connection, original, head.prefix(), CsiNativeToolReservation.inventory(connection, original));
         for (var member : members) {
-            grant(connection, original, member, head);
+            grant(connection, original, member, head, packs);
         }
         head.requireCurrentTime(connection);
     }
 
     static void verifyReceipts(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
-            JdbcCsiActivationAdmission.NativeHead head, CsiNativeActivationProof.Prefix prefix) throws SQLException {
-        verifyReceipts(connection, original, head, prefix, 0, 0);
+            JdbcCsiActivationAdmission.NativeHead head, CsiNativeActivationProof.Prefix prefix,
+            JdbcJournalPacks packs) throws SQLException {
+        verifyReceipts(connection, original, head, prefix, 0, 0, packs);
     }
 
     static void verifyReceipts(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             JdbcCsiActivationAdmission.NativeHead head, CsiNativeActivationProof.Prefix prefix,
-            long candidateHistorySequence, long candidateHistoryRevision) throws SQLException {
-        receiptMembers(connection, original, head, prefix, false, candidateHistorySequence, candidateHistoryRevision);
+            long candidateHistorySequence, long candidateHistoryRevision, JdbcJournalPacks packs) throws SQLException {
+        receiptMembers(connection, original, head, prefix, false, candidateHistorySequence, candidateHistoryRevision, packs);
         head.requireCurrentTime(connection);
     }
 
     static void verifyHistoricalReceipts(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
-            CsiNativeActivationProof.TerminalProof proof, long ceiling, JdbcCsiActivationAdmission.JournalRead read) throws SQLException {
+            CsiNativeActivationProof.TerminalProof proof, long ceiling, JdbcCsiActivationAdmission.JournalRead read,
+            JdbcJournalPacks packs) throws SQLException {
         read.requireHistorical(connection);
         require(ceiling > 0 && ceiling <= original.version());
         var prefix = proof.predecessorPrefix();
@@ -69,8 +73,8 @@ public final class JdbcCsiExecutionAdmission {
         long revision;
         try (var statement = read.statement(connection,
                 "SELECT journal_revision FROM ma_session_head WHERE tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? AND head_kind = 'MANAGED_SESSION'")) {
-            statement.setString(1, JdbcRuntimeBindingRepository.harnessDrainKey(original.request().getScope().getTenantId()));
-            statement.setString(2, JdbcRuntimeBindingRepository.harnessDrainKey(original.request().getIsolationKey()));
+            statement.setString(1, RuntimeAdmissionFences.harnessDrainKey(original.request().getScope().getTenantId()));
+            statement.setString(2, RuntimeAdmissionFences.harnessDrainKey(original.request().getIsolationKey()));
             JdbcRepositorySupport.setIdentity(statement, 3, original.request().getScope().getTenantId());
             JdbcRepositorySupport.setIdentity(statement, 4, original.request().getIsolationKey());
             try (var row = statement.executeQuery()) {
@@ -80,15 +84,15 @@ public final class JdbcCsiExecutionAdmission {
             }
         }
         for (var member : members) {
-            grant(connection, original, member, prefix, revision, ceiling, read);
+            grant(connection, original, member, prefix, revision, ceiling, read, packs);
         }
         verifyReceiptMembers(prefix, members);
         read.requireHistorical(connection);
     }
 
     static List<ToolExecutionRecord> verifyColdReceipts(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
-            JdbcCsiActivationAdmission.NativeHead head) throws SQLException {
-        var members = receiptMembers(connection, original, head, head.prefix(), true, 0, 0);
+            JdbcCsiActivationAdmission.NativeHead head, JdbcJournalPacks packs) throws SQLException {
+        var members = receiptMembers(connection, original, head, head.prefix(), true, 0, 0, packs);
         require(!members.isEmpty() && head.prefix().batches().size() == 1);
         var batch = head.prefix().batches().values().iterator().next().batch();
         require(members.stream().map(member -> member.getReference().get("functionCallId"))
@@ -109,9 +113,9 @@ public final class JdbcCsiExecutionAdmission {
     }
 
     static void verifyColdFinalOutput(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
-            JdbcCsiActivationAdmission.NativeHead head) throws SQLException {
+            JdbcCsiActivationAdmission.NativeHead head, JdbcJournalPacks packs) throws SQLException {
         var expected = CsiNativeActivationProof.completeOutputTail(head.prefix(), head.sequence());
-        var members = verifyColdReceipts(connection, original, head);
+        var members = verifyColdReceipts(connection, original, head, packs);
         require(members.size() == expected.size()
                 && members.stream().map(ToolExecutionRecord::getExecutionCallId)
                         .collect(java.util.stream.Collectors.toSet()).equals(expected));
@@ -120,12 +124,12 @@ public final class JdbcCsiExecutionAdmission {
     private static List<ToolExecutionRecord> receiptMembers(Connection connection,
             JdbcCsiFilesRetirementGuard.Original original, JdbcCsiActivationAdmission.NativeHead head,
             CsiNativeActivationProof.Prefix prefix, boolean recovery,
-            long candidateHistorySequence, long candidateHistoryRevision) throws SQLException {
+            long candidateHistorySequence, long candidateHistoryRevision, JdbcJournalPacks packs) throws SQLException {
         CsiNativeToolReservation.requireReady(connection, original);
         var members = CsiNativeToolReservation.complete(connection, original, prefix,
                 CsiNativeToolReservation.inventory(connection, original), recovery, candidateHistorySequence, candidateHistoryRevision);
         for (var member : members) {
-            grant(connection, original, member, head);
+            grant(connection, original, member, head, packs);
         }
         for (var entry : prefix.receipts().entrySet()) {
             var execution = members.stream().filter(member -> entry.getKey().equals(member.getExecutionCallId()))
@@ -152,9 +156,9 @@ public final class JdbcCsiExecutionAdmission {
     }
 
     static void requireDispatch(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
-            ToolExecutionRecord expected) throws SQLException {
+            ToolExecutionRecord expected, JdbcJournalPacks packs) throws SQLException {
         original.requireAdmission();
-        var head = JdbcCsiActivationAdmission.lockNativeHead(connection, original);
+        var head = JdbcCsiActivationAdmission.lockNativeHead(connection, original, packs);
         CsiNativeToolReservation.requireReady(connection, original);
         var members = CsiNativeToolReservation.complete(connection, original, head.prefix(), CsiNativeToolReservation.inventory(connection, original));
         require(head.prefix().pendingBatch() != null && head.prefix().checkpoint() != null
@@ -177,22 +181,23 @@ public final class JdbcCsiExecutionAdmission {
             if (member.getAuthorizedDispatchGeneration() != null) {
                 require(!member.isCancelRequested() && (member.getState() == ToolExecutionRecord.State.DISPATCHING
                         || member.getState() == ToolExecutionRecord.State.EXECUTING || member.getState() == ToolExecutionRecord.State.SETTLED));
-                grant(connection, original, member, head);
+                grant(connection, original, member, head, packs);
             } else {
                 require(!member.isCancelRequested() && (member.getState() == ToolExecutionRecord.State.PREPARED
                         || member.getState() == ToolExecutionRecord.State.DISPATCHING));
             }
         }
-        dispatchCheckpoint(connection, original, head, batch);
+        dispatchCheckpoint(connection, original, head, batch, packs);
         head.requireCurrentTime(connection);
     }
 
     static ToolExecutionRecord authorize(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
-            RuntimeBindingRecord binding, ToolExecutionRecord expected, String owner, long generation) throws SQLException {
-        requireDispatch(connection, original, expected);
+            RuntimeBindingRecord binding, ToolExecutionRecord expected, String owner, long generation,
+            JdbcJournalPacks packs) throws SQLException {
+        requireDispatch(connection, original, expected, packs);
         require(binding != null && binding.getVersion() == original.version());
-        var head = JdbcCsiActivationAdmission.lockNativeHead(connection, original);
-        var checkpoint = dispatchCheckpoint(connection, original, head, (String) expected.getReference().get("batchId"));
+        var head = JdbcCsiActivationAdmission.lockNativeHead(connection, original, packs);
+        var checkpoint = dispatchCheckpoint(connection, original, head, (String) expected.getReference().get("batchId"), packs);
         var intent = head.prefix().intents().get(expected.getExecutionCallId());
         var context = context(connection, original, binding);
         var grant = new LinkedHashMap<String, Object>();
@@ -228,14 +233,15 @@ public final class JdbcCsiExecutionAdmission {
     }
 
     public static Map<String, Object> readExecution(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
-            JdbcCsiActivationAdmission.NativeHead head, String executionId, Map<String, Object> expectedContext) throws SQLException {
+            JdbcCsiActivationAdmission.NativeHead head, String executionId, Map<String, Object> expectedContext,
+            JdbcJournalPacks packs) throws SQLException {
         CsiNativeToolReservation.requireReady(connection, original);
         var members = CsiNativeToolReservation.complete(connection, original, head.prefix(), CsiNativeToolReservation.inventory(connection, original));
         var execution = members.stream().filter(member -> executionId.equals(member.getExecutionCallId()))
                 .findFirst().orElseThrow(JdbcCsiExecutionAdmission::unavailable);
         require(execution.getState() == ToolExecutionRecord.State.EXECUTING && !execution.isCancelRequested()
                 && execution.hasLiveDispatchAt(JdbcRepositorySupport.databaseNowPrecise(connection)));
-        var grant = grant(connection, original, execution, head);
+        var grant = grant(connection, original, execution, head, packs);
         require(grant != null);
         for (String field : List.of("identity", "context", "installedContext")) {
             require(same(grant.get(field), expectedContext.get(field)));
@@ -268,13 +274,14 @@ public final class JdbcCsiExecutionAdmission {
     }
 
     private static Map<String, Object> grant(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
-            ToolExecutionRecord execution, JdbcCsiActivationAdmission.NativeHead head) throws SQLException {
-        return grant(connection, original, execution, head.prefix(), head.revision(), null, JdbcCsiActivationAdmission.JournalRead.LIVE);
+            ToolExecutionRecord execution, JdbcCsiActivationAdmission.NativeHead head,
+            JdbcJournalPacks packs) throws SQLException {
+        return grant(connection, original, execution, head.prefix(), head.revision(), null, JdbcCsiActivationAdmission.JournalRead.LIVE, packs);
     }
 
     private static Map<String, Object> grant(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
             ToolExecutionRecord execution, CsiNativeActivationProof.Prefix prefix, long revision, Long historicalCeiling,
-            JdbcCsiActivationAdmission.JournalRead read) throws SQLException {
+            JdbcCsiActivationAdmission.JournalRead read, JdbcJournalPacks packs) throws SQLException {
         String saved;
         try (PreparedStatement statement = read.statement(connection,
                 "SELECT execution_call_id, native_authorization_json FROM ma_tool_execution WHERE execution_call_id_hash = ?")) {
@@ -292,7 +299,7 @@ public final class JdbcCsiExecutionAdmission {
                 ? JdbcCsiRetirementSeal.lock(connection, original) : historicalCeiling;
         require(read == JdbcCsiActivationAdmission.JournalRead.LIVE || ceiling != null && ceiling > 0 && ceiling <= original.version());
         var value = grantHeader(original, execution, prefix, ceiling, saved);
-        var checkpoint = dispatchCheckpoint(connection, original, revision, (String) execution.getReference().get("batchId"), read);
+        var checkpoint = dispatchCheckpoint(connection, original, revision, (String) execution.getReference().get("batchId"), read, packs);
         var pinned = context(connection, original, null, read);
         return grantTail(execution, prefix, revision, value, checkpoint, pinned);
     }
@@ -384,12 +391,13 @@ public final class JdbcCsiExecutionAdmission {
     }
 
     private static DispatchCheckpoint dispatchCheckpoint(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
-            JdbcCsiActivationAdmission.NativeHead head, String batchId) throws SQLException {
-        return dispatchCheckpoint(connection, original, head.revision(), batchId, JdbcCsiActivationAdmission.JournalRead.LIVE);
+            JdbcCsiActivationAdmission.NativeHead head, String batchId, JdbcJournalPacks packs) throws SQLException {
+        return dispatchCheckpoint(connection, original, head.revision(), batchId, JdbcCsiActivationAdmission.JournalRead.LIVE, packs);
     }
 
     private static DispatchCheckpoint dispatchCheckpoint(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
-            long maximumRevision, String batchId, JdbcCsiActivationAdmission.JournalRead read) throws SQLException {
+            long maximumRevision, String batchId, JdbcCsiActivationAdmission.JournalRead read,
+            JdbcJournalPacks packs) throws SQLException {
         DispatchCheckpoint result = null;
         try (PreparedStatement statement = read.statement(connection,
                 "SELECT " + ManagedSchemaProjection.SESSION_JOURNAL_TX.columns() + " FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"
@@ -404,7 +412,9 @@ public final class JdbcCsiExecutionAdmission {
                     }
                     long revision = rows.getLong("journal_revision");
                     require(revision <= maximumRevision);
-                    var record = CsiNativeActivationProof.records(rows.getBytes("record_bytes")).stream()
+                    byte[] bytes = CsiPackRecords.resolve(rows, packs, original.request().getScope().getTenantId(), original.request().getIsolationKey(), revision);
+                    require(bytes != null);
+                    var record = CsiNativeActivationProof.records(bytes).stream()
                             .filter(value -> "system".equals(value.path("type").textValue())
                                     && "managed_session_event_v1".equals(value.path("subtype").textValue())
                                     && "checkpoint.committed".equals(value.path("managedSession").path("kind").textValue()))

@@ -1,6 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker.persistence;
 
-import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcJournalPacks;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
@@ -39,14 +39,24 @@ import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 import java.util.UUID;
 import java.util.function.Supplier;
+
+import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.HarnessFence;
+import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.admissionClosed;
+import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.fence;
+import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.hasHarnessDrain;
+import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.harnessDrainKey;
+import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.requirePhysicalStorageAdmission;
+import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.requireResidentWorkspaceAdmission;
+import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.requireStorageAdmission;
+import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.storageAliasKey;
+import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.storageFence;
+import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.storageFenceKey;
 
 /** JDBC Runtime binding repository coordinated through a shared database. */
 public final class JdbcRuntimeBindingRepository
@@ -97,14 +107,26 @@ public final class JdbcRuntimeBindingRepository
     private final SecretProtector secretProtector;
     private final Supplier<String> idSupplier;
     private final RuntimeBindingSessionRelease sessionRelease;
+    private final JdbcJournalPacks journalPacks;
 
     public JdbcRuntimeBindingRepository(DataSource dataSource,
             SecretProtector secretProtector) {
-        this(dataSource, secretProtector, () -> UUID.randomUUID().toString());
+        this(dataSource, secretProtector, null, () -> UUID.randomUUID().toString());
+    }
+
+    public JdbcRuntimeBindingRepository(DataSource dataSource,
+            SecretProtector secretProtector, JdbcJournalPacks journalPacks) {
+        this(dataSource, secretProtector, journalPacks, () -> UUID.randomUUID().toString());
     }
 
     public JdbcRuntimeBindingRepository(DataSource dataSource,
             SecretProtector secretProtector, Supplier<String> idSupplier) {
+        this(dataSource, secretProtector, null, idSupplier);
+    }
+
+    public JdbcRuntimeBindingRepository(DataSource dataSource,
+            SecretProtector secretProtector, JdbcJournalPacks journalPacks,
+            Supplier<String> idSupplier) {
         this.dataSource = JdbcRepositorySupport.requireDataSource(dataSource);
         if (secretProtector == null) {
             throw new IllegalArgumentException("secretProtector is required");
@@ -115,6 +137,11 @@ public final class JdbcRuntimeBindingRepository
         }
         this.idSupplier = idSupplier;
         this.sessionRelease = new RuntimeBindingSessionRelease(this.dataSource, this);
+        this.journalPacks = journalPacks;
+    }
+
+    JdbcJournalPacks journalPacks() {
+        return journalPacks;
     }
 
     @Override
@@ -149,12 +176,7 @@ public final class JdbcRuntimeBindingRepository
 
     private RuntimeBindingRecord recoverLost(RuntimeSessionRepository sessions,
             ToolExecutionRepository executions, RuntimeBindingRecord expected, boolean holdersCleared) {
-        if (!(sessions instanceof JdbcRuntimeSessionRepository jdbcSessions)
-                || !jdbcSessions.usesDataSource(dataSource)
-                || !(executions instanceof JdbcToolExecutionRepository jdbcExecutions)
-                || !jdbcExecutions.usesDataSource(dataSource)) {
-            throw new IllegalArgumentException("Recovery requires the same DataSource");
-        }
+        requireSameDataSource(sessions, executions, "Recovery requires the same DataSource");
         return JdbcRepositorySupport.transaction(
                 dataSource,
                 connection -> {
@@ -280,8 +302,8 @@ public final class JdbcRuntimeBindingRepository
                                     "Storage is under maintenance.",
                                     false);
                         }
-                        RuntimeBindingSessionRelease.requirePhysicalStorageAdmission(connection, binding.getRequest());
-                        requireHarnessAdmission(
+                        requirePhysicalStorageAdmission(connection, binding.getRequest());
+                        RuntimeAdmissionFences.requireHarnessAdmission(
                                 connection,
                                 candidate.getSession().getScope(),
                                 candidate.getSession().getHarnessSessionId(),
@@ -343,7 +365,7 @@ public final class JdbcRuntimeBindingRepository
             lockPlacementDomain(connection, scope.getTenantId());
             RuntimeBindingRecord binding = selectById(connection, candidate.getBindingId(), true);
             RuntimeAdmission.requireRelease(binding, candidate);
-            requireHarnessAdmission(connection, scope, candidate.getSession().getHarnessSessionId(),
+            RuntimeAdmissionFences.requireHarnessAdmission(connection, scope, candidate.getSession().getHarnessSessionId(),
                     scope.getLifecycleAuthority(),
                     fence(HarnessOwnership.sharesRuntimeSessions(binding.getRequest()), HarnessFence.RETIREMENT));
             RuntimeSessionRecord existing = JdbcRuntimeSessionRepository.selectSession(
@@ -362,12 +384,7 @@ public final class JdbcRuntimeBindingRepository
     @Override
     public ToolExecutionRecord admitExecution(RuntimeSessionRepository sessions,
             ToolExecutionRepository executions, ToolExecutionRecord candidate) {
-        if (!(sessions instanceof JdbcRuntimeSessionRepository jdbcSessions)
-                || !jdbcSessions.usesDataSource(dataSource)
-                || !(executions instanceof JdbcToolExecutionRepository jdbcExecutions)
-                || !jdbcExecutions.usesDataSource(dataSource)) {
-            throw new IllegalArgumentException("Admission requires the same DataSource");
-        }
+        requireSameDataSource(sessions, executions, "Admission requires the same DataSource");
         ToolExecutionRows.requireCandidate(candidate);
         ToolExecutionRecord existing = executions.findByIdempotencyKey(candidate.getIdempotencyKey());
         RuntimeBindingRecord original = findById(candidate.getBindingId());
@@ -389,13 +406,13 @@ public final class JdbcRuntimeBindingRepository
                         }
                         var csiOriginal =
                                 JdbcCsiActivationAdmission.lockForExecution(
-                                        connection, original, this);
+                                        connection, original, this, journalPacks);
                         JdbcCsiActivationAdmission.requireExecution(csiOriginal, candidate);
                         RuntimeBindingRecord binding =
                                 selectById(connection, candidate.getBindingId(), true);
                         if (binding != null && HarnessOwnership.sharesRuntimeSessions(binding.getRequest())) {
                             requireStorageAdmission(connection, binding.getRequest());
-                            requireHarnessAdmission(connection, binding.getRequest().getScope(),
+                            RuntimeAdmissionFences.requireHarnessAdmission(connection, binding.getRequest().getScope(),
                                     candidate.getHarnessSessionId(),
                                     binding.getRequest().getScope().getLifecycleAuthority(), fence(true));
                         } else if (binding != null) {
@@ -451,13 +468,13 @@ public final class JdbcRuntimeBindingRepository
             ToolExecutionRecord candidate,
             byte[] input,
             byte[] definition) {
-        requireCsiRepositories(sessions, executions);
+        requireSameDataSource(sessions, executions, "CSI allocation requires the same DataSource");
         ToolExecutionRows.requireCandidate(candidate);
         return JdbcRepositorySupport.transaction(
                 dataSource,
                 connection -> {
                     var admission =
-                            JdbcCsiActivationAdmission.lockForReservation(connection, hint, this);
+                            JdbcCsiActivationAdmission.lockForReservation(connection, hint, this, journalPacks);
                     var original = admission.original();
                     var resources = CsiNativeToolReservation.inventory(connection, original);
                     JdbcCsiFilesRetirementGuard.requireSingleSession(connection, original);
@@ -499,12 +516,12 @@ public final class JdbcRuntimeBindingRepository
             RuntimeBindingRecord hint,
             String promptId,
             String batchId, Map<String, Object> recoveryOwner) {
-        requireCsiRepositories(sessions, executions);
+        requireSameDataSource(sessions, executions, "CSI allocation requires the same DataSource");
         return JdbcRepositorySupport.transaction(
                 dataSource,
                 connection -> {
                     var admission =
-                            JdbcCsiActivationAdmission.lockForReservation(connection, hint, this);
+                            JdbcCsiActivationAdmission.lockForReservation(connection, hint, this, journalPacks);
                     var original = admission.original();
                     var resources = CsiNativeToolReservation.inventory(connection, original);
                     JdbcCsiFilesRetirementGuard.requireSingleSession(connection, original);
@@ -527,7 +544,7 @@ public final class JdbcRuntimeBindingRepository
                     }
                     if (recoveryOwner != null) {
                         admission.head().requireRecoveryOwner(recoveryOwner);
-                        JdbcCsiActivationAdmission.requireRecoveryTail(connection, original, admission.head());
+                        JdbcCsiActivationAdmission.requireRecoveryTail(connection, original, admission.head(), journalPacks);
                     }
                     var result =
                             CsiNativeToolReservation.read(
@@ -542,13 +559,13 @@ public final class JdbcRuntimeBindingRepository
                 });
     }
 
-    private void requireCsiRepositories(
-            RuntimeSessionRepository sessions, ToolExecutionRepository executions) {
+    private void requireSameDataSource(RuntimeSessionRepository sessions,
+            ToolExecutionRepository executions, String message) {
         if (!(sessions instanceof JdbcRuntimeSessionRepository jdbcSessions)
                 || !jdbcSessions.usesDataSource(dataSource)
                 || !(executions instanceof JdbcToolExecutionRepository jdbcExecutions)
                 || !jdbcExecutions.usesDataSource(dataSource)) {
-            throw new IllegalArgumentException("CSI allocation requires the same DataSource");
+            throw new IllegalArgumentException(message);
         }
     }
 
@@ -570,10 +587,6 @@ public final class JdbcRuntimeBindingRepository
             }
             return null;
         });
-    }
-
-    public static String harnessDrainKey(String value) {
-        return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(value);
     }
 
     @Override
@@ -599,41 +612,11 @@ public final class JdbcRuntimeBindingRepository
         return JdbcRepositorySupport.read(dataSource, connection -> hasHarnessDrain(connection, tenantId, harnessSessionId));
     }
 
-    private static boolean hasHarnessDrain(Connection connection, String tenantId, String harnessSessionId)
-            throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(
-                        "SELECT tenant_id, harness_session_id, phase FROM ma_session_head WHERE"
-                                + " tenant_key = ? AND harness_key = ?")) {
-            statement.setString(1, harnessDrainKey(tenantId));
-            statement.setString(2, harnessDrainKey(harnessSessionId));
-            try (ResultSet result = statement.executeQuery()) {
-                if (!result.next()) {
-                    return false;
-                }
-                if (!tenantId.equals(result.getString("tenant_id"))
-                        || !harnessSessionId.equals(result.getString("harness_session_id"))) {
-                    throw new IllegalStateException("Harness drain hash collision");
-                }
-                return !"OPEN".equals(result.getString("phase"));
-            }
-        }
-    }
-
     private static void requireHarnessAdmission(Connection connection, RuntimeProvisionRequest request)
             throws SQLException {
         requireStorageAdmission(connection, request);
-        requireHarnessAdmission(connection, request.getScope(), request.getIsolationKey(),
+        RuntimeAdmissionFences.requireHarnessAdmission(connection, request.getScope(), request.getIsolationKey(),
                 request.getScope().getLifecycleAuthority());
-    }
-
-    private static void requireStorageAdmission(Connection connection, RuntimeProvisionRequest request)
-            throws SQLException {
-        if (request.getStorageId() != null && storageFence(connection,
-                request.getScope().getTenantId(), request.getStorageId()) != null) {
-            throw new RuntimeBrokerException(
-                    409, "workspace_migrating", "Storage is under maintenance.", false);
-        }
-        RuntimeBindingSessionRelease.requirePhysicalStorageAdmission(connection, request);
     }
 
     // Harness admission, recovery, cleanup and Hook checks below are read-only: they write no
@@ -643,7 +626,7 @@ public final class JdbcRuntimeBindingRepository
     @Override
     public void requireHarnessAdmission(RuntimeScope scope, String harnessSessionId, RuntimeLifecycleAuthority authority) {
         JdbcRepositorySupport.transaction(dataSource, connection -> {
-            requireHarnessAdmission(connection, scope, harnessSessionId, authority);
+            RuntimeAdmissionFences.requireHarnessAdmission(connection, scope, harnessSessionId, authority);
             return null;
         });
     }
@@ -656,7 +639,7 @@ public final class JdbcRuntimeBindingRepository
             return;
         }
         JdbcRepositorySupport.transaction(dataSource, connection -> {
-            requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(true));
+            RuntimeAdmissionFences.requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(true));
             return null;
         });
     }
@@ -674,58 +657,14 @@ public final class JdbcRuntimeBindingRepository
 
     private boolean requireHarnessRecovery(RuntimeScope scope, String harnessSessionId, RuntimeLifecycleAuthority authority,
             boolean runtimeSessionOwner) {
-        return JdbcRepositorySupport.transaction(
-                dataSource,
-                connection -> {
-                    try (PreparedStatement fence =
-                            connection.prepareStatement(
-                                    "SELECT operation_id FROM ma_session_head"
-                                            + " WHERE tenant_key = ? AND harness_key = ?")) {
-                        fence.setString(1, harnessDrainKey(scope.getTenantId()));
-                        fence.setString(2, harnessDrainKey(harnessSessionId));
-                        try (ResultSet row = fence.executeQuery()) {
-                            if (!row.next() || row.getString(1) == null) {
-                                return false;
-                            }
-                        }
-                    }
-                    try (PreparedStatement statement =
-                            connection.prepareStatement(
-                                    "SELECT o.lifecycle_protocol_version FROM ma_session_head f"
-                                        + " JOIN ma_operation o ON o.operation_kind IN ('CLOSE',"
-                                        + " 'ARCHIVE', 'DELETE') AND o.tenant_id = f.tenant_id AND"
-                                        + " o.session_id = f.harness_session_id AND o.operation_id"
-                                        + " = f.operation_id WHERE f.tenant_key = ? AND"
-                                        + " f.harness_key = ?")) {
-                        statement.setString(1, harnessDrainKey(scope.getTenantId()));
-                        statement.setString(2, harnessDrainKey(harnessSessionId));
-                        try (ResultSet row = statement.executeQuery()) {
-                            if (!row.next()) {
-                                throw admissionClosed();
-                            }
-                            int version = row.getInt(1);
-                            if (version == 0 || version == 1) {
-                                return false;
-                            }
-                            if (version != 2) {
-                                throw admissionClosed();
-                            }
-                            requireHarnessAdmission(
-                                    connection,
-                                    scope,
-                                    harnessSessionId,
-                                    authority,
-                                    fence(runtimeSessionOwner, HarnessFence.CLEANUP));
-                            return true;
-                        }
-                    }
-                });
+        return JdbcRepositorySupport.transaction(dataSource,
+                connection -> RuntimeAdmissionFences.requireHarnessRecovery(connection, scope, harnessSessionId, authority, runtimeSessionOwner));
     }
 
     @Override
     public void requireHarnessCleanup(RuntimeScope scope, String harnessSessionId, RuntimeLifecycleAuthority authority) {
         JdbcRepositorySupport.transaction(dataSource, connection -> {
-            requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(false, HarnessFence.CLEANUP));
+            RuntimeAdmissionFences.requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(false, HarnessFence.CLEANUP));
             return null;
         });
     }
@@ -738,7 +677,7 @@ public final class JdbcRuntimeBindingRepository
             return;
         }
         JdbcRepositorySupport.transaction(dataSource, connection -> {
-            requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(true, HarnessFence.CLEANUP));
+            RuntimeAdmissionFences.requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(true, HarnessFence.CLEANUP));
             return null;
         });
     }
@@ -746,7 +685,7 @@ public final class JdbcRuntimeBindingRepository
     @Override
     public void requireHookAdmission(RuntimeScope scope, String harnessSessionId, RuntimeLifecycleAuthority authority) {
         JdbcRepositorySupport.transaction(dataSource, connection -> {
-            requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(false, HarnessFence.LEGACY_HOOK));
+            RuntimeAdmissionFences.requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(false, HarnessFence.LEGACY_HOOK));
             return null;
         });
     }
@@ -759,141 +698,9 @@ public final class JdbcRuntimeBindingRepository
             return;
         }
         JdbcRepositorySupport.transaction(dataSource, connection -> {
-            requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(true, HarnessFence.LEGACY_HOOK));
+            RuntimeAdmissionFences.requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(true, HarnessFence.LEGACY_HOOK));
             return null;
         });
-    }
-
-    public static void requireHarnessAdmission(Connection connection, RuntimeScope scope,
-            String harnessSessionId, RuntimeLifecycleAuthority authority) throws SQLException {
-        requireHarnessAdmission(connection, scope, harnessSessionId, authority, fence(false));
-    }
-
-    /** What a Harness fence admits beyond ordinary new work. */
-    enum HarnessFence {
-        LEGACY_HOOK,
-        RETIREMENT,
-        CLEANUP,
-        /** Fences a shared binding by the admitted Runtime Session's own Harness Session. */
-        RUNTIME_SESSION_OWNER
-    }
-
-    static Set<HarnessFence> fence(boolean runtimeSessionOwner, HarnessFence... fences) {
-        Set<HarnessFence> result = EnumSet.noneOf(HarnessFence.class);
-        result.addAll(List.of(fences));
-        if (runtimeSessionOwner) {
-            result.add(HarnessFence.RUNTIME_SESSION_OWNER);
-        }
-        return result;
-    }
-
-    /**
-     * Lifecycle authority over a shared binding is fenced by the Runtime
-     * Session's own Harness Session lifecycle claim: Hook placement and
-     * cleanup proceed only while that claim matches.
-     */
-    static void requireHarnessAdmission(Connection connection, RuntimeScope scope,
-            String harnessSessionId, RuntimeLifecycleAuthority authority, Set<HarnessFence> fence) throws SQLException {
-        boolean legacyHook = fence.contains(HarnessFence.LEGACY_HOOK);
-        boolean retirement = fence.contains(HarnessFence.RETIREMENT);
-        boolean cleanup = fence.contains(HarnessFence.CLEANUP);
-        if (fence.contains(HarnessFence.RUNTIME_SESSION_OWNER)) {
-            BrokerValues.requireId(harnessSessionId, "harnessSessionId");
-        } else if (!"session".equals(scope.getIsolationClass())
-                && !(ResidentWorkspaceProfile.selects(scope) && harnessSessionId != null)
-                && !(WorkspaceExecutionProfile.isBoundWorkspaceScope(scope) && harnessSessionId != null
-                        && authority != null)) {
-            if (authority != null) {
-                throw admissionClosed();
-            }
-            return;
-        }
-        if (ResidentWorkspaceProfile.selects(scope)) {
-            try (PreparedStatement session = connection.prepareStatement(
-                    "SELECT status, workspace_id, workspace_generation, context_config_ref, tool_profile"
-                            + " FROM ma_session WHERE tenant_id = ? AND session_id = ?")) {
-                JdbcRepositorySupport.setIdentity(session, 1, scope.getTenantId());
-                JdbcRepositorySupport.setIdentity(session, 2, harnessSessionId);
-                try (ResultSet row = session.executeQuery()) {
-                    if (!row.next() || !scope.getWorkspaceId().equals(row.getString("workspace_id"))
-                            || !scope.getWorkspaceGeneration().equals(Long.toString(row.getLong("workspace_generation")))
-                            || !WorkspaceExecutionProfile.CONTEXT_CONFIG_REF.equals(row.getString("context_config_ref"))
-                            || !"hosted-workspace-files/1".equals(row.getString("tool_profile"))
-                            || !(authority == null && !cleanup && !retirement && !legacyHook
-                                    ? "ACTIVE".equals(row.getString("status"))
-                                    : List.of("CLOSING", "DELETING").contains(row.getString("status")))) {
-                        throw admissionClosed();
-                    }
-                }
-            }
-        }
-        String claimLock = "";
-        if (authority != null) {
-            // Claim updates queue on the Session, independently of tenant placement.
-            claimLock = "H2".equals(connection.getMetaData().getDatabaseProductName())
-                    ? " FOR UPDATE" : " FOR SHARE";
-        }
-        try (PreparedStatement statement = connection.prepareStatement(
-                        "SELECT tenant_id, harness_session_id, phase, operation_id,"
-                                + " claim_generation, claim_lease_until FROM ma_session_head WHERE"
-                                + " tenant_key = ? AND harness_key = ?" + claimLock)) {
-            statement.setString(1, harnessDrainKey(scope.getTenantId()));
-            statement.setString(2, harnessDrainKey(harnessSessionId));
-            try (ResultSet row = statement.executeQuery()) {
-                if (!row.next()) {
-                    if (authority != null) {
-                        throw admissionClosed();
-                    }
-                    return;
-                }
-                if (!scope.getTenantId().equals(row.getString("tenant_id"))
-                        || !harnessSessionId.equals(row.getString("harness_session_id"))) {
-                    throw admissionClosed();
-                }
-                if ("OPEN".equals(row.getString("phase"))) {
-                    if (authority != null) {
-                        throw admissionClosed();
-                    }
-                    return;
-                }
-                if (retirement && authority == null && "DRAINING".equals(row.getString("phase"))) {
-                    return;
-                }
-                if (legacyHook && authority == null && "DRAINING".equals(row.getString("phase"))
-                        && row.getString("operation_id") == null) {
-                    return;
-                }
-                if (authority == null
-                        || !("LIFECYCLE_ONLY".equals(row.getString("phase"))
-                                || cleanup && "DRAINING".equals(row.getString("phase")))
-                        || !authority.operationId().equals(row.getString("operation_id"))
-                        || authority.claimGeneration() != row.getLong("claim_generation")
-                        || row.getLong("claim_lease_until")
-                                <= JdbcRepositorySupport.databaseNowPrecise(connection)
-                                        .toEpochMilli()) {
-                    throw admissionClosed();
-                }
-            }
-        }
-    }
-
-    public static void beginHarnessLifecycle(Connection connection, String tenantId, String sessionId, String operationId)
-            throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement(
-                        "INSERT INTO ma_session_head (tenant_key, harness_key, tenant_id, harness_session_id, session_id, head_kind, phase, operation_id, gmt_create, gmt_modified) VALUES (?, ?, ?, ?, ?, 'HARNESS', 'LIFECYCLE_ONLY', ?, " + ManagedSchemaTime.SQL_NOW + ", " + ManagedSchemaTime.SQL_NOW + ") ON DUPLICATE KEY UPDATE gmt_modified = CASE WHEN phase IS NULL OR phase <> 'LIFECYCLE_ONLY' OR operation_id IS NULL OR operation_id <> VALUES(operation_id) THEN VALUES(gmt_modified) ELSE gmt_modified END, phase = 'LIFECYCLE_ONLY', operation_id = VALUES(operation_id)")) {
-            statement.setString(1, harnessDrainKey(tenantId));
-            statement.setString(2, harnessDrainKey(sessionId));
-            JdbcRepositorySupport.setIdentity(statement, 3, tenantId);
-            JdbcRepositorySupport.setIdentity(statement, 4, sessionId);
-            JdbcRepositorySupport.setIdentity(statement, 5, sessionId);
-            JdbcRepositorySupport.setIdentity(statement, 6, operationId);
-            statement.executeUpdate();
-        }
-    }
-
-    private static RuntimeBrokerException admissionClosed() {
-        return new RuntimeBrokerException(
-                409, "runtime_admission_closed", "Session admission is closed", false);
     }
 
     @Override
@@ -938,34 +745,6 @@ public final class JdbcRuntimeBindingRepository
             String owner = storageFence(connection, tenantId, storageId);
             return owner != null && (operationId == null || operationId.equals(owner));
         });
-    }
-
-    public static String storageFenceKey(String value) {
-        return JdbcRepositorySupport.valueKey(value);
-    }
-
-    public static String storageAliasKey(String tenantId, String storageId) {
-        return WorkspaceCsiRegistration.aliasKey(tenantId, storageId);
-    }
-
-    private static String storageFence(Connection connection, String tenantId, String storageId) throws SQLException {
-        try (PreparedStatement statement =
-                connection.prepareStatement(
-                        "SELECT tenant_id, storage_id, fence_operation_id"
-                                + " FROM ma_storage WHERE tenant_key = ? AND storage_key = ?")) {
-            statement.setString(1, storageFenceKey(tenantId));
-            statement.setString(2, storageFenceKey(storageId));
-            try (ResultSet rows = statement.executeQuery()) {
-                if (!rows.next()) {
-                    return null;
-                }
-                if (!tenantId.equals(rows.getString("tenant_id"))
-                        || !storageId.equals(rows.getString("storage_id"))) {
-                    throw new IllegalStateException("Storage fence hash collision");
-                }
-                return rows.getString("fence_operation_id");
-            }
-        }
     }
 
     @Override
@@ -1057,25 +836,6 @@ public final class JdbcRuntimeBindingRepository
         } catch (IllegalArgumentException malformed) {
             return false;
         }
-    }
-
-    /** Whether any Runtime Session of the Harness Session was placed on a shared binding. */
-    public static boolean hasSharedRuntimeSessions(Connection connection, String tenantId, String harnessSessionId)
-            throws SQLException {
-        try (PreparedStatement statement = connection.prepareStatement("SELECT " + REQUEST_COLUMNS_AS_B
-                + " FROM ma_runtime_session s JOIN ma_runtime_binding b ON b.binding_id = s.binding_id"
-                + " WHERE s.harness_session_id = ? AND s.tenant_id = ?")) {
-            JdbcRepositorySupport.setIdentity(statement, 1, harnessSessionId);
-            JdbcRepositorySupport.setIdentity(statement, 2, tenantId);
-            try (ResultSet rows = statement.executeQuery()) {
-                while (rows.next()) {
-                    if (sharesRuntimeSessions(rows, "b_")) {
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
     }
 
     @Override
@@ -1284,7 +1044,7 @@ public final class JdbcRuntimeBindingRepository
                         lockPlacementDomain(connection, hint.getRequest().getScope().getTenantId());
                     }
                     var original =
-                            JdbcCsiActivationAdmission.lockForExecution(connection, hint, this);
+                            JdbcCsiActivationAdmission.lockForExecution(connection, hint, this, journalPacks);
                     JdbcCsiActivationAdmission.requireExecution(original, expected);
                     RuntimeBindingRecord binding =
                             selectById(connection, expected.getBindingId(), true, 10);
@@ -1296,7 +1056,7 @@ public final class JdbcRuntimeBindingRepository
                                     expected.getRuntimeSessionId()),
                             expected);
                     if (ResidentWorkspaceProfile.selects(binding.getRequest())) {
-                        requireHarnessAdmission(connection, binding.getRequest().getScope(), expected.getHarnessSessionId(), null);
+                        RuntimeAdmissionFences.requireHarnessAdmission(connection, binding.getRequest().getScope(), expected.getHarnessSessionId(), null);
                     }
                     if (original != null) {
                         if (JdbcCsiExecutionAdmission.legacyReference(expected)) {
@@ -1307,32 +1067,11 @@ public final class JdbcRuntimeBindingRepository
                                     false);
                         }
                         return JdbcCsiExecutionAdmission.authorize(
-                                connection, original, binding, expected, owner, dispatchGeneration);
+                                connection, original, binding, expected, owner, dispatchGeneration, journalPacks);
                     }
                     return JdbcToolExecutionRepository.authorizeDispatch(
                             connection, expected, owner, dispatchGeneration, binding.getVersion());
                 });
-    }
-
-    private static void requireResidentWorkspaceAdmission(Connection connection,
-            RuntimeProvisionRequest request) throws SQLException {
-        if (!ResidentWorkspaceProfile.selects(request)) {
-            return;
-        }
-        var scope = request.getScope();
-        try (PreparedStatement statement = connection.prepareStatement(
-                "SELECT workspace_generation, storage_id, state FROM ma_workspace"
-                        + " WHERE tenant_id = ? AND workspace_id = ?")) {
-            JdbcRepositorySupport.setIdentity(statement, 1, scope.getTenantId());
-            JdbcRepositorySupport.setIdentity(statement, 2, scope.getWorkspaceId());
-            try (ResultSet row = statement.executeQuery()) {
-                if (!row.next() || !"ACTIVE".equals(row.getString("state"))
-                        || !scope.getWorkspaceGeneration().equals(Long.toString(row.getLong("workspace_generation")))
-                        || !request.getStorageId().equals(row.getString("storage_id"))) {
-                    throw admissionClosed();
-                }
-            }
-        }
     }
 
     @Override
@@ -1631,7 +1370,7 @@ public final class JdbcRuntimeBindingRepository
                     current.requireSafeReplacement(replacement);
                     var authority = replacement.getRequest().getScope().getLifecycleAuthority();
                     if (authority != null && replacement.getDrainReceipt() != null) {
-                        requireHarnessAdmission(
+                        RuntimeAdmissionFences.requireHarnessAdmission(
                                 connection,
                                 current.getRequest().getScope(),
                                 current.getRequest().getIsolationKey(),

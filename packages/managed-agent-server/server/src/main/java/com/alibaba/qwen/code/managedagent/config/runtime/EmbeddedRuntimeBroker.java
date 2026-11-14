@@ -196,6 +196,11 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
                 : new ExternalStorageRegistrationStore(jdbc, manager);
         this.workspaces = workspaceExecutionStore == null ? null
                 : new WorkspaceRuntimeResolver(store, workspaceExecutionStore, properties, ssh, externalRegistrations);
+        if (this.workspaces != null) {
+            // Let the capability hint require the same recorded terminal digest
+            // the relay's admission checks, so it never advertises a refused terminal.
+            this.workspaces.setBindingRepository(bindingRepository);
+        }
         WorkspaceRuntimeResolver workspaces = this.workspaces;
         this.childWorkspaces = broker.isChildWorkspacesEnabled()
                 ? childWorkspaces(workspaces, broker) : null;
@@ -535,6 +540,14 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
      */
     public RuntimeBrokerService service() {
         return service;
+    }
+
+    /** The resolver this Broker already built, or null when there is no
+     * workspace execution store. Exposed so the capability hint can share the
+     * very same placement authority instead of a provider lookup that finds no
+     * bean. */
+    public WorkspaceRuntimeResolver workspaceRuntimeResolver() {
+        return workspaces;
     }
 
     @Override

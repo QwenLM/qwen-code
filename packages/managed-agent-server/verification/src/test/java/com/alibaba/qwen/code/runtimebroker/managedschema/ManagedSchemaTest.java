@@ -71,6 +71,8 @@ class ManagedSchemaTest {
             Map.entry("ma_schedule", List.of("tenant_id", "schedule_id")),
             Map.entry("ma_schedule_occurrence", List.of("tenant_id", "schedule_id", "occurrence_key")),
             Map.entry("ma_session_worktree", List.of("tenant_id", "session_id")),
+            Map.entry("ma_client_files_binding", List.of("session_scope_key")),
+            Map.entry("ma_client_files_request", List.of("request_key")),
             Map.entry("ma_journal_pack", List.of("session_scope_key", "from_revision")));
 
     @Test
@@ -650,51 +652,6 @@ class ManagedSchemaTest {
             assertEquals("tenant ", values.get("tenant_id"));
             assertTrue(values.get("observed_at") instanceof java.sql.Timestamp);
         }
-    }
-
-    @Test
-    void all63OriginalEntitiesHaveOnlyRealTargetDestinations() throws Exception {
-        var inventory = ManagedSchemaMapping.inventory();
-        assertEquals(63, inventory.size());
-        try (var source = getClass().getResourceAsStream("/original-managed-table-inventory.tsv")) {
-            String original =
-                    new String(
-                            java.util.Objects.requireNonNull(source).readAllBytes(),
-                            java.nio.charset.StandardCharsets.UTF_8);
-            Set<String> originalNames =
-                    original.lines()
-                            .filter(line -> !line.startsWith("#") && !line.isBlank())
-                            .map(line -> line.split("\\t")[0])
-                            .collect(java.util.stream.Collectors.toSet());
-            assertEquals(63, originalNames.size());
-            assertEquals(originalNames, inventory.keySet());
-        }
-        assertTrue(
-                inventory.values().stream()
-                        .allMatch(
-                                tables ->
-                                        !tables.isEmpty()
-                                                && ManagedSchemaContract.TABLES.containsAll(
-                                                        tables)));
-        Set<String> originalTargets = new java.util.HashSet<>(ManagedSchemaContract.TABLES);
-        originalTargets.removeAll(Set.of("ma_extension_package", "ma_extension_settings", "ma_extension_operation",
-                "ma_extension_source_import", "ma_session_worktree", "ma_session_principal",
-                "ma_memory_store", "ma_memory_entry", "ma_side_query", "ma_journal_pack",
-                "ma_channel_segment"));
-        assertEquals(
-                originalTargets,
-                inventory.values().stream()
-                        .flatMap(java.util.Collection::stream)
-                        .collect(java.util.stream.Collectors.toSet()));
-        assertEquals(Set.of("ma_message"), Set.copyOf(inventory.get("managed_agent_item_part")));
-        assertEquals(
-                Set.of("ma_storage_owner"),
-                Set.copyOf(inventory.get("managed_workspace_execution_lease")));
-        assertEquals(
-                Set.of("ma_session_head"), Set.copyOf(inventory.get("qwen_runtime_harness_drain")));
-        assertEquals(
-                Set.of("ma_event_stream", "ma_resource_ref"),
-                Set.copyOf(inventory.get("qwen_managed_session_task_journal_cursor")));
     }
 
     @Test

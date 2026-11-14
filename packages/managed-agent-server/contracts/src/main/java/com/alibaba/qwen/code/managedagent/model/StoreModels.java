@@ -167,20 +167,18 @@ public final class StoreModels {
     }
 
     public record SessionMutationCommand(String sessionId, String status,
-            boolean replayed, long renameRevision) {
-        public SessionMutationCommand(String sessionId, String status, boolean replayed) {
-            this(sessionId, status, replayed, 0);
-        }
-    }
-
-    public record RenameDelivery(String tenantId, String sessionId,
-            String idempotencyKey, String title, long revision, int attemptCount, long claimGeneration) {
-        public RenameDelivery(String tenantId, String sessionId, String idempotencyKey, String title, long revision, int attemptCount) {
-            this(tenantId, sessionId, idempotencyKey, title, revision, attemptCount, 0);
-        }
+            boolean replayed) {
     }
 
     public record SessionMutation(SessionRecord session, boolean replayed) {
+    }
+
+    /**
+     * A synchronously settled rename: the public SQL row is the display
+     * authority. The revision orders the best-effort journal notification the
+     * caller sends after the settlement transaction commits.
+     */
+    public record SyncRename(SessionRecord session, long revision, boolean replayed) {
     }
 
     public enum OperationKind {

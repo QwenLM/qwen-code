@@ -1,21 +1,38 @@
 package com.alibaba.qwen.code.runtimebroker;
 
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration;
+import com.alibaba.qwen.code.managedagent.persistence.ExternalStorageRegistrationStore;
+import com.alibaba.qwen.code.managedagent.persistence.ExternalWorkspaceMaterializationStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeBrokerTestAccess;
 import com.alibaba.qwen.code.runtimebroker.provisioning.external.ExternalHttpRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.provisioning.external.ExternalWorkspaceProvisioner;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
+import com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient;
 import com.sun.net.httpserver.HttpServer;
 import org.apache.commons.codec.digest.DigestUtils;
+import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+
+import javax.sql.DataSource;
 
 import java.io.IOException;
+import java.lang.reflect.Proxy;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.sql.Connection;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -139,6 +156,7 @@ class RuntimeExternalWorkspaceDrainTest {
             fixture.acquireAndExecute();
             fixture.failCleanup = true;
             fixture.service.requestHarnessDrain("tenant", "harness");
+            fixture.claimLifecycle();
             assertThrows(CompletionException.class, fixture::drain);
             assertNotNull(fixture.binding().getDrainReceipt());
             fixture.service.close();
@@ -320,6 +338,56 @@ class RuntimeExternalWorkspaceDrainTest {
         }
     }
 
+    /** One UUID-named H2 database per fixture, kept alive for the JVM. */
+    private static JdbcDataSource newDataSource() {
+        var source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:external-drain-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        ManagedSchema.initialize(source);
+        return source;
+    }
+
+    /**
+     * Serves the repository's database clock from the fake clock: JDBC lease
+     * stamping reads databaseNowPrecise's UNIX_TIMESTAMP() query, so rewriting
+     * exactly that statement to literal fake-clock readings lets renewal loops
+     * and claim-expiry steps drive lease ends from the MutableClock. The match
+     * is exact because SQL_NOW inlines UNIX_TIMESTAMP() into INSERTs, which
+     * must pass through unchanged (their row timestamps stay real time).
+     */
+    private static DataSource fakeClockDataSource(DataSource delegate, Clock clock) {
+        return (DataSource) Proxy.newProxyInstance(
+                DataSource.class.getClassLoader(),
+                new Class<?>[] {DataSource.class}, (proxy, method, args) -> {
+            try {
+                if (!method.getName().startsWith("getConnection")) {
+                    return method.invoke(delegate, args);
+                }
+                Connection connection = (Connection) method.invoke(delegate, args);
+                return Proxy.newProxyInstance(Connection.class.getClassLoader(),
+                        new Class<?>[] {Connection.class}, (cp, cm, ca) -> {
+                    try {
+                        if (cm.getName().equals("prepareStatement")
+                                && ca[0] instanceof String sql
+                                && sql.equals("SELECT UNIX_TIMESTAMP(),"
+                                        + " EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))")) {
+                            Instant now = clock.instant();
+                            Object[] rewritten = ca.clone();
+                            rewritten[0] = "SELECT " + now.getEpochSecond()
+                                    + ", " + now.getNano() / 1000;
+                            return cm.invoke(connection, rewritten);
+                        }
+                        return cm.invoke(connection, ca);
+                    } catch (java.lang.reflect.InvocationTargetException error) {
+                        throw error.getCause();
+                    }
+                });
+            } catch (java.lang.reflect.InvocationTargetException error) {
+                throw error.getCause();
+            }
+        });
+    }
+
     private static final class MutableClock extends Clock {
         private Instant now = Instant.parse("2026-10-26T00:00:00Z");
         public ZoneId getZone() { return ZoneOffset.UTC; }
@@ -331,15 +399,37 @@ class RuntimeExternalWorkspaceDrainTest {
         private final MutableClock clock = new MutableClock();
         private final RuntimeScope scope = new RuntimeScope("tenant", "workspace", "1", "/workspace",
                 WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session");
-        private final InMemoryRuntimeBindingRepository bindings = new InMemoryRuntimeBindingRepository(clock, () -> "binding");
+        private final DataSource source = fakeClockDataSource(newDataSource(), clock);
+        private final JdbcRuntimeBindingRepository bindings = new JdbcRuntimeBindingRepository(
+                source, new AesGcmSecretProtector("test", new byte[32]), () -> "binding");
         private RuntimeBindingRepository repository = bindings;
         private final RuntimeLifecycleAuthority authority = new RuntimeLifecycleAuthority("close-operation", 1);
         private boolean lifecycleCurrent = true;
         private boolean expireAtCleanup;
         private RuntimeLifecycleAuthority cleanupAuthority;
         private CompletableFuture<Void> pendingAck;
-        private final InMemoryRuntimeSessionRepository sessions = new InMemoryRuntimeSessionRepository();
-        private final InMemoryToolExecutionRepository executions = new InMemoryToolExecutionRepository(clock);
+        private final JdbcRuntimeSessionRepository sessions = new JdbcRuntimeSessionRepository(source);
+        private final JdbcToolExecutionRepository executions = new JdbcToolExecutionRepository(source);
+        private final ManagedSchemaJdbcTemplate jdbc = new ManagedSchemaJdbcTemplate(source);
+        private final DataSourceTransactionManager manager = new DataSourceTransactionManager(source);
+        private final JdbcWorkspaceExecutionStore ownership = new JdbcWorkspaceExecutionStore(jdbc, manager);
+        private final ExternalStorageRegistrationStore registrations = new ExternalStorageRegistrationStore(jdbc, manager);
+        private final ContextBinding context = new ContextBinding("tenant", "workspace", 1, "workspace", ".",
+                WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
+        // The stopped-release ownership guard verifies the boot identity the real
+        // provisioner derives from the registration, so the ensure step uses it.
+        private final ExternalWorkspaceProvisioner bootIdentity = new ExternalWorkspaceProvisioner(
+                new ExternalRuntimeClient() {
+                    public CompletionStage<Map<String, Object>> provision(Map<String, Object> ignored) {
+                        return CompletableFuture.failedFuture(new AssertionError("No allocation in drain fixture"));
+                    }
+                    public CompletionStage<Map<String, Object>> observe(Map<String, Object> ignored) {
+                        return CompletableFuture.failedFuture(new AssertionError("No observation in drain fixture"));
+                    }
+                    public CompletionStage<Map<String, Object>> reattach(Map<String, Object> ignored) {
+                        return CompletableFuture.failedFuture(new AssertionError("No reattach in drain fixture"));
+                    }
+                }, registrations, "provider", Duration.ofSeconds(5));
         private final List<String> events = new ArrayList<>();
         private boolean failAck;
         private boolean failCleanup;
@@ -356,7 +446,7 @@ class RuntimeExternalWorkspaceDrainTest {
             public CompletionStage<RuntimeResourceHandle> ensureResource(RuntimeProvisionRequest request,
                     RuntimeProvisionSeed seed, RuntimeResourceHandle handle) {
                 events.add("ensure");
-                return CompletableFuture.completedFuture(new RuntimeResourceHandle(kind(), 1, Map.of("original", seed.getProvisionRequestId())));
+                return bootIdentity.ensureResource(request, seed, handle);
             }
             public CompletionStage<RuntimeLease> provision(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
                 events.add("provision");
@@ -440,27 +530,30 @@ class RuntimeExternalWorkspaceDrainTest {
         };
         private RuntimeBrokerService service = newService();
 
+        Fixture() {
+            // The control plane registers the EXTERNAL storage, materializes the
+            // Workspace and pins the Session root before the broker may drain it;
+            // the stopped-release ownership guards read exactly those rows.
+            registrations.registerExternalStorage("tenant", "register",
+                    new ExternalStorageRegistration(
+                            new ExternalStorageRegistration.ExternalStorageIdentity("provider", "physical", 1),
+                            new ExternalStorageRegistration.StorageAlias("workspace", "/alias/workspace", "/workspace")));
+            new ExternalWorkspaceMaterializationStore(jdbc, manager)
+                    .materialize("tenant", "workspace", "Name", "actor", "materialize");
+            jdbc.update("INSERT INTO ma_session (tenant_id, session_id, agent_id, gmt_create, gmt_modified, workspace_id,"
+                    + " workspace_generation, workspace_storage_id, cwd_relative, context_config_ref, context_revision,"
+                    + " workspace_config_ref, workspace_policy_ref, tool_profile, creator_actor_key)"
+                    + " VALUES ('tenant', 'harness', 'qwen-code', 1, 1, 'workspace', 1, 'workspace', '.', ?, 1, ?, ?, ?, 'actor')",
+                    WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, WorkspaceExecutionProfile.CONFIG_REF,
+                    WorkspaceExecutionProfile.POLICY_REF, "hosted-workspace-external-files/1");
+        }
+
         RuntimeBrokerService newService() {
-            try {
-                var constructor = RuntimeBrokerService.class.getDeclaredConstructor(
-                        com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver.class,
-                        com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner.class,
-                        com.alibaba.qwen.code.runtimebroker.RuntimeTransport.class,
-                        com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository.class,
-                        com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository.class,
-                        com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository.class,
-                        String.class, Duration.class, Duration.class,
-                        Clock.class, java.util.function.Supplier.class);
-                constructor.setAccessible(true);
-                return constructor.newInstance(
-                        (com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver)
-                                ignored -> CompletableFuture.completedFuture(scope),
-                        provider, transport, repository, sessions, executions, "broker",
-                        Duration.ofMinutes(1), Duration.ofMinutes(1), clock,
-                        (java.util.function.Supplier<String>) () -> UUID.randomUUID().toString());
-            } catch (ReflectiveOperationException error) {
-                throw new IllegalStateException("Construct the broker service fixture", error);
-            }
+            return RuntimeBrokerTestAccess.service(
+                    ignored -> CompletableFuture.completedFuture(scope),
+                    provider, transport, repository, sessions, executions, "broker",
+                    Duration.ofMinutes(1), Duration.ofMinutes(1), clock,
+                    () -> UUID.randomUUID().toString());
         }
         // Lifecycle authorization is an external repository boundary here; MySQL tests
         // separately prove its real row locks and that rejected cleanup retains H.
@@ -517,6 +610,9 @@ class RuntimeExternalWorkspaceDrainTest {
         }
         void acquireAndExecute() {
             service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+            // The control plane claims storage ownership for the admitted Session
+            // before any tool runs; the drain's stopped release verifies that holder.
+            ownership.claim(context, sessions.findById(scope, "runtime"), bindings.findById("binding"), bindings);
             String payload = "{\"toolName\":\"write_file\",\"input\":{\"file_path\":\"note.txt\",\"content\":\"saved\"}}";
             var prepared = prepare(payload);
             service.startExecution("harness", "runtime", prepared.getExecutionCallId(), payload).toCompletableFuture().join();
@@ -524,8 +620,22 @@ class RuntimeExternalWorkspaceDrainTest {
             assertTrue(events.contains("ack"));
         }
         void drain() { service.drainHarnessSession("tenant", "harness").toCompletableFuture().join(); }
+        /**
+         * The control plane's close operation holds a live lifecycle claim on the
+         * harness head (AgentLifecycleOperations stamps operation id, generation
+         * and lease); the broker drain must present the matching authority. The
+         * broker-side requestHarnessDrain alone leaves the claim columns empty.
+         */
+        void claimLifecycle() {
+            jdbc.update("UPDATE ma_session_head SET operation_id = ?, claim_generation = ?, claim_lease_until = ?"
+                    + " WHERE tenant_key = ? AND harness_key = ?",
+                    authority.operationId(), authority.claimGeneration(),
+                    clock.instant().plus(Duration.ofDays(1)).toEpochMilli(),
+                    RuntimeAdmissionFences.harnessDrainKey("tenant"), RuntimeAdmissionFences.harnessDrainKey("harness"));
+        }
         public void close() {
             service.close();
+            bootIdentity.close();
             if (providerServer != null) {
                 providerServer.stop(0);
             }

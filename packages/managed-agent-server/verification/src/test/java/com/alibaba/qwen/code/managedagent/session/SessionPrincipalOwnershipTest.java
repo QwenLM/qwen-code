@@ -286,7 +286,7 @@ class SessionPrincipalOwnershipTest {
             denied(() -> f.service.unarchiveSession(other, "unarchive", otherId));
             assertThat(f.jdbc.queryForObject("SELECT status FROM ma_session WHERE session_id=?", String.class, otherId))
                     .isEqualTo("ARCHIVED");
-            denied(() -> f.store.beginSessionRename("tenant", "null-owner", "digest", otherId, "title"));
+            denied(() -> f.store.settleRenameSync("tenant", "null-owner", "digest", otherId, "title", (String) null));
         });
     }
 

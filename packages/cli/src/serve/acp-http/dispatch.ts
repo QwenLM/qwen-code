@@ -191,6 +191,7 @@ import type {
   AcpConnection,
   ConnectionRegistry,
   DeliveryReceipt,
+  PendingClientRequest,
   PendingClientRequestRef,
 } from './connection-registry.js';
 import type { DeliveryResult } from './transport-stream.js';
@@ -1724,14 +1725,17 @@ export class AcpDispatcher {
   }
 
   /**
-   * Cancel a permission request the client abandoned (closed its stream /
-   * connection before voting), so the bridge isn't left blocked. Invoked
-   * by the connection-registry teardown path.
+   * Release a delivery copy. A workflow-owned request can outlive this
+   * binding and is settled by the bridge when the workflow or owner ends.
    */
   cancelAbandonedPermission(
-    req: { sessionId: string; bridgeRequestId: string },
+    req: Pick<
+      PendingClientRequest,
+      'sessionId' | 'bridgeRequestId' | 'backgroundWorkflowApproval'
+    >,
     clientId: string | undefined,
   ): boolean {
+    if (req.backgroundWorkflowApproval) return true;
     try {
       this.bridge.respondToSessionPermission(
         req.sessionId,
@@ -1878,9 +1882,13 @@ export class AcpDispatcher {
   private dropOwnPendingPermission(
     conn: AcpConnection,
     requestId: string,
+    workflowOnly = false,
   ): void {
     for (const [pid, preq] of conn.pending) {
-      if (preq.kind === 'permission' && preq.bridgeRequestId === requestId) {
+      if (
+        preq.bridgeRequestId === requestId &&
+        (!workflowOnly || preq.backgroundWorkflowApproval)
+      ) {
         conn.pending.delete(pid);
         return;
       }
@@ -3150,16 +3158,18 @@ export class AcpDispatcher {
             writeStderrLine(
               `qwen serve: /acp session/permission vote failed (${logSafe(sessionId)}, requestId ${logSafe(requestId)}): ${logSafe(errMsg(err))}`,
             );
-            const cancelled = this.cancelAbandonedPermission(
-              { sessionId, bridgeRequestId: requestId },
-              pendingRef?.conn.sessions.get(sessionId)?.clientId,
-            );
             // Drop only the VOTING connection's own entry (consistent with the
             // success path) — never `pendingRef`, which may be a sibling/the
             // originator. Deleting the originator's entry would stall a quorum
             // still waiting on its vote. If the voter has no own entry, leave
             // everything for teardown.
-            if (cancelled) {
+            if (
+              !pendingRef?.req.backgroundWorkflowApproval &&
+              this.cancelAbandonedPermission(
+                { sessionId, bridgeRequestId: requestId },
+                pendingRef?.conn.sessions.get(sessionId)?.clientId,
+              )
+            ) {
               this.dropOwnPendingPermission(conn, requestId);
             }
             throw err;
@@ -6097,7 +6107,24 @@ export class AcpDispatcher {
           toolCall: unknown;
           options: unknown;
         };
-        // A permission request MUST reach a LIVE session stream. Going
+        const toolMeta = isObject(data.toolCall)
+          ? data.toolCall['_meta']
+          : undefined;
+        const pending: PendingClientRequest = {
+          sessionId,
+          bridgeRequestId: data.requestId,
+          kind: 'permission',
+          ...(isObject(toolMeta) &&
+          toolMeta['workflowApproval'] === true &&
+          toolMeta['backgroundWorkflowApproval'] === true
+            ? {
+                backgroundWorkflowApproval: {
+                  originatorClientId: event.originatorClientId,
+                },
+              }
+            : {}),
+        };
+        // A prompt-scoped permission request must reach a live session stream. Going
         // through `sendSession` would (a) silently drop the frame if the
         // session was torn down (lookup-only), or (b) put it behind the
         // pre-attach resource guard, where owner teardown cannot preserve a
@@ -6107,6 +6134,8 @@ export class AcpDispatcher {
         // rather than register+stall.
         const binding = conn.sessions.get(sessionId);
         if (!binding?.stream || binding.stream.isClosed) {
+          // Another binding can still receive the workflow's approval.
+          if (pending.backgroundWorkflowApproval) return;
           // KNOWN GAP (tracked as the §1.7 cross-connection permission
           // follow-up): when this fires DURING a reconnect grace window
           // (`binding.graceTimer` set), the prompt is intentionally kept alive,
@@ -6124,7 +6153,7 @@ export class AcpDispatcher {
             );
           }
           const cancelled = this.cancelAbandonedPermission(
-            { sessionId, bridgeRequestId: data.requestId },
+            pending,
             // Pass the bridge-stamped clientId when the binding still exists
             // (stream closed but session live) — only `undefined` when the
             // session is fully gone.
@@ -6177,11 +6206,7 @@ export class AcpDispatcher {
         }
         if (id === undefined) {
           id = conn.nextId();
-          conn.pending.set(id, {
-            sessionId,
-            bridgeRequestId: data.requestId,
-            kind: 'permission',
-          });
+          conn.pending.set(id, pending);
         }
         // INVARIANT: this sends straight to `binding.stream` (not via
         // `conn.sendSession`) and is safe ONLY because `translateEvent` runs
@@ -6198,6 +6223,23 @@ export class AcpDispatcher {
           }),
           // Carry the bus cursor: a permission request is a real sequenced
           // event, so the client must resume past it.
+          event.id,
+        );
+        return;
+      }
+      case 'permission_resolved': {
+        if (
+          isObject(event.data) &&
+          typeof event.data['requestId'] === 'string'
+        ) {
+          this.dropOwnPendingPermission(conn, event.data['requestId'], true);
+        }
+        conn.sendSession(
+          sessionId,
+          notification(`${QWEN_METHOD_NS}notify`, {
+            kind: event.type,
+            data: event.data,
+          }),
           event.id,
         );
         return;
@@ -6267,20 +6309,42 @@ export class AcpDispatcher {
       );
       return;
     }
+    if (pending.backgroundWorkflowApproval && 'error' in msg) {
+      const originator = pending.backgroundWorkflowApproval.originatorClientId;
+      // An observer's transport error leaves the approval retryable. The
+      // originator's own ACP error ends its request and releases the workflow.
+      // A run launched by a turn with no originator (cron, a runtime goal, a
+      // background report) has no observers: like a turn's own approval, the
+      // error of the connection holding the request ends it, or nothing would.
+      if (
+        pendingConn !== conn ||
+        (originator !== undefined &&
+          conn.sessions.get(pending.sessionId)?.clientId !== originator)
+      ) {
+        writeStderrLine(
+          `qwen serve: /acp background workflow approval error ignored: connection ${logSafe(
+            conn.connectionId.slice(0, 8),
+          )} is not its launching client (requestId ${logSafe(
+            pending.bridgeRequestId,
+          )})`,
+        );
+        return;
+      }
+    }
     // NOTE: do NOT delete the pending entry yet. Keep it until either the
     // bridge vote OR the cancel fallback runs — if both somehow fail, the
     // entry survives so a later session/connection teardown
     // (`abandonPendingForSession`) can still release the mediator.
 
     try {
-      // A client error response is a cancellation; otherwise validate +
+      // A client error response that reaches here cancels the request. Otherwise validate +
       // whitelist the result through the SAME `parsePermissionResponse` the
       // `session/permission` handler uses. This PR widened this path to any
       // co-owning connection (via `findPendingClientRequest`), so without the
       // shared validator a co-owner could inject arbitrary top-level args and
       // extra `outcome` sub-fields straight to the bridge. A malformed result
       // throws here (as the old direct cast made the bridge throw) and is
-      // caught below, where the cancel fallback always releases the mediator.
+      // caught below, where the fallback releases prompt-scoped requests.
       const vote =
         'error' in msg
           ? { outcome: { outcome: 'cancelled' } }
@@ -6297,11 +6361,16 @@ export class AcpDispatcher {
         >[2],
         this.sessionCtx(conn, pending.sessionId, fromLoopback),
       );
-      this.dropResolvedPermission(pendingConn, id);
+      if (pending.backgroundWorkflowApproval) {
+        this.dropOwnPendingPermission(conn, pending.bridgeRequestId);
+      } else {
+        this.dropResolvedPermission(pendingConn, id);
+      }
     } catch (err) {
       writeStderrLine(
         `qwen serve: /acp permission vote failed (${logSafe(pending.sessionId)}): ${logSafe(errMsg(err))}`,
       );
+      if (pending.backgroundWorkflowApproval) return;
       // Cancel BEFORE deleting, and ONLY drop the entry if the cancel
       // landed. If it also failed, keep the entry so teardown's
       // `abandonPendingForSession` can retry — otherwise the mediator is
@@ -6333,6 +6402,11 @@ export class AcpDispatcher {
     binding.promptAbort?.abort();
     const abort = new AbortController();
     binding.promptAbort = abort;
+    const { clientId } = binding;
+    if (conn.preserveRunningPromptsOnDisconnect && clientId !== undefined) {
+      binding.suspendWorkflowApprovals = () =>
+        this.bridge.suspendClientWorkflowApprovals?.(sessionId, clientId);
+    }
     const metadata = params['_meta'] as Record<string, unknown> | undefined;
     const submittedPrompt = metadata?.[SUBMITTED_PROMPT_META_KEY];
     try {
