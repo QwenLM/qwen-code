@@ -634,6 +634,52 @@ try {
 }
 ```
 
+## External memory import
+
+Connect to a daemon advertising `memory_import_v1` and select a trusted active
+workspace. The caller reads local Codex Markdown files and sends relative paths
+and contents; the remote daemon does not read the caller's filesystem.
+
+```typescript
+import {
+  DaemonClient,
+  type DaemonMemoryImportSource,
+} from '@qwen-code/sdk/daemon';
+
+const client = new DaemonClient({ baseUrl: daemonUrl, token });
+const workspace = client.workspaceById(workspaceId);
+const source: DaemonMemoryImportSource = {
+  version: 1,
+  source: 'codex',
+  files: [{ path: 'MEMORY.md', content: markdown }],
+};
+const preview = await workspace.previewMemoryImport(source);
+// Show preview.sections and obtain explicit section/scope selections from the user.
+const task = await workspace.submitMemoryImport({
+  source,
+  selection,
+  idempotencyKey,
+});
+const status = await workspace.getMemoryImport(task.id);
+```
+
+Preview transfers content to the daemon but does not invoke a model or persist a
+task. Submission returns a durable receipt before consolidation completes. Keep
+the same idempotency key and request when recovering from a lost response;
+the SDK does not resubmit automatically.
+
+Use `listMemoryImports()` to restore task history, `getMemoryImportSource(batchId,
+sectionId)` to read a retained selected section, and `cancelMemoryImport(batchId)`
+or `retryMemoryImport(batchId)` to control a task. Cancellation does not undo
+published memories; retry handles pending/failed items without resetting budgets.
+Completed tasks may still contain conflicts. `DaemonHttpError` exposes the HTTP
+status, body, and optional raw `retryAfter` header for server-directed backoff.
+
+These methods use native REST even when capability discovery uses an ACP
+transport. All import types are also exported from `@qwen-code/sdk`.
+See the [API contract](../../docs/design/external-memory-import-api.md) for source
+limits, scope mapping, availability restrictions, and result semantics.
+
 ## Error Handling
 
 The SDK provides an `AbortError` class for handling aborted queries:
