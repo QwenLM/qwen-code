@@ -7908,6 +7908,11 @@ async function runQwenServeImpl(
                   'PR watch: an effective subscription exists but the session PR refresh timer is not running (QWEN_SESSION_PR_REFRESH_MINUTES=0); no PR-state transition will be observed.',
                 );
               };
+              // The timer handle exists by now, and the channels may already
+              // have committed before this import finished; run the one-shot
+              // check for that ordering instead of waiting for a callback that
+              // has already fired.
+              warnPrWatchWithoutTimer();
             } catch (error) {
               daemonLog.warn(
                 `PR watch deps unavailable: ${
