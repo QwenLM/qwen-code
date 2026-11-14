@@ -124,14 +124,6 @@ function evalRunsOn(
       /contains\(fromJSON\('\["OWNER","MEMBER","COLLABORATOR"\]'\), github\.event\.pull_request\.author_association\)/,
       String(TRUSTED.includes(assoc)),
     ],
-    [
-      /github\.repository == 'QwenLM\/qwen-code'/,
-      String(repoName === 'QwenLM/qwen-code'),
-    ],
-    [
-      /github\.event\.inputs\.linux_runner != 'hosted'/,
-      String(dispatchRunner !== 'hosted'),
-    ],
   ];
   let expr = expression.replace(/^\$\{\{\s*/, '').replace(/\s*\}\}$/, '');
   for (const [term, value] of substitutions) {
