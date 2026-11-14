@@ -1252,6 +1252,16 @@ jobs:
           # through Agent 7's own build-test (issue #10108). Opt-in here only;
           # rationale, budget and fail-open contract: cli lib/prebuild.ts.
           QWEN_REVIEW_PREBUILD: '1'
+          # Opt CI into the #9556 execution sandbox for the PR's own
+          # install/build/test commands. With the default (off) those commands
+          # inherit this step's GH_TOKEN and OPENAI_API_KEY — a postinstall can
+          # read them in one line. `required` runs them behind the container env
+          # allowlist and refuses unsandboxed execution (build/test evidence then
+          # reports unavailable; the review itself continues, it is not a hard
+          # break). It does NOT contain the agent's own shell probes, so #9556
+          # stays open. Fleet rollout is gated on a runner canary — see the PR
+          # description; do not merge before it passes.
+          QWEN_REVIEW_SANDBOX: 'required'
           TMPDIR: '${{ steps.review_scratch.outputs.dir }}'
         run: |-
           set -euo pipefail
