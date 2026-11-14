@@ -12,7 +12,9 @@ export const shouldShowColor = (color?: string): boolean =>
 export const getColorForDisplay = (colorName?: string): string | undefined =>
   !colorName || colorName === 'auto'
     ? undefined
-    : COLOR_OPTIONS.find((color) => color.name === colorName)?.value;
+    : COLOR_OPTIONS.find(
+        (color) => color.id === colorName || color.name === colorName,
+      )?.value;
 
 /**
  * Sanitizes user input by removing dangerous characters and normalizing whitespace.

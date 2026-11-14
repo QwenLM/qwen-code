@@ -315,6 +315,15 @@ const REQUESTS: Array<[string, OpenTuiDialogRequest]> = [
 ];
 
 describe('OpenTuiDialogMount routing', () => {
+  it('passes the actual configuration owner to native agent creation', () => {
+    const ui = mount({ dialog: 'subagent_create' });
+    expect(mocks.state.dialogProps['subagent_create']['config']).toBe(CONFIG);
+    expect(
+      mocks.state.dialogProps['subagent_create']['settings'],
+    ).toBeUndefined();
+    ui.unmount();
+  });
+
   it('preserves subscription success metadata in history', () => {
     const ui = mount({ dialog: 'auth' });
     dialogProp('auth', 'notify')('new member login', 'subscription-success');
