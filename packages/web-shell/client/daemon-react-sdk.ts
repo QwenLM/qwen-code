@@ -347,6 +347,8 @@ export type {
   DaemonScheduledTaskGateStatus,
   /** One recorded fire in a scheduled task's run history. */
   DaemonScheduledTaskRun,
+  /** A session's pending loop wakeup (`/loop`), aggregated by the daemon. */
+  DaemonLoopWakeup,
   /** Request body for creating a scheduled task. */
   DaemonCreateScheduledTaskRequest,
   /** Partial-update body for a scheduled task. */

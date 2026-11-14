@@ -20,6 +20,7 @@ import type {
   DaemonFileStat,
   DaemonGoal,
   DaemonScheduledTask,
+  DaemonLoopWakeup,
   DaemonWorkspaceActions,
   DaemonWorkspaceDirectoryPickerResult,
   DaemonWorkspacePathSuggestions,
@@ -910,6 +911,25 @@ export function createDaemonWorkspaceActions({
       }
       const data = (await res.json()) as { tasks?: DaemonScheduledTask[] };
       return Array.isArray(data.tasks) ? data.tasks : [];
+    },
+
+    async fetchScheduledTaskWakeups(workspaceId) {
+      requireClient(getClient, 'Fetch loop wakeups failed');
+      const path = scheduledTasksPath(workspaceId);
+      const url = createDaemonRequestUrl(baseUrl, path);
+      const res = await withActionTimeout(
+        requestRest(url, {
+          headers: createDaemonHeaders(token),
+        }),
+        'Fetch loop wakeups timed out',
+      );
+      if (!res.ok) {
+        throw new Error(await readDaemonError(res, `GET ${path}`));
+      }
+      // An older daemon has no `wakeups` field: the wakeups feature is absent,
+      // not broken.
+      const data = (await res.json()) as { wakeups?: DaemonLoopWakeup[] };
+      return Array.isArray(data.wakeups) ? data.wakeups : [];
     },
 
     async createScheduledTask(req, workspaceId) {
