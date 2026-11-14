@@ -16,6 +16,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.annotation.DirtiesContext;
@@ -43,6 +44,7 @@ import static org.assertj.core.api.Assertions.*;
 @DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class HostedWorkspaceRecoveryWorkerIT {
     @Autowired private DataSource source;
+    @Qualifier("managedJdbcTemplate")
     @Autowired private JdbcTemplate jdbc;
     @Autowired private ManagedAgentStore store;
     @Autowired private JdbcWorkspaceExecutionStore authority;
