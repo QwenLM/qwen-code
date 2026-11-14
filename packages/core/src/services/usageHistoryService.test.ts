@@ -1165,6 +1165,202 @@ describe('loadUsageHistoryWithLive — replay cache + selective scan', () => {
       spy.mockRestore();
     }
   });
+
+  it('recovers the later timestamp from a small glued trailing line', async () => {
+    const sessionId = 'sess-glued-small';
+    const dir = path.join(
+      process.env['QWEN_HOME']!,
+      'projects',
+      'cache-project',
+      'chats',
+    );
+    fs.mkdirSync(dir, { recursive: true });
+    const base = { sessionId, cwd: '/cache/project' };
+    const u1 = {
+      ...base,
+      uuid: 'u1',
+      parentUuid: null,
+      timestamp: '2026-06-11T00:00:00.000Z',
+      type: 'user',
+      message: { role: 'user', content: 'hi' },
+    };
+    const u2 = {
+      ...base,
+      uuid: 'u2',
+      parentUuid: 'u1',
+      timestamp: '2026-06-11T00:01:00.000Z',
+      type: 'system',
+      subtype: 'ui_telemetry',
+      systemPayload: {
+        uiEvent: {
+          'event.name': 'qwen-code.api_response',
+          'event.timestamp': '2026-06-11T00:01:00.000Z',
+          response_id: 'r1',
+          model: 'qwen-max',
+          duration_ms: 1200,
+          input_token_count: 600,
+          output_token_count: 300,
+          cached_content_token_count: 0,
+          thoughts_token_count: 100,
+          total_token_count: 1000,
+          prompt_id: 'p1',
+        },
+      },
+    };
+    // Two records fused on the final physical line (interrupted append); the
+    // second carries a much later timestamp. The small-tail parse must take the
+    // LAST recovered record, not the first.
+    const recA = {
+      ...base,
+      uuid: 'u3',
+      parentUuid: 'u2',
+      timestamp: '2026-06-11T00:02:00.000Z',
+      type: 'assistant',
+      message: { role: 'assistant', content: 'a' },
+    };
+    const recB = {
+      ...base,
+      uuid: 'u4',
+      parentUuid: 'u3',
+      timestamp: '2026-06-11T23:59:00.000Z',
+      type: 'assistant',
+      message: { role: 'assistant', content: 'b' },
+    };
+    const body =
+      [u1, u2].map((r) => JSON.stringify(r)).join('\n') +
+      '\n' +
+      JSON.stringify(recA) +
+      JSON.stringify(recB) +
+      '\n';
+    fs.writeFileSync(path.join(dir, `${sessionId}.jsonl`), body);
+
+    const merged = await loadUsageHistoryWithLive();
+    const r = merged.find((x) => x.sessionId === sessionId);
+    expect(r).toBeDefined();
+    expect(tokensOf(merged, sessionId)).toBe(1000);
+    expect(r!.timestamp).toBe(new Date('2026-06-11T23:59:00.000Z').getTime());
+  });
+
+  it('takes the later timestamp from a large glued trailing line without parsing it', async () => {
+    const sessionId = 'sess-glued-large';
+    const dir = path.join(
+      process.env['QWEN_HOME']!,
+      'projects',
+      'cache-project',
+      'chats',
+    );
+    fs.mkdirSync(dir, { recursive: true });
+    const base = { sessionId, cwd: '/cache/project' };
+    const u1 = {
+      ...base,
+      uuid: 'u1',
+      parentUuid: null,
+      timestamp: '2026-06-11T00:00:00.000Z',
+      type: 'user',
+      message: { role: 'user', content: 'hi' },
+    };
+    const u2 = {
+      ...base,
+      uuid: 'u2',
+      parentUuid: 'u1',
+      timestamp: '2026-06-11T00:01:00.000Z',
+      type: 'system',
+      subtype: 'ui_telemetry',
+      systemPayload: {
+        uiEvent: {
+          'event.name': 'qwen-code.api_response',
+          'event.timestamp': '2026-06-11T00:01:00.000Z',
+          response_id: 'r1',
+          model: 'qwen-max',
+          duration_ms: 1200,
+          input_token_count: 600,
+          output_token_count: 300,
+          cached_content_token_count: 0,
+          thoughts_token_count: 100,
+          total_token_count: 1000,
+          prompt_id: 'p1',
+        },
+      },
+    };
+    // A >64KB final line: a megabyte tool_result fused to a later record. The
+    // large-tail branch must take the LAST top-level timestamp as raw text
+    // (first-match would pick the earlier one) and must not JSON-parse the line.
+    const recA = {
+      ...base,
+      uuid: 'u3',
+      parentUuid: 'u2',
+      timestamp: '2026-06-11T00:05:00.000Z',
+      type: 'tool_result',
+      message: { role: 'user', content: 'x'.repeat(1024 * 1024) },
+    };
+    const recB = {
+      ...base,
+      uuid: 'u4',
+      parentUuid: 'u3',
+      timestamp: '2026-06-11T00:09:00.000Z',
+      type: 'assistant',
+      message: { role: 'assistant', content: 'ok' },
+    };
+    const body =
+      [u1, u2].map((r) => JSON.stringify(r)).join('\n') +
+      '\n' +
+      JSON.stringify(recA) +
+      JSON.stringify(recB) +
+      '\n';
+    fs.writeFileSync(path.join(dir, `${sessionId}.jsonl`), body);
+
+    const parseInputLengths: number[] = [];
+    const origParse = JSON.parse;
+    const spy = vi.spyOn(JSON, 'parse').mockImplementation((text: string) => {
+      parseInputLengths.push(text.length);
+      return origParse(text);
+    });
+    try {
+      const merged = await loadUsageHistoryWithLive();
+      const r = merged.find((x) => x.sessionId === sessionId);
+      expect(r).toBeDefined();
+      expect(tokensOf(merged, sessionId)).toBe(1000);
+      expect(r!.timestamp).toBe(new Date('2026-06-11T00:09:00.000Z').getTime());
+      expect(Math.max(...parseInputLengths)).toBeLessThan(10_000);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('bounds the replay scan concurrency instead of one worker per candidate', async () => {
+    const paths: string[] = [];
+    for (let i = 0; i < 12; i++) paths.push(plant(`sess-conc-${i}`, 100));
+    const gated: Readable[] = [];
+    let opens = 0;
+    let gating = true;
+    const orig = fs.createReadStream;
+    const spy = vi.spyOn(fs, 'createReadStream').mockImplementation(((
+      p: fs.PathLike,
+      opts?: Parameters<typeof fs.createReadStream>[1],
+    ) => {
+      if (gating && paths.includes(String(p))) {
+        opens++;
+        const s = new Readable({ read() {} }); // emits no data: worker blocks
+        gated.push(s);
+        return s as unknown as fs.ReadStream;
+      }
+      return orig(p, opts);
+    }) as typeof fs.createReadStream);
+    try {
+      const pending = loadUsageHistoryWithLive();
+      // Let the persisted-file read settle and the pool start: each worker
+      // opens one gated stream and blocks, so no further opens can occur.
+      await new Promise((r) => setTimeout(r, 150));
+      expect(opens).toBeGreaterThan(0);
+      expect(opens).toBeLessThanOrEqual(8); // REBUILD_CONCURRENCY
+      // Release the gates and stop gating so the load can finish.
+      gating = false;
+      for (const s of gated) s.push(null);
+      await pending;
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
 
 // Regression for #7384: deleting a session erased its usage from the

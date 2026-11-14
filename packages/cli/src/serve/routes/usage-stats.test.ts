@@ -236,7 +236,7 @@ describe('usage-stats route (real loader against seeded history)', () => {
     // A daemon / Web Shell session that only exists as a transcript (no
     // usage_record.jsonl entry). The real loader must replay it and the route
     // must serve its totals without writing anything back to ~/.qwen.
-    const day = new Date().toISOString().slice(0, 10);
+    const now = Date.now();
     const chats = path.join(
       process.env['QWEN_HOME']!,
       'projects',
@@ -245,7 +245,10 @@ describe('usage-stats route (real loader against seeded history)', () => {
     );
     fs.mkdirSync(chats, { recursive: true });
     const sessionId = 'sess-replay';
-    const at = (m: number) => `${day}T00:0${m}:00.000Z`;
+    // A few minutes ago: inside [local midnight, now] in every timezone and
+    // never in the future. A UTC-midnight fixture reds in negative UTC offsets
+    // because the `today` window starts at local midnight.
+    const at = (m: number) => new Date(now - (3 - m) * 60_000).toISOString();
     const base = { sessionId, cwd: '/replay/proj' };
     const records = [
       {
@@ -293,14 +296,46 @@ describe('usage-stats route (real loader against seeded history)', () => {
       records.map((r) => JSON.stringify(r)).join('\n') + '\n',
     );
 
-    const app = mount({}); // real loadUsageHistoryWithLive
+    // cacheTtlMs: 0 forces the second GET to run the loader again; the default
+    // 60s route cache would answer it from the first load's records and compare
+    // a value with itself, never exercising the warm path.
+    const app = mount({ cacheTtlMs: 0 }); // real loadUsageHistoryWithLive
     const cold = await request(app).get('/usage/dashboard?range=today');
     expect(cold.status).toBe(200);
     expect(cold.body.summary.totalTokens).toBe(1000);
     expect(cold.body.summary.sessions).toBe(1);
 
+    // Grow the transcript, then reload: the warm path must rescan the changed
+    // file and report the new total, not serve the stale first-load records.
+    fs.appendFileSync(
+      path.join(chats, `${sessionId}.jsonl`),
+      JSON.stringify({
+        ...base,
+        uuid: 'u4',
+        parentUuid: 'u3',
+        timestamp: at(3),
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: {
+          uiEvent: {
+            'event.name': 'qwen-code.api_response',
+            'event.timestamp': at(3),
+            response_id: 'r2',
+            model: 'qwen-max',
+            duration_ms: 500,
+            input_token_count: 300,
+            output_token_count: 150,
+            cached_content_token_count: 0,
+            thoughts_token_count: 50,
+            total_token_count: 500,
+            prompt_id: 'p2',
+          },
+        },
+      }) + '\n',
+    );
     const warm = await request(app).get('/usage/dashboard?range=today');
-    expect(warm.body.summary).toEqual(cold.body.summary);
+    expect(warm.body.summary.totalTokens).toBe(1500);
+    expect(warm.body.summary.sessions).toBe(1);
 
     expect(
       fs.existsSync(path.join(process.env['QWEN_HOME']!, 'usage_record.jsonl')),

@@ -14,7 +14,10 @@ import type { SessionMetrics } from '../telemetry/uiTelemetry.js';
 import type { UiEvent } from '../telemetry/uiTelemetry.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { extractJsonStringField } from '../utils/sessionStorageUtils.js';
+import {
+  extractJsonStringField,
+  extractLastJsonStringField,
+} from '../utils/sessionStorageUtils.js';
 
 const debugLogger = createDebugLogger('USAGE_HISTORY');
 
@@ -240,8 +243,8 @@ export function metricsToUsageRecord(
  * Trailing lines up to this many characters are parsed after the loop so a
  * `}{`-glued final line still recovers its last record's timestamp. Larger
  * trailing lines (a session that idled right after a big tool call ends on a
- * multi-megabyte `tool_result`) are NOT parsed — their own timestamp is
- * already captured by the per-line field extraction below.
+ * multi-megabyte `tool_result`) are NOT JSON-parsed; their last top-level
+ * `timestamp` is extracted as raw text instead (still glued-line aware).
  */
 const MAX_TRAILING_PARSE_CHARS = 64 * 1024;
 
@@ -261,8 +264,9 @@ const MAX_TRAILING_PARSE_CHARS = 64 * 1024;
  * record), and a small trailing line. The bulk of a transcript is large
  * tool-result payloads that contribute nothing to usage; parsing them
  * dominated the dashboard load (multi-GB histories took ~80s). The end
- * timestamp comes from the trailing record, or from the per-line extracted
- * `timestamp` field when the trailing line is large or corrupt.
+ * timestamp comes from the trailing record — parsed when the trailing line is
+ * small, or extracted as raw text (last top-level match, glued-line aware)
+ * when it is large — with a per-line fallback for a corrupt trailing line.
  */
 async function summarizeTranscriptFile(
   filePath: string,
@@ -333,8 +337,10 @@ async function summarizeTranscriptFile(
   if (!hasEvents) return { sessionId, record: null };
 
   // Only parse a small trailing line (cheap `}{`-glued recovery). A large
-  // trailing line is exactly the payload this scan exists to skip; its own
-  // timestamp was already extracted per-line into lastTsFallback.
+  // trailing line is exactly the payload this scan exists to skip, so it is
+  // never JSON-parsed; take its LAST top-level timestamp as raw text so a
+  // glued large tail still ends at the later record (first-match would pick
+  // the earlier one). Escaped payload occurrences are rejected by the helper.
   let endTs: string | undefined;
   if (lastLine.length <= MAX_TRAILING_PARSE_CHARS) {
     const lastRecs = jsonl.parseLineTolerant<ChatRecord>(lastLine, filePath);
@@ -343,7 +349,7 @@ async function summarizeTranscriptFile(
         ? lastRecs[lastRecs.length - 1]!.timestamp
         : lastTsFallback;
   } else {
-    endTs = lastTsFallback;
+    endTs = extractLastJsonStringField(lastLine, 'timestamp') ?? lastTsFallback;
   }
   const startTime = new Date(header.timestamp).getTime();
   const endTime = endTs ? new Date(endTs).getTime() : NaN;
