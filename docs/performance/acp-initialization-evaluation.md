@@ -8,7 +8,7 @@ This report covers local reconstructed private installed workloads after the sep
 
 ## Current integrated source scope
 
-The current comparison uses clean main 6f754be6548903e545e6ff0ed43a34927fe3bfb9 and a 42-file local candidate: **25 production files, 11 test files and six bilingual documents**. Both already contain the merged watcher change. The source combination includes initialization-local ripgrep overlap/cancellation, parallel independent per-extension discovery, attach/export and scheduled-source import cuts, bounded repeated YAML parsing, and lazy top-level CLI command registration. The conservative six-file experiment below is an earlier component cohort, not this final candidate.
+The current comparison uses clean main 6f754be6548903e545e6ff0ed43a34927fe3bfb9 and a 42-file measurement snapshot: **25 production files, 11 test files and six bilingual documents**. The PR subsequently updates one existing managed-initialization test for the added optional private parameter; its 25 production files are unchanged from the measured snapshot. Both already contain the merged watcher change. The source combination includes initialization-local ripgrep overlap/cancellation, parallel independent per-extension discovery, attach/export and scheduled-source import cuts, bounded repeated YAML parsing, and lazy top-level CLI command registration. The conservative six-file experiment below is an earlier component cohort, not this final candidate.
 
 The YAML cache admits at most 256 successful raw object results with inputs no longer than 16,384 UTF-16 code units. Every return creates a fresh sanitized result; diagnostics, invalid inputs and dynamic debug flags retain the existing parser path. CLI registration preserves the 15 original command grammars/order, auth's early translation snapshot, update's getter and the selected command's original synchronous builder/handler. Conservative raw-name and completion-marker matching can load extra implementations without dispatching them.
 
@@ -18,7 +18,7 @@ The primary clock includes the complete awaited SDK create-or-attach: capabiliti
 
 ## Final integrated source on the same main: empty per-row cache
 
-This separate eight-pair cohort compares a clean main build (A) with the final integrated source build on that same main (B), using normal published packages. Base: `6f754be6548903e545e6ff0ed43a34927fe3bfb9`; measurement-time snapshot seal: `78afd107a0f4bc1e0c4222918ca97b43dd441e0fdbe4e5553aab87cfc6d7b827`. This evidence is independent of the earlier YAML, resolver, AOT, runtime and GC/cache-sharing cohorts. The seal identifies the 42-file measurement snapshot, including its then-current documents; later report-only revisions are outside that seal.
+This separate eight-pair cohort compares a clean main build (A) with the final integrated source build on that same main (B), using normal published packages. Base: `6f754be6548903e545e6ff0ed43a34927fe3bfb9`; measurement-time snapshot seal: `78afd107a0f4bc1e0c4222918ca97b43dd441e0fdbe4e5553aab87cfc6d7b827`. This evidence is independent of the earlier YAML, resolver, AOT, runtime and GC/cache-sharing cohorts. The seal identifies the 42-file measurement snapshot, including its then-current documents; later report revisions and the managed-initialization test correction are outside that seal; production file bytes remain identical.
 
 Both arms use the fixed Node 26.7.0 binary, the same complete TypeScript SDK 0.1.32 build, and 31 complete private installed resources reconstructed locally (14 suites plus 17 standalone resources, 90 standard custom Skill files). The normally prepared full published trees contain 1430 files / 168,758,017 bytes for A and 1456 / 168,902,897 for B; both have the same complete normal 2151-byte package manifest. The embedded API imports the actual prepared trees and launches their CLI directly; it does not execute an installed npm/standalone bin wrapper. Default package-size/security gates pass, but complete npm installation and native-feature behavior are not qualified. Every row starts fresh daemon/ACP processes, HOME, workspace, runtime and temp state, and an absent per-row Node compile-cache directory. Parent flags are the original empty list; the actual child retains its original heap-8192/expose-GC flags. There is no parent-GC alignment, startup/request flush, resolver hook, installed AOT, preheat, runtime substitution or first-tool deferral.
 
@@ -150,11 +150,69 @@ All 18 runtime attempts succeeded without retry: 54 distinct new UUIDs, 36 actua
 
 The initial process observer permission failure during artifact setup is retained and launched no compiler; all four actual producers/qualifiers and their independent raw proofs are preserved. One metadata-audit copied-path assertion was corrected with the original failed audit retained; no runtime was retried or data resampled. This experimental local installed-cache profile does not establish a default source improvement below 500 ms and cannot be compared with an older cohort as a regression or as a chained percentage.
 
+## Same-candidate default versus NoLazy installed cache
+
+NoLazy is not adopted. In this separate eight-pair local experiment, the same final candidate app is used on both arms: A has standard V8 laziness with its installed AOT artifact; B adds `--no-lazy` and uses its separately generated installed artifact. Both share one physical resolver hook and manifest, fixed Node 26.7.0, SDK 0.1.32, the identical normal published app tree and the same 31 complete resources (14 suites, 17 standalone resources, 90 standard custom Skill files). It is not a clean-main/source comparison, and is not combined with any earlier cohort or its percentages. The source PR does not enable this flag or deliver these experimental artifacts.
+
+Runtime processes, HOME, workspace, activation and session state are fresh. Code cache is explicitly installed/nonempty on both sides. A parent receives only its own standard resolver import; B receives `--no-lazy` before that same import. Real children inherit those flags before the original heap-8192/expose-GC flags. Verified tags are default parent/child `8d7ad2ee`/`8eb1c7ec`, and NoLazy `d3e6e7c8`/`fadaf815`. No parent-GC alignment, startup/request flush, ACP/channel/session preheat, first-tool deferral or source change is introduced.
+
+The first full SDK clock includes capabilities GET and session POST. The daemon-spawn→SDK-complete clock also retains ordinary startup and hook setup/manifest parsing. The original timestamps and full SDK/request/session block are unchanged; only the necessary parent-spawn argument flag list differs. SDK-driver import, installation, resource seeding, clone copying and audits are outside both clocks and separately retained. All 16 timing rows run in AB/BA/AB/BA/AB/BA/AB/BA order. The two native-debug validations are extra and excluded from timing. OS filesystem and binary caches are not reset.
+
+| Clock (ms)                                    | Default A mean | Default A median | NoLazy B mean | NoLazy B median |
+| --------------------------------------------- | -------------: | ---------------: | ------------: | --------------: |
+| First full SDK call                           |        590.011 |          572.415 |       819.169 |         691.087 |
+| Daemon spawn → first SDK complete             |       1190.107 |         1045.857 |      1424.298 |        1267.586 |
+| Daemon spawn → observed product runtime-ready |        599.966 |          485.786 |       604.976 |         551.755 |
+| Daemon spawn → harness-ready                  |        599.998 |          485.819 |       605.006 |         551.785 |
+| Startup flush                                 |          0.000 |            0.000 |         0.000 |           0.000 |
+| Second full SDK call                          |         69.854 |           66.957 |        75.938 |          61.328 |
+| Third full SDK call                           |         54.051 |           52.416 |        53.069 |          50.745 |
+
+First SDK ranges are A 557.218–736.379 ms and B 571.445–1323.187 ms. Both have 0/8 first-SDK samples below 500 ms. NoLazy has slower first SDK in 8/8 pairs. Same-pair SDK B−A: mean 229.158 ms, median 59.059 ms. Total B−A: mean 234.191 ms, median 100.803 ms; B total is faster in pair 1 and slower in the other 7 pairs. The slow first pair and NoLazy tails in pairs 4 and 8 remain in all statistics. No GC, I/O or other bottleneck is assigned as their cause.
+
+| Pair | Position | Arm / variant | Full first SDK (ms) | Spawn → SDK complete (ms) |
+| ---- | -------- | ------------- | ------------------: | ------------------------: |
+| 1    | 1        | A / default   |          736.379395 |               2047.152344 |
+| 1    | 2        | B / nolazy    |          789.500488 |               1573.667480 |
+| 2    | 1        | B / nolazy    |          571.445068 |               1097.880127 |
+| 2    | 2        | A / default   |          557.218018 |               1065.613281 |
+| 3    | 1        | A / default   |          562.669189 |               1026.100830 |
+| 3    | 2        | B / nolazy    |          581.715820 |               1127.527344 |
+| 4    | 1        | B / nolazy    |         1314.981689 |               2065.064941 |
+| 4    | 2        | A / default   |          579.907959 |               1250.432617 |
+| 5    | 1        | A / default   |          560.332764 |               1101.961426 |
+| 5    | 2        | B / nolazy    |          625.328857 |               1173.558594 |
+| 6    | 1        | B / nolazy    |          590.347412 |               1116.304688 |
+| 6    | 2        | A / default   |          578.754395 |               1016.125244 |
+| 7    | 1        | A / default   |          576.958496 |                998.176025 |
+| 7    | 2        | B / nolazy    |          756.844482 |               1361.613037 |
+| 8    | 1        | B / nolazy    |         1323.187012 |               1878.766602 |
+| 8    | 2        | A / default   |          567.870605 |               1015.296875 |
+
+Installation and memory boundaries: both flag profiles generate all 787 eligible main-build ESM files without evaluating application bodies. The runtime validation subset is separately observed: 420 parent / 369 child sources for each variant. Each declared source has actual V8 acceptance, successful native disk read and a unique exact original-artifact-relative entry matching the per-row clone. There are zero rejections in the two validations; each actual hook is registered with real hits and unchanged before/after tag. These cover the whole three-session lifecycle, not first-await-only attribution, and do not assign hit counts to untraced timing rows.
+
+| Installed artifact / process diagnostic          |      Default |    NoLazy |
+| ------------------------------------------------ | -----------: | --------: |
+| Union files                                      |         1578 |      1578 |
+| Union bytes                                      |     40693688 | 175116088 |
+| Two-profile producer wall sum (ms)               |     2402.066 |  4121.357 |
+| Two-profile qualification wall sum (ms)          |     1220.122 |  1642.939 |
+| parent producer RSS after compiler flush (bytes) | not recorded | 518373376 |
+| child producer RSS after compiler flush (bytes)  | not recorded | 504217600 |
+
+NoLazy producer RSS is an installation-process observation only. Default producer RSS was not recorded, and runtime daemon/ACP memory was not measured; no runtime-memory delta or cause is inferred. The original producer/native-consumer diagnostics, their PIDs/resource-usage evidence, full union copy/seal costs, and all 18 fixture copy/seal costs are retained outside the runtime clocks. Reused default generation cost is historical, not zero. The initial artifacts are 40,693,688 versus 175,116,088 bytes, with the same 1578-file count. These local immutable artifacts depend on the exact physical URLs, runtime, flags, architecture and UID; they are not portable product defaults.
+
+All 18 runtime attempts succeeded with no retry: 54 distinct new UUIDs and 36 actual daemon/ACP PIDs independently gone, normal close ACK, clean 0/null exits, drained stdio and no fallback. Independent full post-verification passed for 211 immutable inputs, 12 full trees, 558 resource copies and 18 mutable final cache trees; initial clones also had 28,404 globally unique device/inode pairs with no template hardlinks. Mutable settings are checked separately: reconstructed initial bytes match, only the existing privacy migration plus `$version:4` is accepted, while trust and V2 activation bytes are unchanged.
+
+The independent native-only auditor initially used an older summary schema and failed before parsing raw data; the original error is retained. The corrected independent full audit passed, with no runtime retry or resampling. Raw slow tails remain. This n=8 local negative experiment does not establish an SLA, stable sub-500-ms behavior, or a bottleneck attribution. NoLazy is excluded from the source PR and not selected as the next runtime policy.
+
 ## Integrated validation and observed limits
 
 The final integrated source passes build, typecheck and bundle. Focused CLI tests pass **1,110/1,110** (937 ordinary and 173 daemon/serve checks); the final Core run passes **2,090/2,091** across 14 files. Its sole remaining extension network-policy assertion also fails when selected independently on exact clean main. Each baseline/candidate reproduction executes one failing case; the remaining 195/198 cases are skipped, not counted as passes. Initial real-HOME permission failures and an intermediate explicit-QWEN_HOME fixture mismatch are retained as validation setup attempts; source and assertions were not changed to hide them.
 
-Independent integration E2E passes **41 out-of-band checks plus 18 two-workspace lifecycle checks per side: 118 assertions total**. This is separate from the timing cohort. All 24 created UUIDs are new, HTTP200 and unattached; four daemon and six ACP PIDs disappear after normal close ACK, exit0/null signal and no fallback termination. Full published applications, fixed SDK/seed-Core, all 42 source files and the restored resource inventories match their integrity records.
+Subsequent Linux CI exposed an existing managed-host test's exact-arity assertion after the private initializer gained its optional parameter. The same selected case passed clean main and failed the initial candidate locally on Node 26.7.0; CI used Node 22.23.2. The test-only correction updates the spy signature and explicitly expects an undefined second argument, preserving skip-MCP and no-registry checks. All 60 cases in that file then pass locally; the separately selected case overlaps that total. No production bytes change in this correction.
+
+Independent integration E2E passes **41 out-of-band checks plus 18 two-workspace lifecycle checks per side: 118 assertions total**. This is separate from the timing cohort. All 24 created UUIDs are new, HTTP200 and unattached; four daemon and six ACP PIDs disappear after normal close ACK, exit0/null signal and no fallback termination. Full published applications, fixed SDK/seed-Core, the original 42-file measurement snapshot and restored resource inventories match their integrity records.
 
 Complete helper snapshots, existing-session menus after helper and new-session menus each match in 8/8 comparisons; lifecycle snapshots match in 11/11. Ordinary workspace envelopes match in 28/32, Skill rows in 30/32 and existing-session commands in 30/32. Each side emits eight SSE events with matching phase/type sequence; seven payloads match. The remaining completion order and natural new-response identity/time differences are retained in the full comparisons, with separately labeled correspondence checks.
 
@@ -576,7 +634,7 @@ That initial single-producer qualification had no consumer, RSS observation, rea
 
 The source PR does not implement managed installation or launcher enablement. Actual integration must generate source/runtime-bound caches only after the final installation path is established and must validate real consumption before advertising the optimized mode. Cache generation costs belong outside the session clock but must still be reported. A downstream Dockerfile pins Node22.23.4; that is checkout evidence, not a running-instance version. This local Node26.7/macOS/arm64 result does not establish that image's behavior or a deployed preproduction latency.
 
-The existing cache experiments retain exact Node/architecture/CPU/account/flag/source-URL limits and the narrow immutable-owned resolver contract. A build-metadata inventory is a possible delivery input, not a shipped helper or generic npm/loader guarantee. No-lazy compilation remains unmeasured on the final application; mechanism evidence alone does not justify a default flag.
+The existing cache experiments retain exact Node/architecture/CPU/account/flag/source-URL limits and the narrow immutable-owned resolver contract. A build-metadata inventory is a possible delivery input, not a shipped helper or generic npm/loader guarantee. The separate same-candidate NoLazy experiment reported above is negative: first-SDK median 572.415 to 691.087 ms, with every paired SDK slower and both sides 0/8 below 500 ms. The flag is not adopted; mechanism evidence and successful cache consumption alone do not establish a latency benefit.
 
 ## Reproduction and remaining acceptance
 
