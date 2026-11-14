@@ -791,6 +791,11 @@ export const userContentPushSnapshotKey = Symbol(
   'LlmChat.userContentPushSnapshot',
 );
 
+// Surviving parts belong to this send; shared push counts do not.
+export const userContentPushAcceptedKey = Symbol(
+  'LlmChat.userContentPushAccepted',
+);
+
 interface TryCompressOptions {
   /**
    * Explicit original token count for this attempt, with its provenance.
@@ -2750,6 +2755,7 @@ export class LlmChat {
     private history: Content[] = [],
     private readonly chatRecordingService?: ChatRecordingService,
     private readonly telemetryService?: UiTelemetryService,
+    private readonly reservedToolCallIds: ReadonlySet<string> = new Set(),
   ) {
     validateHistory(history);
     markCompressedHistory(history);
@@ -3540,6 +3546,11 @@ export class LlmChat {
     goalContext?: GoalTurnPermit,
     options?: LlmChatSendOptions,
   ): Promise<AsyncGenerator<StreamEvent>> {
+    if (Array.isArray(params.message)) {
+      (params.message as unknown as Record<PropertyKey, unknown>)[
+        userContentPushAcceptedKey
+      ] = undefined;
+    }
     // After a Managed Runtime call ended without a known outcome, the model
     // must not continue: it could repeat a call that already took effect.
     const managedSessionBlock = this.config.getManagedSessionBlock?.();
@@ -3642,6 +3653,7 @@ export class LlmChat {
       ? this.generationConfig
       : undefined;
     let currentUserContent: Content | undefined;
+    let submittedUserParts: Part[] = [];
     const callerParams = params;
     try {
       if (options?.preparedRequest) {
@@ -4234,6 +4246,7 @@ export class LlmChat {
         }
         // Add user content to history ONCE before any attempts. Later object
         // spreads preserve the identity marked before compression.
+        submittedUserParts = [...(userContent.parts ?? [])];
         this.history.push(userContent);
         // Interrupted-prompt replay can carry detached snapshot parts itself.
         for (const part of userContent.parts ?? []) {
@@ -4340,6 +4353,18 @@ export class LlmChat {
         this.generationConfig = previousGenerationConfig;
       streamDoneResolver!();
       throw error;
+    }
+
+    if (userContentAdded && Array.isArray(params.message)) {
+      // Repair can hoist a part into an earlier turn or drop a same-ID duplicate.
+      const residentParts = new Set(
+        this.history.flatMap((entry) =>
+          entry.role === 'user' ? (entry.parts ?? []) : [],
+        ),
+      );
+      (params.message as unknown as Record<PropertyKey, unknown>)[
+        userContentPushAcceptedKey
+      ] = submittedUserParts.filter((part) => residentParts.has(part));
     }
 
     // eslint-disable-next-line @typescript-eslint/no-this-alias
@@ -7220,6 +7245,8 @@ export class LlmChat {
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
     const usedToolCallIds = collectToolCallIdsFromHistory(this.history);
+    // Completed IDs remain reserved after their history is compacted or rewound.
+    for (const id of this.reservedToolCallIds) usedToolCallIds.add(id);
     const rawToolCallIdsInCurrentTurn = new Set<string>();
     const reservedToolCallIds = new Map<string, string>();
     let usageMetadata: GenerateContentResponseUsageMetadata | undefined;

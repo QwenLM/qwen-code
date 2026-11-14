@@ -5,6 +5,7 @@
  */
 import { beforeEach, expect, it, vi } from 'vitest';
 import type { CompletedToolCall, Config } from '@qwen-code/qwen-code-core';
+import { LlmClient } from '@qwen-code/qwen-code-core/core/client.js';
 import { observeInteractiveModTool } from './interactive-mod-tool-observer.js';
 const mocks = vi.hoisted(() => ({
   managed: vi.fn(),
@@ -50,6 +51,11 @@ it.each(['error', 'cancelled'] as const)(
     await observeInteractiveModTool(config, call, true);
     await observeInteractiveModTool(config, call, true);
     expect(record).toHaveBeenCalledTimes(2);
+    expect(record).toHaveBeenCalledWith(call.request.name, call.request.args, {
+      ...call.response,
+      status,
+      modelFacing: false,
+    });
     expect(mocks.managed).toHaveBeenCalledTimes(2);
     expect(mocks.managed.mock.calls[0][1][0].status).toBe('success');
     expect(mocks.refresh).toHaveBeenCalledTimes(2);
@@ -87,3 +93,58 @@ it('does not turn validation rejection or client calls into writes', async () =>
   await observeInteractiveModTool(config, call, true);
   expect(record).toHaveBeenCalledOnce();
 });
+
+it.each([false, true])(
+  'accounts only the final model-facing Mod result (skill write: %s)',
+  async (skillWrite) => {
+    const config = {
+      getLlmClient: () => client,
+      getProjectRoot: () => '/workspace',
+      getToolRegistry: () => ({ getTool: () => undefined }),
+    } as unknown as Config;
+    const client = new LlmClient(config);
+    const call: CompletedToolCall = {
+      status: 'error',
+      request: {
+        callId: 'mod-call',
+        name: 'write_file',
+        args: {
+          file_path: skillWrite
+            ? '/workspace/.qwen/skills/example/SKILL.md'
+            : '/workspace/example.txt',
+        },
+        isClientInitiated: false,
+        prompt_id: 'turn',
+      },
+      response: {
+        callId: 'mod-call',
+        responseParts: [],
+        resultDisplay: 'native failure',
+        error: new Error('native failure'),
+        errorType: undefined,
+        executionStatus: 'error',
+      },
+    };
+    await observeInteractiveModTool(config, call, false);
+    await observeInteractiveModTool(config, call, false);
+    expect(client['pendingExperienceOutcomes'].size).toBe(0);
+    expect(client['recentCompletedToolNames']).toEqual([]);
+    expect(client['toolCallCount']).toBe(0);
+    expect(client['skillsModifiedInSession']).toBe(skillWrite);
+    expect([...client['recordedExperienceCallIds']]).toEqual(
+      skillWrite ? ['mod-call'] : [],
+    );
+    client.recordCompletedToolCall(call.request.name, call.request.args, {
+      ...call.response,
+      error: undefined,
+      executionStatus: 'success',
+      status: 'success',
+    });
+    const parts = [{ functionResponse: { id: 'mod-call', response: {} } }];
+    client.acceptCompletedToolResults(parts);
+    client.acceptCompletedToolResults(parts);
+    expect(client['toolCallCount']).toBe(skillWrite ? 0 : 1);
+    expect(client['experienceSignals'].retryArc).toBe(false);
+    expect(client['pendingExperienceOutcomes'].size).toBe(0);
+  },
+);

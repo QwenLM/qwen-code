@@ -5,7 +5,8 @@
  */
 
 /**
- * E2E Integration Tests for AutoSkill mechanism (per skill-nudge.md L258-320)
+ * E2E Integration Tests for AutoSkill mechanism
+ * (per docs/design/auto-skill-experience-gates.md).
  *
  * Tests the complete workflow from toolCallCount tracking to skill file writing.
  * These tests validate the behavior described in the design document's E2E checklist.
@@ -64,6 +65,11 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount: 5,
+        experienceSignals: {
+          retryArc: false,
+          userSteer: false,
+          hasSubstantiveWork: true,
+        },
         skillsModified: false, // Below default threshold of 20
         threshold: AUTO_SKILL_THRESHOLD,
         enabled: true,
@@ -81,6 +87,11 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD - 1,
+        experienceSignals: {
+          retryArc: false,
+          userSteer: false,
+          hasSubstantiveWork: true,
+        },
         skillsModified: false,
         threshold: AUTO_SKILL_THRESHOLD,
         enabled: true,
@@ -101,6 +112,11 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD,
+        experienceSignals: {
+          retryArc: false,
+          userSteer: false,
+          hasSubstantiveWork: true,
+        },
         skillsModified: false,
         threshold: AUTO_SKILL_THRESHOLD,
         enabled: true,
@@ -118,6 +134,11 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD + 10,
+        experienceSignals: {
+          retryArc: false,
+          userSteer: false,
+          hasSubstantiveWork: true,
+        },
         skillsModified: false,
         threshold: AUTO_SKILL_THRESHOLD,
         enabled: true,
@@ -135,6 +156,11 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount: 30,
+        experienceSignals: {
+          retryArc: false,
+          userSteer: false,
+          hasSubstantiveWork: true,
+        },
         skillsModified: false,
         threshold: customThreshold,
         enabled: true,
@@ -155,6 +181,11 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount: 30, // Well above threshold
+        experienceSignals: {
+          retryArc: false,
+          userSteer: false,
+          hasSubstantiveWork: true,
+        },
         threshold: AUTO_SKILL_THRESHOLD,
         skillsModified: true,
         enabled: true,
@@ -171,6 +202,11 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount: 100,
+        experienceSignals: {
+          retryArc: false,
+          userSteer: false,
+          hasSubstantiveWork: true,
+        },
         skillsModified: true,
         enabled: true,
         config: mockConfig,
@@ -190,6 +226,11 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD,
+        experienceSignals: {
+          retryArc: false,
+          userSteer: false,
+          hasSubstantiveWork: true,
+        },
         skillsModified: false,
         enabled: false,
         config: mockConfig,
@@ -205,6 +246,11 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD,
+        experienceSignals: {
+          retryArc: false,
+          userSteer: false,
+          hasSubstantiveWork: true,
+        },
         skillsModified: false,
         config: undefined,
       });
@@ -219,6 +265,11 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD,
+        experienceSignals: {
+          retryArc: false,
+          userSteer: false,
+          hasSubstantiveWork: true,
+        },
         skillsModified: false,
         enabled: true,
         config: mockConfig,
@@ -238,6 +289,11 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD,
+        experienceSignals: {
+          retryArc: false,
+          userSteer: false,
+          hasSubstantiveWork: true,
+        },
         skillsModified: false,
         enabled: true,
         config: mockConfig,
@@ -262,6 +318,11 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'session-1',
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD,
+        experienceSignals: {
+          retryArc: false,
+          userSteer: false,
+          hasSubstantiveWork: true,
+        },
         skillsModified: false,
         enabled: true,
         config: mockConfig,
@@ -274,6 +335,11 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'session-2',
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD,
+        experienceSignals: {
+          retryArc: false,
+          userSteer: false,
+          hasSubstantiveWork: true,
+        },
         skillsModified: false,
         enabled: true,
         config: mockConfig,
@@ -295,6 +361,11 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'session-3',
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD,
+        experienceSignals: {
+          retryArc: false,
+          userSteer: false,
+          hasSubstantiveWork: true,
+        },
         skillsModified: false,
         enabled: true,
         config: mockConfig,
@@ -322,6 +393,11 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount,
+        experienceSignals: {
+          retryArc: false,
+          userSteer: false,
+          hasSubstantiveWork: true,
+        },
         threshold,
         skillsModified: false,
         enabled: true,
@@ -348,6 +424,11 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD,
+        experienceSignals: {
+          retryArc: false,
+          userSteer: false,
+          hasSubstantiveWork: true,
+        },
         skillsModified: false,
         enabled: true,
         config: mockConfig,
@@ -372,6 +453,11 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD - 1,
+        experienceSignals: {
+          retryArc: false,
+          userSteer: false,
+          hasSubstantiveWork: true,
+        },
         skillsModified: false,
         threshold: AUTO_SKILL_THRESHOLD,
         enabled: true,
@@ -387,6 +473,11 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD,
+        experienceSignals: {
+          retryArc: false,
+          userSteer: false,
+          hasSubstantiveWork: true,
+        },
         skillsModified: false,
         threshold: AUTO_SKILL_THRESHOLD,
         enabled: true,
@@ -402,6 +493,11 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD + 1,
+        experienceSignals: {
+          retryArc: false,
+          userSteer: false,
+          hasSubstantiveWork: true,
+        },
         skillsModified: false,
         threshold: AUTO_SKILL_THRESHOLD,
         enabled: true,
@@ -421,6 +517,11 @@ describe('Skill Nudge E2E Integration Tests', () => {
         sessionId: 'test-session-1',
         history: sampleHistory,
         toolCallCount: AUTO_SKILL_THRESHOLD,
+        experienceSignals: {
+          retryArc: false,
+          userSteer: false,
+          hasSubstantiveWork: true,
+        },
         skillsModified: false,
         enabled: true,
         config: mockConfig,

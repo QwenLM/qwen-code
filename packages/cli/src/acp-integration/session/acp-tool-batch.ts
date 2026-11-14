@@ -598,7 +598,10 @@ export async function runAcpToolBatch(
             if (call.response.executionStatus !== 'not_started') {
               config
                 .getLlmClient()
-                .recordCompletedToolCall(call.request.name, call.request.args);
+                .recordCompletedToolCall(call.request.name, call.request.args, {
+                  ...call.response,
+                  status: call.status,
+                });
             }
           }
         }

@@ -671,6 +671,7 @@ export async function runToolBatch(
       client?.recordCompletedToolCall(
         call.request.name,
         call.request.args as Record<string, unknown>,
+        { ...call.response, status: call.status },
       );
     }
     deliver(executedResult(request, call));
