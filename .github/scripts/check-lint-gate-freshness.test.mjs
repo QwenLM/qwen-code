@@ -868,11 +868,12 @@ test('a base ref containing a hash is URI-encoded in the tree path', async () =>
   // below; `fetchGateFilePair`'s takes hex SHAs.) The tree assertion above says
   // nothing about the other two, and the fixture decodes recorded paths and
   // answers the commits lookup whatever `sha` it carries, so this sweep is what
-  // covers them. A raw '#' at the commits site does not even fail: measured
-  // live, `&sha=main#frag` and `&sha=main` both answer 200 with the same commit
-  // (1888aaf49d52), while `&sha=main%23frag` answers 404 — the fragment drops
-  // the sha parameter, so the verdict is computed against the DEFAULT branch
-  // instead of the base, with no error anywhere.
+  // covers them. A raw '#' at the commits site cuts the ref VALUE at the '#',
+  // so this case's own `fix#1` is looked up as `fix`: measured live, that 404s
+  // (no such branch) and reaches main()'s fail-open, while `&sha=x6#frag`
+  // answers 200 with 28415ddff367 — the same commit as `&sha=x6`, a branch that
+  // is NOT the default one — and `&sha=x6%23frag` answers 404. Either a silent
+  // read of another branch or a false green, never a clean refusal.
   assert.deepEqual(
     calls.filter((c) => c.includes('fix#1')),
     [],
@@ -1065,23 +1066,39 @@ test('the fail-closed catch leaves a diagnostic', () => {
   );
 });
 
+// Both wiring pins below read the same call, so the anchors are checked here
+// once: an unchecked indexOf turns a hoisted options literal into an empty
+// slice and a false red, and a second call earlier in main() would let the
+// real one encode its ref unseen.
+function mainWiring() {
+  const source = readFileSync(
+    join(repoRoot, '.github/scripts/check-lint-gate-freshness.mjs'),
+    'utf8',
+  );
+  const at = source.indexOf('async function main()');
+  assert.ok(at > 0, 'main() not found');
+  const main = source.slice(at);
+  const anchor = 'await findStaleGateFiles({';
+  assert.equal(
+    main.split(anchor).length - 1,
+    1,
+    'main() must make exactly one verdict call for the pins to anchor to it',
+  );
+  const call = main.slice(
+    main.indexOf(anchor),
+    main.indexOf('});', main.indexOf(anchor)),
+  );
+  return { main, call };
+}
+
 test('main() passes BASE_REF through verbatim', () => {
   // Every other case injects baseRef directly, so nothing watches this wiring.
   // For a ref carrying a hazardous character, encoding it here double-encodes
   // at the request sites: the lookup 404s, the throw reaches main()'s fail-open,
   // and the whole check reports fresh.
   // Measured: wrapping it in encodeURIComponent leaves every other case green.
-  const source = readFileSync(
-    join(repoRoot, '.github/scripts/check-lint-gate-freshness.mjs'),
-    'utf8',
-  );
-  const main = source.slice(source.indexOf('async function main()'));
-  const call = main.slice(
-    main.indexOf('await findStaleGateFiles({'),
-    main.indexOf('});', main.indexOf('await findStaleGateFiles({')),
-  );
   assert.match(
-    call,
+    mainWiring().call,
     /^\s*baseRef: BASE_REF,$/m,
     'main() must hand BASE_REF to the verdict call unencoded',
   );
@@ -1106,19 +1123,11 @@ test('main() wires fetchText into the verdict call', () => {
   // Source-read pin, same style as the ci.yml wiring case above: deleting the
   // wiring leaves fetchText undefined, the narrowing throws into the
   // fail-closed catch, and every injected-fixture test still passes.
-  const source = readFileSync(
-    join(repoRoot, '.github/scripts/check-lint-gate-freshness.mjs'),
-    'utf8',
-  );
-  const main = source.slice(source.indexOf('async function main()'));
+  const { main, call } = mainWiring();
   assert.match(
     main,
     /const fetchText = \(path\) => curlText\(path, GITHUB_TOKEN\);/,
     'main() must build fetchText from curlText',
-  );
-  const call = main.slice(
-    main.indexOf('await findStaleGateFiles({'),
-    main.indexOf('});', main.indexOf('await findStaleGateFiles({')),
   );
   assert.match(
     call,
@@ -1596,7 +1605,7 @@ test('the ci.yml narrowing encodes a hash-bearing base ref too', async () => {
   // narrowsToUnchangedLintSlice reads the base side at baseRef, so its `?ref=`
   // takes a branch name just like the prettier path does. Before this case
   // nothing drove that path with a ref needing encoding, so deleting its
-  // encoder left every case green. The all-hazards ci.yml case below now covers
+  // encoder left every case green. The all-hazards ci.yml case above now covers
   // the whole character family here; this one keeps the '#' shape explicit.
   const calls = [];
   const stale = await findStaleGateFiles({
