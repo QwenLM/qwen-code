@@ -3655,6 +3655,61 @@ class QwenHostedHarnessConnectorTest {
         verify(client, never()).close();
     }
 
+    // #17260: a public-child Session left over from the shell topology
+    // cannot be opened by a Harness without public child agents. Both the
+    // cancellation takeover and the plain recovery load surface the typed
+    // structural decline — never the generic IllegalStateException the
+    // coordinator's retry lane used to re-drive once a minute forever —
+    // and neither sends a load the daemon can only refuse.
+    @Test
+    void unsupportedPublicChildRecoveryDeclinesTerminallyWithoutLoading() {
+        var session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code",
+                null, null, "ACTIVE", BOOT_ID, "epoch-old", 4, 4, 0, 1, 1,
+                null, 1, new ContextBinding("tenant-a", "ws-a", 1, "storage-a",
+                        ".", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1),
+                "default", "hosted-workspace-shell/1", null, 1);
+        var sessions = sessions();
+        when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
+        var actions = mock(JdbcManagedActionStore.class);
+        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
+        var execution = mock(JdbcWorkspaceExecutionStore.class);
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities =
+                mock(HostedHarnessCapabilities.class);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        // The external-files topology: no public child agents, no Shell
+        // lifecycle v2, but targeted cancellation is present.
+        when(capabilities.getFeatures())
+                .thenReturn(List.of("targeted-cancel/1"));
+        when(capabilities.getLifecycleV2Profiles()).thenReturn(List.of());
+        var settings = properties();
+        settings.getHarness().setWorkspaceFilesEnabled(true);
+        var connector = new QwenHostedHarnessConnector(settings, sessions,
+                execution, actions);
+        ReflectionTestUtils.setField(connector, "client", client);
+
+        assertThatThrownBy(() -> connector.recoverManagedCancellation(
+                "tenant-a", SESSION_ID, SUBMIT_PROMPT_ID))
+                .isInstanceOfSatisfying(
+                        HostedHarnessRecoveryDeclinedException.class,
+                        error -> assertThat(error.getReason()).isEqualTo(
+                                HostedHarnessRecoveryDeclinedException
+                                        .REASON_PUBLIC_CHILD_UNSUPPORTED));
+        assertThatThrownBy(() -> connector.recoverManagedRuntime(
+                "tenant-a", SESSION_ID, false))
+                .isInstanceOfSatisfying(
+                        HostedHarnessRecoveryDeclinedException.class,
+                        error -> assertThat(error.getReason()).isEqualTo(
+                                HostedHarnessRecoveryDeclinedException
+                                        .REASON_PUBLIC_CHILD_UNSUPPORTED));
+        assertThatThrownBy(() -> connector.createOrLoad(
+                "tenant-a", SESSION_ID, true))
+                .isInstanceOf(HostedHarnessRecoveryDeclinedException.class);
+        verify(client, never()).loadSession(any());
+        verify(client, never()).close();
+    }
+
     @Test
     void otherTakeoverConflictsStayOpaqueToErrorCodes() {
         HostedHarnessClient client = mock(HostedHarnessClient.class);

@@ -306,6 +306,62 @@ class RecoverySettlementTest {
                 anyString(), anyString(), anyString(), anyString());
     }
 
+    // #17260: a public-child CANCELLING Turn left over from the shell
+    // topology meets a Harness that can no longer open the Session at all.
+    // The typed structural decline is terminal on the first drive: the
+    // Turn settles FAILED under managed_runtime_recovery_blocked (whose
+    // command settlement parks unconfirmed inputs and cancels), never the
+    // budget-exempt retry lane, never the unproven-execution park, and no
+    // settlement route re-opens the same unloadable Session. The terminal
+    // row leaves findDispatchable/findRuntimeRecoveryParked, so the sweep
+    // and every later restart stop re-offering it.
+    @Test
+    void anUnsupportedPublicChildCancellationSettlesTerminallyOnTheFirstDrive() {
+        Fixture fixture = new Fixture(0, "CANCELLING", false);
+        fixture.failRecovery(new HostedHarnessRecoveryDeclinedException(
+                HostedHarnessRecoveryDeclinedException.REASON_PUBLIC_CHILD_UNSUPPORTED));
+
+        fixture.dispatch();
+
+        verify(fixture.store).failTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("managed_runtime_recovery_blocked"),
+                argThat(message -> message.contains("public child topology")));
+        verify(fixture.harness).discardManagedRecovery("tenant", "session");
+        verify(fixture.store, never()).scheduleTurnRetry(anyString(), anyString(),
+                anyString(), anyString(), anyLong(), anyBoolean());
+        verify(fixture.store, never()).parkTurnForRuntimeRecovery(anyString(),
+                anyString(), anyString(), anyString(), anyString(), anyLong());
+        verify(fixture.store, never()).markTurnFailureRecovery(anyString(),
+                anyString(), anyString(), anyString(), anyString());
+        verify(fixture.harness, never()).recoverManagedFailureCancellation(anyString(),
+                anyString(), anyString(), anyString(), anyString());
+        verify(fixture.harness, never()).cancelOriginalTurn(anyString(), anyString(), anyString());
+        verify(fixture.harness, never()).cancelManagedRuntime(anyString(), anyString(),
+                anyString(), anyString(), anyString());
+        verify(fixture.store, never()).releaseTurnLease(anyString(), anyString(),
+                anyString(), anyString());
+    }
+
+    // The same structural decline on a non-cancelling recovery drive: one
+    // terminal write, no park for the recheck sweep to re-drive.
+    @Test
+    void anUnsupportedPublicChildRecoveryDriveSettlesTerminallyWithoutParking() {
+        Fixture fixture = new Fixture(0, "RUNNING", false);
+        fixture.failRecovery(new HostedHarnessRecoveryDeclinedException(
+                HostedHarnessRecoveryDeclinedException.REASON_PUBLIC_CHILD_UNSUPPORTED));
+
+        fixture.dispatch();
+
+        verify(fixture.store).failTurn(eq("tenant"), eq("session"), eq("turn"),
+                anyString(), eq("managed_runtime_recovery_blocked"), anyString());
+        verify(fixture.store, never()).parkTurnForRuntimeRecovery(anyString(),
+                anyString(), anyString(), anyString(), anyString(), anyLong());
+        verify(fixture.store, never()).scheduleTurnRetry(anyString(), anyString(),
+                anyString(), anyString(), anyLong(), anyBoolean());
+        verify(fixture.harness, never()).recoverManagedFailureCancellation(anyString(),
+                anyString(), anyString(), anyString(), anyString());
+    }
+
     private static RecoveryStatus ready() {
         return new RecoveryStatus("ready", null, "original-prompt", true, true, true);
     }

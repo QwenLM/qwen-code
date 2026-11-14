@@ -205,6 +205,16 @@ load 会把同样的 journal 状态原地停靠）、`batch_not_durable`（批�
 按普通 attach 作答：写了 turn_settled 的 Turn 已完成，绝不能被盖成
 终态失败——普通 attach 被接纳后，daemon 自己的投影会补写终态记录）。
 
+第八种 reason `public_child_recovery_unsupported`（#17260）指向
+Session 自身的耐久形态在这个 Harness 上根本无法打开：在 shell 拓扑下
+持久化的 public-child Session 如今由不具备 public child agents 的
+Harness 服务，或保存的审批续跑档案的 public-child profile 与当前拓扑
+不再匹配。与 journal 状态类 decline 不同，这个 Harness 上没有任何结算
+路径能偿付它，因此 connector 在本地直接抛出类型化 decline，coordinator
+在首次 drive 即放弃恢复——取消也包括在内——不做 reconcile/park 绕行，
+直接把 Turn 以 `managed_runtime_recovery_blocked` 结算为 FAILED，
+使其永久离开两条恢复扫描。
+
 `checkpoint_blocked` 只对耐久判定触发（`opaque_state`、
 `invalid_state`、`identity_mismatch`）。被 authorization 层抹平成
 `missing_state` / `missing_checkpoint` 的瞬时 Managed Session Store

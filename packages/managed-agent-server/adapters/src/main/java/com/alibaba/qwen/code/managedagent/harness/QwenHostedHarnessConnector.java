@@ -490,7 +490,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         SessionRecord session = sessions.requireSession(tenantId, sessionId);
         requireShellApproval(session);
         if (session.publicChildAgentsVersion() == 1 && !supportsPublicChildAgents()) {
-            throw new IllegalStateException("Hosted Harness public child recovery is unsupported");
+            throw publicChildRecoveryUnsupported();
         }
         if (session.workspace() != null) {
             if (!isWorkspaceFilesAvailable()) {
@@ -2211,7 +2211,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             return null;
         }
         if (!supportsPublicChildAgents()) {
-            throw new IllegalStateException("Hosted Harness public child recovery is unsupported");
+            throw publicChildRecoveryUnsupported();
         }
         var lineage = sessions.findChildLineage(session.tenantId(), session.sessionId());
         if (lineage == null) {
@@ -2230,6 +2230,16 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                     "providerPin", origin.required("providerPin").textValue()));
         }
         return result;
+    }
+
+    // #17260: a Session persisted under the public-child (shell) topology
+    // cannot be opened by a Harness without public child agents. That is a
+    // property of the Session's durable shape, not a transient outage, so
+    // the typed decline ends the recovery instead of the generic
+    // IllegalStateException feeding the coordinator's retry lane forever.
+    private static HostedHarnessRecoveryDeclinedException publicChildRecoveryUnsupported() {
+        return new HostedHarnessRecoveryDeclinedException(
+                HostedHarnessRecoveryDeclinedException.REASON_PUBLIC_CHILD_UNSUPPORTED);
     }
 
     private Map<String, Object> publicChildExtensionAgent(SessionRecord session) {

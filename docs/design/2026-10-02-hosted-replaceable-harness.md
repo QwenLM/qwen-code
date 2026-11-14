@@ -236,6 +236,18 @@ because a Turn written turn_settled completed and must never be stamped
 a terminal failure — the daemon's own projection writes the terminal
 record once the plain attach is admitted).
 
+An eighth reason, `public_child_recovery_unsupported` (#17260), names a
+Session whose own durable shape the Harness cannot open at all: a
+public-child Session persisted under the shell topology now served by a
+Harness without public child agents, or a saved approval continuation
+whose public-child profile no longer matches the active topology.
+Unlike the journal-state declines no settlement route can pay on this
+Harness, so the connector raises the typed decline for it locally and
+the coordinator abandons the recovery on the first drive — cancellation
+included — settling the Turn FAILED as `managed_runtime_recovery_blocked`
+without the reconcile/park detour, which removes it from both recovery
+sweeps permanently.
+
 `checkpoint_blocked` fires only on durable verdicts (`opaque_state`,
 `invalid_state`, `identity_mismatch`). A transient Managed Session Store
 failure erased into `missing_state` / `missing_checkpoint` by the
