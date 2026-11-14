@@ -123,7 +123,7 @@ An indeterminate completion is an outcome boundary, not a session-reuse boundary
 
 `HostedHarnessClient` is the Java control-plane transport for `qwen serve --profile hosted-harness`. Construction performs capability negotiation, verifies the deployment capability digest, and pins the process `bootId`. Every Session request then carries protocol and generation fencing automatically. This API keeps model-loop events raw; product services remain responsible for public Session, Turn, Event, tenant, and workspace authorization state.
 
-Removing or replacing a registered session attachment cancels its heartbeat future, including when removal races with the future's initial publication. A session deletion that completes before the attachment is registered is outside this guarantee.
+Removing or replacing an observed session attachment cancels its heartbeat future, including when removal races with the future's initial publication. Delete and detach requests snapshot the attachment before dispatch and retire only that observed attachment. An attachment registered after that snapshot remains active even if registration finishes before the request completes; it retires on a definitive `hosted_session_not_found` heartbeat response or when the client closes.
 
 ```java
 Map<String, Object> text = Map.of("type", "text", "text", "hello");

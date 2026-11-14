@@ -1878,11 +1878,7 @@ class HostedHarnessClientTest {
         createSessionRoute();
         server.createContext("/session/" + SESSION_ID, exchange -> {
             assertEquals("DELETE", exchange.getRequestMethod());
-            assertPrivateHeaders(exchange, false);
-            exchange.getResponseHeaders().set(HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
-            exchange.getResponseHeaders().set("Connection", "close");
-            exchange.sendResponseHeaders(204, -1);
-            exchange.close();
+            sendSessionNoContent(exchange, false);
         });
         PublishingHeartbeatScheduler scheduler = new PublishingHeartbeatScheduler(deleteBeforePublication);
         ExecutorService caller = Executors.newSingleThreadExecutor();
@@ -1927,11 +1923,7 @@ class HostedHarnessClientTest {
         createSessionRoute();
         server.createContext("/session/" + SESSION_ID, exchange -> {
             assertEquals("DELETE", exchange.getRequestMethod());
-            assertPrivateHeaders(exchange, false);
-            exchange.getResponseHeaders().set(HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
-            exchange.getResponseHeaders().set("Connection", "close");
-            exchange.sendResponseHeaders(204, -1);
-            exchange.close();
+            sendSessionNoContent(exchange, false);
         });
         try (HostedHarnessClient client = HostedHarnessClient.builder()
                 .baseUri(baseUri)
@@ -10016,7 +10008,12 @@ class HostedHarnessClientTest {
      */
     private static void sendSessionNoContent(HttpExchange exchange)
             throws IOException {
-        assertPrivateHeaders(exchange);
+        sendSessionNoContent(exchange, true);
+    }
+
+    private static void sendSessionNoContent(HttpExchange exchange,
+            boolean requireClientId) throws IOException {
+        assertPrivateHeaders(exchange, requireClientId);
         exchange.getResponseHeaders().set(
                 HostedHarnessClient.BOOT_ID_HEADER, BOOT_ID);
         exchange.getResponseHeaders().set("Connection", "close");
