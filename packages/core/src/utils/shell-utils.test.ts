@@ -1442,6 +1442,18 @@ describe('buildShellExecWarnings', () => {
 });
 
 describe('splitCommands', () => {
+  it.each([
+    'echo $(( (1) | 2 ))',
+    'echo $(( ((1) | 2) & 3 ))',
+    'echo "$(echo $(( (1) | 2 )))"',
+  ])('keeps arithmetic parentheses inside one segment: %s', (expression) => {
+    expect(splitCommands(`${expression} | cat; git status`)).toEqual([
+      expression,
+      'cat',
+      'git status',
+    ]);
+  });
+
   // The segments this returns decide which sub-commands the shell tool asks
   // about and which one it reads for git attribution, so a command that goes
   // missing here goes missing from those too.

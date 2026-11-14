@@ -305,7 +305,11 @@ export function splitCommands(command: string): string[] {
   // Quote state of each enclosing level, saved on `$(` and restored on the
   // matching `)`, so a substitution body's quotes cannot leak outwards and the
   // surrounding quotes cannot mask the body's closing paren.
-  const quoteStack: Array<{ single: boolean; double: boolean }> = [];
+  const quoteStack: Array<{
+    single: boolean;
+    double: boolean;
+    arithmeticDepth: number;
+  }> = [];
   let i = 0;
 
   const previousNonWhitespaceChar = (index: number): string | undefined => {
@@ -350,13 +354,26 @@ export function splitCommands(command: string): string[] {
       // save the enclosing quote state and start the body unquoted. `"$(...)"`
       // is the common case: the double quote belongs to the outer command and
       // must not make the body's `)` look quoted.
-      quoteStack.push({ single: inSingleQuotes, double: inDoubleQuotes });
+      const arithmetic = command[i + 2] === '(';
+      quoteStack.push({
+        single: inSingleQuotes,
+        double: inDoubleQuotes,
+        arithmeticDepth: arithmetic ? 2 : 0,
+      });
       inSingleQuotes = false;
       inDoubleQuotes = false;
       substitutionDepth++;
-      currentCommand += '$(';
-      i += 2;
+      currentCommand += arithmetic ? '$((' : '$(';
+      i += arithmetic ? 3 : 2;
       continue;
+    } else if (
+      !inBackticks &&
+      !inSingleQuotes &&
+      !inDoubleQuotes &&
+      char === '(' &&
+      (quoteStack.at(-1)?.arithmeticDepth ?? 0) > 0
+    ) {
+      quoteStack.at(-1)!.arithmeticDepth++;
     } else if (
       !inBackticks &&
       substitutionDepth > 0 &&
@@ -369,10 +386,15 @@ export function splitCommands(command: string): string[] {
       // to flip the parser into "in quote" state, which then swallowed every
       // separator to the end of the line -- so `echo $(echo ')') ; rm -rf x`
       // came back as one segment with `rm` nowhere in it.
-      const enclosing = quoteStack.pop();
-      inSingleQuotes = enclosing?.single ?? false;
-      inDoubleQuotes = enclosing?.double ?? false;
-      substitutionDepth--;
+      const level = quoteStack.at(-1);
+      if (level !== undefined && level.arithmeticDepth > 1) {
+        level.arithmeticDepth--;
+      } else {
+        const enclosing = quoteStack.pop();
+        inSingleQuotes = enclosing?.single ?? false;
+        inDoubleQuotes = enclosing?.double ?? false;
+        substitutionDepth--;
+      }
     } else if (!inBackticks && char === "'" && !inDoubleQuotes) {
       // Tracked at every depth, not just the top level: without this the
       // quotes inside a substitution body are invisible and the `)` guard
@@ -400,7 +422,8 @@ export function splitCommands(command: string): string[] {
         currentCommand = '';
       } else if (char === '&') {
         const prevChar = previousNonWhitespaceChar(i);
-        if (prevChar === '>' || prevChar === '<') {
+        if (prevChar === '>' || prevChar === '<' || nextChar === '>') {
+          // `>&2` / `<&fd` and `&>` / `&>>` are redirects, not separators.
           currentCommand += char;
         } else {
           commands.push(currentCommand.trim());

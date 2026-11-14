@@ -16,6 +16,10 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { ShellType } from '@qwen-code/qwen-code-core';
 import {
+  decodeAnsiCBytes,
+  decodeAnsiCEscape,
+} from '@qwen-code/qwen-code-core/utils/shell-utils.js';
+import {
   EXTERNAL_TOOL_GUARD_MAX_DENIAL_REASON_CHARS,
   SHELL_EXECUTING_TOOL_NAMES as SHELL_EXECUTING_TOOLS,
 } from '@qwen-code/acp-bridge/externalToolGuard';
@@ -288,6 +292,8 @@ const DYNAMIC_RELOCATION_DENIAL =
   'Daemon shell guard denied a mutating Git command with a dynamic repository location.';
 const UNPARSEABLE_COMMAND_DENIAL =
   'Daemon shell guard denied a shell command that could not be parsed before execution.';
+const EXPANDING_HEREDOC_DENIAL =
+  "Daemon shell guard denied a shell command whose unquoted heredoc body can run commands during read-time expansion; quote the delimiter (<<'EOF') to keep the body literal.";
 const CMD_REWRITE_SYNTAX_DENIAL =
   'Daemon shell guard denied a shell command containing cmd.exe rewrite syntax it cannot evaluate before execution.';
 const WINDOWS_UNMODELLED_SYNTAX_DENIAL =
@@ -348,6 +354,10 @@ interface PrefixState {
   // travels as a `BASH_FUNC_foo%%` entry, so unsetting it strips the function
   // from the child even though the environment is otherwise intact.
   unsetEnvKeys?: Set<string>;
+  // `env BASHOPTS=lastpipe …` arms lastpipe for the child shell: the final
+  // pipeline stage runs in the current shell, so a `cd` behind a pipe outlives
+  // it and the subshell scoping this guard relies on no longer holds.
+  armsLastpipe?: boolean;
 }
 
 // Bash exports a function `foo` as a `BASH_FUNC_foo%%` (4.3+) or
@@ -895,6 +905,17 @@ function recordEnvAssignment(token: GuardToken, state: PrefixState): void {
     state.unresolved = true;
     return;
   }
+  // BASHOPTS/SHELLOPTS seed the child shell's option set. `lastpipe` moves
+  // the final pipeline stage into the current shell, breaking the subshell
+  // scoping the pipeline analysis relies on; a dynamic value could carry it
+  // unreadably, so both shapes fail closed downstream.
+  if (key === 'BASHOPTS' || key === 'SHELLOPTS') {
+    const value = token.text.slice(token.text.indexOf('=') + 1);
+    if (token.dynamic || value.split(':').includes('lastpipe')) {
+      state.armsLastpipe = true;
+    }
+    return;
+  }
   if (!GIT_DIR_ENV_KEYS.has(key) && !GIT_WORK_TREE_ENV_KEYS.has(key)) return;
   const value = token.text.slice(token.text.indexOf('=') + 1);
   if (
@@ -1131,7 +1152,7 @@ function consumeTimeoutWrapper(run: GuardToken[], start: number): number {
 
 type ShellWrapperScan =
   | { kind: 'none' }
-  | { kind: 'static'; payload: string }
+  | { kind: 'static'; payload: string; armsLastpipe?: boolean }
   | { kind: 'dynamic' };
 
 // The next real argv entry: a redirection between the flag and its payload
@@ -1145,6 +1166,26 @@ function nextArgvIndex(run: GuardToken[], from: number): number {
     index++;
   }
   return index;
+}
+
+// `-O lastpipe` / `-o lastpipe` on the wrapper's argv arms lastpipe for the
+// payload shell; a dynamic option value could carry it unreadably.
+function shellArgvArmsLastpipe(run: GuardToken[], start: number): boolean {
+  for (let index = start + 1; index < run.length; index++) {
+    const token = run[index]!;
+    if (token.text === '-c') break;
+    if (token.text === '-O' || token.text === '-o') {
+      const valueIndex = nextArgvIndex(run, index + 1);
+      const value = run[valueIndex];
+      if (value === undefined || value.dynamic) return true;
+      if (value.text === 'lastpipe') return true;
+      index = valueIndex;
+      continue;
+    }
+    if (token.dynamic) return true;
+    if (shellBundleRequestsCommand(token.text)) break;
+  }
+  return false;
 }
 
 function consumeShellWrapper(
@@ -1161,7 +1202,11 @@ function consumeShellWrapper(
         return { kind: 'static', payload: '' };
       }
       if (payloadToken.dynamic) return { kind: 'dynamic' };
-      return { kind: 'static', payload: payloadToken.text };
+      return {
+        kind: 'static',
+        payload: payloadToken.text,
+        armsLastpipe: shellArgvArmsLastpipe(run, start),
+      };
     }
     if (token.dynamic) {
       // `bash -c$CMD`, `bash $A "$P"`: any unreadable word in a shell's argv
@@ -1177,7 +1222,11 @@ function consumeShellWrapper(
       // Anything else is a payload fused into the token (`bash -c'cmd'`); a
       // pure-letter remainder cannot hide a relocation either way.
       if (remainder.length > 0 && !/^[A-Za-z]+$/.test(remainder)) {
-        return { kind: 'static', payload: remainder };
+        return {
+          kind: 'static',
+          payload: remainder,
+          armsLastpipe: shellArgvArmsLastpipe(run, start),
+        };
       }
       let payloadIndex = nextArgvIndex(run, index + 1);
       // `-o`/`-O` on either side of the `c` each consume one argv entry
@@ -1193,7 +1242,11 @@ function consumeShellWrapper(
         return { kind: 'static', payload: '' };
       }
       if (payloadToken.dynamic) return { kind: 'dynamic' };
-      return { kind: 'static', payload: payloadToken.text };
+      return {
+        kind: 'static',
+        payload: payloadToken.text,
+        armsLastpipe: shellArgvArmsLastpipe(run, start),
+      };
     }
     if (token.text.startsWith('+')) {
       index++;
@@ -1458,16 +1511,29 @@ function analyzeRun(
   const state: PrefixState = { relocations: [], unresolved: false };
   let index = 0;
   let assignments = 0;
-  while (index < run.length && LEADING_SHELL_KEYWORDS.has(run[index]!.text)) {
+  while (index < run.length) {
+    index = nextArgvIndex(run, index);
+    const keyword = run[index]?.text;
+    if (keyword === 'case') return { kind: 'undecidable' };
+    if (keyword === undefined || !LEADING_SHELL_KEYWORDS.has(keyword)) break;
     index++;
+    if (keyword === 'time') {
+      while (run[index]?.text === '-p' || run[index]?.text === '--') index++;
+    }
   }
   while (index < run.length) {
+    index = nextArgvIndex(run, index);
+    if (index >= run.length) break;
+    if (state.armsLastpipe) return { kind: 'undecidable' };
     const token = run[index]!;
     if (leadingEnvAssignmentKey(token.text) !== null) {
       recordEnvAssignment(token, state);
       assignments++;
       index++;
       continue;
+    }
+    if (BRACE_EXPANSION_PATTERN.test(token.text)) {
+      return { kind: 'undecidable' };
     }
     if (token.dynamic) {
       return { kind: 'dynamic-program', rest: run.slice(index), state };
@@ -1539,9 +1605,19 @@ function analyzeRun(
         return { kind: 'all-export-off', state };
       }
     }
+    // `shopt -s lastpipe` runs the last pipeline stage in the current shell
+    // (job control is off in the daemon's non-interactive bash), so a `cd`
+    // behind a pipe outlives it — the subshell scoping this guard relies on
+    // no longer holds. The option can also arrive dynamically (`shopt -s
+    // $opt`), so any shopt invocation is undecidable here.
+    if (program === 'shopt') {
+      return { kind: 'undecidable' };
+    }
     if (program === 'env') {
       const scan = consumeEnvWrapper(run, index, state);
-      if (scan.undecidable) return { kind: 'undecidable' };
+      if (scan.undecidable || state.armsLastpipe) {
+        return { kind: 'undecidable' };
+      }
       if (scan.payload !== undefined) {
         return {
           kind: 'payload',
@@ -1590,6 +1666,9 @@ function analyzeRun(
         return { kind: 'other', state, assignmentsOnly: false };
       }
       if (scan.kind === 'dynamic') return { kind: 'undecidable' };
+      if (scan.armsLastpipe || state.armsLastpipe) {
+        return { kind: 'undecidable' };
+      }
       return {
         kind: 'payload',
         payload: scan.payload,
@@ -2271,47 +2350,816 @@ interface EvaluationScope {
  * A heredoc body is stdin data delivered to the command, not shell commands,
  * yet `splitCommands` has no heredoc state and would parse each body line as
  * its own segment — letting a body `cd` launder the tracked directory. Strip
- * `<<[-]WORD … WORD` bodies (quoted or not) before splitting. This is
- * best-effort: only the first heredoc on a line is handled, which is the
- * shape a model emits, and anything unrecognised is left untouched.
+ * `<<[-]WORD … WORD` bodies before splitting.
+ *
+ * The delimiter's quoting decides what bash does with the body. A quoted
+ * delimiter (`<<'EOF'`, `<<"EOF"`) keeps the body literal, so stripping
+ * hides only inert text from the later stages. With an UNQUOTED delimiter
+ * bash joins backslash-newline pairs and then expands the body at read time:
+ * `$(…)`, backticks and `$((…))` run commands right there, and
+ * `${GIT_DIR=…}` / `:=` assign in the shell reading the body — which for a
+ * builtin receiver such as `read` is the current shell, so the value
+ * outlives the command and a later `export GIT_DIR` (or a stuck export
+ * attribute) arms a following mutating Git command with a repository this
+ * guard never saw. Those shapes fail closed instead of being stripped.
+ * Quoting says nothing about the RECEIVER: fed to a shell or interpreter
+ * (`bash <<'EOF'`) even a literal body executes there, a gap predating this
+ * helper and tracked separately.
+ *
+ * Bodies are consumed in opening order. A body that never reaches its
+ * delimiter runs to the end of the text, exactly what bash feeds to the
+ * receiver after its end-of-file warning.
  */
-function stripHeredocBodies(command: string): string {
-  const lines = command.split('\n');
-  const out: string[] = [];
-  for (let index = 0; index < lines.length; index++) {
-    const line = lines[index]!;
-    out.push(line);
-    const match = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/.exec(line);
-    if (!match) continue;
-    const delimiter = match[2]!;
-    const stripTabs = line.includes('<<-');
-    // Consume the body up to the delimiter line, dropping it from the output.
-    while (index + 1 < lines.length) {
-      index++;
-      const body = lines[index]!;
-      const trimmed = stripTabs ? body.replace(/^\t+/, '') : body;
-      if (trimmed === delimiter) break;
-    }
-  }
-  return out.join('\n');
+type HeredocStrip =
+  | { readonly kind: 'ok'; readonly text: string }
+  | { readonly kind: 'expanding' | 'unresolved' };
+
+interface HeredocMarker {
+  readonly delimiter: string;
+  readonly quoted: boolean;
+  readonly stripTabs: boolean;
+  readonly startIndex: number;
+  readonly endIndex: number;
 }
 
-function readTopLevelSeparators(command: string): string[] {
-  const separators: string[] = [];
+interface HeredocScanState {
+  single: boolean;
+  double: boolean;
+  backtick: boolean;
+  ansiC: boolean;
+  substitution: number;
+  arithmeticDepth: number;
+  legacyArithmeticDepth: number;
+  readonly quoteStack: Array<[boolean, boolean]>;
+  readonly backtickQuoteStack: Array<[boolean, boolean]>;
+  // Markers discovered inside an arithmetic-nested substitution, rebased
+  // onto the full line; drained by findHeredocMarkers before it returns.
+  pendingMarkers?: HeredocMarker[];
+}
+
+function createHeredocScanState(): HeredocScanState {
+  return {
+    single: false,
+    double: false,
+    backtick: false,
+    ansiC: false,
+    substitution: 0,
+    arithmeticDepth: 0,
+    legacyArithmeticDepth: 0,
+    quoteStack: [],
+    backtickQuoteStack: [],
+    pendingMarkers: [],
+  };
+}
+
+function skipParenthesizedArithmetic(
+  line: string,
+  start: number,
+  state: HeredocScanState,
+): number {
+  let depth = state.arithmeticDepth;
+  let cursor = line[start] === '$' ? start + 1 : start;
+  while (cursor < line.length) {
+    const inner = line[cursor]!;
+    if (inner === '\\') {
+      cursor += 2;
+      continue;
+    }
+    // A command substitution inside arithmetic (`$(( $(cat <<EOF) ))`)
+    // carries its own heredoc; its parens are not arithmetic nesting.
+    // Descend into the `$(…)` body with the normal scanner so a marker
+    // inside it is still registered, then resume arithmetic counting.
+    if (inner === '$' && line[cursor + 1] === '(' && line[cursor + 2] !== '(') {
+      const end = findSubstitutionEnd(line, cursor + 2);
+      if (end === -1) {
+        // Unbalanced on this line: the substitution continues past it.
+        // Leave the depth unchanged and let the caller fail closed.
+        state.arithmeticDepth = depth;
+        return line.length;
+      }
+      const body = line.slice(cursor + 2, end);
+      // Take the queue out before descending so the nested call cannot
+      // drain and rebase markers that belong to an earlier substitution.
+      const inherited = state.pendingMarkers?.splice(0) ?? [];
+      const nested = findHeredocMarkers(body, state);
+      if (nested === null) {
+        state.pendingMarkers?.push(...inherited);
+        state.arithmeticDepth = depth;
+        return line.length;
+      }
+      // Markers found inside the substitution are relative to the body;
+      // rebase them onto the full line and register them.
+      for (const marker of nested) {
+        state.pendingMarkers?.push({
+          ...marker,
+          startIndex: marker.startIndex + cursor + 2,
+          endIndex: marker.endIndex + cursor + 2,
+        });
+      }
+      state.pendingMarkers?.push(...inherited);
+      cursor = end + 1;
+      continue;
+    }
+    if (inner === '(') depth++;
+    else if (inner === ')') {
+      depth--;
+      if (depth === 0) break;
+    }
+    cursor++;
+  }
+  state.arithmeticDepth = depth;
+  return cursor;
+}
+
+function skipLegacyArithmetic(
+  line: string,
+  start: number,
+  state: HeredocScanState,
+): number {
+  let depth = state.legacyArithmeticDepth || 1;
+  let cursor = state.legacyArithmeticDepth ? start : start + 2;
+  while (cursor < line.length) {
+    if (line[cursor] === '\\') {
+      cursor += 2;
+      continue;
+    }
+    if (line[cursor] === '[') depth++;
+    else if (line[cursor] === ']' && --depth === 0) break;
+    cursor++;
+  }
+  state.legacyArithmeticDepth = depth;
+  return cursor;
+}
+
+function parseHeredocDelimiter(
+  line: string,
+  start: number,
+): {
+  readonly delimiter: string;
+  readonly quoted: boolean;
+  readonly nextIndex: number;
+} | null {
+  let delimiter = '';
+  let quoted = false;
+  let single = false;
+  let double = false;
+  let cursor = start;
+  while (cursor < line.length) {
+    const character = line[cursor]!;
+    if (!single && !double) {
+      // An arithmetic expansion in the delimiter word (`<<$((1+2))`) is
+      // literal text — bash does not expand the delimiter — but its parens
+      // must not terminate the word early. Step over the whole `$((…))`.
+      if (
+        character === '$' &&
+        line[cursor + 1] === '(' &&
+        line[cursor + 2] === '('
+      ) {
+        let depth = 0;
+        let end = cursor + 1;
+        while (end < line.length) {
+          if (line[end] === '\\') {
+            end += 2;
+            continue;
+          }
+          if (line[end] === '(') depth++;
+          else if (line[end] === ')') {
+            depth--;
+            if (depth === 0) break;
+          }
+          end++;
+        }
+        if (depth !== 0) return null;
+        delimiter += line.slice(cursor, end + 1);
+        cursor = end + 1;
+        continue;
+      }
+      // `${…}` and `$(…)` in the delimiter word are one token (bash does
+      // not expand the delimiter, but the construct's spaces/parens must
+      // not terminate the word early). Fail closed when unbalanced.
+      if (character === '$' && line[cursor + 1] === '{') {
+        const end = matchingBrace(line, cursor + 2);
+        if (end === -1) return null;
+        delimiter += line.slice(cursor, end + 1);
+        cursor = end + 1;
+        continue;
+      }
+      if (
+        character === '$' &&
+        line[cursor + 1] === '(' &&
+        line[cursor + 2] !== '('
+      ) {
+        const end = findSubstitutionEnd(line, cursor + 2);
+        if (end === -1) return null;
+        delimiter += line.slice(cursor, end + 1);
+        cursor = end + 1;
+        continue;
+      }
+      if (' \t;&|<>()'.includes(character)) break;
+      if (character === '$' && line[cursor + 1] === "'") {
+        const end = skipAnsiCQuote(line, cursor);
+        if (end > line.length) return null;
+        const body = line.slice(cursor + 2, end - 1);
+        const bytes: number[] = [];
+        for (let index = 0; index < body.length; ) {
+          const escape = decodeAnsiCEscape(body, index);
+          if (escape) {
+            if (escape.bytes.includes(0)) break;
+            bytes.push(...escape.bytes);
+            index += escape.length;
+          } else {
+            const literal = String.fromCodePoint(body.codePointAt(index)!);
+            bytes.push(...Buffer.from(literal));
+            index += literal.length;
+          }
+        }
+        delimiter += decodeAnsiCBytes(bytes);
+        quoted = true;
+        cursor = end;
+        continue;
+      }
+      if (character === '$' && line[cursor + 1] === '"') {
+        cursor++;
+        continue;
+      }
+      if (character === '\\') {
+        quoted = true;
+        cursor++;
+        if (cursor >= line.length) return null;
+        delimiter += line[cursor]!;
+        cursor++;
+        continue;
+      }
+      if (character === "'") {
+        quoted = true;
+        single = true;
+        cursor++;
+        continue;
+      }
+      if (character === '"') {
+        quoted = true;
+        double = true;
+        cursor++;
+        continue;
+      }
+      delimiter += character;
+      cursor++;
+      continue;
+    }
+    if (single) {
+      if (character === "'") single = false;
+      else delimiter += character;
+      cursor++;
+      continue;
+    }
+    if (character === '"') {
+      double = false;
+      cursor++;
+      continue;
+    }
+    if (
+      character === '\\' &&
+      ['$', '`', '"', '\\'].includes(line[cursor + 1] ?? '')
+    ) {
+      delimiter += line[cursor + 1]!;
+      cursor += 2;
+      continue;
+    }
+    delimiter += character;
+    cursor++;
+  }
+  if (
+    single ||
+    double ||
+    (delimiter === '' && !quoted) ||
+    /[\uD800-\uDFFF]/u.test(delimiter) ||
+    /[\uD800-\uDFFF]/u.test(line.slice(start, cursor))
+  ) {
+    return null;
+  }
+  return { delimiter, quoted, nextIndex: cursor };
+}
+
+/**
+ * Finds every real `<<[-]WORD` marker on a line. The scanner
+ * carries shell quote state across lines and skips arithmetic, herestrings,
+ * comments and quoted text. Backtick payloads are left to their recursive
+ * evaluation, where a closing backtick cannot become part of the delimiter.
+ */
+function findHeredocMarkers(
+  line: string,
+  state: HeredocScanState,
+): HeredocMarker[] | null {
+  // Whether a `#` here would open a comment: only at a word boundary.
+  let wordStart = true;
+  const found: HeredocMarker[] = [];
+  for (let index = 0; index < line.length; index++) {
+    const character = line[index]!;
+    const next = line[index + 1];
+    if (state.arithmeticDepth > 0) {
+      index = skipParenthesizedArithmetic(line, index, state);
+      wordStart = false;
+      continue;
+    }
+    if (state.legacyArithmeticDepth) {
+      index = skipLegacyArithmetic(line, index, state);
+      wordStart = false;
+      continue;
+    }
+    if (state.ansiC) {
+      if (character === '\\' && index + 1 < line.length) index++;
+      else if (character === "'") state.ansiC = false;
+      wordStart = false;
+      continue;
+    }
+    if (!state.single && character === '\\') {
+      if (index + 1 === line.length) return found.length > 0 ? null : found;
+      index++;
+      wordStart = false;
+      continue;
+    }
+    if (!state.single && !state.double && character === '$' && next === "'") {
+      state.ansiC = true;
+      index++;
+      wordStart = false;
+      continue;
+    }
+    if (!state.single && character === '`') {
+      if (state.backtick) {
+        // Inside a backtick payload a single quote is literal data
+        // (`echo '` runs echo with a quote argument); only the closing
+        // backtick ends the payload. Treating it as a quote opener left
+        // the scanner "inside a quote" past the closing backtick, hiding
+        // the line's real heredoc marker.
+        if (!state.single && !state.double) {
+          const enclosing = state.backtickQuoteStack.pop();
+          state.single = enclosing?.[0] ?? false;
+          state.double = enclosing?.[1] ?? false;
+          state.backtick = false;
+        }
+      } else {
+        state.backtickQuoteStack.push([state.single, state.double]);
+        state.single = false;
+        state.double = false;
+        state.backtick = true;
+      }
+      wordStart = false;
+      continue;
+    }
+    if (!state.single && !state.double && character === '$' && next === '{') {
+      const end = matchingBrace(line, index + 2);
+      if (end === -1) return null;
+      index = end;
+      wordStart = false;
+      continue;
+    }
+    if (!state.single && !state.double && character === '$' && next === '[') {
+      index = skipLegacyArithmetic(line, index, state);
+      wordStart = false;
+      continue;
+    }
+    if (!state.single && !state.double && character === '(' && next === '(') {
+      index = skipParenthesizedArithmetic(line, index, state);
+      wordStart = false;
+      continue;
+    }
+    if (!state.single && character === '$' && next === '(') {
+      if (line[index + 2] === '(') {
+        index = skipParenthesizedArithmetic(line, index, state);
+        wordStart = false;
+        continue;
+      }
+      state.quoteStack.push([state.single, state.double]);
+      state.single = false;
+      state.double = false;
+      state.substitution++;
+      index++;
+      wordStart = true;
+      continue;
+    }
+    if (
+      state.substitution > 0 &&
+      character === ')' &&
+      !state.single &&
+      !state.double
+    ) {
+      const enclosing = state.quoteStack.pop();
+      state.single = enclosing?.[0] ?? false;
+      state.double = enclosing?.[1] ?? false;
+      state.substitution--;
+      wordStart = false;
+      continue;
+    }
+    if (character === "'" && !state.double && !state.backtick) {
+      state.single = !state.single;
+      wordStart = false;
+      continue;
+    }
+    if (character === '"' && !state.single && !state.backtick) {
+      state.double = !state.double;
+      wordStart = false;
+      continue;
+    }
+    if (
+      !state.single &&
+      !state.double &&
+      !state.backtick &&
+      state.substitution === 0 &&
+      state.arithmeticDepth === 0 &&
+      state.legacyArithmeticDepth === 0 &&
+      character === '#' &&
+      wordStart
+    ) {
+      // The rest of the line is a comment; no later marker can start.
+      // Inside a substitution or arithmetic body a `#` is data (or a
+      // length/parameter operator), not a comment — bash keeps parsing.
+      if (state.pendingMarkers?.length)
+        found.push(...state.pendingMarkers.splice(0));
+      return found;
+    }
+    if (
+      character === '<' &&
+      next === '<' &&
+      !state.single &&
+      !state.double &&
+      !state.backtick
+    ) {
+      // `<<<` is a herestring: the word after it is data, not a delimiter.
+      if (line[index + 2] === '<') {
+        index += 2;
+        wordStart = false;
+        continue;
+      }
+      let cursor = index + 2;
+      let stripTabs = false;
+      if (line[cursor] === '-') {
+        stripTabs = true;
+        cursor++;
+      }
+      while (line[cursor] === ' ' || line[cursor] === '\t') cursor++;
+      const parsed = parseHeredocDelimiter(line, cursor);
+      if (!parsed) return null;
+      found.push({
+        delimiter: parsed.delimiter,
+        quoted: parsed.quoted,
+        stripTabs,
+        startIndex: index,
+        endIndex: parsed.nextIndex,
+      });
+      index = parsed.nextIndex - 1;
+      wordStart = false;
+      continue;
+    }
+    wordStart =
+      !state.single && !state.double && !state.backtick
+        ? character === ' ' ||
+          character === '\t' ||
+          character === ';' ||
+          character === '|' ||
+          character === '&' ||
+          character === '(' ||
+          character === ')'
+        : false;
+  }
+  if (state.pendingMarkers?.length)
+    found.push(...state.pendingMarkers.splice(0));
+  return found;
+}
+
+// bash joins a live backslash-newline pair in an unquoted body before
+// expanding it, so `$\<LF>(cmd)` still runs `cmd`. Reproduce that join and
+// keep every other backslash in place, so the expansion scan reads the same
+// escape parity the shell would.
+function joinContinuations(text: string): string {
+  let result = '';
+  let index = 0;
+  while (index < text.length) {
+    const character = text[index]!;
+    if (character === '\\') {
+      const next = text[index + 1];
+      if (next === '\n') {
+        index += 2;
+        continue;
+      }
+      if (next === '$' || next === '`' || next === '\\') {
+        result += text.slice(index, index + 2);
+        index += 2;
+        continue;
+      }
+    }
+    result += character;
+    index++;
+  }
+  return result;
+}
+
+// The `}` closing a `${…}`, pairing nested `${` openings. The word part can
+// hold quotes (`${X:-"}"}`) and nested expansions; a quoted `}` is data, so
+// track quote state and skip quoted spans instead of closing on them.
+function matchingBrace(text: string, start: number): number {
+  let depth = 1;
+  let single = false;
+  let double = false;
+  for (let index = start; index < text.length; index++) {
+    const character = text[index]!;
+    if (!single && character === '\\') {
+      index++;
+      continue;
+    }
+    if (character === "'" && !double) {
+      single = !single;
+      continue;
+    }
+    if (character === '"' && !single) {
+      double = !double;
+      continue;
+    }
+    if (single || double) continue;
+    if (character === '$' && text[index + 1] === '{') {
+      depth++;
+      index++;
+      continue;
+    }
+    if (character === '}') {
+      depth--;
+      if (depth === 0) return index;
+    }
+  }
+  return -1;
+}
+
+// True when a `${…}` form has a side effect the stripped text would hide
+// from the tracked environment: `=` / `:=` assign in the shell reading the
+// body (with a builtin receiver such as `read` that is the current shell,
+// so the value persists and a later `export GIT_DIR` arms it), and `@P`
+// re-expands the value as a prompt string, which runs the command
+// substitutions inside it when promptvars is on.
+function parameterExpansionMutates(inner: string): boolean {
+  let cursor = 0;
+  while (inner[cursor] === '!' || inner[cursor] === '#') cursor++;
+  const name = /^(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|.)/.exec(inner.slice(cursor));
+  if (!name) return true;
+  cursor += name[0].length;
+  if (inner[cursor] === '[') {
+    // The subscript's own content is checked by the caller's recursive scan;
+    // here just step past it.
+    const close = inner.indexOf(']', cursor + 1);
+    if (close === -1) return true;
+    cursor = close + 1;
+  }
+  const rest = inner.slice(cursor);
+  return rest.startsWith('=') || rest.startsWith(':=') || rest.startsWith('@P');
+}
+
+// True when expanding this unquoted heredoc body can execute a command or
+// mutate shell state. Plain `${name}` reads are value-only and stay
+// allowed; `\$` is inert because bash leaves it a literal `$`.
+function expansionCanExecute(text: string): boolean {
+  for (let index = 0; index < text.length; index++) {
+    const character = text[index]!;
+    const next = text[index + 1];
+    if (character === '\\') {
+      // A backslash in an expanding body quotes only `$`, backtick and `\`
+      // (backslash-newline was joined by the caller); before anything else it
+      // is literal and the next character is still read normally.
+      if (next === '$' || next === '`' || next === '\\') index++;
+      continue;
+    }
+    if (character === '`') return true;
+    if (character !== '$') continue;
+    if (next === '(') {
+      if (text[index + 2] !== '(') return true;
+      // Bash re-parses variable values in arithmetic, including command
+      // substitutions hidden in array subscripts. Only literal math is inert.
+      let depth = 0;
+      let cursor = index + 1;
+      while (cursor < text.length) {
+        const inner = text[cursor]!;
+        if (inner === '\\') {
+          cursor += 2;
+          continue;
+        }
+        if (inner === '(') depth++;
+        else if (inner === ')') {
+          depth--;
+          if (depth === 0) break;
+        }
+        cursor++;
+      }
+      if (depth !== 0) return true;
+      const literal = text
+        .slice(index + 3, cursor)
+        .replace(/\b0[xX][0-9a-fA-F]+\b|\b[0-9]+#[0-9A-Za-z@_]+\b/g, '0');
+      if (!/^[0-9\s()+*/%<>=!&|^~?:-]*$/.test(literal)) return true;
+      index = cursor;
+      continue;
+    }
+    if (next === '{') {
+      const close = matchingBrace(text, index + 2);
+      if (close === -1) return true;
+      const inner = text.slice(index + 2, close);
+      if (parameterExpansionMutates(inner)) return true;
+      if (expansionCanExecute(inner)) return true;
+      index = close;
+    }
+  }
+  return false;
+}
+
+function stripHeredocBodies(command: string): HeredocStrip {
+  const lines = command.split('\n');
+  const out: string[] = [];
+  const scanState = createHeredocScanState();
+  let index = 0;
+  while (index < lines.length) {
+    // Join backslash-newline continuations for the COMMAND line only.
+    // Bash splices these before tokenizing, but a quoted heredoc body
+    // is read verbatim (no splice), so the body loop below uses raw lines.
+    let line = lines[index]!;
+    let consumed = 1;
+    while (true) {
+      const slashes = /\\+$/.exec(line)?.[0].length ?? 0;
+      // Track quotes and comments: a trailing backslash inside a comment
+      // is comment text, not a continuation (bash ends the comment at the
+      // newline regardless).
+      let single = false;
+      let double = false;
+      let inComment = false;
+      let wordStart = true;
+      for (let ci = 0; ci < line.length; ci++) {
+        const ch = line[ci]!;
+        if (inComment) break;
+        if (!single && ch === '\\' && ci + 1 < line.length) {
+          ci++;
+          wordStart = false;
+          continue;
+        }
+        if (ch === "'" && !double) {
+          single = !single;
+          wordStart = false;
+          continue;
+        }
+        if (ch === '"' && !single) {
+          double = !double;
+          wordStart = false;
+          continue;
+        }
+        if (!single && !double && ch === '#' && wordStart) {
+          inComment = true;
+          break;
+        }
+        wordStart = ' \t;&|()<>'.includes(ch);
+      }
+      if (
+        single ||
+        inComment ||
+        slashes % 2 === 0 ||
+        index + consumed >= lines.length
+      )
+        break;
+      line = line.slice(0, -1) + lines[index + consumed]!;
+      consumed++;
+    }
+    const markers = findHeredocMarkers(line, scanState);
+    if (markers === null) return { kind: 'unresolved' };
+    let rewritten = '';
+    let cursor = 0;
+    for (const marker of markers) {
+      if (marker.startIndex < cursor) return { kind: 'unresolved' };
+      rewritten += line.slice(cursor, marker.startIndex) + '< /dev/null';
+      cursor = marker.endIndex;
+    }
+    out.push(rewritten + line.slice(cursor));
+    if (
+      markers.length > 0 &&
+      (scanState.single || scanState.double || scanState.backtick)
+    ) {
+      return { kind: 'unresolved' };
+    }
+    // Consume heredoc bodies from the ORIGINAL physical lines (no splice).
+    // Bash reads a substitution's heredoc body before the enclosing line's,
+    // so markers inside $(…) consume their bodies first.
+    let bodyStart = index + consumed;
+    const substitutionSpans: Array<[number, number]> = [];
+    {
+      let si = 0;
+      let sq = false;
+      let dq = false;
+      while (si < line.length) {
+        const ch = line[si]!;
+        if (!sq && ch === '\\' && si + 1 < line.length) {
+          si += 2;
+          continue;
+        }
+        if (ch === "'" && !dq) {
+          sq = !sq;
+          si++;
+          continue;
+        }
+        if (ch === '"' && !sq) {
+          dq = !dq;
+          si++;
+          continue;
+        }
+        if (!sq && ch === '$' && line[si + 1] === '(' && line[si + 2] !== '(') {
+          const end = findSubstitutionEnd(line, si + 2);
+          if (end !== -1) {
+            substitutionSpans.push([si, end]);
+            si = end + 1;
+            continue;
+          }
+        }
+        si++;
+      }
+    }
+    const isInsideSubstitution = (pos: number) =>
+      substitutionSpans.some(([s, e]) => pos > s && pos < e);
+    const innerMarkers = markers.filter((m) =>
+      isInsideSubstitution(m.startIndex),
+    );
+    const outerMarkers = markers.filter(
+      (m) => !isInsideSubstitution(m.startIndex),
+    );
+    for (const marker of [...innerMarkers, ...outerMarkers]) {
+      const bodyLines: string[] = [];
+      let bi = bodyStart;
+      while (bi < lines.length) {
+        let body = lines[bi]!;
+        if (marker.stripTabs) body = body.replace(/^\t+/, '');
+        if (!marker.quoted) {
+          while (bi + 1 < lines.length) {
+            const slashes = /\\+$/.exec(body)?.[0].length ?? 0;
+            if (slashes % 2 === 0) break;
+            let next = lines[++bi]!;
+            if (marker.stripTabs) next = next.replace(/^\t+/, '');
+            body = body.slice(0, -1) + next;
+          }
+        }
+        bi++;
+        if (body === marker.delimiter) break;
+        bodyLines.push(body);
+      }
+      bodyStart = bi;
+      if (
+        !marker.quoted &&
+        expansionCanExecute(joinContinuations(bodyLines.join('\n')))
+      ) {
+        return { kind: 'expanding' };
+      }
+    }
+    index = bodyStart;
+  }
+  return { kind: 'ok', text: out.join('\n') };
+}
+
+// Remove `#` comments (word-start, outside quotes/substitutions) so
+// splitCommands does not cut on separators that are only comment text.
+// Mirrors the comment rule in readTopLevelSeparators.
+function stripBashComments(command: string): string {
+  let result = '';
   let single = false;
   let double = false;
   let backtick = false;
   let substitution = 0;
+  let arithmeticDepth = 0;
+  let wordStart = true;
   const quoteStack: Array<[boolean, boolean]> = [];
   for (let index = 0; index < command.length; index++) {
     const character = command[index]!;
     const next = command[index + 1];
+    if (arithmeticDepth > 0) {
+      result += character;
+      if (character === '(') arithmeticDepth++;
+      else if (character === ')') {
+        arithmeticDepth--;
+        if (arithmeticDepth === 0) wordStart = false;
+      }
+      continue;
+    }
+    if (
+      !single &&
+      !double &&
+      !backtick &&
+      character === '$' &&
+      next === '(' &&
+      command[index + 2] === '('
+    ) {
+      arithmeticDepth = 2;
+      result += '$((';
+      index += 2;
+      wordStart = false;
+      continue;
+    }
     if (!single && character === '\\' && index + 1 < command.length) {
+      result += character + command[index + 1];
       index++;
+      wordStart = false;
       continue;
     }
     if (!single && character === '`') {
       backtick = !backtick;
+      result += character;
+      wordStart = false;
       continue;
     }
     if (!single && !backtick && character === '$' && next === '(') {
@@ -2319,7 +3167,9 @@ function readTopLevelSeparators(command: string): string[] {
       single = false;
       double = false;
       substitution++;
+      result += '$(';
       index++;
+      wordStart = false;
       continue;
     }
     if (
@@ -2333,19 +3183,132 @@ function readTopLevelSeparators(command: string): string[] {
       single = enclosing?.[0] ?? false;
       double = enclosing?.[1] ?? false;
       substitution--;
+      result += character;
+      wordStart = false;
       continue;
     }
     if (!backtick && character === "'" && !double) {
       single = !single;
+      result += character;
+      wordStart = false;
       continue;
     }
     if (!backtick && character === '"' && !single) {
       double = !double;
+      result += character;
+      wordStart = false;
+      continue;
+    }
+    if (single || double || backtick || substitution > 0) {
+      result += character;
+      wordStart = false;
+      continue;
+    }
+    if (character === '#' && wordStart) {
+      const newline = command.indexOf('\n', index);
+      if (newline === -1) break;
+      index = newline - 1;
+      continue;
+    }
+    result += character;
+    wordStart = ' \t;&|()<>\n'.includes(character);
+  }
+  return result;
+}
+
+function readTopLevelSeparators(
+  command: string,
+  bashComments: boolean,
+): string[] {
+  const separators: string[] = [];
+  let single = false;
+  let double = false;
+  let backtick = false;
+  let substitution = 0;
+  let arithmeticDepth = 0;
+  let wordStart = true;
+  let segmentStart = 0;
+  const quoteStack: Array<[boolean, boolean]> = [];
+  const addSeparator = (separator: string, index: number, length = 1) => {
+    if (command.slice(segmentStart, index).trim()) separators.push(separator);
+    segmentStart = index + length;
+  };
+  for (let index = 0; index < command.length; index++) {
+    const character = command[index]!;
+    const next = command[index + 1];
+    if (arithmeticDepth > 0) {
+      if (character === '(') arithmeticDepth++;
+      else if (character === ')') {
+        arithmeticDepth--;
+        if (arithmeticDepth === 0) wordStart = false;
+      }
+      continue;
+    }
+    if (
+      !single &&
+      !double &&
+      !backtick &&
+      character === '$' &&
+      next === '(' &&
+      command[index + 2] === '('
+    ) {
+      arithmeticDepth = 2;
+      index += 2;
+      wordStart = false;
+      continue;
+    }
+    if (!single && character === '\\' && index + 1 < command.length) {
+      index++;
+      wordStart = false;
+      continue;
+    }
+    if (!single && character === '`') {
+      backtick = !backtick;
+      wordStart = false;
+      continue;
+    }
+    if (!single && !backtick && character === '$' && next === '(') {
+      quoteStack.push([single, double]);
+      single = false;
+      double = false;
+      substitution++;
+      index++;
+      wordStart = false;
+      continue;
+    }
+    if (
+      !backtick &&
+      substitution > 0 &&
+      character === ')' &&
+      !single &&
+      !double
+    ) {
+      const enclosing = quoteStack.pop();
+      single = enclosing?.[0] ?? false;
+      double = enclosing?.[1] ?? false;
+      substitution--;
+      wordStart = false;
+      continue;
+    }
+    if (!backtick && character === "'" && !double) {
+      single = !single;
+      wordStart = false;
+      continue;
+    }
+    if (!backtick && character === '"' && !single) {
+      double = !double;
+      wordStart = false;
       continue;
     }
     if (single || double || backtick || substitution > 0) continue;
+    if (bashComments && character === '#' && wordStart) {
+      const newline = command.indexOf('\n', index);
+      if (newline === -1) break;
+      index = newline - 1;
+      continue;
+    }
     if (character === '&' && next === '&') {
-      separators.push('&&');
+      addSeparator('&&', index, 2);
       index++;
     } else if (character === '&' && next === '>') {
       // `&>` / `&>>` redirects stdout+stderr; the `&` is not a separator.
@@ -2357,18 +3320,27 @@ function readTopLevelSeparators(command: string): string[] {
       // `>&2` / `<&fd` — the `&` is part of a file-descriptor redirect.
     } else if (character === '&') {
       // A lone `&` backgrounds the command in its own subshell.
-      separators.push('&');
+      addSeparator('&', index);
     } else if (character === '|' && next === '|') {
-      separators.push('||');
+      addSeparator('||', index, 2);
+      index++;
+    } else if (character === '|' && next === '&') {
+      addSeparator('|', index, 2);
       index++;
     } else if (character === '|') {
-      // `>|` is the clobber redirect, not a pipe.
-      separators.push(command[index - 1] === '>' ? '>|' : '|');
-    } else if (character === ';') {
-      separators.push(';');
-    } else if (character === '\n') {
-      separators.push('\n');
+      if (command[index - 1] !== '>') addSeparator('|', index);
+    } else if (character === ';' || character === '\n') {
+      addSeparator(character, index);
     }
+    wordStart = ' \t;&|()<>\n'.includes(character);
+  }
+  const tail = command.slice(segmentStart).trim();
+  if (!tail) {
+    // Only reconcile separators that cannot carry subshell meaning; a
+    // trailing `&` backgrounds the last segment and `isPipeComponent`
+    // reads it to scope that segment's cwd/exports.
+    const last = separators.at(-1);
+    if (last === ';' || last === '\n') separators.pop();
   }
   return separators;
 }
@@ -2536,7 +3508,22 @@ async function evaluateCommandWithCwd(
   // Heredocs are a POSIX shell construct: on the Windows lanes the marker
   // line's body lines are separate commands, so stripping them would hide
   // commands the executed text really runs.
-  const strippedCommand = windowsNative ? command : stripHeredocBodies(command);
+  const heredocStrip: HeredocStrip = windowsNative
+    ? { kind: 'ok', text: command }
+    : stripHeredocBodies(command);
+  if (heredocStrip.kind !== 'ok') {
+    return {
+      denial: {
+        allowed: false,
+        reason:
+          heredocStrip.kind === 'expanding'
+            ? EXPANDING_HEREDOC_DENIAL
+            : UNPARSEABLE_COMMAND_DENIAL,
+      },
+      cwdAfter: trackedCwd,
+    };
+  }
+  const strippedCommand = heredocStrip.text;
   if (containsCmdRewriteSyntax(strippedCommand, platformNow, shellNow)) {
     return {
       denial: { allowed: false, reason: CMD_REWRITE_SYNTAX_DENIAL },
@@ -2561,11 +3548,27 @@ async function evaluateCommandWithCwd(
     platformNow,
     shellNow,
   );
-  const segments = splitCommands(normalizedCommand);
-  const separators = readTopLevelSeparators(normalizedCommand);
-  // On any disagreement with `splitCommands`, treat every segment of a piped
-  // command as a pipeline component rather than guessing.
-  const separatorsMatch = separators.length === segments.length - 1;
+  // splitCommands has no comment awareness: a `|` or `;` inside a `#`
+  // comment becomes a phantom segment. Strip comments first (bash lanes
+  // only) so both views see the same command boundaries.
+  const commentStripped = windowsNative
+    ? normalizedCommand
+    : stripBashComments(normalizedCommand);
+  const segments = splitCommands(commentStripped);
+  const separators = readTopLevelSeparators(commentStripped, false);
+  const separatorsMatch =
+    separators.length === segments.length - 1 ||
+    (separators.length === segments.length && separators.at(-1) === '&');
+  if (
+    !windowsNative &&
+    !separatorsMatch &&
+    separators.some((separator) => separator === '|' || separator === '&')
+  ) {
+    return {
+      denial: { allowed: false, reason: UNPARSEABLE_COMMAND_DENIAL },
+      cwdAfter: trackedCwd,
+    };
+  }
   const isPipeComponent = (index: number): boolean =>
     // A PowerShell pipeline runs every stage in the one session — a `cd` on
     // either side outlives the pipe — so no segment is scoped there.
