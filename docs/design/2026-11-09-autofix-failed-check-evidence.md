@@ -109,14 +109,52 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
    render no excerpt. So the fetch passes the flag, falls back to the bare call
    only when stderr says `unknown flag` (older `gh` has neither the check nor the
    flag), and applies `stripVTControlCharacters` so raw ANSI never reaches
-   `feedback.md` or step stdout. This is the same shape as
-   `packages/cli/src/commands/autofix-pr/ci-log.ts`'s `jobLog`, and the behavioral
-   suite's fake `gh` reproduces the refusal so a missing flag turns it red. The
-   identical fix is applied to the patrol's own `GhClient.jobLog`
-   (`.github/scripts/ci-flaky-rerun.mjs`), which was equally log-blind on current
-   `gh`; it is handled here rather than deferred so the reused scrubber's fetch
-   actually works.
-8. **The fence cannot be closed by the log.** The excerpt's Markdown fence is
+   `feedback.md` or step stdout. This fetch shape — flag, old-`gh` fallback, VT
+   strip — is the same as `packages/cli/src/commands/autofix-pr/ci-log.ts`'s
+   `jobLog`, and the behavioral suite's fake `gh` reproduces the refusal so a
+   missing flag turns it red. The identical fix is applied to the patrol's own
+   `GhClient.jobLog` (`.github/scripts/ci-flaky-rerun.mjs`), which was equally
+   log-blind on current `gh`; it is handled here rather than deferred so the
+   reused scrubber's fetch actually works.
+8. **Terminal controls are stripped between two redaction passes, in the shared
+   scrubber.** `stripVTControlCharacters` removes escape sequences but leaves
+   the bare C0/C1 controls and the Unicode Bidi overrides: a `\r` lets a
+   fork-controlled log line visually overwrite a line's start in a terminal,
+   `\b`, `\x0b`, `\x0c`, DEL and the C1 range repaint it just as well, and the
+   `Bidi_Control` set reorders it. `skillLog` therefore strips
+   `[\x00-\x08\x0b-\x1f\x7f-\x9f\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]`
+   (C0/DEL/C1 plus the full `Bidi_Control` set that `safeReason` already drops,
+   keeping `\n` and `\t`) — between two redaction passes. The first pass is the
+   unchanged `redactLog`, and it runs BEFORE the strip: a bare `\r` still
+   supplies the word boundary the anchored secret patterns (`\bnpm_…`,
+   `\bsk-…`, `\beyJ…`, `\b<scheme>://`) need, and it still bounds the
+   line-scoped `Cookie:` / `Authorization:` rules, whose `[^\r\n]*` must stop
+   at the header's own line. The second pass, `redactWeldedTokens`, runs AFTER
+   the strip and differs from the first in two ways, both forced by the strip.
+   It carries only the token rules: once every `\r` is gone, re-running the two
+   header rules would consume everything up to the next newline — including
+   the `##[error]` line the excerpt exists to show — and their values were
+   already redacted by the first pass. And it drops the `\b` anchors: a control
+   byte INSIDE a credential (`npm_\rABC…`) defeats every anchor on the first
+   pass, and the same strip can weld a word character onto the token's front
+   (`x\rnpm_…` becomes `xnpm_…`), leaving `\b` nothing to match. Over-redaction
+   is the safe direction for a pass that only ever sees already-redacted text;
+   the cost is that an unanchored `sk-` also redacts a `task-…` identifier
+   carrying 20+ alphanumerics. A control inside a header value still leaves the
+   fragment past the CR visible (`Cookie: [redacted]=abc`), exactly as the
+   unstripped base does; scrubbing that remainder would mean re-running a
+   header rule over CR-free text, which is the swallow above. Living in
+   `skillLog`, the strip covers both the collector's excerpt and the patrol's
+   rendered evidence (its only `jobLog` caller goes through `skillLog`). The
+   sibling fetches themselves are unchanged: `ci-log.ts`'s `jobLog` still
+   writes bare controls into `.qwen/tmp/autofix-pr-<n>-ci-<run>.log`, and the
+   patrol's `GhClient.jobLog` still returns them to its caller. One transition
+   cost: the patrol also keys its marker comment off `skillLog`'s output
+   (`fingerprint(target, log)` in `scan`), and `alreadyHandled` matches that key
+   exactly, so removing controls re-keys the fingerprint — a marker written
+   before this lands stops matching once, the patrol re-triages that failure and
+   posts a fresh marker, and it self-heals from the next marker on.
+9. **The fence cannot be closed by the log.** The excerpt's Markdown fence is
    sized longer than the longest backtick run inside it, so a log line carrying
    backticks cannot close the fence early and spill the rest into `feedback.md`
    as markup.
@@ -143,10 +181,25 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
   argument, and every degradation path through a fake `gh` on PATH. The fake
   `gh` reproduces a current gh's escape-sequence refusal (exit 1 unless the flag
   is passed) and an old gh's `unknown flag`, so the excerpt-rendering test
-  witnesses the flag and the ANSI-strip together.
+  witnesses the flag and the ANSI-strip together. Further cases pin the control
+  strip end-to-end: a secret after a bare `\r` is still redacted (the first
+  `redactLog` pass runs before the strip), a header line terminated by a bare CR
+  does not swallow the `##[error]` line that follows it, backspace/C0/C1 and
+  Bidi controls are stripped while tab and newline survive, and the text past
+  the first control is retained (a truncating implementation stays red). The
+  Bidi case feeds every `Bidi_Control` code point and asserts
+  `/\p{Bidi_Control}/u` against stdout, so narrowing the class to a sample
+  cannot stay green.
 - `scripts/tests/ci-flaky-rerun.test.js` (vitest): the patrol's `GhClient.jobLog`
   passes the flag, falls back only on `unknown flag`, strips VT control
-  characters, and propagates a non-refusal error.
+  characters, and propagates a non-refusal error; `skillLog` strips terminal
+  controls and Bidi overrides between two redaction passes (a secret after a
+  bare CR is still redacted, backspace/vertical tab/Bidi are gone, a credential
+  split by a control byte is redacted once the strip rejoins it, and so is one
+  whose leading word boundary the strip also removed), keeps the failure line
+  that follows a CR-terminated header, and strips every C0/DEL/C1 and
+  `Bidi_Control` code point — asserted against Unicode's own property, with
+  `\n` and `\t` still surviving.
 - `scripts/tests/qwen-autofix-workflow.test.js` (vitest): the call precedes the
   checkout and uses the working-tree path; the tolerant fallbacks and stderr
   sink; the section's position between the name-only lists and the gate
@@ -155,20 +208,31 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
 - Mutation checks: moving the call below the checkout, staging it under
   `RUNNER_TEMP`, dropping `|| true`, dropping the feedback guard, dropping
   either CI membership entry, and dropping the skill sentence each turn the
-  workflow pins red; dropping the flag, the ANSI strip, the old-gh fallback,
-  reverting the line cap to 60, fixing the fence at four backticks, narrowing
-  the usage guard to `&&`, rendering the raw log, dropping the self-lane
-  exclusion, the job cap, the dedupe, or adding `CANCELLED` each turn the
-  collector tests red; dropping the patrol's flag turns its witness red.
+  workflow pins red; dropping the flag, the ANSI strip, the control strip, the
+  old-gh fallback, reverting the line cap to 60, fixing the fence at four
+  backticks, narrowing the usage guard to `&&`, rendering the raw log, dropping
+  the self-lane exclusion, the job cap, the dedupe, or adding `CANCELLED` each
+  turn the collector tests red; re-running the whole `redactLog` after the
+  strip, re-anchoring the post-strip `npm_` rule, making that pass a no-op,
+  moving the control strip before the first redaction pass, deleting the strip,
+  narrowing it to `\r` alone, narrowing the Bidi class to the sampled points,
+  dropping a single unsampled `Bidi_Control` point, truncating at the first
+  control, or widening the class to eat `\n`/`\t` each turn the collector or
+  patrol witness red; dropping the patrol's flag turns its witness red.
 - `scripts/tests/ci-platform-lanes.test.js` re-runs because `ci.yml` changed.
 
 ## Acceptance criteria
 
 - A red PR's `feedback.md` carries failed step names and a redacted excerpt for
   up to three failing jobs, and the excerpt actually renders against a current
-  `gh` (the flag is passed) with no raw ANSI reaching `feedback.md` or step
+  `gh` (the flag is passed) with no raw ANSI, terminal control characters
+  (bare CR, backspace, C0/C1) or Bidi overrides reaching `feedback.md` or step
   stdout.
-- No secret from a job log reaches `feedback.md` or step stdout.
+- No secret from a job log reaches `feedback.md` or step stdout, including a
+  credential the strip welds into a contiguous token — whether the control sat
+  inside it or in front of its leading word boundary.
+- A header line terminated by a bare CR still leaves the failure line that
+  follows it in the excerpt.
 - An absent script, an unreadable rollup, or a failed API read never fails a
   round.
 - The collector and its imported helper execute from the trusted base, before

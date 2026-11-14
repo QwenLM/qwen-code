@@ -5044,12 +5044,26 @@ render no excerpt at all. So: pass the flag; fall back to the bare
 call ONLY when stderr says `unknown flag` (older gh has neither the
 check nor the flag); and stripVTControlCharacters the result, because
 raw ANSI would otherwise reach feedback.md and step stdout, where the
-existing defang handles only `::` and `##[`. The behavioral suite's
-fake gh reproduces the refusal, so a missing flag turns it red. The
-same fix lands on the patrol's own GhClient.jobLog, which was equally
-log-blind on current gh. The excerpt fence is sized past any backtick
-run inside it, so a log line carrying backticks cannot close the fence
-early and spill the rest into feedback.md as markdown.
+existing defang handles only `::` and `##[`. Bare CR, the other
+terminal controls and the Bidi overrides are stripped downstream by
+skillLog, BETWEEN two redaction passes: stripVTControlCharacters
+leaves a `\r` that a fork-controlled log line could use to visually
+overwrite a line's start in a terminal (`\b` and the rest of C0/C1
+repaint it, the Bidi set reorders it). The first pass is the unchanged
+redactLog and runs before the strip, so the anchored secret patterns
+keep the word boundary a bare `\r` supplies and the CR-bounded
+Cookie:/Authorization: rules stop at the header's own line. The
+second, redactWeldedTokens, runs after and carries only the token
+rules, unanchored: a control byte inside a credential defeats every
+anchor until the strip welds the fragments back into a token, the
+same strip can weld a word character onto its front, and re-running
+the header rules over CR-free text would swallow the ##[error] line
+the excerpt exists to show. The behavioral suite's fake gh reproduces
+the refusal, so a missing flag turns it red. The same fix lands on
+the patrol's own GhClient.jobLog, which was equally log-blind on
+current gh. The excerpt fence is sized past any backtick run inside
+it, so a log line carrying backticks cannot close the fence early and
+spill the rest into feedback.md as markdown.
 
 PLACEMENT IS THE TRUST BOUNDARY. The call sits BEFORE this step
 switches the working tree to the PR branch, so the collector AND the

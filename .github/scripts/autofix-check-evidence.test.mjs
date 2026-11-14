@@ -387,6 +387,82 @@ describe('CLI', () => {
     assert.ok(result.stdout.includes('AssertionError: boom'));
   });
 
+  it('strips bare CR so a log line cannot overwrite a terminal line', () => {
+    // stripVTControlCharacters removes escape sequences but leaves a bare \r;
+    // a fork-controlled log line could otherwise visually overwrite a line's
+    // start once the excerpt reaches step stdout. The CR strip closes it.
+    const result = runCli(
+      { statusCheckRollup: [failedCheck()] },
+      { log: '##[error]AssertionError: real failure\rOVERWRITTEN start\n' },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(result.stdout.includes('real failure'));
+    // Retention, not just absence: truncating at the first CR would also
+    // pass the absence check while silently dropping the rest of the line.
+    assert.ok(result.stdout.includes('real failureOVERWRITTEN start'));
+    assert.ok(!result.stdout.includes('\r'));
+  });
+
+  it('redacts a secret that follows a bare CR before stripping it', () => {
+    // The first redactLog pass runs BEFORE the strip, so the bare \r still
+    // supplies the word boundary \bnpm_ needs and base redaction semantics
+    // hold. The post-strip pass is unanchored, so a welded prefix cannot leak
+    // the token either; the ordering itself is pinned by the header case below.
+    const result = runCli(
+      { statusCheckRollup: [failedCheck()] },
+      {
+        log: '##[error]Downloading pkg 42% x\rnpm_ABCDEFGHIJKLMNOPQRSTUV0123 installed\n',
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(result.stdout.includes('[redacted]'));
+    assert.ok(!result.stdout.includes('npm_ABCDEFGHIJKLMNOPQRSTUV0123'));
+  });
+
+  it('keeps the failure line that follows a CR-terminated header', () => {
+    // The Cookie:/Authorization: rules are bounded by \r as well as \n, so
+    // they only run in the pre-strip pass. Re-running them over control-free
+    // text would swallow everything up to the next newline — including the
+    // ##[error] line this excerpt was fetched for — and the round would report
+    // success with no evidence of the failure.
+    const noise = Array.from({ length: 30 }, (_, i) => `noise line ${i}`).join(
+      '\n',
+    );
+    const result = runCli(
+      { statusCheckRollup: [failedCheck()] },
+      {
+        log: `${noise}\nCookie: sid=abc\r##[error]AssertionError: real failure\n${noise}\n`,
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(result.stdout.includes('##[error]AssertionError: real failure'));
+    assert.ok(result.stdout.includes('Cookie: [redacted]'));
+    assert.ok(!result.stdout.includes('sid=abc'));
+  });
+
+  it('strips backspace, C0/C1 and Bidi controls, keeping tab and newline', () => {
+    // A \r-only strip leaves \b, \x0b, \x0c, DEL and the C1 range, which a
+    // terminal still applies to repaint the line, and the Bidi overrides that
+    // reorder it. The wider class closes both families; \n and \t must survive
+    // (line structure and layout). Every Bidi_Control code point is fed and the
+    // assertion asks Unicode itself, so narrowing the class to the sampled
+    // points cannot stay green.
+    const result = runCli(
+      { statusCheckRollup: [failedCheck()] },
+      {
+        log: '##[error]AssertionError: real failure\b\b\bSPOOFED\ttail\x0b\x0c\x7f\x9f\u061C\u200E\u200F\u202A\u202B\u202C\u202D\u202E\u2066\u2067\u2068\u2069\n',
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.ok(result.stdout.includes('real failure'));
+    assert.ok(result.stdout.includes('SPOOFED'));
+    assert.ok(result.stdout.includes('\ttail'));
+    for (const control of ['\b', '\x0b', '\x0c', '\x7f', '\x9f']) {
+      assert.ok(!result.stdout.includes(control));
+    }
+    assert.doesNotMatch(result.stdout, /\p{Bidi_Control}/u);
+  });
+
   it('stays silent when nothing is red', () => {
     const result = runCli({
       statusCheckRollup: [failedCheck({ conclusion: 'SUCCESS' })],

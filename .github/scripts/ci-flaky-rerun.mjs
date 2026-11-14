@@ -224,8 +224,60 @@ function redactLog(log) {
     );
 }
 
+// The post-strip pass: the token rules of redactLog, without their \b anchors
+// and without its two line-scoped header rules. Keep the token rules in sync
+// with redactLog. Both differences are forced by the strip:
+//   - a control byte INSIDE a credential (`npm_\rABC…`) defeats every anchor on
+//     the first pass, and deleting it welds the fragments into a contiguous
+//     token; the same strip can also weld a word character onto the token's
+//     front (`x\rnpm_…` → `xnpm_…`), leaving \b nothing to match, so the
+//     anchors are dropped here. Over-redaction is the safe direction: this
+//     pass only ever sees already-redacted text.
+//   - `Cookie:` / `Authorization:` are bounded by \r as well as \n, which is
+//     what keeps them from swallowing the next line. Once the strip has
+//     deleted every \r they would run to the next newline and consume the
+//     ##[error] line the excerpt exists to show. The first pass, which still
+//     saw the CR, has already redacted their values.
+function redactWeldedTokens(log) {
+  return log
+    .replace(
+      /-----BEGIN [^-\r\n]+-----[\s\S]*?-----END [^-\r\n]+-----/g,
+      '[redacted private key]',
+    )
+    .replace(
+      /eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/g,
+      '[redacted jwt]',
+    )
+    .replace(/(Bearer\s+)\S+/gi, '$1[redacted]')
+    .replace(
+      /(?:gh[pousr]_|github_pat_|glpat-|xox[bp]-)[A-Za-z0-9_-]{8,}/g,
+      '[redacted]',
+    )
+    .replace(/sk-(?:proj-)?[A-Za-z0-9-]{20,}/g, 'sk-[redacted]')
+    .replace(/(?:AKIA|ASIA)[A-Z0-9]{16}/g, '[redacted]')
+    .replace(/npm_[A-Za-z0-9]{20,}/g, '[redacted]')
+    .replace(/([a-z][a-z0-9+.-]*:\/\/)(?:[^/\s]+@)+/gi, '$1[redacted]@')
+    .replace(
+      /(["']?)([A-Za-z_][A-Za-z0-9_]*(?:TOKEN|KEY|SECRET|PASSWORD|AUTH|CREDENTIAL)[A-Za-z0-9_]*)(\1\s*[:=]\s*)["']?[^"',\s}]+["']?/gi,
+      '$1$2$3[redacted]',
+    );
+}
+
 export function skillLog(log) {
-  const lines = redactLog(log).split('\n');
+  // Redact, strip, then redact the welded tokens. The first pass runs BEFORE
+  // the strip so a bare \r still supplies both the word boundary the anchored
+  // patterns (\bnpm_…, \bsk-…, \beyJ…) need and the line end that bounds the
+  // header rules. The strip drops the terminal controls (C0/DEL/C1, keeping
+  // \n and \t) plus the full Unicode Bidi_Control set — the same class
+  // safeReason drops — so a fork-controlled line can neither repaint nor
+  // reorder the excerpt.
+  const lines = redactWeldedTokens(
+    redactLog(log).replace(
+      // eslint-disable-next-line no-control-regex -- log text must not control the terminal
+      /[\x00-\x08\x0b-\x1f\x7f-\x9f\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g,
+      '',
+    ),
+  ).split('\n');
   const selected = new Set();
   const primary = new Set();
   const summary =
