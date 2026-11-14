@@ -8,6 +8,8 @@ import type { Content, Part } from '@google/genai';
 import {
   getStartupContextLength,
   isSystemReminderContent,
+  TASK_NOTIFICATION_CLOSE,
+  TASK_NOTIFICATION_OPEN,
 } from './environmentContext.js';
 import { isAgentEnvelopeContent } from '../agents/session-agents/envelope.js';
 import { isApiHistoryDirectoryContext } from '../utils/api-history-metadata.js';
@@ -84,7 +86,8 @@ export function recoveryHistoryBoundary(
   return Math.max(prefix, completedToolCallBoundary(history, toolCallIds));
 }
 
-// Envelope the background registries wrap a notification's `modelText` in.
+// `<task-notification>`, the envelope the background registries wrap a
+// notification's `modelText` in.
 // Seven construction sites in six modules: `packages/cli/src/serve/create-sub-session.ts`,
 // `packages/core/src/services/monitorRegistry.ts` (two),
 // `packages/core/src/services/backgroundShellRegistry.ts`,
@@ -101,8 +104,6 @@ export function recoveryHistoryBoundary(
 // raw), and model output is never defanged at all, so the envelope shape alone
 // cannot prove provenance. The predicate below therefore gates on the role
 // that does carry it: every real notification record is user-role.
-const TASK_NOTIFICATION_OPEN = '<task-notification>';
-const TASK_NOTIFICATION_CLOSE = '</task-notification>';
 
 function isWrappedIn(part: Part, open: string, close: string): boolean {
   const text = part.text;

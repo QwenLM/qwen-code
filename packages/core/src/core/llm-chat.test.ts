@@ -17403,20 +17403,35 @@ describe('LlmChat', async () => {
         expect(compressSpy).toHaveBeenCalledTimes(2);
       });
 
-      it('surfaces an actionable error when compaction cannot recover the 413', async () => {
-        const compressSpy = noopThen(
-          failed(CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY, 90_000),
-        );
-        failThen([sdkStyle413()]);
-
-        const stream = await send(
-          'next prompt',
+      // Only an API failure is transient and keeps the original 413 (the
+      // propagation cases below). Any other failure status earns the
+      // new-session advice. A history too large for any compression request
+      // belongs here: a later send only adds to it (#9455).
+      it.each([
+        [
+          'compaction cannot recover the 413',
+          CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
           'prompt-id-413-compression-failed',
-        );
-        await expect(collect(stream)).rejects.toThrow(/start a new session/i);
-        expect(compressSpy).toHaveBeenCalledTimes(2);
-        expectStreamCalls(1);
-      });
+        ],
+        [
+          'the history is too large to compress',
+          CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
+          'prompt-id-413-input-too-large',
+        ],
+      ])(
+        'surfaces an actionable error when %s',
+        async (_label, status, promptId) => {
+          const compressSpy = noopThen(failed(status, 90_000));
+          failThen([sdkStyle413()]);
+
+          const caught = await sendCaught(promptId);
+
+          expect(caught?.message).toMatch(/start a new session/i);
+          expect(caught?.status).toBe(413);
+          expect(compressSpy).toHaveBeenCalledTimes(2);
+          expectStreamCalls(1);
+        },
+      );
 
       it('keeps token-wording overflow on the original reactive path', async () => {
         // Regression guard: the 413 classification must not change how

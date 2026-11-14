@@ -8,6 +8,10 @@ import type { Content } from '@google/genai';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ToolNames } from '../tools/tool-names.js';
 import {
+  isUserPromptSubmitContextPartText,
+  wrapUserPromptSubmitContext,
+} from '../utils/transcript-records.js';
+import {
   DEFAULT_IMAGE_TOKEN_ESTIMATE,
   DEFAULT_MAX_RECENT_FILES,
   DEFAULT_MAX_RECENT_IMAGES,
@@ -278,6 +282,29 @@ describe('compactionInputSlimming', () => {
       };
       // text:2 + image:1600*4 = 2 + 6400 = 6402
       expect(estimateContentChars(c, 1600)).toBe(6402);
+    });
+
+    it('counts a signed thought part in full', () => {
+      // The signature is replayed to the provider beside the thought text,
+      // so it takes room in the request (#9455; #15936 R5-1).
+      const c: Content = {
+        role: 'model',
+        parts: [
+          { text: 'abc', thought: true, thoughtSignature: 'x'.repeat(1_000) },
+          { text: 'done' },
+        ],
+      };
+      expect(estimateContentChars(c, 1600)).toBe(3 + 1_000 + 4);
+    });
+
+    it('counts a signature on a function call part once', () => {
+      const call = {
+        functionCall: { name: 'read_file', args: { path: '/a' } },
+        thoughtSignature: 'x'.repeat(1_000),
+      };
+      expect(estimateContentChars({ role: 'model', parts: [call] }, 1600)).toBe(
+        JSON.stringify(call).length,
+      );
     });
 
     it('returns 0 for parts-less Content', () => {
@@ -623,6 +650,302 @@ describe('compactionInputSlimming', () => {
       ];
       const { slimmedHistory, stats } = slimCompactionInput(history);
       expect(slimmedHistory).toBe(history);
+      expect(stats.textPartsTruncated).toBe(0);
+    });
+
+    it.each([500, 4_000])(
+      'cuts a long reminder at a %i-character cap and closes it again',
+      (maxTextChars) => {
+        const prompt = { text: 'please fix the parser bug' };
+        const original = `<system-reminder>\nproject notes ${'r'.repeat(8_000)}\n</system-reminder>`;
+        const [reminder, kept] = slimCompactionInput(
+          [{ role: 'user', parts: [{ text: original }, prompt] }],
+          undefined,
+          { maxTextChars },
+        ).slimmedHistory[0]!.parts!;
+
+        expect(reminder!.text).toBe(
+          original.slice(0, maxTextChars) +
+            SLIM_TEXT_TRUNCATION_MARKER +
+            '\n</system-reminder>',
+        );
+        expect(kept).toBe(prompt);
+      },
+    );
+
+    const slimText = (text: string, maxTextChars: number) =>
+      slimCompactionInput([{ role: 'user', parts: [{ text }] }], undefined, {
+        maxTextChars,
+      });
+
+    it('closes a reminder cut inside the IDE context merged before the prompt', () => {
+      // The IDE context is prepended to the prompt's own part, so the part
+      // ends with the prompt, not with the reminder's closing tag.
+      const original = `<system-reminder>\nopen files ${'x'.repeat(8_000)}\n</system-reminder>\n\nfix the bug`;
+
+      const [part] = slimText(original, 500).slimmedHistory[0]!.parts!;
+
+      expect(part!.text).toBe(
+        original.slice(0, 500) +
+          SLIM_TEXT_TRUNCATION_MARKER +
+          '\n</system-reminder>',
+      );
+    });
+
+    it('cuts after a reminder that closes before the cap without closing it twice', () => {
+      const original = `<system-reminder>\nopen files\n</system-reminder>\n\n${'q'.repeat(8_000)}`;
+
+      const [part] = slimText(original, 500).slimmedHistory[0]!.parts!;
+
+      expect(part!.text).toBe(
+        original.slice(0, 500) + SLIM_TEXT_TRUNCATION_MARKER,
+      );
+    });
+
+    it.each([
+      [
+        'stacked at the start, as the CLI prepends one over another',
+        `<system-reminder>\nworktree restored\n</system-reminder>\n\n<system-reminder>\nrecovered agents ${'x'.repeat(8_000)}\n</system-reminder>\n\nfix the bug`,
+      ],
+      [
+        'appended one after another to a tool output',
+        `${'o'.repeat(300)}\n<system-reminder>\nfirst ${'x'.repeat(8_000)}\n</system-reminder>\n<system-reminder>\nsecond\n</system-reminder>`,
+      ],
+    ])(
+      'closes the reminder a cut lands in when two are %s',
+      (_label, original) => {
+        // Only the first envelope at the start, or the last at the end, was
+        // looked at, so a cut inside the other one left it open (#15936 R3-3).
+        const [part] = slimText(original, 500).slimmedHistory[0]!.parts!;
+
+        const count = (tag: string) => part!.text!.split(tag).length - 1;
+        expect(count('</system-reminder>')).toBe(count('<system-reminder>'));
+        expect(part!.text).toBe(
+          original.slice(0, 500) +
+            SLIM_TEXT_TRUNCATION_MARKER +
+            '\n</system-reminder>',
+        );
+      },
+    );
+
+    it('adds no closing tag for one a tool result only quotes at its end', () => {
+      // `grep -n '</system-reminder>'`, or a file whose last line is the tag:
+      // with no opening tag, no envelope ends the text (#15936 R3-11).
+      const original = `${'g'.repeat(8_000)}\n</system-reminder>`;
+
+      const [part] = slimText(original, 4_000).slimmedHistory[0]!.parts!;
+
+      expect(part!.text).toBe(
+        original.slice(0, 4_000) + SLIM_TEXT_TRUNCATION_MARKER,
+      );
+    });
+
+    it('closes cut hook context again, keeping the marker inside it', () => {
+      const original = wrapUserPromptSubmitContext('h'.repeat(20_000));
+
+      const [part] = slimText(original, 4_000).slimmedHistory[0]!.parts!;
+
+      expect(part!.text).toBe(
+        original.slice(0, 4_000) +
+          SLIM_TEXT_TRUNCATION_MARKER +
+          '\n</qwen:user-prompt-submit-context>',
+      );
+      expect(isUserPromptSubmitContextPartText(part!.text!)).toBe(true);
+    });
+
+    it.each([
+      ['a reminder', '<system-reminder>', '</system-reminder>'],
+      [
+        'hook context',
+        '<qwen:user-prompt-submit-context>',
+        '</qwen:user-prompt-submit-context>',
+      ],
+      ['a task notification', '<task-notification>', '</task-notification>'],
+    ])(
+      'leaves %s whole when only its closing tag runs past the cap',
+      (_label, open, close) => {
+        const body = 'n'.repeat(4_000 - open.length - 10);
+        const part = { text: `${open}\n${body}\n${close}\n` };
+
+        const { slimmedHistory, stats } = slimCompactionInput(
+          [{ role: 'user', parts: [part] }],
+          undefined,
+          { maxTextChars: 4_000 },
+        );
+
+        expect(slimmedHistory[0]!.parts![0]).toBe(part);
+        expect(stats.textPartsTruncated).toBe(0);
+      },
+    );
+
+    it('leaves a part an earlier pass cut and closed unchanged', () => {
+      const original = `<system-reminder>\nopen files ${'x'.repeat(8_000)}\n</system-reminder>\n\nfix the bug`;
+      const [once] = slimText(original, 500).slimmedHistory[0]!.parts!;
+
+      const { slimmedHistory, stats } = slimCompactionInput(
+        [{ role: 'user', parts: [once!] }],
+        undefined,
+        { maxTextChars: 500 },
+      );
+
+      expect(slimmedHistory[0]!.parts![0]).toBe(once);
+      expect(stats.textPartsTruncated).toBe(0);
+    });
+
+    it('keeps a reminder whole and cuts the prompt after it when only its closing tag runs past the cap', () => {
+      const reminder = `<system-reminder>\n${'n'.repeat(500 - 20)}\n</system-reminder>`;
+
+      const [part] = slimText(`${reminder}\n\nfix the bug`, 500)
+        .slimmedHistory[0]!.parts!;
+
+      expect(part!.text).toBe(reminder + SLIM_TEXT_TRUNCATION_MARKER);
+    });
+
+    it('closes a cut task notification again', () => {
+      // A background agent's whole result rides inside one notification.
+      const original = `<task-notification>\n<task-id>a1</task-id>\n<result>${'n'.repeat(20_000)}</result>\n</task-notification>`;
+
+      const [part] = slimText(original, 4_000).slimmedHistory[0]!.parts!;
+
+      expect(part!.text).toBe(
+        original.slice(0, 4_000) +
+          SLIM_TEXT_TRUNCATION_MARKER +
+          '\n</task-notification>',
+      );
+    });
+
+    const toolResult = (key: 'output' | 'error', value: string): Content => ({
+      role: 'user',
+      parts: [
+        {
+          functionResponse: {
+            id: 'c1',
+            name: 'read_file',
+            response: { [key]: value },
+          },
+        },
+      ],
+    });
+    const slimResult = (history: Content[], maxTextChars: number) =>
+      slimCompactionInput(history, undefined, { maxTextChars });
+    const responseOf = (history: Content[]) =>
+      history[0]!.parts![0]!.functionResponse!.response!;
+
+    it.each(['output', 'error'] as const)(
+      'closes a reminder appended to a tool %s again when the cut lands inside it',
+      (key) => {
+        // The scheduler appends skill and rule reminders after the tool's own
+        // text, so the envelope ends the string instead of opening it.
+        const original = `${'o'.repeat(3_500)}\n\n<system-reminder>\n${'s'.repeat(2_000)}\n</system-reminder>`;
+
+        const { slimmedHistory } = slimResult(
+          [toolResult(key, original)],
+          4_000,
+        );
+
+        expect(responseOf(slimmedHistory)[key]).toBe(
+          original.slice(0, 4_000) +
+            SLIM_TEXT_TRUNCATION_MARKER +
+            '\n</system-reminder>',
+        );
+      },
+    );
+
+    it('closes only the appended reminder of a tool output that quotes the tags', () => {
+      // A file the tool read is not escaped, so its own tags come before the
+      // envelope's opening, which is found from the end.
+      const file = `const OPEN = '<system-reminder>';\nconst CLOSE = '</system-reminder>';\n${'f'.repeat(3_400)}`;
+      const original = `${file}\n\n<system-reminder>\n${'s'.repeat(2_000)}\n</system-reminder>`;
+
+      const { slimmedHistory } = slimResult(
+        [toolResult('output', original)],
+        4_000,
+      );
+
+      expect(responseOf(slimmedHistory)['output']).toBe(
+        original.slice(0, 4_000) +
+          SLIM_TEXT_TRUNCATION_MARKER +
+          '\n</system-reminder>',
+      );
+    });
+
+    it.each([
+      [
+        'an opening tag the tool output quotes',
+        `const OPEN = '<system-reminder>';\n${'f'.repeat(8_000)}`,
+      ],
+      [
+        'a reminder appended after the cut',
+        `${'o'.repeat(5_000)}\n\n<system-reminder>\nskills\n</system-reminder>`,
+      ],
+      [
+        'a quoted opening tag when the reminder is appended after the cut',
+        `const OPEN = '<system-reminder>';\n${'f'.repeat(5_000)}\n\n<system-reminder>\nskills\n</system-reminder>`,
+      ],
+    ])('adds no closing tag for %s', (_label, original) => {
+      const { slimmedHistory } = slimResult(
+        [toolResult('output', original)],
+        4_000,
+      );
+
+      expect(responseOf(slimmedHistory)['output']).toBe(
+        original.slice(0, 4_000) + SLIM_TEXT_TRUNCATION_MARKER,
+      );
+    });
+
+    it('closes a quoted block the cut lands in when its closing tag comes later', () => {
+      // A file that quotes two balanced pairs of the tag. Neither sits at an
+      // end of the output the cut reaches, so the pair is found by reading the
+      // whole value (#15936 R7-1).
+      const original = `${'a'.repeat(3_950)}<system-reminder>${'b'.repeat(50)}</system-reminder>${'c'.repeat(1_000)}<system-reminder>${'d'.repeat(100)}</system-reminder>`;
+
+      const { slimmedHistory } = slimResult(
+        [toolResult('output', original)],
+        4_000,
+      );
+
+      const output = responseOf(slimmedHistory)['output'] as string;
+      const count = (tag: string) => output.split(tag).length - 1;
+      expect(count('</system-reminder>')).toBe(count('<system-reminder>'));
+      expect(output).toBe(
+        original.slice(0, 4_000) +
+          SLIM_TEXT_TRUNCATION_MARKER +
+          '\n</system-reminder>',
+      );
+    });
+
+    it('closes a block quoted in the middle of a text part when the cut lands in it', () => {
+      const original = `${'p'.repeat(400)}<task-notification>${'n'.repeat(400)}</task-notification>${'q'.repeat(400)}`;
+
+      const [part] = slimText(original, 500).slimmedHistory[0]!.parts!;
+
+      expect(part!.text).toBe(
+        original.slice(0, 500) +
+          SLIM_TEXT_TRUNCATION_MARKER +
+          '\n</task-notification>',
+      );
+    });
+
+    it('closes every quoted block open at the cut, the inner one first', () => {
+      const original = `${'p'.repeat(300)}<task-notification>${'n'.repeat(100)}<system-reminder>${'r'.repeat(400)}</system-reminder>${'n'.repeat(100)}</task-notification>${'q'.repeat(50)}`;
+
+      const [part] = slimText(original, 500).slimmedHistory[0]!.parts!;
+
+      expect(part!.text).toBe(
+        original.slice(0, 500) +
+          SLIM_TEXT_TRUNCATION_MARKER +
+          '\n</system-reminder>\n</task-notification>',
+      );
+    });
+
+    it('leaves a tool output whole when only its reminder’s closing tag runs past the cap', () => {
+      const head = `${'o'.repeat(3_000)}\n\n<system-reminder>\n`;
+      const original = `${head}${'s'.repeat(4_000 - head.length - 6)}\n</system-reminder>\n`;
+      const history = [toolResult('output', original)];
+
+      const { slimmedHistory, stats } = slimResult(history, 4_000);
+
+      expect(slimmedHistory[0]!.parts![0]).toBe(history[0]!.parts![0]);
       expect(stats.textPartsTruncated).toBe(0);
     });
 

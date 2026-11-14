@@ -8,6 +8,16 @@ import type { Content, Part } from '@google/genai';
 import type { ChatCompressionSettings } from '../config/config.js';
 import type { InputModalities } from '../core/contentGenerator.js';
 import { ToolNames } from '../tools/tool-names.js';
+import {
+  SYSTEM_REMINDER_CLOSE,
+  SYSTEM_REMINDER_OPEN,
+  TASK_NOTIFICATION_CLOSE,
+  TASK_NOTIFICATION_OPEN,
+} from '../core/environmentContext.js';
+import {
+  USER_PROMPT_SUBMIT_CONTEXT_CLOSE,
+  USER_PROMPT_SUBMIT_CONTEXT_OPEN,
+} from '../utils/transcript-records.js';
 
 /**
  * Prepares `historyToCompress` for the side-query summary model by
@@ -215,7 +225,10 @@ export function estimatePartChars(
     return imageTokenEstimate * TOKEN_TO_CHAR_RATIO;
   }
   if (typeof part.text === 'string') {
-    return part.text.length;
+    // A thought's signature is replayed beside its text, so it takes room in
+    // the request too (#9455). Other parts reach `JSON.stringify` below,
+    // which already counts it.
+    return part.text.length + (part.thoughtSignature?.length ?? 0);
   }
   // Tool results in qwen-code carry media on `functionResponse.parts`
   // (an extension to the @google/genai schema; see
@@ -399,7 +412,8 @@ function transformPart(
   // Truncate oversized tool-result text on the payload-overflow compaction
   // path so the side-query itself fits under the gateway byte limit that
   // rejected the main request (#10380). Mirrors `estimatePartChars`, which
-  // bills exactly these carriers for tool results.
+  // bills exactly these carriers for tool results. The scheduler appends
+  // reminders after a tool's own text, so a cut can land inside one.
   const maxTextChars = options?.maxTextChars;
   const fr = nextPart.functionResponse;
   if (maxTextChars !== undefined && fr?.response) {
@@ -408,8 +422,10 @@ function transformPart(
     const newResponse: Record<string, unknown> = { ...response };
     for (const key of ['output', 'error'] as const) {
       const value = response[key];
-      if (typeof value === 'string' && value.length > maxTextChars) {
-        newResponse[key] = truncateTextForSlimming(value, maxTextChars);
+      if (typeof value !== 'string' || value.length <= maxTextChars) continue;
+      const cut = truncateKeepingEnvelopes(value, maxTextChars);
+      if (cut !== value) {
+        newResponse[key] = cut;
         stats.textPartsTruncated++;
         touched = true;
       }
@@ -475,16 +491,153 @@ function transformPart(
     typeof nextPart.text === 'string' &&
     nextPart.text.length > maxTextChars
   ) {
-    stats.textPartsTruncated++;
-    // Spread rather than rebuilding a bare `{ text }` so sibling properties
-    // (`thought`, `thoughtSignature`, ...) survive truncation — the converter
-    // pipeline keys reasoning parts off those flags (#10380).
-    return {
-      ...nextPart,
-      text: truncateTextForSlimming(nextPart.text, maxTextChars),
-    };
+    const text = truncateKeepingEnvelopes(nextPart.text, maxTextChars);
+    if (text !== nextPart.text) {
+      stats.textPartsTruncated++;
+      // Spread rather than rebuilding a bare `{ text }` so sibling properties
+      // (`thought`, `thoughtSignature`, ...) survive truncation — the
+      // converter pipeline keys reasoning parts off those flags (#10380).
+      return { ...nextPart, text };
+    }
   }
   return nextPart;
+}
+
+/**
+ * Blocks the writers wrap whole. One opens a text part (the IDE context before
+ * the prompt, hook context, a task notification) or ends a tool result (the
+ * reminders appended after its output). Left open by a cut, one reads as open
+ * over every part after it.
+ */
+const ENVELOPES = [
+  { open: SYSTEM_REMINDER_OPEN, close: SYSTEM_REMINDER_CLOSE },
+  {
+    open: USER_PROMPT_SUBMIT_CONTEXT_OPEN,
+    close: USER_PROMPT_SUBMIT_CONTEXT_CLOSE,
+  },
+  { open: TASK_NOTIFICATION_OPEN, close: TASK_NOTIFICATION_CLOSE },
+] as const;
+
+/** Where an envelope's body starts and where its closing tag starts. */
+interface EnvelopeSpan {
+  bodyAt: number;
+  closeAt: number;
+  close: string;
+}
+
+/**
+ * The envelopes at the start and at the end of `value`, the two places a
+ * writer puts one. Writers stack them there: the CLI prepends one reminder
+ * over another, and a tool result can end with more than one, so each end
+ * holds a run of envelopes apart only by whitespace (#15936 R3-3). The
+ * writers escape tags inside an envelope's body, so the first closing tag
+ * after a leading opening, and the last opening tag before a trailing closing
+ * tag, are the envelope's own. The text around them, such as a file a tool
+ * read or what the user typed, is not escaped, so a tag inside it is never
+ * taken for an envelope.
+ */
+function envelopesAtEnds(value: string): EnvelopeSpan[] {
+  const spans: EnvelopeSpan[] = [];
+  let openAt = 0;
+  for (;;) {
+    const leading = ENVELOPES.find(({ open }) =>
+      value.startsWith(open, openAt),
+    );
+    if (!leading) break;
+    const closeAt = value.indexOf(leading.close, openAt + leading.open.length);
+    if (closeAt === -1) break;
+    spans.push({
+      bodyAt: openAt + leading.open.length,
+      closeAt,
+      close: leading.close,
+    });
+    const next = closeAt + leading.close.length;
+    openAt =
+      next + (value.length - next - value.slice(next).trimStart().length);
+  }
+  let end = value.trimEnd().length;
+  for (;;) {
+    const text = value.slice(0, end);
+    const trailing = ENVELOPES.find(({ close }) => text.endsWith(close));
+    if (!trailing) break;
+    const closeAt = end - trailing.close.length;
+    const lastOpenAt = text.lastIndexOf(trailing.open, closeAt);
+    if (lastOpenAt === -1) break;
+    spans.push({
+      bodyAt: lastOpenAt + trailing.open.length,
+      closeAt,
+      close: trailing.close,
+    });
+    end = value.slice(0, lastOpenAt).trimEnd().length;
+  }
+  return spans;
+}
+
+/**
+ * The closing tags of the blocks that are open at `cutAt`, the inner one
+ * first, read from the whole of `value`. Text that is not an envelope's body,
+ * such as a file a tool read, can quote a block anywhere, so this pairs every
+ * opening tag with its closing tag and keeps the pairs the cut falls between.
+ * An opening tag with no closing tag after it has no pair, so a tag quoted
+ * alone gets no close (#15936 R7-1).
+ */
+function closesOfBlocksOpenAt(value: string, cutAt: number): string[] {
+  return ENVELOPES.flatMap(({ open, close }) => {
+    const openAt: number[] = [];
+    const cutBlocks: Array<{ openAt: number; close: string }> = [];
+    let at = 0;
+    let nextOpen = value.indexOf(open);
+    let nextClose = value.indexOf(close);
+    while (nextClose !== -1) {
+      if (nextOpen !== -1 && nextOpen < nextClose) {
+        openAt.push(nextOpen);
+        at = nextOpen + open.length;
+        nextOpen = value.indexOf(open, at);
+        continue;
+      }
+      const pairedOpenAt = openAt.pop();
+      if (
+        pairedOpenAt !== undefined &&
+        pairedOpenAt + open.length <= cutAt &&
+        nextClose + close.length > cutAt
+      ) {
+        cutBlocks.push({ openAt: pairedOpenAt, close });
+      }
+      at = nextClose + close.length;
+      nextClose = value.indexOf(close, at);
+    }
+    return cutBlocks;
+  })
+    .sort((a, b) => b.openAt - a.openAt)
+    .map(({ close }) => close);
+}
+
+/**
+ * Cuts text like other text, except where the cut lands in an envelope at its
+ * start or its end: a cut inside the body closes the envelope again after the
+ * marker, and a cut that would remove only the closing tag keeps the envelope
+ * whole. An envelope can open a part without ending it, as the IDE context
+ * does before the prompt, or end a tool result without opening it. A cut
+ * before an envelope's body leaves nothing of it to close. A cut inside a
+ * block that sits at neither end, as one quoted in a tool's output does,
+ * closes that block after the marker too.
+ */
+function truncateKeepingEnvelopes(value: string, maxTextChars: number): string {
+  const span = envelopesAtEnds(value).find(
+    ({ bodyAt, closeAt, close }) =>
+      bodyAt <= maxTextChars && closeAt + close.length > maxTextChars,
+  );
+  if (!span) {
+    const cut = truncateTextForSlimming(value, maxTextChars);
+    return [cut, ...closesOfBlocksOpenAt(value, maxTextChars)].join('\n');
+  }
+  if (span.closeAt > maxTextChars) {
+    return `${truncateTextForSlimming(value, maxTextChars)}\n${span.close}`;
+  }
+  const closedAt = span.closeAt + span.close.length;
+  return value.slice(closedAt).trim() === ''
+    ? value
+    : value.slice(0, closedAt) + SLIM_TEXT_TRUNCATION_MARKER;
 }
 
 function truncateTextForSlimming(value: string, maxTextChars: number): string {

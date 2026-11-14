@@ -132,6 +132,19 @@ describe('session-compaction texts (CompressionMessage parity)', () => {
     ).toBe('Could not compress chat history due to an API error.');
   });
 
+  it('reports the input-too-large failure (#9455)', () => {
+    expect(
+      compactionText(
+        props({
+          compressionStatus:
+            CompressionStatus.COMPRESSION_FAILED_INPUT_TOO_LARGE,
+        }),
+      ),
+    ).toBe(
+      'Could not compress chat history because it is too large for the context window.',
+    );
+  });
+
   it('returns an empty text for null', () => {
     expect(compactionText(props({ compressionStatus: null }))).toBe('');
   });
