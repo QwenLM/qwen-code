@@ -6,8 +6,12 @@
 
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { ModToolCall } from '@qwen-code/qwen-code-core/mods/tool-events.js';
-import type { ModCommandPresentation } from '@qwen-code/qwen-code-core/mods/types.js';
 import type {
+  ModCommandPresentation,
+  ModQueuedPrompt,
+} from '@qwen-code/qwen-code-core/mods/types.js';
+import type {
+  ModBandInput,
   ModRenderElement,
   ModRenderInput,
   ModRenderSite,
@@ -82,6 +86,8 @@ export class InteractiveModSession implements ICommandLoader {
   };
   private sites: readonly ModRenderSite[] = [];
   private prompts = false;
+  private runsPrompts = false;
+  private readonly promptListeners = new Set<() => void>();
   // The band's last tree, kept until a new answer lands; none draws nothing.
   private band?: ModBand;
   private revision = 0;
@@ -98,6 +104,10 @@ export class InteractiveModSession implements ICommandLoader {
       presentation: () => this.presentation,
       sites: () => this.sites,
       prompts: () => this.prompts,
+      runsPrompts: () => this.runsPrompts,
+      promptQueued: () => {
+        for (const listener of this.promptListeners) listener();
+      },
       draw: (tree, owner) => {
         const band =
           tree.type === 'engine'
@@ -120,16 +130,21 @@ export class InteractiveModSession implements ICommandLoader {
   }
 
   /**
-   * Loads the Mods once; `sites` names the render sites the host draws, and
-   * `prompts` says whether it raises `prompt.submit`.
+   * Loads the Mods once; `sites` names the render sites the host draws,
+   * `prompts` says whether it raises `prompt.submit`, and `runsPrompts`
+   * whether it runs the prompts the Mods submit with `$.prompt.submit`.
    */
   initialize(
     sites: readonly ModRenderSite[] = [],
-    { prompts = false }: { prompts?: boolean } = {},
+    {
+      prompts = false,
+      runsPrompts = false,
+    }: { prompts?: boolean; runsPrompts?: boolean } = {},
   ): Promise<void> {
     if (!this.initialization) {
       this.sites = sites;
       this.prompts = prompts;
+      this.runsPrompts = runsPrompts;
     }
     this.initialization ??= this.session.initialize(this.lifetime.signal).then(
       () => {
@@ -189,8 +204,42 @@ export class InteractiveModSession implements ICommandLoader {
     this.presentation = { ...presentation };
   }
 
-  setRenderInput(input: ModRenderInput): void {
+  setRenderInput(input: ModBandInput): void {
     if (!this.closing) this.session.setRenderInput(input);
+  }
+
+  /**
+   * Shows a transcript row the Mods may draw; `listener` hears a change of
+   * what it draws. Returns the release, or undefined where nothing draws it.
+   */
+  watchRow(
+    sessionId: string,
+    input: ModRenderInput,
+    listener: () => void,
+  ): (() => void) | undefined {
+    return this.closing || !this.started || this.startupFailed
+      ? undefined
+      : this.session.watchRow(sessionId, input, listener);
+  }
+
+  /** The session whose transcript rows the Mods draw. */
+  get rowSession(): string {
+    return this.session.rowSession;
+  }
+
+  /**
+   * Hears the Mods adopt another session. A transcript can take the new
+   * session's id before they do, so its rows ask again then.
+   */
+  readonly subscribeSession = (listener: () => void): (() => void) =>
+    this.session.subscribeSession(listener);
+
+  /** The props a row draws with, when its hooks rewrote them. */
+  rowProps(
+    sessionId: string,
+    input: ModRenderInput,
+  ): ModRenderInput['props'] | undefined {
+    return this.closing ? undefined : this.session.rowProps(sessionId, input);
   }
 
   readonly subscribeBand = (listener: () => void): (() => void) => {
@@ -255,6 +304,40 @@ export class InteractiveModSession implements ICommandLoader {
       : this.session.submitPrompt(text, signal);
   }
 
+  /** Hears each prompt a Mod queues with `$.prompt.submit`. */
+  readonly subscribePrompts = (listener: () => void): (() => void) => {
+    this.promptListeners.add(listener);
+    return () => this.promptListeners.delete(listener);
+  };
+
+  /** Whether a prompt a Mod submitted waits for the session to be idle. */
+  get hasSubmittedPrompts(): boolean {
+    return !this.closing && this.session.hasSubmittedPrompts;
+  }
+
+  /** The next prompt a Mod submitted, to run now as a turn of its own. */
+  takeSubmittedPrompt(): ModQueuedPrompt | undefined {
+    return this.closing ? undefined : this.session.takeSubmittedPrompt();
+  }
+
+  /** Puts back a prompt whose turn could not start. */
+  returnSubmittedPrompt(prompt: ModQueuedPrompt): void {
+    if (!this.closing) this.session.returnSubmittedPrompt(prompt);
+  }
+
+  /** The person sent a prompt, so the Mods' prompts may start turns again. */
+  notePersonPrompt(): void {
+    this.session.notePersonPrompt();
+  }
+
+  /**
+   * The person stopped the running turn: drops the Mods' queued prompts and
+   * refuses new ones until the person sends a prompt again.
+   */
+  stopSubmittedPrompts(): void {
+    this.session.stopSubmittedPrompts();
+  }
+
   startTurn(
     text: string,
     signal: AbortSignal,
@@ -278,6 +361,7 @@ export class InteractiveModSession implements ICommandLoader {
         this.logs.length = 0;
         this.band = undefined;
         for (const listener of this.bandListeners) listener();
+        this.promptListeners.clear();
         if (sessions.get(this.config) === this) sessions.delete(this.config);
       }
     })();

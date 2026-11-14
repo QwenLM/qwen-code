@@ -38,7 +38,11 @@ import {
 // tool arguments/results, replyContext and message Parts are never traversed.
 const RESOURCE_REF_PATHS: Readonly<Record<string, readonly string[]>> = {
   'managed-tool_stage': ['inputRef', 'permissionRef', 'resultRef'],
-  'managed-history_maintenance': ['requestRef', 'candidateRef'],
+  'managed-history_maintenance': [
+    'requestRef',
+    'candidateRef',
+    'modelStatsRef',
+  ],
   'managed-mcp_configuration': ['catalogRef'],
   'managed-mcp_operation': ['argsRef', 'resultRef'],
   'managed-hook_registration': ['catalogRef'],
@@ -222,7 +226,11 @@ export function managedSessionNestedResourceRefs(
     ...(domain ? ['previousRecordRef'] : []),
     ...(ref.kind === 'managed-file_history' &&
     (record as Record<string, unknown>)['schemaVersion'] === 2 &&
-    (record as Record<string, unknown>)['profile'] === 'csi-files-retirement/1'
+    [
+      'csi-files-retirement/1',
+      'csi-files-retirement/2',
+      'csi-files-retirement/3',
+    ].includes(String((record as Record<string, unknown>)['profile']))
       ? [
           'preparation.intentRef',
           'preparation.invocations.*.inputRef',

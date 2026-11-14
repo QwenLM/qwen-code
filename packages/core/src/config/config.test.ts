@@ -76,7 +76,8 @@ import {
   resetPreloadedContentGenerator,
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
-import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
+import { DEFAULT_TOKEN_LIMIT, tokenLimit } from '../core/tokenLimits.js';
+import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
 import { LlmClient } from '../core/client.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import { buildSessionAgentToolConfig } from '../agents/workspace-agents/capability.js';
@@ -125,6 +126,8 @@ import { syncTeamMemory } from '../memory/team-memory-sync.js';
 import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-status.js';
 import * as runtimeStatus from '../utils/runtimeStatus.js';
 import * as sessionRegistry from '../services/session-registry.js';
+import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
+import { resolveModelConfig } from '../models/modelConfigResolver.js';
 
 /**
  * A settled registration for the shared record, the shape
@@ -316,6 +319,10 @@ vi.mock('../hooks/index.js', () => {
   const HookSystemMock = vi.fn();
   HookSystemMock.prototype.runtimeId = 'test-hook-runtime';
   HookSystemMock.prototype.initialize = vi.fn().mockResolvedValue(undefined);
+  HookSystemMock.prototype.close = vi.fn().mockResolvedValue(undefined);
+  HookSystemMock.prototype.refreshFileWatchingForWorkingDirectory = vi
+    .fn()
+    .mockResolvedValue(undefined);
   HookSystemMock.prototype.hasHooksForEvent = vi.fn().mockReturnValue(false);
   HookSystemMock.prototype.isManaged = vi.fn().mockReturnValue(false);
   HookSystemMock.prototype.getAllHooks = vi.fn().mockReturnValue([]);
@@ -1177,6 +1184,323 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
+  describe('subscription model switching', () => {
+    beforeEach(() => {
+      vi.spyOn(
+        QwenSubscriptionSession.prototype,
+        'getIdentity',
+      ).mockReturnValue('account-a');
+      vi.spyOn(
+        QwenSubscriptionSession.prototype,
+        'getModels',
+      ).mockResolvedValue({
+        models: ['qwen3.8-max', 'qwen3.8-flash'],
+        cached: false,
+      });
+      stubContentGenerator();
+    });
+
+    afterEach(() => {
+      vi.mocked(QwenSubscriptionSession.prototype.getIdentity).mockRestore();
+      vi.mocked(QwenSubscriptionSession.prototype.getModels).mockRestore();
+    });
+
+    const subscriptionConfig = async () => {
+      const config = makeConfig({
+        cliVersion: '0.0.0-test',
+        model: 'qwen3.8-max',
+        generationConfig: { reasoning: { effort: 'high' } },
+        modelProvidersConfig: { openai: [{ id: 'other-model' }] },
+      });
+      await config.refreshAuth(AuthType.QWEN_SUBSCRIPTION);
+      return config;
+    };
+
+    it.each([
+      ['old-project-model', 'qwen3.8-flash', 'qwen3.8-flash'],
+      ['qwen3.8-max', 'qwen3.8-flash', 'qwen3.8-max'],
+      ['old-project-model', 'removed-user-model', undefined],
+    ])(
+      'resolves startup model %s with saved user fallback %s',
+      async (projectModel, fallback, expectedModel) => {
+        const config = makeConfig({
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          model: projectModel,
+        });
+        const refresh = config.refreshAuth(
+          AuthType.QWEN_SUBSCRIPTION,
+          true,
+          fallback,
+        );
+        if (expectedModel) {
+          await refresh;
+          expect(config.getContentGeneratorConfig()?.model).toBe(expectedModel);
+          expect(config.getWarnings()).toEqual([]);
+        } else {
+          await expect(refresh).rejects.toThrow(
+            `The selected model, ${projectModel}, is no longer available. Run /model to choose another model.`,
+          );
+          expect(config.getModel()).toBe(projectModel);
+        }
+        expect(
+          QwenSubscriptionSession.prototype.getModels,
+        ).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.each([
+      { fallback: undefined, expected: 'qwen4' },
+      { fallback: 'removed-user-model', expected: 'qwen4' },
+      { fallback: 'qwen3.8-flash', expected: 'qwen3.8-flash' },
+    ])(
+      'initializes subscription model $expected with startup fallback $fallback',
+      async ({ fallback, expected }) => {
+        const { config: generationConfig, sources } = resolveModelConfig({
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          settings: { model: 'qwen4' },
+          env: {},
+        });
+        const config = makeConfig({
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          model: 'qwen4',
+          generationConfig,
+          generationConfigSources: sources,
+        });
+
+        await config.refreshAuth(
+          AuthType.QWEN_SUBSCRIPTION,
+          true,
+          fallback,
+          true,
+        );
+
+        expect(config.getContentGeneratorConfig()).toMatchObject({
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          model: expected,
+        });
+        expect(
+          config
+            .getAvailableModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)
+            .map(({ id }) => id),
+        ).toEqual(['qwen3.8-max', 'qwen3.8-flash']);
+        expect(config.getWarnings()).toEqual([]);
+      },
+    );
+
+    it('initializes an API model when switching from a signed-out subscription', async () => {
+      const config = makeConfig({
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        model: 'qwen3.8-max',
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'api-model',
+              generationConfig: { contextWindowSize: 64000 },
+            },
+          ],
+        },
+      });
+      expect(
+        config.getContentGenerator({ allowUninitialized: true }),
+      ).toBeUndefined();
+
+      await config.switchModel(AuthType.USE_OPENAI, 'api-model', {
+        initializeIfNeeded: true,
+      });
+      expect(
+        config.getContentGenerator({ allowUninitialized: true }),
+      ).toBeDefined();
+      expect(config.getContentGeneratorConfig()).toMatchObject({
+        authType: AuthType.USE_OPENAI,
+        model: 'api-model',
+        contextWindowSize: 64000,
+      });
+    });
+
+    it('reuses the same account catalog while rebuilding model capabilities and reasoning', async () => {
+      vi.mocked(
+        QwenSubscriptionSession.prototype.getModels,
+      ).mockResolvedValueOnce({
+        models: ['qwen3.8-max', 'qwen3.8-flash'],
+        modelMetadata: [
+          { id: 'qwen3.8-flash', modalities: {}, contextWindowSize: 262144 },
+        ],
+        cached: false,
+      });
+      const config = await subscriptionConfig();
+      await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
+      expect(
+        config.getAvailableModelsForAuthType(AuthType.QWEN_SUBSCRIPTION),
+      ).toContainEqual(
+        expect.objectContaining({
+          id: 'qwen3.8-flash',
+          modalities: {},
+          contextWindowSize: 262144,
+        }),
+      );
+      expect(config.getContentGeneratorConfig()).toMatchObject({
+        model: 'qwen3.8-flash',
+        contextWindowSize: 262144,
+        reasoning: { effort: 'high' },
+      });
+      expect(config.getContentGeneratorConfig()?.modalities).toEqual({});
+      expect(
+        buildAgentContentGeneratorConfig(config, 'qwen3.8-max', {
+          authType: AuthType.QWEN_SUBSCRIPTION,
+        }).contextWindowSize,
+      ).toBe(tokenLimit('qwen3.8-max'));
+      await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
+      await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-max');
+
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        1,
+      );
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledWith(
+        undefined,
+        '0.0.0-test',
+      );
+      expect(createContentGenerator).toHaveBeenCalledTimes(4);
+      expect(config.getContentGeneratorConfig()).toMatchObject({
+        authType: AuthType.QWEN_SUBSCRIPTION,
+        model: 'qwen3.8-max',
+        modalities: { image: true, video: true },
+        contextWindowSize: config
+          .getAvailableModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)
+          .find((model) => model.id === 'qwen3.8-max')?.contextWindowSize,
+        reasoning: { effort: 'high' },
+      });
+    });
+
+    it('reloads the catalog after the login identity changes', async () => {
+      const config = await subscriptionConfig();
+      vi.mocked(QwenSubscriptionSession.prototype.getIdentity).mockReturnValue(
+        'account-b',
+      );
+      await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        2,
+      );
+    });
+
+    it('refuses a model unavailable to the replacement account', async () => {
+      const config = await subscriptionConfig();
+      vi.mocked(QwenSubscriptionSession.prototype.getIdentity).mockReturnValue(
+        'account-b',
+      );
+      vi.mocked(QwenSubscriptionSession.prototype.getModels).mockResolvedValue({
+        models: ['qwen3.8-max'],
+        cached: false,
+      });
+      await expect(
+        config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash'),
+      ).rejects.toThrow('no longer available');
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(config.getModel()).toBe('qwen3.8-max');
+    });
+
+    it('does not reuse the catalog after logout', async () => {
+      const config = await subscriptionConfig();
+      vi.mocked(QwenSubscriptionSession.prototype.getIdentity).mockReturnValue(
+        undefined,
+      );
+      vi.mocked(QwenSubscriptionSession.prototype.getModels).mockRejectedValue(
+        new Error('session_changed'),
+      );
+      await expect(
+        config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash'),
+      ).rejects.toThrow('session_changed');
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        2,
+      );
+    });
+
+    it('refreshes explicitly and when switching back from another provider', async () => {
+      const config = await subscriptionConfig();
+      await config.refreshAuth(AuthType.QWEN_SUBSCRIPTION);
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        2,
+      );
+      await config.switchModel(AuthType.USE_OPENAI, 'other-model');
+      await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        3,
+      );
+    });
+
+    it('invalidates reuse after a failed explicit catalog refresh', async () => {
+      const config = await subscriptionConfig();
+      vi.mocked(
+        QwenSubscriptionSession.prototype.getModels,
+      ).mockRejectedValueOnce(new Error('catalog rejected'));
+      await expect(config.refreshSubscriptionModels()).rejects.toThrow(
+        'catalog rejected',
+      );
+      await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        3,
+      );
+    });
+
+    it('does not bind a catalog to a login that changed during refresh', async () => {
+      vi.mocked(
+        QwenSubscriptionSession.prototype.getModels,
+      ).mockImplementationOnce(async () => {
+        vi.mocked(
+          QwenSubscriptionSession.prototype.getIdentity,
+        ).mockReturnValue('account-b');
+        return { models: ['qwen3.8-max', 'qwen3.8-flash'], cached: false };
+      });
+      const config = await subscriptionConfig();
+      await config.switchModel(AuthType.QWEN_SUBSCRIPTION, 'qwen3.8-flash');
+      expect(QwenSubscriptionSession.prototype.getModels).toHaveBeenCalledTimes(
+        2,
+      );
+    });
+  });
+
+  it('clears active authentication and generators without erasing other providers', async () => {
+    const config = await initConfig({
+      modelProvidersConfig: {
+        openai: [
+          { id: 'saved-model', baseUrl: OPENAI_URL, envKey: 'SAVED_KEY' },
+        ],
+      },
+    });
+    stubContentGenerator();
+    await config.refreshAuth(AuthType.USE_GEMINI);
+    const providers = config
+      .getModelsConfig()
+      .getAvailableModelsForAuthType(AuthType.USE_OPENAI);
+    config.setSubscriptionPlan('pro');
+    const worker = backgroundTask('logout-worker', 'Active member worker');
+    config.getBackgroundTaskRegistry().register(worker);
+    const listener = vi.fn();
+    config.onModelChange(listener);
+
+    config.clearAuth();
+
+    expect(config.getAuthType()).toBeUndefined();
+    expect(config.getCurrentAuthType()).toBeUndefined();
+    expect(config.getSubscriptionPlan()).toBeUndefined();
+    expect(worker.abortController.signal.aborted).toBe(true);
+    expect(() => config.getContentGenerator()).toThrow('Run /auth');
+    expect(
+      config.getContentGenerator({ allowUninitialized: true }),
+    ).toBeUndefined();
+    expect(() => config.getBaseLlmClient()).toThrow('not initialized');
+    expect(
+      config
+        .getModelsConfig()
+        .getAvailableModelsForAuthType(AuthType.USE_OPENAI),
+    ).toEqual(providers);
+    expect(listener).toHaveBeenCalled();
+    await config.refreshAuth(AuthType.USE_GEMINI);
+    expect(config.getContentGenerator()).toBeDefined();
+    expect(config.getAuthType()).toBe(AuthType.USE_GEMINI);
+  });
+
   it('forwards usageStatisticsEnabled and proxy to the extension manager', () => {
     // installProxyDispatcher: false keeps this test from pinning a
     // process-global undici dispatcher; the wiring under test (the two
@@ -1270,6 +1594,76 @@ describe('Server Config (config.ts)', () => {
       expect(config.isProjectHooksApprovalGated()).toBe(false);
       config.setApprovalMode(ApprovalMode.DEFAULT);
       expect(config.isProjectHooksApprovalGated()).toBe(true);
+    });
+
+    it('a stored approval authorizes the block inside a --yolo session with trust off', () => {
+      const config = makeConfig({
+        approvalMode: ApprovalMode.YOLO,
+        projectHooksYoloExempt: true,
+        projectHooksApproved: true,
+        projectHooks,
+      });
+
+      expect(config.isProjectHooksApprovalGated()).toBe(false);
+      expect(config.getProjectHooks()).toBe(projectHooks);
+    });
+
+    it('replacing the block under --yolo drops the old approval authority', () => {
+      const config = makeConfig({
+        approvalMode: ApprovalMode.YOLO,
+        projectHooksYoloExempt: true,
+        projectHooksApproved: true,
+        projectHooks,
+      });
+      const edited = {
+        SessionStart: [{ hooks: [{ type: 'command', command: 'echo new' }] }],
+      };
+
+      config.setHooksFromSettings({ projectHooks: edited });
+
+      // The exemption suppresses asking, not the authority check: the
+      // edited block never carries the previous block's approval.
+      expect(config.getProjectHooks()).toBeUndefined();
+
+      // The caller re-applies a genuine decision for the new block.
+      config.setProjectHooksPendingApproval(false);
+      expect(config.getProjectHooks()).toBe(edited);
+    });
+
+    it('a --yolo session without approval or trust still withholds the block', () => {
+      const config = makeConfig({
+        approvalMode: ApprovalMode.YOLO,
+        projectHooksYoloExempt: true,
+        projectHooks,
+      });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+    });
+
+    it('the display-only block surfaces in diagnostics but never executes', () => {
+      const config = makeConfig({
+        folderTrust: true,
+        trustedFolder: false,
+        projectHooksDisplayOnly: projectHooks,
+      });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getTrustWithheldProjectHooks()).toEqual(projectHooks);
+    });
+
+    it('the display-only block surfaces even when the empty execution block reads the gate as cleared', () => {
+      // Feature on + untrusted: the settings layer passes no execution
+      // block and pending=false ("nothing to approve"). The listing must
+      // still show the configured hooks as trust-withheld.
+      const config = makeConfig({
+        folderTrust: true,
+        trustedFolder: false,
+        projectHooksPendingApproval: false,
+        projectHooksDisplayOnly: projectHooks,
+      });
+
+      expect(config.getProjectHooks()).toBeUndefined();
+      expect(config.getTrustWithheldProjectHooks()).toEqual(projectHooks);
     });
 
     it('withholds the legacy merged hooks from both getters while pending', () => {
@@ -1589,27 +1983,70 @@ describe('Server Config (config.ts)', () => {
     );
 
     it.each([
-      ['the trust feature is off', {}],
-      ['the feature is on but the folder is undecided', { folderTrust: true }],
+      [
+        'the feature is on but the folder is undecided',
+        { folderTrust: true },
+        false,
+      ],
       [
         'the folder is explicitly untrusted',
         { folderTrust: true, trustedFolder: false },
+        false,
       ],
-    ] as Array<[string, Partial<ConfigParameters>]>)(
-      'loads project hooks in non-interactive sessions when %s (implicit trust)',
-      (_label, trust) => {
+      ['the trust feature is off (default)', {}, false],
+      [
+        'the feature is off and a trust flag was passed without it',
+        { trustedFolder: true },
+        false,
+      ],
+      [
+        'the feature is on and the folder is explicitly trusted',
+        { folderTrust: true, trustedFolder: true },
+        true,
+      ],
+    ] as Array<[string, Partial<ConfigParameters>, boolean]>)(
+      'applies the same explicit-trust gate to non-interactive hooks when %s',
+      (_label, trust, loaded) => {
         const config = makeConfig({
           interactive: false,
           ...trust,
           projectHooks,
         });
 
-        expect(config.getProjectHooks()).toEqual(projectHooks);
-        expect(config.getTrustWithheldProjectHooks()).toBeUndefined();
+        expect(config.getProjectHooks()).toEqual(
+          loaded ? projectHooks : undefined,
+        );
       },
     );
 
-    it('still withholds project hooks in non-interactive safe and bare modes', () => {
+    it('exposes the withheld block to diagnostics only while trust withholds it', () => {
+      const withheld = makeConfig({ projectHooks });
+      expect(withheld.getProjectHooks()).toBeUndefined();
+      expect(withheld.getTrustWithheldProjectHooks()).toEqual(projectHooks);
+
+      const trusted = makeConfig({
+        folderTrust: true,
+        trustedFolder: true,
+        projectHooks,
+      });
+      expect(trusted.getProjectHooks()).toEqual(projectHooks);
+      expect(trusted.getTrustWithheldProjectHooks()).toBeUndefined();
+
+      expect(
+        makeConfig({
+          safeMode: true,
+          projectHooks,
+        }).getTrustWithheldProjectHooks(),
+      ).toBeUndefined();
+      expect(
+        makeConfig({
+          bareMode: true,
+          projectHooks,
+        }).getTrustWithheldProjectHooks(),
+      ).toBeUndefined();
+    });
+
+    it('keeps safe and bare modes withholding in non-interactive sessions', () => {
       expect(
         makeConfig({ safeMode: true, projectHooks }).getProjectHooks(),
       ).toBeUndefined();
@@ -6342,6 +6779,19 @@ describe('Server Config (config.ts)', () => {
       ]);
     });
 
+    it('loads bootstrap hooks with file watching disabled', async () => {
+      const config = makeConfig();
+      await config.initialize({
+        skipFileWatching: true,
+        skipLlmInitialization: true,
+        skipMcpDiscovery: true,
+      });
+      expect(HookSystem).toHaveBeenCalled();
+      expect(config.getHookSystem()?.initialize).toHaveBeenCalledWith({
+        skipFileWatching: true,
+      });
+    });
+
     it('should skip hook, skill, and file checkpointing side effects when requested', async () => {
       const config = makeConfig({ fileCheckpointingEnabled: true });
 
@@ -6902,6 +7352,39 @@ describe('Server Config (config.ts)', () => {
       expect(makeConfig().getWorkflowKeywordTriggerEnabled()).toBe(true);
     });
 
+    describe('isEventBusAgentLoopEnabled', () => {
+      beforeEach(() => {
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
+      });
+      afterEach(() => vi.unstubAllEnvs());
+
+      it('defaults to off', () => {
+        expect(makeConfig().isEventBusAgentLoopEnabled()).toBe(false);
+      });
+
+      it('honors the constructor parameter', () => {
+        expect(
+          makeConfig({
+            eventBusAgentLoopEnabled: true,
+          }).isEventBusAgentLoopEnabled(),
+        ).toBe(true);
+      });
+
+      it('is enabled by QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP=1 even when the parameter is off', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', '1');
+        expect(
+          makeConfig({
+            eventBusAgentLoopEnabled: false,
+          }).isEventBusAgentLoopEnabled(),
+        ).toBe(true);
+      });
+
+      it('ignores other env values', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', '0');
+        expect(makeConfig().isEventBusAgentLoopEnabled()).toBe(false);
+      });
+    });
+
     describe('bundled review workflow activation', () => {
       beforeEach(() => {
         vi.stubEnv('QWEN_CODE_ENABLE_WORKFLOWS', undefined);
@@ -6937,6 +7420,26 @@ describe('Server Config (config.ts)', () => {
         expect(config.isWorkflowsEnabled()).toBe(false);
         await config.enableReviewWorkflow();
         expect(config.isWorkflowsEnabled()).toBe(true);
+      });
+
+      it('keeps a review activation through a settings reload that leaves the flag unset', async () => {
+        const config = await workflowConfig();
+        await config.enableReviewWorkflow();
+        await config.enableReviewWorkflow();
+        config.applyWorkflowsEnabledSetting(undefined);
+        expect(config.isWorkflowsEnabled()).toBe(true);
+        // A value the settings do give replaces the activation.
+        config.applyWorkflowsEnabledSetting(false);
+        expect(config.isWorkflowsEnabled()).toBe(false);
+        config.applyWorkflowsEnabledSetting(undefined);
+        expect(config.isWorkflowsEnabled()).toBe(false);
+      });
+
+      it('turns off settings-enabled workflows when the reloaded settings drop the flag', async () => {
+        const config = await workflowConfig({ workflowsEnabled: true });
+        await config.enableReviewWorkflow();
+        config.applyWorkflowsEnabledSetting(undefined);
+        expect(config.isWorkflowsEnabled()).toBe(false);
       });
 
       it.each(['registered', 'deferred', 'disabled'] as const)(
@@ -8014,6 +8517,31 @@ describe('Server Config (config.ts)', () => {
       expect(config.getFastModel()).toBe(expected);
     });
 
+    it.each([true, false])(
+      'rejects a stale fast endpoint in strict mode (same-id alternative: %s)',
+      (alternative) => {
+        const config = makeConfig({
+          authType: AuthType.USE_OPENAI,
+          model: 'main',
+          fastModel: 'openai:shared\0https://removed.example/v1',
+          modelProvidersConfig: {
+            openai: [
+              {
+                id: alternative ? 'shared' : 'other',
+                baseUrl: 'https://moved.example/v1',
+              },
+            ],
+          },
+        });
+        expect(() =>
+          config.getFastModel({ requirePinnedEndpoint: true }),
+        ).toThrow('no longer configured at the selected endpoint');
+        expect(config.getFastModel()).toBe(
+          alternative ? 'openai:shared' : undefined,
+        );
+      },
+    );
+
     const readAuxModel = (
       config: Config,
       key: 'fastModel' | 'compactionModel',
@@ -8332,6 +8860,23 @@ describe('Server Config (config.ts)', () => {
     expect(config.getAutoMemoryContext()).toContain(
       '[Project Memory](project.md)',
     );
+  });
+
+  // Every reader gets the same policy: the main session and a subagent's
+  // derived Config, whether or not that subagent may use the Skill tool.
+  it('sends the resident policy to the session and to a derived Config', async () => {
+    const config = makeConfig();
+    loadProjectRules();
+
+    await config.refreshHierarchicalMemory();
+
+    const policy = config.getAutoMemoryPrompt();
+    expect(policy).toContain('## Types and where they go');
+    expect(policy).not.toContain('<types>');
+    expect(policy).not.toContain('load the `auto-memory` skill');
+    const subagent = deriveConfig(config);
+    subagent.getSkillManager = () => null;
+    expect(subagent.getAutoMemoryPrompt()).toBe(policy);
   });
 
   it('delivers each memory tier in the request catalog while keeping indexes out of the policy', async () => {
@@ -9108,6 +9653,10 @@ describe('Server Config (config.ts)', () => {
 
   it('relocateWorkingDirectory should update the session working roots', async () => {
     const config = makeConfig();
+    const refreshFileWatchingForWorkingDirectory = vi
+      .fn()
+      .mockResolvedValue(undefined);
+    internals(config).hookSystem = { refreshFileWatchingForWorkingDirectory };
     Object.assign(config, {
       memoryRecallMode: 'structured',
       memoryRecallModeInitialized: true,
@@ -9131,6 +9680,7 @@ describe('Server Config (config.ts)', () => {
 
     await config.relocateWorkingDirectory(NEW_DIR);
 
+    expect(refreshFileWatchingForWorkingDirectory).toHaveBeenCalledOnce();
     expect(cwd.chdirSpy).toHaveBeenCalledWith(NEW_DIR);
     expect(config.getTargetDir()).toBe(NEW_DIR);
     expect(config.getProjectRoot()).toBe(NEW_DIR);
@@ -9264,6 +9814,7 @@ describe('Server Config (config.ts)', () => {
       '.runtime.json',
       '.worktree.json',
       '.pr.json',
+      '.title.json',
     ]);
     mockProcessCwd(NEW_DIR);
     existingPaths(...from);
@@ -10524,6 +11075,62 @@ describe('Server Config (config.ts)', () => {
           expect(registeredToolNames()).not.toContain(ToolNames.WEB_SEARCH);
         }
         expect(webSearchNotices(config)).toEqual([]);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it.each([
+      [{}, true],
+      [{ safeMode: true }, false],
+      [{ bareMode: true }, false],
+      [{ webSearch: { enabled: false } }, false],
+      [{ disabledTools: [ToolNames.WEB_SEARCH] }, false],
+    ] satisfies Array<[Partial<ConfigParameters>, boolean]>)(
+      'registers subscription search while respecting restrictions %j',
+      async (overrides, expected) => {
+        vi.stubEnv('DEV', true);
+        process.env['DEV'] = 'true';
+        try {
+          await initConfig({
+            authType: AuthType.QWEN_SUBSCRIPTION,
+            model: 'qwen3.8-max',
+            ...overrides,
+          });
+          expect(registeredToolNames().includes(ToolNames.WEB_SEARCH)).toBe(
+            expected,
+          );
+        } finally {
+          vi.unstubAllEnvs();
+        }
+      },
+    );
+
+    it('activates search immediately after login and removes it when switching away', async () => {
+      vi.stubEnv('DEV', true);
+      process.env['DEV'] = 'true';
+      try {
+        const config = await initConfig({
+          authType: AuthType.USE_GEMINI,
+          model: 'qwen3.8-max',
+        });
+        expect(registeredToolNames()).not.toContain(ToolNames.WEB_SEARCH);
+        vi.spyOn(config, 'refreshSubscriptionModels').mockResolvedValue({
+          models: ['qwen3.8-max'],
+          cached: false,
+        });
+        stubContentGenerator();
+        await config.refreshAuth(AuthType.QWEN_SUBSCRIPTION);
+        expect(registeredToolNames()).toContain(ToolNames.WEB_SEARCH);
+        expect(config.getGeminiClient().setTools).toHaveBeenCalled();
+
+        registerFactory().mockClear();
+        vi.mocked(ToolRegistry.prototype.unregisterTool).mockClear();
+        await config.refreshAuth(AuthType.USE_GEMINI);
+        expect(ToolRegistry.prototype.unregisterTool).toHaveBeenCalledWith(
+          ToolNames.WEB_SEARCH,
+        );
+        expect(registeredToolNames()).not.toContain(ToolNames.WEB_SEARCH);
       } finally {
         vi.unstubAllEnvs();
       }
@@ -12662,7 +13269,13 @@ describe('Model Switching and Config Updates', () => {
         const config = await withHookSystem(hookSystem);
         const warn = vi.spyOn(config.getDebugLogger(), 'warn');
 
-        const response = await hookRequest(config, eventName, {});
+        const response = await hookRequest(
+          config,
+          eventName,
+          eventName === 'FileChanged'
+            ? { file_path: '/tmp/notes.md', event: 'change' }
+            : {},
+        );
 
         expect(warn).not.toHaveBeenCalledWith(
           expect.stringContaining('Unknown hook event'),
@@ -12674,6 +13287,44 @@ describe('Model Switching and Config Updates', () => {
   });
 
   describe('direct-call hook events through the hook execution bridge', () => {
+    it.each(['add', 'change', 'unlink'] as const)(
+      'forwards a valid FileChanged %s input',
+      async (event) => {
+        const fireFileChangedEvent = vi.fn().mockResolvedValue({
+          success: true,
+          allOutputs: [],
+          errors: [],
+          totalDuration: 0,
+        });
+        const config = await withHookSystem({ fireFileChangedEvent });
+        const response = await hookRequest(config, 'FileChanged', {
+          file_path: path.resolve('/memory/topic.md'),
+          event,
+        });
+        expect(response.success).toBe(true);
+        expect(fireFileChangedEvent).toHaveBeenCalledWith(
+          path.resolve('/memory/topic.md'),
+          event,
+          undefined,
+        );
+      },
+    );
+
+    it.each([
+      {},
+      { file_path: 'relative.md', event: 'change' },
+      { file_path: '/memory/topic.md', event: 'rename' },
+      { file_path: 1, event: 'add' },
+    ])(
+      'rejects invalid FileChanged input %j before dispatch',
+      async (input) => {
+        const fireFileChangedEvent = vi.fn();
+        const config = await withHookSystem({ fireFileChangedEvent });
+        const response = await hookRequest(config, 'FileChanged', input);
+        expect(response.success).toBe(false);
+        expect(fireFileChangedEvent).not.toHaveBeenCalled();
+      },
+    );
     const dispatch = async (
       method: string,
       fire: ReturnType<typeof vi.fn>,

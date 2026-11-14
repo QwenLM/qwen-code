@@ -83,6 +83,7 @@ import { getSettingsSchema } from './settingsSchema.js';
 import { resolveHookSettingsForConfig } from './hook-settings.js';
 import { createBundledMem0Server } from './mem0-settings.js';
 import { prepareBundledGeneratedUi } from './generated-ui-settings.js';
+import { isLspOptedIn } from './lsp-opt-in.js';
 import {
   resolveCliGenerationConfig,
   getAuthTypeFromEnv,
@@ -131,7 +132,10 @@ import { isValidSessionId, normalizeSessionIdForLookup } from './session-id.js';
 
 export { isValidSessionId } from './session-id.js';
 
-import { isWorkspaceTrusted } from './trustedFolders.js';
+import {
+  getTrustFileDecisionBelowIdeRoot,
+  isWorkspaceTrusted,
+} from './trustedFolders.js';
 import { assembleMcpServers } from './mcpServers.js';
 import { getPendingGatedMcpServers } from './mcpApprovals.js';
 import {
@@ -153,6 +157,7 @@ import { detectSystemLanguage } from '../i18n/index.js';
 import { normalizeSkillNames, resolveSkillSettings } from './skill-settings.js';
 import { checkAdvisorModelAvailability } from './advisor-model.js';
 import { parseApprovalModeValue } from './approval-mode-value.js';
+import { formatAuxModelSelectorForDisplay } from '../utils/aux-model-selector.js';
 
 export { parseApprovalModeValue };
 
@@ -1320,7 +1325,7 @@ function formatUnavailableAdvisorModelMessage(
       ? 'No models are configured.'
       : `Configured models: ${availableModelIds.join(', ')}.`;
   return (
-    `Advisor model '${modelName}' is not configured.\n` +
+    `Advisor model '${formatAuxModelSelectorForDisplay(modelName)}' is not configured.\n` +
     `${availableModelsLine}\n` +
     'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /advisor without arguments to choose from configured models.'
   );
@@ -1725,6 +1730,8 @@ export async function loadCliConfig(
     systemHooks?: Record<string, unknown>;
     userHooks?: Record<string, unknown>;
     projectHooks?: Record<string, unknown>;
+    /** Display-only raw workspace block; never feeds execution. */
+    projectHooksDisplayOnly?: Record<string, unknown>;
     /** What the project hooks approval covers, when there is anything to gate. */
     projectHooksApproval?: ProjectHooksApproval;
   },
@@ -1780,6 +1787,13 @@ export async function loadCliConfig(
     provisionalWorkspace?: true;
     /** Daemon-owned remote-runtime session with no ambient executable inputs. */
     agentHostReadOnly?: true;
+    /**
+     * A host-owned Config that must never start language servers, whatever the
+     * user's setting or the environment says. `experimentalLsp: false` in argv
+     * cannot express this: the flag parser defaults it to `false`, so the two
+     * are indistinguishable there.
+     */
+    lspDisabled?: true;
     sessionRestore?: {
       projectionSource: (
         sessionId: string,
@@ -1838,6 +1852,25 @@ export async function loadCliConfig(
       'Choose operator settings or a programmatic execution sandbox policy, not both.',
     );
   }
+  // Resolve LSP enablement once, here, because the execution-sandbox guard
+  // below has to see the same answer the session gets: the flag, the
+  // user/system-scope setting and the env pair all start the same subsystem,
+  // and a sandboxed tool runner must refuse every entrance, not just the one
+  // it happens to read. The host-mode terms below are the modes that refuse
+  // LSP wholesale — read-only agent host, SSH workspace, provisional
+  // workspace, bare and safe mode — so the guard asks the question the session
+  // will actually answer rather than one it would decline anyway.
+  const safeMode =
+    agentHostReadOnly ||
+    (argv.safeMode !== undefined ? argv.safeMode : isSafeModeEnv());
+  const lspEnabled =
+    !hostPolicy?.lspDisabled &&
+    !agentHostReadOnly &&
+    !sshWorkspace &&
+    !provisionalWorkspace &&
+    !bareMode &&
+    !safeMode &&
+    isLspOptedIn(argv.experimentalLsp, settings);
   if (
     sandboxEnabled &&
     (argv.promptInteractive !== undefined ||
@@ -1845,7 +1878,7 @@ export async function loadCliConfig(
       argv.acp ||
       argv.experimentalAcp ||
       argv.worktree !== undefined ||
-      argv.experimentalLsp ||
+      lspEnabled ||
       argv.mcpConfig ||
       argv.extensions?.length ||
       argv.includeDirectories?.length ||
@@ -1853,14 +1886,14 @@ export async function loadCliConfig(
       Object.keys(sessionMcpServers ?? {}).length ||
       provisionalWorkspace)
   ) {
+    const lspEntrance =
+      lspEnabled && argv.experimentalLsp !== true
+        ? 'LSP enabled through tools.lspEnabled or QWEN_CODE_ENABLE_LSP'
+        : 'LSP';
     throw new Error(
-      'tools.executionSandbox does not yet support ACP, worktree management, LSP, MCP, extensions or provisional workspaces.',
+      `tools.executionSandbox does not yet support ${lspEntrance}, ACP, worktree management, MCP, extensions or provisional workspaces.`,
     );
   }
-  const safeMode =
-    agentHostReadOnly ||
-    (argv.safeMode !== undefined ? argv.safeMode : isSafeModeEnv());
-
   // Surface `--insecure` as an env var so it reaches the undici dispatcher
   // layer (which controls TLS verification) without threading a flag through
   // every content generator and the preconnect path. Resolution there ORs this
@@ -1905,8 +1938,11 @@ export async function loadCliConfig(
 
   const ideMode = !sandboxEnabled && (settings.ide?.enabled ?? false);
 
+  const isAcpMode = argv.acp || argv.experimentalAcp;
   const folderTrust = settings.security?.folderTrust?.enabled ?? false;
-  const trustedFolder = isWorkspaceTrusted(settings).isTrusted === true;
+  const trustedFolder =
+    isWorkspaceTrusted(settings, undefined, isAcpMode ? cwd : undefined)
+      .isTrusted === true;
 
   // Custom style files are prompts: a project's are read only from a trusted
   // workspace, and none at all in --bare / --safe-mode, which keep built-ins.
@@ -1965,13 +2001,9 @@ export async function loadCliConfig(
           .map(resolvePath)
           .concat((argv.includeDirectories || []).map(resolvePath));
 
-  // LSP configuration: enabled only via --experimental-lsp flag
-  const lspEnabled =
-    !agentHostReadOnly &&
-    !sshWorkspace &&
-    !provisionalWorkspace &&
-    !bareMode &&
-    argv.experimentalLsp === true;
+  // LSP configuration: `lspEnabled` above already carries the
+  // `--experimental-lsp` flag, the tools.lspEnabled setting,
+  // QWEN_CODE_ENABLE_LSP and the host modes that refuse it.
   let lspClient: LspClient | undefined;
   const question = argv.promptInteractive || argv.prompt || '';
   const inputFormat: InputFormat =
@@ -2194,7 +2226,6 @@ export async function loadCliConfig(
   // In non-interactive mode, tools that require a user prompt are denied unless
   // the caller has explicitly allowed them. Stream-JSON input is excluded from
   // this logic because approval can be sent programmatically via JSON messages.
-  const isAcpMode = argv.acp || argv.experimentalAcp;
   if (
     !bareMode &&
     !interactive &&
@@ -2625,9 +2656,32 @@ export async function loadCliConfig(
           ? 'pending'
           : undefined
       : undefined;
+  // Explicit folder trust is the co-equal authority: a trusted folder runs
+  // its project hooks without a stored approval, so the gate must not also
+  // demand one. Only an explicit rejection still withholds there — the user
+  // said no to this exact block, and trust does not override that decision.
+  // Mirror Config.isExplicitlyTrustedFolder(): IDE-reported workspace trust
+  // counts even with the feature off, as the docs promise.
+  const ideTrust = isAcpMode
+    ? ideContextStore.getWorkspaceTrust(cwd)
+    : ideContextStore.get()?.workspaceState?.isTrusted;
+  const explicitlyTrusted =
+    (folderTrust || ideTrust !== undefined) && trustedFolder;
   const projectHooksPendingApproval = gateHooks
-    ? projectHooksState !== undefined && projectHooksState !== 'approved'
+    ? projectHooksState !== undefined &&
+      projectHooksState !== 'approved' &&
+      !(explicitlyTrusted && projectHooksState !== 'rejected')
     : undefined;
+  // Read the stored decision even under command-line YOLO: an approved block
+  // keeps its authority while the gate is exempt, without changing the
+  // exemption's pending-flag semantics.
+  const projectHooksApproved =
+    gateHooks &&
+    (projectHooksState === 'approved' ||
+      (commandLineYolo &&
+        hooksConfig?.projectHooksApproval !== undefined &&
+        getProjectHooksApprovalState(hooksConfig.projectHooksApproval) ===
+          'approved'));
   const advisorModel =
     bareMode || safeMode ? undefined : resolveAdvisorModel(argv, settings);
 
@@ -2777,6 +2831,18 @@ export async function loadCliConfig(
     pendingMcpServers,
     projectHooksPendingApproval,
     projectHooksRejected: projectHooksState === 'rejected',
+    // The stored approval is authority even while command-line YOLO exempts
+    // the gate; only a genuine approved decision sets this.
+    projectHooksApproved,
+    // The exact block the gate covers: mid-session decisions hash this
+    // startup subject, so a decision persisted for a block that changed
+    // since does not apply here.
+    projectHooksApprovalSubject: hooksConfig?.projectHooksApproval
+      ? {
+          hooks: hooksConfig.projectHooksApproval.hooks,
+          env: hooksConfig.projectHooksApproval.env,
+        }
+      : undefined,
     projectHooksYoloExempt: commandLineYolo,
     allowedMcpServers: allowedMcpServers
       ? Array.from(allowedMcpServers)
@@ -2835,7 +2901,7 @@ export async function loadCliConfig(
     maxToolCalls: resolveMaxToolCalls(argv, settings),
     // Undefined flows through to Config's default (5) and clamp logic.
     maxSubagentDepth: resolveMaxSubagentDepth(argv, settings),
-    experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
+    experimentalZedIntegration: isAcpMode ?? false,
     // ACP/serve-scoped: only the spawned ACP child can re-hang a restored
     // ask_user_question. In the plain TUI the flag would skip load-time
     // orphan repair (client.ts) with nothing able to re-hang the question,
@@ -2852,6 +2918,7 @@ export async function loadCliConfig(
     todoWriteEnabled: settings.tools?.todoWrite?.enabled === true,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
     unifiedAgentLoopEnabled: settings.experimental?.unifiedAgentLoop ?? false,
+    eventBusAgentLoopEnabled: settings.experimental?.eventBusAgentLoop ?? false,
     agentCollaborationEnabled:
       settings.experimental?.agentCollaboration ?? false,
     artifactEnabled: settings.experimental?.artifact ?? true,
@@ -2935,6 +3002,8 @@ export async function loadCliConfig(
     folderTrust,
     interactive,
     trustedFolder,
+    trustFileDecisionBelowIdeRoot: (dir, ideRoot) =>
+      getTrustFileDecisionBelowIdeRoot(settings, dir, ideRoot),
     useRipgrep: settings.tools?.useRipgrep,
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
     workflowsEnabled: settings.tools?.workflowsEnabled,
@@ -3051,6 +3120,7 @@ export async function loadCliConfig(
             : undefined,
           modelGrades: settings.agents.modelGrades,
           allowedGrades: settings.agents.allowedGrades,
+          defaultBackground: settings.agents.defaultBackground,
           maxParallelAgents: settings.agents.maxParallelAgents,
           maxParallelAgentsByModel: settings.agents.maxParallelAgentsByModel,
           displayMode: settings.agents.displayMode,

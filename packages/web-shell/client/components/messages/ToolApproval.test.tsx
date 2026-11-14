@@ -924,6 +924,22 @@ describe('ToolApproval accessibility', () => {
     expect(onConfirm).not.toHaveBeenCalled();
   });
 
+  it('sizes the explanation popover with a width utility instead of w-72', async () => {
+    render(undefined, execRequest, undefined, 'en', async function* () {});
+
+    await act(async () =>
+      container!
+        .querySelector<HTMLButtonElement>('button[title="Explain"]')
+        ?.click(),
+    );
+
+    const popover = document.body.querySelector<HTMLElement>(
+      '[data-slot="popover-content"]',
+    )!;
+    expect(popover.className).toContain('w-[min(480px,calc(100vw-32px))]');
+    expect(popover.className).not.toContain('w-72');
+  });
+
   it('only offers explanations for Shell commands', () => {
     const generateContent = async function* () {};
     render(undefined, request, undefined, 'en', generateContent);

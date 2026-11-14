@@ -25,6 +25,7 @@ import {
   CHANNEL_TASK_RESULT_META_KEY,
   CHANNEL_TASK_RESULT_PARTIAL_META_KEY,
   CHANNEL_TASK_OUTPUT_META_KEY,
+  CHANNEL_WORKFLOW_ORIGIN_META_KEY,
   ChannelPromptCancelledError,
   type ChannelLoopToolHandler,
   type ChannelPromptImage,
@@ -989,6 +990,13 @@ describe('AcpBridge', () => {
   it.each([undefined, 'per_task'] as const)(
     'consumes a task result only for %s',
     async (outputMode) => {
+      const workflowOrigin = {
+        channelName: 'telegram',
+        chatId: 'launch-chat',
+        senderId: 'launch-user',
+        threadId: 'launch-thread',
+        userInitiated: true as const,
+      };
       const bridge = new AcpBridge({
         cliEntryPath: '/tmp/qwen',
         cwd: '/tmp',
@@ -1013,9 +1021,10 @@ describe('AcpBridge', () => {
                 [CHANNEL_TASK_OUTPUT_META_KEY]: claimed,
                 backgroundTask: {
                   taskId: 'task-1',
-                  kind: 'agent',
+                  kind: 'workflow',
                   status: 'completed',
                   turnComplete: true,
+                  [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: workflowOrigin,
                 },
               },
             },
@@ -1025,12 +1034,13 @@ describe('AcpBridge', () => {
       });
       bridge.connection = { extMethod: vi.fn(), prompt };
       await expect(
-        bridge.prompt('s-1', 'question', { outputMode }),
+        bridge.prompt('s-1', 'question', { outputMode, workflowOrigin }),
       ).resolves.toBe(outputMode ? 'Task result' : 'Main result');
       expect(prompt).toHaveBeenCalledWith(
         expect.objectContaining({
           _meta: {
             [CHANNEL_PROMPT_META_KEY]: true,
+            [CHANNEL_WORKFLOW_ORIGIN_META_KEY]: workflowOrigin,
             ...(outputMode
               ? { [CHANNEL_OUTPUT_MODE_META_KEY]: outputMode }
               : {}),
@@ -1041,7 +1051,7 @@ describe('AcpBridge', () => {
       expect(backgroundResponse).toHaveBeenCalledWith(
         's-1',
         'Unrelated result',
-        expect.any(Object),
+        expect.objectContaining({ channelWorkflowOrigin: workflowOrigin }),
       );
     },
   );
@@ -1489,6 +1499,162 @@ describe('AcpBridge', () => {
             sessionUpdate: 'agent_message_chunk',
             content: { type: 'text', text: 'Slash output' },
             _meta: { source: 'slash_command' },
+          },
+        });
+        bridge.emit('textChunk', 's-1', 'Model text');
+      }),
+    };
+
+    await expect(bridge.prompt('s-1', 'question')).resolves.toBe('Model text');
+  });
+
+  it('carries a turn notice ahead of the model text instead of shadowing it', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn(async () => {
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Only the first 5 skills were loaded.',
+            },
+            _meta: { source: 'slash_command', turnNotice: true },
+          },
+        });
+        bridge.emit('textChunk', 's-1', 'Model text');
+      }),
+    };
+
+    await expect(bridge.prompt('s-1', 'question')).resolves.toBe(
+      'Only the first 5 skills were loaded.\n\nModel text',
+    );
+  });
+
+  it('keeps the turn notice when a tool call clears the response chunks', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn(async () => {
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Only the first 5 skills were loaded.',
+            },
+            _meta: { source: 'slash_command', turnNotice: true },
+          },
+        });
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'call-1',
+            kind: 'read',
+            title: 'Read',
+            status: 'in_progress',
+          },
+        });
+        bridge.emit('textChunk', 's-1', 'Model text');
+      }),
+    };
+
+    await expect(bridge.prompt('s-1', 'question')).resolves.toBe(
+      'Only the first 5 skills were loaded.\n\nModel text',
+    );
+  });
+
+  it('keeps the turn notice on the per_task reply', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn(async () => {
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Only the first 5 skills were loaded.',
+            },
+            _meta: { source: 'slash_command', turnNotice: true },
+          },
+        });
+        return {
+          stopReason: 'end_turn',
+          _meta: { 'qwen.channel.taskResult': 'Task done' },
+        };
+      }),
+    };
+
+    await expect(
+      bridge.prompt('s-1', 'question', { outputMode: 'per_task' }),
+    ).resolves.toBe('Only the first 5 skills were loaded.\n\nTask done');
+  });
+
+  it('does not add a blank paragraph after a notice-only turn', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn(async () => {
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Only the first 5 skills were loaded.',
+            },
+            _meta: { source: 'slash_command', turnNotice: true },
+          },
+        });
+        return { stopReason: 'end_turn' };
+      }),
+    };
+
+    await expect(bridge.prompt('s-1', 'question')).resolves.toBe(
+      'Only the first 5 skills were loaded.',
+    );
+  });
+
+  it('ignores a turn notice for another prompt session', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn(async () => {
+        bridge.handleSessionUpdate({
+          sessionId: 's-2',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Only the first 5 skills were loaded.',
+            },
+            _meta: { source: 'slash_command', turnNotice: true },
           },
         });
         bridge.emit('textChunk', 's-1', 'Model text');
@@ -2219,6 +2385,48 @@ describe('AcpBridge', () => {
       bridge.respondToPermission(secondEvent.requestId, response),
     ).resolves.toBe(true);
     await expect(second).resolves.toEqual(response);
+  });
+
+  it('keeps a detached workflow approval through prompt cancellation until its tool update', async () => {
+    const bridge = new AcpBridge({ cliEntryPath: '/tmp/qwen', cwd: '/tmp' });
+    const permissionResolved = vi.fn();
+    const responseBoundary = vi.fn();
+    bridge.on('permissionResolved', permissionResolved);
+    bridge.on('responseBoundary', responseBoundary);
+
+    await bridge.start();
+    const foreground = requestPermission('session-1', 'tool-1');
+    const workflow = child.clients[0]!.requestPermission({
+      sessionId: 'session-1',
+      toolCall: {
+        toolCallId: 'workflow-tool',
+        kind: 'shell',
+        title: 'Workflow tool',
+        _meta: { workflowApproval: true, backgroundWorkflowApproval: true },
+      },
+      options: [{ optionId: 'cancel', name: 'Deny' }],
+    });
+    expect(responseBoundary).toHaveBeenCalledTimes(1);
+
+    await bridge.cancelSession('session-1');
+    await expect(foreground).resolves.toEqual({
+      outcome: { outcome: 'cancelled' },
+    });
+    expect(permissionResolved).toHaveBeenCalledTimes(1);
+
+    child.clients[0]!.sessionUpdate({
+      sessionId: 'session-1',
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'workflow-tool',
+        status: 'failed',
+        _meta: { workflowApproval: true, backgroundWorkflowApproval: true },
+      },
+    });
+    await expect(workflow).resolves.toEqual({
+      outcome: { outcome: 'cancelled' },
+    });
+    expect(permissionResolved).toHaveBeenCalledTimes(2);
   });
 
   it('resolves pending permissions as cancelled after the response timeout', async () => {

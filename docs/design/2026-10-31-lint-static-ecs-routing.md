@@ -14,18 +14,42 @@ remains the reference for the pool's shared-HOME property.
 `classify_pr`'s `pick_runner` publishes two routings instead of one, both
 assigned from a single resolved fleet ladder:
 
-| Output          | Admits                                                                                            | Read by                                                               |
-| --------------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
-| `ubuntu_runner` | same-repo heads, `OWNER` / `MEMBER` / `COLLABORATOR` authors, `merge_group`, `push` — else hosted | `test`, `integration_no_ak`, `integration_cli`, `web_shell_e2e_smoke` |
-| `lint_runner`   | every `pull_request`, untrusted forks included; otherwise identical to `ubuntu_runner`            | `lint_and_static`                                                     |
+| Output          | Admits                                                                                            | Read by                                                                                                                                                                        |
+| --------------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ubuntu_runner` | same-repo heads, `OWNER` / `MEMBER` / `COLLABORATOR` authors, `merge_group`, `push` — else hosted | `integration_cli`, `web_shell_e2e_smoke` (`test` moved to `pr_test_runner`; superseded by [2026-11-07-ephemeral-container-runners](2026-11-07-ephemeral-container-runners.md)) |
+| `lint_runner`   | every `pull_request`, untrusted forks included; otherwise identical to `ubuntu_runner`            | `lint_and_static`, `integration_no_ak` (2026-11-02)                                                                                                                            |
 
-`classify_pr`'s OWN runner is unconditional ECS (kill-switch excepted) for
-every event it accepts. The gate executes only trusted base-SHA code with a
-read-only token — strictly less exposure than the lint lane — and keeping it
-on hosted for untrusted forks queued the entire fork CI chain (classify is
-the `needs` prerequisite of every Linux lane) behind the scarce hosted pool.
-The association gate survives where it bounds heavy PR-code execution:
-`ubuntu_runner`, read by the test and integration lanes.
+`classify_pr`'s OWN runner is association-gated ECS (kill-switch excepted):
+same-repo heads, `OWNER` / `MEMBER` / `COLLABORATOR` fork authors, `merge_group`,
+`push` and `workflow_dispatch` reach the pool — except a dispatch whose
+`linux_runner` input is `hosted`, which stays hosted under the 2026-11-14
+amendment below; untrusted fork PRs fall back to
+`ubuntu-latest`. The gate executes only trusted base-SHA code with a read-only
+token — strictly less exposure than the lint lane.
+
+2026-11-14 (PR #17178) reverses the 2026-10-31 extension to unconditional ECS:
+the gate is lightweight, so the hosted queue delay for unreviewed forks is
+acceptable, and keeping them off the persistent pool by default is worth it.
+This is throughput policy, not a fence — a fork can rewrite this `runs-on`
+away (residual-surface note below). The association gate still bounds heavy
+PR-code execution on `ubuntu_runner` (the test lane and the merge-queue-only
+CLI integration lane).
+
+2026-11-02: `integration_no_ak` joined `lint_runner`. Same trust class as
+lint — the lane executes fork code from its checkout and install steps
+(lifecycle scripts plus scripts/prepare.js) — but zero secrets by
+construction: every model key is emptied at the integration gate and the
+job's only token is the read-only checkout grant. Round 2 of review caught
+the gate-scoped HOME being the wrong shape (fork code starts ~14 steps
+earlier), so the lane now mirrors lint exactly: the FIRST step publishes a
+run-unique HOME plus COREPACK_HOME inside it via GITHUB_ENV (corepack does
+not re-verify entries on cache hit — a shared home is a cross-job
+poisoning channel), XDG_CACHE_HOME stays on the shared verified tool
+cache, and an always() cleanup step reclaims the home at the end. The
+routing battery pins the lane set, the first-step isolation, the cleanup,
+and a zero-secrets env contract enforced by VALUE (every non-path key must
+be empty, including `ANTHROPIC_AUTH_TOKEN`, which the Anthropic SDK's auth
+resolver back-fills from env; no secrets.\* anywhere in the gate).
 
 Fallback priority: `MAINTAINER_ECS_RUNNER_DISABLED=true` overrides everything,
 including manual dispatch. `LINUX_RUNNER_FLEET=hosted` forces pull requests,
@@ -111,8 +135,9 @@ residual surface below stays accepted.
   boundary.** A `pull_request` run executes the PR's own workflow file, so any
   fork can put any lane — `test` included — on the pool in the same diff it
   opens (ci.yml's `test_windows` comment records the same fact). GitHub's
-  first-timer workflow approval is the outer gate. The single-lane scope of
-  this decision describes the default routing, not a fence.
+  first-timer workflow approval is the outer gate. The two-lane scope of this
+  decision (Lint & Static and the no-AK integration lane) describes the
+  default routing, not a fence.
 - **Cloud metadata.** If a pool instance binds a RAM role, any job process can
   reach the metadata endpoint. Fleet-side hardened mode is recommended,
   independent of this workflow change.
@@ -131,19 +156,28 @@ minutes, test 120, web-shell smoke 60, no-AK integration 30.
 ## Tests
 
 `.github/scripts/ci-runner-routing.test.mjs` (in `HELPER_TESTS`, so it gates
-every full-profile PR) pins: the gate's unconditional ECS routing across the
-full association matrix (kill-switch reverting it, no association clause
-creeping back), the producer binding
+every full-profile PR) pins: the gate's association-gated DEFAULT routing
+across the full association matrix (trusted/same-repo → ECS, untrusted forks →
+hosted, the kill-switch reverting everyone, and merge_group/push/dispatch
+reaching ECS), structural pins keeping the association and head-repo clauses
+as drift protection (not a fence — a fork rewrites the whole YAML), the
+producer binding
 (`classify_pr.outputs.lint_runner` ← `pick_runner`), the full association /
-event matrix against the real selector shell, the single-lane scope of
+event matrix against the real selector shell, the recorded two-lane scope of
 `lint_runner` (a superset must update this record), the run-unique HOME
 published from the first step with clear-before-create and shared verified
 caches, the cleanup step preceding the collector, and both outputs agreeing
 on one fleet ladder for unmodeled fleet values.
 `scripts/tests/ci-platform-lanes.test.js` pins the `runs-on` literals (lint on
 `lint_runner`, test on `ubuntu_runner`) and evaluates each lane's timeout from
-its own routing output; note that suite runs after the merge queue, which is
-why the load-bearing HOME guard lives in the routing battery.
+its own routing output; note that suite runs in the test job's side lane on
+every full-profile PR. The routing battery runs in lint_and_static after
+dependency install (it imports the `yaml` package, so it cannot join the
+dep-free fast lane), and on `github_ci_only` PRs it does not run in the PR's
+own run at all — a stripped isolation is caught by the next full-profile PR
+or main push, one run later. The HOME guard still lives there because the
+battery drives the real `pick_runner` shell and gates every full-profile PR,
+a strictly larger surface than the vitest side lane.
 
 ## Decision record and open questions
 
@@ -156,11 +190,35 @@ why the load-bearing HOME guard lives in the routing battery.
   the acceptance covers the residual surface above, not a one-lane fence. A
   second maintainer's confirmation is welcome (triage stage-3 deferred on
   exactly this); it is a human decision, not a code change.
+- 2026-11-14 amendment (PR #17178): the classify_pr gate returns to
+  association-gated default routing (untrusted forks → hosted), reversing the
+  same-day unconditional-ECS extension above. The gate is lightweight enough
+  that the hosted queue delay is acceptable, and default routing should keep
+  unreviewed forks off the persistent pool. The risk acceptance is unchanged —
+  the pool already executes fork code in the lint and no-AK lanes, and the
+  association gate remains throughput policy, not an enforceable boundary (a
+  fork rewrites the workflow YAML). Dispatch routing is no longer unconditional:
+  the gate follows the `linux_runner` input, so `hosted` resolves to
+  `ubuntu-latest` while `self-hosted` and `self-hosted-arm64` resolve to
+  `ecs-qwen`. That is a behaviour change this amendment records — the
+  unconditional gate carried no event terms and sent every dispatch to
+  `ecs-qwen` — so the dispatch edge moves too, not only untrusted-fork classify
+  (ECS → hosted). `self-hosted-arm64` is not a clean follow, and this amendment
+  records the exception rather than implying the input is honoured end to end:
+  the gate has no arm64 labels, so it requests
+  `["self-hosted","linux","x64","ecs-qwen"]` while `pick_runner` sends the
+  downstream lanes to `["self-hosted","linux","arm64"]`. With no x64 runner
+  online, `classify_pr` — the `needs` prerequisite of every Linux lane — queues
+  unbounded, because `timeout-minutes` starts only once a runner picks the job
+  up; the job's 10-minute cap bounds a started-and-stalled classify, not that
+  wait. A maintainer is most likely to dispatch `self-hosted-arm64` when the x64
+  fleet is drained, which is exactly when nothing will pick the gate up.
 - The PR's own CI exercises the routing plumbing on the pool (the author is a
   collaborator, so both outputs agree on that run); the fork divergence is
   proven by the routing battery, and its first live end-to-end witness is the
   next untrusted fork PR.
-- Follow-ups owned separately: warm shared pnpm store under the per-run HOME
+- Follow-ups owned separately: warm shared pnpm store (the no-AK lane now
+  pays the same accepted cold-install cost as lint) under the per-run HOME
   (e.g. via `XDG_DATA_HOME` at a content-verified shared path) to recover the
   ~900 s cold-install cost; disk-floor gate coverage of `/tmp` inodes; fleet
   metadata hardening; the `test` lane's constant `qwen-ci-home` persistence;

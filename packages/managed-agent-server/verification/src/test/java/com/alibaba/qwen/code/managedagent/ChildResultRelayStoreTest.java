@@ -5,9 +5,10 @@ import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationComma
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
-import com.alibaba.qwen.code.managedagent.persistence.ChildResultRelayStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcChildResultRelayStore;
 import com.alibaba.qwen.code.managedagent.repository.ChildResultRelayStore.PendingChild;
 import com.alibaba.qwen.code.managedagent.repository.ChildResultRelayStore.RelayRow;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -34,7 +35,7 @@ class ChildResultRelayStoreTest {
     private static final String TENANT = "tenant-relay";
 
     @Autowired
-    private ChildResultRelayStore relayStore;
+    private JdbcChildResultRelayStore relayStore;
 
     @Autowired
     private AgentStateStore state;
@@ -192,7 +193,7 @@ class ChildResultRelayStoreTest {
             assertThat(row.recordResourceId()).isEqualTo("resource-run-live");
         });
         assertThat(relayStore.findLiveScopes(TENANT, session))
-                .extracting(ChildResultRelayStore.LiveScope::childRunId)
+                .extracting(JdbcChildResultRelayStore.LiveScope::childRunId)
                 .containsExactly("run-live", "workflow-live");
         // A live ledger claim leaves its own run discoverable beside the
         // still-unclaimed workflow row; a terminal classification retires
@@ -307,7 +308,7 @@ class ChildResultRelayStoreTest {
                         + " ma_delivery WHERE tenant_id = ? AND delivery_kind ="
                         + " 'CHILD_RESULT' AND source_scope_key = ? AND"
                         + " delivery_id = ?", String.class, TENANT,
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore
+                ManagedSessionStore
                         .sessionScopeKey(TENANT, session), run);
     }
 
@@ -322,7 +323,7 @@ class ChildResultRelayStoreTest {
                         + " delivery_state, gmt_create)"
                         + " VALUES (?, ?, ?, 'workspace', ?, 'child_run', ?,"
                         + " 'h', 1, ?, ?, ?, ?, ?, 1)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, sessionId),
+                ManagedSessionStore.sessionScopeKey(TENANT, sessionId),
                 com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection.recordKey(sessionId, "child_run", recordId),
                 TENANT, sessionId, recordId,
                 "resource-" + recordId,
@@ -640,7 +641,7 @@ class ChildResultRelayStoreTest {
     }
 
     private void resource(String sessionId, String resourceId, String kind, String body) {
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
+        String scope = ManagedSessionStore.sessionScopeKey(TENANT, sessionId);
         byte[] bytes = body.getBytes(java.nio.charset.StandardCharsets.UTF_8);
         jdbc.update("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, ?, 'workspace', ?, ?, ?, 1, ?, ?, 'MYSQL_INLINE', ?, 'command', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")",
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, resourceId), scope, TENANT, sessionId,
@@ -665,7 +666,7 @@ class ChildResultRelayStoreTest {
         RelayRow stale = relayStore.find(TENANT, session, "run-race");
         assertThat(relayStore.claim(TENANT, session, "run-race", "key-race",
                 "owner-a", 70_000, 40_000)).isNotNull();
-        ChildResultRelayStore staleReader = new ChildResultRelayStore(jdbc) {
+        JdbcChildResultRelayStore staleReader = new JdbcChildResultRelayStore(jdbc) {
             @Override
             public RelayRow find(String tenantId, String parentSessionId,
                     String childRunId) {
@@ -692,7 +693,7 @@ class ChildResultRelayStoreTest {
                         + " gmt_modified, completed_at, version)"
                         + " VALUES (?, ?, 'turn-1', 'prompt-1', '[]', 'd',"
                         + " 'COMPLETED', TRUE, 1, 2, 2, 1)", TENANT, session);
-        ChildResultRelayStore.TurnLine turn = relayStore.latestTurn(TENANT,
+        JdbcChildResultRelayStore.TurnLine turn = relayStore.latestTurn(TENANT,
                 session);
         assertThat(turn.status()).isEqualTo("COMPLETED");
         assertThat(turn.submissionAttempted()).isTrue();

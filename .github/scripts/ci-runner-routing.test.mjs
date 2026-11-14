@@ -2,14 +2,16 @@
 // qwen-autofix.yml scan lane, the trusted-PR lanes of #13245, and the
 // control-plane jobs that run no PR code.
 //
-// classify_pr's own runner is unconditional ECS (kill-switch excepted):
-// the gate executes only trusted base-SHA code with a read-only token, and
-// keeping it on hosted for forks queued the whole fork CI chain behind a
-// scarce pool (2026-10-31 decision, same accepted risk class as lint).
+// classify_pr's own runner is association-gated ECS (kill-switch excepted):
+// a pull_request run executes the PR's own YAML, so the clause is throughput
+// policy, not an enforceable trust boundary. The policy is stated once, in
+// docs/design/2026-10-31-lint-static-ecs-routing.md; this file pins its shape —
+// including the repository-name guard, which keeps a fork named `qwen-code`
+// from being sent to a pool it cannot reach.
 // The association routing for DOWNSTREAM lanes lives in the `pick_runner`
 // shell step, which publishes `ubuntu_runner` (association-gated) and
-// `lint_runner` (every pull request reaches the fleet). The matrix below
-// pins the gate's unconditional routing AND that ubuntu_runner keeps the
+// `lint_runner` (untrusted forks use the disposable ARM64 pool). The matrix below
+// pins the gate's association-gated routing AND that ubuntu_runner keeps the
 // association gate for the test/integration lanes.
 //
 // test_windows carries a deliberately different policy. A pull_request run
@@ -61,7 +63,17 @@ const pickRunner = ciDoc.jobs.classify_pr.steps.find(
 // label, unwrapped here to the array it names. Any term the substitutions
 // do not recognise fails loud, so an edited expression is re-read here
 // instead of silently outgrowing the matrix.
-function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
+function evalRunsOn(
+  expression,
+  {
+    ecsDisabled,
+    eventName,
+    sameRepo,
+    assoc,
+    repoName = 'QwenLM/qwen-code',
+    dispatchRunner = 'self-hosted',
+  },
+) {
   const substitutions = [
     [/vars\.MAINTAINER_ECS_RUNNER_DISABLED != 'true'/, String(!ecsDisabled)],
     [
@@ -69,6 +81,10 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
       String(eventName === 'merge_group'),
     ],
     [/github\.event_name == 'push'/, String(eventName === 'push')],
+    [
+      /github\.event_name == 'workflow_dispatch'/,
+      String(eventName === 'workflow_dispatch'),
+    ],
     // Longest term first as a convention; both patterns are quote-anchored
     // (the closing quote is part of each regex), so neither can match
     // inside the other and the substitution order is behaviorally inert.
@@ -88,16 +104,34 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
       /github\.event_name == 'pull_request'/,
       String(eventName === 'pull_request'),
     ],
-    [/github\.repository == 'QwenLM\/qwen-code'/, 'true'],
+    [
+      /github\.repository == 'QwenLM\/qwen-code'/,
+      String(repoName === 'QwenLM/qwen-code'),
+    ],
+    [
+      /github\.event\.inputs\.linux_runner != 'hosted'/,
+      String(dispatchRunner !== 'hosted'),
+    ],
     [
       /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/,
       String(sameRepo),
     ],
     [
+      /github\.event\.pull_request\.head\.repo\.full_name != github\.repository/,
+      String(!sameRepo),
+    ],
+    [
       /contains\(fromJSON\('\["OWNER","MEMBER","COLLABORATOR"\]'\), github\.event\.pull_request\.author_association\)/,
       String(TRUSTED.includes(assoc)),
     ],
-    [/github\.repository == 'QwenLM\/qwen-code'/, 'true'],
+    [
+      /github\.repository == 'QwenLM\/qwen-code'/,
+      String(repoName === 'QwenLM/qwen-code'),
+    ],
+    [
+      /github\.event\.inputs\.linux_runner != 'hosted'/,
+      String(dispatchRunner !== 'hosted'),
+    ],
   ];
   let expr = expression.replace(/^\$\{\{\s*/, '').replace(/\s*\}\}$/, '');
   for (const [term, value] of substitutions) {
@@ -161,7 +195,15 @@ function runPickRunnerOutputs({
     outputs.split('\n').includes(`lint_runner=${lintRunner}`),
     `lint_runner not published: ${outputs}`,
   );
-  return { ubuntuRunner, lintRunner };
+  const prTest = outputs
+    .split('\n')
+    .find((line) => line.startsWith('pr_test_runner='));
+  assert.ok(prTest, 'pr_test_runner not published');
+  return {
+    ubuntuRunner,
+    lintRunner,
+    prTestRunner: prTest.slice('pr_test_runner='.length),
+  };
 }
 
 function runPickRunner(inputs) {
@@ -178,12 +220,13 @@ const ASSOCIATIONS = [
 ];
 
 describe('ci.yml classify_pr runner routing', () => {
-  it('the gate routes every association to ECS; the kill-switch wins', () => {
-    // classify executes trusted base-SHA code only, so its own runner needs
-    // no association gate — a hosted gate queued the entire fork CI chain.
-    // The downstream ubuntu_runner keeps the gate (next test).
+  it('the gate routes trusted authors and same-repo to ECS; untrusted forks stay hosted', () => {
+    // Pins the DEFAULT routing (the header carries the threat model): trusted
+    // associations and same-repo PRs land on ECS, everything else stays hosted
+    // — not a boundary a fork cannot cross. The kill-switch wins for everyone.
     for (const sameRepo of [true, false]) {
       for (const assoc of ASSOCIATIONS) {
+        const isTrusted = sameRepo || TRUSTED.includes(assoc);
         assert.deepEqual(
           evalRunsOn(classifyRunsOn, {
             ecsDisabled: false,
@@ -191,8 +234,8 @@ describe('ci.yml classify_pr runner routing', () => {
             sameRepo,
             assoc,
           }),
-          JSON.parse(ECS),
-          `gate sameRepo=${sameRepo} assoc='${assoc}' must reach ECS`,
+          JSON.parse(isTrusted ? ECS : HOSTED),
+          `gate sameRepo=${sameRepo} assoc='${assoc}' must ${isTrusted ? 'reach ECS' : 'stay hosted'}`,
         );
         assert.deepEqual(
           evalRunsOn(classifyRunsOn, {
@@ -205,6 +248,82 @@ describe('ci.yml classify_pr runner routing', () => {
           `kill-switch must revert the gate (assoc='${assoc}')`,
         );
       }
+    }
+    // dispatch reaches ECS too ("the merge queue, pushes to main, and dispatch"
+    // above). An earlier revision of this PR gated on the PR clauses alone, so
+    // dispatch — whose github.event.pull_request is empty — fell to hosted.
+    // Only users with write access can dispatch, and they already reach ECS via
+    // same-repo PRs and push, so this adds no reachability (unchanged vs base).
+    for (const assoc of ['', 'NONE', 'OWNER']) {
+      assert.deepEqual(
+        evalRunsOn(classifyRunsOn, {
+          ecsDisabled: false,
+          eventName: 'workflow_dispatch',
+          sameRepo: false,
+          assoc,
+        }),
+        JSON.parse(ECS),
+        `dispatch (assoc='${assoc}') must reach ECS`,
+      );
+    }
+    assert.deepEqual(
+      evalRunsOn(classifyRunsOn, {
+        ecsDisabled: true,
+        eventName: 'workflow_dispatch',
+        sameRepo: false,
+        assoc: 'OWNER',
+      }),
+      JSON.parse(HOSTED),
+      'dispatch kill-switch must revert to hosted',
+    );
+    // A maintainer who asks for hosted gets hosted here too: `pick_runner`
+    // treats the `linux_runner` input as authoritative for the downstream
+    // lanes, and a gate that ignored it would sit on the pool the maintainer
+    // just drained. (The arm64 option is a residual with no bound: the gate has
+    // no arm64 labels, so it asks the x64 pool, and `timeout-minutes` cannot
+    // cover the wait because its clock starts only at pickup — with no x64
+    // runner online, `classify_pr` queues unbounded.)
+    assert.deepEqual(
+      evalRunsOn(classifyRunsOn, {
+        ecsDisabled: false,
+        eventName: 'workflow_dispatch',
+        sameRepo: false,
+        assoc: '',
+        dispatchRunner: 'hosted',
+      }),
+      JSON.parse(HOSTED),
+      'dispatch with linux_runner=hosted must stay hosted',
+    );
+    // Only THIS repository. A fork named `qwen-code` satisfies
+    // `head.repo.full_name == github.repository`, and without the name guard it
+    // routes to a pool it cannot reach: classify_pr never finishes, so no lane
+    // gets a verdict at all.
+    assert.deepEqual(
+      evalRunsOn(classifyRunsOn, {
+        ecsDisabled: false,
+        eventName: 'pull_request',
+        sameRepo: true,
+        assoc: 'OWNER',
+        repoName: 'alice/qwen-code',
+      }),
+      JSON.parse(HOSTED),
+      'a fork named qwen-code must not reach the pool',
+    );
+    // merge_group has an empty PR context too. Pin it against the gate's own
+    // runs-on — the pick_runner shell tests below cover the downstream lanes,
+    // not this expression. Without these rows, deleting the merge_group clause
+    // silently demotes the queue to hosted with every test still green.
+    for (const ecsDisabled of [false, true]) {
+      assert.deepEqual(
+        evalRunsOn(classifyRunsOn, {
+          ecsDisabled,
+          eventName: 'merge_group',
+          sameRepo: false,
+          assoc: '',
+        }),
+        JSON.parse(ecsDisabled ? HOSTED : ECS),
+        `merge_group (ecsDisabled=${ecsDisabled})`,
+      );
     }
   });
 
@@ -284,12 +403,13 @@ describe('ci.yml classify_pr runner routing', () => {
     }
   });
 
-  it('the gate expression is unconditional except the kill-switch', () => {
-    // Structural pins: no association/head-repo clause may creep back into
-    // the gate (it would re-queue fork CI on hosted), and the kill-switch
-    // must stay the single escape hatch.
-    assert.doesNotMatch(classifyRunsOn, /author_association/);
-    assert.doesNotMatch(classifyRunsOn, /head\.repo\.full_name/);
+  it('the gate expression requires trusted author or same-repo for self-hosted', () => {
+    // Structural pins for the DEFAULT routing: the gate keeps the association
+    // and head-repo clauses so unreviewed forks stay off the pool by default —
+    // throughput policy, not a fence (a fork can rewrite this whole YAML in the
+    // same diff; see the header). The kill-switch must stay as an escape hatch.
+    assert.match(classifyRunsOn, /author_association/);
+    assert.match(classifyRunsOn, /head\.repo\.full_name/);
     assert.match(
       classifyRunsOn,
       /vars\.MAINTAINER_ECS_RUNNER_DISABLED != 'true'/,
@@ -302,11 +422,34 @@ describe('ci.yml lint_runner routing', () => {
   const ARM = '["self-hosted", "linux", "arm64"]';
   const lintRunner = (inputs) => runPickRunnerOutputs(inputs).lintRunner;
 
-  it('routes every pull request to the fleet, untrusted forks included', () => {
-    // The maintainer decision this pins: Lint & Static executes PR code on
-    // the shared pool for ALL authors. If this matrix ever flips back to
-    // hosted for the negative associations without a deliberate decision,
-    // the lane silently regrows its hosted quota spend.
+  // The disposable-pool config and the CI selectors are one contract: a label
+  // rename on either side leaves every fork PR queued forever with no failed
+  // check to point at. Pin them together (#16551 review).
+  it('publishes exactly the labels the disposable-pool config registers', () => {
+    const config = JSON.parse(
+      readFileSync(
+        join(
+          workflowsDir,
+          '..',
+          '..',
+          'scripts',
+          'ci',
+          'ephemeral-runner',
+          'config.example.json',
+        ),
+        'utf8',
+      ),
+    );
+    const fork = runPickRunnerOutputs({
+      eventName: 'pull_request',
+      sameRepo: false,
+      assoc: 'NONE',
+    });
+    assert.deepEqual(JSON.parse(fork.prTestRunner), config.labels);
+    assert.deepEqual(JSON.parse(fork.lintRunner), config.labels);
+  });
+
+  it('routes untrusted fork lint to the disposable pool without variables', () => {
     for (const sameRepo of [true, false]) {
       for (const assoc of ASSOCIATIONS) {
         assert.equal(
@@ -316,8 +459,10 @@ describe('ci.yml lint_runner routing', () => {
             assoc,
             eventName: 'pull_request',
           }),
-          ECS,
-          `lint sameRepo=${sameRepo} assoc='${assoc}' must route to ECS`,
+          sameRepo || TRUSTED.includes(assoc)
+            ? ECS
+            : '["self-hosted", "ecs-qwen-ephemeral"]',
+          `lint sameRepo=${sameRepo} assoc='${assoc}'`,
         );
       }
     }
@@ -354,7 +499,7 @@ describe('ci.yml lint_runner routing', () => {
       lintRunner({
         ecsDisabled: false,
         sameRepo: false,
-        assoc: 'NONE',
+        assoc: 'MEMBER',
         eventName: 'pull_request',
         fleet: 'arm64',
       }),
@@ -442,6 +587,111 @@ describe('ci.yml lint_runner routing', () => {
   });
 });
 
+describe('ci.yml disposable runner routing', () => {
+  it('selects the formal ARM64 pool when repository variables are empty', () => {
+    const selected = runPickRunnerOutputs({
+      eventName: 'pull_request',
+      sameRepo: false,
+      assoc: 'NONE',
+    });
+    const arm = '["self-hosted", "ecs-qwen-ephemeral"]';
+    assert.equal(selected.prTestRunner, arm);
+    assert.equal(selected.lintRunner, arm);
+    assert.equal(selected.ubuntuRunner, HOSTED);
+    const genericArm = JSON.parse(
+      runPickRunnerOutputs({
+        eventName: 'workflow_dispatch',
+        dispatch: 'self-hosted-arm64',
+      }).ubuntuRunner,
+    );
+    assert.equal(
+      genericArm.every((label) => JSON.parse(arm).includes(label)),
+      false,
+      'generic ARM64 jobs must not match the disposable pool',
+    );
+    assert.equal(pickRunner.env.EPHEMERAL_ENABLED, undefined);
+    assert.equal(pickRunner.env.EPHEMERAL_ARCH, undefined);
+    assert.equal(
+      existsSync(join(workflowsDir, 'ephemeral-runner-smoke.yml')),
+      false,
+    );
+    assert.equal(
+      existsSync(join(workflowsDir, 'ci-runner-routing.yml')),
+      false,
+    );
+    const example = JSON.parse(
+      readFileSync(
+        join(
+          dirname(fileURLToPath(import.meta.url)),
+          '..',
+          '..',
+          'scripts',
+          'ci',
+          'ephemeral-runner',
+          'config.example.json',
+        ),
+        'utf8',
+      ),
+    );
+    assert.deepEqual(
+      example.labels,
+      JSON.parse(arm),
+      'the example runner registration must match the fork routing selector',
+    );
+  });
+  it('routes only untrusted fork jobs to the disposable pool', () => {
+    const ephemeral = '["self-hosted", "ecs-qwen-ephemeral"]';
+    for (const eventName of [
+      'pull_request',
+      'push',
+      'merge_group',
+      'workflow_dispatch',
+    ]) {
+      for (const sameRepo of [true, false]) {
+        for (const assoc of ASSOCIATIONS) {
+          for (const ecsDisabled of [true, false]) {
+            for (const fleet of ['', 'hosted', 'arm64']) {
+              const inputs = { eventName, sameRepo, assoc, ecsDisabled, fleet };
+              const baseline = runPickRunnerOutputs(inputs);
+              const selected =
+                eventName === 'pull_request' &&
+                !sameRepo &&
+                !TRUSTED.includes(assoc) &&
+                !ecsDisabled &&
+                fleet !== 'hosted';
+              assert.equal(
+                baseline.prTestRunner,
+                selected ? ephemeral : baseline.ubuntuRunner,
+                JSON.stringify(inputs),
+              );
+              assert.equal(
+                baseline.lintRunner,
+                selected ? ephemeral : baseline.ubuntuRunner,
+                JSON.stringify(inputs),
+              );
+            }
+          }
+        }
+      }
+    }
+  });
+
+  it('routes only the intended jobs through the new output', () => {
+    assert.equal(
+      ciDoc.jobs.classify_pr.outputs.pr_test_runner,
+      '${{ steps.pick_runner.outputs.pr_test_runner }}',
+    );
+    for (const name of ['test_build', 'test'])
+      assert.match(ciDoc.jobs[name]['runs-on'], /pr_test_runner/);
+    for (const name of ['lint_and_static', 'integration_no_ak'])
+      assert.match(ciDoc.jobs[name]['runs-on'], /lint_runner/);
+    for (const [name, job] of Object.entries(ciDoc.jobs)) {
+      if (!['classify_pr', 'test_build', 'test'].includes(name))
+        assert.doesNotMatch(String(job['runs-on']), /pr_test_runner/, name);
+    }
+  });
+});
+
 describe('ci.yml lint HOME isolation', () => {
   // This guard lives in the routing battery (HELPER_TESTS) because it gates
   // every full-profile PR; the scripts/tests vitest suites only run after the
@@ -456,16 +706,116 @@ describe('ci.yml lint HOME isolation', () => {
     /outputs\.lint_runner/.test(String(job['runs-on'] ?? '')),
   );
 
-  it('scopes the ungated routing to the single recorded lane', () => {
-    // The decision record scopes the boundary change to Lint & Static alone;
-    // a superset must force a deliberate record update, not pass silently.
+  // The one run-unique path per lane. create, the gate's QWEN_HOME and the
+  // cleanup must all name it: a `home=` that drifts at one site leaves the
+  // others pointing at a directory this run never cleared.
+  const HOME_TEMPLATE = {
+    lint_and_static: 'qwen-lint-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}',
+    integration_no_ak: 'qwen-no-ak-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}',
+  };
+
+  // The `$GITHUB_ENV` writers, by value. It is last-write-wins, so an added
+  // HOME/USERPROFILE writer (or a dropped `HOME=%s`) must break equality;
+  // COREPACK_HOME stays inside the run-unique home (corepack does not
+  // re-verify entries on cache hit — a shared home is a poisoning channel)
+  // and XDG_CACHE_HOME rides the SHA-256-verified linter-archive cache.
+  const ENV_WRITES = [
+    'printf \'HOME=%s\\nUSERPROFILE=%s\\n\' "$home" "$home" >> "${GITHUB_ENV}"',
+    'printf \'XDG_CACHE_HOME=%s\\n\' "${RUNNER_TOOL_CACHE}/qwen-ci-cache" >> "${GITHUB_ENV}"',
+    'printf \'COREPACK_HOME=%s\\n\' "${home}/.cache/node/corepack" >> "${GITHUB_ENV}"',
+  ];
+
+  it('scopes the ungated routing to the recorded lanes', () => {
+    // The decision record scopes the boundary change to Lint & Static and
+    // (2026-11-02, same trust class — PR code on the pool, zero secrets by
+    // construction) the no-AK integration lane; a superset must force a
+    // deliberate record update, not pass silently.
     assert.deepEqual(
       ungated.map(([id]) => id),
-      ['lint_and_static'],
+      ['lint_and_static', 'integration_no_ak'],
+    );
+  });
+
+  it('integration_no_ak isolates from its first step, zero-secrets at the gate', () => {
+    // no_ak's fork code starts at the checkout action and the install
+    // (lifecycle scripts AND scripts/prepare.js — build+bundle), not at the
+    // gate step, so the whole job needs lint's first-step isolation:
+    // GITHUB_ENV-published run-unique HOME, COREPACK_HOME inside it (corepack
+    // does not re-verify entries on cache hit — a shared home is a
+    // cross-job poisoning channel), XDG_CACHE_HOME on the shared verified
+    // tool cache. The gate keeps the model-key scrub.
+    // The routing decision's premise is that this job carries no secrets
+    // because its only grant is the read-only checkout. Nothing else pins it:
+    // adding any other scope would leave every assertion below green while
+    // the accepted-risk argument went stale.
+    assert.deepEqual(
+      ciDoc.jobs.integration_no_ak.permissions,
+      { contents: 'read' },
+      'no_ak must keep only the read-only checkout grant',
+    );
+
+    const steps = ciDoc.jobs.integration_no_ak.steps ?? [];
+    assert.equal(
+      steps[0]?.name,
+      'Create isolated HOME',
+      'no_ak must isolate HOME from its first step',
+    );
+    // The create/cleanup step text is pinned by VALUE in the two shared tests
+    // below, which iterate every ungated lane; looped substring checks used to
+    // survive a `-v2` path drift, a dropped `HOME=%s` and an added HOME writer.
+    // Job env must stay empty of HOME (the runner context is illegal there).
+    assert.equal(ciDoc.jobs.integration_no_ak.env?.HOME, undefined);
+
+    const gate = steps.find(
+      (s) => s.name === 'Run required no-AK integration gate',
+    );
+    assert.ok(gate, 'integration gate step missing');
+    // By value, not by prefix: a drifted create path or a `-v2` suffix would
+    // satisfy `startsWith` while QWEN_HOME pointed at a directory this run
+    // never cleared.
+    assert.equal(
+      gate.env?.QWEN_HOME,
+      '${{ runner.temp }}/qwen-no-ak-home-${{ github.run_id }}-${{ github.run_attempt }}/.qwen',
+      'QWEN_HOME must be the run-unique home the create step built',
+    );
+    // Zero-secrets contract, enforced by VALUE not by name: every env key
+    // outside QWEN_HOME must be the empty string, and the step must
+    // reference no secrets.* anywhere. A name-based regex inherits the
+    // implementation's own premise about which names are credentials, so a
+    // secret under any other name (CI_BOT_PAT, *_DSN, *_BEARER) shipped
+    // green — falsifying the contract that justifies routing untrusted-fork
+    // PR code onto the shared pool.
+    const PATH_KEYS = new Set(['QWEN_HOME']);
+    for (const [key, value] of Object.entries(gate.env ?? {})) {
+      if (!PATH_KEYS.has(key)) {
+        assert.equal(
+          value,
+          '',
+          `${key} must be empty in the no-AK PR-code step`,
+        );
+      }
+    }
+    assert.ok(
+      !JSON.stringify(gate).includes('secrets.'),
+      'the no-AK PR-code step must not reference any secrets.* context',
+    );
+    // The value whitelist above only iterates PRESENT keys, so a deleted
+    // scrub key escapes it (verified by mutation: dropping
+    // ANTHROPIC_AUTH_TOKEN left both suites green). Pin a floor on the
+    // known-dangerous set — the SDK back-fills this one from env.
+    assert.equal(
+      gate.env?.ANTHROPIC_AUTH_TOKEN,
+      '',
+      'ANTHROPIC_AUTH_TOKEN must be present and empty (SDK auth-resolver ' +
+        'back-fill; deleting the scrub key escapes the value whitelist)',
     );
   });
 
   it('publishes a run-unique HOME from the first step, not job env', () => {
+    // Both ungated lanes now share lint's shape: fork code runs from early
+    // steps, so the first step publishes HOME/USERPROFILE via GITHUB_ENV for
+    // every later step. no_ak's specifics (gate key scrub, reclamation) are
+    // covered by its own test above.
     for (const [id, job] of ungated) {
       // jobs.<job_id>.env cannot read the runner context — GitHub rejects the
       // whole workflow file (actionlint 1.7.12 witnesses it).
@@ -478,53 +828,438 @@ describe('ci.yml lint HOME isolation', () => {
       const steps = job.steps ?? [];
       assert.equal(steps[0]?.name, 'Create isolated HOME', id);
       const run = String(steps[0]?.run ?? '');
+      const lines = run.split('\n').map((line) => line.trim());
+      // The declared `home=` by value: a `-v2` suffix here leaves the gate's
+      // QWEN_HOME and the cleanup aimed at a directory this run never built.
       assert.ok(
-        run.includes('GITHUB_RUN_ID') && run.includes('GITHUB_RUN_ATTEMPT'),
-        `${id} HOME path must be run-unique`,
+        lines.includes(`home="\${RUNNER_TEMP}/${HOME_TEMPLATE[id]}"`),
+        `${id} must build its run-unique HOME from the lane template`,
       );
       assert.ok(
         run.includes('rm -rf') && run.indexOf('rm -rf') < run.indexOf('mkdir'),
         `${id} must clear the path before creating it`,
       );
-      assert.ok(
-        run.includes('HOME=') &&
-          run.includes('USERPROFILE=') &&
-          run.includes('GITHUB_ENV'),
-        `${id} must publish HOME/USERPROFILE via GITHUB_ENV`,
+      assert.deepEqual(
+        lines.filter((line) => line.includes('${GITHUB_ENV}')),
+        ENV_WRITES,
+        `${id} must publish exactly HOME/USERPROFILE, XDG_CACHE_HOME and COREPACK_HOME via GITHUB_ENV`,
       );
-      // Linter archives are SHA-256-verified on every cache hit (lint.js), so
-      // the shared tool cache is safe for them. Corepack does NOT re-verify
-      // extracted entries on hit (reproduced on 0.34.6 and 0.36.0), so
-      // COREPACK_HOME must stay inside the run-unique HOME — a shared one is
-      // a cross-job poisoning channel. Deleting either line reds this.
-      assert.ok(
-        run.includes('XDG_CACHE_HOME=') && run.includes('RUNNER_TOOL_CACHE'),
-        `${id} must share the verified linter-archive cache`,
-      );
-      assert.ok(
-        run.includes('COREPACK_HOME=') &&
-          run.includes('"${home}/.cache/node/corepack"'),
-        `${id} COREPACK_HOME must stay inside the run-unique HOME`,
-      );
+      // GITHUB_ENV is last-write-wins, so the guard cannot stop at step 0: a
+      // later step that republishes an isolated key silently reverts the home
+      // for the steps that run PR code while step 0 still matches. The npm
+      // cache step is a legitimate later writer, so only the isolated keys
+      // are banned — not every later `$GITHUB_ENV` append.
+      // `[^\w]`, not `\s`: the realistic form is `printf 'HOME=%s\n'` inside
+      // quotes, which a whitespace-only prefix let through.
+      const ISOLATED_KEY =
+        /(^|[^\w])(HOME|USERPROFILE|COREPACK_HOME|XDG_CACHE_HOME)=/;
+      for (const [index, step] of steps.entries()) {
+        if (index === 0) continue;
+        for (const line of String(step.run ?? '')
+          .split('\n')
+          .map((l) => l.trim())) {
+          assert.ok(
+            !(line.includes('${GITHUB_ENV}') && ISOLATED_KEY.test(line)),
+            `${id} step ${index} (${step.name}) must not republish an isolated HOME key via GITHUB_ENV`,
+          );
+        }
+        for (const key of Object.keys(step.env ?? {})) {
+          assert.ok(
+            !/^(HOME|USERPROFILE|COREPACK_HOME|XDG_CACHE_HOME)$/.test(key),
+            `${id} step ${index} (${step.name}) must not override ${key} for a single step`,
+          );
+        }
+      }
     }
   });
 
   it('reclaims the isolated HOME before the failure collector', () => {
+    // Both ungated lanes reclaim: no_ak's cleanup is its last step (it has
+    // no collector); lint's sits before the failure collector, which must
+    // stay last.
     for (const [id, job] of ungated) {
       const steps = job.steps ?? [];
       const names = steps.map((s) => s.name);
       const clean = steps.find((s) => s.name === 'Clean isolated HOME');
       assert.ok(clean, `${id} cleanup step missing`);
       assert.equal(clean.if, '${{ always() }}', id);
-      assert.ok(
-        names.indexOf('Clean isolated HOME') <
-          names.indexOf('Upload disk-pressure samples'),
-        `${id} collector must stay last`,
+      const collectorIndex = names.indexOf('Upload disk-pressure samples');
+      if (collectorIndex !== -1) {
+        assert.ok(
+          names.indexOf('Clean isolated HOME') < collectorIndex,
+          `${id} collector must stay last`,
+        );
+      } else {
+        // No collector (no_ak): the cleanup itself is the last step.
+        assert.equal(
+          names[names.length - 1],
+          'Clean isolated HOME',
+          `${id} cleanup must be the final step`,
+        );
+      }
+      // The realized removal by value, never $HOME: any `qwen-*` path passes a
+      // substring check, so a retargeted `rm -rf` (or an `echo` stand-in)
+      // would leave the run-unique home to accumulate on this persistent pool.
+      //
+      // The reap runs BEFORE the removal and in the SAME step: a daemon that
+      // outlived the suite recreates entries under the home while `rm -rf`
+      // unlinks them, and rmdir loses with ENOTEMPTY (job 130495062334: 223
+      // tests passed, then the required check went red on the cleanup). A
+      // separate step could be skipped by an `if`, and the cleanup must stay
+      // this lane's last step, so the ordering is pinned inside the run body.
+      //
+      // The helper owns the removal so the workflow does not grow past the size
+      // ratchet. The fallback matters: `always()` reaches this step with no
+      // checkout, or one predating the helper, and neither may redden the job.
+      assert.equal(
+        String(clean.run),
+        `h="\${RUNNER_TEMP}/${HOME_TEMPLATE[id]}"; ` +
+          '{ [ -f .github/scripts/ci/reap-isolated-home.sh ] && ' +
+          'bash .github/scripts/ci/reap-isolated-home.sh "$h"; } || ' +
+          'rm -rf -- "$h" || true',
+        `${id} must reap this run's daemons, then reclaim the exact run-unique HOME the create step built`,
       );
-      // The constructed path, never $HOME: a failed init must not aim the
-      // removal at the account's real home.
-      assert.ok(String(clean.run).includes('qwen-lint-home-'), id);
-      assert.ok(!String(clean.run).includes('"$HOME"'), id);
+    }
+  });
+});
+
+describe('credential-free jobs on the disposable pool', () => {
+  // The label's single source of truth is the pool config the classifier
+  // contract test already reads: a rename on either side must red this
+  // suite, not leave the capture requesting a label no runner advertises.
+  const EPHEMERAL = JSON.parse(
+    readFileSync(
+      join(
+        workflowsDir,
+        '..',
+        '..',
+        'scripts',
+        'ci',
+        'ephemeral-runner',
+        'config.example.json',
+      ),
+      'utf8',
+    ),
+  ).labels;
+
+  it('ci.yml test_ubuntu: the checkout-free gate follows the shards fleet', () => {
+    // A REQUIRED context must not sit behind a manually sized pool: pinned
+    // to ecs-qwen-ephemeral it queued 110 minutes with an empty runner_name
+    // (job 128729488158) while its sibling jobs were served in ~3. It now
+    // reads the classifier's ubuntu_runner, so it lands wherever the
+    // shards ran and the kill-switch keeps working through the classifier
+    // — including on fork runs, where repository variables arrive empty.
+    const job = ciDoc.jobs.test_ubuntu;
+    assert.equal(
+      String(job['runs-on']),
+      '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || \'["ubuntu-latest"]\') }}',
+    );
+    for (const eventName of ['pull_request', 'push', 'merge_group']) {
+      for (const sameRepo of [true, false]) {
+        for (const assoc of ASSOCIATIONS) {
+          assert.deepEqual(
+            JSON.parse(
+              runPickRunner({ eventName, sameRepo, assoc, ecsDisabled: true }),
+            ),
+            JSON.parse(HOSTED),
+            `kill-switch must revert the gate on ${eventName} sameRepo=${sameRepo} assoc='${assoc}'`,
+          );
+        }
+      }
+    }
+    // The gate must never queue on the disposable pool, and it must sit
+    // with the shards: hosted for untrusted forks, persistent fleet for
+    // trusted events.
+    assert.deepEqual(
+      JSON.parse(
+        runPickRunner({
+          eventName: 'pull_request',
+          sameRepo: false,
+          assoc: 'NONE',
+          ecsDisabled: false,
+        }),
+      ),
+      JSON.parse(HOSTED),
+    );
+    assert.deepEqual(
+      JSON.parse(
+        runPickRunner({
+          eventName: 'push',
+          sameRepo: true,
+          assoc: 'OWNER',
+          ecsDisabled: false,
+        }),
+      ),
+      JSON.parse(ECS),
+    );
+    assert.ok(
+      !job.steps.some((s) =>
+        String(s.uses || '').startsWith('actions/checkout'),
+      ),
+      'the gate must stay checkout-free wherever it is routed',
+    );
+  });
+
+  it('web-shell-visuals.yml capture: all PR renders ride the disposable pool', () => {
+    // The capture builds and renders untrusted PR code with a read-only
+    // token and no secrets — the disposable pool's exact security model.
+    // Same-repo and fork PRs use the same isolated execution boundary.
+    const doc = parse(
+      readFileSync(join(workflowsDir, 'web-shell-visuals.yml'), 'utf8'),
+    );
+    const runsOn = String(doc.jobs.capture['runs-on']);
+    assert.match(runsOn, /github\.repository == 'QwenLM\/qwen-code'/);
+    assert.doesNotMatch(
+      runsOn,
+      /github\.event\.pull_request\.head\.repo\.full_name/,
+      'capture must not exclude same-repository PRs from the disposable pool',
+    );
+    for (const assoc of ASSOCIATIONS) {
+      // Fork PR: the disposable pool, whoever authored it.
+      assert.deepEqual(
+        evalRunsOn(runsOn, {
+          ecsDisabled: false,
+          eventName: 'pull_request',
+          sameRepo: false,
+          assoc,
+        }),
+        EPHEMERAL,
+        `capture fork assoc='${assoc}'`,
+      );
+      // Same-repo PR: uses the disposable pool while the switch is enabled.
+      assert.deepEqual(
+        evalRunsOn(runsOn, {
+          ecsDisabled: false,
+          eventName: 'pull_request',
+          sameRepo: true,
+          assoc,
+        }),
+        EPHEMERAL,
+        `capture same-repo assoc='${assoc}'`,
+      );
+      assert.deepEqual(
+        evalRunsOn(runsOn, {
+          ecsDisabled: true,
+          eventName: 'pull_request',
+          sameRepo: true,
+          assoc,
+        }),
+        JSON.parse(HOSTED),
+        `kill-switch must revert same-repo capture to hosted assoc='${assoc}'`,
+      );
+      // Kill-switch reverts fork runs to hosted too.
+      assert.deepEqual(
+        evalRunsOn(runsOn, {
+          ecsDisabled: true,
+          eventName: 'pull_request',
+          sameRepo: false,
+          assoc,
+        }),
+        JSON.parse(HOSTED),
+        `kill-switch must revert fork capture to hosted assoc='${assoc}'`,
+      );
+    }
+    // The pool image bakes Chromium and its system libraries, and it keeps the
+    // tree root-owned so a job cannot rewrite a browser. A job's own
+    // `playwright install` cannot even verify there: playwright writes a lock
+    // and a `.links` entry into the registry before it checks what is present.
+    // The pool image is what sets PLAYWRIGHT_BROWSERS_PATH, so the install step
+    // must skip on it.
+    const install = doc.jobs.capture.steps.find(
+      (step) => step.name === 'Install Playwright Chromium',
+    );
+    assert.ok(install, 'the capture job must keep its browser install step');
+    assert.ok(
+      String(install.run).includes(
+        'if [ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ]; then',
+      ),
+      'the browser install must skip on the pool image',
+    );
+    // Only the event-scoped read-only GITHUB_TOKEN may reach the disposable
+    // pool through this workflow; any other secret reference breaks the
+    // pool's no-long-lived-secrets boundary. Walk every parsed ${{ … }}
+    // expression instead of regexing raw text: `toJSON(secrets)` and
+    // bracket forms must fail too, while the header's prose ("NO
+    // secrets") stays invisible. One rule: an expression may mention the
+    // secrets context only as exactly `secrets.GITHUB_TOKEN`.
+    const expressions = [];
+    const walk = (node) => {
+      if (typeof node === 'string') {
+        for (const m of node.matchAll(/\$\{\{([\s\S]*?)\}\}/g)) {
+          expressions.push(m[1]);
+        }
+      } else if (Array.isArray(node)) {
+        node.forEach(walk);
+      } else if (node && typeof node === 'object') {
+        Object.values(node).forEach(walk);
+      }
+    };
+    walk(doc);
+    const assertNoForeignSecrets = (exprs) => {
+      for (const expr of exprs) {
+        if (!/\bsecrets\b/.test(expr)) continue;
+        const stripped = expr.replaceAll('secrets.GITHUB_TOKEN', '');
+        assert.ok(
+          !/\bsecrets\b/.test(stripped),
+          `expression reaches beyond the read-only event token: ${expr}`,
+        );
+      }
+    };
+    assertNoForeignSecrets(expressions);
+    // Sensitivity fixtures: the forms the old raw-text regexes missed.
+    for (const bad of [
+      "${{ secrets['MODEL_KEY'] }}",
+      '${{ secrets["MODEL_KEY"] }}',
+      '${{ toJSON(secrets) }}',
+    ]) {
+      assert.throws(
+        () => assertNoForeignSecrets([bad.slice(3, -3)]),
+        /read-only event token/,
+        `guard must reject ${bad}`,
+      );
+    }
+    assertNoForeignSecrets([' secrets.GITHUB_TOKEN ']);
+    assert.equal(doc.permissions.contents, 'read');
+    // A job-level permissions block REPLACES the workflow-level one, so
+    // workflow-level 'read' alone does not bound the capture's token.
+    for (const [id, job] of Object.entries(doc.jobs)) {
+      for (const scope of Object.values(job.permissions ?? {})) {
+        assert.ok(
+          scope === 'read' || scope === 'none',
+          `job ${id} must not widen its token beyond read/none`,
+        );
+      }
+    }
+    // The pool half of the nodejs.org split (the tui-parity shape): the
+    // hosted setup-node download and pnpm cache stay hosted-only, the pool
+    // reuses the image's Node behind the preflight, and the disk floor
+    // fails fast before two full installs on a shared host.
+    const steps = doc.jobs.capture.steps;
+    const hostedOnly = steps.filter(
+      (s) =>
+        String(s.uses || '').startsWith('actions/setup-node') ||
+        s.uses === './.github/actions/pnpm-store-cache',
+    );
+    assert.equal(hostedOnly.length, 2);
+    for (const s of hostedOnly) {
+      assert.equal(s.if, "${{ runner.environment == 'github-hosted' }}");
+    }
+    const preflight = steps.find(
+      (s) => s.uses === './.github/actions/self-hosted-node',
+    );
+    assert.equal(preflight?.if, "${{ runner.environment == 'self-hosted' }}");
+    const diskFloor = steps.find((s) =>
+      String(s.run || '').includes('check-disk-floor.sh'),
+    );
+    assert.equal(diskFloor?.if, "${{ runner.environment == 'self-hosted' }}");
+    // The shared 2 GiB default passed a slot with 14.6 GB free / 89% used
+    // and pnpm died on ENOSPC minutes later (run 42478651795). This lane
+    // carries its own floor AND a percent ceiling that refuses that shape;
+    // deleting either override must red this pin.
+    assert.equal(diskFloor?.env?.DISK_FLOOR_MIN_FREE_KB, '8388608');
+    assert.ok(
+      Number(diskFloor?.env?.DISK_FLOOR_MAX_USED_PCT) < 89,
+      'the ceiling must refuse the measured 89%-used failure slot',
+    );
+    // The pool pays two cold installs (measured: 22m18s install,
+    // Chromium still downloading at 36m48s), so the hosted 45-minute cap
+    // cancels the job before any render. The ceiling is routed like
+    // runs-on — runner.environment is not available in timeout-minutes —
+    // keyed off the same switch term: pool (not disabled) 90, else 45.
+    assert.equal(
+      String(doc.jobs.capture['timeout-minutes']),
+      "${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && 90 || 45 }}",
+    );
+    // Unpinned workers size Chromium from the HOST's cores inside a 4-CPU
+    // container: the first pooled run lost its runner to CPU/memory
+    // starvation mid-render (run 42494910412). Both render passes must
+    // carry the smoke lane's --workers=2.
+    const renders = steps.filter((s) =>
+      String(s.run || '').includes('test:e2e:visuals'),
+    );
+    assert.equal(renders.length, 2);
+    for (const s of renders) {
+      assert.match(String(s.run), /--workers=2/);
+    }
+    // The slim image needs the DejaVu baseline and ffmpeg at runtime; the
+    // install must stay best-effort so its own failure degrades the
+    // preview instead of sinking it. Pin the WHOLE package list: the
+    // warning prose also says "ffmpeg", and re-adding fonts-dejavu-mono
+    // (no bookworm build) fails the entire apt transaction — a mutation
+    // that survived every earlier revision of this suite.
+    const fonts = steps.find((s) =>
+      String(s.run || '').includes('fonts-dejavu-core'),
+    );
+    assert.equal(fonts?.if, "${{ runner.environment == 'self-hosted' }}");
+    assert.match(
+      String(fonts.run),
+      /apt-get install -y --no-install-recommends fonts-dejavu-core ffmpeg; then/,
+    );
+    assert.ok(
+      !String(fonts.run).includes('fonts-dejavu-mono'),
+      'fonts-dejavu-mono has no bookworm build and sinks the transaction',
+    );
+    // Bounded apt calls: a blackholed mirror must land in the warning
+    // branch, not hang until the job cap (Acquire::* + lock timeout, the
+    // pooled-apt convention). And verify the baseline after installing —
+    // a half-applied transaction otherwise renders drifted shots green.
+    assert.match(String(fonts.run), /Acquire::http::Timeout/);
+    assert.match(String(fonts.run), /DPkg::Lock::Timeout/);
+    assert.match(String(fonts.run), /fc-match[^\n]*sans-serif/);
+    assert.match(String(fonts.run), /fc-match[^\n]*monospace/);
+    // The step carries no continue-on-error: what keeps a failed install from
+    // sinking the job is the shell guard, and the warning has to sit in that
+    // guard's failure branch (`else` today, `||` would do). Asserting only
+    // /::warning:: would pin the prose, not the degradation path.
+    assert.match(
+      String(fonts.run),
+      /(?:else\s*\n\s*|\|\|\s*)echo "::warning::/,
+    );
+  });
+
+  it('web-shell-managed-host.yml build: only PR events ride the disposable pool', () => {
+    // Same credential-free boundary as the capture, but this lane also runs on
+    // post-merge push and manual dispatch, and those witnesses must stay
+    // hosted. Assert the effect per event rather than comparing the selector
+    // text to a copy of itself: flipping the event term and updating a pinned
+    // literal in the same commit leaves a text-only pin green. The pool label
+    // comes from the same config the capture case reads, so a config-only
+    // rename reds this lane too instead of leaving it requesting a label no
+    // runner advertises.
+    const doc = parse(
+      readFileSync(join(workflowsDir, 'web-shell-managed-host.yml'), 'utf8'),
+    );
+    const runsOn = String(doc.jobs.build['runs-on']);
+    for (const eventName of ['push', 'workflow_dispatch', 'merge_group']) {
+      for (const ecsDisabled of [false, true]) {
+        assert.deepEqual(
+          evalRunsOn(runsOn, { eventName, ecsDisabled, sameRepo: true }),
+          JSON.parse(HOSTED),
+          `managed-host ${eventName} must stay hosted ecsDisabled=${ecsDisabled}`,
+        );
+      }
+    }
+    // The selector carries no sameRepo term: same-repository and fork PRs are
+    // both PR events, so pin both arms instead of only the same-repo one.
+    for (const sameRepo of [true, false]) {
+      assert.deepEqual(
+        evalRunsOn(runsOn, {
+          eventName: 'pull_request',
+          ecsDisabled: false,
+          sameRepo,
+        }),
+        EPHEMERAL,
+        `managed-host PR builds ride the disposable pool sameRepo=${sameRepo}`,
+      );
+      assert.deepEqual(
+        evalRunsOn(runsOn, {
+          eventName: 'pull_request',
+          ecsDisabled: true,
+          sameRepo,
+        }),
+        JSON.parse(HOSTED),
+        `kill-switch must revert managed-host PR builds to hosted sameRepo=${sameRepo}`,
+      );
     }
   });
 });
@@ -1184,11 +1919,14 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
     );
     assert.match(remove.if, /always\(\)/);
     const run = (name) => build.steps.find((s) => s.name === name).run;
-    assert.match(run('Build Java components'), /-Dmaven\.repo\.local=/);
+    const buildJava = run('Build Java components');
+    assert.match(buildJava, /-Dmaven\.repo\.local=/);
+    assert.match(buildJava, /find "\$\{repo\}" -depth -type d/);
     assert.match(
-      run('Build Java components'),
-      /rm -rf -- "\$\{repo\}\/com\/alibaba\/qwencode-sdk" "\$\{repo\}\/com\/alibaba\/"qwen-managed-agent-\*/,
+      buildJava,
+      /-path '\*\/com\/alibaba\/qwencode-sdk' -o -path '\*\/com\/alibaba\/qwen-managed-agent-\*'/,
     );
+    assert.match(buildJava, /-exec rm -rf \{\} \+/);
     assert.match(
       run('Assemble reference distribution'),
       /rm -rf -- "\$\{RUNNER_TEMP\}\/managed-agent-reference"\n\s*node scripts\/package-managed-agent-reference\.mjs/,
@@ -1200,6 +1938,21 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
       String(s.uses || '').startsWith('actions/setup-node'),
     );
     assert.equal(setupNode.if, "${{ runner.environment == 'github-hosted' }}");
+    const setupJava = build.steps.find((s) =>
+      String(s.uses || '').startsWith('actions/setup-java'),
+    );
+    const cache = setupJava.with.cache;
+    for (const [environment, expected] of [
+      ['github-hosted', 'maven'],
+      ['self-hosted', ''],
+    ]) {
+      const actual = cache.startsWith('${{')
+        ? new Function('runner', `return (${cache.slice(3, -2)});`)({
+            environment,
+          })
+        : cache;
+      assert.equal(actual, expected, environment);
+    }
   });
 
   it('tui-parity keeps setup-node and the pnpm cache off the pool', () => {
@@ -1361,9 +2114,11 @@ describe('control-plane jobs moved off the hosted queue', () => {
           job.steps[heal].if,
           "${{ runner.environment == 'self-hosted' }}",
         );
-        // Cone mode rejects a file entry the reused index holds as a file.
+        // Cone mode rejects a file entry the reused index holds as a file,
+        // and a reused workspace can inherit non-cone mode from another
+        // job, so the pattern must cover the owner map under either mode.
         for (const step of checkouts) {
-          assert.equal(step.with['sparse-checkout'], '.github/scripts');
+          assert.equal(step.with['sparse-checkout'], '.github');
           assert.equal(step.with['sparse-checkout-cone-mode'], undefined);
         }
       });
@@ -1474,4 +2229,44 @@ describe('credential-free release fanout routing (#15465)', () => {
       }
     });
   }
+});
+
+// The patrol holds CI_BOT_PAT and runs a sandboxed agent, so its routing is
+// evaluated here rather than left to substring pins: `== 'true'` contains
+// every term a `includes("!= 'true'")` style assertion looks for, and an
+// inverted kill switch would send every round to the pool it just disabled.
+describe('CI failure patrol routing (#16462)', () => {
+  const doc = parse(
+    readFileSync(join(workflowsDir, 'qwen-ci-flaky-rerun.yml'), 'utf8'),
+  );
+  const events = Object.keys(doc.on);
+  it('reaches the pool only for this repository with the switch off', () => {
+    assert.deepEqual(events.sort(), ['schedule', 'workflow_dispatch']);
+    for (const jobName of ['classify', 'act']) {
+      const expression = doc.jobs[jobName]['runs-on'];
+      for (const eventName of events) {
+        assert.deepEqual(
+          evalRunsOn(expression, { eventName, ecsDisabled: false }),
+          JSON.parse(ECS),
+          `${jobName} on ${eventName} with the fleet enabled`,
+        );
+        assert.deepEqual(
+          evalRunsOn(expression, { eventName, ecsDisabled: true }),
+          JSON.parse(HOSTED),
+          `${jobName} on ${eventName} with the fleet disabled`,
+        );
+        assert.deepEqual(
+          evalRunsOn(
+            expression.replace(
+              "github.repository == 'QwenLM/qwen-code'",
+              'false',
+            ),
+            { eventName, ecsDisabled: false },
+          ),
+          JSON.parse(HOSTED),
+          `${jobName} on ${eventName} in a fork`,
+        );
+      }
+    }
+  });
 });

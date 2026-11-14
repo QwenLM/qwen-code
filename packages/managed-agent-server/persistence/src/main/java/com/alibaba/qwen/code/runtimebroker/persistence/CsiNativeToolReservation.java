@@ -32,6 +32,7 @@ import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.text;
 import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.utf8;
 import static com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.uuid;
 import static com.alibaba.qwen.code.runtimebroker.CsiNativeToolContent.qualifyContent;
+import static com.alibaba.qwen.code.runtimebroker.persistence.JdbcRepositorySupport.statement;
 
 /** Original assistant allocation evidence; it does not authorize execution. */
 final class CsiNativeToolReservation {
@@ -220,60 +221,6 @@ final class CsiNativeToolReservation {
                 return List.copyOf(result);
             }
         }
-    }
-
-    /** Data membership only; the reader must separately establish complete scoped SQL rows and resource associations. */
-    static void verifyHistoricalMembers(JdbcCsiFilesRetirementGuard.Original original,
-            CsiNativeActivationProof.Prefix prefix, List<ToolExecutionRecord> members,
-            java.util.function.Function<JsonNode, byte[]> resourceReader) {
-        require(original != null && prefix != null && members != null && members.size() <= LIMIT && resourceReader != null);
-        for (var member : members) {
-            require(member != null);
-            JsonNode ref = JSON.valueToTree(member.getReference());
-            qualifyMember(original, prefix, member, resourceReader.apply(ref.path("inputRef")),
-                    resourceReader.apply(ref.path("toolDefinitionRef")));
-        }
-        requireMembers(prefix, members);
-    }
-
-    private static void qualifyMember(JdbcCsiFilesRetirementGuard.Original original, CsiNativeActivationProof.Prefix prefix,
-            ToolExecutionRecord execution, byte[] input, byte[] definition) {
-        qualifyRelated(original, prefix, execution, input, definition);
-        var intent = prefix.intents().get(execution.getExecutionCallId());
-        if (intent != null) {
-            qualifyIntent(execution, intent);
-        }
-        JsonNode ref = JSON.valueToTree(execution.getReference());
-        String batchId = id(ref, "batchId");
-        var frozen = prefix.fileHistory() == null ? null : prefix.fileHistory().batches().get(batchId);
-        if (frozen != null) {
-            require(frozen.invocations().stream().anyMatch(invocation ->
-                    execution.getExecutionCallId().equals(id(invocation, "executionCallId"))
-                            && canonical(ref).equals(canonical(CsiNativeActivationProof.historyExecutionReference(
-                                    original.request(), JSON.createObjectNode().put("promptId", id(ref, "promptId"))
-                                            .put("batchId", batchId), invocation)))));
-        }
-    }
-
-    private static void requireMembers(CsiNativeActivationProof.Prefix prefix, List<ToolExecutionRecord> members) {
-        Set<String> calls = new HashSet<>();
-        Set<String> ordinals = new HashSet<>();
-        Set<String> toolCalls = new HashSet<>();
-        Set<String> executionIds = new HashSet<>();
-        for (var member : members) {
-            JsonNode ref = JSON.valueToTree(member.getReference());
-            String batchId = id(ref, "batchId");
-            require(calls.add(batchId + "\u0000" + id(ref, "functionCallId"))
-                    && ordinals.add(batchId + "\u0000" + number(ref.get("ordinal")))
-                    && toolCalls.add(member.getToolCallId()) && executionIds.add(member.getExecutionCallId()));
-        }
-        if (prefix.fileHistory() != null) {
-            for (var entry : prefix.fileHistory().batches().entrySet()) {
-                require(members.stream().filter(execution -> entry.getKey().equals(
-                        id(JSON.valueToTree(execution.getReference()), "batchId"))).count() == entry.getValue().invocations().size());
-            }
-        }
-        require(executionIds.containsAll(prefix.intents().keySet()));
     }
 
     static ToolExecutionRecord prepare(Connection connection, JdbcCsiFilesRetirementGuard.Original original,
@@ -648,12 +595,6 @@ final class CsiNativeToolReservation {
 
     private static String scope(JdbcCsiFilesRetirementGuard.Original original) {
         return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(original.request().getScope().getTenantId(), original.request().getIsolationKey());
-    }
-
-    private static PreparedStatement statement(Connection connection, String sql) throws SQLException {
-        PreparedStatement statement = connection.prepareStatement(sql);
-        statement.setQueryTimeout(10);
-        return statement;
     }
 
     private static void require(boolean condition) {

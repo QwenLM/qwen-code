@@ -4,6 +4,11 @@ Channels let you interact with a Qwen Code agent from messaging platforms like T
 
 Code-hosting platforms (starting with [GitHub](./github)) and authenticated workspace accounts (starting with [DingTalk Workspace](./dws)) are also supported through channels. [Email](./email) connects a dedicated mailbox through IMAP and SMTP.
 
+For sending results without a conversational bot, [DingTalk Webhook Sending](./dingtalk-webhook)
+and [Feishu Webhook Sending](./feishu-webhook) use a custom bot's configured
+group destination. They share the daemon's Channel delivery path and do not
+listen for incoming messages.
+
 ## How It Works
 
 When you run `qwen channel start`, Qwen Code:
@@ -51,7 +56,7 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 
 | Option              | Required         | Description                                                                                                                                                                                                                                                                                                                                           |
 | ------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `type`              | Yes              | Channel type: `telegram`, `weixin`, `qq`, `dingtalk`, `dws`, `wecom`, `wecom-callback`, `feishu`, `github`, `gitlab`, `email`, or a custom type from an extension (see [Plugins](./plugins))                                                                                                                                                          |
+| `type`              | Yes              | Channel type: `telegram`, `weixin`, `qq`, `dingtalk`, `dingtalk-webhook`, `dws`, `wecom`, `wecom-callback`, `feishu`, `feishu-webhook`, `github`, `gitlab`, `email`, or a custom type from an extension (see [Plugins](./plugins))                                                                                                                    |
 | `token`             | See description  | Required for Telegram (bot token) and WeCom Callback (verification token). Supports `$ENV_VAR` syntax. See [WeCom Callback](./wecom-callback) for application credentials                                                                                                                                                                             |
 | `clientId`          | DingTalk, Feishu | DingTalk AppKey or Feishu App ID. Supports `$ENV_VAR` syntax                                                                                                                                                                                                                                                                                          |
 | `clientSecret`      | DingTalk, Feishu | DingTalk AppSecret or Feishu App Secret. Supports `$ENV_VAR` syntax                                                                                                                                                                                                                                                                                   |
@@ -251,6 +256,13 @@ Channel memory does not automatically learn facts from normal conversation or
 accept `第一个` as confirmation for an ambiguous natural reference. Use a clear
 remember request and an exact entry ID when a natural reference is ambiguous.
 
+A turn a channel sends also runs no
+[auto-memory](../memory#auto-memory-what-qwen-learns-about-you) extraction or
+periodic cleanup (Dream) and gets no
+[follow-up suggestion](../followup-suggestions), including a message delivered
+to a session bound to a pull request. Auto-memory recall still runs, so a reply
+can draw on saved auto-memories.
+
 ### Token Security
 
 Bot tokens should not be stored directly in `settings.json`. Instead, use environment variable references:
@@ -369,7 +381,7 @@ All group settings use field-by-field inheritance: the specific group, then `"*"
 
 `pairing` is deliberately not a `senders` value: pairing approvals are stored per user, so approving someone through a group message would also unlock their direct messages. Use `groupPolicy: "pairing"` to admit an entire group instead.
 
-On the `github` and `gitlab` channels all inbound traffic is group traffic, so only `groupPolicy` and group member settings govern admission — see those channels' Security notes before using it on a public repository or project. Under `sessionScope: "single"` direct messages and groups share one conversation, so opening a group also exposes direct-message history to its members.
+On the `github` and `gitlab` channels all inbound traffic is group traffic, so only `groupPolicy` and group member settings govern admission — see those channels' Security notes before using it on a public repository or project. The `email` channel is the opposite: every delivery is a direct conversation, so `groupPolicy` and `groups` never govern it and the Web Shell editor hides those controls. Under `sessionScope: "single"` direct messages and groups share one conversation, so opening a group also exposes direct-message history to its members.
 
 In the Web Shell channel editor, **Who can talk in groups** and **Allowed group member IDs** edit `groups["*"]`, and **Session operators** edits `operators`. When `senders` is unset, the editor shows its effective default and writes nothing until you pick a value. On `github`, the editor also shows one row per allowlisted repository for that repository's `senders`, `allowedUsers`, and `requireMention` — see [GitHub](./github.md#editing-from-the-web-shell). Other per-group overrides (`dispatchMode`, `groupHistoryLimit`, and per-group `requireMention` on chat platforms) and an explicitly empty `"operators": []` are set in `settings.json`; saving from the editor keeps them.
 
@@ -552,8 +564,12 @@ Channel loops differ from the session-scoped tasks described in
 - They are scoped to the current channel chat or thread. Each target can have up
   to 10 enabled loops, and each prompt is limited to 4,000 characters.
 - They require an adapter and target that support proactive delivery. Telegram,
-  DingTalk, Feishu, and WeCom opt in, subject to platform-specific target
-  restrictions.
+  DingTalk, DingTalk Workspace, Feishu, WeCom, QQ, and Email opt in, subject to
+  platform-specific target restrictions. Email opts in only when
+  `proactiveRecipients` lists the exact target. QQ delivers loop results as
+  active group messages, supports no threaded targets, and requires the chat
+  type to be already learned: a delivery to a group whose type is unknown is
+  rejected.
 - They are unavailable with `sessionScope: "single"` because that scope is not
   tied to one chat target.
 - A saved loop is disabled if its target is no longer authorized when it is due.
@@ -593,9 +609,13 @@ Named-task commands work on all channel types (Telegram, WeChat, QQ, DingTalk, W
 
 The Web Shell's **Channel events** page shows a timeline of what every Channel
 in the current workspace did: the inbound messages it accepted, and the ones it
-skipped and why (`reason_filter`, `mention_required`, `duplicate`, a sender-gate
-rejection), the replies it published or suppressed, its inbound task
-transitions, and how each poll went. Pick the workspace whose Channels you want
+skipped and why (`reason_filter`, `mention_required`, `duplicate`,
+`edited_comment` for an older GitHub comment that mentions the bot and was
+edited, a sender-gate rejection, `github_api_error` when reading or handling a GitHub
+thread failed;
+a `failed` row with that reason means the thread will be read again), the
+replies it published or suppressed, its inbound task transitions, and how each
+poll went. Pick the workspace whose Channels you want
 to inspect, then filter by Channel and by event type; the page refreshes every
 few seconds while its tab is visible, pauses in a background tab, and has a
 manual refresh.
@@ -606,6 +626,12 @@ identifiers, and errors. The page and its route exist wherever Channel
 management is available (`channel_management`), and each Channel keeps its
 journal under `~/.qwen/channels/<workspace>/` with one rotated file, so it
 never grows without bound.
+
+Rows that refer to a concrete session carry an **Open session** button:
+outbound rows open the Channel's own reply session, and GitHub task rows for
+bound-session delivery open the PR-bound session that received the event —
+including when that session lives in another registered workspace. Rows
+without a session (polls, skipped inbound messages) show no button.
 
 ## Running
 

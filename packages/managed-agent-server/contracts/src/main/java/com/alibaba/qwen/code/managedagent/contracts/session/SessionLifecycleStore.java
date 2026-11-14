@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutation;
 
 import java.time.Duration;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -77,7 +78,7 @@ public interface SessionLifecycleStore {
 
     /** The given Sessions whose execution facts hold, in one read. */
     public Set<String> sessionsWithExecutionRegistryFacts(String tenantId,
-            java.util.Collection<String> sessionIds);
+            Collection<String> sessionIds);
 
     public SessionMutation unarchiveWorkspaceSession(String tenantId, String sessionId,
             String actorId, String scopedKey, String requestDigest);
@@ -245,29 +246,6 @@ public interface SessionLifecycleStore {
         return AcceptanceVerdict.unknown();
     }
 
-    /**
-     * D7-2: what the Session journal proves about a parked Session title, or
-     * empty when its delivery is no longer parked: committed once the journal
-     * holds its revision's title, not committed once no writer can still
-     * commit it.
-     */
-    public default Optional<AcceptanceVerdict> renameAcceptance(ParkedOperation parked) {
-        return Optional.of(AcceptanceVerdict.unknown());
-    }
-
-    /**
-     * D7-2: settles a parked Session title, only while it is still parked.
-     * Committed completes its command and shows the title; not committed
-     * fails it; unknown parks it again until {@code retryAt}.
-     *
-     * @return false when the title is no longer parked
-     */
-    public default boolean settleParkedRename(ParkedOperation parked,
-            AcceptanceVerdict verdict, long retryAt) {
-        throw new UnsupportedOperationException(
-                "Operation reconciliation is unavailable");
-    }
-
     /** A task cancel's recorded outcome: its public status and code. */
     public record TaskCancelOutcome(String status, String failureCode) {
         public static TaskCancelOutcome completed() {
@@ -300,6 +278,16 @@ public interface SessionLifecycleStore {
     public boolean completeOperation(String tenantId, String sessionId,
             String operationId, String owner, long claimGeneration,
             boolean harnessConfirmed);
+
+    /**
+     * Binds the Harness boot id of a Session that has no Turn to hang
+     * {@link TurnExecutionStore#bindHarness} on — the automation verbs'
+     * create of a never-attached Session. Fills the column only when it is
+     * still empty, so a Turn that concurrently bound another generation keeps
+     * its own binding.
+     */
+    public void bindSessionHarness(String tenantId, String sessionId,
+            String harnessBootId);
 
     /**
      * Terminates a claimed operation whose retry budget is spent, recording

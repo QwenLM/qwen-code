@@ -11,7 +11,10 @@ import type {
   DaemonChannelTypeDescriptor,
   DaemonChannelUpsertRequest,
 } from '@qwen-code/sdk/daemon';
-import { isRepositoryOnlyChannelType } from './channel-platform';
+import {
+  isPrivateOnlyChannelType,
+  isRepositoryOnlyChannelType,
+} from './channel-platform';
 
 export type ChannelPrivatePolicy =
   | 'disabled'
@@ -56,12 +59,14 @@ export type ChannelEditorValidationCode =
   | 'invalidGroupId'
   | 'invalidOption'
   | 'invalidRepoId'
+  | 'repoFilterRequired'
   | 'conflictingRepoAliases'
   | 'invalidGroupEntry'
   | 'number'
   | 'outOfRange'
   | 'policy'
-  | 'requiresBoundDelivery';
+  | 'requiresBoundDelivery'
+  | 'requiresBoundDeliveryForWatchGate';
 
 export type ChannelEditorValidationErrors = Record<
   string,
@@ -76,17 +81,184 @@ export const PRIVATE_ONLY_FIELD_KEYS = new Set([
   'allowedUsers',
 ]);
 
+/**
+ * The mirror set: access fields that only gate group traffic, which
+ * private-only channels never receive. `operators` stays out — it governs
+ * shared sessions, which a private-only channel can still have under
+ * `chat_thread` or `single`.
+ */
+export const GROUP_ONLY_FIELD_KEYS = new Set(['groupPolicy']);
+
 const REPOSITORY_FULL_NAME_RE = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+// GitLab project paths nest subgroups (group/subgroup/project); GitHub
+// repositories are exactly owner/repo. The runtime matches arbitrary group
+// keys, so this shape is a usability guard keyed on the channel, not a
+// security boundary.
+const GITLAB_PROJECT_PATH_RE = /^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+$/;
+
+function repositoryIdPattern(type: unknown): RegExp {
+  return type === 'gitlab' ? GITLAB_PROJECT_PATH_RE : REPOSITORY_FULL_NAME_RE;
+}
 
 /**
  * Canonical repository IDs the allowlist currently names, in typing order.
- * Entries that are not `owner/repo` are left out: the save path rejects them,
- * and a row for a half-typed repository would only flicker.
+ * Entries that do not match the channel's repository shape are left out: the
+ * save path rejects them, and a row for a half-typed repository would only
+ * flicker.
  */
-export function repositoryAllowlistIds(value: string): string[] {
+export function repositoryAllowlistIds(value: string, type: unknown): string[] {
+  const pattern = repositoryIdPattern(type);
   return [...new Set(toList(value.toLowerCase()))].filter((id) =>
-    REPOSITORY_FULL_NAME_RE.test(id),
+    pattern.test(id),
   );
+}
+
+/** Whether the repository event filter processes a list at all. */
+export function isRepoFilterActive(mode: unknown): boolean {
+  return mode === 'allowlist' || mode === 'blocklist';
+}
+
+const GITHUB_REPOSITORY_URL_RE =
+  /^https?:\/\/[^/]+\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?(?:[/?#].*)?$/;
+
+/**
+ * GitHub areas whose two-segment URLs look like `owner/repo` but are not
+ * repositories. Shortening one would silently filter a nonexistent
+ * repository — fatal under an allowlist — so these URLs pass through
+ * unchanged and validation rejects them by name instead.
+ *
+ * Best-effort by construction: a denylist of GitHub's top-level paths cannot
+ * be complete, and a future GitHub area can reintroduce the hazard until it
+ * is added here. The enumerated test over this set keeps every listed root
+ * rejected; the residual risk is documented in the design doc.
+ *
+ * Exported so the test can enumerate every member instead of sampling a few.
+ */
+export const GITHUB_RESERVED_URL_PATHS = new Set([
+  'about',
+  'account',
+  'accounts',
+  'advisories',
+  'apps',
+  'codespaces',
+  'collections',
+  'contact',
+  'copilot',
+  'customer-stories',
+  'discussions',
+  'enterprise',
+  'enterprises',
+  'events',
+  'explore',
+  'features',
+  'followers',
+  'following',
+  'issues',
+  'join',
+  'login',
+  'logout',
+  'marketplace',
+  'mobile',
+  'new',
+  'notifications',
+  'orgs',
+  'organizations',
+  'password_reset',
+  'premium-support',
+  'pricing',
+  'pulls',
+  'readme',
+  'search',
+  'security',
+  'sessions',
+  'settings',
+  'signup',
+  'site',
+  'sponsors',
+  'stars',
+  'team',
+  'topics',
+  'trending',
+  'users',
+  'watching',
+]);
+
+/**
+ * The hosts whose two-segment paths may be repository URLs: github.com, plus
+ * the channel's own GitHub Enterprise WEB host derived from baseUrl. Only the
+ * web host qualifies: an `api.`-prefixed baseUrl host denotes the deployment's
+ * API, so the stripped form is added and the raw API host is NOT (pasting a
+ * REST URL like https://api.github.com/repos/octo/repo must not shorten to
+ * `repos/octo`). The baseUrl's own API path prefix (e.g. /api/v3) is returned
+ * alongside so REST-shaped paths on a shared web+API host are excluded too.
+ * Any other host — gist.github.com, gitlab.com, an arbitrary site — passes
+ * through unchanged for validation to reject.
+ */
+function repositoryUrlContext(baseUrl: string): {
+  hosts: Set<string>;
+  apiPath: string;
+} {
+  const hosts = new Set(['github.com', 'www.github.com']);
+  let apiPath = '';
+  const trimmed = baseUrl.trim();
+  if (trimmed) {
+    try {
+      const url = new URL(trimmed);
+      const host = url.hostname.toLowerCase();
+      hosts.add(host.startsWith('api.') ? host.slice(4) : host);
+      const path = url.pathname.replace(/\/+$/, '').toLowerCase();
+      if (path) apiPath = path;
+    } catch {
+      // A malformed baseUrl is its own field's validation error; only
+      // github.com remains shortenable here.
+    }
+  }
+  return { hosts, apiPath };
+}
+
+/**
+ * Canonicalize the repository filter input: lowercase, deduplicate, strip
+ * trailing sentence punctuation a paste can carry (`.`, `)`, …), and shorten
+ * GitHub web URLs (repository, PR, or issue pages, with an optional `.git`,
+ * trailing path, query, or fragment) to `owner/repo` — only when the URL's
+ * host is the channel's own GitHub web host and its path is not the baseUrl's
+ * API prefix. Entries that are not repository URLs on that host pass through
+ * unchanged so validation can name them. Shared by the validator and the save
+ * path so the two cannot disagree.
+ */
+export function normalizeRepositoryFilterInput(
+  value: string,
+  baseUrl = '',
+): string {
+  const { hosts, apiPath } = repositoryUrlContext(baseUrl);
+  const entries = toList(value)
+    .map((raw) => raw.replace(/[.,;:!?)\]]+$/, ''))
+    .filter(Boolean)
+    .map((entry) => {
+      const match = GITHUB_REPOSITORY_URL_RE.exec(entry);
+      let url: URL | undefined;
+      if (match) {
+        try {
+          url = new URL(entry);
+        } catch {
+          url = undefined;
+        }
+      }
+      const onApiPath =
+        url !== undefined &&
+        apiPath !== '' &&
+        url.pathname.toLowerCase().startsWith(`${apiPath}/`);
+      const shortened =
+        match &&
+        url !== undefined &&
+        hosts.has(url.hostname.toLowerCase()) &&
+        !onApiPath &&
+        !GITHUB_RESERVED_URL_PATHS.has(match[1].toLowerCase())
+          ? `${match[1]}/${match[2]}`
+          : entry;
+      return shortened.toLowerCase();
+    });
+  return [...new Set(entries)].join(', ');
 }
 
 export function toList(value: string): string[] {
@@ -194,7 +366,10 @@ function initialFieldValue(
 ): string | boolean {
   const value = instance?.config[field.key];
   if (field.kind === 'boolean') {
-    return typeof value === 'boolean' ? value : false;
+    // Honour the declared default when the key is absent so a default-on field
+    // (prCommentWatch) is not silently saved as false by every UI edit. An
+    // explicit stored boolean — including false — is preserved verbatim.
+    return typeof value === 'boolean' ? value : field.default === 'true';
   }
   if (field.kind === 'number') {
     return typeof value === 'number' ? String(value) : '';
@@ -224,6 +399,7 @@ function initialFieldValue(
       if (field.key === 'privatePolicy')
         return configuredPrivatePolicy(instance);
       if (field.key === 'groupPolicy') return 'disabled';
+      if (field.key === 'repoFilterMode') return 'off';
       if (field.key === 'outputMode') return field.default ?? '';
       if (field.key === 'dmPolicy') return 'open';
       if (field.key !== 'sessionScope') return '';
@@ -297,8 +473,10 @@ export function createChannelEditorDraft(
 ): ChannelEditorDraft {
   const values: Record<string, string | boolean> = {};
   const secrets: Record<string, ChannelSecretDraft> = {};
+  const privateOnly = isPrivateOnlyChannelType(descriptor.type);
   for (const field of descriptor.fields) {
     if (field.kind === 'object') continue;
+    if (privateOnly && GROUP_ONLY_FIELD_KEYS.has(field.key)) continue;
     if (field.kind === 'secret') {
       secrets[field.key] = instance?.secrets[field.key]?.present
         ? { operation: 'preserve' }
@@ -326,11 +504,14 @@ export function createChannelEditorDraft(
     name: instance?.name ?? '',
     values,
     secrets,
-    privatePolicy: hasDescriptorPolicy
-      ? ''
-      : ['disabled', 'allowlist', 'pairing', 'open'].includes(configuredPolicy)
-        ? (configuredPolicy as ChannelPrivatePolicy)
-        : '',
+    privatePolicy:
+      descriptor.outboundOnly || hasDescriptorPolicy
+        ? ''
+        : ['disabled', 'allowlist', 'pairing', 'open'].includes(
+              configuredPolicy,
+            )
+          ? (configuredPolicy as ChannelPrivatePolicy)
+          : '',
     // Show repository IDs in the canonical lower-case form the editor writes,
     // so re-saving an older mixed-case allowlist migrates it instead of
     // rewriting the same spelling back.
@@ -375,8 +556,12 @@ export function validateChannelEditorDraft(
   } else if (existingNames.includes(name)) {
     errors['name'] = 'duplicate';
   }
+  const privateOnly = isPrivateOnlyChannelType(descriptor.type);
   for (const field of descriptor.fields) {
     if (field.kind === 'object') continue;
+    // The draft deliberately omits these, so the required-field check must not
+    // ask the operator to fill in a control the editor never renders.
+    if (privateOnly && GROUP_ONLY_FIELD_KEYS.has(field.key)) continue;
     const draftValue = draft.values[field.key];
     if (field.required && isMissingField(field, draft)) {
       errors[field.key] = 'required';
@@ -400,6 +585,7 @@ export function validateChannelEditorDraft(
         !unchanged &&
         ((field.exclusiveMinimum !== undefined &&
           parsed <= field.exclusiveMinimum) ||
+          (field.minimum !== undefined && parsed < field.minimum) ||
           (field.maximum !== undefined && parsed > field.maximum))
       ) {
         errors[field.key] = 'outOfRange';
@@ -434,8 +620,34 @@ export function validateChannelEditorDraft(
     ) {
       errors['prWatchEvents'] = 'requiresBoundDelivery';
     }
+    if (
+      draft.values['requireBoundWatch'] === true &&
+      draft.values['deliverToBoundSessions'] !== true
+    ) {
+      // Its own code: the shared requiresBoundDelivery message names "the
+      // selected watch events", a control this field's operator never touched.
+      errors['requireBoundWatch'] = 'requiresBoundDeliveryForWatchGate';
+    }
+    // Mirror validateRepoFilterConfig: an active mode needs a non-empty list
+    // of owner/repo entries. While the mode is off the list is ignored (and
+    // hidden), matching the runtime's ignore-while-off rule, so a parked list
+    // never strands a save on a field the operator cannot see.
+    if (isRepoFilterActive(draft.values['repoFilterMode'])) {
+      const normalized = normalizeRepositoryFilterInput(
+        String(draft.values['repoFilter'] ?? ''),
+        String(draft.values['baseUrl'] ?? ''),
+      );
+      if (!normalized) {
+        errors['repoFilter'] = 'repoFilterRequired';
+      } else if (
+        toList(normalized).some((id) => !REPOSITORY_FULL_NAME_RE.test(id))
+      ) {
+        errors['repoFilter'] = 'invalidRepoId';
+      }
+    }
   }
   if (
+    !descriptor.outboundOnly &&
     !isRepositoryOnlyChannelType(descriptor.type) &&
     !draft.privatePolicy &&
     !hasDescriptorPrivatePolicy(descriptor)
@@ -454,9 +666,26 @@ export function validateChannelEditorDraft(
     isRepositoryOnlyChannelType(descriptor.type) &&
     String(draft.values['groupPolicy'] ?? '') === 'allowlist'
   ) {
+    const pattern = repositoryIdPattern(descriptor.type);
+    // A stored entry the runtime already tolerates must not block an unrelated
+    // edit (same convention as the number-field branch above). This applies
+    // only to GitLab, the newly admitted platform whose pre-existing allowlist
+    // was never validated against the shape; GitHub keeps its strict check so
+    // its behavior is unchanged. The draft lower-cases repository ids, so
+    // compare against the stored keys case-insensitively.
+    const storedGroups = instance?.config['groups'];
+    const storedIds = new Set(
+      (isRecord(storedGroups) ? Object.keys(storedGroups) : [])
+        .filter((id) => id !== '*')
+        .map((id) => id.toLowerCase()),
+    );
     if (
       splitList(draft.allowedGroupIds).some(
-        (groupId) => !REPOSITORY_FULL_NAME_RE.test(groupId),
+        (groupId) =>
+          !pattern.test(groupId) &&
+          !(
+            descriptor.type === 'gitlab' && storedIds.has(groupId.toLowerCase())
+          ),
       )
     ) {
       errors['allowedGroupIds'] = 'invalidRepoId';
@@ -734,6 +963,7 @@ function assignGroupSenders(
 function removeGroupAllowlistMembership(
   config: Record<string, unknown>,
   instance: DaemonChannelInstanceSnapshot | undefined,
+  type: unknown,
   overrides?: Record<string, ChannelGroupOverrideDraft>,
   allowedGroupIds = '',
 ): void {
@@ -752,7 +982,7 @@ function removeGroupAllowlistMembership(
     const storedIds = new Set(
       [...entries.keys()].map((id) => id.toLowerCase()),
     );
-    for (const groupId of repositoryAllowlistIds(allowedGroupIds)) {
+    for (const groupId of repositoryAllowlistIds(allowedGroupIds, type)) {
       if (!storedIds.has(groupId)) entries.set(groupId, {});
     }
   }
@@ -827,10 +1057,14 @@ export function buildChannelUpsertRequest(
     type: descriptor.type,
   };
   const repositoryOnly = isRepositoryOnlyChannelType(descriptor.type);
+  const privateOnly = isPrivateOnlyChannelType(descriptor.type);
   const secrets: Record<string, DaemonChannelSecretUpdate> = {};
   for (const field of descriptor.fields) {
     if (field.kind === 'object') continue;
     if (repositoryOnly && PRIVATE_ONLY_FIELD_KEYS.has(field.key)) continue;
+    // Skipping here as well as in the draft is what preserves a stored value:
+    // assignField() reads an absent draft key as empty and deletes the key.
+    if (privateOnly && GROUP_ONLY_FIELD_KEYS.has(field.key)) continue;
     if (field.kind === 'secret') {
       const secret = draft.secrets[field.key] ?? { operation: 'preserve' };
       secrets[field.key] =
@@ -843,16 +1077,38 @@ export function buildChannelUpsertRequest(
     }
     assignField(config, field, draft.values[field.key]);
   }
+  if (
+    descriptor.type === 'github' &&
+    isRepoFilterActive(config['repoFilterMode']) &&
+    Array.isArray(config['repoFilter'])
+  ) {
+    // Same canonicalization the validator applied, so pasted URLs reach the
+    // daemon as owner/repo. Gated on the active mode: a parked list stays
+    // exactly as stored on an unrelated save. Gated on GitHub (not the wider
+    // repository-only set) to match the validator: another repository-only
+    // channel may carry a preserved repoFilter it does not manage, and
+    // rewriting it here would make the daemon reject every save.
+    const normalized = normalizeRepositoryFilterInput(
+      config['repoFilter']
+        .filter((entry): entry is string => typeof entry === 'string')
+        .join(', '),
+      typeof config['baseUrl'] === 'string' ? config['baseUrl'] : '',
+    );
+    config['repoFilter'] = normalized ? normalized.split(', ') : [];
+  }
   if (repositoryOnly) {
     // The editor used to persist the injected private-access defaults here
     // even though these channels never read them, and the pairing panel would
     // then present the stale user list as an authoritative allowlist. Drop the
     // whole set on the next save; the effective list lives under `groups`.
     for (const key of PRIVATE_ONLY_FIELD_KEYS) delete config[key];
-  } else if (!hasDescriptorPrivatePolicy(descriptor)) {
+  } else if (
+    !descriptor.outboundOnly &&
+    !hasDescriptorPrivatePolicy(descriptor)
+  ) {
     config['privatePolicy'] = draft.privatePolicy;
   }
-  if (hasDescriptorGroupPolicy(descriptor)) {
+  if (!privateOnly && hasDescriptorGroupPolicy(descriptor)) {
     if (config['groupPolicy'] === 'allowlist') {
       assignGroups(
         config,
@@ -872,6 +1128,7 @@ export function buildChannelUpsertRequest(
       removeGroupAllowlistMembership(
         config,
         instance,
+        descriptor.type,
         repositoryOnly ? draft.groupOverrides : undefined,
         draft.allowedGroupIds,
       );

@@ -181,6 +181,7 @@ export const DialogManager = ({
       <ConsentPrompt
         prompt={uiState.confirmationRequest.prompt}
         onConfirm={uiState.confirmationRequest.onConfirm}
+        dismissOnEscape
         terminalWidth={terminalWidth}
         availableTerminalHeight={constrainedDialogHeight}
       />
@@ -438,7 +439,7 @@ export const DialogManager = ({
   if (uiState.auth.isAuthDialogOpen || uiState.auth.authError) {
     return (
       <Box flexDirection="column">
-        <AuthDialog availableTerminalHeight={listDialogHeight} />
+        <AuthDialog />
       </Box>
     );
   }

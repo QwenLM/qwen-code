@@ -1,8 +1,9 @@
 package com.alibaba.qwen.code.managedagent.workspace.runtime;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import org.junit.jupiter.api.Test;
@@ -108,7 +109,7 @@ public class WorkspaceRuntimeInstallProbeTest {
                 "jdbc:h2:mem:probe-guarded;MODE=MySQL;DB_CLOSE_DELAY=-1",
                 "sa", "");
         WorkspaceRuntimeResolver guarded = new WorkspaceRuntimeResolver(
-                null, com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(new JdbcTemplate(
+                null, com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(new JdbcTemplate(
                         dataSource),
                         new DataSourceTransactionManager(dataSource), guard)),
                 mountProperties(root));
@@ -123,7 +124,7 @@ public class WorkspaceRuntimeInstallProbeTest {
         // against the current binding (would permanently refuse the escape).
         org.mockito.Mockito.verifyNoMoreInteractions(guard);
 
-        org.mockito.Mockito.doThrow(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable())
+        org.mockito.Mockito.doThrow(WorkspaceExecutionStore.unavailable())
                 .when(guard).verifyProbe(
                         org.mockito.ArgumentMatchers.any(
                                 ContextBinding.class));
@@ -215,7 +216,7 @@ public class WorkspaceRuntimeInstallProbeTest {
                 "jdbc:h2:mem:probe-candidate;MODE=MySQL;DB_CLOSE_DELAY=-1",
                 "sa", "");
         WorkspaceRuntimeResolver guarded = new WorkspaceRuntimeResolver(
-                null, com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(new JdbcTemplate(
+                null, com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(new JdbcTemplate(
                         dataSource),
                         new DataSourceTransactionManager(dataSource), guard)),
                 mountProperties(root));
@@ -289,7 +290,7 @@ public class WorkspaceRuntimeInstallProbeTest {
         var dataSource = new DriverManagerDataSource(
                 "jdbc:h2:mem:probe;MODE=MySQL;DB_CLOSE_DELAY=-1", "sa", "");
         return new WorkspaceRuntimeResolver(null,
-                com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(new JdbcTemplate(dataSource),
+                com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(new JdbcTemplate(dataSource),
                         new DataSourceTransactionManager(dataSource))),
                 mountProperties(root));
     }

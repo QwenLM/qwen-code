@@ -125,7 +125,12 @@ function bridged(
   registry?: WorkflowRunRegistry,
 ) {
   const { r, entry } = registered(runId, overrides, registry);
-  if (channel) r.setApprovalChangeCallback(() => {});
+  if (channel) {
+    // A host that can answer: the badge callback alone is display-only and
+    // no longer qualifies as a parking channel.
+    r.setApprovalChangeCallback(() => {});
+    r.setApprovalRequestCallback(() => {});
+  }
   const emitter = new AgentEventEmitter();
   const cleanup = r.bridgeApprovalEvents(runId, emitter);
   /** Emits approvalEvent(event) on `on` and returns it. */
@@ -428,6 +433,21 @@ describe('WorkflowRunRegistry', () => {
     expect(pending()).toEqual([]);
   });
 
+  it('fails closed when only a badge (approval-change) callback is registered', async () => {
+    // The shape the interactive TUI had: an approval-change consumer that
+    // repaints "needs approval" but cannot answer the request.
+    const { r, entry } = registered('wf_badge_only_host');
+    r.setApprovalChangeCallback(() => {});
+    const emitter = new AgentEventEmitter();
+    r.bridgeApprovalEvents('wf_badge_only_host', emitter);
+
+    const request = approvalEvent();
+    emitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, request);
+
+    await expectCancelled(request.respond);
+    expect(entry.pendingApprovals).toEqual([]);
+  });
+
   it('isolates approvals from two agents that share a provider callId', async () => {
     const { emit, resolve, pending } = bridged('wf_shared_call_id');
     const { respond: firstRespond } = emit({ subagentId: 'agent-a' });
@@ -469,6 +489,7 @@ describe('WorkflowRunRegistry', () => {
     await expectCancelled(rejectedRespond);
 
     r.setApprovalChangeCallback(() => {});
+    r.setApprovalRequestCallback(() => {});
     const { respond: retryRespond } = emit({ timestamp: 1_700_000_000_200 });
 
     expect(pending()).toMatchObject([parkedAt(1_700_000_000_200)]);
@@ -890,6 +911,49 @@ describe('WorkflowRunRegistry', () => {
     const entry = r.register(reg(runId), owner);
     expect(entry.runId).toBe(runId);
     expect(r.isStarting(runId)).toBe(false);
+  });
+
+  it('cancelBackgroundRuns ends active background runs only', () => {
+    const r = new WorkflowRunRegistry();
+    const background = r.register(reg('wf_bg', { isBackgrounded: true }));
+    const pausedBackground = r.register(
+      reg('wf_bg_paused', { isBackgrounded: true, status: 'paused' }),
+    );
+    const foreground = r.register(reg('wf_fg'));
+    const settled = r.register(reg('wf_bg_done', { isBackgrounded: true }));
+    r.complete('wf_bg_done', 'done', 1_700_000_000_500);
+
+    expect(r.cancelBackgroundRuns(1_700_000_001_000).sort()).toEqual([
+      'wf_bg',
+      'wf_bg_paused',
+    ]);
+    expect(background.status).toBe('cancelled');
+    expect(background.abortController.signal.aborted).toBe(true);
+    expect(pausedBackground.status).toBe('cancelled');
+    expect(foreground.status).toBe('running');
+    expect(foreground.abortController.signal.aborted).toBe(false);
+    expect(settled.status).toBe('completed');
+    expect(r.cancelBackgroundRuns(1_700_000_002_000)).toEqual([]);
+  });
+
+  // A start reserved before the controls went off would otherwise register
+  // afterwards, hidden and uncancellable.
+  it('cancelBackgroundRuns aborts background starts that have not registered', () => {
+    const r = new WorkflowRunRegistry();
+    const background = new AbortController();
+    const foreground = new AbortController();
+    r.reserveStart('wf_bg_starting', () => background, { background: true });
+    r.reserveStart('wf_fg_starting', () => foreground);
+
+    expect(r.cancelBackgroundRuns(1_700_000_001_000)).toEqual([
+      'wf_bg_starting',
+    ]);
+    expect(background.signal.aborted).toBe(true);
+    expect(foreground.signal.aborted).toBe(false);
+    // The reservation stays the runner's to release, as after abortAll.
+    expect(r.isStarting('wf_bg_starting')).toBe(true);
+    r.releaseStart('wf_bg_starting', background);
+    r.releaseStart('wf_fg_starting', foreground);
   });
 
   it('aborts a workflow that has not registered yet', () => {
@@ -2227,7 +2291,12 @@ describe('WorkflowRunRegistry', () => {
     const { r, completion, bg } = withCompletion();
     const entry = promptIdContext.run('local-turn', () =>
       runWithInvocationContext(
-        { version: 1, sessionId: 's', promptId: 'invocation-turn' },
+        {
+          version: 1,
+          sessionId: 's',
+          promptId: 'invocation-turn',
+          originatorClientId: 'workflow-client',
+        },
         () => bg('wf_turn'),
       ),
     );
@@ -2235,6 +2304,7 @@ describe('WorkflowRunRegistry', () => {
     r.complete(entry.runId, 'done', 1_000);
 
     expect(entry.sourceTurnId).toBe('invocation-turn');
+    expect(entry.sourceOriginatorClientId).toBe('workflow-client');
     expect(completion.mock.calls[0][2].sourceTurnId).toBe('invocation-turn');
   });
 
@@ -2245,6 +2315,44 @@ describe('WorkflowRunRegistry', () => {
     );
 
     expect(entry.sourceTurnId).toBe('caller-turn');
+  });
+
+  // A channel session's completion and approvals go back to the chat that
+  // launched the run, so the entry keeps the origin it registered under.
+  it('records the channel launch origin of the registering turn', () => {
+    const origin = {
+      channelName: 'dingtalk',
+      chatId: 'chat-1',
+      senderId: 'alice',
+      isGroup: true,
+      userInitiated: true as const,
+    };
+    const launched = runWithInvocationContext(
+      undefined,
+      () => registered('wf_channel').entry,
+      origin,
+    );
+    const plain = registered('wf_plain').entry;
+
+    expect(launched.channelWorkflowOrigin).toEqual(origin);
+    expect(plain.channelWorkflowOrigin).toBeUndefined();
+  });
+
+  // The originator decides who may vote on the run's approvals, so it is
+  // taken only from the invocation of the turn the run is attributed to.
+  it('takes no originator from an invocation of another turn', () => {
+    const entry = runWithInvocationContext(
+      {
+        version: 1,
+        sessionId: 's',
+        promptId: 'invocation-turn',
+        originatorClientId: 'workflow-client',
+      },
+      () => registered('wf_turn', { sourceTurnId: 'caller-turn' }).entry,
+    );
+
+    expect(entry.sourceTurnId).toBe('caller-turn');
+    expect(entry.sourceOriginatorClientId).toBeUndefined();
   });
 
   it('errors thrown by the notification callback do not break the call site', () => {

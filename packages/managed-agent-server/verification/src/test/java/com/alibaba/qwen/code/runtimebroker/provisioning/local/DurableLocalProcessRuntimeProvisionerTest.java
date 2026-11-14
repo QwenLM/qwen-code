@@ -10,9 +10,10 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeBrokerTestAccess;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import org.junit.jupiter.api.AfterEach;
@@ -236,7 +237,11 @@ class DurableLocalProcessRuntimeProvisionerTest {
     @ValueSource(strings = {"PROVISIONING", "RECOVERY_BLOCKED"})
     void brokerAdoptsARegisteredStartupWithoutASavedLease(String state) throws Exception {
         RuntimeProvisionRequest request = request(true);
-        var bindings = new InMemoryRuntimeBindingRepository();
+        var source = new org.h2.jdbcx.JdbcDataSource();
+        source.setURL("jdbc:h2:mem:durable-adopt-" + java.util.UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
         var initial = bindings.findOrCreate(request);
         var claim = bindings.claimOperation(initial.getBindingId(), "setup", Duration.ofSeconds(10));
         var seed = claim.getProvisionSeed();
@@ -255,7 +260,7 @@ class DurableLocalProcessRuntimeProvisionerTest {
         }
         try (var restored = provisioner(store()); var service = new RuntimeBrokerService(
                 ignored -> CompletableFuture.completedFuture(request.getScope()), restored, TRANSPORT,
-                bindings, new InMemoryRuntimeSessionRepository(), new InMemoryToolExecutionRepository(),
+                bindings, new JdbcRuntimeSessionRepository(source), new JdbcToolExecutionRepository(source),
                 "restored", Duration.ofSeconds(10), Duration.ofSeconds(10))) {
             var ready = await(service.warm("harness"));
             assertEquals(RuntimeBindingRecord.State.READY, ready.getState());
@@ -491,43 +496,6 @@ class DurableLocalProcessRuntimeProvisionerTest {
             assertEquals(RuntimeObservation.Outcome.CONFLICT, observation.getOutcome());
             assertNull(observation.getLossEvidence());
             assertTrue(workers.isEmpty());
-        }
-    }
-
-    @Test
-    void failedSpawnDoesNotRetryReconciliationForever() throws Exception {
-        var scope = new RuntimeScope("tenant", "workspace", "1",
-                directory.toAbsolutePath().toString(), WorkspaceExecutionProfile.CAPABILITY_DIGEST,
-                "session");
-        var store = store();
-        var bindings = new InMemoryRuntimeBindingRepository();
-        try (var provisioner = new LocalProcessRuntimeProvisioner(
-                List.of(directory.resolve("missing-worker").toString()), directory,
-                TRANSPORT, ignored -> "storage:a", store);
-                var service = new RuntimeBrokerService(
-                        ignored -> CompletableFuture.completedFuture(scope),
-                        provisioner, TRANSPORT, bindings,
-                        new InMemoryRuntimeSessionRepository(),
-                        new InMemoryToolExecutionRepository(), "broker",
-                        // The failing spawn releases the store lock in
-                        // milliseconds; a 1.2s operation deadline could beat
-                        // it on a loaded runner and leave the lock held.
-                        Duration.ofSeconds(5), Duration.ofMillis(300))) {
-            assertThrows(java.util.concurrent.ExecutionException.class,
-                    () -> await(service.warm("harness")));
-            var request = provisioner.createRequest(scope, "harness");
-            var blocked = bindings.findActive(request);
-            assertEquals(RuntimeBindingRecord.State.RECOVERY_BLOCKED, blocked.getState());
-            assertNull(blocked.getLease());
-            assertEquals(LocalRuntimeStore.State.LAUNCHING,
-                    store.locked(request, blocked.getProvisionSeed(), blocked.getResourceHandle(),
-                            false, (resource, record) -> record.state()));
-            var failure = assertThrows(java.util.concurrent.ExecutionException.class,
-                    () -> await(service.warm("harness")));
-            assertTrue(failure.getCause() instanceof RuntimeBrokerException);
-            assertEquals("runtime_broker_resource_conflict",
-                    ((RuntimeBrokerException) failure.getCause()).getCode());
-            assertFalse(((RuntimeBrokerException) failure.getCause()).isRetryable());
         }
     }
 

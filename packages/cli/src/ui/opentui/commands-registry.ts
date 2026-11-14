@@ -220,12 +220,18 @@ export interface CommandRouteSpec {
 }
 
 /**
- * All 70 built-in command modules, one entry each, in the registration order
+ * All 71 built-in command modules, one entry each, in the registration order
  * of BuiltinCommandLoader.ts. `/status` is aboutCommand's canonical name
  * ('about' is the alias); names with subcommands list the union of the whole
  * command tree.
  */
 export const OPEN_TUI_COMMAND_ROUTES: readonly CommandRouteSpec[] = [
+  { name: 'upgrade', results: ['message'] },
+  {
+    name: 'logout',
+    results: ['message', 'dialog'],
+    dialogs: ['auth'],
+  },
   { name: 'status', altNames: ['about'], results: ['none', 'message'] },
   {
     name: 'agents',
@@ -325,6 +331,7 @@ export const OPEN_TUI_COMMAND_ROUTES: readonly CommandRouteSpec[] = [
   { name: 'plan', results: ['message', 'submit_prompt'] },
   { name: 'peers', results: ['message'] },
   { name: 'permissions', results: ['dialog'], dialogs: ['permissions'] },
+  { name: 'pr', results: ['message'] },
   {
     name: 'trust',
     results: ['dialog'],

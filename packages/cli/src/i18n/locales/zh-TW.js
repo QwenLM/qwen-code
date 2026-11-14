@@ -9,6 +9,21 @@
 // then extensively hand-corrected for Taiwan vocabulary conventions.
 // This file is the authoritative source — do not overwrite with auto-generated output.
 export default {
+  "You've used up your weekly credits.{{reset}} You can wait or run /upgrade to get more credits.":
+    '週額度已用完{{reset}}。您可以等待額度恢復，或執行 /upgrade 升級方案以取得更多額度。',
+  "You've used up your weekly credits.{{reset}} Please try again after the reset.":
+    '週額度已用完{{reset}}，請在額度恢復後重試。',
+  "You've used up your credits.{{reset}} Please try again after the reset.":
+    '額度已用完{{reset}}，請在額度恢復後重試。',
+  ' Your credits are expected to reset in {{time}}.':
+    '，預計將於{{time}}後恢復',
+  '{{days}} and {{hours}}': '{{days}} {{hours}}',
+  '1 day': '1天',
+  '{{count}} days': '{{count}}天',
+  '1 hour': '1小時',
+  '{{count}} hours': '{{count}}小時',
+  Retry: '重試',
+  'Connecting…': '正在連線…',
   'Generated UI': 'Generated UI 生成式介面',
   'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
     '在支援的本機工作階段中啟用內建 Generated UI。重新建立所屬工作階段後生效。',
@@ -345,6 +360,8 @@ export default {
   'Open the skills panel (browse, search, toggle, pick).':
     '開啟技能面板（瀏覽、搜尋、啟停、選擇）。',
   'Move this session to a new working directory': '將此會話移動到新的工作目錄',
+  'Wait for background agents to finish or stop them in /tasks before changing directories.':
+    '請等待背景智能體完成，或在 /tasks 中停止它們後再切換目錄。',
   'Manage Skills': '管理技能',
   'Skills configuration saved.': '技能設定已儲存。',
   'Skills configuration saved, but refresh failed: {{error}}. Restart to ensure the new state is applied.':
@@ -1260,6 +1277,26 @@ export default {
   'Usage: /forget <memory text to remove>': '用法：/forget <要刪除的記憶文本>',
   'No managed auto-memory entries matched: {{query}}':
     '沒有匹配的託管自動記憶條目：{{query}}',
+  'Bind a GitHub pull request to this session':
+    '將 GitHub 提取請求綁定到本會話',
+  'Usage: /pr <number | url>': '用法：/pr <編號 | url>',
+  'No PRs bound to this session.': '本會話尚未綁定 PR。',
+  'Bound PRs: {{list}}': '已綁定 PR：{{list}}',
+  'Invalid PR reference. Usage: /pr <number | url>':
+    '無效的 PR 引用。用法：/pr <編號 | url>',
+  'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
+    '無法透過 gh 解析 PR #{{number}}。請改用完整 PR URL。',
+  'Bound PR #{{number}} to this session: {{url}}':
+    '已將 PR #{{number}} 綁定到本會話：{{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}':
+    'PR #{{number}} 已綁定到本會話：{{url}}',
+  'Failed to bind PR #{{number}}.': '綁定 PR #{{number}} 失敗。',
+  'Failed to bind PR #{{number}}: {{message}}':
+    '綁定 PR #{{number}} 失敗：{{message}}',
+  'Could not read the PR bindings for this session.':
+    '無法讀取本會話的 PR 綁定。',
+  'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.':
+    'GitHub CLI (gh) 不可用或逾時。請改用完整 PR URL 直接綁定。',
   'Consolidate managed auto-memory topic files.': '整理託管自動記憶主題檔案',
   'Import MCP servers from Claude configs': '從 Claude 設定匯入 MCP 伺服器',
   'Open MCP management dialog': '打開 MCP 管理對話框',
@@ -1830,6 +1867,7 @@ export default {
   'Model Usage': '模型使用情況',
   'Input Tokens': '輸入 token 數',
   'Output Tokens': '輸出 token 數',
+  'Output (incl. Reasoning)': '輸出（含推理）',
   'Savings Highlight:': '節省亮點：',
   'of input tokens were served from the cache, reducing costs.':
     '從緩存載入 token ，降低了成本',
@@ -2177,6 +2215,8 @@ export default {
   'Advisor review failed: {{error}}': '審查失敗：{{error}}',
   'No conversation context available for /advisor':
     '沒有可供 /advisor 使用的對話上下文',
+  'No conversation context available for /btw':
+    '沒有可供 /btw 使用的對話上下文',
   'Focus too long (max {{max}} chars)': '關注點過長（最多 {{max}} 個字元）',
   'Another operation is in progress, wait for it to complete before running /advisor':
     '另一個操作正在進行中，請等待其完成後再執行 /advisor',
@@ -2543,4 +2583,99 @@ export default {
     '檢視其他 Qwen Code 工作階段傳來的待處理訊息（accept | deny），並管理受信任控制器（controllers | revoke）',
   'Create a git commit with an AI-drafted message':
     '使用 AI 起草的提交訊息建立 git 提交',
+  'Authentication timed out. Please try again or select a different authentication method.':
+    '驗證逾時，請重試或選擇其他驗證方式。',
+  'Authorization or access was denied.': '授權或存取遭拒。',
+  'Retry Connection': '重試',
+  'Checking your subscription…': '正在檢查你的訂閱…',
+  'Choose another model provider': '選擇其他模型服務供應商',
+  'Could not complete authorization. Please try signing in again.':
+    '無法完成授權，請重新登入。',
+  'Could not read or save Qwen credentials. Check local file permissions and disk space.':
+    '無法讀取或儲存 Qwen 憑證，請檢查本機檔案權限和磁碟空間。',
+  'Could not refresh your Qwen session. Please try again.':
+    '無法更新 Qwen 登入憑證，請重試。',
+  'Could not remove local Qwen credentials. Check local file permissions.':
+    '無法清除本機 Qwen 憑證，請檢查檔案權限。',
+  'Could not request an authorization link. Please try signing in again.':
+    '無法申請授權連結，請重新登入。',
+  'Enter to select, ↑↓ to navigate · Esc to close':
+    '按 Enter 選取，↑↓ 切換 · Esc 關閉',
+  "If the browser didn't open, visit:": '如果瀏覽器未開啟，請前往：',
+  'Loading models from provider…': '正在從服務供應商載入模型…',
+  'Model: {{model}}': '模型：{{model}}',
+  'View Plans': '檢視方案',
+  'Opening chat.qwen.ai in your browser… Sign in there to connect Qwen Code.':
+    '正在瀏覽器中開啟 chat.qwen.ai… 請登入以連接 Qwen Code。',
+  'Opens the Qwen Code plans page in your browser':
+    '在瀏覽器中開啟 Qwen Code 方案頁面',
+  'Qwen Account with Subscription': '使用 Qwen 訂閱帳號',
+  'Qwen Code is included with Qwen Plus and Pro':
+    'Qwen Plus 和 Pro 包含 Qwen Code',
+  'Qwen Subscription': 'Qwen 訂閱',
+  'Qwen {{plan}} is active · usage is included with your plan':
+    'Qwen {{plan}} 已啟用 · 用量包含在你的方案中',
+  'Recommended models · provider list unavailable, showing built-ins':
+    '推薦模型 · 無法取得服務供應商清單，顯示內建模型',
+  'Sign out': '登出',
+  'Signed in as {{email}}': '已登入 {{email}}',
+  'Signed in successfully · {{email}}': '登入成功 · {{email}}',
+  'Current plan: Qwen {{plan}}. Qwen Code is ready.':
+    '目前方案：Qwen {{plan}}，已可使用 Qwen Code',
+  'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, /model to switch models, or /effort to change reasoning effort.':
+    '模型：{{model}}，輸入 /upgrade 升級方案，/usage 查看用量，/model 切換模型，/effort 修改思考強度。',
+  'Common commands: /usage   /upgrade   /model   /effort   /status   /logout':
+    '常用指令：/usage   /upgrade   /model   /effort   /status   /logout',
+  'Signed in as {{email}} (Qwen {{plan}})': '已登入 {{email}}（Qwen {{plan}}）',
+  'The network request failed or timed out.': '網路請求失敗或逾時。',
+  'The service returned an invalid response.': '服務回傳的資料格式無效。',
+  'Too many requests. Please try again later.': '請求過多，請稍後重試。',
+  'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai':
+    '在 chat.qwen.ai 訂閱 Plus／Pro，解鎖 Qwen Code 和 Agent 能力',
+  'Your login credentials are no longer valid. Run /auth to sign in again.':
+    '登入憑證已失效，請執行 /auth 重新登入。',
+  'Switch Provider': '切換供應商',
+  'Use another account': '使用其他帳號',
+  'Waiting for sign-in…': '正在等待登入…',
+  'Waiting for your subscription to become active…': '正在等待你的訂閱生效…',
+  'You are signed out locally, but the remote session could not be revoked.':
+    '本機已登出，但未能撤銷遠端工作階段。',
+  "You're signed in with a {{plan}} account, which doesn't include Qwen Code. Choose Plus or Pro in your browser; this terminal continues automatically after you subscribe.":
+    '你目前登入的 {{plan}} 帳號未包含 Qwen Code。請在瀏覽器中選擇 Plus 或 Pro；訂閱後此終端機將自動繼續。',
+  'Your Qwen session has expired. Run /auth to sign in again.':
+    '你的 Qwen 登入已過期，請執行 /auth 重新登入。',
+  'c to copy link · Esc to cancel': '按 c 複製連結 · Esc 取消',
+  'Model: {{model}} · Run /usage to see your plan usage':
+    '模型：{{model}} · 執行 /usage 查看方案用量',
+  'Type your request, or /usage': '輸入你的請求，或 /usage',
+  'Try:': '試試：',
+  'Open Qwen subscription plans': '開啟 Qwen 訂閱方案頁',
+  'Could not open your browser. Visit {{url}}':
+    '無法開啟瀏覽器，請造訪 {{url}}',
+  'Qwen subscription plans: {{url}}': 'Qwen 訂閱方案：{{url}}',
+  'Sign out of your Qwen account': '登出 Qwen 帳號',
+  'This connection does not require /logout. Use /auth to switch model providers.':
+    '目前連線無需透過 /logout 登出。如需切換模型服務，請使用 /auth。',
+  'This command is only available with Qwen Subscription login. Use /auth to sign in to Qwen Subscription.':
+    '此命令僅適用於 Qwen 訂閱登入。如需使用 Qwen 訂閱，請透過 /auth 登入。',
+  'Wait for the current response to finish before signing out.':
+    '請等待目前回覆結束後再登出。',
+  'You are signed out, but the saved authentication selection could not be cleared.':
+    '已登出，但無法清除儲存的驗證方式。',
+  'Signed out of Qwen. Use /auth to sign in with another account.':
+    '已登出 Qwen，請使用 /auth 登入其他帳號。',
+  'Tip: Run /usage to see your plan usage.': '提示：執行 /usage 查看方案用量。',
+  'Copied to clipboard': '已複製到剪貼簿',
+  'Copy failed': '複製失敗',
+  '(API error: {{error}})': '（API 錯誤：{{error}}）',
+  'API error': 'API 錯誤',
+  '{{reason}} · retrying in {{seconds}}s · attempt {{attempt}}/{{max}}':
+    '{{reason}} · {{seconds}} 秒後重試 · 第 {{attempt}}/{{max}} 次',
+  '←/→ browse earlier answers': '←/→ 瀏覽先前的回答',
+  'c copy': 'c 複製',
+  'x clear history': 'x 清除歷史',
+  'Tip: Use /btw to ask a quick side question without interrupting the current work':
+    '提示：用 /btw 順帶問一個旁路問題，不打斷目前的工作',
+  '(The model tried to call {{tool}} instead of answering directly. Try rephrasing or ask in the main conversation.)':
+    '（模型嘗試呼叫 {{tool}}，而沒有直接回答。請換個問法，或在主對話中提問。）',
 };

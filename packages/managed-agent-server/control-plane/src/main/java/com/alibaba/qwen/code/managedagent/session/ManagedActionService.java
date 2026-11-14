@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedUserQuestions;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicActionList;
@@ -28,15 +29,20 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 @Service
 public class ManagedActionService {
     private static final Logger LOG =
             LoggerFactory.getLogger(ManagedActionService.class);
     private static final int INPUT_PREVIEW_BYTES = 8192;
+    private static final int MAX_CURSOR_LENGTH = 512;
+    private static final Pattern CURSOR_TIMESTAMP = Pattern.compile("0|[1-9][0-9]{0,18}");
+    private static final Pattern CURSOR_SESSION = Pattern.compile("[0-9a-f-]{36}");
+    private static final Pattern UPPERCASE_LETTER = Pattern.compile("([A-Z])");
     private static final Set<String> PREVIEW_TOOLS =
             Set.of("web_fetch", "read_file", "write_file", "edit", "run_shell_command",
-                    "todo_write",
+                    "todo_write", "loop_wakeup", "cron_create", "cron_list", "cron_delete", "context_search", "context_remember", "context_get", "context_forget",
                     "agent", "send_message", "team_create", "task_create",
                     "task_update", "workflow", "request_shutdown", "exit_plan_mode",
                     "team_plan_approval");
@@ -115,7 +121,7 @@ public class ManagedActionService {
         String beforeId = null;
         if (cursor != null && !cursor.isEmpty()) {
             try {
-                if (cursor.length() > 512) {
+                if (cursor.length() > MAX_CURSOR_LENGTH) {
                     throw new IllegalArgumentException();
                 }
                 String decoded = new String(Base64.getUrlDecoder().decode(cursor), StandardCharsets.UTF_8);
@@ -124,8 +130,9 @@ public class ManagedActionService {
                     throw new IllegalArgumentException();
                 }
                 String[] parts = decoded.substring(scope.length()).split(":", -1);
-                if (parts.length != 3 || !parts[0].matches("0|[1-9][0-9]{0,18}")
-                        || !parts[1].matches("[0-9a-f-]{36}") || !parts[2].matches("tool_approval_[0-9a-f]{32}")) {
+                if (parts.length != 3 || !CURSOR_TIMESTAMP.matcher(parts[0]).matches()
+                        || !CURSOR_SESSION.matcher(parts[1]).matches()
+                        || !ManagedActionStore.ACTION_ID.matcher(parts[2]).matches()) {
                     throw new IllegalArgumentException();
                 }
                 before = Long.parseLong(parts[0]);
@@ -184,22 +191,42 @@ public class ManagedActionService {
             JsonNode revision,
             String policy,
             String option) {
+        return respond(tenant, actor, session, id, key, kind, revision, policy, option, null, false);
+    }
+
+    public OperationAdmission respond(
+            String tenant, String actor, String session, String id, String key,
+            String kind, JsonNode revision, String policy, String option, JsonNode answers, boolean publicNames) {
         sessions.requireReadableSession(tenant, actor, session);
         ManagedAgentService.validateIdempotencyKey(key);
-        if (!"permission".equals(kind)
+        if (!("permission".equals(kind) || "question".equals(kind))
                 || revision == null
                 || !revision.isIntegralNumber()
                 || !revision.canConvertToLong()) {
             throw new ManagedAgentException(
                     400,
                     "invalid_action_response",
-                    "Only permission responses are supported.");
+                    "The Action response kind or revision is invalid.");
         }
-        ObjectNode body =
-                json.createObjectNode()
-                        .put("optionId", option)
-                        .put("inputRevision", revision.longValue())
-                        .put("policyRevision", policy);
+        ObjectNode body = json.createObjectNode();
+        if ("question".equals(kind)) {
+            Action action = actions.find(tenant, session, id).orElseThrow(() ->
+                    new ManagedAgentException(404, "action_not_found", "The Action was not found."));
+            try {
+                if (option != null || !ManagedUserQuestions.isQuestion(action.options())) {
+                    throw new IllegalArgumentException();
+                }
+                body.set("answers", ManagedUserQuestions.canonicalAnswers(action.options().get("questions"), answers, publicNames));
+            } catch (IllegalArgumentException error) {
+                throw new ManagedAgentException(400, "invalid_action_response", "The answer does not match the original question.");
+            }
+        } else {
+            if (answers != null) {
+                throw new ManagedAgentException(400, "invalid_action_response", "Permission responses cannot contain answers.");
+            }
+            body.put("optionId", option);
+        }
+        body.put("inputRevision", revision.longValue()).put("policyRevision", policy);
         OperationAdmission admitted =
                 actions.admit(
                         tenant,
@@ -272,15 +299,16 @@ public class ManagedActionService {
         String beforeId = null;
         if (cursor != null && !cursor.isEmpty()) {
             try {
-                if (cursor.length() > 512) {
+                if (cursor.length() > MAX_CURSOR_LENGTH) {
                     throw new IllegalArgumentException();
                 }
                 String decoded =
                         new String(Base64.getUrlDecoder().decode(cursor), StandardCharsets.UTF_8);
-                if (!decoded.matches("(0|[1-9][0-9]{0,18}):tool_approval_[0-9a-f]{32}")) {
+                String[] parts = decoded.split(":", 2);
+                if (parts.length != 2 || !CURSOR_TIMESTAMP.matcher(parts[0]).matches()
+                        || !ManagedActionStore.ACTION_ID.matcher(parts[1]).matches()) {
                     throw new IllegalArgumentException();
                 }
-                String[] parts = decoded.split(":", 2);
                 before = Long.parseLong(parts[0]);
                 beforeId = parts[1];
             } catch (IllegalArgumentException error) {
@@ -305,7 +333,7 @@ public class ManagedActionService {
                 json.createObjectNode()
                         .put(web ? "actionId" : "id", action.id())
                         .put(web ? "sessionId" : "session_id", session)
-                        .put("kind", "permission")
+                        .put("kind", ManagedUserQuestions.isQuestion(options) ? "question" : "permission")
                         .put("state", action.state());
         result.set(
                 "source",
@@ -320,12 +348,23 @@ public class ManagedActionService {
                         "expiresAt",
                         "functionCallId",
                         "toolName")) {
-            String name = web ? field : field.replaceAll("([A-Z])", "_$1").toLowerCase(Locale.ROOT);
+            String name = web ? field : UPPERCASE_LETTER.matcher(field).replaceAll("_$1").toLowerCase(Locale.ROOT);
             result.set(name, options.get(field));
         }
         actions.publicTurnId(tenant, session, options.path("turnId").asText())
                 .ifPresent(turn -> result.put(web ? "turnId" : "turn_id", turn));
-        result.set("options", options.path("options"));
+        if (ManagedUserQuestions.isQuestion(options)) {
+            JsonNode questions = options.path("questions").deepCopy();
+            if (!web) {
+                for (JsonNode question : questions) {
+                    ObjectNode item = (ObjectNode) question;
+                    item.set("allow_text", item.remove("allowText"));
+                }
+            }
+            result.set("questions", questions);
+        } else {
+            result.set("options", options.path("options"));
+        }
         JsonNode preview = inputPreview(tenant, session, action, web);
         if (preview != null) {
             result.set(web ? "inputPreview" : "input_preview", preview);
@@ -373,7 +412,7 @@ public class ManagedActionService {
                     return null;
                 }
                 text = wrapper.path("payloadJson").asText();
-                JsonNode payload = com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore.parse(text);
+                JsonNode payload = ManagedExtensionRecordStore.parse(text);
                 if (payload == null
                         || payload.size() != 2
                         || !tool.equals(payload.path("toolName").asText())

@@ -1,7 +1,7 @@
 {
   "name": "@qwen-code/qwen-code",
   "private": true,
-  "version": "0.26.7",
+  "version": "0.27.2",
   "packageManager": "pnpm@11.24.0+sha512.bd27e345e976dcb0be0b7a1228217b049a817e21b1f355c90dbe7dc46671895a8bc1e6d06c24554505ea93ea0b45f489a27ec1bfbc8de6a9659fca0f16fa0000",
   "engines": {
     "node": ">=22.0.0"
@@ -35,7 +35,7 @@
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.26.7"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.27.2"
   },
   "scripts": {
     "start": "node scripts/start.js",
@@ -82,6 +82,7 @@
     "test:e2e:managed-harness-restart-approval-after-result": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault after-result",
     "test:e2e:managed-harness-restart-approval-finished-before-commit": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault finished-before-commit",
     "test:e2e:managed-harness-restart-approval-sibling-approval": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault sibling-approval",
+    "test:e2e:managed-harness-restart-approval-command-rewrite": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault command-rewrite",
     "test:e2e:managed-harness-restart-approval-after-earlier-tools": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault after-earlier-tools",
     "test:e2e:managed-harness-restart-approval-cleanup-failed": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault cleanup-failed",
     "test:e2e:managed-harness-restart-approval-decision-reply-lost": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault decision-reply-lost",
@@ -99,7 +100,7 @@
     "test:integration:sandbox:docker": "cross-env QWEN_SANDBOX=docker npm run build:sandbox && QWEN_SANDBOX=docker vitest run --root ./integration-tests",
     "test:integration:sandbox:podman": "cross-env QWEN_SANDBOX=podman vitest run --root ./integration-tests",
     "test:integration:hosted:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --config ./vitest.hosted.config.ts",
-    "test:integration:no-ak:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.forks.maxForks 2 ./fake-openai-server.test.ts ./test-helper.test.ts ./chat-transcript-contract.test.ts ./skill-hooks-invocation-parity.test.ts ./skill-hooks-resume.test.ts ./qwen-live-m4-acp-call.test.ts ./qwen-live-m4-acp-permission.test.ts ./qwen-live-m4-acp-steering.test.ts ./qwen-live-m4-acp-multibackend.test.ts ./qwen-live-m1-call.test.ts ./qwen-live-m2-inject.test.ts ./qwen-live-m2-permission.test.ts ./qwen-live-m2-steering.test.ts ./cli/_prompt-latency-policy.test.ts ./cli/agent-loop-parity.test.ts ./cli/acp-agent-loop-parity.test.ts ./cli/hosted-harness-process.test.ts ./cli/daemon-invocation-context.test.ts ./cli/headless-workflow-skill.test.ts ./cli/workflow-ancestor-discovery.test.ts ./cli/daemon-workflow-ancestor-trust.test.ts ./cli/workflow-intent.test.ts ./cli/workflow-mode.test.ts ./cli/acp-workflow-mode.test.ts ./cli/daemon-workflow-intent.test.ts ./cli/daemon-workflow-mode.test.ts ./cli/list_directory.test.ts ./cli/tool-hook-context.test.ts ./cli/tool-hook-updated-input.test.ts ./cli/qwen-serve-routes.test.ts ./cli/qwen-serve-session-cd.test.ts ./cli/qwen-serve-streaming.test.ts ./cli/qwen-serve-standalone-concurrency.test.ts ./helpers/hosted-sse-observer.test.ts ./interactive/workflow-completion.test.ts ./interactive/workflow-intent.test.ts ./interactive/workflow-mode.test.ts ./interactive/mods-tool-middleware.test.ts ./interactive/statusline-parity.test.ts ./interactive/tui-editor-parity.test.ts ./interactive/tui-input-ownership.test.ts ./interactive/ink-agent-loop-parity.test.ts ./sdk-typescript/abort-and-lifecycle.test.ts ./sdk-typescript/permission-control.test.ts ./sdk-typescript/sdk-mcp-server.test.ts ./sdk-typescript/subagents.test.ts ./sdk-typescript/system-control.test.ts ./sdk-typescript/tool-control.test.ts ./sdk-typescript/workflow-intent.test.ts ./sdk-typescript/workflow-mode.test.ts",
+    "test:integration:no-ak:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.forks.maxForks 2 ./fake-openai-server.test.ts ./generated-ui-acceptance/fixtures.test.ts ./generated-ui-acceptance/harness.test.ts ./generated-ui-acceptance/live-case.test.ts ./generated-ui-acceptance/live-config.test.ts ./test-helper.test.ts ./chat-transcript-contract.test.ts ./skill-hooks-invocation-parity.test.ts ./skill-hooks-resume.test.ts ./qwen-live-m4-acp-call.test.ts ./qwen-live-m4-acp-permission.test.ts ./qwen-live-m4-acp-steering.test.ts ./qwen-live-m4-acp-multibackend.test.ts ./qwen-live-m1-call.test.ts ./qwen-live-m2-inject.test.ts ./qwen-live-m2-permission.test.ts ./qwen-live-m2-steering.test.ts ./cli/_prompt-latency-policy.test.ts ./cli/agent-loop-parity.test.ts ./cli/acp-agent-loop-parity.test.ts ./cli/hosted-harness-process.test.ts ./cli/daemon-invocation-context.test.ts ./cli/headless-workflow-skill.test.ts ./cli/workflow-ancestor-discovery.test.ts ./cli/daemon-workflow-ancestor-trust.test.ts ./cli/workflow-intent.test.ts ./cli/workflow-mode.test.ts ./cli/acp-workflow-mode.test.ts ./cli/daemon-workflow-intent.test.ts ./cli/daemon-workflow-mode.test.ts ./cli/daemon-workflow-background.test.ts ./cli/list_directory.test.ts ./cli/tool-hook-context.test.ts ./cli/tool-hook-updated-input.test.ts ./cli/mods-prompt-submit.test.ts ./cli/qwen-serve-conversations-root.test.ts ./cli/qwen-serve-routes.test.ts ./cli/qwen-serve-session-cd.test.ts ./cli/qwen-serve-streaming.test.ts ./cli/qwen-serve-standalone-concurrency.test.ts ./helpers/hosted-sse-observer.test.ts ./interactive/workflow-completion.test.ts ./interactive/workflow-intent.test.ts ./interactive/workflow-mode.test.ts ./interactive/mods-tool-middleware.test.ts ./interactive/mods-prompt-submit.test.ts ./interactive/mods-assistant-message.test.ts ./interactive/statusline-parity.test.ts ./interactive/tui-editor-parity.test.ts ./interactive/tui-input-ownership.test.ts ./interactive/tui-agent-loop-parity.test.ts ./sdk-typescript/abort-and-lifecycle.test.ts ./sdk-typescript/permission-control.test.ts ./sdk-typescript/sdk-mcp-server.test.ts ./sdk-typescript/subagents.test.ts ./sdk-typescript/system-control.test.ts ./sdk-typescript/tool-control.test.ts ./sdk-typescript/workflow-intent.test.ts ./sdk-typescript/workflow-mode.test.ts",
     "test:integration:sdk:sandbox:none": "cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.forks.maxForks 2 sdk-typescript",
     "test:integration:sdk:sandbox:docker": "cross-env QWEN_SANDBOX=docker npm run build:sandbox && QWEN_SANDBOX=docker vitest run --root ./integration-tests --poolOptions.forks.maxForks 2 sdk-typescript",
     "test:sdk:python": "python3 -m pytest -c packages/sdk-python/pyproject.toml packages/sdk-python/tests -q",
@@ -146,6 +147,15 @@
     "pre-commit": "node scripts/pre-commit.js"
   },
   "overrides": {
+    "glob@10 || 13": "14.0.6",
+    "minimatch@9 || 10": "11.0.8",
+    "qs": "6.17.1",
+    "fast-uri": "3.1.9",
+    "ip-address": "10.7.4",
+    "hono": "4.13.18",
+    "@hono/node-server@2": "2.1.7",
+    "body-parser": "2.4.0",
+    "dompurify": "3.4.17",
     "brace-expansion@1": "1.1.21",
     "brace-expansion@2": "2.1.7",
     "ansi-regex": "6.2.2",
@@ -173,6 +183,7 @@
   "devDependencies": {
     "@emnapi/core": "1.11.3",
     "@emnapi/runtime": "1.11.3",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@qwen-code/acp-bridge": "file:packages/acp-bridge",
     "@qwen-code/channel-base": "file:packages/channels/base",
     "@qwen-code/qwen-code": "file:packages/cli",
@@ -205,7 +216,7 @@
     "eslint-plugin-license-header": "^0.8.0",
     "eslint-plugin-react": "^7.37.5",
     "eslint-plugin-react-hooks": "^5.2.0",
-    "glob": "^10.5.0",
+    "glob": "^14.0.6",
     "globals": "^16.0.0",
     "husky": "^9.1.7",
     "jsdom": "^26.1.0",
@@ -228,7 +239,7 @@
     "vitest": "^3.2.4",
     "yaml": "^2.8.1",
     "yargs": "^17.7.2",
-    "zod": "3.25.76"
+    "zod": "4.6.6"
   },
   "dependencies": {
     "@testing-library/dom": "^10.4.1",

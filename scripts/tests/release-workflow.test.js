@@ -1607,6 +1607,7 @@ describe('release workflow', () => {
     // run never reached, words a test merely printed).
     const timeout = 'Error: [vitest-worker]: Timeout calling "x"';
     const tally = ' Tests  10614 passed (10614)';
+    const unhandled = '⎯⎯⎯⎯⎯⎯ Unhandled Errors ⎯⎯⎯⎯⎯⎯';
     const passedThrough =
       '::warning title=Workspace tests passed through a Vitest transport timeout::';
     const stands =
@@ -1622,14 +1623,14 @@ describe('release workflow', () => {
       // unhandled error Vitest counted. It cost this release three attempts.
       [
         'transport timeout, run completed',
-        `${timeout}\n${tally}\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\n${tally}\n     Errors  1 error`,
         1,
         passedThrough,
         0,
       ],
       [
         'transport timeout, killed by a signal',
-        `${timeout}\n${tally}\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\n${tally}\n     Errors  1 error`,
         137,
         '::warning title=Workspace tests exited 137 on a Vitest transport timeout::',
       ],
@@ -1637,7 +1638,7 @@ describe('release workflow', () => {
       // something else as well, whatever its header said.
       [
         'transport timeout beside a real one',
-        `${timeout}\nError: write after end\n${tally}\n     Errors  2 errors`,
+        `${unhandled}\n${timeout}\nError: write after end\n${tally}\n     Errors  2 errors`,
         1,
         stands,
       ],
@@ -1648,7 +1649,7 @@ describe('release workflow', () => {
       // them the oncall is told one of four things happened when none did.
       [
         'transport timeout counted twice against one unhandled error',
-        `${timeout}\n${timeout}\n${tally}\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\n${timeout}\n${tally}\n     Errors  1 error`,
         1,
         '::warning title=Workspace tests exited 1 on a Vitest transport timeout::A transport timeout the run cannot account for — no passing tally, a failing tally, a signal death, an unhandled error that was not the transport, or the two counts disagreeing for a reason this log does not show. The failure stands (status 1, 1 counted error(s) vs 2 transport line(s)); rerun the job.',
       ],
@@ -1660,13 +1661,13 @@ describe('release workflow', () => {
       // The count sees both, because it never looks at the header.
       [
         'transport timeout beside a suffix-less crash header',
-        `${timeout}\nPoolTimeout: worker pool exhausted\n${tally}\n     Errors  2 errors`,
+        `${unhandled}\n${timeout}\nPoolTimeout: worker pool exhausted\n${tally}\n     Errors  2 errors`,
         1,
         stands,
       ],
       [
         'transport timeout beside a bare string throw',
-        `${timeout}\nUnknown Error: a bare string, no class header\n${tally}\n     Errors  2 errors`,
+        `${unhandled}\n${timeout}\nUnknown Error: a bare string, no class header\n${tally}\n     Errors  2 errors`,
         1,
         stands,
       ],
@@ -1677,18 +1678,18 @@ describe('release workflow', () => {
       // unmoved by them.
       [
         'transport timeout beside Error: lines a test printed',
-        `${timeout}\nError: boom\nError: Not implemented: navigation\n${tally}\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\nError: boom\nError: Not implemented: navigation\n${tally}\n     Errors  1 error`,
         1,
         passedThrough,
         0,
       ],
-      // `--workspaces` prints one summary per workspace into one log, so both
-      // figures are whole-file sums: a passing tally cannot cover a later
-      // workspace's crash, and two transport deaths in two workspaces still
-      // pass.
+      // `--workspaces` prints one summary per workspace into one log, so the
+      // `Errors` figure is a whole-file sum: a passing tally cannot cover a
+      // later workspace's crash, and two transport deaths in two workspaces
+      // still pass.
       [
         'tally, then a later workspace crashing',
-        `${timeout}\n${tally}\n Tests  8 passed (8)\n     Errors  2 errors`,
+        `${unhandled}\n${timeout}\n${tally}\n Tests  8 passed (8)\n     Errors  2 errors`,
         1,
         stands,
       ],
@@ -1697,14 +1698,14 @@ describe('release workflow', () => {
       // one of them (run 33713579913).
       [
         'four transport deaths, four unhandled errors',
-        `${timeout}\n${timeout}\n${timeout}\n${timeout}\n${tally}\n     Errors  4 errors`,
+        `${unhandled}\n${timeout}\n${timeout}\n${timeout}\n${timeout}\n${tally}\n     Errors  4 errors`,
         1,
         passedThrough,
         0,
       ],
       [
         'two workspaces, both lost to the transport',
-        `${timeout}\n Tests  5 passed (5)\n     Errors  1 error\nError: [vitest-worker]: Timeout calling "y"\n Tests  7 passed (7)\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\n Tests  5 passed (5)\n     Errors  1 error\n${unhandled}\nError: [vitest-worker]: Timeout calling "y"\n Tests  7 passed (7)\n     Errors  1 error`,
         1,
         passedThrough,
         0,
@@ -1713,13 +1714,13 @@ describe('release workflow', () => {
       // line at all, no passing tally, or a failing tally.
       [
         'transport timeout, no error summary to count',
-        `${timeout}\n${tally}`,
+        `${unhandled}\n${timeout}\n${tally}`,
         1,
         stands,
       ],
       [
         'transport timeout, no tally to back it',
-        'Error: [vitest-worker]: Timeout calling "onTaskUpdate"',
+        `${unhandled}\nError: [vitest-worker]: Timeout calling "onTaskUpdate"`,
         1,
         stands,
       ],
@@ -1728,7 +1729,7 @@ describe('release workflow', () => {
       // count is all transport.
       [
         'error summary with no tally to back it',
-        `${timeout}\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\n     Errors  1 error`,
         1,
         stands,
       ],
@@ -1745,7 +1746,7 @@ describe('release workflow', () => {
       // beside a real transport death do not inflate it into a mismatch.
       [
         'transport timeout, and Timeout calling printed by a test',
-        `${timeout}\nTimeout calling the vendor API\n${tally}\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\nTimeout calling the vendor API\n${tally}\n     Errors  1 error`,
         1,
         passedThrough,
         0,
@@ -1758,14 +1759,56 @@ describe('release workflow', () => {
       // earned — the false-red this PR exists to remove, back again.
       [
         'transport timeout, and a summary-shaped line a test printed',
-        `${timeout}\nErrors 2 errors occurred in fixture data\n${tally}\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\nErrors 2 errors occurred in fixture data\n${tally}\n     Errors  1 error`,
+        1,
+        passedThrough,
+        0,
+      ],
+      // Console output is echoed at column 0, so a test that prints the
+      // transport's exact prefix outside the unhandled-error section must not
+      // move the count. A whole-file grep reads two here against one counted
+      // error and refuses the pass the run earned; the anchored count reads
+      // one and grants it.
+      [
+        'transport timeout, and the transport prefix printed outside the section',
+        `${unhandled}\n${timeout}\n${tally}\n     Errors  1 error\n[vitest-worker]: Timeout calling "printed by a test"`,
+        1,
+        passedThrough,
+        0,
+      ],
+      // The pass must be earned by at least one unhandled error Vitest itself
+      // counted. A log with no `Errors` summary and a transport prefix printed
+      // outside any section used to satisfy `0 == 0` and pass a shard whose
+      // only "evidence" was a test's own output.
+      [
+        'transport prefix printed, no error summary to count',
+        `${tally}\n[vitest-worker]: Timeout calling "printed by a test"`,
+        1,
+        stands,
+      ],
+      // The opener needs Vitest's ruler on both sides: the bare words are a
+      // phrase a test can print, not the section header.
+      [
+        'transport timeout, and the bare section words printed',
+        `Unhandled Errors\n${timeout}\n${unhandled}\n${timeout}\n${tally}\n     Errors  1 error`,
+        1,
+        passedThrough,
+        0,
+      ],
+      // A test can print a line that merely starts with the section header.
+      // The opener must match Vitest's ruler-shaped line, not any line that
+      // contains the words, or the printed copy opens a pseudo-section and the
+      // transport line after it is counted twice against one real error.
+      [
+        'transport timeout, and a printed near-miss of the section header',
+        `${unhandled}\n${timeout}\n${tally}\n     Errors  1 error\nUnhandled Errors: a test printed this\n${timeout}`,
         1,
         passedThrough,
         0,
       ],
       [
         'transport timeout, failing tally',
-        `${timeout}\n Tests  3 failed | 10611 passed (10614)\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\n Tests  3 failed | 10611 passed (10614)\n     Errors  1 error`,
         1,
         stands,
       ],
@@ -1774,7 +1817,7 @@ describe('release workflow', () => {
       // across the whole log rather than trusted to the branch above.
       [
         'passing tally in one workspace, failing tally in another',
-        `${timeout}\n Tests  10 passed (10)\n Test Files  1 failed (3)\n     Errors  1 error`,
+        `${unhandled}\n${timeout}\n Tests  10 passed (10)\n Test Files  1 failed (3)\n     Errors  1 error`,
         1,
         stands,
       ],
@@ -2516,6 +2559,23 @@ describe('release workflow', () => {
     );
   });
 
+  it('selects the apt mirror before the always-cold sandbox build', () => {
+    // #16271: this lane prunes the builder cache, so its apt layers are always
+    // cold — the same defect #16214 fixed for the E2E leg. It must source the
+    // shared probe and apply it before `build:sandbox`, so a mainland host
+    // builds against the VPC intranet mirror rather than the throttled default.
+    // Match the source statement, not a substring — the shellcheck directive
+    // above it also names the file.
+    expect(dockerIntegrationScript).toMatch(
+      /^source .*apt-mirror-probe\.sh"$/m,
+    );
+    const applyIndex = dockerIntegrationScript.indexOf('apply_apt_mirror');
+    expect(applyIndex).toBeGreaterThan(-1);
+    expect(
+      dockerIntegrationScript.indexOf('npm run build:sandbox'),
+    ).toBeGreaterThan(applyIndex);
+  });
+
   it('prunes BuildKit cache and gates the docker data root before the build and the vitest phase', () => {
     // #13479: run 37374675168 passed the job-start disk floor gate and the
     // runner still died on ENOSPC 24 minutes into the docker test step. The
@@ -2591,6 +2651,9 @@ describe('release workflow', () => {
     dockerPostFloorKb,
     postGateExit,
     inspectTimesOut = false,
+    aptDefaultRate,
+    aptAliyunRate,
+    aptTunaRate,
   } = {}) => {
     const directory = mkdtempSync(
       join(tmpdir(), 'release-docker-integration-'),
@@ -2647,8 +2710,25 @@ if [ "$1" = 'info' ]; then
 fi
 exit 0`,
     );
-    stub('npm', `printf 'npm %s\\n' "$*" >> "$CALLS_LOG"`);
+    stub(
+      'npm',
+      `printf 'npm %s flags=%s\\n' "$*" "\${BUILD_SANDBOX_FLAGS:-}" >> "$CALLS_LOG"`,
+    );
     stub('npx', `printf 'npx %s\\n' "$*" >> "$CALLS_LOG"`);
+    // Deterministic stand-in for the probe's range reads so the suite stays
+    // hermetic (#16278 R1-1): answer the -w '%{http_code} %{speed_download}'
+    // projection per URL, default slow + one fast mirror.
+    stub(
+      'curl',
+      `for url; do :; done
+case "$url" in
+  *deb.debian.org*) printf '206 %s' "\${CURL_DEFAULT_RATE:-10000}" ;;
+  *mirrors.aliyun.com*) printf '206 %s' "\${CURL_ALIYUN_RATE:-5000000}" ;;
+  *mirrors.tuna.tsinghua.edu.cn*) printf '206 %s' "\${CURL_TUNA_RATE:-0}" ;;
+  *mirrors.cloud.aliyuncs.com*) printf '000 0' ;;
+  *) printf '000 0' ;;
+esac`,
+    );
     if (!helperAbsent) {
       // Both checkpoints share this stub: count invocations so a case can
       // fail the pre-vitest gate while the pre-build gate passes.
@@ -2683,6 +2763,10 @@ exit 0`,
         PRUNE_FAILS: pruneFails ? '1' : '0',
         IMAGE_PRUNE_FAILS: imagePruneFails ? '1' : '0',
         DOCKER_INFO_FAILS: dockerInfoFails ? '1' : '0',
+        BUILD_SANDBOX_FLAGS: '--label org.qwen-code.ci.sandbox=true',
+        CURL_DEFAULT_RATE: String(aptDefaultRate ?? 10000),
+        CURL_ALIYUN_RATE: String(aptAliyunRate ?? 5000000),
+        CURL_TUNA_RATE: String(aptTunaRate ?? 0),
       };
       // The floor knobs come from the test, never the ambient environment:
       // the suite's verdict must not depend on the env of whoever runs it.
@@ -2720,6 +2804,30 @@ exit 0`,
       rmSync(directory, { recursive: true, force: true });
     }
   };
+
+  it.skipIf(process.platform === 'win32')(
+    'selects the fast apt mirror and preserves the CI label in the build flags',
+    () => {
+      const { result, calls } = runDockerIntegrationScript();
+      expect(result.status).toBe(0);
+      expect(calls).toContain('--build-arg APT_MIRROR=mirrors.aliyun.com');
+      expect(calls).toContain('--label org.qwen-code.ci.sandbox=true');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'adds no apt mirror build arg when every endpoint is slow',
+    () => {
+      const { result, calls } = runDockerIntegrationScript({
+        aptDefaultRate: 10000,
+        aptAliyunRate: 20000,
+        aptTunaRate: 15000,
+      });
+      expect(result.status).toBe(0);
+      expect(calls).not.toContain('--build-arg APT_MIRROR=');
+      expect(calls).toContain('--label org.qwen-code.ci.sandbox=true');
+    },
+  );
 
   it.skipIf(process.platform === 'win32')(
     'reclaims without the disk gate or the lock protocol on hosted runners',

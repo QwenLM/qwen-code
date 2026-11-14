@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.junit.jupiter.api.AfterEach;
@@ -17,6 +18,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -51,7 +53,7 @@ class ManagedLockScopeConcurrencyMySqlIT {
         jdbc = new ManagedSchemaJdbcTemplate(database.source());
         transactions = new TransactionTemplate(new DataSourceTransactionManager(database.source()));
         agents = VerificationFixtures.managedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(),
-                events -> {}, mock(ManagedWorkspaceRegistry.class), new ManagedAgentProperties(), new SdkHarnessRules());
+                events -> {}, mock(JdbcManagedWorkspaceRegistry.class), new ManagedAgentProperties(), new SdkHarnessRules());
     }
 
     @AfterEach
@@ -150,7 +152,7 @@ class ManagedLockScopeConcurrencyMySqlIT {
             assertThat(jdbc.queryForObject("SELECT claim_lease_until FROM ma_session_head WHERE head_kind = 'HARNESS'"
                     + " AND tenant_id = 'tenant' AND harness_session_id = ?", Long.class, fixture.session)).isNull();
             JdbcRuntimeBindingRepository.lockPlacementDomain(readView, "tenant");
-            assertThatThrownBy(() -> JdbcRuntimeBindingRepository.requireHarnessAdmission(readView, fixture.scope(),
+            assertThatThrownBy(() -> RuntimeAdmissionFences.requireHarnessAdmission(readView, fixture.scope(),
                     fixture.session, authority))
                     .as("cleared " + action + " claim cannot be accepted from an old read view")
                     .isInstanceOfSatisfying(RuntimeBrokerException.class,
@@ -168,7 +170,7 @@ class ManagedLockScopeConcurrencyMySqlIT {
         try (Connection admission = database.source().getConnection(); var executor = Executors.newVirtualThreadPerTaskExecutor()) {
             admission.setAutoCommit(false);
             JdbcRuntimeBindingRepository.lockPlacementDomain(admission, "tenant");
-            JdbcRuntimeBindingRepository.requireHarnessAdmission(admission, fixture.scope(), fixture.session, authority);
+            RuntimeAdmissionFences.requireHarnessAdmission(admission, fixture.scope(), fixture.session, authority);
             Future<?> mutation = executor.submit(() -> fixture.transactions.executeWithoutResult(status -> {
                 if ("retry".equals(action)) {
                     fixture.store.retryOperation("tenant", fixture.session, operation.operationId(),
@@ -198,14 +200,14 @@ class ManagedLockScopeConcurrencyMySqlIT {
         jdbc.update("UPDATE ma_storage SET storage_kind = ?", kind);
         jdbc.update("UPDATE ma_storage_owner SET storage_kind = ?", kind);
         String readyKey = transactions.execute(status -> "LOCAL".equals(kind)
-                ? LocalStorageOwners.key(jdbc, TENANT, "storage") : SshWorkspaceStore.physicalKey(jdbc, TENANT, "storage"));
+                ? LocalStorageOwners.key(jdbc, TENANT, "storage") : JdbcSshWorkspaceStore.physicalKey(jdbc, TENANT, "storage"));
         assertThat(readyKey).isEqualTo("d".repeat(64));
         jdbc.update(fenceSql("physical"));
         if ("LOCAL".equals(kind)) {
             String recoveryKey = transactions.execute(status -> LocalStorageOwners.key(jdbc, TENANT, "storage"));
             assertThat(recoveryKey).isEqualTo(readyKey);
         } else {
-            assertThatThrownBy(() -> transactions.execute(status -> SshWorkspaceStore.physicalKey(jdbc, TENANT, "storage")))
+            assertThatThrownBy(() -> transactions.execute(status -> JdbcSshWorkspaceStore.physicalKey(jdbc, TENANT, "storage")))
                     .isInstanceOf(RuntimeBrokerException.class);
         }
         assertThatThrownBy(() -> transactions.executeWithoutResult(status ->
@@ -242,15 +244,48 @@ class ManagedLockScopeConcurrencyMySqlIT {
             }
             first.get(5, TimeUnit.SECONDS);
             second.get(5, TimeUnit.SECONDS);
-            assertThat(blocked).as("unrelated Session commits share read-only storage admission").isFalse();
+            assertThat(blocked).as("unrelated Session commits do not lock shared storage").isFalse();
         } finally {
             release.countDown();
         }
     }
 
     @ParameterizedTest
+    @CsvSource({"alias, commit", "physical, commit", "alias, tool-result", "physical, tool-result"})
+    void ordinaryJournalDoesNotWaitForStorageMetadata(String domain, String route) throws Exception {
+        var journal = storageWriters(false);
+        try (var blocker = database.source().getConnection(); var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            blocker.setAutoCommit(false);
+            String sql = "alias".equals(domain)
+                    ? "SELECT alias_key FROM ma_storage WHERE alias_key = ? FOR UPDATE"
+                    : "SELECT storage_key FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE";
+            try (var statement = blocker.prepareStatement(sql)) {
+                statement.setString(1, "alias".equals(domain)
+                        ? RuntimeAdmissionFences.storageAliasKey(TENANT, "storage") : "d".repeat(64));
+                try (var rows = statement.executeQuery()) {
+                    assertThat(rows.next()).isTrue();
+                    assertThat(rows.next()).isFalse();
+                }
+            }
+            var operation = executor.submit(() -> transactions.execute(status -> "commit".equals(route)
+                    ? journal.commit(TENANT, "storage-a", TOKEN, JournalLockContractTest.genesis())
+                    : journal.publishToolResult(TENANT, "storage-a", TOKEN,
+                            new PublishToolResultRequest("workspace", "writer", 1, "result",
+                                    "managed-tool-result-content", 1, 1, DigestUtils.sha256Hex(new byte[] {1}), "AQ=="))));
+            boolean blocked;
+            try {
+                blocked = waitsForLock(route + "-" + domain, operation);
+            } finally {
+                blocker.rollback();
+            }
+            assertThat(operation.get(5, TimeUnit.SECONDS)).isNotNull();
+            assertThat(blocked).as("ordinary %s does not lock %s metadata", route, domain).isFalse();
+        }
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"alias", "physical"})
-    void storageMutationWaitsForReadAdmissionAndThenClosesAdmission(String domain) throws Exception {
+    void metadataUpdatesDoNotWaitForJournalAndCommittedFencesStillReject(String domain) throws Exception {
         var journal = storageWriters(false);
         CountDownLatch admitted = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
@@ -267,7 +302,9 @@ class ManagedLockScopeConcurrencyMySqlIT {
             }));
             assertThat(admitted.await(5, TimeUnit.SECONDS)).isTrue();
             Future<?> writer = executor.submit(() -> transactions.executeWithoutResult(status ->
-                    jdbc.update(fenceSql(domain))));
+                    jdbc.update("alias".equals(domain)
+                            ? "UPDATE ma_storage SET gmt_modified = 1 WHERE storage_id = 'storage'"
+                            : "UPDATE ma_storage_owner SET member_count = member_count + 1 WHERE storage_id = 'storage'")));
             boolean blocked;
             try {
                 blocked = waitsForLock(domain + "-mutation", writer);
@@ -276,7 +313,8 @@ class ManagedLockScopeConcurrencyMySqlIT {
             }
             reader.get(5, TimeUnit.SECONDS);
             writer.get(5, TimeUnit.SECONDS);
-            assertThat(blocked).as("storage mutation waits for the admitted reader transaction").isTrue();
+            assertThat(blocked).as("metadata updates do not wait for the journal transaction").isFalse();
+            jdbc.update(fenceSql(domain));
             assertThatThrownBy(() -> transactions.executeWithoutResult(status ->
                     WorkspaceMigrationAdmission.requireOpenForAdmission(jdbc, TENANT, "storage")))
                     .isInstanceOfSatisfying(RuntimeBrokerException.class,
@@ -345,7 +383,7 @@ class ManagedLockScopeConcurrencyMySqlIT {
                 : "UPDATE ma_storage_owner SET mount_state = 'FENCED' WHERE storage_key = '" + "d".repeat(64) + "'";
     }
 
-    private ManagedSessionStore storageWriters(boolean distinctAliases) {
+    private JdbcManagedSessionStore storageWriters(boolean distinctAliases) {
         var journal = VerificationFixtures.managedSessionStore(jdbc);
         for (String session : List.of("storage-a", "storage-b")) {
             transactions.execute(status -> journal.acquireWriter(TENANT, session, TOKEN,
@@ -356,9 +394,9 @@ class ManagedLockScopeConcurrencyMySqlIT {
             jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, physical_key,"
                             + " storage_kind, registration_state, registration_revision, registration_json)"
                             + " VALUES (?, ?, ?, ?, ?, ?, 'LOCAL', 'REGISTERED', 1, '{}')",
-                    JdbcRuntimeBindingRepository.storageAliasKey(TENANT, alias),
-                    JdbcRuntimeBindingRepository.storageFenceKey(TENANT),
-                    JdbcRuntimeBindingRepository.storageFenceKey(alias), TENANT, alias, physical);
+                    RuntimeAdmissionFences.storageAliasKey(TENANT, alias),
+                    RuntimeAdmissionFences.storageFenceKey(TENANT),
+                    RuntimeAdmissionFences.storageFenceKey(alias), TENANT, alias, physical);
         }
         jdbc.update("INSERT INTO ma_storage_owner (storage_key, physical_key, storage_kind, tenant_id, storage_id, mount_state)"
                 + " VALUES (?, ?, 'LOCAL', ?, 'storage', 'READY')", physical, physical, TENANT);

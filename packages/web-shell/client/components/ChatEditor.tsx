@@ -43,6 +43,17 @@ import type {
   DaemonWorkflowModeStatus,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useWebShellPortalRoot } from '../portalRoot';
+import { useTheme } from '../themeContext';
+import type {
+  WebShellModelPickerContext,
+  WebShellModelPickerItemContext,
+  WebShellModelPickerOptions,
+} from '../model-picker';
+import {
+  isModelPickerOverlayEvent,
+  ModelPickerContent,
+  useModelPickerOverlays,
+} from './ModelPickerContent';
 import {
   useWebShellCustomization,
   type WebShellComposerInput,
@@ -231,6 +242,8 @@ interface ChatEditorProps {
   /** First Esc armed a cancel — the send button shows an "Esc to stop" hint. */
   cancelArmed?: boolean;
   disabled?: boolean;
+  /** Keep the editor editable but reject every submit path. */
+  submitDisabled?: boolean;
   placeholderText?: string;
   commands: CommandInfo[];
   skills?: SkillInfo[];
@@ -284,7 +297,6 @@ interface ChatEditorProps {
   workspaceColor?: DaemonSessionGroupPresetColor;
   chatWidthMode?: '1000' | 'wide';
   showChatWidthToggle?: boolean;
-  chatWidthToggleMin?: number;
   visibleToolbarActions?: readonly ComposerToolbarAction[];
   liveVoicePortalContainer?: HTMLElement | null;
   /**
@@ -307,6 +319,10 @@ interface ChatEditorProps {
   onOpenContextUsage?: () => void;
   contextUsageControls?: ContextCompressionControls;
   modelRefresh?: ModelRefreshState;
+  modelPickerScope?: Pick<
+    WebShellModelPickerContext,
+    'sessionId' | 'workspaceId' | 'workspaceCwd' | 'daemonBaseUrl'
+  >;
   availableModels?: Array<{ id: string; label?: string }>;
   unavailableModels?: readonly WebShellUnavailableModel[];
   mountUnavailableModelTooltip?: WebShellUnavailableModelTooltipMount;
@@ -744,6 +760,7 @@ interface DropdownItem extends ToolbarDropdownItem {
   icon?: ReactNode;
   disabled?: boolean;
   tooltip?: string;
+  danger?: boolean;
 }
 
 function CheckIcon() {
@@ -811,6 +828,128 @@ function getModeListLabel(modeId: string, t: (key: string) => string): string {
   return labels[modeId] ?? getModeLabel(modeId, t);
 }
 
+type ModelPickerContext = Omit<WebShellModelPickerContext, 'overlayContainer'>;
+
+function ToolbarDropdownRow({
+  item,
+  activeId,
+  hasRichItems,
+  hasCheckItems,
+  onSelect,
+  itemTooltipMount,
+  modelPicker,
+  pickerContext,
+  overlayRoot,
+}: {
+  item: DropdownItem;
+  activeId: string;
+  hasRichItems: boolean;
+  hasCheckItems: boolean;
+  onSelect: (id: string) => void;
+  itemTooltipMount?: WebShellUnavailableModelTooltipMount;
+  modelPicker?: WebShellModelPickerOptions;
+  pickerContext?: ModelPickerContext;
+  overlayRoot: HTMLElement | null;
+}) {
+  const [rowElement, setRowElement] = useState<HTMLButtonElement | null>(null);
+  const [customActive, setCustomActive] = useState(false);
+  const selected = item.id === activeId && !item.disabled;
+  const entries = modelPicker?.displayContentByModelId;
+  const mount =
+    entries && Object.hasOwn(entries, item.id) ? entries[item.id] : undefined;
+  const context = useMemo(
+    () =>
+      pickerContext && rowElement
+        ? {
+            ...pickerContext,
+            model: {
+              id: item.id,
+              label: item.label,
+              disabled: Boolean(item.disabled),
+              tooltip: item.tooltip,
+            },
+            isSelected: selected,
+            rowElement,
+          }
+        : undefined,
+    [
+      pickerContext,
+      rowElement,
+      item.id,
+      item.label,
+      item.disabled,
+      item.tooltip,
+      selected,
+    ],
+  );
+  const nativeContent = hasCheckItems ? (
+    <>
+      {hasRichItems && (
+        <span className={styles.dropdownItemIcon}>{item.icon}</span>
+      )}
+      <span className={styles.dropdownItemContent}>
+        <span className={styles.dropdownItemLabel}>{item.label}</span>
+        {item.description && (
+          <span className={styles.dropdownItemDesc}>{item.description}</span>
+        )}
+      </span>
+    </>
+  ) : (
+    item.label
+  );
+  const button = (
+    <button
+      ref={setRowElement}
+      type="button"
+      className={`${styles.dropdownItem} ${selected ? styles.dropdownItemActive : ''} ${item.danger ? styles.dropdownItemDanger : ''} ${customActive ? styles.modelPickerRow : ''}`}
+      title={item.disabled || customActive ? undefined : item.label}
+      aria-label={customActive ? item.label : undefined}
+      aria-disabled={item.disabled || undefined}
+      data-disabled={item.disabled ? '' : undefined}
+      data-web-shell-unavailable-model={item.disabled ? '' : undefined}
+      data-model-id={item.id}
+      onClick={(event) => {
+        if (item.disabled) {
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
+        if (!event.defaultPrevented) onSelect(item.id);
+      }}
+    >
+      {context && (mount || customActive) ? (
+        <ModelPickerContent<WebShellModelPickerItemContext>
+          mount={mount}
+          context={context}
+          overlayRoot={overlayRoot}
+          revision={entries}
+          fallback={nativeContent}
+          className={styles.modelPickerContent}
+          onActiveChange={setCustomActive}
+        />
+      ) : (
+        nativeContent
+      )}
+      {hasCheckItems && (
+        <span className={styles.dropdownItemCheck}>
+          {item.disabled ? <LockIcon /> : selected ? <CheckIcon /> : null}
+        </span>
+      )}
+    </button>
+  );
+  return item.disabled ? (
+    <UnavailableModelTooltip
+      enabled={!customActive}
+      model={{ id: item.id, label: item.label, tooltip: item.tooltip }}
+      mount={itemTooltipMount}
+    >
+      {button}
+    </UnavailableModelTooltip>
+  ) : (
+    button
+  );
+}
+
 function ToolbarPopover({
   open,
   items,
@@ -830,6 +969,8 @@ function ToolbarPopover({
   compact = false,
   modePopover = false,
   itemTooltipMount,
+  modelPicker,
+  pickerContext,
 }: {
   open: boolean;
   items: DropdownItem[];
@@ -853,6 +994,8 @@ function ToolbarPopover({
   compact?: boolean;
   modePopover?: boolean;
   itemTooltipMount?: WebShellUnavailableModelTooltipMount;
+  modelPicker?: WebShellModelPickerOptions;
+  pickerContext?: ModelPickerContext;
 }) {
   const [searchQuery, setSearchQuery] = useState('');
   const [submenuOpen, setSubmenuOpen] = useState(false);
@@ -864,6 +1007,17 @@ function ToolbarPopover({
   const submenuTriggerRef = useRef<HTMLButtonElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const returningFromSubmenuRef = useRef(false);
+  const scopeKey = JSON.stringify([
+    pickerContext?.sessionId,
+    pickerContext?.workspaceId,
+    pickerContext?.workspaceCwd,
+    pickerContext?.daemonBaseUrl,
+  ]);
+  const overlayRoot = useModelPickerOverlays(
+    Boolean(modelPicker) && open && (!submenu || submenuOpen),
+  );
+  const isHostOverlayEvent = (event: Event) =>
+    isModelPickerOverlayEvent(overlayRoot, event);
   const hasRichItems = items.some((item) => item.description || item.icon);
   const visibleItems = searchable
     ? filterToolbarDropdownItems(items, searchQuery)
@@ -899,72 +1053,23 @@ function ToolbarPopover({
             : ''
       } ${searchable ? styles.dropdownListConstrained : ''}`}
     >
-      {visibleItems.map((item) => {
-        const button = (
-          <button
-            key={item.disabled ? undefined : item.id}
-            type="button"
-            className={`${styles.dropdownItem} ${
-              item.id === activeId && !item.disabled
-                ? styles.dropdownItemActive
-                : ''
-            }`}
-            title={item.disabled ? undefined : item.label}
-            aria-disabled={item.disabled || undefined}
-            data-disabled={item.disabled ? '' : undefined}
-            data-web-shell-unavailable-model={item.disabled ? '' : undefined}
-            data-model-id={item.id}
-            onClick={(event) => {
-              if (item.disabled) {
-                event.preventDefault();
-                event.stopPropagation();
-                return;
-              }
-              selectionRef.current = true;
-              onSelect(item.id);
-            }}
-          >
-            {hasCheckItems ? (
-              <>
-                {hasRichItems && (
-                  <span className={styles.dropdownItemIcon}>{item.icon}</span>
-                )}
-                <span className={styles.dropdownItemContent}>
-                  <span className={styles.dropdownItemLabel}>{item.label}</span>
-                  {item.description && (
-                    <span className={styles.dropdownItemDesc}>
-                      {item.description}
-                    </span>
-                  )}
-                </span>
-                <span className={styles.dropdownItemCheck}>
-                  {item.disabled ? (
-                    <LockIcon />
-                  ) : item.id === activeId ? (
-                    <CheckIcon />
-                  ) : null}
-                </span>
-              </>
-            ) : (
-              item.label
-            )}
-          </button>
-        );
-        if (!item.disabled) return button;
-        return (
-          <UnavailableModelTooltip
-            key={item.id}
-            model={{
-              id: item.id,
-              label: item.label,
-              tooltip: item.tooltip,
-            }}
-            mount={itemTooltipMount}
-          >
-            {button}
-          </UnavailableModelTooltip>
-        );
-      })}
+      {visibleItems.map((item) => (
+        <ToolbarDropdownRow
+          key={JSON.stringify([scopeKey, item.id])}
+          item={item}
+          activeId={activeId}
+          hasRichItems={hasRichItems}
+          hasCheckItems={hasCheckItems}
+          onSelect={(id) => {
+            selectionRef.current = true;
+            onSelect(id);
+          }}
+          itemTooltipMount={itemTooltipMount}
+          modelPicker={modelPicker}
+          pickerContext={pickerContext}
+          overlayRoot={overlayRoot}
+        />
+      ))}
       {visibleItems.length === 0 && noResultsLabel && (
         <div className={styles.dropdownEmpty} role="status">
           {noResultsLabel(searchQuery)}
@@ -991,6 +1096,16 @@ function ToolbarPopover({
   ) : null;
   const searchableItems = (
     <>
+      {pickerContext && modelPicker?.mountHeader && (
+        <ModelPickerContent
+          key={scopeKey}
+          mount={modelPicker.mountHeader}
+          context={pickerContext}
+          overlayRoot={overlayRoot}
+          revision={modelPicker}
+          className={styles.modelPickerContent}
+        />
+      )}
       {searchable &&
         (searchAction ? (
           <div className={styles.dropdownSearch}>
@@ -1048,12 +1163,19 @@ function ToolbarPopover({
         data-web-shell-reasoning-popover={submenu ? '' : undefined}
         data-web-shell-mode-popover={modePopover ? '' : undefined}
         onClick={(event) => event.stopPropagation()}
+        onEscapeKeyDown={(event) => {
+          if (isHostOverlayEvent(event)) event.preventDefault();
+        }}
         onOpenAutoFocus={(event) => {
           if (!submenu) return;
           event.preventDefault();
           submenuTriggerRef.current?.focus();
         }}
         onPointerDownOutside={(event) => {
+          if (isHostOverlayEvent(event.detail.originalEvent)) {
+            event.preventDefault();
+            return;
+          }
           const target = event.target;
           if (!(target instanceof Element)) return;
           if (target.closest('[data-web-shell-toolbar-popover-trigger]')) {
@@ -1064,6 +1186,10 @@ function ToolbarPopover({
           }
         }}
         onInteractOutside={(event) => {
+          if (isHostOverlayEvent(event.detail.originalEvent)) {
+            event.preventDefault();
+            return;
+          }
           const target = event.target;
           if (
             target instanceof Element &&
@@ -1135,7 +1261,14 @@ function ToolbarPopover({
                   data-web-shell-toolbar-popover
                   data-web-shell-model-submenu
                   onClick={(event) => event.stopPropagation()}
+                  onEscapeKeyDown={(event) => {
+                    if (isHostOverlayEvent(event)) event.preventDefault();
+                  }}
                   onPointerDownOutside={(event) => {
+                    if (isHostOverlayEvent(event.detail.originalEvent)) {
+                      event.preventDefault();
+                      return;
+                    }
                     const target = event.target;
                     if (
                       target instanceof Element &&
@@ -1147,6 +1280,10 @@ function ToolbarPopover({
                     }
                   }}
                   onInteractOutside={(event) => {
+                    if (isHostOverlayEvent(event.detail.originalEvent)) {
+                      event.preventDefault();
+                      return;
+                    }
                     const target = event.target;
                     if (
                       target instanceof Element &&
@@ -1259,6 +1396,8 @@ function ModelReasoningControls({
 
 function SlashCommandPanel({
   menu,
+  commands,
+  skills,
   loading,
   loadError,
   anchorRef,
@@ -1270,6 +1409,8 @@ function SlashCommandPanel({
   onAccept,
 }: {
   menu: SlashMenuState;
+  commands: CommandInfo[];
+  skills: SkillInfo[];
   loading?: boolean;
   loadError?: boolean;
   anchorRef: RefObject<HTMLElement | null>;
@@ -1287,6 +1428,7 @@ function SlashCommandPanel({
     useState<HTMLElement | null>(null);
   const [hoverDetail, setHoverDetail] = useState<{
     label: string;
+    extensionName?: string;
     detail: string;
     side: 'top' | 'right' | 'bottom' | 'left';
   } | null>(null);
@@ -1462,8 +1604,31 @@ function SlashCommandPanel({
                                 : rowRect.top - top >= bottom - rowRect.bottom
                                   ? 'top'
                                   : 'bottom';
+                          const name =
+                            item.type === 'skill' ? item.label : item.id;
+                          const skill = skills.find((s) => s.name === name);
+                          const isSkill =
+                            skill ||
+                            item.type === 'skill' ||
+                            item.category === 'skill';
+                          const extensionName =
+                            skill?.extensionName ??
+                            (isSkill &&
+                            commands.find((c) => c.name === name)?.source ===
+                              'plugin-command' &&
+                            name.includes(':')
+                              ? name.slice(0, name.indexOf(':'))
+                              : undefined);
+                          let label = isSkill ? name : item.label;
+                          if (
+                            extensionName &&
+                            label.startsWith(`${extensionName}:`)
+                          ) {
+                            label = label.slice(extensionName.length + 1);
+                          }
                           setHoverDetail({
-                            label: item.label,
+                            label,
+                            extensionName,
                             detail: item.detail,
                             side,
                           });
@@ -1535,6 +1700,11 @@ function SlashCommandPanel({
               <div className={styles.slashDetailCommand}>
                 {hoverDetail.label}
               </div>
+              {hoverDetail.extensionName && (
+                <div className={styles.slashDetailText}>
+                  {t('skills.extension')}: {hoverDetail.extensionName}
+                </div>
+              )}
               <div className={styles.slashDetailText}>{hoverDetail.detail}</div>
             </div>
           </PopoverContent>
@@ -1559,6 +1729,7 @@ export const ChatEditor = memo(
       isPreparing = false,
       cancelArmed = false,
       disabled = false,
+      submitDisabled = false,
       placeholderText = 'Type a message...',
       commands,
       skills = [],
@@ -1594,7 +1765,6 @@ export const ChatEditor = memo(
       workspaceColor,
       chatWidthMode = '1000',
       showChatWidthToggle = true,
-      chatWidthToggleMin,
       visibleToolbarActions,
       liveVoicePortalContainer,
       contextChipPlacement = 'toolbar',
@@ -1606,6 +1776,7 @@ export const ChatEditor = memo(
       onOpenContextUsage,
       contextUsageControls,
       modelRefresh,
+      modelPickerScope,
       availableModels = [],
       unavailableModels,
       mountUnavailableModelTooltip,
@@ -1666,6 +1837,7 @@ export const ChatEditor = memo(
       renderComposerToolbarStart: ToolbarStart,
       renderComposerToolbarEnd: ToolbarEnd,
       renderComposerToolbarRight: ToolbarRight,
+      hostOwnsAddMenu = false,
       renderComposerTag,
       renderComposerTagTooltip,
       onComposerTagClick,
@@ -1676,6 +1848,7 @@ export const ChatEditor = memo(
       fileUploadDirectory,
       fileDropAction,
       composerVariant = 'default',
+      modelPicker,
     } = useWebShellCustomization();
     const [advancedMode, setAdvancedMode] = useState(false);
     const simpleVariantEnabled = composerVariant === 'simple';
@@ -1807,6 +1980,7 @@ export const ChatEditor = memo(
       cycleModeOnTab,
       onToggleShortcuts,
       disabled,
+      submitDisabled,
       fileDragEnabled: attachmentsEnabled,
       placeholderText,
       commands,
@@ -1852,6 +2026,30 @@ export const ChatEditor = memo(
     });
 
     const { t, language } = useI18n();
+    const theme = useTheme();
+    const composerId = useId();
+    const pickerContext = useMemo<ModelPickerContext>(
+      () => ({
+        composerId,
+        sessionId: modelPickerScope?.sessionId,
+        workspaceId: modelPickerScope?.workspaceId,
+        workspaceCwd: modelPickerScope?.workspaceCwd,
+        daemonBaseUrl: modelPickerScope?.daemonBaseUrl,
+        currentModelId: currentModel || undefined,
+        language,
+        theme,
+      }),
+      [
+        composerId,
+        modelPickerScope?.sessionId,
+        modelPickerScope?.workspaceId,
+        modelPickerScope?.workspaceCwd,
+        modelPickerScope?.daemonBaseUrl,
+        currentModel,
+        language,
+        theme,
+      ],
+    );
 
     useImperativeHandle(ref, () => core.handle, [core.handle]);
 
@@ -2037,7 +2235,8 @@ export const ChatEditor = memo(
     ]);
     // -- Composer add menu (`+`) ---------------------------------------------
     const showAddMenuAction =
-      isSimple || visibleToolbarActions?.includes('addMenu');
+      !hostOwnsAddMenu &&
+      (isSimple || visibleToolbarActions?.includes('addMenu'));
     const getAddMenuWorkspaceActions = useCallback(
       () => core.workspaceActionsRef.current,
       [core.workspaceActionsRef],
@@ -2186,6 +2385,7 @@ export const ChatEditor = memo(
 
     const planDescriptionId = useId();
     const workflowChipDescriptionId = useId();
+    const workflowSwitchDescriptionId = useId();
     const modeItems = useMemo<DropdownItem[]>(
       () =>
         EXECUTION_APPROVAL_MODES.filter((id) =>
@@ -2195,6 +2395,7 @@ export const ChatEditor = memo(
           label: getModeListLabel(id, t),
           description: t(`mode.desc.${id}`),
           icon: <ModeIcon mode={id} />,
+          danger: id === 'yolo',
         })),
       [availableModes, t],
     );
@@ -2304,6 +2505,7 @@ export const ChatEditor = memo(
     const toolbarEndRef = useRef<HTMLDivElement>(null);
     const toolbarRightCustomRef = useRef<HTMLDivElement>(null);
     const toolbarMeasurementsRef = useRef<HTMLDivElement>(null);
+    const widthToggleRef = useRef<HTMLButtonElement>(null);
     const [widthToggleFits, setWidthToggleFits] = useState(false);
     const [voiceActive, setVoiceActive] = useState(false);
     const pendingVoiceInsertRef = useRef<{
@@ -2408,26 +2610,6 @@ export const ChatEditor = memo(
       return attachComposerGlow(glowRoot, inputEl);
     }, [editorViewRef]);
 
-    useEffect(() => {
-      const container = containerRef.current;
-      const minWidth = chatWidthToggleMin;
-      if (!container || minWidth === undefined) {
-        setWidthToggleFits(false);
-        return;
-      }
-
-      const update = () => {
-        setWidthToggleFits(
-          container.getBoundingClientRect().width >= minWidth - 50,
-        );
-      };
-      update();
-
-      const resizeObserver = new ResizeObserver(update);
-      resizeObserver.observe(container);
-      return () => resizeObserver.disconnect();
-    }, [chatWidthToggleMin]);
-
     const visibleActionSet = useMemo(() => {
       if (!visibleToolbarActions) return null;
       const activeActions = visibleToolbarActions.filter((action) =>
@@ -2496,19 +2678,27 @@ export const ChatEditor = memo(
     // Workflow, like Plan, is toggled from the add menu, so the toolbar shows
     // a dismissible chip while the saved preference is on — including while
     // it cannot take effect, since that is when turning it off matters most.
-    const workflowControl =
-      showAddMenuAction && showToolbarAction('workflowMode')
-        ? getWorkflowModeControlState(
-            {
-              workflowMode,
-              workflowModeStatus,
-              workflowModePending,
-              onWorkflowModeChange,
-            },
-            language,
-          )
-        : null;
-    const showWorkflowChip = Boolean(workflowControl?.mode?.requested);
+    // A composer whose host takes the add menu away has no menu to hold the
+    // entry and keeps a toolbar switch instead, so the saved preference can
+    // still be turned both ways.
+    const showWorkflowAction = showToolbarAction('workflowMode');
+    const showWorkflowInAddMenu =
+      showWorkflowAction && Boolean(showAddMenuAction);
+    const workflowControl = showWorkflowAction
+      ? getWorkflowModeControlState(
+          {
+            workflowMode,
+            workflowModeStatus,
+            workflowModePending,
+            onWorkflowModeChange,
+          },
+          language,
+        )
+      : null;
+    const showWorkflowChip =
+      showWorkflowInAddMenu && Boolean(workflowControl?.mode?.requested);
+    const showWorkflowSwitch =
+      showWorkflowAction && !showWorkflowInAddMenu && workflowControl !== null;
     const workflowChipUnavailable =
       showWorkflowChip && workflowControl?.mode?.effective === false;
     const workflowChipTooltip = workflowControl
@@ -2754,10 +2944,20 @@ export const ChatEditor = memo(
         Boolean(gitContextControl));
 
     useLayoutEffect(() => {
-      if (currentModelLabel && currentModelLabel !== lastConfirmedModelLabel) {
+      if (!currentModel && availableModels.length === 0) {
+        setLastConfirmedModelLabel('');
+      } else if (
+        currentModelLabel &&
+        currentModelLabel !== lastConfirmedModelLabel
+      ) {
         setLastConfirmedModelLabel(currentModelLabel);
       }
-    }, [currentModelLabel, lastConfirmedModelLabel]);
+    }, [
+      currentModel,
+      availableModels.length,
+      currentModelLabel,
+      lastConfirmedModelLabel,
+    ]);
 
     const showWorkspaceSelectLabel =
       isMobile || toolbarLabelVisibility.workspaceSelect;
@@ -2915,7 +3115,7 @@ export const ChatEditor = memo(
           ...(showPlanToolbarControl
             ? [{ id: 'plan', expansionWidth: expansionWidth('plan') }]
             : []),
-          ...(showWorkflowChip
+          ...(showWorkflowChip || showWorkflowSwitch
             ? [{ id: 'workflow', expansionWidth: expansionWidth('workflow') }]
             : []),
           ...(showModelAction
@@ -2940,10 +3140,25 @@ export const ChatEditor = memo(
         const gap = Math.ceil(
           Number.parseFloat(getComputedStyle(toolbar).columnGap) || 0,
         );
+        const toolbarWidth = Math.floor(toolbar.getBoundingClientRect().width);
+        const rightWidth = Math.ceil(
+          toolbarRight.getBoundingClientRect().width,
+        );
+        const rightGap =
+          Number.parseFloat(getComputedStyle(toolbarRight).columnGap) || 0;
+        const toggle = widthToggleRef.current;
+        // Exclude the toggle so its own visibility cannot affect the result.
+        const toggleSpace = toggle
+          ? toggle.getBoundingClientRect().width + rightGap
+          : 0;
+        setWidthToggleFits(
+          toolbarWidth - currentLeadingWidth - rightWidth + toggleSpace - gap >=
+            50,
+        );
         const availableWidth = getToolbarExpansionBudget({
-          toolbarWidth: Math.floor(toolbar.getBoundingClientRect().width),
+          toolbarWidth,
           leadingWidth: currentLeadingWidth,
-          rightWidth: Math.ceil(toolbarRight.getBoundingClientRect().width),
+          rightWidth,
           currentExpansionWidth,
           gap,
         });
@@ -3032,6 +3247,7 @@ export const ChatEditor = memo(
       showModeAction,
       showPlanToolbarControl,
       showWorkflowChip,
+      showWorkflowSwitch,
       workspaceChipInToolbar,
       workspaceIndicatorVisible,
       workspaceName,
@@ -3065,7 +3281,10 @@ export const ChatEditor = memo(
 
     const renderAddMenu = () =>
       (showAddMenuAction ||
-        (isMobile && showCommandAction && !core.shellMode)) && (
+        (isMobile &&
+          !hostOwnsAddMenu &&
+          showCommandAction &&
+          !core.shellMode)) && (
         <AddMenu
           simpleMode={isSimple}
           key={JSON.stringify([sessionId, atWorkspaceCwd, Boolean(disabled)])}
@@ -3117,7 +3336,7 @@ export const ChatEditor = memo(
           skillsLoadError={skillsLoadError}
           skillsLoaded={skillsLoaded}
           workflow={
-            showAddMenuAction && showToolbarAction('workflowMode')
+            showWorkflowInAddMenu
               ? {
                   workflowMode,
                   workflowModeStatus,
@@ -3208,6 +3427,8 @@ export const ChatEditor = memo(
                   <button
                     className={`${styles.toolBtn} ${styles.modeToolBtn} ${
                       showModeLabel ? '' : styles.toolBtnCompact
+                    } ${
+                      currentMode === 'yolo' ? styles.modeToolBtnDanger : ''
                     }`}
                     data-web-shell-mode-button
                     disabled={
@@ -3356,6 +3577,43 @@ export const ChatEditor = memo(
               </Tooltip>
             </TooltipProvider>
           )}
+          {showWorkflowSwitch && workflowControl && (
+            <TooltipProvider delayDuration={300}>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <label
+                    className={`${styles.toolBtn} ${styles.planControl}`}
+                    data-web-shell-workflow-switch
+                    data-workflow-state={workflowControl.status}
+                    data-disabled={workflowControl.disabled ? '' : undefined}
+                  >
+                    {showWorkflowLabel ? (
+                      <span className={styles.toolBtnText}>Workflow</span>
+                    ) : (
+                      <span className={styles.toolBtnModeIcon}>
+                        <GitBranchIcon />
+                      </span>
+                    )}
+                    <Switch
+                      size="sm"
+                      className="after:inset-x-0"
+                      aria-label={workflowControl.messages.label}
+                      aria-describedby={workflowSwitchDescriptionId}
+                      checked={Boolean(workflowControl.mode?.requested)}
+                      disabled={workflowControl.disabled}
+                      onCheckedChange={(next) => onWorkflowModeChange?.(next)}
+                    />
+                  </label>
+                </TooltipTrigger>
+                <span id={workflowSwitchDescriptionId} className="sr-only">
+                  {workflowControl.description}
+                </span>
+                <TooltipContent side="top">
+                  {workflowControl.description}
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          )}
           {showPlanSwitch && (
             <TooltipProvider delayDuration={300}>
               <Tooltip>
@@ -3414,6 +3672,8 @@ export const ChatEditor = memo(
                 }}
                 onSelect={handleModelSelect}
                 itemTooltipMount={mountUnavailableModelTooltip}
+                modelPicker={modelPicker}
+                pickerContext={pickerContext}
                 tooltip={modelLabel}
                 showCheck
                 searchable
@@ -3505,6 +3765,7 @@ export const ChatEditor = memo(
           widthToggleFits &&
           showToolbarAction('widthMode') && (
             <button
+              ref={widthToggleRef}
               className={`${styles.toolBtn} ${styles.widthModeBtn}`}
               data-hide-during-mobile-voice
               onClick={(e) => {
@@ -4289,6 +4550,8 @@ export const ChatEditor = memo(
             {core.slashMenu && (
               <SlashCommandPanel
                 menu={core.slashMenu}
+                commands={commands}
+                skills={skills}
                 loading={skillsLoading}
                 loadError={skillsLoadError}
                 anchorRef={containerRef}
@@ -4562,6 +4825,34 @@ export const ChatEditor = memo(
                       <GitBranchIcon />
                     </span>
                     <span className={styles.toolBtnText}>Workflow</span>
+                  </span>
+                </>
+              )}
+              {showWorkflowSwitch && (
+                <>
+                  <span
+                    data-toolbar-measure="workflow:collapsed"
+                    className={`${styles.toolBtn} ${styles.planControl}`}
+                  >
+                    <span className={styles.toolBtnModeIcon}>
+                      <GitBranchIcon />
+                    </span>
+                    <Switch
+                      size="sm"
+                      tabIndex={-1}
+                      checked={Boolean(workflowControl?.mode?.requested)}
+                    />
+                  </span>
+                  <span
+                    data-toolbar-measure="workflow:expanded"
+                    className={`${styles.toolBtn} ${styles.planControl}`}
+                  >
+                    <span className={styles.toolBtnText}>Workflow</span>
+                    <Switch
+                      size="sm"
+                      tabIndex={-1}
+                      checked={Boolean(workflowControl?.mode?.requested)}
+                    />
                   </span>
                 </>
               )}

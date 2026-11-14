@@ -28,6 +28,7 @@ import {
 } from '@qwen-code/qwen-code-core/core/deepseek-reasoning.js';
 import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
 import { isTieredEffortQwenPrefix } from '@qwen-code/qwen-code-core/core/modalityDefaults.js';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import type { SessionConfigOption } from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../config/settings.js';
 import { ACP_ROUTE_ID_PREFIX } from '../utils/acpModelUtils.js';
@@ -82,6 +83,13 @@ const MODEL_CONFIGURATIONS: Readonly<
     },
   },
   'qwen3.8-max': {
+    reasoning: {
+      thinking: true,
+      efforts: ['low', 'medium', 'xhigh'],
+      defaultEffort: 'xhigh',
+    },
+  },
+  'qwen3.8-flash': {
     reasoning: {
       thinking: true,
       efforts: ['low', 'medium', 'xhigh'],
@@ -686,11 +694,6 @@ export function buildModelReasoningRoutePreview(
   const model = getRequestModel(generation);
   const thinkingMandatory =
     model === generation.model && generation.thinkingMandatory === true;
-  // The new tiered Qwen families resolve no core capability without a
-  // declaration; on routed (opaque) selectors the manifest fallback is their
-  // known contract, so the controls must survive the route guard. The same
-  // holds for the stable tiered family the new prefixes inherit from. Both
-  // only ever map to tiered (non-toggle) manifest entries.
   const qwenManifest =
     reasoning === undefined && hasTieredManifestReasoning(model)
       ? (getModelConfiguration(model)?.reasoning as
@@ -700,6 +703,7 @@ export function buildModelReasoningRoutePreview(
   const routeReasoning = reasoning ?? qwenManifest;
   if (
     opaqueRoute &&
+    generation.authType !== AuthType.QWEN_SUBSCRIPTION &&
     !routeReasoning?.profile &&
     !qwenManifest &&
     !getDeepSeekReasoningState(generation, routeReasoning)

@@ -172,6 +172,7 @@ describe('TUI product evidence', () => {
     ['packages/core/src/core/coreToolScheduler.ts', lanes.slice(0, -1)],
     ['packages/core/src/core/client.ts', lanes.slice(0, -1)],
     ['packages/cli/src/ui/opentui/live-turn.ts', lanes.slice(0, -1)],
+    ['packages/cli/src/ui/opentui/shared-model-round.ts', lanes.slice(0, -1)],
     ['packages/cli/src/ui/opentui/opentui-runtime.ts', lanes],
     ['pnpm-lock.yaml', lanes],
     ['packages/cli/package.json', lanes],
@@ -230,6 +231,8 @@ describe('TUI product evidence', () => {
           selected.includes('recovery'),
         );
       }
+      if (selected.length === 0)
+        expect(outputs.reason).toBe('Outside the TUI build/test closure');
       if (selected.length === 1)
         expect(outputs.reason).toContain(
           'maintainers should consider manual full',
@@ -637,11 +640,16 @@ describe('TUI product evidence', () => {
   const excludedTrees = (yamlText) =>
     parse(yamlText)
       .packages.filter((entry) => entry.startsWith('!'))
-      .map((entry) => entry.slice(1));
+      .map((entry) => entry.slice(1))
+      .filter((tree) => !/[*?[\]{}]/.test(tree));
 
   it('excludes every tree the pnpm workspace itself leaves out', async () => {
     const excluded = excludedTrees(readFileSync('pnpm-workspace.yaml', 'utf8'));
-    expect(excluded.length).toBeGreaterThan(0);
+    expect([...excluded].sort()).toEqual([
+      'packages/desktop',
+      'packages/live-host',
+      'packages/mobile-shell',
+    ]);
     for (const tree of excluded) {
       const { outputs } = await impact([
         { filename: `${tree}/placeholder.ts` },
@@ -651,7 +659,7 @@ describe('TUI product evidence', () => {
     }
   });
 
-  it('reconciles negations spelled with a trailing comment or another scope', () => {
+  it('reconciles literal negations across YAML spellings and ignores globs', () => {
     expect(
       excludedTrees(
         [
@@ -659,6 +667,10 @@ describe('TUI product evidence', () => {
           "  - 'packages/*'",
           "  - '!packages/desktop' # promoted to its own release later",
           "  - '!integrations/generated-ui'",
+          "  - '!**/fixtures/**'",
+          "  - '!packages/fixture?'",
+          "  - '!packages/[ab]'",
+          "  - '!packages/{foo,bar}'",
           '',
         ].join('\n'),
       ),
@@ -1030,6 +1042,129 @@ describe('e2e workflow', () => {
     ).toBe(true);
   });
 
+  describe('agent-loop legs (#17045)', () => {
+    // The nightly signal each surface's default change waits on: a Linux
+    // sandbox:none leg and an OpenTUI leg with the shared loop on, and the
+    // same two legs with both switches on (the event-bus kernel). Pushes
+    // keep the current loop only. These pins evaluate the workflow's actual
+    // matrix and env expressions — a substring pin would pass on a leg that
+    // exists but wires the wrong switch.
+    const jobs = ['e2e-test-linux', 'e2e-interactive-opentui'];
+    const runStepName = {
+      'e2e-test-linux': 'Run E2E tests',
+      'e2e-interactive-opentui': 'Run interactive E2E tests (OpenTUI)',
+    };
+    const arms = ['current', 'unified', 'kernel'];
+    const stripExpression = (raw) => String(raw).trim().slice(3, -2).trim();
+    // Like the macOS shard guard below: an unmodeled term must throw, not
+    // evaluate as undefined — a leg that wires an unmodeled github.* / matrix
+    // term would otherwise pass these pins while running the wrong switch.
+    const strict = (value) =>
+      value && typeof value === 'object'
+        ? new Proxy(value, {
+            get(target, prop) {
+              if (typeof prop === 'symbol' || prop in target)
+                return strict(target[prop]);
+              throw new Error(
+                `agent-loop expression carries an unmodeled term: ${String(prop)}`,
+              );
+            },
+          })
+        : value;
+    const evalExpression = (expression, context) =>
+      new Function(
+        ...Object.keys(context),
+        // GitHub expressions allow hyphenated property names
+        // (matrix.agent-loop); JavaScript reads that as subtraction.
+        `return (${expression.replace(/(\w+)\.([\w-]*-[\w-]*)/g, "$1['$2']")});`,
+      )(...Object.values(context).map(strict));
+    const agentLoopValues = (job, eventName) =>
+      evalExpression(
+        stripExpression(yml.jobs[job].strategy.matrix['agent-loop']),
+        { github: { event_name: eventName }, fromJSON: JSON.parse },
+      );
+    const switchEnv = (job, arm) => {
+      const step = yml.jobs[job].steps.find(
+        (candidate) => candidate.name === runStepName[job],
+      );
+      return [
+        'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
+        'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP',
+      ].map((key) =>
+        evalExpression(stripExpression(step.env[key]), {
+          matrix: { 'agent-loop': arm },
+        }),
+      );
+    };
+
+    it.each(jobs)('%s runs only the current loop on push', (job) => {
+      expect(agentLoopValues(job, 'push')).toEqual(['current']);
+    });
+
+    it.each(jobs)(
+      '%s runs all three loop arms on schedule and dispatch',
+      (job) => {
+        for (const eventName of ['schedule', 'workflow_dispatch']) {
+          expect(agentLoopValues(job, eventName), eventName).toEqual(arms);
+        }
+      },
+    );
+
+    it('keeps both jobs on the identical matrix expression', () => {
+      // One expression, two jobs: a divergence would let one surface's
+      // nightly signal accrue on arms the other never runs.
+      expect(String(yml.jobs[jobs[0]].strategy.matrix['agent-loop'])).toBe(
+        String(yml.jobs[jobs[1]].strategy.matrix['agent-loop']),
+      );
+    });
+
+    it('excludes both switch legs from the docker sandbox', () => {
+      expect(yml.jobs['e2e-test-linux'].strategy.matrix.exclude).toEqual([
+        { sandbox: 'sandbox:docker', 'agent-loop': 'unified' },
+        { sandbox: 'sandbox:docker', 'agent-loop': 'kernel' },
+      ]);
+    });
+
+    it.each(jobs)('%s never cancels a sibling loop arm', (job) => {
+      expect(yml.jobs[job].strategy['fail-fast']).toBe(false);
+    });
+
+    it.each(jobs)('%s wires the switches per arm', (job) => {
+      expect(switchEnv(job, 'current')).toEqual(['', '']);
+      expect(switchEnv(job, 'unified')).toEqual(['1', '']);
+      expect(switchEnv(job, 'kernel')).toEqual(['1', '1']);
+    });
+
+    it.each(jobs)('%s names each leg after its loop', (job) => {
+      const name = (arm) =>
+        String(yml.jobs[job].name).replace(
+          /\$\{\{(.*?)\}\}/g,
+          (_, expression) =>
+            evalExpression(expression.trim(), {
+              matrix: {
+                sandbox: 'sandbox:none',
+                shard: '1/1',
+                'agent-loop': arm,
+              },
+            }),
+        );
+      expect(name('current')).not.toContain('unified agent loop');
+      expect(name('current')).not.toContain('event-bus kernel');
+      expect(name('unified')).toContain(' - unified agent loop');
+      expect(name('kernel')).toContain(' - event-bus kernel');
+    });
+
+    it('keeps the OpenTUI leg on the opentui renderer in every arm', () => {
+      // The matrix adds loop arms, not renderer arms: a leg that silently
+      // fell back to ink would pass as a false OpenTUI signal.
+      const step = yml.jobs['e2e-interactive-opentui'].steps.find(
+        (candidate) =>
+          candidate.name === runStepName['e2e-interactive-opentui'],
+      );
+      expect(step.run).toContain('QWEN_E2E_RENDERER=opentui');
+    });
+  });
+
   describe('sandbox image preparation', () => {
     const steps = yml.jobs['e2e-test-linux'].steps;
     const setupStep = steps.find((step) => step.name === 'Set up Docker');
@@ -1096,18 +1231,25 @@ describe('e2e workflow', () => {
 
     it('probes the apt mirror instead of pinning a region', () => {
       // #16214: deb.debian.org serves this pool at MB/s from Hong Kong and
-      // 11-20 kB/s from the mainland hosts, where the two apt layers then
-      // outlast the job's 60-minute cap. So neither a single mirror nor a
+      // 11-45 kB/s from the mainland hosts, where the two apt layers then
+      // outlast the job's execution cap. So neither a single mirror nor a
       // host-name map is correct — the build probes and overrides only on a
-      // clear win, which leaves healthy hosts on the built-in source.
-      // The VPC intranet mirror is the durable fix: it bypasses the capped
-      // public egress that throttles the public mirrors (the maven script's
-      // rationale). It must stay a probe candidate — unreachable off-VPC, it
-      // measures 0 and loses, so no host map is needed.
-      expect(e2eRunScript).toContain('mirrors.cloud.aliyuncs.com');
-      expect(e2eRunScript).toContain('mirrors.aliyun.com');
-      expect(e2eRunScript).toContain('mirrors.tuna.tsinghua.edu.cn');
-      expect(e2eRunScript).toContain('--build-arg APT_MIRROR=');
+      // clear win, which leaves healthy hosts on the built-in source. The
+      // probe lives in a shared script so the release docker lane (#16271)
+      // selects the same source; the VPC intranet mirror bypasses the capped
+      // public egress (the maven script's rationale) and, unreachable off-VPC,
+      // measures 0 and loses — no host map needed.
+      const aptProbeScript = readFileSync(
+        '.github/scripts/apt-mirror-probe.sh',
+        'utf8',
+      );
+      // Pin the candidate loop itself, not a substring: the mirrors are also
+      // named in the comments, so a toContain would survive removing a
+      // candidate from the actual `for` list.
+      expect(aptProbeScript).toMatch(
+        /for mirror in mirrors\.cloud\.aliyuncs\.com mirrors\.aliyun\.com mirrors\.tuna\.tsinghua\.edu\.cn; do/,
+      );
+      expect(aptProbeScript).toContain('--build-arg APT_MIRROR=');
       // Both stages need the ARG: a stage cannot inherit an ARG declared
       // before its own FROM, so one declaration per stage is the contract.
       // Counting (not toMatch) catches deleting either one — R1-1 witnessed
@@ -1116,16 +1258,15 @@ describe('e2e workflow', () => {
         readFileSync('Dockerfile', 'utf8').match(/^ARG APT_MIRROR=$/gm),
       ).toHaveLength(2);
 
-      const selectIndex = e2eRunScript.indexOf('select_apt_mirror()');
-      expect(selectIndex).toBeGreaterThan(-1);
-      const callIndex = e2eRunScript.indexOf(
-        'apt_mirror="$(select_apt_mirror)"',
-      );
-      expect(callIndex).toBeGreaterThan(selectIndex);
-      // The probe has to run before the build consumes the flag, otherwise the
-      // mirror is decided after the layer it was meant to speed up.
+      // The E2E leg sources the shared probe and applies it before the build
+      // consumes the flag, otherwise the mirror is decided after the layer it
+      // was meant to speed up. Match the source statement, not a substring —
+      // the shellcheck directive above it also names the file.
+      expect(e2eRunScript).toMatch(/^source .*apt-mirror-probe\.sh"$/m);
+      const applyIndex = e2eRunScript.indexOf('apply_apt_mirror');
+      expect(applyIndex).toBeGreaterThan(-1);
       expect(e2eRunScript.indexOf('if ! build_image;')).toBeGreaterThan(
-        callIndex,
+        applyIndex,
       );
       // Two gates hold the override back, both on the mirror side: an absolute
       // floor (no "slow vs slower" override) and a 4x factor (a genuinely fast
@@ -1133,16 +1274,16 @@ describe('e2e workflow', () => {
       // pinned, not just the names: a 10x mutation of the floor flips the
       // both-slow shape onto a still-slow mirror. \b, not toContain, so the
       // 10x-up mutation 'fast_mirror=10000000' cannot satisfy the pin.
-      expect(e2eRunScript).toMatch(/fast_mirror=1000000\b/);
-      expect(e2eRunScript).toMatch(/-gt "\$\{fast_mirror\}" \]/);
-      expect(e2eRunScript).toMatch(/-gt \$\(\(default_rate \* 4\)\)/);
+      expect(aptProbeScript).toMatch(/fast_mirror=1000000\b/);
+      expect(aptProbeScript).toMatch(/-gt "\$\{fast_mirror\}" \]/);
+      expect(aptProbeScript).toMatch(/-gt \$\(\(default_rate \* 4\)\)/);
       // There must be NO "default looks healthy" gate: the mainland paths are
       // bimodal, so a short probe of the default cannot veto the override
       // (#16214 recurrence on hz4-2, run 41743539611). Pin its absence.
-      expect(e2eRunScript).not.toContain('slow_default');
+      expect(aptProbeScript).not.toContain('slow_default');
       // The measurements have to reach the log, or the next slow build is
       // another manual investigation.
-      expect(e2eRunScript).toContain('apt probe:');
+      expect(aptProbeScript).toContain('apt probe:');
     });
 
     it('keeps one bounded retry without pruning the shared daemon', () => {

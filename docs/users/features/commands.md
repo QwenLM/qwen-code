@@ -34,6 +34,11 @@ These commands help you save, restore, and summarize work progress.
 | `/export`        | Export session history to file                                           | `/export html`, `/export md`, `/export json`, `/export jsonl` |
 | `/rename`        | Rename or tag the current session                                        | `/rename My Feature` or `/tag`                                |
 | `/commit`        | Create a git commit with an AI-drafted message                           | `/commit` or `/commit only stage the parser changes`          |
+| `/pr`            | Bind a GitHub pull request to this session                               | `/pr 123`, `/pr #123`, or `/pr <PR URL>`                      |
+
+> [!note]
+>
+> `/pr` with a bare number resolves the PR in the session's target-directory repository, which may not be where your work happened — the success message prints the resolved URL so you can check it. A full PR URL names its own repository. There is no unbind command. To fix a bare-number bind, re-run `/pr` with the full URL of the PR you meant — when the intended PR carries the same number, that replaces the wrong entry in place; otherwise the wrong entry stays until you bind enough further PRs to push it past the session's 10-binding cap, or edit the session's PR sidecar file.
 
 > [!note]
 >
@@ -140,7 +145,7 @@ Commands for managing AI tools and models.
 
 > [!note]
 >
-> `/workflows`, `/lsp`, and `/trust` are registered only when their feature is enabled — via the user/system-scoped `tools.workflowsEnabled` setting or `QWEN_CODE_ENABLE_WORKFLOWS=1` env var, the `--experimental-lsp` CLI flag, and the `security.folderTrust.enabled` setting respectively. Workspace values for `tools.workflowsEnabled` are ignored. When disabled these commands won't appear and will report an unknown command. Similarly, `/dream` and `/forget` are registered only when managed auto-memory is available; without it they won't appear.
+> `/workflows`, `/lsp`, and `/trust` are registered only when their feature is enabled — via the user/system-scoped `tools.workflowsEnabled` setting or `QWEN_CODE_ENABLE_WORKFLOWS=1` env var, the user/system-scoped `tools.lspEnabled` setting, its `QWEN_CODE_ENABLE_LSP=1` / `QWEN_CODE_DISABLE_LSP=1` env pair, or the `--experimental-lsp` CLI flag, and the `security.folderTrust.enabled` setting respectively. Workspace values for `tools.workflowsEnabled` and `tools.lspEnabled` are ignored. When disabled these commands won't appear and will report an unknown command. Similarly, `/dream` and `/forget` are registered only when managed auto-memory is available; without it they won't appear.
 
 > [!note]
 >
@@ -468,6 +473,8 @@ Commands for obtaining information and performing system settings.
 | `/settings`      | Open settings editor                                                                                                           | `/settings`                                                                         |
 | `/config`        | Get or set any setting by dot-path key (writes to user settings)                                                               | `/config` (list all), `/config <key>`, `/config <key>=<value>`                      |
 | `/auth`          | Change authentication method                                                                                                   | `/auth`, `/connect`, `/login`                                                       |
+| `/logout`        | Sign out of the active Qwen Subscription account (available with Qwen Subscription login)                                      | `/logout`                                                                           |
+| `/upgrade`       | Open Qwen subscription plans (available with Qwen Subscription login)                                                          | `/upgrade`                                                                          |
 | `/doctor`        | Run installation and environment diagnostics                                                                                   | `/doctor`, `/doctor memory`                                                         |
 | → `memory`       | Show current process memory diagnostics                                                                                        | `/doctor memory [--json] [--sample] [--snapshot]`                                   |
 | → `cpu-profile`  | Record a CPU profile for Chrome DevTools analysis                                                                              | `/doctor cpu-profile [--duration <seconds>]`                                        |

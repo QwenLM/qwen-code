@@ -430,6 +430,13 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     expect(resolveDaemonTelemetryRoute(mockReq('POST', '/language'))).toEqual({
       route: 'POST /language',
     });
+    expect(
+      resolveDaemonTelemetryRoute(
+        mockReq('POST', '/workspaces/ws-secondary/language'),
+      ),
+    ).toEqual({
+      route: 'POST /workspaces/:workspace/language',
+    });
   });
 
   it.each([
@@ -506,6 +513,20 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
       }),
       expect.any(Function),
     );
+  });
+
+  it('attributes Hook-page reads to a stable workspace route and decoded session', () => {
+    expect(
+      resolveDaemonTelemetryRoute(
+        mockReq(
+          'GET',
+          '/workspaces/ws/session/session%2F1/turns/session%23%23%23%23%23%23%23%231/hooks',
+        ),
+      ),
+    ).toEqual({
+      route: 'GET /workspaces/:workspace/session/:id/turns/:promptId/hooks',
+      sessionId: 'session/1',
+    });
   });
 
   it('attributes tool-call reads to a stable workspace route and decoded session', () => {
@@ -1195,17 +1216,17 @@ describe('legacy session telemetry route catalog', () => {
   // MCP App calls, attachment uploads, the batch live-state snapshot, shell
   // runtime, and message group routes resolve the live session owner in the
   // handler, preserving the two pre-resolved routes.
-  it('contains 86 unique routes with the audited 84/2 attribution split', () => {
+  it('contains 87 unique routes with the audited 85/2 attribution split', () => {
     const keys = legacySessionTelemetryRoutes.map(
       ({ method, path }) => `${method} ${path}`,
     );
-    expect(keys).toHaveLength(86);
-    expect(new Set(keys).size).toBe(86);
+    expect(keys).toHaveLength(87);
+    expect(new Set(keys).size).toBe(87);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'handler_resolved',
       ),
-    ).toHaveLength(84);
+    ).toHaveLength(85);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'pre_resolved',

@@ -129,6 +129,12 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'GET',
+    path: '/session/:id/turns/:promptId/hooks',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/turns/:promptId/hooks',
+  },
+  {
+    method: 'GET',
     path: '/session/:id/context',
     attribution: 'handler_resolved',
     route: 'GET /session/:id/context',
@@ -732,6 +738,15 @@ export function resolveDaemonTelemetryRoute(
       sessionId: decodePathSegment(workspaceTurnIndex[1]),
     };
   }
+  const workspaceTurnHooks = path.match(
+    /^\/workspaces\/[^/]+\/session\/([^/]+)\/turns\/[^/]+\/hooks$/,
+  );
+  if (workspaceTurnHooks?.[1] && req.method === 'GET') {
+    return {
+      route: 'GET /workspaces/:workspace/session/:id/turns/:promptId/hooks',
+      sessionId: decodePathSegment(workspaceTurnHooks[1]),
+    };
+  }
   const workspaceToolCalls = path.match(
     /^\/workspaces\/[^/]+\/session\/([^/]+)\/tool-calls$/,
   );
@@ -762,6 +777,9 @@ export function resolveDaemonTelemetryRoute(
   const pluralWorkspacePrefix = /^\/workspaces\/[^/]+/;
   if (pluralWorkspacePrefix.test(path)) {
     const suffix = path.replace(pluralWorkspacePrefix, '/workspace');
+    if (req.method === 'POST' && suffix === '/workspace/language') {
+      return { route: 'POST /workspaces/:workspace/language' };
+    }
     if (req.method === 'GET') {
       if (
         suffix === '/workspace/mcp' ||

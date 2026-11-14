@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker.provisioning.ssh;
 
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
+import com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt;
@@ -20,11 +21,14 @@ import com.alibaba.qwen.code.runtimebroker.spi.SshRuntimeStorage;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -59,14 +63,14 @@ public final class SshRuntimeProvisioner implements RuntimeProvisioner {
     public SshRuntimeProvisioner(Function<String, SshRuntimeNode> nodes,
             Function<RuntimeScope, SshRuntimeStorage> storages, SshConnections connections,
             HttpRuntimeTransport transport) {
-        this.nodes = java.util.Objects.requireNonNull(nodes, "nodes");
-        this.storages = java.util.Objects.requireNonNull(storages, "storages");
-        this.connections = java.util.Objects.requireNonNull(connections, "connections");
-        this.transport = java.util.Objects.requireNonNull(transport, "transport");
+        this.nodes = Objects.requireNonNull(nodes, "nodes");
+        this.storages = Objects.requireNonNull(storages, "storages");
+        this.connections = Objects.requireNonNull(connections, "connections");
+        this.transport = Objects.requireNonNull(transport, "transport");
     }
 
     public SshRuntimeProvisioner withManagedExtensionCacheDirectory(String directory, String cgroupRoot) {
-        if (directory == null || !java.nio.file.Path.of(directory).isAbsolute()) {
+        if (directory == null || !Path.of(directory).isAbsolute()) {
             throw new IllegalArgumentException("Extension cache must be absolute");
         }
         this.managedExtensionCacheDirectory = directory;
@@ -217,13 +221,13 @@ public final class SshRuntimeProvisioner implements RuntimeProvisioner {
                 throw stopUnconfirmed();
             }
             RuntimeProvisionSeed seed = binding.getProvisionSeed();
-            boolean extended = com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.admits(binding.getRequest().getScope().getCapabilityDigest());
-            Set<String> proofFields = new java.util.HashSet<>(PROOF_FIELDS);
+            boolean extended = ManagedExtensionExecutionProfile.admits(binding.getRequest().getScope().getCapabilityDigest());
+            Set<String> proofFields = new HashSet<>(PROOF_FIELDS);
             if (extended) {
                 proofFields.add("executionMode");
                 proofFields.add("scope");
             }
-            String mode = extended ? com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.mode(binding.getRequest().getScope().getCapabilityDigest()) : null;
+            String mode = extended ? ManagedExtensionExecutionProfile.mode(binding.getRequest().getScope().getCapabilityDigest()) : null;
             String proofScope = extended ? ("linux-cgroup".equals(mode) ? "process_tree" : "process_group") : null;
             if (!proof.keySet().equals(proofFields)
                     || !number(proof.get("version"), extended ? 2 : 1)
@@ -275,8 +279,8 @@ public final class SshRuntimeProvisioner implements RuntimeProvisioner {
     private Map<String, Object> contextBoot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
         String digest = request.getScope().getCapabilityDigest();
         return ManagedContextProtocol.boot(request, seed,
-                com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.admits(digest)
-                        ? com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile.configuration(digest,
+                ManagedExtensionExecutionProfile.admits(digest)
+                        ? ManagedExtensionExecutionProfile.configuration(digest,
                                 managedExtensionCacheDirectory, managedExtensionCgroupRoot) : null);
     }
 
@@ -299,14 +303,16 @@ public final class SshRuntimeProvisioner implements RuntimeProvisioner {
 
     private Map<String, Object> awaitStartup(SshRuntimeNode node, RuntimeResourceHandle handle, Map<String, Object> result) {
         long deadline = System.nanoTime() + Duration.ofSeconds(60).toNanos();
+        long pause = 200;
         verifyResource(result, handle);
         while ("STARTING".equals(result.get("state")) && System.nanoTime() < deadline) {
             try {
-                Thread.sleep(100);
+                Thread.sleep(pause);
             } catch (InterruptedException failure) {
                 Thread.currentThread().interrupt();
                 throw new RuntimeBrokerException(503, "ssh_runtime_start_pending", "Original SSH worker startup was interrupted.", true, failure);
             }
+            pause = Math.min(pause * 2, 2_000);
             result = connections.bootstrap(node, operation(node, handle, "observe"));
             verifyResource(result, handle);
         }
