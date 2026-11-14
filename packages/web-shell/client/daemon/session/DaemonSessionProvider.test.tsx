@@ -22558,6 +22558,10 @@ describe('DaemonSessionProvider', () => {
     expect(connection?.sessionId).toBeUndefined();
     expect(connection?.context).toBeUndefined();
     expect(connection?.reasoning).toBeUndefined();
+    // The terminal park is structured, not inferred: consumers (e.g. the
+    // Split View pane prune) key off the flag, mirroring sessionArchived.
+    expect(connection?.userClosedSession).toBe(true);
+    expect(connection?.sessionArchived).toBeUndefined();
     // The close must re-project models from the retained provider snapshot:
     // the attached context's models carry no reasoningPreview, so keeping
     // them would drop the welcome preview.
@@ -22792,6 +22796,8 @@ describe('DaemonSessionProvider', () => {
       // provider did NOT exit the loop, it preserved the session
       // for delta resume.
       expect(connection?.sessionId).toBe('session-1');
+      // Server-initiated closes must not set the user-close terminal flag.
+      expect(connection?.userClosedSession).toBeUndefined();
     },
   );
 
