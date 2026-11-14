@@ -150,19 +150,21 @@ describe('managed DingTalk webhook verdict honesty (R2-2)', () => {
 });
 
 describe('managed DingTalk webhook transient verdicts (R2-3)', () => {
-  it.each([{ errcode: 410100 }, { errcode: -1 }])(
-    'errcode $errcode is transient (non-definitive)',
-    async (body) => {
-      vi.stubGlobal(
-        'fetch',
-        vi.fn(async () => jsonResponse(body)),
-      );
-      const { sendWebhook } = createManagedDingtalkDeps();
-      await expect(sendWebhook(WEBHOOK, 'hello')).rejects.toMatchObject({
-        definitive: false,
-      });
-    },
-  );
+  it.each([
+    { errcode: 410100 },
+    { errcode: -1 },
+    { errcode: 130101 },
+    { errcode: 88 },
+  ])('errcode $errcode is transient (non-definitive)', async (body) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse(body)),
+    );
+    const { sendWebhook } = createManagedDingtalkDeps();
+    await expect(sendWebhook(WEBHOOK, 'hello')).rejects.toMatchObject({
+      definitive: false,
+    });
+  });
 
   it.each([429, 408, 425])(
     'HTTP %i is retryable (non-definitive)',
@@ -198,5 +200,30 @@ describe('managed DingTalk webhook transient verdicts (R2-3)', () => {
     await expect(sendWebhook(WEBHOOK, 'hello')).rejects.toMatchObject({
       definitive: true,
     });
+  });
+});
+
+describe('managed DingTalk webhook URL validation (R4-7)', () => {
+  it.each([
+    'http://evil.example/hook',
+    'https://evil.example/hook',
+    'https://oapi.dingtalk.com:8443/robot/sendBySession',
+    'not-a-url',
+  ])('rejects %s without fetching', async (url) => {
+    const fetchMock = vi.fn(async () => jsonResponse({ errcode: 0 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { sendWebhook } = createManagedDingtalkDeps();
+    await expect(sendWebhook(url, 'hello')).rejects.toMatchObject({
+      definitive: true,
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('admits the provider sessionWebhook host', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ errcode: 0 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { sendWebhook } = createManagedDingtalkDeps();
+    await expect(sendWebhook(WEBHOOK, 'hello')).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

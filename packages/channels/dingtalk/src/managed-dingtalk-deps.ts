@@ -18,9 +18,14 @@ import {
 } from './connect-logging.js';
 import { splitChunks } from './markdown.js';
 import { isRetryableDingtalkStatus } from './interactive-card-client.js';
+import { ROBOT_MESSAGE_HOSTS } from './DingtalkAdapter.js';
 
 const WEBHOOK_TIMEOUT_MS = 30_000;
 const RECONNECT_RETRY_MS = 5_000;
+// Provider verdicts a retry can heal: system busy (-1), throttled (88), and the
+// send-rate limits (410100 / 130101). Classifying these definitive would settle
+// a rate-limited chunk's whole delivery rejected and never send the rest.
+const TRANSIENT_ERRCODES = new Set([-1, 88, 410100, 130101]);
 
 function createStreamClient(
   settings: DingtalkSettings,
@@ -76,6 +81,7 @@ function createStreamClient(
   // so re-arm the retry here or one transient error leaves the adapter deaf.
   let stopped = false;
   let everConnected = false;
+  let loggedReconnectFailure = false;
   let retry: ReturnType<typeof setTimeout> | undefined;
   const sdkConnect = internals.connect.bind(client);
   const guardedConnect = (): Promise<void> => {
@@ -83,15 +89,25 @@ function createStreamClient(
     return withConnectLoggingSuppressed(sdkConnect).then(
       (result) => {
         everConnected = true;
+        loggedReconnectFailure = false;
+        // A disconnect may have landed while this attempt was in flight; the
+        // attempt then opened a fresh socket and armed the SDK heartbeat. Close
+        // it so the process can exit and no zombie keeps acking LATER.
+        if (stopped) client.disconnect();
         return result;
       },
       (error) => {
         if (!everConnected) throw error;
-        // Do not echo the error: it can carry the endpoint/ticket.
+        // Do not echo the error: it can carry the endpoint/ticket. Log only on
+        // the transition — a permanently rejected app would otherwise re-emit
+        // this line every retry interval and drown the log.
         void error;
-        process.stderr.write(
-          `Managed DingTalk stream reconnect failed; retrying in ${RECONNECT_RETRY_MS} ms.\n`,
-        );
+        if (!loggedReconnectFailure) {
+          loggedReconnectFailure = true;
+          process.stderr.write(
+            `Managed DingTalk stream reconnect failed; retrying in ${RECONNECT_RETRY_MS} ms.\n`,
+          );
+        }
         if (!stopped && retry === undefined) {
           retry = setTimeout(() => {
             retry = undefined;
@@ -114,6 +130,23 @@ function createStreamClient(
 }
 
 async function sendWebhook(webhook: string, text: string): Promise<void> {
+  // The sessionWebhook is a bearer capability URL taken from the inbound frame;
+  // validate it before the first fetch (the same guard the Legacy path applies)
+  // so a reply — assistant output and the URL's token included — is never sent
+  // over cleartext or to a non-DingTalk host.
+  let url: URL;
+  try {
+    url = new URL(webhook);
+  } catch {
+    throw webhookFailure('DingTalk webhook URL is not a valid URL.', true);
+  }
+  if (
+    url.protocol !== 'https:' ||
+    url.port !== '' ||
+    !ROBOT_MESSAGE_HOSTS.has(url.hostname)
+  ) {
+    throw webhookFailure('DingTalk webhook URL rejected.', true);
+  }
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), WEBHOOK_TIMEOUT_MS);
   try {
@@ -142,6 +175,7 @@ async function postTextChunk(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ msgtype: 'text', text: { content } }),
       signal,
+      redirect: 'error',
     });
   } catch (error) {
     // A timeout or a dropped connection leaves the provider's state unknown.
@@ -185,10 +219,10 @@ async function postTextChunk(
     );
   }
   if (body.errcode !== 0) {
-    // System-busy and throttling verdicts are transient (the package's own
-    // classifier treats -1 / 410100 as transient): the outcome is unknown, not
-    // a definitive refusal the ledger could never revise.
-    if (body.errcode === -1 || body.errcode === 410100) {
+    // System-busy and send-throttle verdicts are transient: the outcome is
+    // unknown, not a definitive refusal the ledger could never revise. A
+    // rate-limited chunk must not settle the whole delivery rejected.
+    if (TRANSIENT_ERRCODES.has(body.errcode)) {
       throw webhookFailure(
         `DingTalk webhook is busy (errcode ${body.errcode}); the send outcome is unknown.`,
         false,

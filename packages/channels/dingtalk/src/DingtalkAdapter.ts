@@ -645,7 +645,12 @@ const PROACTIVE_MSG_KEY = 'sampleMarkdown'; // DingTalk's built-in {title, text}
 const PROACTIVE_FILE_MSG_KEY = 'sampleFile';
 const TOKEN_API = 'https://oapi.dingtalk.com/gettoken';
 const PROACTIVE_FETCH_TIMEOUT_MS = 15_000;
-const ROBOT_MESSAGE_HOSTS = new Set(['api.dingtalk.com', 'oapi.dingtalk.com']);
+// Shared with the managed adapter's webhook send so both paths validate the
+// sessionWebhook host against the same allowlist.
+export const ROBOT_MESSAGE_HOSTS = new Set([
+  'api.dingtalk.com',
+  'oapi.dingtalk.com',
+]);
 /**
  * gettoken business errors a retry cannot fix: an invalid appkey/secret or a
  * missing app. Any other errcode (-1 system busy, 88 throttled, ...) is

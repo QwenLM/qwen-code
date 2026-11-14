@@ -238,6 +238,10 @@ export class ManagedDingtalkAdapter {
       if (this.pollLoop) this.loop = this.runLoop();
     } catch (error) {
       this.stop();
+      // Frames acked between stream.connect() and a failed registration are
+      // already durable on the provider side; persist them as claims so a
+      // restart re-drives them instead of losing them.
+      await this.drainInboxOnShutdown().catch(() => undefined);
       await this.release();
       throw error;
     }
@@ -247,28 +251,35 @@ export class ManagedDingtalkAdapter {
     this.stop();
     await this.loop;
     try {
-      // The stream acked these messages and will never redeliver them; persist
-      // them as claims before releasing the lock so a graceful restart re-drives
-      // them instead of losing them. They are not submitted here — the next
-      // process owns the admission. Bound the drain by the pending cap so it
-      // never evicts an already-persisted claim (the provider acked that one
-      // too and will not redeliver it).
-      const state = this.state!;
-      while (
-        this.inbox.length > 0 &&
-        state.pending.length < MANAGED_DINGTALK_PENDING_LIMIT
-      ) {
-        await this.admit(this.inbox.shift()!, false);
-      }
-      if (this.inbox.length > 0) {
-        this.log(
-          `Managed DingTalk could not persist ${this.inbox.length} acked message(s): the pending claim table is full.`,
-        );
-        this.inbox.length = 0;
-      }
+      await this.drainInboxOnShutdown();
     } finally {
       await this.controlPlane.disconnect().catch(() => undefined);
       await this.release();
+    }
+  }
+
+  // The stream acked these messages and will never redeliver them; persist them
+  // as claims before releasing the lock so a graceful restart re-drives them
+  // instead of losing them. They are not submitted here — the next process owns
+  // the admission. Bound the drain by the pending cap so it never evicts an
+  // already-persisted claim (the provider acked that one too and will not
+  // redeliver it).
+  private async drainInboxOnShutdown(): Promise<void> {
+    const state = this.state;
+    if (!state) return;
+    while (
+      this.inbox.length > 0 &&
+      state.pending.length < MANAGED_DINGTALK_PENDING_LIMIT
+    ) {
+      const item = this.inbox[0]!;
+      await this.admit(item, false);
+      this.inbox.shift();
+    }
+    if (this.inbox.length > 0) {
+      this.log(
+        `Managed DingTalk could not persist ${this.inbox.length} acked message(s): the pending claim table is full.`,
+      );
+      this.inbox.length = 0;
     }
   }
 
@@ -284,11 +295,18 @@ export class ManagedDingtalkAdapter {
   // Returns whether the frame was queued. Acceptance is the commit point: the
   // caller acks SUCCESS only on true, so an overflow leaves the frame unacked
   // and the provider's own redelivery is the backstop instead of a silent drop.
+  // Acceptance must mean "there is a durable claim slot", not merely inbox room:
+  // a frame acked while the 32-claim table is full could never be persisted and
+  // would be discarded on shutdown, so couple the gate to the claim budget.
   private onMessage(messageId: string, data: string): boolean {
     if (!this.running) return false;
-    if (this.inbox.length >= INBOX_LIMIT) {
+    if (
+      this.inbox.length >= INBOX_LIMIT ||
+      (this.state?.pending.length ?? 0) + this.inbox.length >=
+        MANAGED_DINGTALK_PENDING_LIMIT
+    ) {
       this.log(
-        `Managed DingTalk inbox is full; message ${messageId} is left unacked for redelivery.`,
+        `Managed DingTalk has no durable claim slot; message ${messageId} is left unacked for redelivery.`,
       );
       return false;
     }
@@ -323,8 +341,11 @@ export class ManagedDingtalkAdapter {
         this.instanceStalled
       )
         return;
-      const item = this.inbox.shift()!;
+      // Peek, then shift only after the claim is durable: a failed store.save()
+      // must leave the frame in the inbox for the next tick, not drop it.
+      const item = this.inbox[0]!;
       await this.admit(item);
+      this.inbox.shift();
       if (this.registeredGeneration === 0 || this.instanceStalled) return;
     }
   }

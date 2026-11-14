@@ -132,7 +132,7 @@ function fakeControlPlane() {
 }
 
 function fakeDeps() {
-  let handler: ((messageId: string, data: string) => void) | undefined;
+  let handler: ((messageId: string, data: string) => boolean) | undefined;
   const sent: Array<{ webhook: string; text: string }> = [];
   let behavior: 'ok' | 'definitive' | 'transient' = 'ok';
   const deps: ManagedDingtalkAdapterDeps = {
@@ -820,5 +820,26 @@ describe('managed DingTalk adapter review fixes', () => {
     expect(plane.submit).toHaveLength(1);
     expect(plane.submit[0]!.text.isWellFormed()).toBe(true);
     await adapter.disconnect();
+  });
+
+  it('acks only when a durable claim slot exists (R4-1)', async () => {
+    const cwd = tempCwd();
+    const first = await connectedAdapter(cwd);
+    first.plane.setRefuseSubmit({ status: 503 });
+    for (let i = 1; i <= 32; i += 1) {
+      first.fake.push(`m${i}`, messageData({ msgId: `m${i}` }));
+    }
+    await first.adapter.tick(); // pending fills to the 32-claim cap
+    // The 33rd frame has no durable claim slot: it must be left unacked for
+    // provider redelivery, not acked and parked in memory to be discarded.
+    const accepted = first.fake.push('m33', messageData({ msgId: 'm33' }));
+    expect(accepted).toBe(false);
+    await first.adapter.disconnect();
+    const second = await connectedAdapter(cwd);
+    await second.adapter.tick();
+    expect(
+      second.plane.submit.map((event) => event.platformEventId),
+    ).not.toContain('dingtalk:m33');
+    await second.adapter.disconnect();
   });
 });

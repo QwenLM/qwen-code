@@ -9,6 +9,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const mockState = vi.hoisted(() => ({
   behavior: 'ok' as 'ok' | 'fail',
   calls: 0,
+  disconnects: 0,
+  connectGate: null as null | { promise: Promise<void>; resolve: () => void },
   instance: null as unknown as { onDownStream: (data: unknown) => void },
   registered: null as null | { topic: unknown; cb: (m: unknown) => void },
   acks: [] as Array<{ id: string; payload: { status: string } }>,
@@ -43,11 +45,16 @@ vi.mock('dingtalk-stream-sdk-nodejs', () => {
     }
     async connect(): Promise<void> {
       mockState.calls += 1;
+      if (mockState.connectGate) {
+        await mockState.connectGate.promise;
+      }
       if (mockState.behavior === 'fail') {
         throw new Error('getEndpoint failed');
       }
     }
-    disconnect(): void {}
+    disconnect(): void {
+      mockState.disconnects += 1;
+    }
   }
   return {
     DWClient,
@@ -75,6 +82,8 @@ function robotFrame(messageId: string): string {
 beforeEach(() => {
   mockState.behavior = 'ok';
   mockState.calls = 0;
+  mockState.disconnects = 0;
+  mockState.connectGate = null;
   mockState.registered = null;
   mockState.acks = [];
 });
@@ -177,5 +186,45 @@ describe('managed DingTalk stream frame path (R3-1 / R3-3 / R3-4)', () => {
     expect(() => mockState.instance.onDownStream(noMessageId)).not.toThrow();
     expect(received).toEqual([]);
     expect(mockState.acks).toEqual([]);
+  });
+});
+
+describe('managed DingTalk stream reconnect lifecycle (R4-2 / R4-3)', () => {
+  it('closes a socket opened by an in-flight connect that resolves after disconnect (R4-2)', async () => {
+    let resolveConnect!: () => void;
+    mockState.connectGate = {
+      promise: new Promise<void>((resolve) => {
+        resolveConnect = resolve;
+      }),
+      resolve: () => resolveConnect(),
+    };
+    const { createStreamClient } = createManagedDingtalkDeps();
+    const stream = createStreamClient(SETTINGS, () => true);
+    const connecting = stream.connect(); // in flight, gated
+    stream.disconnect(); // lands while the attempt is in flight
+    const disconnectsBeforeResolve = mockState.disconnects;
+    mockState.connectGate.resolve();
+    await connecting;
+    // The resolve handler must close the socket the attempt opened, so no
+    // zombie socket / heartbeat survives the disconnect.
+    expect(mockState.disconnects).toBeGreaterThan(disconnectsBeforeResolve);
+  });
+
+  it('logs a permanently failing reconnect only on the transition (R4-3)', async () => {
+    vi.useFakeTimers();
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const { createStreamClient } = createManagedDingtalkDeps();
+    const stream = createStreamClient(SETTINGS, () => true);
+    await stream.connect(); // call 1 succeeds, everConnected = true
+    mockState.behavior = 'fail';
+    await stream.connect(); // call 2 fails: logs once, re-arms the retry
+    await vi.advanceTimersByTimeAsync(5_000); // call 3 fails: must not re-log
+    const reconnectLines = stderrSpy.mock.calls.filter((call) =>
+      String(call[0]).includes('reconnect failed'),
+    ).length;
+    expect(reconnectLines).toBe(1);
+    stream.disconnect();
   });
 });

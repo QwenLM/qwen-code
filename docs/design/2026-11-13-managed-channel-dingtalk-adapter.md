@@ -86,11 +86,15 @@ full inbound event. A restart re-drives that exact persisted event; it must not
 drop an admission it can no longer rebuild.
 
 Inbound text is clamped to what the wire admits before it is submitted — at most
-32,000 characters and the Harness's 64 KiB byte envelope, with the byte cut on a
-code-point boundary — the same clamp the email reference applies. An over-long
-message is therefore admitted truncated instead of meeting a deterministic
-refusal and being dropped whole. A CJK message can sit under the character line
-yet overflow the byte envelope, so both bounds are enforced.
+32,000 UTF-16 units (the cap counts UTF-16 because the server's `maxTextChars`
+does, and a trailing high surrogate is backed off so the text stays well-formed)
+and the Harness's 64 KiB byte envelope. The byte bound is measured on the
+JSON-serialized text — a control character costs six bytes, a quote or backslash
+two — and cut on a code-point boundary. An over-long message is therefore
+admitted truncated instead of meeting a deterministic refusal and being dropped
+whole. Note this deliberately diverges from the email reference clamp, which
+still budgets the raw UTF-8 length; copying email's raw-byte budget here would
+re-introduce the escape-inflation refusal this clamp prevents.
 
 The reply context's `sessionWebhook` is a bearer capability. Restart durability
 requires persisting it with the state (a `0600` file inside a `0700` directory),
