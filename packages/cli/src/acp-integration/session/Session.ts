@@ -8991,8 +8991,10 @@ export class Session implements SessionContext {
     // call, which the turn takes to hand the batch over.
     const sendRound: typeof runModelRound = round.sharedToolBatch
       ? (_client, request, roundSignal, host) => {
+          // Not the round marker: #runSharedRound already logged that, and the
+          // parity suites count its occurrences as the session's rounds.
           debugLogger.debug(
-            `model round on the shared agent loop (prompt ${request.promptId})`,
+            `model round on the shared batch (prompt ${request.promptId})`,
           );
           const loop = startSharedLoopRound(
             this.config.getLlmClient(),
