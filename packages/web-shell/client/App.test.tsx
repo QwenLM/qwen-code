@@ -1926,9 +1926,12 @@ vi.mock('./components/dialogs/GitDiffDialog', async () => {
 // sub-dialog (model picker, approval-mode picker) via [data-testid="dialog-shell"].
 // It also carries the real component's [data-web-shell-dialog] marker, which
 // the drawer's touch-scroll blocker keys its dialog exemption off.
-vi.mock('./components/dialogs/DialogShell', async () => {
+vi.mock('./components/dialogs/DialogShell', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./components/dialogs/DialogShell')>();
   const React = await import('react');
   return {
+    ...actual,
     DialogShell: (props: {
       children?: React.ReactNode;
       title?: React.ReactNode;
@@ -3120,6 +3123,9 @@ const { McpStatusMessage } = await import(
   './components/messages/McpStatusMessage'
 );
 const { I18nProvider } = await import('./i18n');
+const { SessionSearchDialog } = await import(
+  './components/sidebar/SessionSearchDialog'
+);
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -43027,6 +43033,109 @@ describe('App session callbacks', () => {
     expect(swipe(drawer)).toBe(false);
     // The page behind the drawer must stay locked.
     expect(swipe(document.body)).toBe(true);
+  });
+
+  it('keeps the real session search scrollable and dismissible over the drawer', async () => {
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({ sidebar: true, shellRef });
+    await flush();
+
+    await act(async () => {
+      shellRef.current?.openSessionDrawer();
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-sidebar-shell]')).not.toBeNull();
+
+    // The sidebar is mocked in this harness, so mount the real dialog beside
+    // it: the App drawer guards are document-level and apply to any focusable
+    // node outside the shell, exactly like the portaled dialog in production.
+    const searchContainer = document.createElement('div');
+    document.body.appendChild(searchContainer);
+    const searchRoot = createRoot(searchContainer);
+    mounted.push({ root: searchRoot, container: searchContainer });
+    const onClose = vi.fn();
+    await act(async () => {
+      searchRoot.render(
+        <I18nProvider language="en">
+          <SessionSearchDialog
+            client={undefined}
+            workspaces={[{ cwd: '/workspace', displayName: 'Workspace' }]}
+            initialSessions={[
+              {
+                sessionId: 'drawer-search',
+                displayName: 'Drawer search',
+                workspaceCwd: '/workspace',
+              } as DaemonSessionSummary,
+            ]}
+            primaryWorkspaceCwd="/workspace"
+            includeStandalone={false}
+            organizationEnabled={false}
+            qualified={false}
+            catalogKey=""
+            restoreFocus={null}
+            onClose={onClose}
+            onSelect={vi.fn()}
+            onQueryChange={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const dialog = document
+      .querySelector<HTMLElement>('[role="listbox"]')
+      ?.closest<HTMLElement>('[role="dialog"]');
+    expect(dialog).not.toBeNull();
+    const row = dialog!.querySelector<HTMLElement>('[role="option"]');
+    expect(row).not.toBeNull();
+
+    // jsdom has no layout: give the result list real scroll geometry so
+    // Radix's scroll lock sees a scrollable ancestor instead of cancelling
+    // every touch gesture targeting it.
+    const list =
+      dialog!.querySelector<HTMLElement>('[role="listbox"]')!.parentElement!;
+    list.style.overflowY = 'auto';
+    Object.defineProperty(list, 'scrollHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(list, 'clientHeight', {
+      configurable: true,
+      value: 200,
+    });
+    const touch = (type: string, clientY: number, target: EventTarget) => {
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      const point = [{ clientX: 10, clientY }];
+      for (const property of ['touches', 'changedTouches']) {
+        Object.defineProperty(event, property, { value: point });
+      }
+      target.dispatchEvent(event);
+      return event;
+    };
+    act(() => {
+      touch('touchstart', 300, row!);
+    });
+    let swipeEvent!: Event;
+    act(() => {
+      swipeEvent = touch('touchmove', 200, row!);
+    });
+    expect(swipeEvent.defaultPrevented).toBe(false);
+
+    const close = dialog!.querySelector<HTMLButtonElement>(
+      'button[aria-label="close"]',
+    )!;
+    act(() => {
+      close.focus();
+      close.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Escape',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    // Escape belongs to the dialog; the drawer behind it stays open.
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(container.querySelector('[data-sidebar-shell]')).not.toBeNull();
   });
 
   it('starts a new session from the external shell ref and returns to chat', async () => {

@@ -94,6 +94,8 @@ import { ManagedTaskPanel, taskCancelMessage } from './ManagedTaskPanel';
 import { useManagedTasks } from './use-managed-tasks';
 import { ManagedChildSessionView } from './ManagedChildSessionView';
 import { ManagedDiagnosticsPanel } from './ManagedDiagnosticsPanel';
+import { ManagedTerminalPanel } from './ManagedTerminalPanel';
+import { newManagedTerminalId } from './managed-terminal-protocol';
 import { useManagedDiagnosticsText } from './managed-diagnostics-messages';
 import { useManagedTaskCancel } from './use-managed-task-cancel';
 import { TodoFullList } from '../messages/TodoView';
@@ -485,6 +487,10 @@ function ManagedSessionsContent({
   const [wideTasks, setWideTasks] = useState(false);
   const [taskPanelSession, setTaskPanelSession] = useState<string>();
   const taskPanelOpen = !!sessionId && taskPanelSession === sessionId;
+  const terminalTriggerRef = useRef<HTMLButtonElement>(null);
+  const [terminalSession, setTerminalSession] = useState<string>();
+  const terminalIds = useRef(new Map<string, string>());
+  const terminalOpen = !!sessionId && terminalSession === sessionId;
   const publicChildren = detail.summary?.capabilities.childAgents === true;
   const tasks = useManagedTasks(
     provider,
@@ -533,6 +539,9 @@ function ManagedSessionsContent({
     // instance; without re-running here the observer never attaches.
   }, [sessionId, hostSessionOnly]);
   useEffect(() => setTaskPanelSession(undefined), [provider, sessionId]);
+  useEffect(() => {
+    setTerminalSession(undefined);
+  }, [provider, sessionId]);
   const [sessions, setSessions] = useState<ManagedAgentSessionSummary[]>([]);
   const [archivedSummaries, setArchivedSummaries] = useState<
     ManagedAgentSessionSummary[]
@@ -1469,6 +1478,46 @@ function ManagedSessionsContent({
         {diagnosticsText('title')}
       </Button>
     ) : null;
+  const terminalPanelOpen =
+    terminalOpen &&
+    currentSummary?.capabilities.terminal === true &&
+    !!provider.terminal;
+  const terminalId = sessionId
+    ? terminalIds.current.get(`${provider.storageKey}:${sessionId}`)
+    : undefined;
+  // A non-true capabilities.terminal reading is transient server state (a DB
+  // or filesystem blip in a session-list poll), not proof the terminal died.
+  // The panel therefore stays mounted across capability dips: unmounting would
+  // send the release frame and SIGKILL a live PTY. The relay is the authority
+  // on loss — it maps worker loss to a non-retryable close code that renders
+  // the terminal-lost notice. Genuine close still unmounts via onClose and
+  // session change below.
+  function toggleTerminal() {
+    if (terminalPanelOpen) {
+      setTerminalSession(undefined);
+      return;
+    }
+    if (!sessionId || !currentSummary || !provider.terminal) return;
+    const key = `${provider.storageKey}:${sessionId}`;
+    if (!terminalIds.current.has(key)) {
+      terminalIds.current.set(key, newManagedTerminalId());
+    }
+    setTerminalSession(sessionId);
+  }
+  const terminalButton =
+    interactive &&
+    currentSummary?.capabilities.terminal === true &&
+    provider.terminal ? (
+      <Button
+        ref={terminalTriggerRef}
+        variant="outline"
+        size="sm"
+        aria-expanded={terminalPanelOpen}
+        onClick={toggleTerminal}
+      >
+        {t('terminal.title')}
+      </Button>
+    ) : null;
   const localFilesButton =
     provider.clientFiles && currentSummary?.capabilities.clientFiles ? (
       <ManagedLocalFilesControl
@@ -2099,6 +2148,7 @@ function ManagedSessionsContent({
                     )}
                     {sessionActions(summary)}
                     {diagnosticsButton}
+                    {terminalButton}
                     {sideQueryButtons}
                     {localFilesButton}
                   </span>
@@ -2154,6 +2204,7 @@ function ManagedSessionsContent({
                 </Button>
               )}
               {diagnosticsButton}
+              {terminalButton}
               {sideQueryButtons}
               {localFilesButton}
               {provider.tasks &&
@@ -3233,6 +3284,27 @@ function ManagedSessionsContent({
             restoreFocus={() => {
               if (taskTriggerRef.current?.isConnected)
                 taskTriggerRef.current.focus();
+              else (sessionsNavRef.current ?? pageRef.current)?.focus();
+            }}
+          />
+        )}
+        {/* Keep the panel mounted while the user has it open, independent of
+            transient dips: `interactive` goes false when a side panel opens and
+            the summary is briefly absent during a reload. Unmounting here would
+            send the release frame and SIGTERM the live PTY. The relay is the
+            authority on loss (a non-retryable close renders the terminal-lost
+            notice); genuine close unmounts via onClose and session change. */}
+        {terminalOpen && sessionId && terminalId && provider.terminal && (
+          <ManagedTerminalPanel
+            key={`${provider.storageKey}:${sessionId}:${terminalId}`}
+            terminal={provider.terminal}
+            sessionId={sessionId}
+            terminalId={terminalId}
+            clientId={clientId}
+            onClose={() => setTerminalSession(undefined)}
+            restoreFocus={() => {
+              if (terminalTriggerRef.current?.isConnected)
+                terminalTriggerRef.current.focus();
               else (sessionsNavRef.current ?? pageRef.current)?.focus();
             }}
           />
