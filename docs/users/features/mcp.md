@@ -43,8 +43,9 @@ Then enter:
 /mcp
 ```
 
-3. If Qwen Code was already running before you added the server, restart it in
-   the same project. Then ask the model to use tools from that server.
+3. Qwen Code watches `settings.json` and reloads changes to `mcpServers`
+   automatically. Ask the model to use tools from the server. If the tools do
+   not appear, restart Qwen Code in the same project.
 
 ## Where configuration is stored (scopes)
 
