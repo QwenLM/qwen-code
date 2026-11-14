@@ -41,6 +41,11 @@ import {
   isValidGoalTokenBudget,
   installSessionWorkflowRevisionWriteThrough,
 } from './config.js';
+import {
+  AGENT_LOOP_SURFACES,
+  UNIFIED_SURFACE_DEFAULTS,
+  EVENT_BUS_SURFACE_DEFAULTS,
+} from './agent-loop-rollout.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
 import { Storage } from './storage.js';
 import { ideContextStore } from '../ide/ideContext.js';
@@ -7358,16 +7363,23 @@ describe('Server Config (config.ts)', () => {
       });
       afterEach(() => vi.unstubAllEnvs());
 
-      it('defaults to off', () => {
-        expect(makeConfig().isEventBusAgentLoopEnabled()).toBe(false);
+      it('defaults to off for every surface', () => {
+        for (const surface of AGENT_LOOP_SURFACES) {
+          expect(makeConfig().isEventBusAgentLoopEnabled(surface)).toBe(false);
+        }
       });
 
       it('honors the constructor parameter', () => {
         expect(
           makeConfig({
             eventBusAgentLoopEnabled: true,
-          }).isEventBusAgentLoopEnabled(),
+          }).isEventBusAgentLoopEnabled('headless'),
         ).toBe(true);
+        expect(
+          makeConfig({
+            eventBusAgentLoopEnabled: false,
+          }).isEventBusAgentLoopEnabled('headless'),
+        ).toBe(false);
       });
 
       it('is enabled by QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP=1 even when the parameter is off', () => {
@@ -7375,13 +7387,124 @@ describe('Server Config (config.ts)', () => {
         expect(
           makeConfig({
             eventBusAgentLoopEnabled: false,
-          }).isEventBusAgentLoopEnabled(),
+          }).isEventBusAgentLoopEnabled('headless'),
         ).toBe(true);
       });
 
-      it('ignores other env values', () => {
+      it('is forced off by QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP=0 even when the parameter is on', () => {
         vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', '0');
-        expect(makeConfig().isEventBusAgentLoopEnabled()).toBe(false);
+        expect(
+          makeConfig({
+            eventBusAgentLoopEnabled: true,
+          }).isEventBusAgentLoopEnabled('headless'),
+        ).toBe(false);
+      });
+
+      it('forces only the surfaces named in an env list', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', 'headless,acp=0');
+        const config = makeConfig({ eventBusAgentLoopEnabled: true });
+        expect(config.isEventBusAgentLoopEnabled('headless')).toBe(true);
+        expect(config.isEventBusAgentLoopEnabled('acp')).toBe(false);
+        expect(config.isEventBusAgentLoopEnabled('ink')).toBe(true);
+      });
+    });
+
+    describe('isUnifiedAgentLoopEnabled', () => {
+      beforeEach(() => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
+      });
+      afterEach(() => vi.unstubAllEnvs());
+
+      it('defaults to off for every surface', () => {
+        for (const surface of AGENT_LOOP_SURFACES) {
+          expect(makeConfig().isUnifiedAgentLoopEnabled(surface)).toBe(false);
+        }
+      });
+
+      it('honors the constructor parameter', () => {
+        expect(
+          makeConfig({
+            unifiedAgentLoopEnabled: true,
+          }).isUnifiedAgentLoopEnabled('acp'),
+        ).toBe(true);
+        expect(
+          makeConfig({
+            unifiedAgentLoopEnabled: false,
+          }).isUnifiedAgentLoopEnabled('acp'),
+        ).toBe(false);
+      });
+
+      it('is enabled by QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1 even when the parameter is off', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', '1');
+        expect(
+          makeConfig({
+            unifiedAgentLoopEnabled: false,
+          }).isUnifiedAgentLoopEnabled('acp'),
+        ).toBe(true);
+      });
+
+      it('is forced off by QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=0 even when the parameter is on', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', '0');
+        expect(
+          makeConfig({
+            unifiedAgentLoopEnabled: true,
+          }).isUnifiedAgentLoopEnabled('acp'),
+        ).toBe(false);
+      });
+
+      it('forces only the surfaces named in an env list', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'acp=1,ink=0');
+        const config = makeConfig();
+        expect(config.isUnifiedAgentLoopEnabled('acp')).toBe(true);
+        expect(config.isUnifiedAgentLoopEnabled('ink')).toBe(false);
+        expect(config.isUnifiedAgentLoopEnabled('headless')).toBe(false);
+      });
+
+      it('resolves each surface independently', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'opentui');
+        const config = makeConfig();
+        expect(config.isUnifiedAgentLoopEnabled('opentui')).toBe(true);
+        expect(config.isUnifiedAgentLoopEnabled('agent-core')).toBe(false);
+        expect(config.isUnifiedAgentLoopEnabled('speculation')).toBe(false);
+      });
+    });
+
+    describe('loop-switch default tables are independent', () => {
+      // Snapshot the tables as found so cleanup restores them rather than a
+      // hardcoded false — the first rollout flip must not be erased here.
+      const savedUnified = { ...UNIFIED_SURFACE_DEFAULTS };
+      const savedEventBus = { ...EVENT_BUS_SURFACE_DEFAULTS };
+      afterEach(() => {
+        for (const surface of AGENT_LOOP_SURFACES) {
+          UNIFIED_SURFACE_DEFAULTS[surface] = savedUnified[surface];
+          EVENT_BUS_SURFACE_DEFAULTS[surface] = savedEventBus[surface];
+        }
+        vi.unstubAllEnvs();
+      });
+
+      it('flipping a unified surface default does not flip the event-bus default', () => {
+        // The next rollout step flips one surface's unified default. The kernel
+        // must stay at its own table's value for that surface unless its own
+        // table is flipped — re-merging the two tables reds this case.
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
+        UNIFIED_SURFACE_DEFAULTS.headless = true;
+        const config = makeConfig();
+        expect(config.isUnifiedAgentLoopEnabled('headless')).toBe(true);
+        expect(config.isEventBusAgentLoopEnabled('headless')).toBe(
+          savedEventBus.headless,
+        );
+      });
+
+      it('flipping an event-bus surface default does not flip the unified default', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
+        EVENT_BUS_SURFACE_DEFAULTS.headless = true;
+        const config = makeConfig();
+        expect(config.isEventBusAgentLoopEnabled('headless')).toBe(true);
+        expect(config.isUnifiedAgentLoopEnabled('headless')).toBe(
+          savedUnified.headless,
+        );
       });
     });
 

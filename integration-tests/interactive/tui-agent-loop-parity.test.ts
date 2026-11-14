@@ -26,7 +26,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { E2E_MEMORY_SETTINGS_DEFAULTS } from '../e2e-memory-defaults.js';
 import {
@@ -36,7 +36,7 @@ import {
   type FakeOpenAIServer,
 } from '../fake-openai-server.js';
 import { pickE2eRenderer } from '../renderer-matrix.js';
-import { IS_CONTAINER_SANDBOX } from '../test-helper.js';
+import { IS_CONTAINER_SANDBOX, readDebugLogs } from '../test-helper.js';
 import { InteractiveSession } from './interactive-session.js';
 
 type JsonObject = Record<string, unknown>;
@@ -830,14 +830,7 @@ describeTui(SUITE, () => {
       () => session!.exitResult() !== undefined,
       '/quit exits the TUI',
     );
-    const debugDir = join(runtimeDir, 'debug');
-    const debugLog = existsSync(debugDir)
-      ? files(debugDir)
-          // `latest` points at the session's own log.
-          .filter((file) => basename(file) !== 'latest')
-          .map((file) => readFileSync(file, 'utf8'))
-          .join('')
-      : '';
+    const debugLog = readDebugLogs(runtimeDir);
     return {
       requests: modelRequests(server, workspace, scratch, scenario),
       sideRequests: modelRequests(server, workspace, scratch, scenario, false),
