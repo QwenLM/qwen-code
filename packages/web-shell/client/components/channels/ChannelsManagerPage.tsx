@@ -944,14 +944,18 @@ export function ChannelsManagerPage({
                   {t(
                     descriptor.outboundOnly
                       ? 'channels.method.webhook'
-                      : 'channels.method.applicationBot',
+                      : descriptor.type === 'wecom'
+                        ? 'channels.method.intelligentBot'
+                        : 'channels.method.applicationBot',
                   )}
                 </span>
                 <span className="text-xs font-normal text-muted-foreground">
                   {t(
                     descriptor.outboundOnly
                       ? 'channels.method.webhook.description'
-                      : 'channels.method.applicationBot.description',
+                      : descriptor.type === 'wecom'
+                        ? 'channels.method.intelligentBot.description'
+                        : 'channels.method.applicationBot.description',
                   )}
                 </span>
               </Button>

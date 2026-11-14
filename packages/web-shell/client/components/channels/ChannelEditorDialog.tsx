@@ -117,6 +117,9 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     secret: 'channels.editor.field.wecom.secret',
     wsUrl: 'channels.editor.field.wecom.wsUrl',
   },
+  'wecom-webhook': {
+    webhookUrl: 'channels.editor.field.webhook.webhookUrl',
+  },
   feishu: {
     clientId: 'channels.editor.field.feishu.clientId',
     clientSecret: 'channels.editor.field.feishu.clientSecret',

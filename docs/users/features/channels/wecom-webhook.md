@@ -28,6 +28,9 @@ additional parameters are not accepted. There is no separate signing secret.
 
 ## Configure a Channel
 
+Configure this integration in [Web Shell](#use-web-shell) or `settings.json` as
+shown below.
+
 Add a named instance to the workspace's Channel settings:
 
 ```json
@@ -54,6 +57,22 @@ groups. Changing an instance's URL changes future deliveries through it.
 Starting makes the Channel locally ready to send. It does not send a test
 message or verify the remote credential. Stopping cancels in-flight sends;
 restart or reload applies saved configuration changes.
+
+## Use Web Shell
+
+In Channels, choose WeCom and then Webhook (send only). Select the workspace,
+save the webhook URL and start the Channel. No signing secret is needed.
+Receiving, pairing and agent-session settings do not apply to this method.
+The intelligent-bot method remains under WeCom; WeCom Callback keeps its
+separate entry.
+
+In Scheduled Tasks, choose a persistent task session and select this Channel
+as the delivery destination. Web Shell fills its configured group automatically;
+no observed contacts or manually entered chat ID are needed. Existing per-run
+and manual-trigger delivery restrictions remain in effect.
+
+The same controls are available through `WebShellWithProviders` when the host
+enables Channels and Scheduled Tasks and supplies a daemon workspace.
 
 ## Explicit API delivery
 

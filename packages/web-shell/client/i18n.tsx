@@ -4687,6 +4687,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.platform.add': 'Add connection',
   'channels.platform.name.dingtalk': 'DingTalk',
   'channels.platform.name.feishu': 'Feishu',
+  'channels.platform.name.wecom': 'WeCom',
   'channels.method.title': (v) =>
     `Choose a ${v?.platform ?? 'Channel'} connection`,
   'channels.method.description': (v) =>
@@ -4694,6 +4695,9 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.method.applicationBot': 'Application bot',
   'channels.method.applicationBot.description':
     'Receive messages and reply using an application bot.',
+  'channels.method.intelligentBot': 'Intelligent bot',
+  'channels.method.intelligentBot.description':
+    'Receive messages and reply using an intelligent bot.',
   'channels.method.webhook': 'Webhook (send only)',
   'channels.method.webhook.description':
     'Send notifications to the group configured by a custom bot webhook.',
@@ -9638,12 +9642,16 @@ const ZH: Messages = {
   'channels.platform.add': '添加连接',
   'channels.platform.name.dingtalk': '钉钉',
   'channels.platform.name.feishu': '飞书',
+  'channels.platform.name.wecom': '企业微信',
   'channels.method.title': (v) => `选择${v?.platform ?? '此频道'}的连接方式`,
   'channels.method.description': (v) =>
     `选择此频道连接${v?.platform ?? '平台'}的方式。`,
   'channels.method.applicationBot': '应用机器人',
   'channels.method.applicationBot.description':
     '通过应用机器人接收消息并回复。',
+  'channels.method.intelligentBot': '智能机器人',
+  'channels.method.intelligentBot.description':
+    '通过智能机器人接收消息并回复。',
   'channels.method.webhook': 'Webhook（仅发送）',
   'channels.method.webhook.description':
     '通过自定义机器人 Webhook，向配置的群发送通知。',
