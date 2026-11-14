@@ -5,7 +5,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, realpathSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -25,6 +25,7 @@ import {
   pickE2eRenderer,
   resolveE2eCliCommand,
 } from './renderer-matrix.js';
+import { E2E_MEMORY_SETTINGS_DEFAULTS } from './e2e-memory-defaults.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -199,12 +200,21 @@ interface ParsedLog {
   }[];
 }
 
+/**
+ * `TestRig.getDefaultTimeout()`'s CI branch. Exported so a suite that derives
+ * its own ceilings multiplies this value instead of re-spelling it.
+ */
+export const CI_DEFAULT_WAIT_MS = 60_000;
+
 export class TestRig {
   bundlePath: string;
   testDir: string | null;
   testName?: string;
   _lastRunStdout?: string;
   _interactiveOutput = '';
+  // cleanup() sets this so an abandoned poll stops instead of scanning a dead
+  // pty until its own budget expires.
+  _closed = false;
   private readonly interactiveProcesses: pty.IPty[] = [];
 
   constructor() {
@@ -214,7 +224,7 @@ export class TestRig {
 
   // Get timeout based on environment
   getDefaultTimeout() {
-    if (env['CI']) return 60000; // 1 minute in CI
+    if (env['CI']) return CI_DEFAULT_WAIT_MS; // 1 minute in CI
     if (env['QWEN_SANDBOX']) return 30000; // 30s in containers
     return 15000; // 15s locally
   }
@@ -224,6 +234,8 @@ export class TestRig {
     options: { settings?: Record<string, unknown> } = {},
   ) {
     this.testName = testName;
+    // setup() re-arms a rig reused after cleanup().
+    this._closed = false;
     const sanitizedName = sanitizeTestName(testName);
     this.testDir = join(
       env['INTEGRATION_TEST_FILE_DIR']!,
@@ -243,6 +255,13 @@ export class TestRig {
     // The container mounts the test directory at the same path as the host
     const telemetryPath = join(this.testDir, 'telemetry.log'); // Always use test directory for telemetry
 
+    const optionsSettings = options.settings ?? {};
+    const memorySettings =
+      typeof optionsSettings['memory'] === 'object' &&
+      optionsSettings['memory'] !== null
+        ? (optionsSettings['memory'] as Record<string, unknown>)
+        : {};
+
     const settings = {
       telemetry: {
         enabled: true,
@@ -252,11 +271,37 @@ export class TestRig {
       },
       sandbox: env.QWEN_SANDBOX !== 'false' ? env.QWEN_SANDBOX : false,
       ...options.settings, // Allow tests to override/add settings
+      // Per-key merge: a suite opting back into one flag keeps the other off.
+      memory: { ...E2E_MEMORY_SETTINGS_DEFAULTS, ...memorySettings },
     };
     writeFileSync(
       join(qwenDir, 'settings.json'),
       JSON.stringify(settings, null, 2),
     );
+
+    // Hooks declared in this project settings file now require explicit
+    // folder trust. Grant the rig directory in an isolated trust store so
+    // hook fixtures keep executing; tests about untrusted behavior override
+    // QWEN_CODE_TRUSTED_FOLDERS_PATH themselves.
+    const qwenHome = join(this.testDir, '.qwen-home');
+    mkdirSync(qwenHome, { recursive: true });
+    const userSettingsPath = join(qwenHome, 'settings.json');
+    if (!fs.existsSync(userSettingsPath)) {
+      writeFileSync(
+        userSettingsPath,
+        JSON.stringify({ security: { folderTrust: { enabled: true } } }),
+      );
+    }
+    const trustStorePath = join(qwenHome, 'trustedFolders.json');
+    if (!fs.existsSync(trustStorePath)) {
+      writeFileSync(
+        trustStorePath,
+        JSON.stringify({ [realpathSync(this.testDir)]: 'TRUST_FOLDER' }),
+      );
+    }
+    vi.stubEnv('QWEN_HOME', qwenHome);
+    vi.stubEnv('QWEN_RUNTIME_DIR', qwenHome);
+    vi.stubEnv('QWEN_CODE_TRUSTED_FOLDERS_PATH', trustStorePath);
   }
 
   createFile(fileName: string, content: string) {
@@ -510,6 +555,7 @@ export class TestRig {
   }
 
   async cleanup() {
+    this._closed = true;
     // A session a test never closed keeps its CLI child forwarding PTY bytes
     // into this worker's stdout; after vitest tears the worker down those
     // writes EPIPE and fail an otherwise all-green run (#10969).
@@ -624,7 +670,7 @@ export class TestRig {
     const startTime = Date.now();
     let attempts = 0;
     let lastError: unknown;
-    while (Date.now() - startTime < timeout) {
+    while (!this._closed && Date.now() - startTime < timeout) {
       attempts++;
       try {
         const result = predicate();
@@ -1038,6 +1084,7 @@ export async function runForcedToolCallScenario(options: {
   vi.stubEnv('QWEN_MODEL', 'fake-model');
   vi.stubEnv('QWEN_HOME', join(rig.testDir!, '.qwen-home'));
   vi.stubEnv('QWEN_RUNTIME_DIR', join(rig.testDir!, '.qwen-home'));
+  vi.stubEnv('QWEN_CODE_MODELS_DEV_REFRESH', 'off');
   vi.stubEnv('NO_PROXY', noProxy);
   vi.stubEnv('no_proxy', noProxy);
 
@@ -1062,4 +1109,45 @@ export async function runForcedToolCallScenario(options: {
   } finally {
     await fakeServer.close();
   }
+}
+
+/**
+ * The debug-log line `runModelRound` writes on the shared agent loop. Its
+ * presence proves a round ran on the shared loop; a surface's legacy loop
+ * never calls `runModelRound`, so the line is absent there. The wording is
+ * distinct from the TUI surfaces' own "model round on the shared agent loop"
+ * marker so this count does not double-count the TUI parity's marker.
+ */
+export const SHARED_LOOP_ROUND_MARKER =
+  /runModelRound on the shared agent loop/g;
+
+/**
+ * Concatenates a runtime dir's debug logs, marker-agnostic. Skips `latest`,
+ * which points at the session's own log. Shared by every arm-identity and
+ * debug-marker probe so the scan exists once.
+ */
+export function readDebugLogs(runtimeDir: string): string {
+  const debugDir = join(runtimeDir, 'debug');
+  if (!fs.existsSync(debugDir)) return '';
+  return fs
+    .readdirSync(debugDir, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name !== 'latest')
+    .map((entry) => readFileSync(join(entry.parentPath, entry.name), 'utf8'))
+    .join('');
+}
+
+/**
+ * Counts the shared-loop round markers in a runtime dir's debug logs. Run the
+ * child with `QWEN_DEBUG_LOG_FILE=1` and `QWEN_RUNTIME_DIR` pointing at the
+ * returned dir, then assert the count is > 0 for a shared arm and 0 for a
+ * legacy arm — so an arm label is verified, not assumed.
+ *
+ * The count is process-wide: it sums the markers of every surface in the run
+ * (a subagent on the shared loop counts too). It is a valid per-arm identity
+ * only when the arms force every surface together (whole-value `1`/`0` env).
+ * Under a per-surface force-off, a surface that stayed on the shared loop
+ * would keep the count non-zero even though the forced-off surface ran legacy.
+ */
+export function sharedLoopRoundCount(runtimeDir: string): number {
+  return readDebugLogs(runtimeDir).match(SHARED_LOOP_ROUND_MARKER)?.length ?? 0;
 }

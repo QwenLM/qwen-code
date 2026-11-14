@@ -30,6 +30,10 @@ import {
 } from './managed-context-envelope.js';
 import { createHash } from 'node:crypto';
 import {
+  MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST,
+  MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST,
+} from './managed-extension-profile.js';
+import {
   CONTEXT_BINDING_DOMAIN_TAG,
   computeManagedContextDigest,
   type ManagedContextBinding,
@@ -86,6 +90,10 @@ const INVALID = {
   status: 400,
   code: 'managed_runtime_attestation_invalid',
 } as const;
+const CONTEXT_CONFLICT = {
+  status: 409,
+  code: 'managed_context_conflict',
+} as const;
 const CLOSED_DEFINITIONS = [
   'bootV2',
   'readyV2',
@@ -108,13 +116,24 @@ const BEYOND_SCHEMA = {
     'generation-over-int64',
     'two-byte-mount-root-over-4096-bytes',
   ],
-  ready: ['other-epoch', 'other-incarnation', 'other-instance', 'other-lease'],
+  ready: [
+    'incarnation-other-case',
+    'instance-other-case',
+    'lease-other-case',
+    'other-epoch',
+    'other-incarnation',
+    'other-instance',
+    'other-lease',
+  ],
   attestation: [
     'astral-mount-root-over-4096-bytes',
     'generation-over-int64',
     'two-byte-mount-root-over-4096-bytes',
   ],
   installation: [
+    'after-a-digest-refusal-keeps-the-operation#1',
+    'after-a-digest-refusal-keeps-the-session#1',
+    'after-a-digest-refusal-replays-the-receipt#1',
     'astral-session-over-512-units',
     'binding-directory-dot-segment',
     'binding-directory-parent-inside',
@@ -124,10 +143,13 @@ const BEYOND_SCHEMA = {
     'binding-parent-segment',
     'binding-revision-over-int64',
     'binding-trailing-slash',
+    'checks-the-digest-before-an-operation-reused-by-another-session#1',
     'checks-the-digest-before-the-workspace',
     'digest-of-another-binding',
+    'keeps-no-session-after-a-digest-refusal#0',
     'keeps-no-state-after-a-binding-rule-refusal#0',
     'keeps-no-state-after-a-digest-refusal#0',
+    'keeps-no-state-after-a-digest-refusal-for-another-session#0',
   ],
 };
 /** The keywords of a closed record definition, and no others. */
@@ -180,6 +202,8 @@ const installationRequest = firstInstallation.request as Record<
   string,
   unknown
 > & { readonly binding: Record<string, unknown> };
+/** The fixtures leave out step 6, which a real directory answers. */
+const anyDirectory = async () => true;
 
 function sortedKeys(value: object): string[] {
   return Object.keys(value).sort();
@@ -214,12 +238,14 @@ function rawDigest(binding: Record<string, unknown>): string | undefined {
 }
 
 /**
- * The case an order case derives from. It differs from its base case in one
- * valid field only, so the schema judges both alike.
+ * The case an order case derives from: the malformed step of an
+ * after-an-installation sequence, or an other-identity or other-workspace
+ * variant. Every field in which it differs from its base case is itself
+ * valid, so the schema judges both alike.
  */
 function baseCase(id: string): string {
   return id.replace(
-    /-(?:after-an-installation#\d+|with-other-(?:identity|workspace))$/,
+    /-(?:after-an-installation#1|with-other-(?:identity|workspace))$/,
     '',
   );
 }
@@ -402,6 +428,95 @@ describe('Managed context envelope contract', () => {
     expect(Object.isFrozen((outcome as { body: object }).body)).toBe(true);
   });
 
+  it.each([
+    {
+      capabilityDigest: MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST,
+      managedExtensions: {
+        enabled: true,
+        mode: 'linux-cgroup',
+        cacheDirectory: '/private/extension-cache',
+        cgroupRoot: '/sys/fs/cgroup/qwen',
+      },
+    },
+    {
+      capabilityDigest: MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST,
+      managedExtensions: {
+        enabled: true,
+        mode: 'developer-process-group',
+        cacheDirectory: '/private/extension-cache',
+      },
+    },
+  ])(
+    'attests the exact extension boot configuration $managedExtensions.mode',
+    (profile) => {
+      const configured = parseManagedContextBoot({ ...boot, ...profile });
+      // Java ManagedContextProtocol derives both bodies by removing these boot fields.
+      const {
+        type: _type,
+        version: _version,
+        token: _token,
+        ...responseFields
+      } = configured;
+      const {
+        runtimeInstanceId: _runtimeInstanceId,
+        runtimeIncarnation: _runtimeIncarnation,
+        leaseId: _leaseId,
+        epoch: _epoch,
+        ...requestFields
+      } = responseFields;
+      const request = { ...requestFields, protocolVersion: 3 };
+      expect(checkManagedContextAttestation(request, configured)).toStrictEqual(
+        {
+          status: 200,
+          body: { ...responseFields, protocolVersion: 3 },
+        },
+      );
+      expect(createManagedContextAttestationResponse(configured)).toStrictEqual(
+        {
+          ...responseFields,
+          protocolVersion: 3,
+        },
+      );
+      const { managedExtensions: _extensions, ...missing } = request;
+      expect(checkManagedContextAttestation(missing, configured)).toStrictEqual(
+        INVALID,
+      );
+      expect(
+        checkManagedContextAttestation(
+          {
+            ...request,
+            managedExtensions: { ...profile.managedExtensions, unknown: true },
+          },
+          configured,
+        ),
+      ).toStrictEqual(INVALID);
+      expect(
+        checkManagedContextAttestation(
+          {
+            ...request,
+            managedExtensions: {
+              ...profile.managedExtensions,
+              cacheDirectory: '/another/cache',
+            },
+          },
+          configured,
+        ),
+      ).toStrictEqual({
+        status: 409,
+        code: 'managed_runtime_identity_conflict',
+      });
+      expect(
+        checkManagedContextAttestation(
+          {
+            ...(fixtures.attestationCases[0].body as object),
+            managedExtensions: profile.managedExtensions,
+          },
+          boot,
+        ),
+      ).toStrictEqual(INVALID);
+    },
+  );
+
   it.each(fixtures.attestationCases)(
     'answers the $id attestation case',
     (fixture) => {
@@ -413,19 +528,22 @@ describe('Managed context envelope contract', () => {
 
   it.each(fixtures.installationSequences)(
     'replays the $id installation sequence',
-    (sequence) => {
+    async (sequence) => {
       const installations = new ManagedContextInstallations(boot);
       for (const step of sequence.steps) {
-        expect(installations.install(step.request)).toStrictEqual(
-          step.expected,
-        );
+        expect(
+          await installations.install(step.request, anyDirectory),
+        ).toStrictEqual(step.expected);
       }
     },
   );
 
-  it('builds records with exactly the schema keys', () => {
+  it('builds records with exactly the schema keys', async () => {
     const installations = new ManagedContextInstallations(boot);
-    const outcome = installations.install(installationRequest);
+    const outcome = await installations.install(
+      installationRequest,
+      anyDirectory,
+    );
 
     expect(sortedKeys(createManagedContextReady(boot, readyPort))).toEqual(
       requiredKeys('readyV2'),
@@ -494,10 +612,16 @@ describe('Managed context envelope contract', () => {
     expect(checked).toBeGreaterThan(20);
   });
 
-  it('returns the original receipt when an installation repeats', () => {
+  it('returns the original receipt when an installation repeats', async () => {
     const installations = new ManagedContextInstallations(boot);
-    const first = installations.install(installationRequest);
-    const second = installations.install(structuredClone(installationRequest));
+    const first = await installations.install(
+      installationRequest,
+      anyDirectory,
+    );
+    const second = await installations.install(
+      structuredClone(installationRequest),
+      anyDirectory,
+    );
 
     expect(first.status).toBe(200);
     expect(second.status).toBe(200);
@@ -507,13 +631,174 @@ describe('Managed context envelope contract', () => {
     expect(Object.isFrozen((first as { body: unknown }).body)).toBe(true);
   });
 
-  it('keeps each Runtime its own installations', () => {
+  it('keeps each Runtime its own installations', async () => {
     const first = new ManagedContextInstallations(boot);
     const second = new ManagedContextInstallations(boot);
     const otherSession = { ...installationRequest, sessionId: 'session-2' };
 
-    expect(first.install(installationRequest).status).toBe(200);
-    expect(second.install(otherSession).status).toBe(200);
+    expect(
+      (await first.install(installationRequest, anyDirectory)).status,
+    ).toBe(200);
+    expect((await second.install(otherSession, anyDirectory)).status).toBe(200);
+  });
+
+  it('verifies the directory of a new installation only', async () => {
+    const installations = new ManagedContextInstallations(boot);
+    const verified: unknown[] = [];
+    const verify = async (binding: unknown) => {
+      verified.push(binding);
+      return true;
+    };
+
+    for (const request of [
+      installationRequest,
+      structuredClone(installationRequest),
+      { ...installationRequest, sessionId: 'session-2' },
+      { ...installationRequest, protocolVersion: 2 },
+      { ...installationRequest, operationId: 'op-2' },
+    ]) {
+      await installations.install(request, verify);
+    }
+
+    expect(verified).toStrictEqual([
+      installationRequest.binding,
+      installationRequest.binding,
+    ]);
+    expect(verified.every((binding) => Object.isFrozen(binding))).toBe(true);
+  });
+
+  it('records nothing when the directory cannot be verified', async () => {
+    const installations = new ManagedContextInstallations(boot);
+    const sessionId = installationRequest['sessionId'] as string;
+
+    expect(
+      await installations.install(installationRequest, async () => false),
+    ).toStrictEqual({ status: 409, code: 'managed_context_unavailable' });
+    expect(installations.installed(sessionId)).toBeUndefined();
+    expect(
+      (await installations.install(installationRequest, anyDirectory)).status,
+    ).toBe(200);
+    expect(installations.installed(sessionId)).toStrictEqual(
+      installationRequest.binding,
+    );
+    expect(installations.installed('session-2')).toBeUndefined();
+  });
+
+  it('rechecks admission after verification and preserves original receipts after seal', async () => {
+    const installations = new ManagedContextInstallations(boot);
+    let open = true;
+    const refused = await installations.install(
+      installationRequest,
+      async () => {
+        queueMicrotask(() => {
+          open = false;
+        });
+        return true;
+      },
+      () => open,
+    );
+    expect(refused).toEqual({
+      status: 409,
+      code: 'managed_context_unavailable',
+    });
+    expect(
+      installations.installed(installationRequest['sessionId'] as string),
+    ).toBeUndefined();
+    open = true;
+    const original = await installations.install(
+      installationRequest,
+      anyDirectory,
+      () => open,
+    );
+    open = false;
+    expect(
+      await installations.install(
+        installationRequest,
+        async () => {
+          throw new Error('Unexpected verify');
+        },
+        () => open,
+      ),
+    ).toEqual(original);
+    expect(
+      await installations.install(
+        {
+          ...installationRequest,
+          operationId: 'op-new',
+          sessionId: 'session-new',
+        },
+        async () => {
+          throw new Error('Unexpected verify');
+        },
+        () => open,
+      ),
+    ).toEqual({ status: 409, code: 'managed_context_unavailable' });
+  });
+
+  it('checks the operation and the Session again after the verification', async () => {
+    const installations = new ManagedContextInstallations(boot);
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => (release = resolve));
+    const verify = async () => {
+      await released;
+      return true;
+    };
+    const binding = { ...installationRequest.binding, cwdRelative: 'x' };
+    const otherContext = {
+      ...installationRequest,
+      operationId: 'op-2',
+      binding,
+      contextDigest: computeManagedContextDigest(
+        binding as ManagedContextBinding,
+      ),
+    };
+
+    const outcomes = Promise.all(
+      [
+        installationRequest,
+        structuredClone(installationRequest),
+        { ...installationRequest, sessionId: 'session-2' },
+        otherContext,
+      ].map((request) => installations.install(request, verify)),
+    );
+    release();
+    const [first, repeated, otherSession, changed] = await outcomes;
+
+    expect(first.status).toBe(200);
+    expect((repeated as { body: unknown }).body).toBe(
+      (first as { body: unknown }).body,
+    );
+    expect(otherSession).toStrictEqual(CONTEXT_CONFLICT);
+    expect(changed).toStrictEqual(CONTEXT_CONFLICT);
+  });
+
+  it('answers a failed verification with a receipt recorded meanwhile', async () => {
+    const installations = new ManagedContextInstallations(boot);
+    let releaseFirst!: () => void;
+    const first = new Promise<void>((resolve) => (releaseFirst = resolve));
+    let releaseSecond!: () => void;
+    const second = new Promise<void>((resolve) => (releaseSecond = resolve));
+
+    const original = installations.install(installationRequest, async () => {
+      await first;
+      return true;
+    });
+    const repeated = installations.install(
+      structuredClone(installationRequest),
+      async () => {
+        await second;
+        return false;
+      },
+    );
+    releaseFirst();
+    const recorded = await original;
+    releaseSecond();
+
+    expect(recorded.status).toBe(200);
+    expect((await repeated) as { body: unknown }).toHaveProperty(
+      'body',
+      (recorded as { body: unknown }).body,
+    );
   });
 
   it('returns a frozen copy of the boot document', () => {
@@ -540,7 +825,7 @@ describe('Managed context envelope contract', () => {
     }
   });
 
-  it('reads each installation field once, so the checked value is used', () => {
+  it('reads each installation field once, so the checked value is used', async () => {
     for (const field of requiredKeys('installationRequest')) {
       if (field === 'binding') continue;
       const changing = withChangingField(
@@ -551,7 +836,10 @@ describe('Managed context envelope contract', () => {
       );
 
       expect(
-        new ManagedContextInstallations(boot).install(changing.value),
+        await new ManagedContextInstallations(boot).install(
+          changing.value,
+          anyDirectory,
+        ),
       ).toStrictEqual(firstInstallation.expected);
       expect(changing.reads()).toBe(1);
     }
@@ -565,13 +853,16 @@ describe('Managed context envelope contract', () => {
       const request = { ...installationRequest, binding: changing.value };
 
       expect(
-        new ManagedContextInstallations(boot).install(request),
+        await new ManagedContextInstallations(boot).install(
+          request,
+          anyDirectory,
+        ),
       ).toStrictEqual(firstInstallation.expected);
       expect(changing.reads()).toBe(1);
     }
   });
 
-  it('refuses a function that carries every key', () => {
+  it('refuses a function that carries every key', async () => {
     // Object.keys lists exactly the fixture keys on these functions.
     const callable = <T extends object>(value: T) =>
       Object.assign(() => undefined, value);
@@ -590,18 +881,22 @@ describe('Managed context envelope contract', () => {
       code: 'managed_runtime_attestation_invalid',
     });
     expect(
-      new ManagedContextInstallations(boot).install(
+      await new ManagedContextInstallations(boot).install(
         callable(installationRequest),
+        anyDirectory,
       ),
     ).toStrictEqual({
       status: 400,
       code: 'managed_runtime_attestation_invalid',
     });
     expect(
-      new ManagedContextInstallations(boot).install({
-        ...installationRequest,
-        binding: callable(installationRequest.binding),
-      }),
+      await new ManagedContextInstallations(boot).install(
+        {
+          ...installationRequest,
+          binding: callable(installationRequest.binding),
+        },
+        anyDirectory,
+      ),
     ).toStrictEqual({
       status: 400,
       code: 'managed_runtime_attestation_invalid',
@@ -637,7 +932,7 @@ describe('Managed context envelope contract', () => {
     );
   });
 
-  it('never echoes the bearer token', () => {
+  it('never echoes the bearer token', async () => {
     const token = 'secret-token-value';
     const secretBoot = { ...boot, token };
     let message = '';
@@ -647,7 +942,10 @@ describe('Managed context envelope contract', () => {
       message = (error as Error).message;
     }
     const installations = new ManagedContextInstallations(secretBoot);
-    const installed = installations.install(installationRequest);
+    const installed = await installations.install(
+      installationRequest,
+      anyDirectory,
+    );
     const outputs = [
       createManagedContextReady(secretBoot, readyPort),
       createManagedContextAttestationResponse(secretBoot),
@@ -657,8 +955,11 @@ describe('Managed context envelope contract', () => {
       ),
       checkManagedContextAttestation({}, secretBoot),
       installed,
-      installations.install(installationRequest),
-      installations.install({ ...installationRequest, operationId: 'op/1' }),
+      await installations.install(installationRequest, anyDirectory),
+      await installations.install(
+        { ...installationRequest, operationId: 'op/1' },
+        anyDirectory,
+      ),
     ];
 
     expect(message).toBe(INVALID_BOOT_MESSAGE);
@@ -666,7 +967,7 @@ describe('Managed context envelope contract', () => {
     expect(JSON.stringify(outputs)).not.toContain(token);
   });
 
-  it('keeps the largest records within their body limits', () => {
+  it('keeps the largest records within their body limits', async () => {
     // Backslashes and quotes double when JSON-encoded; C0 controls and lone
     // surrogates take six bytes. These values are the largest each rule
     // allows.
@@ -712,7 +1013,10 @@ describe('Managed context envelope contract', () => {
       capabilityDigest: largest.capabilityDigest,
       isolationClass: largest.isolationClass,
     };
-    const installed = new ManagedContextInstallations(largest).install(request);
+    const installed = await new ManagedContextInstallations(largest).install(
+      request,
+      anyDirectory,
+    );
     const answered = checkManagedContextAttestation(attestation, largest);
     const bytes = (value: unknown) =>
       Buffer.byteLength(JSON.stringify(value), 'utf8');

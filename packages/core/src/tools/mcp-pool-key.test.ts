@@ -16,6 +16,12 @@ import {
   POOLED_TRANSPORTS_DEFAULT,
 } from './mcp-pool-key.js';
 
+/** MCPServerConfig with only the named fields set (no positional undefineds). */
+const cfgWith = (fields: Partial<MCPServerConfig>) =>
+  Object.assign(new MCPServerConfig(), fields);
+const transports = (...kinds: Array<ReturnType<typeof mcpTransportOf>>) =>
+  new Set(kinds);
+
 describe('mcp-pool-key', () => {
   describe('fingerprint', () => {
     it('is stable across two MCPServerConfig instances with identical content', () => {
@@ -31,81 +37,93 @@ describe('mcp-pool-key', () => {
     });
 
     it('diverges on any byte change in env value (critical for credential isolation)', () => {
-      const a = new MCPServerConfig(
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        'https://api.example.com',
-        { Authorization: 'Bearer tokenA' },
-      );
-      const b = new MCPServerConfig(
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        'https://api.example.com',
-        { Authorization: 'Bearer tokenB' },
-      );
+      const a = cfgWith({
+        httpUrl: 'https://api.example.com',
+        headers: { Authorization: 'Bearer tokenA' },
+      });
+      const b = cfgWith({
+        httpUrl: 'https://api.example.com',
+        headers: { Authorization: 'Bearer tokenB' },
+      });
       expect(fingerprint(a)).not.toBe(fingerprint(b));
     });
 
     it('diverges on header-key permutation only via value (keys are sorted)', () => {
-      const a = new MCPServerConfig(
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        'https://x',
-        { 'X-A': '1', 'X-B': '2' },
-      );
-      const b = new MCPServerConfig(
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        'https://x',
-        { 'X-B': '2', 'X-A': '1' },
-      );
+      const a = cfgWith({
+        httpUrl: 'https://x',
+        headers: { 'X-A': '1', 'X-B': '2' },
+      });
+      const b = cfgWith({
+        httpUrl: 'https://x',
+        headers: { 'X-B': '2', 'X-A': '1' },
+      });
       expect(fingerprint(a)).toBe(fingerprint(b));
     });
 
     it('SAME key when includeTools/excludeTools/trust/description differ (per-session filters excluded)', () => {
-      const a = new MCPServerConfig(
-        'node',
-        ['s.js'],
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        /*trust*/ false,
-        /*description*/ 'A',
-        ['onlyA'],
-        ['notA'],
-      );
-      const b = new MCPServerConfig(
-        'node',
-        ['s.js'],
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        /*trust*/ true,
-        /*description*/ 'B',
-        undefined,
-        undefined,
-      );
+      const a = cfgWith({
+        command: 'node',
+        args: ['s.js'],
+        trust: false,
+        description: 'A',
+        includeTools: ['onlyA'],
+        excludeTools: ['notA'],
+      });
+      const b = cfgWith({
+        command: 'node',
+        args: ['s.js'],
+        trust: true,
+        description: 'B',
+      });
       expect(fingerprint(a)).toBe(fingerprint(b));
+    });
+
+    it.each([
+      // In-range values on both sides: enforced policy differs, so the pool
+      // must split. (Both 2_000_000 and 3_000_000 clamp to the same enforced
+      // appResourceTimeoutMs ceiling, so the timeout arm needs in-range
+      // values to keep asserting isolation.)
+      { setting: 'appResourceMaxBytes', low: 2_000_000, high: 3_000_000 },
+      { setting: 'appResourceTimeoutMs', low: 20_000, high: 30_000 },
+    ] as const)(
+      'isolates pooled tools with different $setting limits',
+      ({ setting, low, high }) => {
+        const base = { command: 'node' };
+        expect(fingerprint(base)).not.toBe(
+          fingerprint({ ...base, [setting]: low }),
+        );
+        expect(fingerprint({ ...base, [setting]: low })).not.toBe(
+          fingerprint({ ...base, [setting]: high }),
+        );
+      },
+    );
+
+    it('hashes App resource limits at their enforced values', () => {
+      const base = { command: 'node' };
+      // Unset and the explicit default enforce the same 1 MiB limit.
+      expect(fingerprint(base)).toBe(
+        fingerprint({ ...base, appResourceMaxBytes: 1_048_576 }),
+      );
+      // Two over-ceiling values clamp to the same enforced limit.
+      expect(fingerprint({ ...base, appResourceMaxBytes: 8_388_608 })).toBe(
+        fingerprint({ ...base, appResourceMaxBytes: 4_194_304 }),
+      );
+      expect(fingerprint({ ...base, appResourceTimeoutMs: 2_000_000 })).toBe(
+        fingerprint({ ...base, appResourceTimeoutMs: 3_000_000 }),
+      );
+      // A non-numeric value behaves exactly like unset at the read site.
+      expect(fingerprint(base)).toBe(
+        fingerprint({
+          ...base,
+          appResourceMaxBytes: '4194304' as unknown as number,
+        }),
+      );
+      expect(fingerprint(base)).toBe(
+        fingerprint({
+          ...base,
+          appResourceTimeoutMs: '30000' as unknown as number,
+        }),
+      );
     });
 
     it('produces a 16-char hex string', () => {
@@ -176,42 +194,13 @@ describe('mcp-pool-key', () => {
       expect(mcpTransportOf(new MCPServerConfig('node'))).toBe('stdio');
     });
     it('classifies sdk via isSdkMcpServerConfig', () => {
-      const cfg = new MCPServerConfig(
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        'sdk',
-      );
+      const cfg = cfgWith({ type: 'sdk' });
       expect(mcpTransportOf(cfg)).toBe('sdk');
     });
     it('classifies http when httpUrl set', () => {
-      expect(
-        mcpTransportOf(
-          new MCPServerConfig(
-            undefined,
-            undefined,
-            undefined,
-            undefined,
-            undefined,
-            'https://api.x.com',
-          ),
-        ),
-      ).toBe('http');
+      expect(mcpTransportOf(cfgWith({ httpUrl: 'https://api.x.com' }))).toBe(
+        'http',
+      );
     });
     it('returns unknown when no transport-defining field', () => {
       expect(mcpTransportOf(new MCPServerConfig())).toBe('unknown');
@@ -225,83 +214,36 @@ describe('mcp-pool-key', () => {
       ).toBe(true);
     });
     it('http is NOT poolable by default (V21 C8 / opt-in)', () => {
-      const cfg = new MCPServerConfig(
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        'https://x',
-      );
+      const cfg = cfgWith({ httpUrl: 'https://x' });
       expect(isPoolable(cfg, POOLED_TRANSPORTS_DEFAULT)).toBe(false);
     });
     it('http IS poolable when operator opts in via pooledTransports', () => {
-      const cfg = new MCPServerConfig(
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        'https://x',
+      const cfg = cfgWith({ httpUrl: 'https://x' });
+      expect(isPoolable(cfg, transports('stdio', 'websocket', 'http'))).toBe(
+        true,
       );
-      expect(
-        isPoolable(
-          cfg,
-          new Set(['stdio', 'websocket', 'http']) as ReadonlySet<
-            ReturnType<typeof mcpTransportOf>
-          >,
-        ),
-      ).toBe(true);
     });
     it('SDK MCP is never poolable (always bypass)', () => {
-      const cfg = new MCPServerConfig(
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        'sdk',
-      );
+      const cfg = cfgWith({ type: 'sdk' });
       // Even with sdk in pooledTransports, isPoolable returns false.
-      expect(
-        isPoolable(
-          cfg,
-          new Set(['stdio', 'websocket', 'sdk']) as ReadonlySet<
-            ReturnType<typeof mcpTransportOf>
-          >,
-        ),
-      ).toBe(false);
+      expect(isPoolable(cfg, transports('stdio', 'websocket', 'sdk'))).toBe(
+        false,
+      );
     });
   });
 
   describe('connectionIdOf + parseConnectionId', () => {
-    it('round-trips for normal server names', () => {
-      const cfg = new MCPServerConfig('node');
-      const id = connectionIdOf('foo', cfg);
-      const parsed = parseConnectionId(id);
-      expect(parsed.serverName).toBe('foo');
-      expect(parsed.fingerprint).toBe(fingerprint(cfg));
-    });
-
-    it('handles server names containing the :: separator by using lastIndexOf', () => {
+    it.each([
+      ['round-trips for normal server names', 'foo'],
       // Edge: user with namespaced server name like "ext::github".
+      [
+        'handles server names containing the :: separator by using lastIndexOf',
+        'ext::github',
+      ],
+    ])('%s', (_title, serverName) => {
       const cfg = new MCPServerConfig('node');
-      const id = connectionIdOf('ext::github', cfg);
-      const parsed = parseConnectionId(id);
-      expect(parsed.serverName).toBe('ext::github');
+      const parsed = parseConnectionId(connectionIdOf(serverName, cfg));
+      expect(parsed.serverName).toBe(serverName);
       expect(parsed.fingerprint).toBe(fingerprint(cfg));
     });
   });

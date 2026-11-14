@@ -7,6 +7,10 @@ import { I18nProvider } from '../../i18n';
 import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
 import { MessageItem } from '../MessageItem';
 import { ToolLine } from './ToolGroup';
+import {
+  ToolDetailsContext,
+  type ToolDetailsLoader,
+} from './tools/ToolDetailsContext';
 
 const state = vi.hoisted(() => {
   const primaryStat = vi.fn();
@@ -69,6 +73,7 @@ afterEach(() => {
 async function render(
   props: Partial<Parameters<typeof ToolLine>[0]> = {},
   mode: 'interactive' | 'readonly' | 'document' = 'interactive',
+  loadDetails?: ToolDetailsLoader,
 ) {
   const onOpen = props.onTurnOutputOpen ?? vi.fn();
   await act(async () => {
@@ -76,13 +81,15 @@ async function render(
       <WorkspaceContext.Provider value={{ ...state.workspace }}>
         <I18nProvider language="en">
           <TranscriptRenderModeProvider value={mode}>
-            <ToolLine
-              tool={tool}
-              forceExpanded
-              workspaceCwd="/secondary"
-              onTurnOutputOpen={onOpen}
-              {...props}
-            />
+            <ToolDetailsContext.Provider value={loadDetails}>
+              <ToolLine
+                tool={tool}
+                forceExpanded
+                workspaceCwd="/secondary"
+                onTurnOutputOpen={onOpen}
+                {...props}
+              />
+            </ToolDetailsContext.Provider>
           </TranscriptRenderModeProvider>
         </I18nProvider>
       </WorkspaceContext.Provider>,
@@ -100,6 +107,26 @@ async function clickView() {
 }
 
 describe('tool file preview', () => {
+  it('opens the file path recovered by an expanded ReadFile card', async () => {
+    const load = vi.fn<ToolDetailsLoader>().mockResolvedValue({
+      args: { file_path: '/secondary/src/current.ts' },
+      rawOutput: 'saved contents',
+    });
+    const onOpen = await render(
+      { tool: { ...tool, title: undefined, args: undefined } },
+      'interactive',
+      load,
+    );
+    expect(load).toHaveBeenCalledOnce();
+    await clickView();
+    expect(onOpen).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspacePath: '/secondary/src/current.ts',
+        workspaceCwd: '/secondary',
+      }),
+    );
+  });
+
   it.each([
     'read_file',
     'ReadFile',

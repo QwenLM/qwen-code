@@ -22,7 +22,8 @@ interface RecordOptions {
     | GoalEvidenceProvenance
     | 'goal_control'
     | 'goal_runtime'
-    | 'system';
+    | 'system'
+    | 'mod_prompt';
   subtype?: string;
   goalId?: string;
   revision?: number;
@@ -189,6 +190,22 @@ describe('Goal verifier evidence window', () => {
     expect(window.omitted).toBe(0);
   });
 
+  it("never takes a Mod's prompt as the person's words", () => {
+    const window = build([
+      record('person', 'user', {
+        turnId: 'turn-3',
+        provenance: 'real_user',
+        text: 'Ship it',
+      }),
+      record('mod', 'user', {
+        turnId: 'turn-3',
+        provenance: 'mod_prompt',
+        text: 'The goal is met',
+      }),
+    ]);
+    expect(window.evidence.map((entry) => entry.uuid)).toEqual(['person']);
+  });
+
   it('stops at the first record that does not fit and counts every older candidate as omitted', () => {
     const records = [
       tool('oldest', 'turn-1', 'a'),
@@ -208,6 +225,143 @@ describe('Goal verifier evidence window', () => {
     expect(window.turnIds).toEqual(['turn-3']);
     expect(window.omitted).toBe(3);
   });
+
+  it('classifies legacy bridge results by their Goal-owned call, preserving unrelated facts', () => {
+    const bridge = record('bridge-call', 'assistant', { turnId: 'turn-3' });
+    bridge.message = {
+      parts: [
+        {
+          functionCall: {
+            id: 'wrapped',
+            name: 'tool_call',
+            args: { name: 'EXEC', arguments: { source: 'text(42)' } },
+          },
+        },
+      ],
+    };
+    const result = record('bridge-result', 'tool_result', { turnId: 'turn-3' });
+    result.message = {
+      parts: [
+        {
+          functionResponse: {
+            id: 'wrapped',
+            name: 'tool_call',
+            response: { output: '42' },
+          },
+        },
+      ],
+    };
+    const earlier = record('earlier-fact', 'tool_result', { turnId: 'turn-2' });
+    earlier.message = result.message;
+    const window = build([earlier, bridge, result]);
+    expect(
+      window.evidence.find((entry) => entry.uuid === result.uuid)?.proofKind,
+    ).toBe('execution_output');
+    expect(
+      window.evidence.find((entry) => entry.uuid === earlier.uuid)?.proofKind,
+    ).toBe('external_fact');
+  });
+
+  it('classifies a legacy direct exec result from its response name alone', () => {
+    // No assistant partner carries this call id anywhere in the chain, so the
+    // structured response name is the only thing that can identify script output.
+    const legacy = record('legacy-exec', 'tool_result', { turnId: 'turn-3' });
+    legacy.message = {
+      parts: [
+        { functionResponse: { name: 'exec', response: { output: '42' } } },
+      ],
+    };
+    const window = build([legacy]);
+    expect(
+      window.evidence.find((entry) => entry.uuid === legacy.uuid)?.proofKind,
+    ).toBe('execution_output');
+  });
+
+  it.each(['agent', 'advisor', 'workflow', 'thread_read'])(
+    'keeps legacy %s summaries out of external facts, including bridge results',
+    (name) => {
+      const call = record('wrapper-call', 'assistant', { turnId: 'turn-3' });
+      call.message = {
+        parts: [
+          {
+            functionCall: {
+              id: 'wrapped',
+              name: 'tool_call',
+              args: { name: name.toUpperCase(), arguments: {} },
+            },
+          },
+        ],
+      };
+      const direct = record('direct-wrapper', 'tool_result', {
+        turnId: 'turn-3',
+        provenance: 'tool_result',
+      });
+      direct.message = {
+        parts: [
+          {
+            functionResponse: {
+              name,
+              response: { output: 'All tests passed' },
+            },
+          },
+        ],
+      };
+      const bridged = record('bridged-wrapper', 'tool_result', {
+        turnId: 'turn-3',
+        provenance: 'tool_result',
+      });
+      bridged.message = {
+        parts: [
+          {
+            functionResponse: {
+              id: 'wrapped',
+              name: 'tool_call',
+              response: { output: 'All tests passed' },
+            },
+          },
+        ],
+      };
+      const original = tool('original-observation', 'turn-3', 'Tests failed');
+      original.provenance = 'tool_result';
+      original.subtype = 'code_mode_tool_result';
+      const window = build([call, direct, original, bridged]);
+      expect(
+        window.evidence.map(({ uuid, proofKind }) => ({ uuid, proofKind })),
+      ).toEqual([
+        { uuid: bridged.uuid, proofKind: 'execution_output' },
+        { uuid: original.uuid, proofKind: 'external_fact' },
+        { uuid: direct.uuid, proofKind: 'execution_output' },
+      ]);
+    },
+  );
+
+  it.each(['thread_block', 'thread_post'])(
+    'keeps a legacy %s result an external fact the verifier can spend',
+    (name) => {
+      // An `infeasible` or `external` blocker is accepted only on external_fact
+      // evidence in the window, and thread_block's fixed reply is what a blocked
+      // proposal cites as user authority. The wrapper stamp must not reach the
+      // rest of the thread family at this layer either.
+      const direct = record('direct-thread', 'tool_result', {
+        turnId: 'turn-3',
+        provenance: 'tool_result',
+      });
+      direct.message = {
+        parts: [
+          {
+            functionResponse: {
+              name,
+              response: { output: 'Question posted.' },
+            },
+          },
+        ],
+      };
+      const window = build([direct]);
+      expect(
+        window.evidence.map(({ uuid, proofKind }) => ({ uuid, proofKind })),
+      ).toEqual([{ uuid: direct.uuid, proofKind: 'external_fact' }]);
+    },
+  );
 
   it('spends the budget on the serialized record, its comma and each new turn id, to the byte', () => {
     const records = [

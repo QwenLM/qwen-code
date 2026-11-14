@@ -18,6 +18,8 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Session } from './Session.js';
+import type { Part } from '@google/genai';
+import { getAutoMemorySnapshot } from '@qwen-code/qwen-code-core/memory/request-context.js';
 import type { Config, LlmChat } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
@@ -90,6 +92,7 @@ describe('Session.pendingWorktreeNotice', () => {
         ),
       addHistory: vi.fn(),
       getHistory: vi.fn().mockReturnValue([]),
+      getHistoryShallow: vi.fn(() => mockChat.getHistory()),
       setHistory: vi.fn(),
       truncateHistory: vi.fn(),
       stripThoughtsFromHistory: vi.fn(),
@@ -98,13 +101,19 @@ describe('Session.pendingWorktreeNotice', () => {
     const mockLlmClient = {
       isInitialized: vi.fn().mockReturnValue(true),
       getChat: vi.fn().mockReturnValue(mockChat),
+      stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
       tryCompressChat: vi.fn().mockResolvedValue({
         originalTokenCount: 0,
         newTokenCount: 0,
         compressionStatus: core.CompressionStatus.NOOP,
       }),
+      activatePreparedMemoryRecallTransition: vi
+        .fn()
+        .mockResolvedValue(undefined),
       beginManagedAutoMemoryRecall: vi.fn(),
       consumeManagedAutoMemoryRecall: vi.fn().mockResolvedValue(null),
+      commitManagedAutoMemoryRecallDelivery: vi.fn(),
+      discardManagedAutoMemoryRecallDelivery: vi.fn(),
       finishManagedAutoMemoryRecall: vi.fn(),
       captureCacheSafeParams: vi.fn(),
       recordCompletedToolCall: vi.fn(),
@@ -133,6 +142,7 @@ describe('Session.pendingWorktreeNotice', () => {
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(false),
       getContentGeneratorConfig: vi.fn().mockReturnValue(undefined),
       getChatRecordingService: vi.fn().mockReturnValue({
+        readActiveTranscriptChain: vi.fn().mockResolvedValue([]),
         getBranchCheckpointCursor: vi.fn().mockReturnValue({
           recordId: null,
           activeRecordCount: 0,
@@ -140,6 +150,7 @@ describe('Session.pendingWorktreeNotice', () => {
         }),
         recordBranchCheckpointTransaction: vi.fn().mockResolvedValue(undefined),
         recordUserMessage: vi.fn(),
+        recordTurnAttempt: vi.fn(),
         recordUiTelemetryEvent: vi.fn(),
         recordToolResult: vi.fn(),
         recordSlashCommand: vi.fn(),
@@ -172,6 +183,9 @@ describe('Session.pendingWorktreeNotice', () => {
       getSessionTokenLimit: vi.fn().mockReturnValue(0),
       getLlmClient: vi.fn().mockReturnValue(mockLlmClient),
       getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(false),
+      getMemoryManager: vi.fn().mockReturnValue({
+        resetExhaustedBodyRefsForCurrentTurn: vi.fn(),
+      }),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
       getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -425,6 +439,46 @@ describe('Session.pendingWorktreeNotice', () => {
     // Message was still sent to the model.
     expect(capturedMessages.length).toBeGreaterThanOrEqual(1);
   });
+
+  it.each([false, true])(
+    'preserves plan reminders on catalog-bearing continuation, existing reminder=%s',
+    async (withReminder) => {
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.PLAN);
+      const parts: Part[] = [
+        { text: 'do the thing' },
+        getAutoMemorySnapshot(
+          [],
+          '<system-reminder>CATALOG</system-reminder>',
+        )!,
+      ];
+      if (withReminder) {
+        parts.unshift({
+          text: '<system-reminder>Existing plan reminder</system-reminder>',
+        });
+      }
+      vi.mocked(mockChat.getHistory).mockReturnValue([{ role: 'user', parts }]);
+      const session = new Session(
+        SESSION_ID,
+        mockConfig,
+        mockClient,
+        mockSettings,
+      );
+      await session.prompt({
+        sessionId: SESSION_ID,
+        prompt: [],
+        _meta: { 'qwen.daemon.continueLastTurn': true },
+      } as unknown as PromptRequest);
+      expect(capturedMessages).toHaveLength(1);
+      expect(capturedMessages[0]).toEqual(
+        withReminder
+          ? parts
+          : [
+              { text: expect.stringContaining('Plan mode is active.') },
+              ...parts,
+            ],
+      );
+    },
+  );
 
   // VP5: ordering contract when the worktree notice, system reminders, and a
   // continuation that leads with functionResponse parts all combine. Locks the

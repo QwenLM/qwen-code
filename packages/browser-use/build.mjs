@@ -31,8 +31,8 @@ const nodeBanner =
 // reads process.env/process.platform, so bind `process` through createRequire,
 // the one route the kernel leaves open. The load check at the bottom of this
 // file runs in Node's main realm, where `process` is always a global, so it
-// cannot detect this binding going missing; src/skill-runtime-kernel.test.ts
-// runs the skill's first cell through the real kernel for that.
+// cannot detect this binding going missing; src/runtime-kernel.test.ts
+// imports the SDK through the real kernel for that.
 const kernelBanner =
   "import { createRequire as __qwenCreateRequire } from 'node:module'; const process = __qwenCreateRequire(import.meta.url)('node:process');";
 

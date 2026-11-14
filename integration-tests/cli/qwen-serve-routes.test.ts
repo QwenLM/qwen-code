@@ -47,6 +47,7 @@ import {
   isLocalPathOpenAvailable,
   isLocalTerminalAvailable,
 } from '../../packages/cli/src/serve/local-path-open.js';
+import { isGitAvailable } from '../../packages/cli/src/serve/git-availability.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Match the rest of the integration suite: prefer the bundled CLI
@@ -86,6 +87,8 @@ let nativeDirectoryPickerAtBoot = false;
 let localPathOpenAtBoot = false;
 // Same boot-time probe pinning as above, for the workspace_local_terminal tag.
 let localTerminalOpenAtBoot = false;
+// Same boot-time probe pinning as above, for the git_workspace_clone tag.
+let gitAvailableAtBoot = false;
 
 function writePersistedTranscript(
   sessionId: string,
@@ -165,6 +168,7 @@ beforeAll(async () => {
   nativeDirectoryPickerAtBoot = isNativeDirectoryPickerAvailable();
   localPathOpenAtBoot = isLocalPathOpenAvailable();
   localTerminalOpenAtBoot = isLocalTerminalAvailable();
+  gitAvailableAtBoot = isGitAvailable();
   daemon = spawn(
     process.execPath,
     [
@@ -348,11 +352,13 @@ describe('qwen serve — capabilities envelope', () => {
     // rate-limit opt-in, no `--channel`, no configured batch ASR model):
     // `require_auth`, `allow_origin`, `cdp_tunnel_over_ws`,
     // `prompt_absolute_deadline`, `writer_idle_timeout`,
-    // `workspace_voice_transcription`, `rate_limit`, `channel_reload`.
+    // `workspace_voice_transcription`, `rate_limit`.
     // `native_directory_picker` is host-conditional (the daemon host's GUI
     // environment, not a spawn flag) and is spliced at its registry
     // position below, using the boot-time probe captured when the daemon
     // was spawned rather than a fresh probe at assertion time.
+    // `git_workspace_clone` is host-conditional too (the daemon host's
+    // `git` binary) and is spliced the same way.
     // Pool tags (`mcp_workspace_pool`, `mcp_pool_restart`) ARE present
     // because the workspace MCP pool is on by default, as are
     // `workspace_settings`, `workspace_permissions`, `workspace_voice`,
@@ -360,13 +366,22 @@ describe('qwen serve — capabilities envelope', () => {
     // `scheduled_task_session_reuse` appears only after the managed runtime
     // mounts, so the fast-path bootstrap and runtime envelopes legitimately
     // differ by that tag. Its transition is covered by the serve startup tests.
+    // `workspace_runtime_stop` skews the same way (#12490): stop readiness
+    // depends on the mounted runtime's bridge, which the bootstrap envelope
+    // cannot see, so the tag appears only once the runtime app serves the
+    // envelope.
+    // `channel_reload` also appears once the runtime channel manager mounts.
     expect(
       caps.features.filter(
-        (feature) => feature !== 'scheduled_task_session_reuse',
+        (feature) =>
+          feature !== 'scheduled_task_session_reuse' &&
+          feature !== 'workspace_runtime_stop' &&
+          feature !== 'channel_reload',
       ),
     ).toEqual([
       'health',
       'daemon_status',
+      'daemon_update',
       'capabilities',
       'session_create',
       'session_startup_config',
@@ -376,6 +391,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_resume',
       'unstable_session_resume',
       'session_list',
+      'session_last_user_prompt_sort',
       'session_catalog_batch',
       'session_info',
       'session_source_metadata',
@@ -383,13 +399,18 @@ describe('qwen serve — capabilities envelope', () => {
       'session_prompt',
       'session_turn_status',
       'session_attachments',
+      'session_attachment_chunk_upload',
       'session_attachment_list',
       'session_mid_turn_message_mutation',
       'session_mid_turn_message_query',
+      'session_mid_turn_send_now',
       'session_cancel',
       'session_events',
       'session_artifacts',
       'session_artifacts_persistence',
+      'session_artifact_library',
+      'workspace_artifact_library',
+      'workspace_artifact_library_stream',
       'session_sources',
       'slow_client_warning',
       'typed_event_schema',
@@ -406,6 +427,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_acp_status',
       'auth_provider_install',
       'workspace_memory',
+      'memory_import_v1',
       'workspace_memory_remember',
       'workspace_memory_remember_project_scope',
       'workspace_memory_remember_user_scope',
@@ -422,6 +444,8 @@ describe('qwen serve — capabilities envelope', () => {
       'session_tasks',
       'session_agents',
       'session_agent_trace',
+      'scheduled_task_gate',
+      'autofix_pr_watches',
       'session_monitor_tool_correlation',
       'session_stats',
       'session_lsp',
@@ -429,6 +453,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_status',
       'session_close',
       'session_archive',
+      'session_archive_idle_guard',
       'session_storage_conflict_repair',
       'session_metadata',
       'session_organization',
@@ -447,28 +472,38 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_file_read_cursor',
       'workspace_file_write',
       'workspace_file_upload',
+      'workspace_file_delete',
+      'workspace_directory_create',
+      'workspace_directory_delete',
       'session_approval_mode_control',
       'workspace_tool_toggle',
       'workspace_skill_settings_toggle',
       'workspace_skill_settings_batch_toggle',
+      'user_skill_activation',
+      'workspace_session_refresh',
       'extension_batch_activation_v2',
       'extension_activation_explicit_refresh',
       'workspace_skill_manage',
+      'skill_archive_install',
+      'skill_zip_file_source',
       'web_shell_brand',
       'workspace_settings',
       'workspace_permissions',
       'workspace_voice',
       'workspace_trust',
+      'workspace_trust_grant',
       'workspace_trust_hot_reload',
       'workspace_init',
       'workspace_github_setup',
       'workspace_github_prs',
       'workspace_git_worktrees',
+      'workspace_git_check_ignore',
       'workspace_mcp_restart',
       'session_recap',
       'session_generation',
       'workspace_generation',
       'session_btw',
+      'session_btw_stream',
       'mcp_workspace_pool',
       'mcp_pool_restart',
       'auth_device_flow',
@@ -476,27 +511,35 @@ describe('qwen serve — capabilities envelope', () => {
       'non_blocking_prompt',
       'session_language',
       'user_language_sync',
+      'session_message_deletion',
       'session_rewind',
       'workspace_hooks',
       'session_hooks',
       'workspace_extensions',
       'session_branch',
+      'session_branch_worktree',
       'workspace_reload',
+      'workspace_model_reload',
       'channel_delivery',
       'channel_control',
       'channel_management',
+      'channel_delete_config_loss_convergence',
       'workspace_channel_observed_contacts',
       'dynamic_workspace_registration',
       'persistent_workspace_registration',
+      'workspace_order',
       'workspace_display_name',
       'scratch_workspace_registration',
+      ...(gitAvailableAtBoot ? ['git_workspace_clone'] : []),
       'workspace_runtime_removal',
       ...(nativeDirectoryPickerAtBoot ? ['native_directory_picker'] : []),
       'workspace_runtime',
+      'workspace_directories',
       ...(localPathOpenAtBoot ? ['workspace_local_open'] : []),
       ...(localTerminalOpenAtBoot ? ['workspace_local_terminal'] : []),
       'workspace_qualified_rest_core',
       'extension_management_v2',
+      'extension_list_details',
       'extension_state',
       'extension_git_credentials',
       'extension_local_path_install',
@@ -504,6 +547,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_session_export',
       'workspace_archived_session_export',
       'workspace_session_live_state',
+      'workspace_session_live_state_batch',
       'workspace_session_metadata',
       'session_worktree_persistence_v1',
       'session_worktree_reset_v1',
@@ -771,27 +815,34 @@ describe('qwen serve — POST /session validation + concurrent coalescing', () =
   });
 
   it('honors and reserves a normalized caller-supplied session ID', async () => {
-    const requestedId = '550E8400-E29B-41D4-A716-446655440000';
+    // Fresh id per attempt: vitest `retry` re-enters this body against the
+    // same long-lived daemon, and a fixed id turns one timed-out create into
+    // deterministic 409 session_id_conflict failures on every retry — the
+    // session a failed attempt left live (or abandoned-but-later-registered)
+    // still owns the reservation the retry's first POST collides with. The
+    // ACP_INITIALIZE_TIMEOUT_MS note above names the load class.
+    const requestedId = randomUUID().toUpperCase();
     const normalizedId = requestedId.toLowerCase();
-    const created = await fetch(`${base}/session`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${TOKEN}`,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        cwd: REPO_ROOT,
-        sessionId: requestedId,
-        sessionScope: 'single',
-      }),
-    });
-    expect(created.status).toBe(200);
-    await expect(created.json()).resolves.toMatchObject({
-      sessionId: normalizedId,
-      attached: false,
-    });
-
     try {
+      const created = await fetch(`${base}/session`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${TOKEN}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          cwd: REPO_ROOT,
+          sessionId: requestedId,
+          sessionScope: 'single',
+        }),
+      });
+      const createdBody = await created.json();
+      expect(created.status, JSON.stringify(createdBody)).toBe(200);
+      expect(createdBody).toMatchObject({
+        sessionId: normalizedId,
+        attached: false,
+      });
+
       let conflict: unknown;
       try {
         await client.createOrAttachSession({
@@ -1232,6 +1283,108 @@ describe('qwen serve — DELETE /session/:id', () => {
     await client.closeSession(session.sessionId);
     await client.closeSession(session.sessionId);
   });
+});
+
+describe('qwen serve — session approval-mode recovery', () => {
+  it('restores Full Access, explicit overrides, and Plan execution mode after cold load', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: REPO_ROOT,
+      sessionScope: 'thread',
+      sourceType: 'approval-mode-persistence-test',
+      sourceId: `cold-load-${Date.now()}`,
+    });
+    expect(session.clientId).toBeTypeOf('string');
+    expect(session.sourcePersisted).toBe(true);
+
+    try {
+      const waitUntilClosed = async () => {
+        await expect
+          .poll(
+            async () => {
+              try {
+                await client.sessionStatus(session.sessionId);
+                return false;
+              } catch (error) {
+                return error instanceof DaemonHttpError && error.status === 404;
+              }
+            },
+            { timeout: 15_000 },
+          )
+          .toBe(true);
+      };
+      await client.setSessionApprovalMode(session.sessionId, 'yolo');
+      await client.detachSession(session.sessionId, session.clientId);
+      await waitUntilClosed();
+
+      const restored = await client.loadSession(session.sessionId, {
+        workspaceCwd: REPO_ROOT,
+      });
+      const modes = restored.state.modes as { currentModeId?: string };
+      const configOptions = restored.state.configOptions as Array<{
+        id: string;
+        currentValue: string;
+      }>;
+
+      expect(modes.currentModeId).toBe('yolo');
+      expect(
+        configOptions.find((option) => option.id === 'mode'),
+      ).toMatchObject({ currentValue: 'yolo' });
+
+      await client.reload({ clientId: restored.clientId });
+      const afterReload = await client.loadSession(session.sessionId, {
+        workspaceCwd: REPO_ROOT,
+      });
+      expect(
+        (afterReload.state.modes as { currentModeId?: string }).currentModeId,
+      ).toBe('yolo');
+      await client.detachSession(session.sessionId, afterReload.clientId);
+
+      expect(restored.clientId).toBeTypeOf('string');
+      await client.detachSession(session.sessionId, restored.clientId);
+      await waitUntilClosed();
+      const overridden = await client.loadSession(session.sessionId, {
+        workspaceCwd: REPO_ROOT,
+        approvalMode: 'default',
+      });
+      expect(
+        (overridden.state.modes as { currentModeId?: string }).currentModeId,
+      ).toBe('default');
+
+      expect(overridden.clientId).toBeTypeOf('string');
+      await client.detachSession(session.sessionId, overridden.clientId);
+      await waitUntilClosed();
+      const restoredOverride = await client.loadSession(session.sessionId, {
+        workspaceCwd: REPO_ROOT,
+      });
+      expect(
+        (restoredOverride.state.modes as { currentModeId?: string })
+          .currentModeId,
+      ).toBe('default');
+
+      await client.setSessionApprovalMode(session.sessionId, 'yolo');
+      await client.setSessionApprovalMode(session.sessionId, 'yolo', {
+        planMode: true,
+      });
+      await client.setSessionApprovalMode(session.sessionId, 'auto-edit', {
+        planMode: true,
+      });
+      expect(restoredOverride.clientId).toBeTypeOf('string');
+      await client.detachSession(session.sessionId, restoredOverride.clientId);
+      await waitUntilClosed();
+
+      const restoredPlan = await client.loadSession(session.sessionId, {
+        workspaceCwd: REPO_ROOT,
+      });
+      const planModes = restoredPlan.state.modes as {
+        currentModeId?: string;
+        _meta?: { planExecutionMode?: string };
+      };
+      expect(planModes.currentModeId).toBe('plan');
+      expect(planModes._meta?.planExecutionMode).toBe('auto-edit');
+    } finally {
+      await client.closeSession(session.sessionId).catch(() => undefined);
+    }
+  }, 45_000);
 });
 
 describe('qwen serve — PATCH /session/:id/metadata', () => {

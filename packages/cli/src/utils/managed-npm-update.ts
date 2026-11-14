@@ -15,12 +15,13 @@ import { promisify } from 'node:util';
 import lockfile from 'proper-lockfile';
 import semver from 'semver';
 import { getNpmCliPath } from './installationInfo.js';
+import { getNpmNodePath } from './npm-runtime.js';
 
 const PACKAGE_NAME = '@qwen-code/qwen-code';
 const debugLogger = createDebugLogger('MANAGED_NPM_UPDATE');
 const execFileAsync = promisify(execFile);
 
-interface ManagedNpmUpdate {
+export interface ManagedNpmUpdate {
   stagingDir: string;
   versionDir: string;
   launcherRoot: string;
@@ -115,9 +116,10 @@ function cleanupOrphanedManagedNpmUpdateArtifacts(
 function resolveNpmGlobalConfigPath(): string {
   const configured = process.env['NPM_CONFIG_GLOBALCONFIG'];
   if (configured) return path.resolve(configured);
-  const npmCliPath = getNpmCliPath(process.execPath, process.platform);
+  const nodePath = getNpmNodePath();
+  const npmCliPath = getNpmCliPath(nodePath, process.platform);
   const runNpm = (args: string[]) =>
-    execFileSync(process.execPath, [npmCliPath, ...args], {
+    execFileSync(nodePath, [npmCliPath, ...args], {
       encoding: 'utf8',
       timeout: 10_000,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -134,7 +136,7 @@ function resolveNpmGlobalConfigPath(): string {
         'exec',
         '--offline',
         '-c',
-        `"${process.execPath}" -p "process.env.npm_config_globalconfig || require('path').resolve(process.env.npm_config_global_prefix, 'etc', 'npmrc')"`,
+        `"${nodePath}" -p "process.env.npm_config_globalconfig || require('path').resolve(process.env.npm_config_global_prefix, 'etc', 'npmrc')"`,
       ])
         .split(/\r?\n/)
         .at(-1) ?? '';
@@ -185,7 +187,7 @@ async function smokeTest(prefix: string): Promise<void> {
   delete env['CLI_VERSION'];
   delete env['QWEN_CODE_RELAUNCH_ARGS'];
   await execFileAsync(
-    process.execPath,
+    getNpmNodePath(),
     [path.join(packageDir(prefix), 'cli-entry.js'), '--help'],
     { encoding: 'utf8', env, timeout: 10_000 },
   );
@@ -296,6 +298,27 @@ export async function installManagedNpmUpdate(
     path.join(Storage.getGlobalQwenDir(), 'updates', 'npm'),
   spawnFn: typeof spawn = spawn,
 ): Promise<void> {
+  const update = await stageManagedNpmUpdate(
+    version,
+    bootstrapPath,
+    updateRoot,
+    spawnFn,
+  );
+  try {
+    await activateManagedNpmUpdate(update, version, bootstrapPath);
+  } catch (error) {
+    await cleanupManagedNpmUpdate(update);
+    throw error;
+  }
+}
+
+export async function stageManagedNpmUpdate(
+  version: string,
+  bootstrapPath = process.env['QWEN_CODE_CLI'],
+  updateRoot = process.env['QWEN_CODE_MANAGED_NPM_ROOT'] ??
+    path.join(Storage.getGlobalQwenDir(), 'updates', 'npm'),
+  spawnFn: typeof spawn = spawn,
+): Promise<ManagedNpmUpdate> {
   const update = prepareManagedNpmUpdate(version, bootstrapPath, updateRoot);
   const env = { ...process.env };
   for (const key of ['NPM_CONFIG_USERCONFIG', 'npm_config_userconfig']) {
@@ -305,9 +328,9 @@ export async function installManagedNpmUpdate(
   try {
     await new Promise<void>((resolve, reject) => {
       const child = spawnFn(
-        process.execPath,
+        getNpmNodePath(),
         [
-          getNpmCliPath(process.execPath, process.platform),
+          getNpmCliPath(getNpmNodePath(), process.platform),
           ...update.installArgs,
         ],
         {
@@ -324,7 +347,8 @@ export async function installManagedNpmUpdate(
         else reject(new Error(`npm install exited with code ${code}`));
       });
     });
-    await activateManagedNpmUpdate(update, version, bootstrapPath);
+    await validateInstallation(update.stagingDir, version);
+    return update;
   } catch (error) {
     await cleanupManagedNpmUpdate(update);
     throw error;

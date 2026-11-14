@@ -56,6 +56,42 @@ function cleanup(container: HTMLDivElement) {
   container.remove();
 }
 
+describe('Markdown math', () => {
+  it('renders inline and display math with accessible annotations', () => {
+    const view = renderMd('Inline $x^2$.\n\n$$\ny = x + 1\n$$');
+    try {
+      expect(view.querySelectorAll('.katex')).toHaveLength(2);
+      expect(view.querySelectorAll('.katex-display')).toHaveLength(1);
+      expect(
+        [...view.querySelectorAll('annotation')].map(
+          (node) => node.textContent,
+        ),
+      ).toEqual(['x^2', 'y = x + 1']);
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('does not inherit a polluted KaTeX trust option', () => {
+    const previous = Object.getOwnPropertyDescriptor(Object.prototype, 'trust');
+    Object.defineProperty(Object.prototype, 'trust', {
+      value: true,
+      configurable: true,
+      writable: true,
+    });
+    let view: HTMLDivElement | undefined;
+    try {
+      view = renderMd('$\\href{https://example.com/untrusted}{click}$');
+      expect(view.querySelector('.katex')).not.toBeNull();
+      expect(view.querySelector('a')).toBeNull();
+    } finally {
+      if (previous) Object.defineProperty(Object.prototype, 'trust', previous);
+      else Reflect.deleteProperty(Object.prototype, 'trust');
+      if (view) cleanup(view);
+    }
+  });
+});
+
 describe('isSafeHref', () => {
   it('allows https URLs', () => {
     expect(isSafeHref('https://example.com')).toBe(true);
@@ -339,7 +375,7 @@ describe('Markdown enhanced tables', () => {
       );
     });
 
-    expect(container.textContent).toContain('Copy table');
+    expect(container.textContent).toContain('Copy');
     expect(
       container.querySelector('button[aria-label="View details for row 1"]'),
     ).not.toBeNull();
@@ -385,7 +421,7 @@ describe('Markdown enhanced tables', () => {
       );
     });
 
-    expect(container.textContent).toContain('Copy table');
+    expect(container.textContent).toContain('Copy');
     expect(container.querySelector('[data-custom-table="true"]')).toBeNull();
 
     act(() => root.unmount());
@@ -411,7 +447,7 @@ describe('Markdown enhanced tables', () => {
     });
 
     expect(container.querySelector('table')).not.toBeNull();
-    expect(container.textContent).not.toContain('Copy table');
+    expect(container.textContent).not.toContain('Copy');
 
     act(() => root.unmount());
     container.remove();
@@ -449,7 +485,7 @@ describe('Markdown enhanced tables', () => {
     expect(table).not.toBeNull();
     expect(table?.textContent).toContain('A');
     expect(table?.textContent).toContain('1');
-    expect(container.textContent).not.toContain('Copy table');
+    expect(container.textContent).not.toContain('Copy');
     expect(consoleError).toHaveBeenCalledWith(
       '[web-shell] enhanced markdown table failed:',
       expect.any(Error),

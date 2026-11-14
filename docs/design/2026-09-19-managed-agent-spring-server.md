@@ -23,7 +23,7 @@ public state in MySQL, and keep Harness and Tool Runtime credentials private.
 ## 2. Goals
 
 - Add an independently runnable Spring Boot application under
-  `packages/sdk-java/managed-agent-server`.
+  `packages/managed-agent-server`.
 - Require `X-Qwen-Tenant-Id` on Agent API requests and use it as the database
   ownership boundary.
 - Do not implement end-user authentication or interpret `Authorization` on the
@@ -267,9 +267,9 @@ admission completed in 114 ms, the first real model event arrived at 6,629 ms,
 Runtime became ready at 31,141 ms, and the Turn completed at 39,237 ms. The
 same run verified the exact `write_file` side effect, same-Session idempotent
 replay, cross-tenant 404, unique durable Event sequences, and one terminal
-Event. These timings are one local observation, not an SLO. The deterministic
-model fixture remains the CI ordering proof and most recently emitted its
-first model event at 300 ms before Runtime readiness at 15,565 ms.
+Event. These timings are one local observation, not an SLO. A deterministic
+controlled-model ordering proof is not implemented yet and is tracked in
+#12941.
 
 Production ACS/Pod provisioning, multi-node durable Broker repositories,
 process-loss recovery, real load balancing, and full tenant-isolation matrices

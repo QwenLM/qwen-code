@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { Config } from '@qwen-code/qwen-code-core';
 import { vi, describe, it, expect, beforeEach, type Mock } from 'vitest';
 import { advisorCommand } from './advisor-command.js';
 import { type CommandContext } from './types.js';
@@ -89,6 +90,8 @@ describe('advisorCommand', () => {
     getSessionId: () => 'test-session-id',
     getApprovalMode: () => 'default',
     getAdvisorModel: () => undefined,
+    getAdvisorUseCount: () => 0,
+    getAdvisorMaxUses: () => 0,
     getAllConfiguredModels: () => [
       { id: 'advisor-model' },
       { id: 'image-model', imageOnly: true },
@@ -118,12 +121,34 @@ describe('advisorCommand', () => {
     });
   });
 
+  it('reports the configured model and session budget without a picker', async () => {
+    mockContext.executionMode = 'non_interactive';
+    mockContext.services.config = createConfig({
+      getAdvisorModel: () => 'advisor-model',
+      getAdvisorUseCount: () => 1,
+      getAdvisorMaxUses: () => 2,
+    }) as unknown as Config;
+    const result = await advisorCommand.action!(mockContext, '');
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'info',
+      content: expect.stringContaining('Session calls: 1 / 2'),
+    });
+    expect(result).toMatchObject({
+      content: expect.stringContaining('Advisor: advisor-model'),
+    });
+  });
+
   it('should have correct metadata', () => {
     expect(advisorCommand.name).toBe('advisor');
     expect(advisorCommand.kind).toBe(CommandKind.BUILT_IN);
     expect(advisorCommand.description).toBeTruthy();
     expect(advisorCommand.argumentHint).toBe('[<model-id>|off|review [focus]]');
-    expect(advisorCommand.supportedModes).toEqual(['interactive', 'acp']);
+    expect(advisorCommand.supportedModes).toEqual([
+      'interactive',
+      'non_interactive',
+      'acp',
+    ]);
   });
 
   it('opens the model picker when no argument is provided', async () => {

@@ -20,17 +20,31 @@ fn run() -> Result<(), String> {
         .find(|arg| !arg.starts_with('-'))
         .map(String::as_str)
         .unwrap_or("all");
-    if !matches!(target, "all" | "manifest") {
-        return Err("usage: cua-contract-gen [all|manifest] [--check]".into());
+    if !matches!(target, "all" | "manifest" | "computer-use") {
+        return Err("usage: cua-contract-gen [all|manifest|computer-use] [--check]".into());
     }
 
-    let mut contents = serde_json::to_string_pretty(&manifest()).map_err(|e| e.to_string())?;
-    contents.push('\n');
-    write_or_check(
-        &driver_root()?.join("contract/manifest.json"),
-        &contents,
-        check,
-    )
+    if target != "computer-use" {
+        let mut contents = serde_json::to_string_pretty(&manifest()).map_err(|e| e.to_string())?;
+        contents.push('\n');
+        write_or_check(
+            &driver_root()?.join("contract/manifest.json"),
+            &contents,
+            check,
+        )?;
+    }
+    if target != "manifest" {
+        let mut contents =
+            serde_json::to_string_pretty(&cua_driver_contract::computer_use::manifest())
+                .map_err(|e| e.to_string())?;
+        contents.push('\n');
+        write_or_check(
+            &driver_root()?.join("typescript/computer-use/interface.json"),
+            &contents,
+            check,
+        )?;
+    }
+    Ok(())
 }
 
 fn driver_root() -> Result<PathBuf, String> {

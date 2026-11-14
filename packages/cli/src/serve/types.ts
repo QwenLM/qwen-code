@@ -59,6 +59,8 @@ export interface ChannelWebhookConfigSource {
 export interface ServeOptions {
   hostname: string;
   port: number;
+  /** Launcher-owned Conversations working root, fixed until daemon restart. */
+  conversationsDir?: string;
   /** Deployment boundary for provider selection and exposed surfaces. */
   profile?: ServeProfile;
   /**
@@ -142,10 +144,16 @@ export interface ServeOptions {
    * `BridgeOptions.eventRingSize` and used at every `new EventBus(...)`
    * construction site. Defaults to 8000. Must be a positive
    * finite integer — `0` / `NaN` / negative fail at boot. Larger
-   * rings let clients with longer reconnect gaps replay more history
-   * at the cost of a few hundred KB extra RAM per session.
+   * rings let clients with longer reconnect gaps replay more history only
+   * while the separate `eventRingMaxBytes` budget has room.
    */
   eventRingSize?: number;
+  /**
+   * Per-session retained SSE ring byte cap, including the latest full commands
+   * snapshot. Threaded into `BridgeOptions.eventRingMaxBytes`. Defaults to
+   * 8 MiB. Must be a positive safe integer up to 256 MiB, never unlimited.
+   */
+  eventRingMaxBytes?: number;
   /**
    * Per-session in-memory compacted replay snapshot byte cap. Threaded into
    * `BridgeOptions.compactedReplayMaxBytes`. Defaults to 4 MiB. Must be a
@@ -342,6 +350,13 @@ export interface ServeOptions {
    * `POST /session/:id/prompt` from receipt to completion.
    */
   promptDeadlineMs?: number;
+  /**
+   * Build every ordinary workspace runtime's Bridge with paired Legacy and
+   * Managed engines. No Managed engine exists for these hosts yet, so new
+   * sessions run on Legacy with a durable owner and Managed owners are
+   * refused on restore.
+   */
+  experimentalPairedEngines?: boolean;
   /** Mount the experimental resident Managed Gateway and Tool Runtime path. */
   experimentalManagedAgents?: boolean;
   /** Expose the private authenticated Tool-only Runtime worker protocol. */
@@ -357,6 +372,8 @@ export interface ServeOptions {
   managedRuntimeBrokerToken?: string;
   /** Deployment-generated digest for the Hosted Harness private contract. */
   hostedHarnessCapabilityDigest?: string;
+  /** Trusted startup URL for the operator-only original CSI attachment. */
+  hostedCsiSessionStoreUrl?: string;
   /**
    * Per-SSE-connection idle deadline.
    */
@@ -443,6 +460,11 @@ export interface ServeOptions {
  * `v` is the wire schema version; bumped only on breaking frame changes.
  */
 export interface HostedHarnessCapabilities {
+  readonly instanceId?: string;
+  readonly features?: readonly string[];
+  readonly lifecycleProtocolVersion?: 1;
+  readonly lifecycleV2Profiles?: readonly string[];
+  readonly titleProtocolVersion?: 1;
   readonly protocolVersions: {
     readonly current: 1;
     readonly supported: readonly [1];
@@ -453,6 +475,8 @@ export interface HostedHarnessCapabilities {
 
 export interface CapabilitiesEnvelope {
   v: 1;
+  /** Private process generation and protocol for the Hosted Harness client. */
+  hostedHarness?: HostedHarnessCapabilities;
   /**
    * Serve protocol versions supported by this daemon. Optional because this is
    * additive to v=1; older v=1 daemons omit it.
@@ -501,6 +525,8 @@ export interface CapabilitiesEnvelope {
     ssh?: { host: string; port?: number; directory: string };
     primary: boolean;
     trusted: boolean;
+    /** Whether persistent Agent collaboration is enabled for this workspace. */
+    agentCollaborationEnabled?: boolean;
     workflowsEnabled?: boolean;
     removable?: boolean;
     kind?: 'live';
@@ -543,6 +569,11 @@ export interface CapabilitiesEnvelope {
     sessionRestoreTimeoutMs?: number;
     /** Present when `workspace_file_upload` is advertised. */
     maxWorkspaceFileUploadBytes?: number;
+    /** Only raw Skill archives and zip-file sources; legacy limits are unchanged. */
+    maxSkillArchiveBytes?: number;
+    maxSkillArchiveExpandedBytes?: number;
+    maxSkillArchiveEntries?: number;
+    maxSkillArchiveManifestBytes?: number;
   };
   /**
    * Language codes accepted by `POST /session/:id/language`.
@@ -596,7 +627,7 @@ export interface ServeAuthProviderCatalog {
   workspaceCwd: string;
   providers: ServeAuthProviderDescriptor[];
   groups: Array<{
-    id: 'alibaba' | 'third-party' | 'custom';
+    id: 'qwencloud' | 'alibaba' | 'third-party' | 'custom';
     label: string;
     description: string;
     providerIds: string[];

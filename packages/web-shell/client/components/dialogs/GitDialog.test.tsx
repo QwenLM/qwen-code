@@ -115,6 +115,7 @@ async function flush() {
 function mount(
   initialView: 'diff' | 'log' | 'prs' | 'worktrees' = 'diff',
   gitCwd?: string,
+  sessionId?: string,
 ) {
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -125,6 +126,7 @@ function mount(
         <GitDialog
           workspaceCwd="/repo"
           gitCwd={gitCwd}
+          sessionId={sessionId}
           initialView={initialView}
           onClose={vi.fn()}
         />
@@ -197,6 +199,7 @@ describe('GitDialog', () => {
     expect(workspaceGitLog).toHaveBeenCalledWith(50, 0, undefined, undefined, {
       all: false,
       search: undefined,
+      sessionId: undefined,
     });
   });
 
@@ -254,10 +257,13 @@ describe('GitDialog', () => {
       entries: [],
       hasMore: false,
     });
-    mount('diff', '/worktrees/feature-x');
+    mount('diff', '/worktrees/feature-x', 'session-worktree');
     await flush();
 
-    expect(workspaceGitDiff).toHaveBeenCalledWith('/worktrees/feature-x');
+    expect(workspaceGitDiff).toHaveBeenCalledWith(
+      '/worktrees/feature-x',
+      'session-worktree',
+    );
 
     const historyTab = document.getElementById('git-dialog-tab-log');
     await act(async () => {
@@ -270,7 +276,7 @@ describe('GitDialog', () => {
       0,
       '/worktrees/feature-x',
       undefined,
-      { all: false, search: undefined },
+      { all: false, search: undefined, sessionId: 'session-worktree' },
     );
   });
 
@@ -493,6 +499,7 @@ describe('GitDialog', () => {
           <GitDialog
             workspaceCwd="/repo"
             gitCwd="/worktrees/wt"
+            sessionId="session-worktree"
             initialView="commit"
             onClose={vi.fn()}
           />
@@ -535,10 +542,12 @@ describe('GitDialog', () => {
       'fix: test commit',
       { all: true },
       '/worktrees/wt',
+      'session-worktree',
     );
     expect(workspaceGitPush).toHaveBeenCalledWith(
       { setUpstream: true },
       '/worktrees/wt',
+      'session-worktree',
     );
   });
 
@@ -783,6 +792,7 @@ describe('GitDialog', () => {
       'fix: commit only',
       { all: true },
       undefined,
+      undefined,
     );
     expect(workspaceGitPush).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain('Committed abc1234');
@@ -927,6 +937,7 @@ describe('GitDialog', () => {
         body: undefined,
         base: 'main',
       },
+      undefined,
       undefined,
     );
     expect(document.body.textContent).toContain('#99');

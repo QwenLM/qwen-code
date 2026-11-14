@@ -68,6 +68,12 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 The `Desktop Release` workflow builds signed updater artifacts when `dry_run` is disabled. Published releases require the Tauri updater private key. macOS releases also require Apple signing and notarization credentials.
 
-The first stable Tauri release may set `electron_bridge=true` to publish the macOS ZIPs and DMGs, Windows NSIS installer, Linux AppImage, and their Electron `0.0.5` manifests. Leave the input disabled for later releases; the fixed `desktop-latest` release retains the bridge assets while `desktop-latest.json` advances independently.
+The first stable Tauri release may set `electron_bridge=true` to publish the macOS ZIPs and DMGs, Windows NSIS installer, x64 Linux AppImage, and their Electron `0.0.5` manifests. Leave the input disabled for later releases; the fixed `desktop-latest` release retains the bridge assets while `desktop-latest.json` advances independently.
+
+### Linux AppImage dependencies
+
+The AppImage bundles WebKitGTK and its application libraries, but it deliberately relies on the host for the baseline libraries in the [AppImage excludelist](https://github.com/AppImageCommunity/pkg2appimage/blob/master/excludelist): glibc and the C++ runtime, the OpenGL/DRM drivers, X11/xcb, fontconfig/freetype/harfbuzz, zlib, and their low-level dependencies. Bundling those copies breaks against the host's graphics drivers or ABI. Install the distribution packages for the GTK/WebKit stack when using the AppImage.
+
+The release smoke test extracts the AppImage, reads every ELF file's `DT_NEEDED` entries, and fails on any dependency that is neither inside the image nor on that host baseline list. A newly missing application library therefore blocks publication instead of surfacing as a runtime failure.
 
 The macOS workflow accepts either the Tauri-era `APPLE_*` certificate and notarization secrets or the existing `MAC_CSC_*` and `APPLE_NOTARY_*` secrets. `TAURI_SIGNING_PRIVATE_KEY` must match the public key in `src-tauri/tauri.conf.json`.

@@ -12,7 +12,11 @@ import { Logger } from '@qwen-code/qwen-code-core/core/logger.js';
  * Hook to manage the logger instance.
  */
 export const useLogger = (storage: Storage, sessionId: string) => {
-  const [logger, setLogger] = useState<Logger | null>(null);
+  const [ready, setReady] = useState<{
+    logger: Logger;
+    sessionId: string;
+    storage: Storage;
+  } | null>(null);
 
   useEffect(() => {
     if (!sessionId) {
@@ -31,7 +35,7 @@ export const useLogger = (storage: Storage, sessionId: string) => {
       .initialize()
       .then(() => {
         if (!cancelled) {
-          setLogger(newLogger);
+          setReady({ logger: newLogger, sessionId, storage });
         }
       })
       .catch(() => {});
@@ -41,5 +45,7 @@ export const useLogger = (storage: Storage, sessionId: string) => {
     };
   }, [storage, sessionId]);
 
-  return logger;
+  return ready?.sessionId === sessionId && ready.storage === storage
+    ? ready.logger
+    : null;
 };

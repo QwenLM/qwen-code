@@ -8,9 +8,10 @@ import { createHash } from 'node:crypto';
 
 // TypeScript half of the W0a Workspace binding contract; the Java half is the
 // com.alibaba.qwen.code.runtimebroker.managedworkspace package in
-// packages/sdk-java/runtime-broker. The shared fixtures in
+// packages/managed-agent-server. The shared fixtures in
 // contracts/managed-workspace-binding-v1.fixtures.json keep both byte for
-// byte identical. Nothing wires this into the Runtime worker yet.
+// byte identical. The Runtime worker uses it through the managed-context/1
+// envelope.
 
 export const WORKSPACE_ROOT = '.';
 export const CONTEXT_BINDING_DOMAIN_TAG = 'qwen-managed-context-binding-v1';

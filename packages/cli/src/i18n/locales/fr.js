@@ -7,6 +7,10 @@
 // Traductions françaises pour Qwen Code CLI
 
 export default {
+  'Generated UI': 'Generated UI',
+  'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
+    'Active Generated UI intégré dans les sessions locales compatibles. Redémarrez la session concernée pour appliquer les modifications.',
+
   // ============================================================================
   // Aide / Composants UI
   // ============================================================================
@@ -194,6 +198,8 @@ export default {
     'Le retour en arrière n’affecte pas les fichiers édités manuellement ou via des commandes shell.',
   'Cannot rewind to a turn that was compressed. Try a more recent turn.':
     'Impossible de revenir à un tour qui a été compressé. Essayez un tour plus récent.',
+  'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.':
+    "Impossible de ramener la conversation à ce tour : il ne correspond plus à l'historique du modèle (par exemple après une nouvelle tentative). Essayez un tour plus récent.",
   'File restore is unavailable for this turn (no captured file changes, or this turn predates the current session).':
     'La restauration des fichiers est indisponible pour ce tour (aucune modification capturée, ou ce tour est antérieur à la session actuelle).',
   '(+{{insertions}} -{{deletions}} in {{count}} file)':
@@ -442,6 +448,8 @@ export default {
   'disabled (bare mode)': 'désactivé (mode minimal)',
   'disabled (safe mode)': 'désactivé (mode sécurisé)',
   'disabled (disableAllHooks)': 'désactivé (disableAllHooks)',
+  'disabled (not approved)': 'désactivé (non approuvé)',
+  'disabled (rejected)': 'désactivé (refusé)',
   'disabled (folder not trusted)': 'désactivé (dossier non approuvé)',
   'disabled (turned off for this session)':
     'désactivé (désactivé pour cette session)',
@@ -1559,6 +1567,7 @@ export default {
   Reqs: 'Req.',
   'Input Tokens': "Tokens d'entrée",
   'Output Tokens': 'Tokens de sortie',
+  'Output (incl. Reasoning)': 'Sortie (avec raisonnement)',
   'Savings Highlight:': 'Économies notables :',
   'of input tokens were served from the cache, reducing costs.':
     "des tokens d'entrée ont été servis depuis le cache, réduisant les coûts.",
@@ -1913,6 +1922,8 @@ export default {
   'System prompt': 'Invite système',
   'Built-in tools': 'Outils intégrés',
   'MCP tools': 'MCP tools',
+  'Instruction files': 'Fichiers d’instructions',
+  'Auto memory': 'Mémoire automatique',
   'Memory files': 'Fichiers mémoire',
   Skills: 'Compétences',
   Messages: 'Messages',
@@ -2046,6 +2057,8 @@ export default {
     "Échec de la revue de l'advisor : {{error}}",
   'No conversation context available for /advisor':
     'Aucun contexte de conversation disponible pour /advisor',
+  'No conversation context available for /btw':
+    'Aucun contexte de conversation disponible pour /btw',
   'Focus too long (max {{max}} chars)':
     'Focus trop long (max {{max}} caractères)',
   'Another operation is in progress, wait for it to complete before running /advisor':
@@ -2128,6 +2141,26 @@ export default {
     'Utilisation : /forget <texte de mémoire à supprimer>',
   'No managed auto-memory entries matched: {{query}}':
     'Aucune entrée de mémoire automatique gérée ne correspond à : {{query}}',
+  'Bind a GitHub pull request to this session':
+    'Lier une pull request GitHub à cette session',
+  'Usage: /pr <number | url>': 'Utilisation : /pr <numéro | url>',
+  'No PRs bound to this session.': 'Aucune PR liée à cette session.',
+  'Bound PRs: {{list}}': 'PR liées : {{list}}',
+  'Invalid PR reference. Usage: /pr <number | url>':
+    'Référence de PR invalide. Utilisation : /pr <numéro | url>',
+  'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
+    'Impossible de résoudre la PR #{{number}} via gh. Indiquez l’URL complète de la PR.',
+  'Bound PR #{{number}} to this session: {{url}}':
+    'PR #{{number}} liée à cette session : {{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}':
+    'La PR #{{number}} est déjà liée à cette session : {{url}}',
+  'Failed to bind PR #{{number}}.': 'Échec de la liaison de la PR #{{number}}.',
+  'Failed to bind PR #{{number}}: {{message}}':
+    'Échec de la liaison de la PR #{{number}} : {{message}}',
+  'Could not read the PR bindings for this session.':
+    'Impossible de lire les liaisons PR de cette session.',
+  'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.':
+    'GitHub CLI (gh) est indisponible ou a expiré. Indiquez l’URL complète de la PR pour lier sans lui.',
   'Consolidate managed auto-memory topic files.':
     'Consolider les fichiers de sujets de mémoire automatique gérée.',
   'Press c to copy the authorization URL to your clipboard.':
@@ -2138,6 +2171,10 @@ export default {
     "Impossible d'écrire dans le terminal — copiez manuellement l'URL ci-dessus.",
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     'API Key invalide. Les Coding Plan API Keys commencent par "sk-sp-". Veuillez vérifier.',
+  'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.':
+    'API Key invalide. Les clés à la demande commencent par "sk-" ou "sk-ws-". Les clés Token Plan ("sk-sp-") nécessitent l\'entrée Token Plan.',
+  'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.':
+    'API Key invalide. Les Token Plan API Keys commencent par "sk-sp-". Générez-en une depuis la console Token Plan, ou utilisez l\'entrée Standard API Key pour une clé à la demande.',
   'Lock release warning': 'Avertissement de libération du verrou',
   'Metadata write warning': "Avertissement d'écriture des métadonnées",
   "Subsequent dreams may be skipped as locked until the next session's staleness sweep cleans the file.":
@@ -2212,6 +2249,8 @@ export default {
   out: 'sort.',
   'In/Out': 'Ent/Sort',
   // Update command
+  'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.':
+    'La mise à jour vers une version précise nécessite une installation autonome. Installez manuellement la version {{version}} avec votre méthode d’installation.',
   'Check for Qwen Code updates and install if available':
     'Vérifier les mises à jour de Qwen Code et installer si disponible',
   'Qwen Code update available! {{current}} → {{latest}}':

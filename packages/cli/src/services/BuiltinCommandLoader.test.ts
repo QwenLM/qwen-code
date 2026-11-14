@@ -76,7 +76,15 @@ vi.mock('../ui/commands/hooksCommand.js', async () => {
   };
 });
 
-import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach,
+  type Mock,
+} from 'vitest';
 import { BuiltinCommandLoader } from './BuiltinCommandLoader.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { CommandKind } from '../ui/commands/types.js';
@@ -126,6 +134,8 @@ describe('BuiltinCommandLoader', () => {
 
   const restoreCommandMock = restoreCommand as Mock;
 
+  afterEach(() => vi.unstubAllEnvs());
+
   beforeEach(() => {
     vi.clearAllMocks();
     mockConfig = {
@@ -142,6 +152,32 @@ describe('BuiltinCommandLoader', () => {
       description: 'Restore command',
       kind: CommandKind.BUILT_IN,
     });
+  });
+
+  it.each([undefined, 'false', 'true'])(
+    'registers subscription account commands when DEV=%s',
+    async (dev) => {
+      vi.stubEnv('DEV', false);
+      if (dev === undefined) delete process.env['DEV'];
+      else process.env['DEV'] = dev;
+      const commands = await new BuiltinCommandLoader(mockConfig).loadCommands(
+        new AbortController().signal,
+      );
+      expect(commands.map((command) => command.name)).toEqual(
+        expect.arrayContaining(['upgrade', 'logout']),
+      );
+    },
+  );
+
+  it('registers /pr for interactive, headless and ACP sessions', async () => {
+    const commands = await new BuiltinCommandLoader(mockConfig).loadCommands(
+      new AbortController().signal,
+    );
+    const pr = commands.find((command) => command.name === 'pr');
+    expect(pr).toBeDefined();
+    expect(pr?.supportedModes).toEqual(
+      expect.arrayContaining(['interactive', 'non_interactive', 'acp']),
+    );
   });
 
   it('skips automatic IDE process detection in tool sandbox', async () => {
@@ -288,6 +324,15 @@ describe('BuiltinCommandLoader', () => {
     const advisorCmd = commands.find((c) => c.name === 'advisor');
     expect(advisorCmd).toBeDefined();
     expect(advisorCmd?.kind).toBe(CommandKind.BUILT_IN);
+  });
+
+  it('should always register the /commit command', async () => {
+    const loader = new BuiltinCommandLoader(mockConfig);
+    const commands = await loader.loadCommands(new AbortController().signal);
+    const commitCmd = commands.find((c) => c.name === 'commit');
+    expect(commitCmd).toBeDefined();
+    expect(commitCmd?.kind).toBe(CommandKind.BUILT_IN);
+    expect(commitCmd?.supportedModes).toEqual(['interactive']);
   });
 
   it('should include lsp command only when LSP is enabled', async () => {

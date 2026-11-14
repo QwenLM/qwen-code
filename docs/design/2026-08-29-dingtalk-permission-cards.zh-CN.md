@@ -17,7 +17,7 @@
 ## 非目标
 
 - 不改变审批策略、审批模式、ACP 或会话语言 API。
-- 不新增钉钉卡片模板。复用现有问题表单模板，其中只包含一个必填、单选的审批字段。
+- 不新增钉钉卡片模板。复用现有问题表单模板，其中只包含一个必填的审批字段，以 checkbox group 形式渲染、按单选处理：只有恰好选中一个选项时，提交才会被接受。
 - 不支持跨客户端或群内投票。只有发起该次有人参与的 Channel 运行的用户可以操作卡片。
 - 不在 CLI、Web、IDE 或其他 IM 适配器中实现原生审批卡片。
 
@@ -51,7 +51,7 @@ export interface ChannelPermissionRequestContext {
 
 ## 钉钉控制器
 
-`PermissionCardController` 管理钉钉专用状态，以请求 ID 和 `outTrackId` 为键。它复用现有问题模板，仅包含一个 `permission_decision` checkbox-group 字段，不提供自由输入选项。渲染的选项是从上下文决策中选取的字面值，因此 daemon 未声明 `allow_always` 时，不会显示该选项。
+`PermissionCardController` 管理钉钉专用状态，以请求 ID 和 `outTrackId` 为键。它复用现有问题模板，仅包含一个必填的 `permission_decision` checkbox-group 字段，不提供自由输入选项。单选由提交时的校验保证，而不是由字段类型保证：值的数量不恰好为一个的 **submit** 回调会被 `ignored`，记录保持未认领，卡片仍处于待处理状态。cancel 回调不携带值，会被接受，并通过一次性 responder 拒绝。渲染的选项是从上下文决策中选取的字面值，因此 daemon 未声明 `allow_always` 时，不会显示该选项。
 
 展示过程经过四个状态：`reserved`、`pending`、`claimed` 和 `terminal`。记录在投递前订阅 Channel 审批结束事件，避免网络请求期间从外部完成的审批被重新激活。投递失败会移除本地记录并返回 `unsupported`；随后 `ChannelBase` 发送现有文本请求。投递成功后启动配置的超时计时。
 

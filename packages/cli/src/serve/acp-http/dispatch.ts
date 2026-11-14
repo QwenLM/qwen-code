@@ -29,6 +29,7 @@ import {
   readSessionPrs,
   toSessionPrInfo,
   upsertSessionPr,
+  isSessionPrRole,
   type SessionArchiveState,
   type SubagentLevel,
   IMAGE_CAPABILITY,
@@ -62,12 +63,18 @@ import {
   SUBMITTED_PROMPT_META_KEY,
   CHANNEL_PROMPT_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
+  getPromptCancelAbortReason,
   type BridgeBranchedSession,
   type BridgeRestoredSession,
   type HttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY } from '../channel-worker-prompt-authorization.js';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
+import {
+  AGENT_HOST_SESSION_SOURCE_TYPE,
+  AGENT_SESSION_SOURCE_TYPE,
+} from '../../runtime/agent-session-source.js';
+
 import { readServeWorkflowActionInput } from '@qwen-code/acp-bridge/status';
 import { restoreRetryAfterSeconds } from '@qwen-code/acp-bridge/sessionRestoreTimeout';
 import {
@@ -83,11 +90,15 @@ import {
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
   AcpChildCapacityExceededError,
+  ManagedSessionBranchUnsupportedError,
+  RequestedSessionIdRejectedError,
   SessionNotFoundError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
   WorkspaceMismatchError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
+import { SessionExecutionEngineError } from '@qwen-code/qwen-code-core/services/session-execution-engine.js';
+import { SessionTranscriptSnapshotUnavailableError } from '@qwen-code/qwen-code-core/services/session-transcript-reader.js';
 import {
   SessionArtifactAuthorizationError,
   SessionArtifactValidationError,
@@ -122,6 +133,8 @@ import {
 } from '../routes/workspace-setup-github.js';
 import { parseWorkspaceVoiceUpdateParams } from '../routes/workspace-voice.js';
 import {
+  redactWorkflowModeFromConfigOptions,
+  redactWorkflowModeFromSessionState,
   redactWorkflowsFromAvailableCommandsEvent,
   redactWorkflowsFromSupportedCommands,
 } from '../workflow-session-gate.js';
@@ -143,6 +156,7 @@ import {
   type StandaloneSessionService,
 } from '../conversations/standalone-session-service.js';
 import { collectWorkspaceMemoryStatus } from '../workspace-memory.js';
+import { runWithWorkspaceRuntimeStorage } from '../workspace-runtime-storage.js';
 import {
   createDaemonSubagentManager,
   toSummary as agentToSummary,
@@ -177,6 +191,7 @@ import type {
   AcpConnection,
   ConnectionRegistry,
   DeliveryReceipt,
+  PendingClientRequest,
   PendingClientRequestRef,
 } from './connection-registry.js';
 import type { DeliveryResult } from './transport-stream.js';
@@ -199,8 +214,24 @@ import {
   type JsonRpcResponse,
 } from './json-rpc.js';
 
+/**
+ * Sources only the daemon itself may create a session under: `agent` sessions
+ * are spawned in-process by the session-agents orchestrator, and acpAgent
+ * additionally requires a persisted session-agents binding for them.
+ */
+function isAgentSessionSourceType(sourceType: unknown): boolean {
+  return (
+    sourceType === AGENT_HOST_SESSION_SOURCE_TYPE ||
+    sourceType === AGENT_SESSION_SOURCE_TYPE
+  );
+}
+
 function errMsg(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+  if (err instanceof Error) return err.message;
+  // The ACP SDK rejects with the child's JSON-RPC error object, not an Error.
+  if (isObject(err) && typeof err['message'] === 'string')
+    return err['message'];
+  return String(err);
 }
 
 const SESSION_WRITER_RPC_ERRORS = {
@@ -250,6 +281,27 @@ function sessionWriterRpcError(err: unknown):
   };
 }
 
+function withGeneratedUiReceipt(
+  generatedUi: BridgeRestoredSession['generatedUi'],
+  state: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const { generatedUi: _stateGeneratedUi, ...response } = state;
+  const meta = isObject(response['_meta']) ? response['_meta'] : undefined;
+  const { generatedUi: _stateGeneratedUiMeta, ...publicMeta } = meta ?? {};
+  return {
+    ...response,
+    ...(generatedUi ? { generatedUi } : {}),
+    ...(meta || generatedUi
+      ? {
+          _meta: {
+            ...publicMeta,
+            ...(generatedUi ? { generatedUi } : {}),
+          },
+        }
+      : {}),
+  };
+}
+
 const debugLogger = createDebugLogger('ACP_HTTP_DISPATCH');
 
 type PermissionResponse = Parameters<
@@ -283,6 +335,7 @@ const SSH_METHODS = new Set([
     'session/detach',
     'session/context_usage',
     'session/tasks',
+    'session/task_runtime',
     'session/agents',
     'session/agent_trace',
     'session/attachments',
@@ -293,6 +346,7 @@ const SSH_METHODS = new Set([
     'workspace/session_groups/delete',
     'workspace/trust',
     'workspace/trust/request',
+    'workspace/trust/grant',
     'workspace/providers',
     'workspace/tools',
     'workspace/voice',
@@ -336,6 +390,7 @@ const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}workspace/init`,
   `${QWEN_METHOD_NS}workspace/trust`,
   `${QWEN_METHOD_NS}workspace/trust/request`,
+  `${QWEN_METHOD_NS}workspace/trust/grant`,
   `${QWEN_METHOD_NS}workspace/permissions`,
   `${QWEN_METHOD_NS}workspace/permissions/set`,
   `${QWEN_METHOD_NS}workspace/voice`,
@@ -350,6 +405,7 @@ const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}session/detach`,
   `${QWEN_METHOD_NS}session/context_usage`,
   `${QWEN_METHOD_NS}session/tasks`,
+  `${QWEN_METHOD_NS}session/task_runtime`,
   `${QWEN_METHOD_NS}session/agents`,
   `${QWEN_METHOD_NS}session/agent_trace`,
   `${QWEN_METHOD_NS}session/attachments`,
@@ -442,12 +498,14 @@ const TRUSTED_WORKSPACE_METHODS = new Set<string>([
 ]);
 
 const WORKSPACE_GENERATION_MUTATION_METHODS = new Set<string>([
+  'session/set_config_option',
   'session/new',
   'session/load',
   'session/resume',
   'session/fork',
   `${QWEN_METHOD_NS}workspace/init`,
   `${QWEN_METHOD_NS}workspace/trust/request`,
+  `${QWEN_METHOD_NS}workspace/trust/grant`,
   `${QWEN_METHOD_NS}workspace/permissions/set`,
   `${QWEN_METHOD_NS}workspace/voice/set`,
   `${QWEN_METHOD_NS}workspace/setup-github`,
@@ -513,7 +571,11 @@ const MAX_FILE_LINE_LIMIT = 2000;
  * setter's rejection message so the advertised set and the set reported as
  * supported cannot drift apart.
  */
-const HTTP_ACP_CONFIG_OPTION_IDS: readonly string[] = ['model', 'mode'];
+const HTTP_ACP_CONFIG_OPTION_IDS: readonly string[] = [
+  'model',
+  'mode',
+  'workflow_mode',
+];
 
 class AcpParamError extends Error {}
 
@@ -765,6 +827,78 @@ export function toRpcError(err: unknown): {
       },
     };
   }
+  if (err instanceof RequestedSessionIdRejectedError) {
+    return {
+      code: RPC.INVALID_PARAMS,
+      message: err.message,
+      data:
+        err.errorKind === 'invalid_session_id'
+          ? { httpStatus: 400, errorKind: err.errorKind }
+          : {
+              httpStatus: 409,
+              errorKind: err.errorKind,
+              sessionId: err.sessionId,
+              conflict: 'live',
+            },
+    };
+  }
+  if (err instanceof ManagedSessionBranchUnsupportedError) {
+    return {
+      code: RPC.INVALID_PARAMS,
+      message: err.message,
+      data: {
+        httpStatus: 409,
+        errorKind: 'managed_session_branch_unsupported',
+        sessionId: err.sessionId,
+      },
+    };
+  }
+  // Raised by the ACP child while its Managed engine is quarantined: a
+  // temporary refusal, with the quarantine reason kept in the message,
+  // never the resume-conflict shape the engine selector's errors take.
+  if (
+    isObject(err) &&
+    isObject(err['data']) &&
+    err['data']['errorKind'] === 'managed_engine_quarantined'
+  ) {
+    return {
+      code: typeof err['code'] === 'number' ? err['code'] : -32024,
+      message: errMsg(err),
+      data: {
+        httpStatus: 503,
+        errorKind: 'managed_engine_quarantined',
+      },
+    };
+  }
+  // Raised by a paired host's owner selection or by the ACP child's check.
+  if (
+    err instanceof SessionExecutionEngineError ||
+    (isObject(err) &&
+      isObject(err['data']) &&
+      err['data']['errorKind'] === 'session_execution_engine_unavailable')
+  ) {
+    return {
+      code: RPC.INVALID_PARAMS,
+      message:
+        'This session cannot be resumed with the current execution engine.',
+      data: {
+        httpStatus: 409,
+        errorKind: 'session_execution_engine_unavailable',
+      },
+    };
+  }
+  if (
+    err instanceof SessionTranscriptSnapshotUnavailableError ||
+    (isObject(err) &&
+      isObject(err['data']) &&
+      err['data']['errorKind'] === 'transcript_snapshot_unavailable')
+  ) {
+    return {
+      code: RPC.INTERNAL_ERROR,
+      message: errMsg(err),
+      data: { httpStatus: 409, errorKind: 'transcript_snapshot_unavailable' },
+    };
+  }
   if (err instanceof RequestedSessionIdNotHonoredError) {
     return {
       code: RPC.INTERNAL_ERROR,
@@ -787,14 +921,16 @@ export function toRpcError(err: unknown): {
   if (err instanceof StandaloneSessionServiceError) {
     const httpStatus = err.capacity
       ? 503
-      : err.code === 'invalid_request'
-        ? 400
-        : err.code === 'standalone_session_not_found'
-          ? 404
-          : err.code === 'standalone_creation_outcome_unknown' ||
-              err.code === 'standalone_creation_rolled_back'
-            ? 500
-            : 409;
+      : err.code === 'managed_engine_quarantined'
+        ? 503
+        : err.code === 'invalid_request'
+          ? 400
+          : err.code === 'standalone_session_not_found'
+            ? 404
+            : err.code === 'standalone_creation_outcome_unknown' ||
+                err.code === 'standalone_creation_rolled_back'
+              ? 500
+              : 409;
     return {
       code:
         httpStatus >= 500 || err.retryable
@@ -1008,6 +1144,15 @@ export function toRpcError(err: unknown): {
         },
       };
     }
+    case 'WorkspaceTrustGrantIneffectiveError':
+      // The REST twin answers this refusal 409 `trust_grant_ineffective`
+      // (routes/workspace-trust.ts); without this arm ACP clients get the
+      // opaque default frame and cannot branch on the refusal.
+      return {
+        code: RPC.INVALID_PARAMS,
+        message: errMsg(err),
+        data: { errorKind: 'trust_grant_ineffective', httpStatus: 409 },
+      };
     case 'BridgeChannelQuarantinedError': {
       const unavailableError = err as BridgeChannelQuarantinedError;
       return {
@@ -1411,6 +1556,15 @@ export class AcpDispatcher {
     return value;
   }
 
+  private parseRequireIdle(params: Record<string, unknown>): boolean {
+    const value = params['requireIdle'];
+    if (value === undefined) return false;
+    if (typeof value !== 'boolean') {
+      throw new AcpParamError('`requireIdle` must be a boolean');
+    }
+    return value;
+  }
+
   private rejectActiveLiveSessionMutation(
     conn: AcpConnection,
     id: JsonRpcId | undefined,
@@ -1475,13 +1629,13 @@ export class AcpDispatcher {
 
   /**
    * The session's ACP-shaped config options supported by this HTTP transport
-   * (currently model and mode), read from the child's own session state.
+   * (model, mode, and workflow_mode), read from the child's own session state.
    * Every response built from this helper (`session/new`,
    * `session/load`/`session/resume`, `session/fork`, and the
    * `session/set_config_option` result) is gated to the ids the transport
    * can route. Raw-state surfaces (context status, REST load/resume state)
-   * intentionally carry the child's full unfiltered set — they report session
-   * state. Best-effort — `undefined` on error.
+   * retain other child options but omit Workflow mode for untrusted workspaces.
+   * Best-effort — `undefined` on error.
    */
   private async configOptionsFor(
     sessionId: string,
@@ -1491,20 +1645,27 @@ export class AcpDispatcher {
       const ctx = (await bridge.getSessionContextStatus(sessionId)) as {
         state?: { configOptions?: unknown };
       };
-      const co = ctx?.state?.configOptions;
-      return Array.isArray(co)
-        ? co.filter(
-            (option) =>
-              isObject(option) &&
-              HTTP_ACP_CONFIG_OPTION_IDS.includes(option['id'] as string),
-          )
-        : undefined;
+      return this.filterConfigOptions(ctx?.state?.configOptions);
     } catch (err) {
       writeStderrLine(
         `qwen serve: /acp configOptionsFor(${logSafe(sessionId)}) failed: ${logSafe(errMsg(err))}`,
       );
       return undefined;
     }
+  }
+
+  private filterConfigOptions(options: unknown): unknown[] | undefined {
+    return Array.isArray(options)
+      ? options.filter(
+          (option) =>
+            isObject(option) &&
+            HTTP_ACP_CONFIG_OPTION_IDS.includes(option['id'] as string) &&
+            !(
+              option['id'] === 'workflow_mode' &&
+              (this.fsFactory?.sshWorkspace || !this.isWorkspaceTrusted())
+            ),
+        )
+      : undefined;
   }
 
   /**
@@ -1564,14 +1725,17 @@ export class AcpDispatcher {
   }
 
   /**
-   * Cancel a permission request the client abandoned (closed its stream /
-   * connection before voting), so the bridge isn't left blocked. Invoked
-   * by the connection-registry teardown path.
+   * Release a delivery copy. A workflow-owned request can outlive this
+   * binding and is settled by the bridge when the workflow or owner ends.
    */
   cancelAbandonedPermission(
-    req: { sessionId: string; bridgeRequestId: string },
+    req: Pick<
+      PendingClientRequest,
+      'sessionId' | 'bridgeRequestId' | 'backgroundWorkflowApproval'
+    >,
     clientId: string | undefined,
   ): boolean {
+    if (req.backgroundWorkflowApproval) return true;
     try {
       this.bridge.respondToSessionPermission(
         req.sessionId,
@@ -1718,9 +1882,13 @@ export class AcpDispatcher {
   private dropOwnPendingPermission(
     conn: AcpConnection,
     requestId: string,
+    workflowOnly = false,
   ): void {
     for (const [pid, preq] of conn.pending) {
-      if (preq.kind === 'permission' && preq.bridgeRequestId === requestId) {
+      if (
+        preq.bridgeRequestId === requestId &&
+        (!workflowOnly || preq.backgroundWorkflowApproval)
+      ) {
         conn.pending.delete(pid);
         return;
       }
@@ -1893,6 +2061,19 @@ export class AcpDispatcher {
             return;
           }
           const sessionRuntime = this.getSessionRuntimeContext();
+          // Same reservation as the REST route: only the daemon creates
+          // agent-host and agent sessions.
+          if (isAgentSessionSourceType(params['sourceType'])) {
+            conn.sendConn(
+              error(
+                id,
+                RPC.INVALID_PARAMS,
+                'The requested session source is reserved for daemon-owned agent sessions.',
+                { errorKind: 'reserved_session_source' },
+              ),
+            );
+            return;
+          }
           if (
             isReservedStandaloneSessionSource({
               sourceType:
@@ -2039,6 +2220,7 @@ export class AcpDispatcher {
                 id,
                 {
                   sessionId: session.sessionId,
+                  ...withGeneratedUiReceipt(session.generatedUi),
                   ...(session.startupConfigApplied
                     ? {
                         modelApplied: true,
@@ -2178,9 +2360,8 @@ export class AcpDispatcher {
             // of a caller id contends on one key), so the request spelling
             // alone covers the raw-spelled batch delete/archive/unarchive
             // locks (parity with the REST restore handler).
-            restored ??= await this.archiveCoordinator.runSharedMany(
-              [sessionId],
-              async () => {
+            const restoreInRuntime = () =>
+              this.archiveCoordinator.runSharedMany([sessionId], async () => {
                 assertGenerationOpen?.();
                 const sessionService = new SessionService(cwd, {
                   runtimeBaseDir: sessionRuntime.sessionRuntimeBaseDir,
@@ -2226,9 +2407,13 @@ export class AcpDispatcher {
                   sourceId: _reservedSourceId,
                   ...metadataWithoutSource
                 } = metadata;
+                // Agent-source sessions strip their source as the REST restore
+                // does: a restore is a person reading history, and keeping the
+                // source would let the load stand in for a dispatched run.
                 const restoreMetadata =
-                  this.liveSessionIsolation === undefined &&
-                  isReservedStandaloneSessionSource(metadata)
+                  (this.liveSessionIsolation === undefined &&
+                    isReservedStandaloneSessionSource(metadata)) ||
+                  metadata.sourceType === AGENT_SESSION_SOURCE_TYPE
                     ? metadataWithoutSource
                     : metadata;
                 // The private directory belongs to the live entry, which the
@@ -2316,7 +2501,10 @@ export class AcpDispatcher {
                   throw error;
                 }
                 return session;
-              },
+              });
+            restored ??= await runWithWorkspaceRuntimeStorage(
+              sessionRuntime,
+              restoreInRuntime,
             );
             const initialReplayOnDelivery =
               method === 'session/load' && !conn.ownsSession(sessionId);
@@ -2337,7 +2525,10 @@ export class AcpDispatcher {
               );
               const loadModels = this.extractModelState(loadConfigOptions);
               const loadModes = this.extractModeState(loadConfigOptions);
-              const loadState = restored.state ?? {};
+              const loadState =
+                this.fsFactory?.sshWorkspace || !this.isWorkspaceTrusted()
+                  ? redactWorkflowModeFromConfigOptions(restored.state ?? {})
+                  : (restored.state ?? {});
               const loadMeta = isObject(loadState._meta)
                 ? loadState._meta
                 : undefined;
@@ -2384,18 +2575,20 @@ export class AcpDispatcher {
                 conn,
                 id,
                 {
-                  ...loadState,
-                  ...(replayStatus
-                    ? {
-                        _meta: {
-                          ...(loadMeta ?? {}),
-                          [QWEN_META_KEY]: {
-                            ...(loadQwenMeta ?? {}),
-                            sessionLoadReplay: replayStatus,
+                  ...withGeneratedUiReceipt(restored.generatedUi, {
+                    ...loadState,
+                    ...(replayStatus
+                      ? {
+                          _meta: {
+                            ...(loadMeta ?? {}),
+                            [QWEN_META_KEY]: {
+                              ...(loadQwenMeta ?? {}),
+                              sessionLoadReplay: replayStatus,
+                            },
                           },
-                        },
-                      }
-                    : {}),
+                        }
+                      : {}),
+                  }),
                   ...(loadConfigOptions
                     ? { configOptions: loadConfigOptions }
                     : {}),
@@ -2570,6 +2763,7 @@ export class AcpDispatcher {
             await this.bridge.closeSession(
               sessionId,
               this.sessionCtx(conn, sessionId, loopback),
+              { cancelReason: 'user' },
             );
           };
           try {
@@ -2685,6 +2879,7 @@ export class AcpDispatcher {
                 id,
                 {
                   sessionId: result.sessionId,
+                  ...withGeneratedUiReceipt(result.generatedUi),
                   ...(configOptions ? { configOptions } : {}),
                   ...(models ? { models } : {}),
                   ...(modes ? { modes } : {}),
@@ -2705,7 +2900,9 @@ export class AcpDispatcher {
             // Abort our local in-flight prompt controller too — cancelSession
             // tells the agent to wind down, but the HTTP-side `sendPrompt`
             // await must also be released so the session FIFO unblocks.
-            conn.sessions.get(sessionId)?.promptAbort?.abort();
+            conn.sessions
+              .get(sessionId)
+              ?.promptAbort?.abort(getPromptCancelAbortReason(params['_meta']));
             await this.bridge.cancelSession(
               sessionId,
               // Forward client-supplied cancel fields (reason/context) while
@@ -2961,16 +3158,18 @@ export class AcpDispatcher {
             writeStderrLine(
               `qwen serve: /acp session/permission vote failed (${logSafe(sessionId)}, requestId ${logSafe(requestId)}): ${logSafe(errMsg(err))}`,
             );
-            const cancelled = this.cancelAbandonedPermission(
-              { sessionId, bridgeRequestId: requestId },
-              pendingRef?.conn.sessions.get(sessionId)?.clientId,
-            );
             // Drop only the VOTING connection's own entry (consistent with the
             // success path) — never `pendingRef`, which may be a sibling/the
             // originator. Deleting the originator's entry would stall a quorum
             // still waiting on its vote. If the voter has no own entry, leave
             // everything for teardown.
-            if (cancelled) {
+            if (
+              !pendingRef?.req.backgroundWorkflowApproval &&
+              this.cancelAbandonedPermission(
+                { sessionId, bridgeRequestId: requestId },
+                pendingRef?.conn.sessions.get(sessionId)?.clientId,
+              )
+            ) {
               this.dropOwnPendingPermission(conn, requestId);
             }
             throw err;
@@ -3080,6 +3279,48 @@ export class AcpDispatcher {
                 { persist: params['persist'] === true },
                 ctx,
               );
+            } else if (configId === 'workflow_mode') {
+              if (
+                (rawValue !== 'on' && rawValue !== 'off') ||
+                params['persist'] !== undefined ||
+                this.fsFactory?.sshWorkspace
+              ) {
+                if (id !== undefined) {
+                  this.replySession(
+                    conn,
+                    sessionId,
+                    id,
+                    undefined,
+                    error(
+                      id,
+                      RPC.INVALID_PARAMS,
+                      'Workflow mode requires on/off on a supported local session and does not accept persist',
+                    ),
+                  );
+                }
+                return;
+              }
+              if (!this.isWorkspaceTrusted()) {
+                if (id !== undefined) {
+                  this.replySession(
+                    conn,
+                    sessionId,
+                    id,
+                    undefined,
+                    error(id, -32003, 'Workspace is not trusted.', {
+                      errorKind: 'untrusted_workspace',
+                      httpStatus: 403,
+                    }),
+                  );
+                }
+                return;
+              }
+              await this.bridge.setSessionConfigOption(
+                sessionId,
+                { sessionId, configId, value: rawValue },
+                ctx,
+                assertGenerationOpen,
+              );
             } else {
               // Ids advertised by raw-state surfaces but unroutable here
               // (e.g. reasoning_effort) must fail loud, not fall into mode.
@@ -3100,6 +3341,7 @@ export class AcpDispatcher {
             }
             // Response returns the updated config option set (per ACP).
             const configOptions = await this.configOptionsFor(sessionId);
+            assertGenerationOpen?.();
             this.replySession(conn, sessionId, id, { configOptions });
           });
           return;
@@ -3197,10 +3439,13 @@ export class AcpDispatcher {
         case `${QWEN_METHOD_NS}session/context`: {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
+          const status = await this.bridge.getSessionContextStatus(sessionId);
           this.replyConn(
             conn,
             id,
-            await this.bridge.getSessionContextStatus(sessionId),
+            this.fsFactory?.sshWorkspace || !this.isWorkspaceTrusted()
+              ? redactWorkflowModeFromSessionState(status)
+              : status,
           );
           return;
         }
@@ -3277,6 +3522,9 @@ export class AcpDispatcher {
                 typeof boundPr['url'] === 'string'
               ) {
                 const boundState = boundPr['state'];
+                // The bridge validated the shape above; a role it accepted
+                // persists, an absent one preserves the known role.
+                const boundRole = boundPr['role'];
                 const persistedPrs = (
                   await upsertSessionPr(
                     service.getPrSessionPathForArchiveState(
@@ -3291,6 +3539,9 @@ export class AcpDispatcher {
                       boundState === 'merged' ||
                       boundState === 'closed'
                         ? { state: boundState }
+                        : {}),
+                      ...(isSessionPrRole(boundRole)
+                        ? { role: boundRole }
                         : {}),
                     },
                   )
@@ -3568,6 +3819,29 @@ export class AcpDispatcher {
             ...(reason !== undefined ? { reason } : {}),
           });
           assertGenerationOpen?.();
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/trust/grant`: {
+          const ctx = this.wsCtx(conn, method);
+          const status = await this.workspace.getWorkspaceTrustStatus(ctx);
+          if (!status.folderTrustEnabled) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_REQUEST,
+                  'Folder trust is disabled for this workspace',
+                ),
+              );
+            }
+            return;
+          }
+          assertGenerationOpen?.();
+          // No post-write assert: a grant that lands replaces this very
+          // generation, so the guard closing is the success signal.
+          const result = await this.workspace.grantWorkspaceTrust(ctx);
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -3960,6 +4234,26 @@ export class AcpDispatcher {
           return;
         }
 
+        case `${QWEN_METHOD_NS}session/task_runtime`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const taskId = params['taskId'];
+          if (typeof taskId !== 'string' || taskId.length === 0) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`taskId` is required'),
+              );
+            }
+            return;
+          }
+          const result = await this.bridge.getSessionTaskRuntime(
+            sessionId,
+            taskId,
+          );
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
         case `${QWEN_METHOD_NS}session/agents`: {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
@@ -4179,6 +4473,7 @@ export class AcpDispatcher {
         case `${QWEN_METHOD_NS}workspace/memory`: {
           const result = await collectWorkspaceMemoryStatus(
             this.boundWorkspace,
+            { includeContent: params['content'] === true },
           );
           assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
@@ -4453,25 +4748,7 @@ export class AcpDispatcher {
             return;
           }
           try {
-            const available =
-              await this.bridge.isWorkspaceMemoryRememberAvailable();
             assertGenerationOpen?.();
-            if (!available) {
-              if (id !== undefined) {
-                conn.sendConn(
-                  error(
-                    id,
-                    -32009,
-                    'Managed memory is unavailable for this daemon workspace',
-                    {
-                      errorKind: 'managed_memory_unavailable',
-                      httpStatus: 409,
-                    },
-                  ),
-                );
-              }
-              return;
-            }
             const task = this.workspaceRememberLane.enqueueForget({
               query: trimmedQuery,
               ...(rawScope ? { scope: rawScope } : {}),
@@ -5210,6 +5487,7 @@ export class AcpDispatcher {
         case `${QWEN_METHOD_NS}sessions/archive`: {
           const ids = this.parseSessionIds(params);
           const resolveConflicts = this.parseResolveConflicts(params);
+          const requireIdle = this.parseRequireIdle(params);
           if (this.rejectActiveLiveSessionMutation(conn, id, ids)) return;
           const svc = new SessionService(this.boundWorkspace, {
             onWarning: logSessionArchiveWarning,
@@ -5223,6 +5501,7 @@ export class AcpDispatcher {
                 bridge: this.bridge,
                 coordinator: this.archiveCoordinator,
                 resolveConflicts,
+                requireIdle,
                 assertCanMutate: assertGenerationOpen,
               }),
           );
@@ -5798,9 +6077,25 @@ export class AcpDispatcher {
         const shaped = this.isWorkspaceTrusted()
           ? event
           : redactWorkflowsFromAvailableCommandsEvent(event);
+        let data = shaped.data;
+        if (
+          isObject(data) &&
+          isObject(data['update']) &&
+          data['update']['sessionUpdate'] === 'config_option_update'
+        ) {
+          data = {
+            ...data,
+            update: {
+              ...data['update'],
+              configOptions: this.filterConfigOptions(
+                data['update']['configOptions'],
+              ),
+            },
+          };
+        }
         conn.sendSession(
           sessionId,
-          notification('session/update', shaped.data),
+          notification('session/update', data),
           event.id,
         );
         return;
@@ -5812,7 +6107,24 @@ export class AcpDispatcher {
           toolCall: unknown;
           options: unknown;
         };
-        // A permission request MUST reach a LIVE session stream. Going
+        const toolMeta = isObject(data.toolCall)
+          ? data.toolCall['_meta']
+          : undefined;
+        const pending: PendingClientRequest = {
+          sessionId,
+          bridgeRequestId: data.requestId,
+          kind: 'permission',
+          ...(isObject(toolMeta) &&
+          toolMeta['workflowApproval'] === true &&
+          toolMeta['backgroundWorkflowApproval'] === true
+            ? {
+                backgroundWorkflowApproval: {
+                  originatorClientId: event.originatorClientId,
+                },
+              }
+            : {}),
+        };
+        // A prompt-scoped permission request must reach a live session stream. Going
         // through `sendSession` would (a) silently drop the frame if the
         // session was torn down (lookup-only), or (b) put it behind the
         // pre-attach resource guard, where owner teardown cannot preserve a
@@ -5822,6 +6134,8 @@ export class AcpDispatcher {
         // rather than register+stall.
         const binding = conn.sessions.get(sessionId);
         if (!binding?.stream || binding.stream.isClosed) {
+          // Another binding can still receive the workflow's approval.
+          if (pending.backgroundWorkflowApproval) return;
           // KNOWN GAP (tracked as the §1.7 cross-connection permission
           // follow-up): when this fires DURING a reconnect grace window
           // (`binding.graceTimer` set), the prompt is intentionally kept alive,
@@ -5839,7 +6153,7 @@ export class AcpDispatcher {
             );
           }
           const cancelled = this.cancelAbandonedPermission(
-            { sessionId, bridgeRequestId: data.requestId },
+            pending,
             // Pass the bridge-stamped clientId when the binding still exists
             // (stream closed but session live) — only `undefined` when the
             // session is fully gone.
@@ -5892,11 +6206,7 @@ export class AcpDispatcher {
         }
         if (id === undefined) {
           id = conn.nextId();
-          conn.pending.set(id, {
-            sessionId,
-            bridgeRequestId: data.requestId,
-            kind: 'permission',
-          });
+          conn.pending.set(id, pending);
         }
         // INVARIANT: this sends straight to `binding.stream` (not via
         // `conn.sendSession`) and is safe ONLY because `translateEvent` runs
@@ -5913,6 +6223,23 @@ export class AcpDispatcher {
           }),
           // Carry the bus cursor: a permission request is a real sequenced
           // event, so the client must resume past it.
+          event.id,
+        );
+        return;
+      }
+      case 'permission_resolved': {
+        if (
+          isObject(event.data) &&
+          typeof event.data['requestId'] === 'string'
+        ) {
+          this.dropOwnPendingPermission(conn, event.data['requestId'], true);
+        }
+        conn.sendSession(
+          sessionId,
+          notification(`${QWEN_METHOD_NS}notify`, {
+            kind: event.type,
+            data: event.data,
+          }),
           event.id,
         );
         return;
@@ -5982,20 +6309,42 @@ export class AcpDispatcher {
       );
       return;
     }
+    if (pending.backgroundWorkflowApproval && 'error' in msg) {
+      const originator = pending.backgroundWorkflowApproval.originatorClientId;
+      // An observer's transport error leaves the approval retryable. The
+      // originator's own ACP error ends its request and releases the workflow.
+      // A run launched by a turn with no originator (cron, a runtime goal, a
+      // background report) has no observers: like a turn's own approval, the
+      // error of the connection holding the request ends it, or nothing would.
+      if (
+        pendingConn !== conn ||
+        (originator !== undefined &&
+          conn.sessions.get(pending.sessionId)?.clientId !== originator)
+      ) {
+        writeStderrLine(
+          `qwen serve: /acp background workflow approval error ignored: connection ${logSafe(
+            conn.connectionId.slice(0, 8),
+          )} is not its launching client (requestId ${logSafe(
+            pending.bridgeRequestId,
+          )})`,
+        );
+        return;
+      }
+    }
     // NOTE: do NOT delete the pending entry yet. Keep it until either the
     // bridge vote OR the cancel fallback runs — if both somehow fail, the
     // entry survives so a later session/connection teardown
     // (`abandonPendingForSession`) can still release the mediator.
 
     try {
-      // A client error response is a cancellation; otherwise validate +
+      // A client error response that reaches here cancels the request. Otherwise validate +
       // whitelist the result through the SAME `parsePermissionResponse` the
       // `session/permission` handler uses. This PR widened this path to any
       // co-owning connection (via `findPendingClientRequest`), so without the
       // shared validator a co-owner could inject arbitrary top-level args and
       // extra `outcome` sub-fields straight to the bridge. A malformed result
       // throws here (as the old direct cast made the bridge throw) and is
-      // caught below, where the cancel fallback always releases the mediator.
+      // caught below, where the fallback releases prompt-scoped requests.
       const vote =
         'error' in msg
           ? { outcome: { outcome: 'cancelled' } }
@@ -6012,11 +6361,16 @@ export class AcpDispatcher {
         >[2],
         this.sessionCtx(conn, pending.sessionId, fromLoopback),
       );
-      this.dropResolvedPermission(pendingConn, id);
+      if (pending.backgroundWorkflowApproval) {
+        this.dropOwnPendingPermission(conn, pending.bridgeRequestId);
+      } else {
+        this.dropResolvedPermission(pendingConn, id);
+      }
     } catch (err) {
       writeStderrLine(
         `qwen serve: /acp permission vote failed (${logSafe(pending.sessionId)}): ${logSafe(errMsg(err))}`,
       );
+      if (pending.backgroundWorkflowApproval) return;
       // Cancel BEFORE deleting, and ONLY drop the entry if the cancel
       // landed. If it also failed, keep the entry so teardown's
       // `abandonPendingForSession` can retry — otherwise the mediator is
@@ -6048,6 +6402,11 @@ export class AcpDispatcher {
     binding.promptAbort?.abort();
     const abort = new AbortController();
     binding.promptAbort = abort;
+    const { clientId } = binding;
+    if (conn.preserveRunningPromptsOnDisconnect && clientId !== undefined) {
+      binding.suspendWorkflowApprovals = () =>
+        this.bridge.suspendClientWorkflowApprovals?.(sessionId, clientId);
+    }
     const metadata = params['_meta'] as Record<string, unknown> | undefined;
     const submittedPrompt = metadata?.[SUBMITTED_PROMPT_META_KEY];
     try {
@@ -6092,7 +6451,10 @@ export class AcpDispatcher {
         );
       }
     } finally {
-      if (binding.promptAbort === abort) binding.promptAbort = undefined;
+      if (binding.promptAbort === abort) {
+        binding.promptAbort = undefined;
+        conn.promptSettled(sessionId);
+      }
     }
   }
 

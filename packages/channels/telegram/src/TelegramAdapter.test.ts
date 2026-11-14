@@ -1,6 +1,16 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { rmSync } from 'node:fs';
-import { dirname } from 'node:path';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { TelegramChannel } from './TelegramAdapter.js';
 import type {
   ChannelAgentBridge,
@@ -145,7 +155,7 @@ function createChannel(
     { ...config, ...configOverrides },
     {} as ChannelAgentBridge,
     {
-      router: router as never,
+      router: { setChannelRotation: vi.fn(), ...(router as object) } as never,
     },
   );
 }
@@ -195,6 +205,17 @@ function installFakeBot(channel: TelegramChannel): {
 }
 
 describe('TelegramChannel', () => {
+  const qwenHome = mkdtempSync(join(tmpdir(), 'telegram-channel-home-'));
+
+  beforeAll(() => {
+    vi.stubEnv('QWEN_HOME', qwenHome);
+  });
+
+  afterAll(() => {
+    vi.unstubAllEnvs();
+    rmSync(qwenHome, { recursive: true, force: true });
+  });
+
   beforeEach(() => {
     vi.useFakeTimers();
   });
