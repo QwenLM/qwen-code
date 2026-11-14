@@ -53285,6 +53285,81 @@ describe('settings-derived theme and language (#11955)', () => {
     expect(onLanguageResolved).toHaveBeenCalledWith('zh-CN');
   });
 
+  it('resolves general.language and ui.theme from settings when no workspaces are present (#16398)', async () => {
+    mockWorkspace.capabilities = {
+      workspaces: [],
+      features: ['standalone_sessions_v1'],
+    };
+    testState.settings = [languageSetting('ru'), themeSetting('Qwen Light')];
+    const onLanguageResolved = vi.fn();
+    const onThemeResolved = vi.fn();
+    const { container } = renderApp({ onLanguageResolved, onThemeResolved });
+    await flush();
+
+    expect(testState.latestSettingsHookOptions).toEqual({
+      autoLoad: true,
+      enabled: true,
+    });
+    expect(testState.latestProvidersHookOptions).toEqual({
+      autoLoad: false,
+      enabled: false,
+    });
+
+    expect(
+      container.querySelector('[data-web-shell-root]')?.getAttribute('lang'),
+    ).toBe('ru');
+    expect(onLanguageResolved).toHaveBeenCalledWith('ru');
+    expect(
+      container
+        .querySelector('[data-web-shell-root]')
+        ?.classList.contains('dark'),
+    ).toBe(false);
+    expect(onThemeResolved).toHaveBeenCalledWith('light');
+
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    expect(testState.latestProvidersHookOptions).toEqual({
+      autoLoad: true,
+      enabled: true,
+    });
+  });
+
+  it('resolves settings without a workspace even when no capability advertises settings', async () => {
+    mockWorkspace.capabilities = {
+      workspaces: [],
+      features: [],
+    } as unknown as typeof mockWorkspace.capabilities;
+    testState.settings = [languageSetting('ru'), themeSetting('Qwen Light')];
+    const onLanguageResolved = vi.fn();
+    const onThemeResolved = vi.fn();
+    const { container } = renderApp({ onLanguageResolved, onThemeResolved });
+    await flush();
+
+    expect(testState.latestSettingsHookOptions).toEqual({
+      autoLoad: true,
+      enabled: true,
+    });
+    expect(
+      container.querySelector('[data-web-shell-root]')?.getAttribute('lang'),
+    ).toBe('ru');
+    expect(onLanguageResolved).toHaveBeenCalledWith('ru');
+    expect(
+      container
+        .querySelector('[data-web-shell-root]')
+        ?.classList.contains('dark'),
+    ).toBe(false);
+    expect(onThemeResolved).toHaveBeenCalledWith('light');
+
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    expect(testState.latestProvidersHookOptions).toEqual({
+      autoLoad: false,
+      enabled: false,
+    });
+  });
+
   it('lets an explicit language prop win over general.language', async () => {
     testState.settings = [languageSetting('zh')];
     const onLanguageResolved = vi.fn();
