@@ -1179,4 +1179,19 @@ describe('managed DingTalk adapter review fixes', () => {
     // adapter must reject so a supervisor can restart it, not park deaf.
     await expect(connecting).rejects.toThrow('stopped during connection');
   });
+
+  it('a frame redelivered while its claim is pending is not staged twice (R10-3)', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    fake.push('m1', messageData({ msgId: 'm1' }));
+    // The claim is staged (pending) but not yet submitted — no tick has run.
+    const state = (adapter as unknown as { state: { pending: unknown[] } })
+      .state;
+    expect(state.pending).toHaveLength(1);
+    // The provider redelivers the same frame (its admission answer was lost).
+    fake.push('m1', messageData({ msgId: 'm1' }));
+    expect(state.pending).toHaveLength(1); // not staged a second time
+    await adapter.tick();
+    expect(plane.submit).toHaveLength(1); // submitted exactly once
+    await adapter.disconnect();
+  });
 });

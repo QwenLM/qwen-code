@@ -382,7 +382,13 @@ export class ManagedDingtalkAdapter {
       skip();
       return;
     }
-    if (state.recent.includes(eventId)) {
+    // Dedupe against both the settled window and the in-flight claims: a frame
+    // redelivered while its claim is still pending (its admission answer was
+    // lost) must not be staged a second time before recent is updated.
+    if (
+      state.recent.includes(eventId) ||
+      state.pending.some((entry) => entry.eventId === eventId)
+    ) {
       return;
     }
     if (!this.senderAllowed(senderId)) {
