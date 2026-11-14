@@ -1400,6 +1400,148 @@ describe('ToolConfirmationMessage', () => {
     });
   });
 
+  // A body taller than the dialog's height budget pushes the question line and
+  // the option list out of the viewport, so the user decides blind.
+  describe('keeps the question and options inside the height budget', () => {
+    const longPrompt = Array.from(
+      { length: 40 },
+      (_, i) => `finding ${i + 1}`,
+    ).join('\n\n');
+
+    it('caps a long inline-Markdown info prompt', () => {
+      const availableTerminalHeight = 12;
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            type: 'info',
+            title: 'Confirm',
+            prompt: longPrompt,
+            hideAlwaysAllow: true,
+            onConfirm: vi.fn(),
+          }}
+          config={mockConfig}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={50}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      expect(frame).toContain('finding 1');
+      expect(frame).not.toContain('finding 40');
+      expect(frame).toContain('Do you want to proceed?');
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain('No, suggest changes (esc)');
+    });
+
+    it('caps a long URLs list', () => {
+      const availableTerminalHeight = 12;
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            type: 'info',
+            title: 'Confirm Web Fetch',
+            prompt: 'fetch every page below',
+            urls: Array.from({ length: 30 }, (_, i) => `https://e.com/${i}`),
+            hideAlwaysAllow: true,
+            onConfirm: vi.fn(),
+          }}
+          config={mockConfig}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={50}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      expect(frame).toContain('fetch every page below');
+      expect(frame).toContain('Do you want to proceed?');
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain('No, suggest changes (esc)');
+    });
+
+    it('caps long MCP server and tool labels', () => {
+      const availableTerminalHeight = 12;
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            type: 'mcp',
+            title: 'Confirm MCP tool',
+            serverName: 'server-'.repeat(40),
+            toolName: 'tool-'.repeat(40),
+            toolDisplayName: 'a very long tool display name',
+            hideAlwaysAllow: true,
+            onConfirm: vi.fn(),
+          }}
+          config={mockConfig}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={50}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      expect(frame).toContain('Allow execution of MCP tool');
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain('No, suggest changes (esc)');
+    });
+
+    it('caps the body of a compact confirmation', () => {
+      const availableTerminalHeight = 8;
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            type: 'info',
+            title: 'Confirm',
+            prompt: longPrompt,
+            hideAlwaysAllow: true,
+            onConfirm: vi.fn(),
+          }}
+          config={mockConfig}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={50}
+          compactMode={true}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      expect(frame).toContain('Do you want to proceed?');
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain('No');
+    });
+
+    it('leaves a body that fits the budget untouched', () => {
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            type: 'info',
+            title: 'Confirm',
+            prompt: 'Delete node_modules?',
+            hideAlwaysAllow: true,
+            onConfirm: vi.fn(),
+          }}
+          config={mockConfig}
+          availableTerminalHeight={12}
+          contentWidth={50}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('Delete node_modules?');
+      expect(frame).toContain('Do you want to proceed?');
+      expect(frame).toContain('Yes, allow once');
+    });
+  });
+
   it.each([true, false])(
     'handles a right-click and keys in one stdin chunk (menu items: %s)',
     async (hasItems) => {
