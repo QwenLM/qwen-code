@@ -51,7 +51,7 @@ function showMemoryAction(config: Config | null): SlashCommandActionReturn {
       messageType: 'info',
       content: t(
         'Loaded memory from {{count}} context file(s).\n\nCurrent combined memory content:\n```markdown\n{{content}}\n```',
-        { count: fileCount, content: combined },
+        { count: String(fileCount), content: combined },
       ),
     };
   }
