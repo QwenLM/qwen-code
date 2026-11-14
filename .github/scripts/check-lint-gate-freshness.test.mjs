@@ -863,8 +863,9 @@ test('a base ref containing a hash is URI-encoded in the tree path', async () =>
   );
   // On this path the base ref reaches three URLs, not just the tree one: the
   // root `.prettierignore` contents `?ref=` read and the commits `&sha=` lookup
-  // interpolate it too. (A fourth encoder exists in fetchGateFilePair, but the
-  // eslint path feeds it hex SHAs, never a branch name.) The fixture decodes
+  // interpolate it too. (Two encoders sit outside this path: the ci.yml
+  // narrowing's `?ref=` takes a branch name and is pinned by its own case
+  // below; `fetchGateFilePair`'s takes hex SHAs.) The fixture decodes
   // every recorded path before matching, so deleting either of the other two
   // encoders would otherwise stay green. A raw '#' there is worse than a wrong
   // tree: the commits lookup has no try of its own, so its throw reaches
@@ -899,6 +900,15 @@ test('a base ref containing a percent is URI-encoded in the tree path', async ()
   assert.ok(
     calls.some((c) => c.includes('/git/trees/fix%25201?recursive=1')),
     `expected an encoded tree ref, got ${JSON.stringify(calls)}`,
+  );
+  // The hash case's scan can only ever see a raw '#', so without this the
+  // commits `&sha=` encoder has no '%' witness: narrowing it to escape only
+  // '#' and '/' stays green while sending a '%'-bearing ref as another ref.
+  // 'fix%25201' does not contain 'fix%201', so correct encoding cannot trip it.
+  assert.deepEqual(
+    calls.filter((c) => c.includes('fix%201')),
+    [],
+    'every URL embedding the base ref must encode it',
   );
 });
 
@@ -1134,7 +1144,13 @@ const realCi = readFileSync(join(repoRoot, CI_FILE), 'utf8');
 // is a bug, not a match. A second compare is refused: the narrowing must reuse
 // the containment compare, because a fresh `base...head` one is ~4 MB here and
 // timed out against the live API.
-function ciFetch(baseText, branchText, calls = [], mergeBase = MERGE_BASE_SHA) {
+function ciFetch(
+  baseText,
+  branchText,
+  calls = [],
+  mergeBase = MERGE_BASE_SHA,
+  baseRef = 'main',
+) {
   return {
     fetchJson: async (path) => {
       calls.push(path);
@@ -1150,7 +1166,7 @@ function ciFetch(baseText, branchText, calls = [], mergeBase = MERGE_BASE_SHA) {
     fetchText: async (path) => {
       calls.push(path);
       const prefix = `/repos/QwenLM/qwen-code/contents/${CI_FILE}?ref=`;
-      if (path === `${prefix}main`) return baseText;
+      if (path === `${prefix}${encodeURIComponent(baseRef)}`) return baseText;
       if (path === `${prefix}${MERGE_BASE_SHA}`) return branchText;
       throw new Error(`unexpected text path: ${path}`);
     },
@@ -1469,6 +1485,29 @@ test('the gate is compared at the merge base, not at the head', async () => {
     ...ciFetch(realCi, realCi),
   });
   assert.deepEqual(stale, []);
+});
+
+test('the ci.yml narrowing encodes a hash-bearing base ref too', async () => {
+  // narrowsToUnchangedLintSlice reads the base side at baseRef, so its `?ref=`
+  // takes a branch name just like the prettier path does. Nothing else in this
+  // file drove that path with a ref needing encoding, so deleting its encoder
+  // left every case green — the same silent wrong-ref read, one narrowing over.
+  const calls = [];
+  const stale = await findStaleGateFiles({
+    ...CI_OPTS,
+    baseRef: 'fix#1',
+    ...ciFetch(realCi, realCi, calls, MERGE_BASE_SHA, 'fix#1'),
+  });
+  assert.deepEqual(stale, []);
+  assert.ok(
+    calls.some((c) => c.includes('?ref=fix%231')),
+    `expected an encoded contents ref, got ${JSON.stringify(calls)}`,
+  );
+  assert.deepEqual(
+    calls.filter((c) => c.includes('fix#1')),
+    [],
+    'every URL embedding the base ref must encode it',
+  );
 });
 
 test('a comment-only base-side edit does not stale the branch', () => {
