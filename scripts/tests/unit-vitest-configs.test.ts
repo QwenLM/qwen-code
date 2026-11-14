@@ -434,6 +434,9 @@ describe('shared-pool test timeout', () => {
     // `expectOffPoolCeilings` asserts it, node-repl/sdk-typescript/scripts/tests
     // carry flat ceilings, and qwen-live's ceiling is unconditional.
     vi.stubEnv('RUNNER_NAME', 'ubuntu-latest-runner');
+    // cli also keys its ceiling on RUNNER_OS === 'macOS'; drop the ambient
+    // value so this arm reads the off-macOS figure even on a macOS runner.
+    vi.stubEnv('RUNNER_OS', undefined);
     vi.resetModules();
     try {
       await expectOffPoolCeilings();
@@ -453,6 +456,7 @@ describe('shared-pool test timeout', () => {
     // passes the on-pool floor and the foreign-string off-pool sample above;
     // it must fail here, on the state the configs actually see off CI.
     vi.stubEnv('RUNNER_NAME', undefined);
+    vi.stubEnv('RUNNER_OS', undefined);
     vi.resetModules();
     try {
       await expectOffPoolCeilings();
