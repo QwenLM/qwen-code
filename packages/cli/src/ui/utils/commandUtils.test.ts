@@ -27,6 +27,12 @@ import { CommandKind, type SlashCommand } from '../commands/types.js';
 // Mock child_process
 vi.mock('child_process');
 
+// Keep the pre-existing platform matrix deterministic: the native fallback is
+// covered by its own suite, not by these OSC/xclip expectation tests.
+vi.mock('./native-clipboard.js', () => ({
+  copyTextViaNativeClipboard: vi.fn().mockResolvedValue(false),
+}));
+
 // Mock process.platform for platform-specific tests
 const mockProcess = vi.hoisted(() => ({
   platform: 'darwin',
@@ -410,7 +416,7 @@ describe('commandUtils', () => {
 
         try {
           await expect(copyToClipboard('failure')).rejects.toThrow(
-            /wl-copy failed \("wl-copy not found"\); xclip\/xsel not found/,
+            /wl-copy failed \("wl-copy not found"\); xclip\/xsel and native clipboard addon unavailable/,
           );
           expect(mockSpawn).toHaveBeenCalledTimes(3);
         } finally {
@@ -683,7 +689,7 @@ describe('commandUtils', () => {
         const xselErrorMsg = `'xsel' exited with code ${exitCode}${errorMsg ? `: ${errorMsg}` : ''}`;
 
         await expect(copyToClipboard(testText)).rejects.toThrow(
-          `Clipboard unavailable: xclip/xsel failed ("${xclipErrorMsg}", "${xselErrorMsg}") and OSC 52 requires a TTY. Try running inside a terminal emulator.`,
+          `Clipboard unavailable: xclip/xsel failed ("${xclipErrorMsg}", "${xselErrorMsg}"), the native clipboard addon is unavailable, and OSC 52 requires a TTY. Try running inside a terminal emulator.`,
         );
 
         expect(mockSpawn).toHaveBeenCalledTimes(2);

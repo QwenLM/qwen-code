@@ -44,7 +44,13 @@ import { isValidElement, type ReactNode } from 'react';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { act, render, renderHook, screen } from '@testing-library/react';
+import {
+  act,
+  fireEvent,
+  render,
+  renderHook,
+  screen,
+} from '@testing-library/react';
 import { OpenTuiApp } from './opentui-app-shell.js';
 import {
   getDialogMaxHeight,
@@ -148,6 +154,11 @@ const mocks = vi.hoisted(() => {
     },
     loadingProps: null as Record<string, unknown> | null,
     keyboardHandlers: [] as Array<(key: unknown) => void>,
+    readClipboardText: vi.fn(async (): Promise<string | null> => null),
+    selectionText: null as string | null,
+    selectionContainer: null as Element | null,
+    selectionRenderables: null as Element[] | null,
+    clearSelection: vi.fn(),
     exitInProgress: false,
     /** Runs while a dispatched command is still awaiting its outcome. */
     onHandle: null as null | ((text: string) => void),
@@ -181,10 +192,14 @@ const mocks = vi.hoisted(() => {
         ),
       );
       if (type === 'box' || type === 'text') {
+        const onMouseDown = (props as Record<string, unknown> | null)?.[
+          'onMouseDown'
+        ] as React.MouseEventHandler | undefined;
         return React.createElement(
           type === 'box' ? 'div' : 'span',
           {
             ...(key === undefined ? {} : { key }),
+            ...(onMouseDown ? { onMouseDown } : {}),
             'data-p': captured,
           },
           children,
@@ -212,6 +227,23 @@ vi.mock('@opentui/react', () => ({
   useRenderer: () => ({
     addInputHandler: () => {},
     removeInputHandler: () => {},
+    on: () => {},
+    off: () => {},
+    getSelectionContainer: () =>
+      mocks.state.selectionText !== null
+        ? (mocks.state.selectionContainer ??
+          document.querySelector('scrollbox'))
+        : null,
+    getSelection: () =>
+      mocks.state.selectionText !== null
+        ? {
+            getSelectedText: () => mocks.state.selectionText,
+            selectedRenderables: mocks.state.selectionRenderables ?? [
+              document.querySelector('scrollbox')!,
+            ],
+          }
+        : null,
+    clearSelection: mocks.state.clearSelection,
   }),
 }));
 vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
@@ -225,7 +257,7 @@ vi.mock('@qwen-code/qwen-code-core/qwen/subscription-session.js', () => ({
 }));
 vi.mock('@opentui/core', () => ({
   SyntaxStyle: { fromStyles: () => ({}) },
-  MouseButton: { LEFT: 0 },
+  MouseButton: { LEFT: 0, RIGHT: 2 },
 }));
 
 // Slash dispatcher: a submission resolves to the next queued handleResults
@@ -313,6 +345,10 @@ vi.mock('./live-session.js', async (importOriginal) => {
 });
 
 // Child widgets: string markers that also record their props for assertions.
+vi.mock('../utils/clipboardUtils.js', async (importOriginal) => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  readClipboardText: () => mocks.state.readClipboardText(),
+}));
 vi.mock('./shell-mode.js', () => ({
   executeUserShell: mocks.state.executeUserShell,
 }));
@@ -552,6 +588,11 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.footerProps = null;
     mocks.state.loadingProps = null;
     mocks.state.keyboardHandlers.length = 0;
+    mocks.state.selectionText = null;
+    mocks.state.selectionContainer = null;
+    mocks.state.selectionRenderables = null;
+    mocks.state.clearSelection.mockClear();
+    mocks.state.readClipboardText.mockReset().mockResolvedValue(null);
     mocks.state.exitInProgress = false;
     mocks.state.onHandle = null;
     mocks.state.holdHandleOn = null;
@@ -5058,6 +5099,10 @@ describe('OpenTuiApp approval-mode cycling (F-2)', () => {
     mocks.state.pendingHookLines = null;
     mocks.state.hooksAddInfo = null;
     mocks.state.handleProjectHooksApprovalSelect.mockClear();
+    mocks.state.selectionText = null;
+    mocks.state.selectionContainer = null;
+    mocks.state.selectionRenderables = null;
+    mocks.state.clearSelection.mockClear();
   });
 
   function fakeConfig(
@@ -5098,7 +5143,11 @@ describe('OpenTuiApp approval-mode cycling (F-2)', () => {
     if (!handler) {
       throw new Error('shell registered no keyboard handler');
     }
-    const event = { preventDefault: vi.fn(), ...key };
+    const event = {
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn(),
+      ...key,
+    };
     await act(async () => {
       handler(event);
     });
@@ -5122,6 +5171,237 @@ describe('OpenTuiApp approval-mode cycling (F-2)', () => {
     await settle();
     await pressKey({ name: 'tab', sequence: '\t' });
     expect(writes).toEqual([]);
+  });
+
+  it('scrolls exactly one viewport page on PageUp and PageDown', async () => {
+    renderApp();
+    await settle();
+    const scrollbox = document.querySelector('scrollbox') as HTMLElement & {
+      scrollBy: ReturnType<typeof vi.fn>;
+    };
+    const scrollBy = vi.fn();
+    scrollbox.scrollBy = scrollBy;
+
+    const up = await pressKey({ name: 'pageup' });
+    expect(scrollBy).toHaveBeenLastCalledWith(-1, 'viewport');
+    expect(up.preventDefault).toHaveBeenCalledTimes(1);
+    expect(up.stopPropagation).toHaveBeenCalledTimes(1);
+
+    const down = await pressKey({ name: 'pagedown' });
+    expect(scrollBy).toHaveBeenLastCalledWith(1, 'viewport');
+    expect(down.preventDefault).toHaveBeenCalledTimes(1);
+
+    // The shared PAGE_UP/PAGE_DOWN matchers also accept Ctrl.
+    await pressKey({ name: 'pageup', ctrl: true });
+    expect(scrollBy).toHaveBeenLastCalledWith(-1, 'viewport');
+  });
+
+  it('jumps to the top and bottom on Ctrl+Home and Ctrl+End', async () => {
+    renderApp();
+    await settle();
+    const scrollbox = document.querySelector('scrollbox') as HTMLElement & {
+      scrollHeight: number;
+      scrollTo: ReturnType<typeof vi.fn>;
+    };
+    Object.defineProperty(scrollbox, 'scrollHeight', {
+      value: 500,
+      configurable: true,
+    });
+    const scrollTo = vi.fn();
+    scrollbox.scrollTo = scrollTo;
+
+    const home = await pressKey({ name: 'home', ctrl: true });
+    expect(scrollTo).toHaveBeenLastCalledWith(0);
+    expect(home.preventDefault).toHaveBeenCalledTimes(1);
+
+    const end = await pressKey({ name: 'end', ctrl: true });
+    expect(scrollTo).toHaveBeenLastCalledWith(500);
+    expect(end.preventDefault).toHaveBeenCalledTimes(1);
+  });
+
+  it('pastes the clipboard on right-click without a selection', async () => {
+    const pasteClipboard = vi.fn();
+    renderApp({
+      composerHandle: {
+        current: {
+          getText: () => '',
+          setText: () => {},
+          pasteClipboard,
+        },
+      },
+    });
+    await settle();
+
+    fireEvent.mouseDown(document.querySelector('scrollbox')!, { button: 2 });
+    expect(pasteClipboard).toHaveBeenCalledTimes(1);
+    expect(mocks.state.clearSelection).not.toHaveBeenCalled();
+  });
+
+  it('clears a transcript selection on right-click instead of pasting', async () => {
+    mocks.state.selectionText = 'selected text';
+    const pasteClipboard = vi.fn();
+    renderApp({
+      composerHandle: {
+        current: {
+          getText: () => '',
+          setText: () => {},
+          pasteClipboard,
+        },
+      },
+    });
+    await settle();
+
+    fireEvent.mouseDown(document.querySelector('scrollbox')!, { button: 2 });
+    expect(mocks.state.clearSelection).toHaveBeenCalledTimes(1);
+    expect(pasteClipboard).not.toHaveBeenCalled();
+  });
+
+  it('clears a cross-region selection when a selected renderable stays in the transcript', async () => {
+    const pasteClipboard = vi.fn();
+    renderApp({
+      composerHandle: {
+        current: {
+          getText: () => '',
+          setText: () => {},
+          pasteClipboard,
+        },
+      },
+    });
+    await settle();
+    const scrollbox = document.querySelector('scrollbox')!;
+    mocks.state.selectionText = 'selected text';
+    mocks.state.selectionContainer = document.body;
+    mocks.state.selectionRenderables = [scrollbox];
+
+    fireEvent.mouseDown(scrollbox, { button: 2 });
+    expect(mocks.state.clearSelection).toHaveBeenCalledTimes(1);
+    expect(pasteClipboard).not.toHaveBeenCalled();
+  });
+
+  it('pastes after a plain left-click leaves a zero-length transcript selection', async () => {
+    const pasteClipboard = vi.fn();
+    renderApp({
+      composerHandle: {
+        current: {
+          getText: () => '',
+          setText: () => {},
+          pasteClipboard,
+        },
+      },
+    });
+    await settle();
+    const scrollbox = document.querySelector('scrollbox')!;
+    // OpenTUI keeps the clicked text's container as the selection container
+    // after a click without a drag, but nothing is selected.
+    mocks.state.selectionText = '';
+    mocks.state.selectionContainer = scrollbox;
+    mocks.state.selectionRenderables = [];
+
+    fireEvent.mouseDown(scrollbox, { button: 2 });
+    expect(pasteClipboard).toHaveBeenCalledTimes(1);
+    expect(mocks.state.clearSelection).not.toHaveBeenCalled();
+  });
+
+  it('pastes when every selected renderable is outside the transcript', async () => {
+    const pasteClipboard = vi.fn();
+    renderApp({
+      composerHandle: {
+        current: {
+          getText: () => '',
+          setText: () => {},
+          pasteClipboard,
+        },
+      },
+    });
+    await settle();
+    const footer = screen.getByText('footer');
+    mocks.state.selectionText = 'footer text';
+    mocks.state.selectionContainer = footer;
+    mocks.state.selectionRenderables = [footer];
+
+    fireEvent.mouseDown(footer, { button: 2 });
+    expect(pasteClipboard).toHaveBeenCalledTimes(1);
+    expect(mocks.state.clearSelection).not.toHaveBeenCalled();
+  });
+
+  it('pastes into a focused foreground shell on right-click, not the chat draft', async () => {
+    const owner = { callId: 'shell', pid: 4301, turn: 1 };
+    const control = {
+      foregroundShell: owner,
+      promoteShellToBackground: vi.fn(() => false),
+      writeShellInput: vi.fn((_owner: typeof owner, _input: string) => true),
+      resizeShell: vi.fn(() => true),
+      scrollShell: vi.fn(() => true),
+    };
+    const pasteClipboard = vi.fn();
+    mocks.state.readClipboardText.mockResolvedValue('ls -la');
+    renderApp({
+      config: {
+        ...CONFIG,
+        getShellExecutionConfig: () => ({}),
+        setShellExecutionConfig: vi.fn(),
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+        setApprovalMode: vi.fn(),
+      } as unknown as Config,
+      foregroundShellControl: control,
+      composerHandle: {
+        current: { getText: () => '', setText: () => {}, pasteClipboard },
+      },
+    });
+    await settle();
+    act(() => {
+      (mocks.state.inputProps!['onShellKey'] as (key: unknown) => boolean)({
+        name: 'f',
+        sequence: '\x06',
+        ctrl: true,
+        shift: false,
+        preventDefault: vi.fn(),
+        stopPropagation: vi.fn(),
+      });
+    });
+
+    fireEvent.mouseDown(document.querySelector('scrollbox')!, { button: 2 });
+    await settle();
+
+    expect(control.writeShellInput).toHaveBeenLastCalledWith(owner, 'ls -la');
+    expect(pasteClipboard).not.toHaveBeenCalled();
+  });
+
+  it('pastes the clipboard on right-click outside the transcript', async () => {
+    const pasteClipboard = vi.fn();
+    renderApp({
+      composerHandle: {
+        current: {
+          getText: () => '',
+          setText: () => {},
+          pasteClipboard,
+        },
+      },
+    });
+    await settle();
+
+    fireEvent.mouseDown(screen.getByText('footer'), { button: 2 });
+    expect(pasteClipboard).toHaveBeenCalledTimes(1);
+    expect(mocks.state.clearSelection).not.toHaveBeenCalled();
+  });
+
+  it('leaves PageUp/PageDown to an open dialog', async () => {
+    renderApp();
+    await settle();
+    const scrollbox = document.querySelector('scrollbox') as HTMLElement & {
+      scrollBy: ReturnType<typeof vi.fn>;
+    };
+    const scrollBy = vi.fn();
+    scrollbox.scrollBy = scrollBy;
+
+    mocks.state.handleResult = {
+      kind: 'open_dialog',
+      request: { dialog: 'help' },
+    } satisfies OpenTuiDispatchOutcome;
+    await submit('/help');
+
+    await pressKey({ name: 'pageup' });
+    expect(scrollBy).not.toHaveBeenCalled();
   });
 
   it('still cycles while a dialog has the composer unmounted', async () => {

@@ -270,6 +270,13 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // `cd <untrusted repo> && qwen serve` into code execution as the daemon
   // via an attacker-chosen ACP entrypoint, for every workspace's sessions.
   'QWEN_CLI_ENTRY',
+  // QWEN_NODE_BINARY names the Node the native clipboard helper spawns, and
+  // NVM_BIN is where that resolver looks next under Bun. A project `.env` or
+  // settings.env fixing either runs an attacker-chosen binary on the first
+  // clipboard read or copy fallback. The npm Bun handoff still passes
+  // QWEN_NODE_BINARY through the child env directly.
+  'QWEN_NODE_BINARY',
+  'NVM_BIN',
   // QWEN_CDP_MCP_COMMAND is the command the daemon spawns as the
   // browser-automation MCP adapter, and QWEN_SERVE_CDP_TUNNEL_OVER_WS
   // switches that tunnel surface on. A project `.env` or settings.env fixing

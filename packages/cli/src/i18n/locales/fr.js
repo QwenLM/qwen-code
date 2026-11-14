@@ -2414,4 +2414,7 @@ export default {
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     'Les modifications du gestionnaire de compétences automatiques ne sont disponibles que dans les espaces de travail approuvés. Marquez ce dossier comme approuvé avec `/trust`, puis réessayez.',
   'Kept model as {{model}}': 'Modèle conservé : {{model}}',
+  'Jump to bottom (ctrl+End)': 'Aller en bas (Ctrl+Fin)',
+  'Copied {{count}} chars': '{{count}} caractères copiés',
+  'Copied 1 char': '1 caractère copié',
 };

@@ -2881,4 +2881,7 @@ export default {
     '提示：用 /btw 顺带问一个旁路问题，不打断当前工作',
   '(The model tried to call {{tool}} instead of answering directly. Try rephrasing or ask in the main conversation.)':
     '（模型试图调用 {{tool}}，而没有直接回答。请换个问法，或在主对话中提问。）',
+  'Jump to bottom (ctrl+End)': '跳到底部（Ctrl+End）',
+  'Copied {{count}} chars': '已复制 {{count}} 个字符',
+  'Copied 1 char': '已复制 1 个字符',
 };

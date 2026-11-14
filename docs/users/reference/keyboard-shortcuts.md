@@ -134,6 +134,17 @@ When `ui.useTerminalBuffer` is on and `ui.mouseTracking` is enabled (the default
 
 A **plain single click** on an http(s) OSC 8 hyperlink in the viewport opens it in your default browser. Non-http(s) links (for example `mailto:`) are copied to the clipboard instead. **Right-click** on a link or an active text selection opens an in-app context menu with **Open Link**, **Copy Link Address**, or **Copy Selection**. The menu can be navigated with the arrow keys, executed with `Enter`, and dismissed with `Esc` or by clicking outside it. Set `ui.mouseTracking` to `false` to stop qwen-code from capturing the mouse entirely; that restores the terminal's native right-click menu, OSC 8 hyperlink clicks, and click-and-drag selection, but the in-app viewport no longer responds to the mouse, so use the keyboard shortcuts above to scroll.
 
+With the OpenTUI renderer (`QWEN_TUI_RENDERER=opentui`) the transcript is always an in-app viewport, so the following applies regardless of `ui.useTerminalBuffer` (it still requires `ui.mouseTracking`). There is no context menu: right-click clears a transcript selection, or pastes the clipboard into the composer when no transcript selection exists (into a focused foreground shell instead, when one owns input). Right-click is ignored while a dialog, tool confirmation, or approval prompt is open. A completed selection is copied from any region (transcript, footer, composer, dialogs), not only the transcript; a copy made while a dialog or confirmation is open shows no confirmation. `PgUp`/`PgDn` and `Ctrl+Home`/`Ctrl+End` scroll the transcript the same way. A right-click after a terminal-native `Shift`+drag selection still pastes into the composer; set `ui.mouseTracking` to `false` to give the right-click menu back to the terminal.
+
+### Terminal support for mouse and clipboard
+
+Terminal support varies, and qwen-code cannot compensate for a terminal that never delivers mouse events:
+
+- **Apple Terminal.app** has **View > Allow Mouse Reporting**, but in our macOS testing its mouse reporting did not deliver the drag/right-click events OpenTUI needs. In that setup, dragging uses Terminal.app's own selection, and copy/paste stay native (`Cmd+C` / `Cmd+V`); use `Ctrl+V` to paste through qwen-code, which runs the same image-first path as the in-app right-click. If your Terminal version and settings do forward those events, the in-app selection, right-click clear, and right-click paste work as described above; otherwise keep using the native selection and `Ctrl+V`.
+- **iTerm2** forwards drags, so selection auto-copy works, but it opens its own context menu on right-click even while mouse reporting is on. Use the menu's **Paste** or `Ctrl+V` in place of the in-app right-click paste; the menu's Paste only carries text, while `Ctrl+V` also handles clipboard images.
+
+The in-app right-click paste requires a terminal that forwards right-click events to the application.
+
 ### tmux trackpad scrolling
 
 Inside tmux, some terminals translate trackpad or wheel gestures into plain `Up Arrow` and `Down Arrow` sequences before qwen-code sees them. Those bytes are identical to real arrow-key presses, so qwen-code cannot tell whether you meant to scroll the viewport or navigate prompt history.

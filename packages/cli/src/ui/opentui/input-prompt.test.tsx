@@ -3854,6 +3854,21 @@ describe('OpenTuiInputPrompt editing ownership and recall', () => {
     },
   );
 
+  it('pastes clipboard text through the mounted handle (shell right-click)', async () => {
+    mocks.state.clipboardHasImage.mockResolvedValue(false);
+    mocks.state.readClipboardText.mockResolvedValue('pasted via handle');
+    const composerHandle: OpenTuiComposerSlot = { current: null };
+    renderPrompt({ composerHandle });
+    await waitFor(() => expect(composerHandle.current).not.toBeNull());
+
+    act(() => composerHandle.current!.pasteClipboard!());
+
+    await waitFor(() =>
+      expect(currentEditor().plainText).toBe('pasted via handle'),
+    );
+    expect(mocks.state.readClipboardText).toHaveBeenCalledTimes(1);
+  });
+
   it('puts a prompt handed back through the mounted handle ahead of the draft', async () => {
     const composerHandle: OpenTuiComposerSlot = { current: null };
     renderPrompt({ composerHandle });

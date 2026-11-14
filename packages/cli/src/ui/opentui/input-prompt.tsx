@@ -543,6 +543,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     submittedPrompt: string;
   } | null>(null);
   const clipboardUnavailableShownRef = useRef(false);
+  const pasteClipboardRef = useRef<() => void>(() => {});
   const showAttachments = useCallback(
     () => setAttachments([...draftRef.current.attachments]),
     [],
@@ -1119,6 +1120,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       },
       cancelTurn,
       submitDraft,
+      pasteClipboard: () => pasteClipboardRef.current(),
       invalidateImportedInput,
       restoreSubmission: (submission) => restoreSubmission(submission, '\n'),
     };
@@ -1240,16 +1242,9 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
 
   const handleClipboardImage = useCallback(() => {
     queuePaste(async (notify, isCurrent) => {
+      let imageUnavailable = false;
       const reportUnavailable = () => {
-        if (clipboardUnavailableShownRef.current) return;
-        clipboardUnavailableShownRef.current = true;
-        notify(
-          t(
-            process.platform === 'linux'
-              ? 'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.'
-              : 'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
-          ),
-        );
+        imageUnavailable = true;
       };
       const hasImage = await clipboardHasImage(reportUnavailable);
       if (!isCurrent()) return { paths: [] };
@@ -1263,9 +1258,29 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       }
       if (!isCurrent()) return { paths: [] };
       const text = await readClipboardText();
-      return { paths: [], ...(text ? { fallback: text } : {}) };
+      if (text) {
+        return { paths: [], fallback: text };
+      }
+      // The native text fallback above can succeed without wl-paste/xclip.
+      // Only warn about the missing image backend when there is no text to
+      // paste either.
+      if (imageUnavailable && !clipboardUnavailableShownRef.current) {
+        clipboardUnavailableShownRef.current = true;
+        notify(
+          t(
+            process.platform === 'linux'
+              ? 'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.'
+              : 'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
+          ),
+        );
+      }
+      return { paths: [] };
     });
   }, [queuePaste]);
+
+  useEffect(() => {
+    pasteClipboardRef.current = handleClipboardImage;
+  }, [handleClipboardImage]);
 
   const promoteImagePaths = useCallback(
     (paths: string[], original: string) => {

@@ -108,6 +108,9 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
   // NODE_TLS_REJECT_UNAUTHORIZED outcome by addition instead of disable.
   it('excludes entrypoint and trust-anchor keys', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_CLI_ENTRY');
+    // The clipboard helper spawns this Node; NVM_BIN is its next lookup.
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_NODE_BINARY');
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('NVM_BIN');
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('NODE_EXTRA_CA_CERTS');
   });
 

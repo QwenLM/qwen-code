@@ -213,6 +213,7 @@ export function selectNpmBunHandoff({
     return {
       interpreter: { command, runtime: 'bun' },
       childEnv: {
+        QWEN_NODE_BINARY: executableFile(process.execPath),
         [NPM_RUNTIME_CONTEXT]: JSON.stringify({
           node: executableFile(process.execPath),
           bun: command,

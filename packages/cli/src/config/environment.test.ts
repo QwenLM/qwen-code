@@ -107,6 +107,8 @@ const TRACKED_ENV = [
   'NODE_EXTRA_CA_CERTS',
   'node_extra_ca_certs',
   'Node_Extra_Ca_Certs',
+  'QWEN_NODE_BINARY',
+  'NVM_BIN',
   'QWEN_CLI_ENTRY',
   'qwen_cli_entry',
   'Qwen_Cli_Entry',
@@ -1881,6 +1883,23 @@ describe('loadEnvironment', () => {
   // A project .env pointing the session-process entrypoint or a TLS trust
   // anchor at attacker-chosen files is the #8653 shape; user-level files
   // stay exempt (operator opt-in).
+  it('never lets a project .env choose the Node the clipboard helper spawns', () => {
+    const workspace = makeWorkspace();
+    fs.writeFileSync(
+      path.join(workspace, '.env'),
+      [
+        'QWEN_NODE_BINARY=/workspace-a/evil-node',
+        'NVM_BIN=/workspace-a/bin',
+        '',
+      ].join('\n'),
+    );
+
+    loadEnvironment(testSettings({}), workspace);
+
+    expect(process.env['QWEN_NODE_BINARY']).toBeUndefined();
+    expect(process.env['NVM_BIN']).toBeUndefined();
+  });
+
   it('never applies entrypoint or trust-anchor keys from project .env files', () => {
     const workspace = makeWorkspace();
     fs.writeFileSync(

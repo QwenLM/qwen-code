@@ -2173,4 +2173,7 @@ export default {
   'Auto-skill curator changes are only available in trusted workspaces. Trust this folder via `/trust` and try again.':
     '自動スキル管理による変更は信頼済みのワークスペースでのみ利用できます。`/trust` でこのフォルダーを信頼してから、もう一度お試しください。',
   'Kept model as {{model}}': 'モデルは {{model}} のままです',
+  'Jump to bottom (ctrl+End)': '一番下へ移動（Ctrl+End）',
+  'Copied {{count}} chars': '{{count}} 文字をコピーしました',
+  'Copied 1 char': '1 文字をコピーしました',
 };
