@@ -344,15 +344,17 @@ export class ManagedDingtalkAdapter {
       // Peek, then shift only after the claim is durable: a failed store.save()
       // must leave the frame in the inbox for the next tick, not drop it.
       const item = this.inbox[0]!;
-      // A frame acked before the stall armed must still become durable: persist
-      // its claim without submitting while admission is stalled, so a hard
-      // restart re-drives it instead of losing it. The gate refuses new frames
-      // during the stall, so this only ever drains the pre-stall backlog; the
-      // stall-lift re-drives pending and the backlog flows once the binding
-      // answers again.
-      await this.admit(item, !this.instanceStalled);
+      // Every acked frame must become a durable claim. Submit only while
+      // admission is live — not stalled and still registered; while stalled or
+      // unregistered the claim is persisted without submitting, so a hard
+      // restart re-drives the backlog instead of losing it. The gate refuses
+      // new frames during the stall, and the stall-lift / re-register re-drives
+      // pending, so the backlog flows once the binding answers again.
+      await this.admit(
+        item,
+        !this.instanceStalled && this.registeredGeneration !== 0,
+      );
       this.inbox.shift();
-      if (this.registeredGeneration === 0) return;
     }
   }
 

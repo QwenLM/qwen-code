@@ -923,4 +923,34 @@ describe('managed DingTalk adapter review fixes', () => {
     ]);
     await second.adapter.disconnect();
   });
+
+  it('persists the acked inbox backlog when a registration refusal interrupts the drain (R5-1)', async () => {
+    const cwd = tempCwd();
+    const first = await connectedAdapter(cwd);
+    // msgA's admission is refused as not-registered (resets the generation);
+    // msgB is already acked into the inbox behind it.
+    first.plane.setSubmitErrorFor((id) =>
+      id === 'dingtalk:msgA'
+        ? Object.assign(new Error('not registered'), {
+            status: 404,
+            code: 'channel_not_found',
+          })
+        : undefined,
+    );
+    first.fake.push(
+      'msgA',
+      messageData({ msgId: 'msgA', text: { content: 'A' } }),
+    );
+    first.fake.push(
+      'msgB',
+      messageData({ msgId: 'msgB', text: { content: 'B' } }),
+    );
+    await first.adapter.tick();
+    // Hard restart: no graceful disconnect. A fresh process reads only the
+    // persisted state; an inbox frame left in memory is lost.
+    const second = await connectedAdapter(cwd);
+    await second.adapter.tick();
+    expect(second.plane.submit.map((event) => event.text)).toEqual(['A', 'B']);
+    await second.adapter.disconnect();
+  });
 });
