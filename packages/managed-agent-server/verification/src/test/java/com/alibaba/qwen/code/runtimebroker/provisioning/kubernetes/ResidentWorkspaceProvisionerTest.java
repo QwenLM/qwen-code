@@ -3,9 +3,9 @@ package com.alibaba.qwen.code.runtimebroker.provisioning.kubernetes;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ResidentWorkspaces;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
@@ -13,9 +13,9 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -106,9 +106,13 @@ class ResidentWorkspaceProvisionerTest {
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
         var foreign = new ContextBinding("tenant", "other-workspace", 1, "storage", ".",
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
+        var source = new org.h2.jdbcx.JdbcDataSource();
+        source.setURL("jdbc:h2:mem:resident-close-" + java.util.UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
         try (var broker = com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedBrokerFixture.create(mock(ManagedAgentStore.class), properties,
-                bindings, new InMemoryRuntimeSessionRepository(), new InMemoryToolExecutionRepository(),
-                mock(WorkspaceExecutionStore.class), null, null, jdbc,
+                bindings, new JdbcRuntimeSessionRepository(source), new JdbcToolExecutionRepository(source),
+                mock(JdbcWorkspaceExecutionStore.class), null, null, jdbc,
                 mock(PlatformTransactionManager.class), wrapper)) {
             assertThat(broker.supportsWorkspaceClose()).isTrue();
             assertThat(RuntimeWarmer.supportsClose(broker, binding)).isTrue();

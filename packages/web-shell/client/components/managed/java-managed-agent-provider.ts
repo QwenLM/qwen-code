@@ -42,6 +42,15 @@ export interface JavaManagedAgentProviderOptions
   saveArtifact?: ManagedArtifactSave;
 }
 
+function requireDiagnosticSnapshot<
+  T extends { schemaVersion: 1; sessionId: string },
+>(snapshot: T, sessionId: string): T {
+  if (snapshot?.schemaVersion !== 1 || snapshot.sessionId !== sessionId) {
+    throw new Error('Managed diagnostics identity mismatch');
+  }
+  return snapshot;
+}
+
 type JavaCommandOperation = Awaited<
   ReturnType<JavaManagedAgentClient['respondAction']>
 >;
@@ -107,6 +116,7 @@ export function createJavaManagedAgentProvider(
     request: {
       agentId: string;
       modelId?: string;
+      memoryStoreId?: string;
       workspaceId: string;
       cwdRelative: string;
       text?: string;
@@ -131,6 +141,9 @@ export function createJavaManagedAgentProvider(
           ? {}
           : { worktree: request.worktree }),
         ...(request.modelId === undefined ? {} : { modelId: request.modelId }),
+        ...(request.memoryStoreId === undefined
+          ? {}
+          : { memoryStoreId: request.memoryStoreId }),
         ...(request.skills?.length ? { skills: request.skills } : {}),
         ...(request.extensionPins === undefined
           ? {}
@@ -164,6 +177,31 @@ export function createJavaManagedAgentProvider(
     return { sessionId: result.sessionId };
   }
   return {
+    sideQueries: {
+      context: (sessionId, options) =>
+        client.sideQueryContext(sessionId, options.signal),
+      create: (sessionId, request, options) =>
+        client.createSideQuery(
+          sessionId,
+          request,
+          options.idempotencyKey,
+          options.signal,
+        ),
+      list: (sessionId, options) =>
+        client.listSideQueries(
+          { sessionId, cursor: options.cursor, limit: options.limit },
+          options.signal,
+        ),
+      get: (sessionId, queryId, options) =>
+        client.getSideQuery(sessionId, queryId, options.signal),
+      stream: (sessionId, queryId, options) =>
+        client.streamSideQuery(
+          { sessionId, queryId, afterRevision: options.afterRevision },
+          options.signal,
+        ),
+      cancel: (sessionId, queryId, options) =>
+        client.cancelSideQuery(sessionId, queryId, options.signal),
+    },
     userMessages: {
       query: (sessionId, options) =>
         client.queryUserMessages(sessionId, options.signal),
@@ -273,6 +311,9 @@ export function createJavaManagedAgentProvider(
       list: (sessionId, request) =>
         client.getSessionMcp(sessionId, request.signal),
     },
+    clientFiles: {
+      transport: () => client.clientFilesTransport(),
+    },
     extensions: {
       storageScope: options.productScope?.trim()
         ? storageKey(options)
@@ -288,6 +329,51 @@ export function createJavaManagedAgentProvider(
           archive,
           request.idempotencyKey,
           request.signal,
+        ),
+      importPackage: (workspaceId, extensionId, metadata, source, request) =>
+        client.importExtensionPackage(
+          workspaceId,
+          extensionId,
+          metadata,
+          source,
+          request.idempotencyKey,
+          request.signal,
+        ),
+      inspect: (workspaceId, pin, request) =>
+        client.inspectExtensionPackage(workspaceId, pin, request.signal),
+      previewPackage: (workspaceId, metadata, source, request) =>
+        client.previewExtensionPackage(
+          workspaceId,
+          metadata,
+          source,
+          request.signal,
+        ),
+      runtimeSkillCandidates: (sessionId, request) =>
+        client.getRuntimeSkillCandidates(sessionId, request.signal),
+      runtimeSkillSnapshot: (sessionId, input, request) =>
+        client.snapshotRuntimeSkill(sessionId, input, request.signal),
+      importRuntimeSkill: (sessionId, input, request) =>
+        client.importRuntimeSkill(
+          sessionId,
+          input,
+          request.idempotencyKey,
+          request.signal,
+        ),
+      lookupPackageOperation: (workspaceId, kind, key, request) =>
+        client.lookupExtensionPackageOperation(
+          workspaceId,
+          kind,
+          key,
+          request.signal,
+        ),
+      lookupApplyOperation: async (sessionId, key, request) =>
+        requireExtensionSnapshot(
+          await client.lookupExtensionApplyOperation(
+            sessionId,
+            key,
+            request.signal,
+          ),
+          sessionId,
         ),
       settings: (workspaceId, extensionId, request) =>
         client.getExtensionSettings(workspaceId, extensionId, request.signal),
@@ -387,6 +473,55 @@ export function createJavaManagedAgentProvider(
         if (snapshot.operation?.operationId !== operationId)
           throw new Error('Managed MCP operation identity mismatch');
         return snapshot;
+      },
+    },
+    diagnostics: {
+      async getActivityStatistics(sessionId, request) {
+        return requireDiagnosticSnapshot(
+          await client.getActivityStatistics(sessionId, request.signal),
+          sessionId,
+        );
+      },
+      async listActivity(sessionId, request) {
+        return requireDiagnosticSnapshot(
+          await client.listActivity(
+            {
+              sessionId,
+              kind: request.kind,
+              cursor: request.cursor,
+              limit: request.limit,
+            },
+            request.signal,
+          ),
+          sessionId,
+        );
+      },
+      async getContextUsage(sessionId, request) {
+        return requireDiagnosticSnapshot(
+          await client.getDiagnosticContextUsage(sessionId, request.signal),
+          sessionId,
+        );
+      },
+      async getStatistics(sessionId, request) {
+        return requireDiagnosticSnapshot(
+          await client.getDiagnosticStatistics(sessionId, request.signal),
+          sessionId,
+        );
+      },
+      async getResources(sessionId, request) {
+        return requireDiagnosticSnapshot(
+          await client.getDiagnosticResources(sessionId, request.signal),
+          sessionId,
+        );
+      },
+      async listAgentTrace(sessionId, request) {
+        return requireDiagnosticSnapshot(
+          await client.listDiagnosticAgentTrace(
+            { sessionId, cursor: request.cursor, limit: request.limit },
+            request.signal,
+          ),
+          sessionId,
+        );
       },
     },
     tasks: {
@@ -687,6 +822,12 @@ export function createJavaManagedAgentProvider(
       get: (sessionId, itemId, request) =>
         client.getToolDetails(sessionId, itemId, request.signal),
     },
+    terminal: {
+      ticket: (sessionId, terminalId, request) =>
+        client.terminalTicket(sessionId, terminalId, request.signal),
+      webSocketUrl: (sessionId, terminalId) =>
+        client.terminalWebSocketUrl(sessionId, terminalId),
+    },
     toolResults: {
       canDownload: saveArtifact !== undefined,
       getResult: (sessionId, itemId, request) =>
@@ -791,6 +932,7 @@ export function createJavaManagedAgentProvider(
               {
                 agentId,
                 modelId,
+                memoryStoreId,
                 workspaceId,
                 cwdRelative,
                 approvalMode,
@@ -805,6 +947,7 @@ export function createJavaManagedAgentProvider(
                 {
                   agentId,
                   modelId,
+                  memoryStoreId,
                   workspaceId,
                   cwdRelative,
                   approvalMode,
@@ -896,6 +1039,9 @@ export function createJavaManagedAgentProvider(
           idempotencyKey: command.idempotencyKey,
           agentId,
           title: titleFor(request.text),
+          ...(request.memoryStoreId === undefined
+            ? {}
+            : { memoryStoreId: request.memoryStoreId }),
           input: request.input ?? [{ type: 'input_text', text: request.text }],
           metadata: { clientId: command.clientId },
         },
@@ -1052,7 +1198,18 @@ function toSessionSummary(
         : {}),
       ...(session.capabilities?.rename === true ? { canRename: true } : {}),
       ...(session.capabilities?.tasks === true ? { tasks: true } : {}),
+      ...(session.capabilities?.diagnostics === true
+        ? { diagnostics: true }
+        : {}),
       ...(session.capabilities?.artifacts === true ? { artifacts: true } : {}),
+      ...(session.capabilities?.btw === true ? { btw: true } : {}),
+      ...(session.capabilities?.recap === true ? { recap: true } : {}),
+      ...(session.capabilities?.terminal !== undefined
+        ? { terminal: session.capabilities.terminal }
+        : {}),
+      ...(session.capabilities?.clientFiles === true
+        ? { clientFiles: true }
+        : {}),
       canSend:
         sessionActive &&
         !active &&

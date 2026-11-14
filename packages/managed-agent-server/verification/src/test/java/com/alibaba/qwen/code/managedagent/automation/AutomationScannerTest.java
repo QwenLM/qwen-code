@@ -5,6 +5,7 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.alibaba.qwen.code.managedagent.AutomationHarnessFake;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.contracts.automation.AutomationSessionModels;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
@@ -15,11 +16,13 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicAutomation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicAutomationRun;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
-import com.alibaba.qwen.code.managedagent.persistence.AutomationLedgerStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcAutomationLedgerStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore;
 import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.OccurrenceView;
 import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.ScheduleRow;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -58,6 +61,8 @@ import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * H6b: the scanner and the service against the real ledger on H2 and the
@@ -82,7 +87,7 @@ class AutomationScannerTest {
     private static final long MINUTE = 60_000L;
 
     @Autowired
-    private AutomationLedgerStore ledger;
+    private JdbcAutomationLedgerStore ledger;
 
     @Autowired
     private ManagedAgentStore agentStore;
@@ -91,7 +96,7 @@ class AutomationScannerTest {
     private ManagedAgentService sessions;
 
     @Autowired
-    private ManagedWorkspaceRegistry workspaces;
+    private JdbcManagedWorkspaceRegistry workspaces;
 
     @Autowired
     private RequestDigests digests;
@@ -166,6 +171,116 @@ class AutomationScannerTest {
                 clock::get);
     }
 
+    private String activeOtherSession() {
+        String other = sessions.createWorkspaceSession(tenant, ACTOR,
+                "create-" + UUID.randomUUID(), "qwen-code", null, "Other",
+                Map.of(), List.of(), new WorkspaceSelection(WORKSPACE, "."))
+                .sessionId();
+        jdbc.update("UPDATE ma_session SET status = 'ACTIVE'"
+                + " WHERE tenant_id = ? AND session_id = ?", tenant, other);
+        return other;
+    }
+
+    @Test
+    void listSessionReturnsOnlyTheBoundSessionsDefinitions() {
+        PublicAutomation mine = service.create(tenant, ACTOR,
+                "iso-list-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true))
+                .body();
+        String other = activeOtherSession();
+        service.create(tenant, ACTOR, "iso-list-other-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(other, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true));
+        PublicList<PublicAutomation> page = service.listSession(tenant,
+                sessionId, null, 100);
+        assertThat(page.data()).extracting(PublicAutomation::id)
+                .containsExactly(mine.id());
+    }
+
+    @Test
+    void listSessionOmitsRetiredDefinitionsSoThePageIsBoundedByLiveCapacity() {
+        PublicAutomation live = service.create(tenant, ACTOR,
+                "iso-live-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true))
+                .body();
+        PublicAutomation retired = service.create(tenant, ACTOR,
+                "iso-retired-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true))
+                .body();
+        service.retireSession(tenant, sessionId, ACTOR, retired.id(),
+                "iso-retire-key-" + UUID.randomUUID());
+        // Retire only flips state (there is no production DELETE): without the
+        // live filter the Session's lifetime creations would accumulate in the
+        // model's inline cron_list tool_result instead of its 32 live slots.
+        assertThat(ledger.findSchedule(tenant, retired.id()).orElseThrow().state())
+                .isEqualTo(AutomationLedgerStore.STATE_RETIRED);
+        PublicList<PublicAutomation> page = service.listSession(tenant,
+                sessionId, null, 100);
+        assertThat(page.data()).extracting(PublicAutomation::id)
+                .containsExactly(live.id());
+    }
+
+    @Test
+    void retireSessionRefusesAForeignDefinitionAndLeavesItLive() {
+        PublicAutomation mine = service.create(tenant, ACTOR,
+                "iso-retire-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true))
+                .body();
+        String other = activeOtherSession();
+        assertThatThrownBy(() -> service.retireSession(tenant, other, ACTOR,
+                mine.id(), "iso-foreign-" + UUID.randomUUID()))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(404);
+                    assertThat(error.getCode()).isEqualTo("automation_not_found");
+                });
+        assertThat(ledger.findSchedule(tenant, mine.id()).orElseThrow().state())
+                .isEqualTo(AutomationLedgerStore.STATE_LIVE);
+    }
+
+    @Test
+    void retireSessionVerifiesOwnershipBeforeAnsweringAReplay() {
+        PublicAutomation mine = service.create(tenant, ACTOR,
+                "iso-replay-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true))
+                .body();
+        // Land a replay receipt under this key by retiring once as the owner.
+        String key = "iso-replay-key-" + UUID.randomUUID();
+        service.retireSession(tenant, sessionId, ACTOR, mine.id(), key);
+        String other = activeOtherSession();
+        // A foreign Session presenting the same key and automationId must be
+        // refused, not handed the owner's replayed record.
+        assertThatThrownBy(() -> service.retireSession(tenant, other, ACTOR,
+                mine.id(), key))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(404);
+                    assertThat(error.getCode()).isEqualTo("automation_not_found");
+                });
+    }
+
+    @Test
+    void createForcesTheBoundSessionEvenWhenTheBodyNamesAnother() {
+        String other = activeOtherSession();
+        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        when(sessionStore.creatorActor(tenant, sessionId)).thenReturn(ACTOR);
+        ManagedAutomationSessionService sessionService =
+                new ManagedAutomationSessionService(sessionStore, service);
+        AutomationSessionModels.Create request = new AutomationSessionModels.Create(
+                WORKSPACE, "writer", 1,
+                new AutomationDefinitionRequest(other, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true));
+        PublicAutomation created = sessionService.create(tenant, sessionId,
+                "writer-token", "iso-create-" + UUID.randomUUID(), request)
+                .body();
+        assertThat(created.sessionId()).isEqualTo(sessionId);
+        assertThat(ledger.findSchedule(tenant, created.id()).orElseThrow()
+                .sessionId()).isEqualTo(sessionId);
+    }
+
     private PublicAutomation defineGated(String gate) {
         return service.create(tenant, ACTOR, "key-" + UUID.randomUUID(),
                 new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
@@ -173,9 +288,37 @@ class AutomationScannerTest {
                         TextNode.valueOf(gate))).body();
     }
 
-    private AutomationLedgerStore.OccurrenceRow occurrence(String automationId,
+    private JdbcAutomationLedgerStore.OccurrenceRow occurrence(String automationId,
             String key) {
         return ledger.findOccurrence(tenant, automationId, key).orElseThrow();
+    }
+
+    // The fixed-interval /loop entry path: the internal automations:create
+    // route delegates to this create, which mirrors the definition into the
+    // scanner's index. The witness is that a tool-created definition fires at
+    // its next due slot, and that the mirror — not the journal — is what the
+    // scanner discovers: a definition with no mirror row never fires.
+    @Test
+    void aToolCreatedDefinitionIsMirroredAndFiresAtItsNextDueSlot() {
+        PublicAutomation automation = service.create(tenant, ACTOR,
+                "key-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true,
+                        null)).body();
+        assertThat(ledger.findSchedule(tenant, automation.id())).isPresent();
+        clock.set(T0 + MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(1);
+        assertThat(occurrence(automation.id(), "schedule:2026-06-01T10:01:00Z")
+                .outcome()).isEqualTo(JdbcAutomationLedgerStore.OUTCOME_FIRED);
+        assertThat(fake.fires()).isEqualTo(1);
+
+        // Removing the mirror row (a journal-only definition) makes the
+        // definition undiscoverable: the next due slot fires nothing.
+        jdbc.update("DELETE FROM ma_schedule WHERE tenant_id=? AND schedule_id=?",
+                tenant, automation.id());
+        clock.set(T0 + 2 * MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(0);
+        assertThat(fake.fires()).isEqualTo(1);
     }
 
     @Test
@@ -194,7 +337,7 @@ class AutomationScannerTest {
         String first = "schedule:2026-06-01T10:01:00Z";
         assertThat(fake.probes).containsExactly(automation.id() + "|" + first);
         assertThat(occurrence(automation.id(), first).outcome())
-                .isEqualTo(AutomationLedgerStore.OUTCOME_SKIPPED);
+                .isEqualTo(JdbcAutomationLedgerStore.OUTCOME_SKIPPED);
         assertThat(occurrence(automation.id(), first).reason())
                 .isEqualTo(AutomationScanner.REASON_GATE_QUIET);
         PublicAutomation quiet = service.get(tenant, ACTOR, automation.id());
@@ -233,9 +376,9 @@ class AutomationScannerTest {
         // Delivered: the one fire, and the status starts over.
         clock.set(T0 + 5 * MINUTE + 1_000);
         assertThat(scanner.tick(clock.get())).isEqualTo(1);
-        assertThat(outcomes(automation.id()).get(AutomationLedgerStore
+        assertThat(outcomes(automation.id()).get(JdbcAutomationLedgerStore
                 .OUTCOME_FIRED)).containsExactly("schedule:2026-06-01T10:05:00Z");
-        assertThat(outcomes(automation.id()).get(AutomationLedgerStore
+        assertThat(outcomes(automation.id()).get(JdbcAutomationLedgerStore
                 .OUTCOME_SKIPPED)).hasSize(4);
         PublicAutomation delivered = service.get(tenant, ACTOR, automation.id());
         assertThat(delivered.gateStatus().lastOutcome()).isEqualTo("delivered");
@@ -282,7 +425,7 @@ class AutomationScannerTest {
         clock.addAndGet(11_000);
         assertThat(scanner.tick(clock.get())).isEqualTo(1);
         assertThat(occurrence(automation.id(), "schedule:2026-06-01T10:01:00Z")
-                .outcome()).isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+                .outcome()).isEqualTo(JdbcAutomationLedgerStore.OUTCOME_FIRED);
         assertThat(fake.probes).hasSize(1);
         PublicAutomation revised = service.get(tenant, ACTOR, automation.id());
         assertThat(revised.gate()).isEqualTo("./other.sh");
@@ -374,13 +517,13 @@ class AutomationScannerTest {
                 .isInstanceOf(ManagedAgentException.class)
                 .hasMessageContaining(AutomationScanner.REASON_GATE_QUIET);
         assertThat(occurrence(automation.id(), "manual:manual-quiet").outcome())
-                .isEqualTo(AutomationLedgerStore.OUTCOME_SKIPPED);
+                .isEqualTo(JdbcAutomationLedgerStore.OUTCOME_SKIPPED);
         assertThat(occurrence(automation.id(), "manual:manual-quiet").reason())
                 .isEqualTo(AutomationScanner.REASON_GATE_QUIET);
         // A printing probe fires the manual run like any other.
         PublicAutomationRun run = service.run(tenant, ACTOR, automation.id(),
                 "manual-print").body();
-        assertThat(run.outcome()).isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+        assertThat(run.outcome()).isEqualTo(JdbcAutomationLedgerStore.OUTCOME_FIRED);
         assertThat(fake.probes).containsExactly(
                 automation.id() + "|manual:manual-quiet",
                 automation.id() + "|manual:manual-print");
@@ -435,9 +578,9 @@ class AutomationScannerTest {
         return ledger.listOccurrences(tenant, automationId, null, 100).rows()
                 .stream().map(OccurrenceView::occurrence)
                 .collect(Collectors.groupingBy(
-                        AutomationLedgerStore.OccurrenceRow::outcome,
+                        JdbcAutomationLedgerStore.OccurrenceRow::outcome,
                         Collectors.mapping(
-                                AutomationLedgerStore.OccurrenceRow::occurrenceKey,
+                                JdbcAutomationLedgerStore.OccurrenceRow::occurrenceKey,
                                 Collectors.toList())));
     }
 
@@ -453,7 +596,7 @@ class AutomationScannerTest {
         assertThat(fake.firedOccurrences())
                 .containsExactly("schedule:2026-06-01T10:01:00Z");
         assertThat(outcomes(automation.id()))
-                .containsOnlyKeys(AutomationLedgerStore.OUTCOME_FIRED);
+                .containsOnlyKeys(JdbcAutomationLedgerStore.OUTCOME_FIRED);
         // A lease another scanner holds keeps this one out; an expired
         // lease yields the row.
         long held = ledger.claim(tenant, automation.id(), "scanner-c",
@@ -518,7 +661,7 @@ class AutomationScannerTest {
                         automation.id(), null, 100).rows().stream()
                         .map(OccurrenceView::occurrence)
                         .filter(each -> "skipped".equals(each.outcome()))
-                        .map(AutomationLedgerStore.OccurrenceRow::reason)
+                        .map(JdbcAutomationLedgerStore.OccurrenceRow::reason)
                         .distinct().toList();
                 assertThat(skippedReasons).as(label).isSubsetOf(List.of(
                         "allow".equals(overlap) ? "count_limit" : "overlap"));
@@ -536,11 +679,11 @@ class AutomationScannerTest {
         clock.set(T0 + MINUTE + 1_000);
         assertThat(scanner.tick(clock.get())).isEqualTo(0);
         assertThat(outcomes(automation.id()))
-                .containsOnlyKeys(AutomationLedgerStore.OUTCOME_FIRING);
+                .containsOnlyKeys(JdbcAutomationLedgerStore.OUTCOME_FIRING);
         clock.set(T0 + MINUTE + 11_000);
         assertThat(scanner.tick(clock.get())).isEqualTo(1);
         assertThat(outcomes(automation.id()))
-                .containsOnlyKeys(AutomationLedgerStore.OUTCOME_FIRED);
+                .containsOnlyKeys(JdbcAutomationLedgerStore.OUTCOME_FIRED);
         assertThat(fake.firedOccurrences())
                 .containsExactly("schedule:2026-06-01T10:01:00Z",
                         "schedule:2026-06-01T10:01:00Z");
@@ -588,7 +731,7 @@ class AutomationScannerTest {
         assertThat(retired.body().state()).isEqualTo("retired");
         assertThat(retired.body().enabled()).isFalse();
         assertThat(ledger.findSchedule(tenant, automation.id()).orElseThrow()
-                .state()).isEqualTo(AutomationLedgerStore.STATE_RETIRED);
+                .state()).isEqualTo(JdbcAutomationLedgerStore.STATE_RETIRED);
         assertThat(ledger.findSchedule(tenant, automation.id()).orElseThrow().enabled()).isTrue();
         // No slot of it is decided again: the retire is visible, not an
         // endless skipped(session_not_active) column.
@@ -641,7 +784,7 @@ class AutomationScannerTest {
                 "manual-1").body();
         assertThat(first.outcome()).isEqualTo("fired");
         assertThat(first.occurrenceKey()).isEqualTo("manual:manual-1");
-        assertThat(first.id()).isEqualTo(com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.automationRunId(automation.id(), "manual:manual-1"));
+        assertThat(first.id()).isEqualTo(AutomationLedgerStore.automationRunId(automation.id(), "manual:manual-1"));
         assertThat(service.run(tenant, ACTOR, automation.id(), "manual-1")
                 .replayed()).isTrue();
         assertThat(fake.fires()).isEqualTo(1);
@@ -660,7 +803,7 @@ class AutomationScannerTest {
                         + " task_kind, task_state, gmt_create)"
                         + " VALUES (?, ?, ?, ?, ?, 'automation_run', ?, ?, 3,"
                         + " 'resource', 'automation_run', 'completed', ?)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, sessionId),
+                ManagedSessionStore.sessionScopeKey(tenant, sessionId),
                 ManagedExtensionProjection.recordKey(sessionId, "automation_run",
                         first.id()), tenant, WORKSPACE, sessionId, first.id(),
                 "0".repeat(64), clock.get());
@@ -747,7 +890,7 @@ class AutomationScannerTest {
         assertThat(retried.body().id()).isEqualTo(created.id());
         assertThat(retried.body().definitionRevision()).isEqualTo(1);
         assertThat(ledger.listReadableSchedules(tenant, ACTOR, null, 10).rows())
-                .extracting(AutomationLedgerStore.ScheduleRow::scheduleId)
+                .extracting(JdbcAutomationLedgerStore.ScheduleRow::scheduleId)
                 .containsExactly(created.id());
         assertThat(fake.operations).filteredOn(operation ->
                 "define_schedule".equals(operation.get("kind"))).hasSize(2);
@@ -818,7 +961,7 @@ class AutomationScannerTest {
                 true);
         String id = automation.id();
         String key = "schedule:2026-06-01T10:01:00Z";
-        AutomationLedgerStore.ScheduleRow row = ledger.findSchedule(tenant, id)
+        JdbcAutomationLedgerStore.ScheduleRow row = ledger.findSchedule(tenant, id)
                 .orElseThrow();
         long first = ledger.claim(tenant, id, "scanner-a", T0 + 60_000, T0);
         assertThat(first).isPositive();
@@ -831,36 +974,36 @@ class AutomationScannerTest {
         assertThat(second).isGreaterThan(first);
         long now = T0 + 61_000;
         // The stale holder records nothing and moves nothing.
-        AutomationLedgerStore.OccurrenceRow stale = AutomationLedgerStore
+        JdbcAutomationLedgerStore.OccurrenceRow stale = JdbcAutomationLedgerStore
                 .OccurrenceRow.decision(row, key, T0 + MINUTE,
                         AutomationScanner.TRIGGER_SCHEDULED,
-                        AutomationLedgerStore.OUTCOME_FIRING, null, first, now);
+                        JdbcAutomationLedgerStore.OUTCOME_FIRING, null, first, now);
         assertThat(ledger.recordOccurrence(stale, "scanner-a")).isEmpty();
         assertThat(ledger.advanceWatermark(tenant, id, "scanner-a", first,
                 T0 + MINUTE, now)).isFalse();
         assertThat(ledger.findSchedule(tenant, id).orElseThrow()
                 .watermarkSlot()).isNull();
         // The holder records; only the holder settles.
-        AutomationLedgerStore.OccurrenceRow held = ledger.recordOccurrence(
-                AutomationLedgerStore.OccurrenceRow.decision(row, key,
+        JdbcAutomationLedgerStore.OccurrenceRow held = ledger.recordOccurrence(
+                JdbcAutomationLedgerStore.OccurrenceRow.decision(row, key,
                         T0 + MINUTE, AutomationScanner.TRIGGER_SCHEDULED,
-                        AutomationLedgerStore.OUTCOME_FIRING, null, second, now),
+                        JdbcAutomationLedgerStore.OUTCOME_FIRING, null, second, now),
                 "scanner-b").orElseThrow();
         assertThat(held.fence()).isEqualTo(second);
         assertThat(ledger.settleOccurrence(tenant, id, key,
-                AutomationLedgerStore.OUTCOME_FIRED, null, "scanner-a", first,
+                JdbcAutomationLedgerStore.OUTCOME_FIRED, null, "scanner-a", first,
                 now)).isFalse();
         assertThat(ledger.deferOccurrence(tenant, id, key, 1, now + 1_000,
                 "lost", "scanner-a", first, now)).isFalse();
         assertThat(ledger.repinOccurrence(tenant, id, key, 7, "scanner-a",
                 first, now)).isFalse();
         assertThat(ledger.settleOccurrence(tenant, id, key,
-                AutomationLedgerStore.OUTCOME_FIRED, null, "scanner-b", second,
+                JdbcAutomationLedgerStore.OUTCOME_FIRED, null, "scanner-b", second,
                 now)).isTrue();
         // A late record of an existing decision answers that decision.
         assertThat(ledger.recordOccurrence(stale, "scanner-a"))
-                .map(AutomationLedgerStore.OccurrenceRow::outcome)
-                .contains(AutomationLedgerStore.OUTCOME_FIRED);
+                .map(JdbcAutomationLedgerStore.OccurrenceRow::outcome)
+                .contains(JdbcAutomationLedgerStore.OUTCOME_FIRED);
         assertThat(ledger.findOccurrence(tenant, id, key).orElseThrow()
                 .definitionRevision()).isEqualTo(1);
     }
@@ -871,41 +1014,41 @@ class AutomationScannerTest {
                 true);
         String id = automation.id();
         String key = "schedule:2026-06-01T10:01:00Z";
-        AutomationLedgerStore.ScheduleRow row = ledger.findSchedule(tenant, id)
+        JdbcAutomationLedgerStore.ScheduleRow row = ledger.findSchedule(tenant, id)
                 .orElseThrow();
         long fence = ledger.claim(tenant, id, "scanner-a", T0 + 60_000, T0);
         assertThat(fence).isPositive();
         // Past lease_until with nobody else claiming: owner and fence still
         // match, so a tick that outlived its lease records and settles.
         long late = T0 + 61_000;
-        assertThat(ledger.recordOccurrence(AutomationLedgerStore.OccurrenceRow
+        assertThat(ledger.recordOccurrence(JdbcAutomationLedgerStore.OccurrenceRow
                         .decision(row, key, T0 + MINUTE,
                                 AutomationScanner.TRIGGER_SCHEDULED,
-                                AutomationLedgerStore.OUTCOME_FIRING, null, fence,
+                                JdbcAutomationLedgerStore.OUTCOME_FIRING, null, fence,
                                 late), "scanner-a"))
-                .map(AutomationLedgerStore.OccurrenceRow::fence).contains(fence);
+                .map(JdbcAutomationLedgerStore.OccurrenceRow::fence).contains(fence);
         assertThat(ledger.repinOccurrence(tenant, id, key, 1, "scanner-a", fence,
                 late)).isTrue();
         assertThat(ledger.deferOccurrence(tenant, id, key, 1, late + 1_000,
                 "slow", "scanner-a", fence, late)).isTrue();
         assertThat(ledger.settleOccurrence(tenant, id, key,
-                AutomationLedgerStore.OUTCOME_FIRED, null, "scanner-a", fence,
+                JdbcAutomationLedgerStore.OUTCOME_FIRED, null, "scanner-a", fence,
                 late)).isTrue();
         assertThat(ledger.advanceWatermark(tenant, id, "scanner-a", fence,
                 T0 + MINUTE, late)).isTrue();
         String next = "schedule:2026-06-01T10:02:00Z";
-        assertThat(ledger.recordOccurrence(AutomationLedgerStore.OccurrenceRow
+        assertThat(ledger.recordOccurrence(JdbcAutomationLedgerStore.OccurrenceRow
                 .decision(row, next, T0 + 2 * MINUTE,
                         AutomationScanner.TRIGGER_SCHEDULED,
-                        AutomationLedgerStore.OUTCOME_FIRING, null, fence, late),
+                        JdbcAutomationLedgerStore.OUTCOME_FIRING, null, fence, late),
                 "scanner-a")).isPresent();
         assertThat(ledger.settleOccurrence(tenant, id, next,
-                AutomationLedgerStore.OUTCOME_SKIPPED, "gate_failed",
+                JdbcAutomationLedgerStore.OUTCOME_SKIPPED, "gate_failed",
                 "probe exited 2", "scanner-a", fence, late)).isTrue();
         assertThat(ledger.findOccurrence(tenant, id, next).orElseThrow()
                 .lastError()).isEqualTo("probe exited 2");
         assertThat(ledger.recordGateOutcome(row, row.definitionRevision(),
-                "scanner-a", fence, AutomationLedgerStore.GATE_FAILED,
+                "scanner-a", fence, JdbcAutomationLedgerStore.GATE_FAILED,
                 "probe exited 2", late)).isTrue();
         ledger.block(tenant, id, "scanner-a", fence, "cron * does not compile",
                 late);
@@ -935,9 +1078,9 @@ class AutomationScannerTest {
         fake.failNextFire = new HarnessFailure("answer lost");
         clock.set(T0 + MINUTE + 1_000);
         assertThat(scanner.tick(clock.get())).isEqualTo(0);
-        AutomationLedgerStore.OccurrenceRow claim = ledger.findOccurrence(
+        JdbcAutomationLedgerStore.OccurrenceRow claim = ledger.findOccurrence(
                 tenant, id, key).orElseThrow();
-        assertThat(claim.outcome()).isEqualTo(AutomationLedgerStore.OUTCOME_FIRING);
+        assertThat(claim.outcome()).isEqualTo(JdbcAutomationLedgerStore.OUTCOME_FIRING);
         assertThat(claim.attempts()).isEqualTo(1);
         assertThat(claim.nextRetryAt()).isEqualTo(clock.get() + 2_000);
         assertThat(claim.lastError()).isEqualTo("answer lost");
@@ -951,10 +1094,10 @@ class AutomationScannerTest {
             fake.failNextFire = new HarnessFailure("answer lost " + attempt);
             clock.addAndGet(301_000);
             assertThat(scanner.tick(clock.get())).isEqualTo(0);
-            AutomationLedgerStore.OccurrenceRow again = ledger.findOccurrence(
+            JdbcAutomationLedgerStore.OccurrenceRow again = ledger.findOccurrence(
                     tenant, id, key).orElseThrow();
             assertThat(again.outcome())
-                    .isEqualTo(AutomationLedgerStore.OUTCOME_FIRING);
+                    .isEqualTo(JdbcAutomationLedgerStore.OUTCOME_FIRING);
             assertThat(again.attempts()).isEqualTo(attempt);
             assertThat(again.nextRetryAt() - clock.get())
                     .isBetween(2_000L, 300_000L);
@@ -963,9 +1106,9 @@ class AutomationScannerTest {
         fake.failNextFire = new HarnessFailure("answer lost, last");
         clock.addAndGet(301_000);
         assertThat(scanner.tick(clock.get())).isEqualTo(0);
-        AutomationLedgerStore.OccurrenceRow given = ledger.findOccurrence(
+        JdbcAutomationLedgerStore.OccurrenceRow given = ledger.findOccurrence(
                 tenant, id, key).orElseThrow();
-        assertThat(given.outcome()).isEqualTo(AutomationLedgerStore.OUTCOME_UNKNOWN);
+        assertThat(given.outcome()).isEqualTo(JdbcAutomationLedgerStore.OUTCOME_UNKNOWN);
         assertThat(given.reason())
                 .isEqualTo(AutomationScanner.REASON_ANSWER_UNOBTAINABLE);
         assertThat(given.attempts()).isEqualTo(AutomationScanner.MAX_FIRE_ATTEMPTS - 1);
@@ -989,7 +1132,7 @@ class AutomationScannerTest {
         clock.set(T0 + MINUTE + 1_000);
         assertThat(scanner.tick(clock.get())).isEqualTo(0);
         assertThat(outcomes(id))
-                .containsOnlyKeys(AutomationLedgerStore.OUTCOME_FIRING);
+                .containsOnlyKeys(JdbcAutomationLedgerStore.OUTCOME_FIRING);
         // Disabled before the answer was obtained: the definition is no
         // longer armed, but the claim is still re-driven — and the
         // revision it moved to is learned and re-pinned on the way.
@@ -1000,7 +1143,7 @@ class AutomationScannerTest {
         clock.set(T0 + MINUTE + 11_000);
         assertThat(scanner.tick(clock.get())).isEqualTo(1);
         assertThat(outcomes(id))
-                .containsOnlyKeys(AutomationLedgerStore.OUTCOME_FIRED);
+                .containsOnlyKeys(JdbcAutomationLedgerStore.OUTCOME_FIRED);
         assertThat(ledger.findOccurrence(tenant, id,
                 "schedule:2026-06-01T10:01:00Z").orElseThrow()
                 .definitionRevision()).isEqualTo(2);
@@ -1022,13 +1165,13 @@ class AutomationScannerTest {
         String id = automation.id();
         String key = "schedule:2026-06-01T10:01:00Z";
         long now = T0 + MINUTE + 1_000;
-        AutomationLedgerStore.ScheduleRow row = ledger.findSchedule(tenant, id)
+        JdbcAutomationLedgerStore.ScheduleRow row = ledger.findSchedule(tenant, id)
                 .orElseThrow();
         long fence = ledger.claim(tenant, id, "scanner-a", now + 60_000, now);
-        AutomationLedgerStore.OccurrenceRow claim = ledger.recordOccurrence(
-                AutomationLedgerStore.OccurrenceRow.decision(row, key,
+        JdbcAutomationLedgerStore.OccurrenceRow claim = ledger.recordOccurrence(
+                JdbcAutomationLedgerStore.OccurrenceRow.decision(row, key,
                         T0 + MINUTE, AutomationScanner.TRIGGER_SCHEDULED,
-                        AutomationLedgerStore.OUTCOME_FIRING, null, fence, now),
+                        JdbcAutomationLedgerStore.OUTCOME_FIRING, null, fence, now),
                 "scanner-a").orElseThrow();
         // Between the claim and the fire another instance revised the
         // definition and its projection now hold revision 2; the claim
@@ -1038,13 +1181,13 @@ class AutomationScannerTest {
                 "scheduleId", id, "definition", Map.of("goal", "Moved")));
         assertThat(scanner.fire(row, claim, "scanner-a", fence, now)).isTrue();
         ledger.release(tenant, id, "scanner-a", fence, now);
-        AutomationLedgerStore.ScheduleRow refreshed = ledger.findSchedule(
+        JdbcAutomationLedgerStore.ScheduleRow refreshed = ledger.findSchedule(
                 tenant, id).orElseThrow();
         assertThat(refreshed.definitionRevision()).isEqualTo(2);
         assertThat(refreshed.goal()).isEqualTo("Moved");
-        AutomationLedgerStore.OccurrenceRow fired = ledger.findOccurrence(
+        JdbcAutomationLedgerStore.OccurrenceRow fired = ledger.findOccurrence(
                 tenant, id, key).orElseThrow();
-        assertThat(fired.outcome()).isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+        assertThat(fired.outcome()).isEqualTo(JdbcAutomationLedgerStore.OUTCOME_FIRED);
         assertThat(fired.definitionRevision()).isEqualTo(2);
         assertThat(fake.operations).filteredOn(operation ->
                 "fire_run".equals(operation.get("kind")))
@@ -1055,11 +1198,11 @@ class AutomationScannerTest {
         String later = "schedule:2026-06-01T10:02:00Z";
         long then = T0 + 2 * MINUTE + 1_000;
         long again = ledger.claim(tenant, id, "scanner-a", then + 60_000, then);
-        AutomationLedgerStore.OccurrenceRow second = ledger.recordOccurrence(
-                AutomationLedgerStore.OccurrenceRow.decision(
+        JdbcAutomationLedgerStore.OccurrenceRow second = ledger.recordOccurrence(
+                JdbcAutomationLedgerStore.OccurrenceRow.decision(
                         ledger.findSchedule(tenant, id).orElseThrow(), later,
                         T0 + 2 * MINUTE, AutomationScanner.TRIGGER_SCHEDULED,
-                        AutomationLedgerStore.OUTCOME_FIRING, null, again,
+                        JdbcAutomationLedgerStore.OUTCOME_FIRING, null, again,
                         then), "scanner-a").orElseThrow();
         fake.run(sessionId, Map.of("operationId",
                 UUID.randomUUID().toString(), "kind", "define_schedule",
@@ -1082,9 +1225,9 @@ class AutomationScannerTest {
         assertThat(racing.fire(refreshed, second, "scanner-a", again, then))
                 .isFalse();
         ledger.release(tenant, id, "scanner-a", again, then);
-        AutomationLedgerStore.OccurrenceRow skipped = ledger.findOccurrence(
+        JdbcAutomationLedgerStore.OccurrenceRow skipped = ledger.findOccurrence(
                 tenant, id, later).orElseThrow();
-        assertThat(skipped.outcome()).isEqualTo(AutomationLedgerStore.OUTCOME_SKIPPED);
+        assertThat(skipped.outcome()).isEqualTo(JdbcAutomationLedgerStore.OUTCOME_SKIPPED);
         assertThat(skipped.reason()).isEqualTo(AutomationScanner.REASON_REVISION_STALE);
     }
 
@@ -1128,7 +1271,7 @@ class AutomationScannerTest {
                     assertThat(error.getCode())
                             .isEqualTo("automation_operation_unknown");
                 });
-        AutomationLedgerStore.CommandRow claim = ledger
+        JdbcAutomationLedgerStore.CommandRow claim = ledger
                 .findCommand(tenant, keyA).orElseThrow();
         assertThat(claim.resultJson()).isEmpty();
         // The journal commit published the definition before its answer was lost.
@@ -1185,7 +1328,7 @@ class AutomationScannerTest {
         // the pre-relay claim is still the request's unanswered binding.
         assertThat(
                 ledger.findSchedule(tenant, created.id()).orElseThrow().state())
-                .isEqualTo(AutomationLedgerStore.STATE_RETIRED);
+                .isEqualTo(JdbcAutomationLedgerStore.STATE_RETIRED);
         assertThat(ledger.findCommand(tenant, keyR).orElseThrow().resultJson())
                 .isEmpty();
         // The terminal committed projection answers the retry directly.
@@ -1194,7 +1337,7 @@ class AutomationScannerTest {
         assertThat(retried.body().state()).isEqualTo("retired");
         assertThat(
                 ledger.findSchedule(tenant, created.id()).orElseThrow().state())
-                .isEqualTo(AutomationLedgerStore.STATE_RETIRED);
+                .isEqualTo(JdbcAutomationLedgerStore.STATE_RETIRED);
         var replayed = service.retire(tenant, ACTOR, created.id(), keyR);
         assertThat(replayed.replayed()).isTrue();
         assertThat(replayed.body().state()).isEqualTo("retired");
@@ -1281,7 +1424,7 @@ class AutomationScannerTest {
                             .isEqualTo("idempotency_conflict");
                 });
         assertThat(ledger.findSchedule(tenant, second.id()).orElseThrow()
-                .state()).isEqualTo(AutomationLedgerStore.STATE_LIVE);
+                .state()).isEqualTo(JdbcAutomationLedgerStore.STATE_LIVE);
         assertThat(fake.scheduleOf(sessionId, second.id()).get("state"))
                 .isEqualTo("admitted");
         // The honest retry still answers the first one's cancel.
@@ -1394,9 +1537,9 @@ class AutomationScannerTest {
                     assertThat(error.getCode())
                             .isEqualTo("automation_operation_unknown");
                 });
-        AutomationLedgerStore.OccurrenceRow claim = ledger.findOccurrence(
+        JdbcAutomationLedgerStore.OccurrenceRow claim = ledger.findOccurrence(
                 tenant, id, "manual:lost-1").orElseThrow();
-        assertThat(claim.outcome()).isEqualTo(AutomationLedgerStore.OUTCOME_FIRING);
+        assertThat(claim.outcome()).isEqualTo(JdbcAutomationLedgerStore.OUTCOME_FIRING);
         assertThat(claim.attempts()).isEqualTo(1);
         assertThat(claim.lastError()).isEqualTo("connection lost");
         assertThat(claim.trigger()).isEqualTo(AutomationScanner.TRIGGER_MANUAL);
@@ -1429,7 +1572,7 @@ class AutomationScannerTest {
         connector.unavailable = false;
         assertThat(ledger.findOccurrence(tenant, id, "manual:lost-3")
                 .orElseThrow().outcome())
-                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRING);
+                .isEqualTo(JdbcAutomationLedgerStore.OUTCOME_FIRING);
         assertThat(ledger.findSchedule(tenant, id).orElseThrow().leaseOwner())
                 .isNull();
     }
@@ -1443,10 +1586,10 @@ class AutomationScannerTest {
         long seedFence = ledger.claim(tenant, id, "seed",
                 clock.get() + 60_000, clock.get());
         assertThat(seedFence).isPositive();
-        assertThat(ledger.recordOccurrence(AutomationLedgerStore.OccurrenceRow
+        assertThat(ledger.recordOccurrence(JdbcAutomationLedgerStore.OccurrenceRow
                 .decision(held, "manual:seeded", null,
                         AutomationScanner.TRIGGER_MANUAL,
-                        AutomationLedgerStore.OUTCOME_FIRING, null, seedFence,
+                        JdbcAutomationLedgerStore.OUTCOME_FIRING, null, seedFence,
                         clock.get()), "seed")).isPresent();
         assertThat(ledger.deferOccurrence(tenant, id, "manual:seeded", 63,
                 clock.get() + 30_000, "seeded", "seed", seedFence,
@@ -1463,10 +1606,10 @@ class AutomationScannerTest {
                             .isEqualTo("automation_operation_unknown");
                 });
         assertThat(fake.fires()).isZero();
-        AutomationLedgerStore.OccurrenceRow after = ledger.findOccurrence(
+        JdbcAutomationLedgerStore.OccurrenceRow after = ledger.findOccurrence(
                 tenant, id, "manual:seeded").orElseThrow();
         assertThat(after.outcome())
-                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRING);
+                .isEqualTo(JdbcAutomationLedgerStore.OUTCOME_FIRING);
         assertThat(after.attempts()).isEqualTo(63);
     }
 
@@ -1512,10 +1655,10 @@ class AutomationScannerTest {
         long fence = ledger.claim(tenant, id, "seed",
                 clock.get() + 60_000, clock.get());
         assertThat(fence).isPositive();
-        assertThat(ledger.recordOccurrence(AutomationLedgerStore.OccurrenceRow
+        assertThat(ledger.recordOccurrence(JdbcAutomationLedgerStore.OccurrenceRow
                 .decision(held, occurrenceKey, null,
                         AutomationScanner.TRIGGER_MANUAL,
-                        AutomationLedgerStore.OUTCOME_FIRING, null, fence,
+                        JdbcAutomationLedgerStore.OUTCOME_FIRING, null, fence,
                         clock.get()), "seed")).isPresent();
         assertThat(ledger.deferOccurrence(tenant, id, occurrenceKey, attempts,
                 clock.get() + 30_000, lastError, "seed", fence,
@@ -1549,8 +1692,8 @@ class AutomationScannerTest {
         assertThat(scanner.tick(clock.get())).isEqualTo(0);
         assertThat(fake.fires()).isZero();
         assertThat(outcomes(automation.id()))
-                .containsOnlyKeys(AutomationLedgerStore.OUTCOME_SKIPPED);
-        AutomationLedgerStore.OccurrenceRow skipped = ledger.findOccurrence(
+                .containsOnlyKeys(JdbcAutomationLedgerStore.OUTCOME_SKIPPED);
+        JdbcAutomationLedgerStore.OccurrenceRow skipped = ledger.findOccurrence(
                 tenant, automation.id(), "schedule:2026-06-01T10:01:00Z")
                 .orElseThrow();
         assertThat(skipped.reason())
@@ -1574,11 +1717,11 @@ class AutomationScannerTest {
                 "automation_mode_disabled");
         clock.set(T0 + MINUTE + 1_000);
         assertThat(scanner.tick(clock.get())).isEqualTo(0);
-        AutomationLedgerStore.OccurrenceRow row = ledger.findOccurrence(
+        JdbcAutomationLedgerStore.OccurrenceRow row = ledger.findOccurrence(
                 tenant, automation.id(), "schedule:2026-06-01T10:01:00Z")
                 .orElseThrow();
         assertThat(row.outcome())
-                .isEqualTo(AutomationLedgerStore.OUTCOME_SKIPPED);
+                .isEqualTo(JdbcAutomationLedgerStore.OUTCOME_SKIPPED);
         assertThat(row.reason()).isEqualTo("automation_mode_disabled");
         assertThat(row.attempts()).isZero();
         // The obtained 4xx is not re-driven; the next slot fires normally.
@@ -1597,13 +1740,13 @@ class AutomationScannerTest {
                 "hosted_session_blocked");
         clock.set(T0 + MINUTE + 1_000);
         assertThat(scanner.tick(clock.get())).isEqualTo(0);
-        AutomationLedgerStore.OccurrenceRow row = ledger.findOccurrence(
+        JdbcAutomationLedgerStore.OccurrenceRow row = ledger.findOccurrence(
                 tenant, automation.id(), "schedule:2026-06-01T10:01:00Z")
                 .orElseThrow();
         // A transient session-state refusal is a defer, never a skip:
         // the claim stays firing with its backoff visible.
         assertThat(row.outcome())
-                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRING);
+                .isEqualTo(JdbcAutomationLedgerStore.OUTCOME_FIRING);
         assertThat(row.attempts()).isEqualTo(1);
         assertThat(row.nextRetryAt()).isGreaterThan(T0 + MINUTE + 1_000);
         assertThat(row.lastError()).contains("hosted_session_blocked");
@@ -1614,7 +1757,7 @@ class AutomationScannerTest {
         assertThat(scanner.tick(clock.get())).isEqualTo(1);
         assertThat(ledger.findOccurrence(tenant, automation.id(),
                 "schedule:2026-06-01T10:01:00Z").orElseThrow().outcome())
-                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+                .isEqualTo(JdbcAutomationLedgerStore.OUTCOME_FIRED);
         clock.set(T0 + 2 * MINUTE + 1_000);
         assertThat(scanner.tick(clock.get())).isEqualTo(1);
         assertThat(fake.firedOccurrences()).containsExactly(
@@ -1633,11 +1776,11 @@ class AutomationScannerTest {
         // and the reconcile the decision asked reports that, untouched.
         clock.set(T0 + 2 * MINUTE + 1_000);
         assertThat(scanner.tick(clock.get())).isEqualTo(0);
-        AutomationLedgerStore.OccurrenceRow skipped = ledger.findOccurrence(
+        JdbcAutomationLedgerStore.OccurrenceRow skipped = ledger.findOccurrence(
                 tenant, automation.id(), "schedule:2026-06-01T10:02:00Z")
                 .orElseThrow();
         assertThat(skipped.outcome())
-                .isEqualTo(AutomationLedgerStore.OUTCOME_SKIPPED);
+                .isEqualTo(JdbcAutomationLedgerStore.OUTCOME_SKIPPED);
         assertThat(skipped.reason()).isEqualTo(AutomationScanner.REASON_OVERLAP);
         assertThat(fake.operations.stream()
                 .filter(operation -> "reconcile_run"
@@ -1649,7 +1792,7 @@ class AutomationScannerTest {
         // loads the Session under overlap skip: the next decision's
         // reconcile settles the crashed run — and the very slot that
         // asked fires instead of being recorded skipped forever.
-        fake.crashedRuns.add(com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.automationRunId(
+        fake.crashedRuns.add(AutomationLedgerStore.automationRunId(
                 automation.id(), "schedule:2026-06-01T10:01:00Z"));
         clock.set(T0 + 3 * MINUTE + 1_000);
         assertThat(scanner.tick(clock.get())).isEqualTo(1);
@@ -1667,19 +1810,19 @@ class AutomationScannerTest {
         String id = automation.id();
         String wedged = "schedule:2026-06-01T10:01:00Z";
         String liveKey = "schedule:2026-06-01T10:02:00Z";
-        String wedgedRunId = com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.automationRunId(id, wedged);
+        String wedgedRunId = AutomationLedgerStore.automationRunId(id, wedged);
         // A second, genuinely live run beside the wedged one (a manual
         // run, fired and never settled: the mirror has no terminal row).
-        AutomationLedgerStore.ScheduleRow row = ledger.findSchedule(tenant, id)
+        JdbcAutomationLedgerStore.ScheduleRow row = ledger.findSchedule(tenant, id)
                 .orElseThrow();
         long fence = ledger.claim(tenant, id, "scanner-a",
                 clock.get() + 60_000, clock.get());
-        ledger.recordOccurrence(AutomationLedgerStore.OccurrenceRow.decision(
+        ledger.recordOccurrence(JdbcAutomationLedgerStore.OccurrenceRow.decision(
                 row, liveKey, T0 + 2 * MINUTE, AutomationScanner.TRIGGER_MANUAL,
-                AutomationLedgerStore.OUTCOME_FIRING, null, fence, clock.get()),
+                JdbcAutomationLedgerStore.OUTCOME_FIRING, null, fence, clock.get()),
                 "scanner-a");
         assertThat(ledger.settleOccurrence(tenant, id, liveKey,
-                AutomationLedgerStore.OUTCOME_FIRED, null, "scanner-a", fence,
+                JdbcAutomationLedgerStore.OUTCOME_FIRED, null, "scanner-a", fence,
                 clock.get())).isTrue();
         ledger.release(tenant, id, "scanner-a", fence, clock.get());
         // Production's shape: the commit that settles the wedged run
@@ -1696,7 +1839,7 @@ class AutomationScannerTest {
                         tenantId, sessionId, body);
                 if (!applied && "reconcile_run".equals(body.get("kind"))) {
                     applied = true;
-                    String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant,
+                    String scope = ManagedSessionStore.sessionScopeKey(tenant,
                             sessionId);
                     byte[] bytes = "{}".getBytes(StandardCharsets.UTF_8);
                     jdbc.update("INSERT INTO ma_resource"
@@ -1709,7 +1852,7 @@ class AutomationScannerTest {
                             + " 'managed-automation-run', 1, ?, ?,"
                             + " 'MYSQL_INLINE', ?, 'publish', 'REFERENCED', ?)",
                             com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(scope, "wedged-run-rev-3"), scope, tenant, WORKSPACE, sessionId, bytes.length,
-                            com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.sha256(
+                            AutomationLedgerStore.sha256(
                                     new String(bytes, StandardCharsets.UTF_8)),
                             bytes, new java.sql.Timestamp(clock.get()));
                     jdbc.update(
@@ -1735,10 +1878,10 @@ class AutomationScannerTest {
         fake.crashedRuns.add(wedgedRunId);
         clock.set(T0 + 3 * MINUTE + 1_000);
         assertThat(applyingScanner.tick(clock.get())).isEqualTo(0);
-        AutomationLedgerStore.OccurrenceRow skipped = ledger.findOccurrence(
+        JdbcAutomationLedgerStore.OccurrenceRow skipped = ledger.findOccurrence(
                 tenant, id, "schedule:2026-06-01T10:03:00Z").orElseThrow();
         assertThat(skipped.outcome())
-                .isEqualTo(AutomationLedgerStore.OUTCOME_SKIPPED);
+                .isEqualTo(JdbcAutomationLedgerStore.OUTCOME_SKIPPED);
         assertThat(skipped.reason()).isEqualTo(AutomationScanner.REASON_OVERLAP);
         assertThat(fake.firedOccurrences()).containsExactly(wedged);
     }
@@ -1754,19 +1897,19 @@ class AutomationScannerTest {
         // into unknown nor fired on a guess.
         fake.failNextReconcile = AutomationHarnessFake.refusal(503,
                 "automation_operation_failed");
-        fake.crashedRuns.add(com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.automationRunId(
+        fake.crashedRuns.add(AutomationLedgerStore.automationRunId(
                 automation.id(), "schedule:2026-06-01T10:01:00Z"));
         clock.set(T0 + 2 * MINUTE + 1_000);
         assertThat(scanner.tick(clock.get())).isEqualTo(0);
-        AutomationLedgerStore.OccurrenceRow skipped = ledger.findOccurrence(
+        JdbcAutomationLedgerStore.OccurrenceRow skipped = ledger.findOccurrence(
                 tenant, automation.id(), "schedule:2026-06-01T10:02:00Z")
                 .orElseThrow();
         assertThat(skipped.outcome())
-                .isEqualTo(AutomationLedgerStore.OUTCOME_SKIPPED);
+                .isEqualTo(JdbcAutomationLedgerStore.OUTCOME_SKIPPED);
         assertThat(skipped.reason()).isEqualTo(AutomationScanner.REASON_OVERLAP);
         // The re-drive repairs the run the fault swallowed, and clears the
         // slot that asked.
-        fake.crashedRuns.add(com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.automationRunId(
+        fake.crashedRuns.add(AutomationLedgerStore.automationRunId(
                 automation.id(), "schedule:2026-06-01T10:01:00Z"));
         clock.set(T0 + 3 * MINUTE + 1_000);
         assertThat(scanner.tick(clock.get())).isEqualTo(1);
@@ -1789,17 +1932,17 @@ class AutomationScannerTest {
                 "automation_not_found");
         clock.set(T0 + 2 * MINUTE + 1_000);
         assertThat(scanner.tick(clock.get())).isEqualTo(0);
-        AutomationLedgerStore.OccurrenceRow skipped = ledger.findOccurrence(
+        JdbcAutomationLedgerStore.OccurrenceRow skipped = ledger.findOccurrence(
                 tenant, automation.id(), "schedule:2026-06-01T10:02:00Z")
                 .orElseThrow();
         assertThat(skipped.outcome())
-                .isEqualTo(AutomationLedgerStore.OUTCOME_SKIPPED);
+                .isEqualTo(JdbcAutomationLedgerStore.OUTCOME_SKIPPED);
         assertThat(skipped.reason())
                 .isEqualTo(AutomationScanner.REASON_DEFINITION_RETIRED);
-        AutomationLedgerStore.ScheduleRow mirror = ledger.findSchedule(tenant,
+        JdbcAutomationLedgerStore.ScheduleRow mirror = ledger.findSchedule(tenant,
                 automation.id()).orElseThrow();
         assertThat(mirror.state())
-                .isEqualTo(AutomationLedgerStore.STATE_RETIRED);
+                .isEqualTo(JdbcAutomationLedgerStore.STATE_RETIRED);
         clock.set(T0 + 3 * MINUTE + 1_000);
         assertThat(scanner.tick(clock.get())).isEqualTo(0);
         assertThat(fake.operations.stream()
@@ -1821,15 +1964,15 @@ class AutomationScannerTest {
                 "hosted_session_not_found");
         clock.set(T0 + 2 * MINUTE + 1_000);
         assertThat(scanner.tick(clock.get())).isEqualTo(0);
-        AutomationLedgerStore.OccurrenceRow skipped = ledger.findOccurrence(
+        JdbcAutomationLedgerStore.OccurrenceRow skipped = ledger.findOccurrence(
                 tenant, automation.id(), "schedule:2026-06-01T10:02:00Z")
                 .orElseThrow();
         assertThat(skipped.outcome())
-                .isEqualTo(AutomationLedgerStore.OUTCOME_SKIPPED);
+                .isEqualTo(JdbcAutomationLedgerStore.OUTCOME_SKIPPED);
         assertThat(skipped.reason()).isEqualTo(AutomationScanner.REASON_OVERLAP);
         assertThat(ledger.findSchedule(tenant, automation.id()).orElseThrow()
-                .state()).isEqualTo(AutomationLedgerStore.STATE_LIVE);
-        fake.crashedRuns.add(com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.automationRunId(
+                .state()).isEqualTo(JdbcAutomationLedgerStore.STATE_LIVE);
+        fake.crashedRuns.add(AutomationLedgerStore.automationRunId(
                 automation.id(), "schedule:2026-06-01T10:01:00Z"));
         clock.set(T0 + 3 * MINUTE + 1_000);
         assertThat(scanner.tick(clock.get())).isEqualTo(1);
@@ -1853,15 +1996,15 @@ class AutomationScannerTest {
                 "hosted_session_not_found");
         clock.set(T0 + 2 * MINUTE + 1_000);
         assertThat(scanner.tick(clock.get())).isEqualTo(0);
-        AutomationLedgerStore.OccurrenceRow skipped = ledger.findOccurrence(
+        JdbcAutomationLedgerStore.OccurrenceRow skipped = ledger.findOccurrence(
                 tenant, automation.id(), "schedule:2026-06-01T10:02:00Z")
                 .orElseThrow();
         assertThat(skipped.outcome())
-                .isEqualTo(AutomationLedgerStore.OUTCOME_SKIPPED);
+                .isEqualTo(JdbcAutomationLedgerStore.OUTCOME_SKIPPED);
         assertThat(skipped.reason())
                 .isEqualTo(AutomationScanner.REASON_DEFINITION_RETIRED);
         assertThat(ledger.findSchedule(tenant, automation.id()).orElseThrow()
-                .state()).isEqualTo(AutomationLedgerStore.STATE_RETIRED);
+                .state()).isEqualTo(JdbcAutomationLedgerStore.STATE_RETIRED);
     }
 
     @Test
@@ -1881,11 +2024,11 @@ class AutomationScannerTest {
                 tenant, sessionId);
         clock.set(T0 + 2 * MINUTE + 1_000);
         assertThat(scanner.tick(clock.get())).isEqualTo(0);
-        AutomationLedgerStore.OccurrenceRow skipped = ledger.findOccurrence(
+        JdbcAutomationLedgerStore.OccurrenceRow skipped = ledger.findOccurrence(
                 tenant, automation.id(), "schedule:2026-06-01T10:02:00Z")
                 .orElseThrow();
         assertThat(skipped.outcome())
-                .isEqualTo(AutomationLedgerStore.OUTCOME_SKIPPED);
+                .isEqualTo(JdbcAutomationLedgerStore.OUTCOME_SKIPPED);
         assertThat(skipped.reason()).isEqualTo(AutomationScanner.REASON_OVERLAP);
         assertThat(fake.operations.stream()).noneMatch(
                 operation -> "reconcile_run".equals(operation.get("kind")));
@@ -1906,13 +2049,13 @@ class AutomationScannerTest {
         clock.set(T0 + MINUTE + 1_000);
         assertThat(scanner.tick(clock.get())).isEqualTo(0);
         assertThat(outcomes(automation.id()))
-                .containsOnlyKeys(AutomationLedgerStore.OUTCOME_FIRING);
+                .containsOnlyKeys(JdbcAutomationLedgerStore.OUTCOME_FIRING);
         assertThat(ledger.findSchedule(tenant, automation.id()).orElseThrow()
-                .state()).isEqualTo(AutomationLedgerStore.STATE_LIVE);
+                .state()).isEqualTo(JdbcAutomationLedgerStore.STATE_LIVE);
         clock.set(T0 + MINUTE + 11_000);
         assertThat(scanner.tick(clock.get())).isEqualTo(1);
         assertThat(outcomes(automation.id()))
-                .containsOnlyKeys(AutomationLedgerStore.OUTCOME_FIRED);
+                .containsOnlyKeys(JdbcAutomationLedgerStore.OUTCOME_FIRED);
         assertThat(fake.firedOccurrences()).containsExactly(
                 "schedule:2026-06-01T10:01:00Z",
                 "schedule:2026-06-01T10:01:00Z");
@@ -1935,15 +2078,15 @@ class AutomationScannerTest {
                 "hosted_session_not_found");
         clock.set(T0 + MINUTE + 11_000);
         assertThat(scanner.tick(clock.get())).isEqualTo(0);
-        AutomationLedgerStore.OccurrenceRow settled = ledger.findOccurrence(
+        JdbcAutomationLedgerStore.OccurrenceRow settled = ledger.findOccurrence(
                 tenant, automation.id(), "schedule:2026-06-01T10:01:00Z")
                 .orElseThrow();
         assertThat(settled.outcome())
-                .isEqualTo(AutomationLedgerStore.OUTCOME_SKIPPED);
+                .isEqualTo(JdbcAutomationLedgerStore.OUTCOME_SKIPPED);
         assertThat(settled.reason())
                 .isEqualTo(AutomationScanner.REASON_DEFINITION_RETIRED);
         assertThat(ledger.findSchedule(tenant, automation.id()).orElseThrow()
-                .state()).isEqualTo(AutomationLedgerStore.STATE_RETIRED);
+                .state()).isEqualTo(JdbcAutomationLedgerStore.STATE_RETIRED);
     }
 
     @Test
@@ -1958,11 +2101,11 @@ class AutomationScannerTest {
         clock.set(T0 + MINUTE + 1_000);
         assertThat(scanner.tick(clock.get())).isEqualTo(0);
         assertThat(outcomes(automation.id()))
-                .containsOnlyKeys(AutomationLedgerStore.OUTCOME_FIRING);
+                .containsOnlyKeys(JdbcAutomationLedgerStore.OUTCOME_FIRING);
         clock.set(T0 + MINUTE + 11_000);
         assertThat(scanner.tick(clock.get())).isEqualTo(1);
         assertThat(outcomes(automation.id()))
-                .containsOnlyKeys(AutomationLedgerStore.OUTCOME_FIRED);
+                .containsOnlyKeys(JdbcAutomationLedgerStore.OUTCOME_FIRED);
         assertThat(fake.firedOccurrences()).containsExactly(
                 "schedule:2026-06-01T10:01:00Z",
                 "schedule:2026-06-01T10:01:00Z");
@@ -1988,7 +2131,7 @@ class AutomationScannerTest {
                 });
         ScheduleRow mirror = ledger.findSchedule(tenant, automation.id())
                 .orElseThrow();
-        assertThat(mirror.state()).isEqualTo(AutomationLedgerStore.STATE_LIVE);
+        assertThat(mirror.state()).isEqualTo(JdbcAutomationLedgerStore.STATE_LIVE);
         assertThat(mirror.definitionRevision()).isEqualTo(1L);
     }
 
@@ -2081,7 +2224,7 @@ class AutomationScannerTest {
                 key);
         // A foreign request's claim already holds the key mid-flight:
         // this one never reaches the Harness and mirrors nothing.
-        ledger.claimCommand(sessionId, new AutomationLedgerStore.CommandRow(tenant, key,
+        ledger.claimCommand(sessionId, new JdbcAutomationLedgerStore.CommandRow(tenant, key,
                 ACTOR, "deadbeef", scheduleId, ""), clock.get());
         assertThatThrownBy(() -> service.create(tenant, ACTOR, key,
                 new AutomationDefinitionRequest(sessionId, "Goal",
@@ -2102,7 +2245,7 @@ class AutomationScannerTest {
         String key = "claim-" + UUID.randomUUID();
         String scheduleId = ManagedAutomationService.scheduleIdFor(tenant,
                 key);
-        ledger.claimCommand(sessionId, new AutomationLedgerStore.CommandRow(tenant, key,
+        ledger.claimCommand(sessionId, new JdbcAutomationLedgerStore.CommandRow(tenant, key,
                 ACTOR, "digest-c", scheduleId, ""), clock.get());
         assertThat(ledger.settleCommand(tenant, key, "digest-c", ACTOR,
                 "{\"id\":\"" + scheduleId + "\"}")).isTrue();
@@ -2456,10 +2599,10 @@ class AutomationScannerTest {
                 "key-" + UUID.randomUUID());
         clock.addAndGet(11_000);
         assertThat(scanner.tick(clock.get())).isEqualTo(1);
-        AutomationLedgerStore.OccurrenceRow row = ledger.findOccurrence(
+        JdbcAutomationLedgerStore.OccurrenceRow row = ledger.findOccurrence(
                 tenant, automation.id(), "schedule:2026-06-01T10:01:00Z")
                 .orElseThrow();
-        assertThat(row.outcome()).isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+        assertThat(row.outcome()).isEqualTo(JdbcAutomationLedgerStore.OUTCOME_FIRED);
         assertThat(fake.fires()).isEqualTo(2);
     }
 
@@ -2503,11 +2646,11 @@ class AutomationScannerTest {
         }
         String slot = "schedule:2026-06-01T10:01:00Z";
         assertThat(occurrence(firstAutomation.id(), slot).outcome())
-                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+                .isEqualTo(JdbcAutomationLedgerStore.OUTCOME_FIRED);
         assertThat(occurrence(secondAutomation.id(), slot).outcome())
-                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+                .isEqualTo(JdbcAutomationLedgerStore.OUTCOME_FIRED);
         assertThat(occurrence(thirdAutomation.id(), slot).outcome())
-                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+                .isEqualTo(JdbcAutomationLedgerStore.OUTCOME_FIRED);
     }
 
     @Test
@@ -2576,9 +2719,9 @@ class AutomationScannerTest {
         stillFiring.countDown();
         first.join(10_000);
         assertThat(first.isAlive()).isFalse();
-        AutomationLedgerStore.OccurrenceRow row = occurrence(automation.id(),
+        JdbcAutomationLedgerStore.OccurrenceRow row = occurrence(automation.id(),
                 "schedule:2026-06-01T10:01:00Z");
-        assertThat(row.outcome()).isEqualTo(AutomationLedgerStore
+        assertThat(row.outcome()).isEqualTo(JdbcAutomationLedgerStore
                 .OUTCOME_FIRED);
         assertThat(row.attempts()).isEqualTo(0);
         assertThat(fake.fires()).isEqualTo(2);
@@ -2612,11 +2755,11 @@ class AutomationScannerTest {
         }
         String slot = "schedule:2026-06-01T10:01:00Z";
         assertThat(occurrence(firstAutomation.id(), slot).outcome())
-                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+                .isEqualTo(JdbcAutomationLedgerStore.OUTCOME_FIRED);
         assertThat(occurrence(secondAutomation.id(), slot).outcome())
-                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+                .isEqualTo(JdbcAutomationLedgerStore.OUTCOME_FIRED);
         assertThat(occurrence(thirdAutomation.id(), slot).outcome())
-                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+                .isEqualTo(JdbcAutomationLedgerStore.OUTCOME_FIRED);
     }
 
     @Test
@@ -2642,9 +2785,9 @@ class AutomationScannerTest {
         }
         String slot = "schedule:2026-06-01T10:01:00Z";
         assertThat(occurrence(firstAutomation.id(), slot).outcome())
-                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+                .isEqualTo(JdbcAutomationLedgerStore.OUTCOME_FIRED);
         assertThat(occurrence(secondAutomation.id(), slot).outcome())
-                .isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+                .isEqualTo(JdbcAutomationLedgerStore.OUTCOME_FIRED);
     }
 
     @Test
@@ -2660,8 +2803,8 @@ class AutomationScannerTest {
         CountDownLatch firstFailed = new CountDownLatch(1);
         AtomicBoolean secondDone = new AtomicBoolean();
         AtomicInteger claims = new AtomicInteger();
-        AutomationLedgerStore downAtFirstClaim =
-                new AutomationLedgerStore(jdbc) {
+        JdbcAutomationLedgerStore downAtFirstClaim =
+                new JdbcAutomationLedgerStore(jdbc) {
                     @Override
                     public long claim(String tenantId, String scheduleId,
                             String owner, long leaseUntil, long now) {
@@ -2715,7 +2858,7 @@ class AutomationScannerTest {
         IllegalStateException firstFailure = new IllegalStateException(
                 "claim store down");
         AtomicInteger claims = new AtomicInteger();
-        AutomationLedgerStore downAtClaim = new AutomationLedgerStore(jdbc) {
+        JdbcAutomationLedgerStore downAtClaim = new JdbcAutomationLedgerStore(jdbc) {
             @Override
             public long claim(String tenantId, String scheduleId,
                     String owner, long leaseUntil, long now) {
@@ -2765,7 +2908,7 @@ class AutomationScannerTest {
         define("* * * * *", "allow", "none", null, true);
         clock.set(T0 + MINUTE + 1_000);
         AtomicInteger claims = new AtomicInteger();
-        AutomationLedgerStore downAtClaim = new AutomationLedgerStore(jdbc) {
+        JdbcAutomationLedgerStore downAtClaim = new JdbcAutomationLedgerStore(jdbc) {
             @Override
             public long claim(String tenantId, String scheduleId,
                     String owner, long leaseUntil, long now) {
@@ -2838,7 +2981,7 @@ class AutomationScannerTest {
                 .extracting(ScheduleRow::scheduleId)
                 .contains(automation.id());
         AtomicInteger claims = new AtomicInteger();
-        AutomationLedgerStore counting = new AutomationLedgerStore(jdbc) {
+        JdbcAutomationLedgerStore counting = new JdbcAutomationLedgerStore(jdbc) {
             @Override
             public long claim(String tenantId, String scheduleId, String owner,
                     long leaseUntil, long now) {
@@ -2865,7 +3008,7 @@ class AutomationScannerTest {
         assertThat(ledger.listOccurrences(tenant, automation.id(), null, 100)
                 .rows().stream()
                 .map(OccurrenceView::occurrence)
-                .map(AutomationLedgerStore.OccurrenceRow::occurrenceKey))
+                .map(JdbcAutomationLedgerStore.OccurrenceRow::occurrenceKey))
                 .contains("schedule:2026-06-01T10:02:00Z");
     }
 
@@ -2881,7 +3024,7 @@ class AutomationScannerTest {
         CountDownLatch releaseClaim = new CountDownLatch(1);
         CountDownLatch rowReleased = new CountDownLatch(1);
         AtomicLong fence = new AtomicLong(-1);
-        AutomationLedgerStore slowClaim = new AutomationLedgerStore(jdbc) {
+        JdbcAutomationLedgerStore slowClaim = new JdbcAutomationLedgerStore(jdbc) {
             @Override
             public long claim(String tenantId, String scheduleId, String owner,
                     long leaseUntil, long now) {
@@ -2937,7 +3080,7 @@ class AutomationScannerTest {
             assertThat(fence.get()).isGreaterThanOrEqualTo(0);
             assertThat(occurrence(automation.id(),
                     "schedule:2026-06-01T10:01:00Z").outcome())
-                    .isEqualTo(AutomationLedgerStore.OUTCOME_FIRED);
+                    .isEqualTo(JdbcAutomationLedgerStore.OUTCOME_FIRED);
         } finally {
             releaseClaim.countDown();
             rows.destroy();
