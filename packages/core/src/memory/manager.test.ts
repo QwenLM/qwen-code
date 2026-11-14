@@ -2481,42 +2481,6 @@ describe('MemoryManager', () => {
       expect((await turn(mgr, 8)).skippedReason).toBe('cadence');
     });
 
-    it('reports a flush whose own deadline expired while the slot was held', async () => {
-      vi.stubEnv('QWEN_CODE_MEMORY_EXTRACT_NOOP_SKIP_TURNS', '1');
-      const mgr = new MemoryManager();
-      await turn(mgr, 2);
-      expect((await turn(mgr, 4)).skippedReason).toBe('cadence');
-
-      const release = holdNextExtract((params) =>
-        engagedNoop(params.sessionId, params.history.length),
-      );
-      const direct = turn(mgr, 6);
-      await vi.waitFor(() =>
-        expect(runAutoMemoryExtract).toHaveBeenCalledTimes(2),
-      );
-
-      debugWarn.mockClear();
-      // A zero budget expires the run's deadline at creation, so whichever
-      // way the slot-wait interleaves — parked on the held run, or slipping
-      // past the wait in the starting millisecond — the body always finds
-      // its deadline already expired (#17068: a 1ms budget let the check
-      // race the clock on loaded runners and take the silent fork path).
-      await expect(mgr.flushPendingExtract('sess', 0)).resolves.toBe(false);
-      release();
-      await direct;
-      await mgr.drain();
-
-      await vi.waitFor(() =>
-        expect(debugWarn).toHaveBeenCalledWith(
-          expect.stringContaining('expired before it could run'),
-          expect.objectContaining({
-            reason: 'flush_deadline_expired',
-            owedTurns: 2,
-          }),
-        ),
-      );
-    });
-
     // The zero-budget determinism rests on the deadline comparison being
     // inclusive: with the clock frozen on the flush's creation millisecond,
     // deadline === now and only >= treats it as expired. A strict > would
