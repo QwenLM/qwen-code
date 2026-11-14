@@ -178,14 +178,14 @@ Qwen Code ships with a complete agent harness — multi-agent orchestration, per
 ### Memory, skills, and sessions
 
 - **[Auto-Memory](https://qwenlm.github.io/qwen-code-docs/en/users/features/memory/)** — the agent writes its own notes and recalls them across sessions; your `QWEN.md` and `AGENTS.md` briefings load automatically.
-- **[Skills & Auto-Skills](https://qwenlm.github.io/qwen-code-docs/en/users/features/skills/)** — built-in skills (`/review`, `/batch`, `/bugfix`…) work out of the box; `/learn` distills docs or code into new skills, the agent can generate skills on its own, and `/curator` maintains the library.
+- **[Skills & Auto-Skills](https://qwenlm.github.io/qwen-code-docs/en/users/features/skills/)** — built-in skills (`/review`, `/batch`, `/bugfix`…) work out of the box; `/learn` distills docs or code into new skills, the agent can generate skills on its own _(opt-in)_, and `/curator` maintains the library.
 - **[Session management](https://qwenlm.github.io/qwen-code-docs/en/users/features/session-overview/)** — resume past conversations with `/resume`, and browse, rename, or archive sessions.
 
 ### Extensibility and control
 
 - **[Hooks](https://qwenlm.github.io/qwen-code-docs/en/users/features/hooks/)** — run your own scripts at lifecycle events: before and after tool calls, session start and end, and more.
 - **[MCP](https://qwenlm.github.io/qwen-code-docs/en/users/features/mcp/)** — connect any Model Context Protocol server to add tools, resources, and prompts.
-- **[LSP integration](https://qwenlm.github.io/qwen-code-docs/en/users/features/lsp/)** — native language-server support: go-to-definition, references, diagnostics, and code actions.
+- **[LSP integration](https://qwenlm.github.io/qwen-code-docs/en/users/features/lsp/)** _(experimental, opt-in)_ — native language-server support: go-to-definition, references, diagnostics, and code actions.
 - **[Computer Use & Browser Use](https://qwenlm.github.io/qwen-code-docs/en/users/features/computer-use/)** — automate desktop applications and the browser through native MCP tools.
 - **[Plan Mode & approval modes](https://qwenlm.github.io/qwen-code-docs/en/users/features/approval-mode/)** — plan read-only before touching files, then choose per-call confirmation, auto-edit, classifier-driven [Auto Mode](https://qwenlm.github.io/qwen-code-docs/en/users/features/auto-mode/), or YOLO.
 - **[Sandbox](https://qwenlm.github.io/qwen-code-docs/en/users/features/sandbox/) & [Git worktrees](https://qwenlm.github.io/qwen-code-docs/en/users/features/worktree/)** — confine tool execution with built-in sandboxing and isolate wide-ranging edits in a temporary worktree.
