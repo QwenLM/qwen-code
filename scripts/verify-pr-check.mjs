@@ -64,7 +64,7 @@ const HEADING_TITLE_MAX = 120;
 const FOOTER =
   /^_— .+ via Qwen Code \/verify-pr \(v[^;]+; skill [0-9a-f]{12}\)_$/;
 
-const HELP = `Usage: node scripts/verify-pr-check.mjs [--context <snapshot>] <artifact-dir>
+const HELP = `Usage: node scripts/verify-pr-check.mjs [--context <snapshot>] [--publish-lane] <artifact-dir>
 
 Checks a local round against the rules the CI publisher enforces:
 
@@ -81,12 +81,13 @@ Checks a local round against the rules the CI publisher enforces:
     and lists at least one commit (an empty set makes the claim vacuous)
   - boundary.json declares where the untrusted PR code ran: mode container
     with a non-empty detail, backed by the boundary-gate.json record a passing
-    --require-isolation --artifact-dir gate run wrote (the CI publish job
-    writes its own ci-lane record), or mode waived with the approving
-    maintainer (by), a permalink to the approval comment (approval) and the
-    reason; a round without the declaration is refused. On the CI entry path
-    ($QWEN_VERIFY_CONTEXT set) an absent declaration is only a warning: the
-    publish job writes the CI lane's own before trusting the verdict
+    --require-isolation --artifact-dir gate run wrote, or mode waived with the
+    approving maintainer (by), a permalink to the approval comment (approval)
+    and the reason; a round without the declaration is refused. The CI publish
+    job's own ci-lane record is honored only under --publish-lane, the flag
+    the publish job alone passes. On the CI entry path ($QWEN_VERIFY_CONTEXT
+    set) an absent declaration is only a warning: the publish job writes the
+    CI lane's own before trusting the verdict
   - an unreadable artifact (a directory or permission-denied file in its
     place) is reported as unreadable, not silently treated as absent
 
@@ -202,9 +203,11 @@ export function checkMutationCoverage(text) {
  */
 // A container declaration must be backed by a gate run, not minted by the
 // round: the record is written by verify-pr-prepare.mjs --require-isolation
-// (gate "require-isolation") or by the CI publish job (gate "ci-lane").
-const GATE_VALUES = ['require-isolation', 'ci-lane'];
-function gateRecordErrors(gateText) {
+// (gate "require-isolation"). The CI publish job writes its own "ci-lane"
+// record, and that value is honored ONLY under --publish-lane, the flag the
+// publish job alone passes — a local round cannot claim the lane by writing
+// the record itself.
+function gateRecordErrors(gateText, { publishLane = false } = {}) {
   if (gateText === null || gateText === undefined || gateText.trim() === '') {
     return [
       'boundary-gate.json is missing: a mode:"container" declaration must be backed by a gate run — verify-pr-prepare.mjs --require-isolation --artifact-dir <round-dir> inside the boundary (the CI publish job writes its own ci-lane record)',
@@ -219,9 +222,12 @@ function gateRecordErrors(gateText) {
   if (!gate || typeof gate !== 'object' || Array.isArray(gate)) {
     return ['boundary-gate.json must be an object'];
   }
-  if (!GATE_VALUES.includes(gate.gate) || gate.passed !== true) {
+  const values = publishLane
+    ? ['require-isolation', 'ci-lane']
+    : ['require-isolation'];
+  if (!values.includes(gate.gate) || gate.passed !== true) {
     return [
-      `boundary-gate.json does not record a passed isolation gate (gate: ${GATE_VALUES.join(' | ')}, passed: true)`,
+      `boundary-gate.json does not record a passed isolation gate (gate: ${values.join(' | ')}, passed: true)`,
     ];
   }
   return [];
@@ -232,7 +238,11 @@ function gateRecordErrors(gateText) {
 const APPROVAL_PERMALINK =
   /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/(?:issues|pull)\/\d+#issuecomment-\d+$/;
 
-export function checkBoundary(text, gateText = null) {
+export function checkBoundary(
+  text,
+  gateText = null,
+  { publishLane = false } = {},
+) {
   if (text === null || text === undefined || text.trim() === '') {
     return {
       errors: [
@@ -288,7 +298,7 @@ export function checkBoundary(text, gateText = null) {
     };
   }
   if (parsed.mode === 'container') {
-    const gateErrors = gateRecordErrors(gateText);
+    const gateErrors = gateRecordErrors(gateText, { publishLane });
     if (gateErrors.length > 0) return { errors: gateErrors };
   }
   if (
@@ -356,18 +366,34 @@ function leadShapeWarnings(text, verdict, label) {
  */
 function boundaryLineWarnings(text, label) {
   const lines = text.split('\n');
+  // The Methodology opens either as an H2 heading or as the report
+  // structure's numbered bold label ("8. **Methodology** — …"); both are
+  // documented shapes, and the Boundary line must follow whichever the
+  // round used.
   const idx = lines.findIndex((line) =>
-    /^##\s+Methodology\s*$/.test(line.trim()),
+    /^(##\s+Methodology\s*$|\d+\.\s+\*\*Methodology\*\*)/.test(line.trim()),
   );
   if (idx === -1) {
     return [
-      `${label} has no ## Methodology section: it opens with a **Boundary.** line naming where the untrusted PR code ran (the image and network policy, or the recorded waiver)`,
+      `${label} has no Methodology section (## Methodology or the numbered **Methodology** label): it opens with a **Boundary.** line naming where the untrusted PR code ran (the image and network policy, or the recorded waiver)`,
     ];
+  }
+  // The numbered label may carry the Boundary line on the same line
+  // ("8. **Methodology** — **Boundary.** …"); the H2 form opens on the next.
+  // The Boundary token must OPEN the text after the label — a prose mention
+  // ("we discuss the **Boundary.** rule") is not a declaration.
+  const opening = lines[idx].trim();
+  if (
+    /^\d+\.\s+\*\*Methodology\*\*\s*(?:[—:-]\s*)?\*\*Boundary\.\*\*/.test(
+      opening,
+    )
+  ) {
+    return [];
   }
   const first = lines.slice(idx + 1).find((line) => line.trim() !== '');
   if (!first || !first.trim().startsWith('**Boundary.**')) {
     return [
-      `${label}: the first line after ## Methodology must be the **Boundary.** line — a prose mention of the rule elsewhere does not declare where the untrusted PR code ran`,
+      `${label}: the first line after the Methodology opening must be the **Boundary.** line — a prose mention of the rule elsewhere does not declare where the untrusted PR code ran`,
     ];
   }
   return [];
@@ -386,6 +412,7 @@ export function checkArtifacts({
   evidence = [],
   expectedHead = null,
   publisherOwnsBoundary = false,
+  publishLane = false,
 }) {
   const errors = [];
   const warnings = [];
@@ -561,7 +588,10 @@ export function checkArtifacts({
       'boundary.json is absent on the CI entry path ($QWEN_VERIFY_CONTEXT): the publish job writes the CI lane declaration before it trusts the verdict',
     );
   } else {
-    errors.push(...checkBoundary(files.boundary, files.boundaryGate).errors);
+    errors.push(
+      ...checkBoundary(files.boundary, files.boundaryGate, { publishLane })
+        .errors,
+    );
   }
 
   if (files.report && files.report.trim() !== '') {
@@ -630,6 +660,7 @@ function main(argv) {
     return 0;
   }
   let contextPath = null;
+  let publishLane = false;
   const positional = [];
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
@@ -641,6 +672,10 @@ function main(argv) {
         );
         return 2;
       }
+    } else if (arg === '--publish-lane') {
+      // Passed only by the CI publish job: honors the ci-lane gate record
+      // the job writes itself. A local round cannot claim the lane.
+      publishLane = true;
     } else if (arg.startsWith('-')) {
       process.stderr.write(`verify-pr check: unknown option ${arg}\n\n${HELP}`);
       return 2;
@@ -754,6 +789,7 @@ function main(argv) {
     evidence,
     expectedHead,
     publisherOwnsBoundary: !!process.env.QWEN_VERIFY_CONTEXT,
+    publishLane,
   });
   result.errors.unshift(...unreadableErrors);
   if (snapshotWarning) result.warnings.unshift(snapshotWarning);

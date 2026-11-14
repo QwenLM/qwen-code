@@ -287,7 +287,8 @@ describe('startRound', () => {
         head: PREV,
         round: 13,
         artifactDir: 'r13',
-        deferredAt: '2026-11-14T02:40:00.000Z',
+        // The original push-order timestamp is kept, not the redelivery's.
+        deferredAt: '2026-11-14T02:30:00.000Z',
       },
     ]);
   });
@@ -380,6 +381,16 @@ describe('startRound', () => {
     const deferred = readState(root, 1).deferredHeads;
     expect(deferred.map((entry) => entry.head)).toEqual([PREV, OLDER]);
     expect(deferred[0]).toMatchObject({ round: 14, artifactDir: 'r14' });
+    // The original deferredAt is kept: refreshing it would let the
+    // redelivered older head outrank the newer push in the supersede filter.
+    expect(deferred[0].deferredAt).toBe('2026-11-14T02:00:00.000Z');
+    completeRound(root, { pr: 1, head: HEAD, round: 11, verdict: 'findings' });
+    expect(
+      startRound(root, { pr: 1, head: OLDER, round: 15, artifactDir: 'r15' })
+        .duplicate,
+    ).toBeUndefined();
+    // Starting the newer push supersedes the redelivered older head too.
+    expect(readState(root, 1).deferredHeads).toEqual([]);
   });
 
   it('refuses a start for another repository sharing the PR number', () => {
@@ -651,11 +662,39 @@ describe('completeRound', () => {
     expect(result.state.verifiedHeads.map((entry) => entry.head)).toEqual([
       PREV,
     ]);
-    // The head stays startable for a later round.
+    // The head is re-deferred: the start call consumed its only event, so
+    // a later command must name it again or it ships unverified.
+    expect(state.deferredHeads.map((entry) => entry.head)).toEqual([HEAD]);
+    expect(result.deferred.map((entry) => entry.head)).toEqual([HEAD]);
+    // The head stays startable for a later round, which clears the entry.
     expect(
       startRound(root, { pr: 1, head: HEAD, round: 11, artifactDir: 'r11' })
         .duplicate,
     ).toBeUndefined();
+    expect(readState(root, 1).deferredHeads).toEqual([]);
+  });
+
+  // A head an earlier round already verified keeps that verdict: an
+  // inconclusive re-run neither re-defers it nor makes it startable.
+  it('an inconclusive completion of a verified head keeps the verdict', () => {
+    const root = makeRoot();
+    startRound(root, { pr: 1, head: HEAD, round: 10, artifactDir: 'r10' });
+    completeRound(root, { pr: 1, head: HEAD, round: 10, verdict: 'findings' });
+    const result = completeRound(root, {
+      pr: 1,
+      head: HEAD,
+      round: 10,
+      verdict: 'inconclusive',
+    });
+    expect(result.keptVerdict).toBe(true);
+    expect(result.deferred).toEqual([]);
+    const state = readState(root, 1);
+    expect(state.verifiedHeads.map((entry) => entry.head)).toEqual([HEAD]);
+    expect(state.deferredHeads).toEqual([]);
+    expect(
+      startRound(root, { pr: 1, head: HEAD, round: 11, artifactDir: 'r11' })
+        .duplicate,
+    ).toBe('verified');
   });
 
   // A round released while still alive can complete after its replacement
@@ -1107,10 +1146,47 @@ describe('CLI', () => {
     ]);
     expect(completed.status).toBe(0);
     expect(completed.stdout).toMatch(
-      /recorded inconclusive .*\(not verified; the head stays startable\)/,
+      /recorded inconclusive .*\(not verified; the head stays startable and is re-deferred for the next round\)/,
     );
-    expect(readState(root, 16866).verifiedHeads).toEqual([]);
+    // The completion names the re-deferred head: its only delivery.
+    expect(completed.stdout).toMatch(
+      new RegExp(`deferred heads awaiting a round: ${HEAD}`),
+    );
+    const state = readState(root, 16866);
+    expect(state.verifiedHeads).toEqual([]);
+    expect(state.deferredHeads.map((entry) => entry.head)).toEqual([HEAD]);
     expect(run(root, [...START, '--artifact-dir', 'r12']).status).toBe(0);
+  });
+
+  it('refuses a start for another repository through the CLI', () => {
+    const root = makeRoot();
+    expect(
+      run(root, [
+        ...START,
+        '--artifact-dir',
+        'r11',
+        '--repo',
+        'QwenLM/qwen-code',
+      ]).status,
+    ).toBe(0);
+    const foreign = run(root, [
+      '16866',
+      '--start',
+      '--head',
+      PREV,
+      '--round',
+      '12',
+      '--artifact-dir',
+      'r12',
+      '--repo',
+      'other/repo',
+    ]);
+    expect(foreign.status).toBe(3);
+    expect(foreign.stderr).toMatch(/state belongs to QwenLM\/qwen-code/);
+    expect(foreign.stderr).toMatch(/only unique within its repository/);
+    expect(readState(root, 16866).inFlightHeads).toEqual([
+      expect.objectContaining({ head: HEAD }),
+    ]);
   });
 
   it('rejects a relative --state-root as usage', () => {
@@ -1159,6 +1235,10 @@ describe('CLI', () => {
       { encoding: 'utf8', cwd: root },
     );
     expect(res.status).toBe(2);
+    // The emptiness guard's own message, not the later absolute-path one:
+    // deleting the emptiness clause must red this, not silently degrade
+    // the diagnosis.
+    expect(res.stderr).toMatch(/--state-root must not be empty/);
     expect(existsSync(statePath(root, 16866))).toBe(false);
   });
 

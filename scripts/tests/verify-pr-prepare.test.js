@@ -619,7 +619,15 @@ describe('parseArgs', () => {
     expect(parseArgs(['--require-isolation'])).toMatchObject({
       requireIsolation: true,
     });
+    expect(
+      parseArgs(['--require-isolation', '--artifact-dir', 'd']),
+    ).toMatchObject({ requireIsolation: true, artifactDir: 'd' });
     expect(parseArgs(['--help'])).toMatchObject({ help: true });
+    // The flag is load-bearing only for the gate: alone it must not
+    // silently succeed on the coordinate path writing nothing.
+    expect(
+      parseArgs(['42', '--repo', REPO, '--artifact-dir', 'd']).error,
+    ).toMatch(/--artifact-dir only applies with --require-isolation/);
   });
 
   it('rejects a missing PR, a missing repo, and a stray argument', () => {
@@ -756,7 +764,11 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     expect(result.stdout).toContain(
       `isolation  ${isolation.signals.join(', ')}`,
     );
-    expect(result.stdout).toContain('--require-isolation');
+    // The printed next-step command must carry the flag the checker's
+    // gate-record requirement now depends on.
+    expect(result.stdout).toContain(
+      'node scripts/verify-pr-prepare.mjs --require-isolation --artifact-dir',
+    );
 
     const root = realpathSync(dir);
     const contextPath = join(root, 'tmp', 'verify-context', 'pr42.json');

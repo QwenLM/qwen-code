@@ -38,9 +38,10 @@
  * heads so the caller can start the latest one. `--complete` removes only
  * its own round's in-flight entry (matched by head and round) and upserts
  * its verified entry, except for `inconclusive`, which releases the marker
- * without filing the head as verified — an inconclusive head stays
- * startable. The top-level `verifiedHead`/`previousHead` view reflects the
- * most recent completion. `--release --head <oid>` is the recovery path for
+ * without filing the head as verified and re-defers the head so the next
+ * command names it again (a head that already keeps an earlier verdict is
+ * not re-deferred). The top-level `verifiedHead`/`previousHead` view
+ * reflects the most recent completion. `--release --head <oid>` is the recovery path for
  * a round that died after `--start`: it removes only the named head's
  * in-flight entry and refuses a head with no entry, including when no
  * markers exist at all — a release aimed at the wrong state root must not
@@ -335,15 +336,21 @@ export function startRound(
       if (duplicate === 'in-flight' && !sameCommit(blocker, head)) {
         // A redelivery updates the entry in place: re-appending it would
         // make the tail write order rather than push order, and
-        // "start the latest one" would name a stale head.
+        // "start the latest one" would name a stale head. The original
+        // deferredAt is kept: it records push order, and refreshing it
+        // would let a redelivered older head outrank a newer push in the
+        // supersede filter.
         const prior = deferredEntries(existing);
+        const at = prior.findIndex((e) => sameCommit(e.head, head));
         const entry = {
           head,
           round,
           artifactDir,
-          deferredAt: now.toISOString(),
+          deferredAt:
+            at >= 0
+              ? (prior[at].deferredAt ?? now.toISOString())
+              : now.toISOString(),
         };
-        const at = prior.findIndex((e) => sameCommit(e.head, head));
         const deferred =
           at >= 0
             ? prior.map((e, i) => (i === at ? entry : e))
@@ -457,15 +464,33 @@ export function completeRound(
     // A completed head no longer awaits a round — including the fallback
     // path that completes a deferred head without a prior start, which
     // would otherwise leave it named by every later --complete. An
-    // inconclusive completion files no verdict, so its head keeps the
-    // deferred delivery: pruning it would leave the head in none of the
-    // three lists, and no second event will ever arrive.
-    const deferred =
-      verdict === 'inconclusive'
-        ? deferredEntries(existing)
-        : deferredEntries(existing).filter(
-            (entry) => !sameCommit(entry.head, head),
-          );
+    // inconclusive completion files no verdict: its head is re-deferred so
+    // a later command names it again (the probe's cursor already advanced
+    // in the start call, so no second event arrives) — unless an earlier
+    // round already verified it, in which case the head keeps that verdict
+    // and its dedup, and is not re-deferred.
+    let deferred;
+    let keptVerdict = false;
+    if (verdict === 'inconclusive') {
+      if (prior) {
+        keptVerdict = true;
+        deferred = deferredEntries(existing);
+      } else {
+        deferred = deferredEntries(existing).filter(
+          (entry) => !sameCommit(entry.head, head),
+        );
+        deferred.push({
+          head,
+          round,
+          artifactDir: dir,
+          deferredAt: completedAt,
+        });
+      }
+    } else {
+      deferred = deferredEntries(existing).filter(
+        (entry) => !sameCommit(entry.head, head),
+      );
+    }
     const state = deriveView({
       ...(existing ?? {}),
       pr,
@@ -483,6 +508,7 @@ export function completeRound(
       path: writeState(stateRoot, pr, state),
       state,
       deferred,
+      keptVerdict,
     };
   });
 }
@@ -541,9 +567,10 @@ and --release name the deferred heads so the caller can start the latest
 one. --complete must repeat the --start round: a mismatch, or a completion
 from a round older than the one already answered for the head, is refused
 (exit 3). --verdict inconclusive releases the marker without filing the head
-as verified, and keeps its deferred entry. --release removes only the named
-head's in-flight entry; a head with no entry is refused (exit 3), including
-when no markers exist at all. A corrupt state file is refused (exit 1), never
+as verified and re-defers the head for the next round (a head that already
+keeps an earlier verdict is not re-deferred). --release removes only the
+named head's in-flight entry; a head with no entry is refused (exit 3),
+including when no markers exist at all. A corrupt state file is refused (exit 1), never
 silently rewritten. --state-root must be an absolute path; the default is
 the main worktree of the clone the script lives in, and a default root that
 is not a git worktree is refused (exit 2) — pass --state-root explicitly.
@@ -699,7 +726,9 @@ function main(argv) {
       }
       process.stdout.write(
         args.verdict === 'inconclusive'
-          ? `verify-pr watch-state: PR ${args.pr} round ${args.round} recorded inconclusive for ${args.head} (not verified; the head stays startable) at ${result.path}\n`
+          ? result.keptVerdict
+            ? `verify-pr watch-state: PR ${args.pr} round ${args.round} recorded inconclusive for ${args.head} (the head keeps its earlier verdict; not re-deferred) at ${result.path}\n`
+            : `verify-pr watch-state: PR ${args.pr} round ${args.round} recorded inconclusive for ${args.head} (not verified; the head stays startable and is re-deferred for the next round) at ${result.path}\n`
           : `verify-pr watch-state: PR ${args.pr} round ${args.round} verified ${args.head} (${args.verdict}) at ${result.path}\n`,
       );
       printDeferred(args.pr, result.deferred);

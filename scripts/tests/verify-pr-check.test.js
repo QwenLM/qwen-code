@@ -595,13 +595,21 @@ describe('checkBoundary', () => {
     }
   });
 
-  it('accepts the CI lane gate record the publish job writes', () => {
+  it('accepts the CI lane gate record only under the publish invocation', () => {
     expect(
       checkBoundary(
         JSON.stringify({ mode: 'container', detail: 'CI verify lane' }),
         JSON.stringify({ gate: 'ci-lane', passed: true }),
+        { publishLane: true },
       ).errors,
     ).toEqual([]);
+    // A local round cannot claim the lane by writing the record itself.
+    expect(
+      checkBoundary(
+        JSON.stringify({ mode: 'container', detail: 'CI verify lane' }),
+        JSON.stringify({ gate: 'ci-lane', passed: true }),
+      ).errors.join('\n'),
+    ).toMatch(/does not record a passed isolation gate/);
   });
 
   it('accepts a waiver naming the maintainer, the approval and the reason', () => {
@@ -769,7 +777,7 @@ describe('boundary line in the report', () => {
       report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n# Report\n`,
     });
     expect(result.errors).toEqual([]);
-    expect(result.warnings.join('\n')).toMatch(/no ## Methodology section/);
+    expect(result.warnings.join('\n')).toMatch(/has no Methodology section/);
   });
 
   it('warns when the Methodology does not open with the Boundary line', () => {
@@ -778,7 +786,7 @@ describe('boundary line in the report', () => {
     });
     expect(result.errors).toEqual([]);
     expect(result.warnings.join('\n')).toMatch(
-      /first line after ## Methodology must be the \*\*Boundary\.\*\* line/,
+      /first line after the Methodology opening must be the \*\*Boundary\.\*\* line/,
     );
   });
 
@@ -790,12 +798,64 @@ describe('boundary line in the report', () => {
       report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n## Methodology\n\nThe skill requires a **Boundary.** line; see the rule.\n`,
     });
     expect(result.warnings.join('\n')).toMatch(
-      /first line after ## Methodology must be the \*\*Boundary\.\*\* line/,
+      /first line after the Methodology opening must be the \*\*Boundary\.\*\* line/,
     );
   });
 
   it('stays quiet when the Boundary line opens the Methodology', () => {
     expect(check({}).warnings).toEqual([]);
+  });
+
+  // The skill's report structure prescribes the numbered bold label, not
+  // an H2; a compliant report must not draw a permanent false warning.
+  it('accepts the numbered **Methodology** label with a Boundary line', () => {
+    const result = check({
+      report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n8. **Methodology** — one paragraph.\n\n**Boundary.** node:22-bookworm, --network none.\n`,
+    });
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('accepts the Boundary line on the numbered label line itself', () => {
+    const result = check({
+      report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n8. **Methodology** — **Boundary.** node:22-bookworm, --network none. The round ran the battery.\n`,
+    });
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('warns when the label line only mentions the Boundary rule in prose', () => {
+    const result = check({
+      report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n8. **Methodology** — we discuss the **Boundary.** rule here.\n`,
+    });
+    expect(result.warnings.join('\n')).toMatch(
+      /first line after the Methodology opening must be the \*\*Boundary\.\*\* line/,
+    );
+  });
+
+  it('warns when the numbered label has no Boundary line after it', () => {
+    const result = check({
+      report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n8. **Methodology** — one paragraph.\n\nWe ran the battery.\n`,
+    });
+    expect(result.warnings.join('\n')).toMatch(
+      /first line after the Methodology opening must be the \*\*Boundary\.\*\* line/,
+    );
+  });
+
+  // The posted body is what the maintainer reads: the same disclosure
+  // rule applies to comment.md, not only report.md.
+  it('warns when the posted body has no Methodology section', () => {
+    const result = check({
+      comment: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n_— test-model via Qwen Code /verify-pr (v0.1.2; skill 0123456789ab)_\n`,
+    });
+    expect(result.warnings.join('\n')).toMatch(
+      /comment\.md has no Methodology section/,
+    );
+  });
+
+  it('stays quiet when the posted body opens its Methodology with Boundary', () => {
+    const result = check({
+      comment: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n## Methodology\n\n**Boundary.** node:22-bookworm, --network none.\n\n_— test-model via Qwen Code /verify-pr (v0.1.2; skill 0123456789ab)_\n`,
+    });
+    expect(result.warnings).toEqual([]);
   });
 });
 
@@ -978,6 +1038,29 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
     });
     expect(ci.status).toBe(0);
     expect(ci.stdout).toMatch(/warn.*CI entry path/);
+  });
+
+  // A host round cannot claim the CI lane by writing the record itself:
+  // only the publish job's --publish-lane invocation honors ci-lane.
+  it('refuses a self-minted ci-lane record locally, accepts it under --publish-lane', () => {
+    const dir = makeArtifactDir(
+      validFiles({
+        boundaryGate: JSON.stringify({ gate: 'ci-lane', passed: true }),
+      }),
+      ['01-ab-cells.png'],
+    );
+    const local = run(dir);
+    expect(local.status).toBe(1);
+    expect(local.stdout).toMatch(/does not record a passed isolation gate/);
+    const publish = spawnSync(
+      process.execPath,
+      [SCRIPT, '--publish-lane', dir],
+      { encoding: 'utf8', env: { ...process.env, QWEN_VERIFY_CONTEXT: '' } },
+    );
+    expect(publish.status).toBe(0);
+    expect(publish.stdout).toContain(
+      'ok: verdict=merge-ready (4 passed · 0 failed · 4 total)',
+    );
   });
 
   // The artifact directory is writable by the PR code the round executed:

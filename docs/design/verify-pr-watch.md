@@ -69,9 +69,10 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
   the deferred heads, and the watch prompt starts the latest one as the
   next round; starting a deferred head supersedes every head deferred no
   later than it (events arrive in push order), and a redelivery updates
-  the entry in place so the tail stays push order, not write order. A
-  redelivery of the in-flight head itself is simply skipped: the running
-  round answers it. The local recipe's clone, base copy, proxy files and
+  the entry in place — keeping its original `deferredAt`, so a redelivered
+  older head cannot outrank a newer push — so the tail stays push order,
+  not write order. A redelivery of the in-flight head itself is simply
+  skipped: the running round answers it. The local recipe's clone, base copy, proxy files and
   container name are per PR, so overlapping rounds would clobber each
   other; the CI lane serialises the same way with its per-PR concurrency
   group. Every read-modify-write holds an exclusive lock file beside the
@@ -95,10 +96,13 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
   marker is refused, and a completion from a round older than the one that
   already answered for the head is refused as stale — neither strands the
   real marker nor overwrites the newer verdict and comment id.
-  `inconclusive` releases the marker without filing the head as verified,
-  so a later round can still verify it, and keeps the head's deferred
-  entry. A late completion for a _different_ head changes the top-level
-  view but erases no verification. A corrupt state body is refused (exit
+  `inconclusive` releases the marker without filing the head as verified
+  and **re-defers the head**, so the completion output names it again —
+  the start call already consumed its only event. The watch prompt retries
+  it once; a second inconclusive is reported under _Not covered_, not
+  looped. A head that already keeps an earlier verdict is not re-deferred:
+  it keeps that verdict and its dedup. A late completion for a _different_
+  head changes the top-level view but erases no verification. A corrupt state body is refused (exit
   1), never silently rewritten from empty lists. `--start` writes the sha
   **before** the round begins, so a round that dies still does not replay
   the same head. A round that dies after `--start` is recovered with

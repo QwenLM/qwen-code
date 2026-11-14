@@ -6780,10 +6780,27 @@ describe('qwen-triage verify hardening round 2', () => {
     );
     // A container declaration is backed by a gate record, not minted.
     expect(flat).toContain('backed by `boundary-gate.json`');
-    expect(flat).toContain('--require-isolation --artifact-dir <round-dir>');
+    // Pin the in-container command with its interpreter prefix: the bare
+    // flag string also appears in prose, so deleting it from the command
+    // alone must red this.
+    expect(flat).toContain(
+      'node /trusted-scripts/verify-pr-prepare.mjs --require-isolation --artifact-dir <round-dir>',
+    );
+    // The ci-lane record is honored only under the publish invocation.
+    expect(flat).toContain(
+      "which the checker honors only under the publish job's `--publish-lane` invocation, never for a local round",
+    );
     expect(flat).toContain(
       '{"mode":"waived","by":"<maintainer>","approval":"<permalink to the maintainer\'s approval comment>","reason":"<why this round may run outside a boundary>"}',
     );
+    // The waiver's approval channel is named: the maintainer (or the round
+    // under the local publish path) posts the comment the permalink points at.
+    expect(flat).toContain(
+      'or the round, under the local publish path — record that approval as a PR comment',
+    );
+    // The completion duty is a top-level paragraph, not folded into the
+    // last exit-3 bullet by a two-space indent.
+    expect(verifySkill).toContain('\nRecord the finished round');
     // The VM attestation variables are the operator's, never the round's,
     // and are unset when the round ends.
     expect(flat).toContain(
@@ -6860,31 +6877,38 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('Open it with a `**Boundary.**` line');
   });
 
-  // The step-7 block driven verbatim, not just pinned as text: a planted
-  // declaration that resists removal (chmod 444 file, 555 directory) must
-  // fail the block WITHOUT running the checker, and the proxy teardown must
-  // still run — under bash -e as well. Removing either `|| rc=1` capture
-  // reds this test.
+  // The step-7 block driven verbatim, not just pinned as text: every
+  // failure path (planted chmod-resistant declaration, failing docker,
+  // read-only round dir) must fail the block WITHOUT running the checker,
+  // and the proxy teardown — kill AND the removal of the token-bearing
+  // files — must still run, under bash -e as well. Removing any `|| rc=1`
+  // capture or any of the three proxy-file removals reds these tests.
   describe.skipIf(process.platform === 'win32')('step 7 block replay', () => {
-    const replay = ({ planted = false } = {}) => {
+    const replay = ({
+      planted = false,
+      dockerFails = false,
+      readOnlyRound = false,
+    } = {}) => {
       const root = mkdtempSync(join(tmpdir(), 'verify-step7-'));
       const round = join(root, 'round');
       const home = join(root, 'home');
       const trusted = join(root, 'trusted');
       const shim = join(root, 'shim');
+      const proxyDir = join(home, '.cache', 'qwen-verify', 'pr16866');
       mkdirSync(round, { recursive: true });
-      mkdirSync(join(home, '.cache', 'qwen-verify', 'pr16866'), {
-        recursive: true,
-      });
+      mkdirSync(proxyDir, { recursive: true });
       mkdirSync(trusted, { recursive: true });
       mkdirSync(shim, { recursive: true });
-      writeFileSync(
-        join(home, '.cache', 'qwen-verify', 'pr16866', 'proxy.pid'),
-        '424242\n',
-      );
+      // All three token-bearing files exist, so their removal is witnessed.
+      writeFileSync(join(proxyDir, 'proxy.pid'), '424242\n');
+      writeFileSync(join(proxyDir, 'proxy.json'), '{"token":"bearer"}');
+      writeFileSync(join(proxyDir, 'proxy.err'), '');
       const calls = join(root, 'calls.log');
       for (const [tool, body] of [
-        ['docker', `echo "docker $*" >> "${calls}"\n`],
+        [
+          'docker',
+          `echo "docker $*" >> "${calls}"\n${dockerFails ? 'exit 1\n' : ''}`,
+        ],
         ['kill', `echo "kill $*" >> "${calls}"\n`],
         ['node', `echo "node $*" >> "${calls}"\nexit 0\n`],
       ]) {
@@ -6898,6 +6922,9 @@ describe('qwen-triage verify hardening round 2', () => {
           '{"mode":"waived","by":"PR-code","reason":"forged"}',
         );
         chmodSync(join(round, 'boundary.json'), 0o444);
+        chmodSync(round, 0o555);
+      } else if (readOnlyRound) {
+        // No declaration to clear: the rm succeeds, the WRITE fails.
         chmodSync(round, 0o555);
       }
       const step7 = verifySkill.slice(
@@ -6923,13 +6950,13 @@ describe('qwen-triage verify hardening round 2', () => {
           },
         },
       );
-      if (planted) chmodSync(round, 0o755);
+      if (planted || readOnlyRound) chmodSync(round, 0o755);
       const log = existsSync(calls) ? readFileSync(calls, 'utf8') : '';
-      return { res, log, round, root };
+      return { res, log, round, root, proxyDir };
     };
 
     it('runs the checker and tears the proxy down on the normal path', () => {
-      const { res, log, round, root } = replay();
+      const { res, log, round, root, proxyDir } = replay();
       try {
         expect(res.status).toBe(0);
         expect(log).toMatch(/^node /m);
@@ -6937,6 +6964,10 @@ describe('qwen-triage verify hardening round 2', () => {
         expect(readFileSync(join(round, 'boundary.json'), 'utf8')).toContain(
           '"mode":"container"',
         );
+        // The token-bearing files are gone, not just the process killed.
+        for (const f of ['proxy.pid', 'proxy.json', 'proxy.err']) {
+          expect(existsSync(join(proxyDir, f))).toBe(false);
+        }
       } finally {
         rmSync(root, { recursive: true, force: true });
       }
@@ -6945,7 +6976,7 @@ describe('qwen-triage verify hardening round 2', () => {
     it.skipIf(!arePermissionBitsEnforced())(
       'refuses a declaration it cannot clear, without running the checker',
       () => {
-        const { res, log, round, root } = replay({ planted: true });
+        const { res, log, round, root, proxyDir } = replay({ planted: true });
         try {
           expect(res.status).toBe(1);
           expect(res.stderr).toMatch(/cannot clear boundary.json/);
@@ -6953,10 +6984,44 @@ describe('qwen-triage verify hardening round 2', () => {
           expect(log).not.toMatch(/^node /m);
           // The proxy was still torn down on the refusal path.
           expect(log).toMatch(/kill 424242/);
+          for (const f of ['proxy.pid', 'proxy.json', 'proxy.err']) {
+            expect(existsSync(join(proxyDir, f))).toBe(false);
+          }
           // The planted declaration is untouched, not silently trusted.
           expect(readFileSync(join(round, 'boundary.json'), 'utf8')).toContain(
             'forged',
           );
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it('a failing docker stop skips the checker but still tears the proxy down', () => {
+      const { res, log, root, proxyDir } = replay({ dockerFails: true });
+      try {
+        expect(res.status).toBe(1);
+        expect(log).not.toMatch(/^node /m);
+        expect(log).toMatch(/kill 424242/);
+        for (const f of ['proxy.pid', 'proxy.json', 'proxy.err']) {
+          expect(existsSync(join(proxyDir, f))).toBe(false);
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it.skipIf(!arePermissionBitsEnforced())(
+      'a write it cannot perform skips the checker but still tears the proxy down',
+      () => {
+        const { res, log, root, proxyDir } = replay({ readOnlyRound: true });
+        try {
+          expect(res.status).toBe(1);
+          expect(log).not.toMatch(/^node /m);
+          expect(log).toMatch(/kill 424242/);
+          for (const f of ['proxy.pid', 'proxy.json', 'proxy.err']) {
+            expect(existsSync(join(proxyDir, f))).toBe(false);
+          }
         } finally {
           rmSync(root, { recursive: true, force: true });
         }
@@ -7358,6 +7423,9 @@ describe('qwen-triage verify publish fidelity', () => {
       expect(script.indexOf('"gate":"ci-lane"')).toBeLessThan(
         script.indexOf('VERIFY_PR_CHECK'),
       );
+      // The publish job passes its own --publish-lane signal: only under
+      // it does the checker honor the ci-lane record.
+      expect(script).toContain('--publish-lane "$(dirname "$REPORT")"');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

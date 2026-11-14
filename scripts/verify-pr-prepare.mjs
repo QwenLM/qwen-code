@@ -345,6 +345,9 @@ export function parseArgs(argv) {
     }
   }
   if (options.help || options.requireIsolation) return options;
+  if (options.artifactDir !== null) {
+    return { error: '--artifact-dir only applies with --require-isolation' };
+  }
   if (!Number.isInteger(options.pr) || options.pr <= 0) {
     return { error: 'a PR number is required' };
   }
@@ -727,7 +730,10 @@ function main(argv) {
     'because resolving the coordinates needs `gh` and `gh` is mutually',
     'exclusive with the boundary. Before executing PR code, run inside it:',
     '',
-    '  node scripts/verify-pr-prepare.mjs --require-isolation',
+    `  node scripts/verify-pr-prepare.mjs --require-isolation --artifact-dir ${artifacts}`,
+    '',
+    'The gate writes boundary-gate.json into the artifact directory; the',
+    'checker requires that record alongside the container declaration.',
   ]);
   return 0;
 }

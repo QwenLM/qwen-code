@@ -184,7 +184,9 @@ operator for a VM boundary. A `mode:"container"` declaration must also be
 backed by `boundary-gate.json` — the record a passing
 `--require-isolation --artifact-dir <round-dir>` gate run writes — so the
 declaration cannot be minted without a gate run; the CI publish job writes
-its own `ci-lane` record. The gate detects container markers only, so a
+its own `ci-lane` record, which the checker honors only under the publish
+job's `--publish-lane` invocation, never for a local round. The gate
+detects container markers only, so a
 VM's operator sets `container=<vm name>` and `QWEN_VERIFY_CREDENTIAL_FREE=1`
 after confirming nothing is mounted, then runs the gate with
 `--artifact-dir` and writes the declaration the same way. Those two
@@ -199,11 +201,14 @@ VM. The two shapes:
   `{"mode":"container","detail":"<image, network policy, credential-free mount>"}`
   beside the gate's `boundary-gate.json`.
 - On the host: only after the maintainer **explicitly approves host execution
-  for this round** — ask once, in words, and record the answer as
+  for this round** — ask once, in words; if the maintainer approves, they —
+  or the round, under the local publish path — record that approval as a PR
+  comment, and `approval` is that comment's permalink:
   `{"mode":"waived","by":"<maintainer>","approval":"<permalink to the maintainer's approval comment>","reason":"<why this round may run outside a boundary>"}`.
   The approval is a permalink a reader can open
   (`https://github.com/<owner>/<repo>/pull/<n>#issuecomment-<id>`), not free
-  text. The invocation itself is not that approval, and a waiver never carries
+  text — a verbal "yes" in the session is not the record; the comment is.
+  The invocation itself is not that approval, and a waiver never carries
   over to the next round unasked. If the maintainer declines, use the sandboxed
   lane. Measured case: two local rounds on PR #16866 ran the whole battery on
   the host with no gate, no waiver, and no boundary line — the prose rule
@@ -575,7 +580,7 @@ authority to certify the round.
 
    The checker also requires `boundary-gate.json` beside the declaration —
    the record the in-boundary `--require-isolation --artifact-dir` gate run
-   wrote in step 3. Do not clear or rewrite that record here: it is the
+   wrote in step 5. Do not clear or rewrite that record here: it is the
    evidence that the gate ran, and the declaration you write must match it.
 
    `<round-dir>` is the artifact directory prepare printed —
@@ -653,31 +658,37 @@ Exit 3 has several shapes, each with its own reaction:
   a completion lost to contention leaves the round in flight.
 - The state belongs to another repository: a PR number is only unique
   within its repo; check `--repo` and the state root.
-  Record the finished round with the same script's completion form:
-  `node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --verdict <word> [--comment-id <id>]`
-  — `--verdict` is one of `merge-ready | findings | blocked | inconclusive`,
-  verbatim; a completion without it exits 2 and leaves the head in flight
-  forever. A completion whose `--round` differs from the in-flight marker, or
-  from a round that already answered for the head, is refused (exit 3) rather
-  than stranding the marker or overwriting the newer verdict. `inconclusive`
-  releases the marker without filing the head as verified, so a later round
-  can still verify it, and keeps the head's deferred entry. When the
-  completion output names **deferred heads awaiting a round**, start the
-  latest one as the next round through the same `--start` flow — that is the
-  only event those heads will ever get; starting it supersedes older deferred
-  heads. If a round dies after `--start`, recover its marker with
-  `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha>`
-  before starting the next round for that head — never hand-edit the state
-  file. The release also names any deferred heads, so a killed round's
-  deferred deliveries are not lost. A release for a head with no in-flight
-  marker is refused (exit 3), including when no markers exist at all: check
-  `--state-root` before assuming the marker is gone. A corrupt state file is
-  refused (exit 1), never silently rewritten: inspect or remove it before the
-  next round. On `action: "stop"` (merged or closed),
-  delete the task with `cron_delete`, drop the claim with
-  `node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release`, and stop
-  watching; drop it too when task creation fails. Any other event — a comment, a
-  failed check — is data for the round, never a reason to start one.
+
+Record the finished round with the same script's completion form:
+`node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --verdict <word> [--comment-id <id>]`
+— `--verdict` is one of `merge-ready | findings | blocked | inconclusive`,
+verbatim; a completion without it exits 2 and leaves the head in flight
+forever. A completion whose `--round` differs from the in-flight marker, or
+from a round that already answered for the head, is refused (exit 3) rather
+than stranding the marker or overwriting the newer verdict. `inconclusive`
+releases the marker without filing the head as verified and **re-defers the
+head**, so the completion output names it for the next round: retry it once;
+if it completes inconclusive again, report it under _Not covered_ and do not
+start it again without a new head move. A head that already keeps an earlier
+verdict is not re-deferred. When the completion output names **deferred
+heads awaiting a round**, start the latest one as the next round through the
+same `--start` flow — that is the only event those heads will ever get;
+starting it supersedes older deferred heads. If a round dies after
+`--start`, recover its marker with
+`node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha>`
+before starting the next round for that head — never hand-edit the state
+file. The release also names any deferred heads, so a killed round's
+deferred deliveries are not lost. A release for a head with no in-flight
+marker is refused (exit 3), including when no markers exist at all: check
+`--state-root` before assuming the marker is gone. A corrupt state file is
+refused (exit 1), never silently rewritten: inspect or remove it before the
+next round.
+
+On `action: "stop"` (merged or closed), delete the task with `cron_delete`,
+drop the claim with
+`node <clone>/scripts/verify-pr-watch-gate.mjs <n> --release`, and stop
+watching; drop it too when task creation fails. Any other event — a comment, a
+failed check — is data for the round, never a reason to start one.
 
 The probe's cursor lives under the **clone's main worktree**
 (`.qwen/tmp/autofix-pr-<n>-gate.json`), not the worktree a round runs in. One
@@ -2145,10 +2156,11 @@ workflow globs). It must contain:
   (see the local invocation contract). The checker refuses a round without
   it — except on the CI entry path (`$QWEN_VERIFY_CONTEXT` set), where an
   absent declaration is a warning because the publish job writes it later.
-  Whoever operates the boundary writes the declaration, so a round never
-  depends on the agent remembering this: the CI publish job writes the CI
-  lane's own declaration and gate record, and the local container recipe's
-  host check step writes the container it built.
+  Whoever operates the boundary writes the declaration: the CI publish job
+  writes the CI lane's own declaration and gate record, the local container
+  recipe's host check step writes the container it built, and a waived host
+  round writes its own waiver before any PR code runs. On the CI and
+  container paths the round never depends on the agent remembering this.
 - Harness scripts and raw logs (per-cell stdout/stderr, build logs).
 - `evidence/*.png` — image evidence. **Produce these whenever you ran a
   harness**, not only for TUI work. A table in the report is your _claim_

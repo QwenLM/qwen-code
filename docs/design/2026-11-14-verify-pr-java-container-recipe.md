@@ -89,24 +89,37 @@ paths the CI lane's Java gate matches:
    the managed-agent build resolves `qwencode-sdk` only): the managed-agent
    build resolves it from the local repo, so a fresh seed without it cannot
    resolve, and a reused seed with a stale one compiles against the wrong
-   jar. The reuse key is one rule everywhere in this recipe: **reuse the
-   seeded repository only when the pom set, the SDK sources and `.mvn/` are
-   all unchanged**; a change to any re-seeds, under the same
-   built-for-this-head reuse rule the skill applies to installs and builds.
-   (The seed builds without the PR's `.mvn/` — the strip list removes it —
-   so a PR that edits `.mvn/` gets a seed jar built without that config; the
-   reuse key re-seeds on such a change, and the round records the deviation.)
-   Strip the `_remote.repositories` tracking files afterwards (or seed with
-   `-Dmaven.legacyLocalRepo=true`): they record which mirror served each
-   artifact, and offline resolution against a different repo id otherwise
-   re-resolves and fails. The battery container mounts the seeded repository
-   **read-only** — never `settings.xml`, which can carry mirror credentials —
-   and runs with `-Dmaven.repo.local=/m2 --network none` — stricter than the
-   JS recipe, which keeps network for the model proxy, because the Java
-   battery needs no model access. A row that must write (a mutation
-   installing a mutated SDK jar) gets its own copy of the repository and its
-   own `-Dmaven.repo.local`, as the skill's mutation rules already require;
-   a writing round invalidates the reuse key, so the shared seed never holds
+   jar. The reuse key is one rule everywhere in this recipe: **reuse a
+   seeded repository only when the pom set, the SDK sources and the arm
+   (head vs base) are all unchanged**; a change to any re-seeds, under the
+   same built-for-this-head reuse rule the skill applies to installs and
+   builds. There are **two** seeded repositories, `m2repo-head` and
+   `m2repo-base`: the head seed installs the head's SDK jar, the base seed
+   the base's, each built from that side's sanitized copy — a single shared
+   seed would let the trusted base arm resolve the head-built jar and hide
+   any regression the jar carries. `.mvn/` is deliberately NOT a reuse-key
+   dimension: the strip list always removes it, so a `.mvn/` change cannot
+   affect the seed; a PR that edits `.mvn/` gets a seed jar built without
+   that config, and the round records the deviation instead of re-seeding
+   byte-identical output.
+   Seed with `-Dmaven.legacyLocalRepo=true` and KEEP the
+   `_remote.repositories` provenance markers: they record which mirror
+   served each artifact, and the copy-out is restricted to the paths the
+   seed's own `dependency:go-offline` and SDK install wrote (a before/after
+   manifest of the repository tree), verified against the resolved tree.
+   Residual risk, stated rather than hidden: a PR build plugin executing
+   during the seed can still install a doctored jar at a real dependency's
+   coordinates inside the seed container, and the manifest cannot attribute
+   authorship — the containment is the mirror-only egress plus the base
+   arm's independent seed, not a proof that every jar is mirror-fetched.
+   The battery container mounts its arm's seeded repository **read-only** —
+   never `settings.xml`, which can carry mirror credentials — and runs with
+   `-Dmaven.repo.local=/m2 --network none` — stricter than the JS recipe,
+   which keeps network for the model proxy, because the Java battery needs
+   no model access. A row that must write (a mutation installing a mutated
+   SDK jar) gets its own copy of the repository and its own
+   `-Dmaven.repo.local`, as the skill's mutation rules already require; a
+   writing round invalidates the reuse key, so the shared seed never holds
    a mutant jar. Offline resolution keeps the credential-free boundary
    intact: no network means no exfiltration path and no mirror auth inside.
 3. **Trusted scripts, PR clone, model proxy.** Same layout as the JS recipe:
@@ -140,8 +153,8 @@ paths the CI lane's Java gate matches:
   itself runs with `--network none` against the copied-out repository. The
   host never runs a goal against PR poms: lifecycle-bound plugin executions
   are PR code too, and no strip list can enumerate them. Cost: a seed step
-  per round (minutes, cached across rounds of the same PR by reusing the
-  repository directory when the pom set, the SDK sources and `.mvn/` are all
+  per round per arm (minutes, cached across rounds of the same PR by reusing
+  the arm's repository directory when the pom set and the SDK sources are
   unchanged — the same reuse rule the skill already applies to installs
   and builds).
 - **Bundled image over JDK-on-node.** Layering a JDK onto `node:22-bookworm`
@@ -189,8 +202,14 @@ paths the CI lane's Java gate matches:
   can mask a dependency change, and stale SDK jars compile against the wrong
   code. Mitigation: the skill's existing built-for-this-head reuse rule
   applies with the single reuse key above — the pom set, the SDK sources and
-  `.mvn/` must all be unchanged; a change to any re-seeds, and a writing
-  round invalidates the key outright.
+  the arm must all match; a change to any re-seeds, and a writing round
+  invalidates the key outright. The base arm never resolves the head seed.
+- **Seed provenance.** A PR build plugin running during the seed can install
+  a doctored jar at a real dependency's coordinates; the copy-out manifest
+  restricts what leaves the seed but cannot attribute authorship. Mitigation:
+  mirror-only egress, the base arm's independent seed, and the residual risk
+  recorded under _Not covered_ — never a claim that every jar is
+  mirror-fetched.
 - **Image drift.** Digest pinning plus a documented refresh step.
 
 ## Validation plan
