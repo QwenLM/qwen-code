@@ -46,6 +46,8 @@ describe('DiffView line list caps', () => {
     expect(declarations(rules[0]!)).toEqual([
       'max-height: 400px',
       'overflow-y: auto',
+      'flex: 1 1 auto',
+      'min-height: 0',
     ]);
   });
 
