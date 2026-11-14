@@ -39,6 +39,7 @@ const TEXT_ONLY = equals({});
 const IMAGE_VIDEO = equals({ image: true, video: true });
 const IMAGE = has({ image: true });
 const IMAGE_NO_PDF = has({ image: true, pdf: undefined });
+const ONLY_IMAGE = equals({ image: true });
 const IMAGE_PDF = has({ image: true, pdf: true });
 const ONLY_IMAGE_VIDEO = has({
   image: true,
@@ -196,6 +197,12 @@ describe('defaultModalities', () => {
     it('returns image for the official deepseek-flash', () => {
       IMAGE_NO_PDF('deepseek-flash');
     });
+
+    casesFor('returns image for', [
+      ['DeepSeek-VL2', ONLY_IMAGE, 'deepseek-ai/deepseek-vl2'],
+      ['DeepSeek-VL2-Small', ONLY_IMAGE, 'deepseek-ai/deepseek-vl2-small'],
+      ['DeepSeek-VL', ONLY_IMAGE, 'deepseek-ai/deepseek-vl-7b-chat'],
+    ]);
   });
 
   describe('Zhipu GLM', () => {
@@ -222,6 +229,10 @@ describe('defaultModalities', () => {
     it('returns text-only for MiniMax-M2.5', () => {
       TEXT_ONLY('MiniMax-M2.5');
     });
+
+    it('returns image for MiniMax-VL-01', () => {
+      ONLY_IMAGE('MiniMaxAI/MiniMax-VL-01');
+    });
   });
 
   describe('Kimi', () => {
@@ -241,6 +252,11 @@ describe('defaultModalities', () => {
     it('returns text-only for kimi-k2', () => {
       TEXT_ONLY('kimi-k2');
     });
+
+    casesFor('returns image for', [
+      ['Kimi-VL-A3B-Instruct', ONLY_IMAGE, 'moonshotai/Kimi-VL-A3B-Instruct'],
+      ['Kimi-VL-A3B-Thinking', ONLY_IMAGE, 'moonshotai/Kimi-VL-A3B-Thinking'],
+    ]);
   });
 
   describe('ByteDance Doubao', () => {
