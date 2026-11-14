@@ -1372,6 +1372,76 @@ export class GitWorktreeService {
   }
 
   /**
+   * Snapshot the source checkout's uncommitted state without modifying its
+   * working tree or index: `git stash create` for tracked changes (staged +
+   * unstaged) plus the untracked file list. Each probe fails open so a
+   * capture problem degrades to committed-state-only worktrees.
+   */
+  private async captureDirtyState(): Promise<{
+    stashCommit: string;
+    untrackedFiles: string[];
+    repoTop: string;
+  }> {
+    // NOTE: `git stash create` does NOT support --include-untracked;
+    // untracked files are handled separately via file copy.
+    let stashCommit = '';
+    try {
+      stashCommit = (await (await this.getGit()).stash(['create'])).trim();
+    } catch {
+      // Ignore — proceed without dirty state if stash create fails
+    }
+    // The service may be rooted at a subdirectory of the repository;
+    // --full-name keeps untracked paths repository-relative so the overlay
+    // lands them at the same offset inside the worktree.
+    const repoTop =
+      (await this.getRepoTopLevel().catch(() => null)) ?? this.sourceRepoPath;
+    let untrackedFiles: string[] = [];
+    try {
+      const raw = await (
+        await this.getGit()
+      ).raw(['ls-files', '--others', '--exclude-standard', '--full-name']);
+      untrackedFiles = raw.trim().split('\n').filter(Boolean);
+    } catch {
+      // Non-fatal: proceed without untracked files
+    }
+    return { stashCommit, untrackedFiles, repoTop };
+  }
+
+  /**
+   * Overlay a captured dirty state onto a worktree: apply the tracked
+   * changes, then copy untracked files. Fail-open per step — the worktree
+   * stays usable with whatever applied.
+   */
+  private async applyDirtyState(
+    worktreePath: string,
+    dirtyState: {
+      stashCommit: string;
+      untrackedFiles: string[];
+      repoTop: string;
+    },
+  ): Promise<void> {
+    const { simpleGit } = await loadSimpleGit();
+    const wtGit = simpleGit(worktreePath);
+    if (dirtyState.stashCommit) {
+      try {
+        await wtGit.raw(['stash', 'apply', dirtyState.stashCommit]);
+      } catch {
+        // Non-fatal: worktree still usable with committed state only
+      }
+    }
+    for (const relPath of dirtyState.untrackedFiles) {
+      try {
+        const src = path.join(dirtyState.repoTop, relPath);
+        const dst = path.join(worktreePath, relPath);
+        await fs.mkdir(path.dirname(dst), { recursive: true });
+        await fs.copyFile(src, dst);
+      } catch {
+        // Non-fatal: skip files that can't be copied
+      }
+    }
+  }
+
+  /**
    * Sets up all worktrees for a session.
    * This is the main entry point for worktree creation.
    */
@@ -1447,30 +1517,10 @@ export class GitWorktreeService {
     };
     await fs.writeFile(configPath, JSON.stringify(configFile, null, 2));
 
-    // Capture the current dirty state (tracked: staged + unstaged changes)
-    // without modifying the source working tree or index.
-    // NOTE: `git stash create` does NOT support --include-untracked;
-    // untracked files are handled separately below via file copy.
-    let dirtyStateSnapshot = '';
-    try {
-      dirtyStateSnapshot = (
-        await (await this.getGit()).stash(['create'])
-      ).trim();
-    } catch {
-      // Ignore — proceed without dirty state if stash create fails
-    }
-
-    // Discover untracked files so they can be copied into each worktree.
-    // `git ls-files --others --exclude-standard` is read-only and safe.
-    let untrackedFiles: string[] = [];
-    try {
-      const raw = await (
-        await this.getGit()
-      ).raw(['ls-files', '--others', '--exclude-standard']);
-      untrackedFiles = raw.trim().split('\n').filter(Boolean);
-    } catch {
-      // Non-fatal: proceed without untracked files
-    }
+    // Capture the current dirty state (tracked: staged + unstaged changes,
+    // plus untracked files) once, without modifying the source working tree
+    // or index, then overlay it onto each worktree below.
+    const dirtyState = await this.captureDirtyState();
 
     // Create worktrees for each entry
     for (const name of config.worktreeNames) {
@@ -1512,33 +1562,14 @@ export class GitWorktreeService {
     // see the same files the user currently has on disk.
     if (result.success) {
       for (const worktree of result.worktrees) {
-        const { simpleGit } = await loadSimpleGit();
-        const wtGit = simpleGit(worktree.path);
+        // 1. Apply tracked dirty changes and copy untracked files.
+        await this.applyDirtyState(worktree.path, dirtyState);
 
-        // 1. Apply tracked dirty changes (staged + unstaged)
-        if (dirtyStateSnapshot) {
-          try {
-            await wtGit.raw(['stash', 'apply', dirtyStateSnapshot]);
-          } catch {
-            // Non-fatal: worktree still usable with committed state only
-          }
-        }
-
-        // 2. Copy untracked files into the worktree
-        for (const relPath of untrackedFiles) {
-          try {
-            const src = path.join(this.sourceRepoPath, relPath);
-            const dst = path.join(worktree.path, relPath);
-            await fs.mkdir(path.dirname(dst), { recursive: true });
-            await fs.copyFile(src, dst);
-          } catch {
-            // Non-fatal: skip files that can't be copied
-          }
-        }
-
-        // 3. Create a baseline commit capturing the full starting state
+        // 2. Create a baseline commit capturing the full starting state
         //    (committed + dirty + untracked). This allows us to later diff
         //    only the agent's changes, excluding the pre-existing dirty state.
+        const { simpleGit } = await loadSimpleGit();
+        const wtGit = simpleGit(worktree.path);
         try {
           await wtGit.add(['--all']);
           await wtGit.commit(BASELINE_COMMIT_MESSAGE, {
@@ -2453,6 +2484,13 @@ export class GitWorktreeService {
       symlinkDirectories?: readonly string[];
       /** The caller owns the pr-<N> shape (PR-backed startup). */
       prBacked?: boolean;
+      /**
+       * Apply the source checkout's uncommitted changes (tracked staged +
+       * unstaged, and untracked files) to the new worktree, so a session
+       * starts from the same files the user has on disk. Fail-open per
+       * step; no baseline commit is created.
+       */
+      carryDirtyState?: boolean;
     },
   ): Promise<CreateWorktreeResult> {
     const validationError = GitWorktreeService.validateUserWorktreeSlug(
@@ -2529,6 +2567,11 @@ export class GitWorktreeService {
             `createUserWorktree: symlinkConfiguredDirectories failed for ${slug}: ${error}`,
           );
         });
+      }
+
+      if (options?.carryDirtyState === true) {
+        const dirtyState = await this.captureDirtyState();
+        await this.applyDirtyState(worktreePath, dirtyState);
       }
 
       const worktree: WorktreeInfo = {

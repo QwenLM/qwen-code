@@ -15787,7 +15787,9 @@ describe('createServeApp', () => {
         expect(bridge.changeSessionCwdCalls[0]?.allowedRoots).toEqual([
           path.join(WS_BOUND, '.qwen', 'worktrees'),
         ]);
-        expect(mockCreate).toHaveBeenCalledWith('my-task', 'main');
+        expect(mockCreate).toHaveBeenCalledWith('my-task', 'main', {
+          carryDirtyState: true,
+        });
         expect(createMarker).toHaveBeenCalledWith(worktreePath, 'fake-0');
         expect(writeSidecar).toHaveBeenCalledWith(
           expect.stringMatching(/fake-0\.worktree\.json$/),

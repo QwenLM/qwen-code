@@ -3385,7 +3385,9 @@ export function registerSessionRoutes(
           .getCurrentBranch()
           .catch(() => undefined);
         assertRuntimeGenerationOpen?.();
-        const wtResult = await wtService.createUserWorktree(slug, baseBranch);
+        const wtResult = await wtService.createUserWorktree(slug, baseBranch, {
+          carryDirtyState: true,
+        });
         if (!wtResult.success || !wtResult.worktree) {
           res.status(500).json({
             error: wtResult.error ?? 'Failed to create worktree',
@@ -5172,6 +5174,7 @@ export function registerSessionRoutes(
                 const worktreeResult = await worktreeService.createUserWorktree(
                   slug,
                   base.headCommit,
+                  { carryDirtyState: true },
                 );
                 if (!worktreeResult.success || !worktreeResult.worktree) {
                   await cleanupPrepared();
