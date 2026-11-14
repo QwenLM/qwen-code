@@ -10,22 +10,31 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { FSWatcher } from 'chokidar';
+import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 import { FileChangedWatcher } from './file-changed-watcher.js';
 
 // The macOS nightly legs run on contended 3-core hosts: FSEvents delivery
 // plus the watcher's awaitWriteFinish stability polling (200ms threshold,
 // 50ms poll) can stretch past 5s under saturation, and the real-file cases
 // then read zero notifications (three different cases across the 11-10 to
-// 11-13 nightlies). 15s matches the repo's other contended-host waits.
-const waitOptions = { timeout: 15_000, interval: 25 };
+// 11-13 nightlies). 15s matches the repo's other contended-host waits. An
+// idle host keeps the original 5s so a genuinely lost event still fails
+// fast instead of burning the contended budget on every machine. Sampled
+// once so the wait budget and the ceiling above it cannot disagree if the
+// load average crosses the threshold between two reads.
+const SLOW_HOST = isSlowTestHost();
+const waitOptions = { timeout: SLOW_HOST ? 15_000 : 5_000, interval: 25 };
 
 // The per-wait budget must stay UNDER the case ceiling, or vitest decides
 // the outcome first and the diagnostic becomes an opaque runner timeout
-// (packages/core/src/test-utils/latency-budget.ts). The off-ECS lane default
-// is 15s — equal to a single wait — and the multi-wait cases chain three to
-// four of them, so lift the whole describe instead of the config ternary
-// (same shape as AuthDialog.test.tsx's describe-level timeout).
-describe('FileChangedWatcher with real files', { timeout: 90_000 }, () => {
+// (packages/core/src/test-utils/latency-budget.ts). The multi-wait cases
+// chain three to four waits, so the ceiling is lifted above them rather
+// than the config ternary (same shape as AuthDialog.test.tsx's
+// describe-level timeout). Both arms scale with the wait budget: the fast
+// arm covers four 5s waits plus the FSEvents settles, the slow arm four
+// 15s waits.
+const CEILING_MS = SLOW_HOST ? 90_000 : 30_000;
+describe('FileChangedWatcher with real files', { timeout: CEILING_MS }, () => {
   let root: string;
   let watcher: FileChangedWatcher;
 

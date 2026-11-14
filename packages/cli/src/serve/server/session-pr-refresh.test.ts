@@ -55,6 +55,21 @@ import {
 import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
 import { slowHostBudgetMs } from '../../test-utils/slow-test-host.js';
 
+// The timer ceiling above is derived, so the waits under it have to be too:
+// a 15s fast ceiling cannot contain a hardcoded 10s + 10s + 30s chain, or
+// vitest truncates the case before the last wait reports its own assertion.
+// An idle host keeps vi.waitFor's 1s default; a saturated one gets the
+// contended budget.
+const OBSERVE_WAIT_MS = slowHostBudgetMs(1_000, 10_000);
+const SETTLE_WAIT_MS = slowHostBudgetMs(1_000, 30_000);
+
+// Captured at module load, before any case installs fake timers: the
+// rotation loop has to give the refresh tail REAL wall time, and inside a
+// fake-timer case `setTimeout` is the faked one. Vitest fakes `setImmediate`
+// as well (it excludes only nextTick/queueMicrotask), so the setImmediate
+// settle idiom used by the real-timer cases below cannot serve here.
+const realSetTimeout = globalThis.setTimeout;
+
 // dispose() stops the next tick but does not await the sweep already in
 // flight, so a sweep can still be writing under the temp tree while teardown
 // walks it — recursive rm then fails with ENOTEMPTY when a file lands between
@@ -327,11 +342,14 @@ describe('refreshWorkspaceSessionPrStates', () => {
     );
   });
 
-  // The real-git origin probe runs under the test-generous budget above;
-  // the lifted ceiling keeps probe + seeded git + refresh tail inside the
-  // lane budget on contended hosts (the 15s off-ECS default would otherwise
-  // decide the outcome before the value assertions).
-  describe('on an Aone workspace', { timeout: 60_000 }, () => {
+  // The real-git origin probe runs under the test-generous budget above
+  // (15s today); the ceiling keeps probe + seeded git + refresh tail inside
+  // the lane budget on contended hosts, where the 15s off-ECS default would
+  // otherwise decide the outcome before the value assertions. The fast arm
+  // is 30s rather than the lane default because it must stay above that
+  // probe budget even on an idle host.
+  const AONE_CEILING_MS = slowHostBudgetMs(30_000, 60_000);
+  describe('on an Aone workspace', { timeout: AONE_CEILING_MS }, () => {
     const AONE_URL =
       'https://code.alibaba-inc.com/jspt/agentic_coding/codereview/26430560';
 
@@ -3740,7 +3758,7 @@ describe(
             expect(view).toHaveBeenCalled();
             expect(fetchGitHubPullRequestsMock).toHaveBeenCalled();
           },
-          { timeout: 10_000 },
+          { timeout: OBSERVE_WAIT_MS },
         );
       } finally {
         handle?.dispose();
@@ -3818,7 +3836,7 @@ describe(
           () => {
             expect(view).toHaveBeenCalledTimes(1);
           },
-          { timeout: 10_000 },
+          { timeout: OBSERVE_WAIT_MS },
         );
         // Tick 1's refresh tail runs after the view and awaits real fs; the
         // re-entrancy guard silently skips the next interval while it is still
@@ -3828,7 +3846,7 @@ describe(
           () => {
             expect(fetchGitHubPullRequestIssuesMock).toHaveBeenCalledTimes(1);
           },
-          { timeout: 10_000 },
+          { timeout: OBSERVE_WAIT_MS },
         );
         await vi.advanceTimersByTimeAsync(0);
         // Tick 2: rotation 1 → trusted non-primary first, views PR 43.
@@ -3838,30 +3856,28 @@ describe(
         // until the second view lands instead of assuming the very next one
         // runs; the executed tick's rotation is 1 either way, and the order
         // stays [42, 43]. advanceTimersByTimeAsync drains fake timers and
-        // microtasks but starves the tail's real fs I/O under extreme macOS
-        // nightly load, so between advances yield REAL macrotasks via a
-        // MessageChannel (not intercepted by fake timers, unlike setImmediate)
-        // to let the tail complete; allow plenty of advances for the worst load.
-        const yieldRealMacrotask = (): Promise<void> =>
-          new Promise((resolve) => {
-            const { port1, port2 } = new MessageChannel();
-            port1.onmessage = () => {
-              port1.close();
-              resolve();
-            };
-            port2.postMessage(0);
-          });
-        for (let i = 0; i < 20 && view.mock.calls.length < 2; i++) {
+        // microtasks, so on its own every advance can run while tick()'s
+        // `if (running) return` is still set and none of them advances the
+        // rotation — dispatch 43599265724 (cli 1/3) ended at one view after
+        // the full 30s. Yielding real macrotasks instead (MessageChannel, 10
+        // per advance) is not enough either: measured on a host at load 14
+        // and again at load 22, that variant still failed at ~30s, because
+        // the tail's fs work needs wall time to finish, not just event-loop
+        // turns. So pause on a real timer. The pause cannot itself start a
+        // third tick: the fake clock is frozen while it runs, so no further
+        // interval fires, and the guard skips the next advance's tick while
+        // this one is still in flight. The loop reads the call count only
+        // after the tick it just triggered has had real time to finish, and
+        // exits on the second view.
+        for (let i = 0; i < 40 && view.mock.calls.length < 2; i++) {
           await vi.advanceTimersByTimeAsync(60_000);
-          for (let k = 0; k < 10; k++) {
-            await yieldRealMacrotask();
-          }
+          await new Promise((resolve) => realSetTimeout(resolve, 200));
         }
         await vi.waitFor(
           () => {
             expect(view).toHaveBeenCalledTimes(2);
           },
-          { timeout: 30_000 },
+          { timeout: SETTLE_WAIT_MS },
         );
         expect(view.mock.calls.map((call) => call[0])).toEqual([
           'https://github.com/o/r/pull/42',
@@ -4094,7 +4110,7 @@ describe(
             >,
           ).toHaveBeenCalledTimes(times);
         },
-        { timeout: 30_000 },
+        { timeout: SETTLE_WAIT_MS },
       );
 
     it('rotates the Aone view window across timer ticks', async () => {
@@ -4340,7 +4356,7 @@ describe(
         () => {
           expect(assertOpen).toHaveBeenCalled();
         },
-        { timeout: 30_000 },
+        { timeout: SETTLE_WAIT_MS },
       );
       expect(view).toHaveBeenCalledTimes(AONE_MAX_MR_VIEW_CALLS_PER_RUN);
 
