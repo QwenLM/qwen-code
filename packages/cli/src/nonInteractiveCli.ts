@@ -2739,7 +2739,8 @@ export async function runNonInteractive(
       // the shared agent loop. Each `sharedAgentLoop` branch below replaces
       // the current code next to it, which stays unchanged while the setting
       // exists.
-      const sharedAgentLoop = config.isUnifiedAgentLoopEnabled?.() === true;
+      const sharedAgentLoop =
+        config.isUnifiedAgentLoopEnabled?.('headless') === true;
       type SharedLoopScope = {
         maxRounds?: number;
         runtimeView?: RuntimeContentGeneratorView;
@@ -2808,17 +2809,21 @@ export async function runNonInteractive(
               let call: CompletedToolCall | undefined;
               const response = await executeToolCall(config, request, signal, {
                 recordToolResult: false,
+                isFinished: hooks.isFinished,
                 modToolCall: modSession?.toolCall(() =>
                   budgetEnforcer.tickToolCall(),
                 ),
-                onToolResultFullTurnModel,
+                onToolResultFullTurnModel: (model) =>
+                  !hooks.isFinished?.() && onToolResultFullTurnModel(model),
                 outputUpdateHandler: hooks.output,
                 onAllToolCallsComplete: async (calls) => {
                   call = calls[0];
                 },
                 runtimeView: scope.runtimeView,
                 ...(toolCallUpdateCallback && {
-                  onToolCallsUpdate: toolCallUpdateCallback,
+                  onToolCallsUpdate: (calls) => {
+                    if (!hooks.isFinished?.()) toolCallUpdateCallback(calls);
+                  },
                 }),
               });
               settled.push({
@@ -2833,6 +2838,7 @@ export async function runNonInteractive(
         return runAgentLoop({
           client: llmClient,
           config,
+          useEventBus: config.isEventBusAgentLoopEnabled?.('headless') === true,
           signal: abortController.signal,
           ...(activeGoalTurn && {
             toolSignal: AbortSignal.any([

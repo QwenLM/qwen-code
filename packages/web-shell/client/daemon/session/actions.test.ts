@@ -1439,18 +1439,90 @@ describe('createDaemonSessionActions', () => {
       expect(setPromptStatus).toHaveBeenCalledWith('idle');
     });
 
-    it('settles when the authority itself goes unknown', () => {
-      // A dead daemon: the live-state channel stops answering, its retained
-      // snapshot is dropped, and the bridge publishes `undefined`. Nothing
-      // vouches for the turn any more, so the pane must be released instead of
-      // holding a running turn for the life of the tab.
-      const { actions, setPromptStatus } = createActionsHarness({
-        session: createMockSession('session-1'),
-      });
+    it('bounds activity recovery with the existing load watchdog', async () => {
+      vi.useFakeTimers();
+      try {
+        const harness = createActionsHarness({
+          session: createMockSession('session-1'),
+          connection: {
+            status: 'connected',
+            workspaceCwd: '/workspace',
+            sessionId: 'session-1',
+          },
+          getPromptStatus: () => 'streaming',
+        });
+        harness.actions.setDaemonActivePrompt(true);
+        harness.actions.setDaemonActivePrompt(undefined);
+        expect(harness.pendingSessionLoadRef.current).toMatchObject({
+          sessionId: 'session-1',
+          mode: 'load',
+          reconcilePromptActivity: true,
+        });
+        expect(harness.setPromptStatus).not.toHaveBeenCalled();
 
-      actions.setDaemonActivePrompt(true);
-      actions.setDaemonActivePrompt(undefined);
-      expect(setPromptStatus).toHaveBeenCalledWith('idle');
+        await vi.advanceTimersByTimeAsync(75_000);
+        expect(harness.setPromptStatus).toHaveBeenCalledWith('idle');
+        expect(harness.getConnection().error).toContain('timed out');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not apply an old recovery failure after switching sessions', async () => {
+      vi.useFakeTimers();
+      try {
+        const harness = createActionsHarness({
+          session: createMockSession('session-a'),
+          connection: {
+            status: 'connected',
+            workspaceCwd: '/workspace',
+            sessionId: 'session-a',
+          },
+          getPromptStatus: () => 'streaming',
+        });
+        harness.actions.setDaemonActivePrompt(true);
+        harness.actions.setDaemonActivePrompt(undefined);
+        const switched = harness.actions.loadSession('session-b');
+        harness.setPromptStatus.mockClear();
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(harness.getConnection().sessionId).toBe('session-b');
+        expect(harness.getConnection().error).toBeUndefined();
+        expect(harness.setPromptStatus).not.toHaveBeenCalled();
+        const pending = harness.pendingSessionLoadRef.current!;
+        clearTimeout(pending.timeout);
+        pending.resolve();
+        await switched;
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not settle a local prompt submitted during failed recovery', async () => {
+      const harness = createActionsHarness({
+        session: createMockSession('session-1'),
+        connection: {
+          status: 'connected',
+          workspaceCwd: '/workspace',
+          sessionId: 'session-1',
+        },
+        getPromptStatus: () => 'streaming',
+      });
+      harness.actions.setDaemonActivePrompt(true);
+      harness.actions.setDaemonActivePrompt(undefined);
+      harness.activePromptsRef.current.set('session-1', {
+        controller: new AbortController(),
+      });
+      const pending = harness.pendingSessionLoadRef.current!;
+      clearTimeout(pending.timeout);
+      harness.pendingSessionLoadRef.current = undefined;
+      pending.reject(new Error('Activity recovery unavailable'));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(harness.setPromptStatus).not.toHaveBeenCalled();
+      expect(harness.getConnection().error).toBe(
+        'Activity recovery unavailable',
+      );
     });
 
     it('never revives a settled turn', () => {
@@ -4585,6 +4657,55 @@ describe('createDaemonSessionActions', () => {
     expect(pendingSessionLoadRef.current).toBeUndefined();
   });
 
+  describe('bindSessionPr', () => {
+    const pr = {
+      number: 16865,
+      url: 'https://github.com/QwenLM/qwen-code/pull/16865',
+      state: 'open' as const,
+    };
+
+    it('binds through the session metadata update and returns the result', async () => {
+      const result = { prs: [pr] };
+      const session = {
+        ...createMockSession('session-a'),
+        updateMetadata: vi.fn(async () => result),
+      };
+      const { actions } = createActionsHarness({ session });
+      await expect(actions.bindSessionPr(pr)).resolves.toBe(result);
+      expect(session.updateMetadata).toHaveBeenCalledWith({ pr });
+    });
+
+    it('dispatches a bind_session_pr notice and rethrows on failure', async () => {
+      const addNotice = vi.fn();
+      const session = {
+        ...createMockSession('session-a'),
+        updateMetadata: vi.fn(async () => {
+          throw new Error('locked');
+        }),
+      };
+      const { actions } = createActionsHarness({ session, addNotice });
+      await expect(actions.bindSessionPr(pr)).rejects.toThrow('locked');
+      expect(addNotice).toHaveBeenCalledWith(
+        expect.objectContaining({
+          severity: 'error',
+          operation: 'bind_session_pr',
+          code: 'daemon.bind_session_pr.failed',
+        }),
+      );
+    });
+
+    it('fails with a notice when no session is connected', async () => {
+      const addNotice = vi.fn();
+      const { actions } = createActionsHarness({ addNotice });
+      await expect(actions.bindSessionPr(pr)).rejects.toThrow(
+        'Daemon session is not connected',
+      );
+      expect(addNotice).toHaveBeenCalledWith(
+        expect.objectContaining({ code: 'daemon.bind_session_pr.failed' }),
+      );
+    });
+  });
+
   describe('continueSession', () => {
     function connection(): DaemonConnectionState {
       return {
@@ -7624,6 +7745,7 @@ function createActionsHarness(
     getDefaultSessionContext?: () => DaemonProductSessionContext | undefined;
     getClient?: () => DaemonClient | undefined;
     getEventDetailMode?: () => 'full' | 'summary';
+    getPromptStatus?: () => 'idle' | 'waiting' | 'streaming';
   } = {},
 ) {
   let connection: DaemonConnectionState = opts.connection ?? {
@@ -7699,6 +7821,7 @@ function createActionsHarness(
       opts.getDefaultSessionContext ?? (() => undefined),
     getClient: opts.getClient,
     getConnection: () => connection,
+    getPromptStatus: opts.getPromptStatus ?? (() => 'idle'),
     getEventDetailMode: opts.getEventDetailMode ?? (() => 'full'),
     hasSessionActivePrompt: opts.hasSessionActivePrompt ?? (() => false),
     resetCurrentSessionActivePrompt: vi.fn(),

@@ -165,6 +165,12 @@ import type {
   LspStatusSnapshot,
 } from '../lsp/types.js';
 import type { InstructionLoadReason } from '../hooks/types.js';
+import {
+  resolveAgentLoopSwitch,
+  UNIFIED_SURFACE_DEFAULTS,
+  EVENT_BUS_SURFACE_DEFAULTS,
+  type AgentLoopSurface,
+} from './agent-loop-rollout.js';
 import { ApprovalMode } from './approval-mode.js';
 
 // Other modules
@@ -1447,6 +1453,8 @@ export interface ConfigParameters {
   agentTeamEnabled?: boolean;
   /** Experimental: run migrated surfaces on the shared agent loop. */
   unifiedAgentLoopEnabled?: boolean;
+  /** Experimental: run the shared agent loop on the event bus. */
+  eventBusAgentLoopEnabled?: boolean;
   /**
    * Opt-in for persistent workspace Agents answering @-mentions in chat
    * sessions. Separate from `agentTeamEnabled`: neither implies the other.
@@ -1616,6 +1624,14 @@ export interface ConfigParameters {
   autoCompactThreshold?: number;
   interactive?: boolean;
   trustedFolder?: boolean;
+  /**
+   * The trust file's decision for `dir` when a rule set strictly inside the
+   * IDE workspace root `ideRoot` decides it; such a rule wins over the IDE.
+   */
+  trustFileDecisionBelowIdeRoot?: (
+    dir: string,
+    ideRoot: string,
+  ) => boolean | undefined;
   defaultFileEncoding?: FileEncodingType;
   useRipgrep?: boolean;
   useBuiltinRipgrep?: boolean;
@@ -3257,7 +3273,8 @@ export class Config {
   private readonly lsToolEnabled: boolean = false;
   private readonly todoWriteEnabled: boolean = false;
   private readonly agentTeamEnabled: boolean = false;
-  private readonly unifiedAgentLoopEnabled: boolean = false;
+  private readonly unifiedAgentLoopEnabled: boolean | undefined;
+  private readonly eventBusAgentLoopEnabled: boolean | undefined;
   private readonly agentCollaborationEnabled: boolean = false;
   private readonly artifactEnabled: boolean = true;
   private readonly artifactRecordingSupported: boolean = true;
@@ -3296,6 +3313,8 @@ export class Config {
    * lazily on first use, never persisted. */
   private omniMediaResourceRegistry?: MediaResourceRegistry;
   private workflowsEnabled: boolean | undefined;
+  /** Workflows are on because the bundled review skill turned them on. */
+  private workflowsEnabledByReviewSkill = false;
   private workflowKeywordTriggerEnabled: boolean;
   private readonly sessionWorkflowEnabled: boolean;
   private sessionWorkflowEnabledProvider?: () => boolean;
@@ -3326,6 +3345,9 @@ export class Config {
   private readonly autoCompactThreshold: number | undefined;
   private readonly interactive: boolean;
   private readonly trustedFolder: boolean | undefined;
+  private readonly trustFileDecisionBelowIdeRoot:
+    | ((dir: string, ideRoot: string) => boolean | undefined)
+    | undefined;
   private readonly useRipgrep: boolean;
   private readonly useBuiltinRipgrep: boolean;
   private readonly shouldUseNodePtyShell: boolean;
@@ -3720,7 +3742,12 @@ export class Config {
     this.lsToolEnabled = params.lsToolEnabled ?? false;
     this.todoWriteEnabled = params.todoWriteEnabled ?? false;
     this.agentTeamEnabled = params.agentTeamEnabled ?? false;
-    this.unifiedAgentLoopEnabled = params.unifiedAgentLoopEnabled ?? false;
+    // Deliberately not `?? false`: these are tri-state. Unset must stay
+    // undefined so the resolver falls through to the per-surface built-in
+    // default; collapsing to false here would make "not set" indistinguishable
+    // from "explicitly off" and block a later per-surface default flip.
+    this.unifiedAgentLoopEnabled = params.unifiedAgentLoopEnabled;
+    this.eventBusAgentLoopEnabled = params.eventBusAgentLoopEnabled;
     this.agentCollaborationEnabled = params.agentCollaborationEnabled ?? false;
     this.artifactEnabled = params.artifactEnabled ?? true;
     this.artifactRecordingSupported = params.artifactRecordingSupported ?? true;
@@ -3784,6 +3811,7 @@ export class Config {
     this.autoCompactThreshold = params.autoCompactThreshold;
     this.interactive = params.interactive ?? false;
     this.trustedFolder = params.trustedFolder;
+    this.trustFileDecisionBelowIdeRoot = params.trustFileDecisionBelowIdeRoot;
     this.skipLoopDetection = params.skipLoopDetection ?? false;
     // Embedders bypass the CLI's check; an unknown mode would act as `off`.
     this.loopProtection = isLoopProtectionMode(params.loopProtection)
@@ -6157,12 +6185,14 @@ export class Config {
     authMethod: AuthType,
     isInitialAuth?: boolean,
     subscriptionFallbackModel?: string,
+    allowUnlistedSubscriptionModel?: boolean,
   ) {
     return this.rebuildContentGenerator(
       authMethod,
       isInitialAuth,
       true,
       subscriptionFallbackModel,
+      allowUnlistedSubscriptionModel,
     );
   }
 
@@ -6171,6 +6201,7 @@ export class Config {
     isInitialAuth: boolean | undefined,
     refreshSubscriptionModels: boolean,
     subscriptionFallbackModel?: string,
+    allowUnlistedSubscriptionModel?: boolean,
   ) {
     const hookOwner = captureHookExecutionOwner(this, null);
     if (!this.contentGenerator && authMethod === this.initialAuthType) {
@@ -6208,17 +6239,22 @@ export class Config {
       const selected = this.modelsConfig.getModel();
       if (selected && !models.includes(selected)) {
         if (
+          isInitialAuth &&
+          subscriptionFallbackModel &&
+          models.includes(subscriptionFallbackModel)
+        ) {
+          fallbackModel = subscriptionFallbackModel;
+        } else if (
           !isInitialAuth ||
-          !subscriptionFallbackModel ||
-          !models.includes(subscriptionFallbackModel)
+          !allowUnlistedSubscriptionModel ||
+          priorGeneration.authType !== authMethod
         ) {
           throw new Error(subscriptionModelUnavailable(selected));
         }
-        fallbackModel = subscriptionFallbackModel;
       }
     }
 
-    // Sync modelsConfig state for this auth refresh.
+    // The CLI's resolved subscription credentials preserve an unlisted model during sync.
     const modelId = fallbackModel ?? this.modelsConfig.getModel();
     this.modelsConfig.syncAfterAuthRefresh(authMethod, modelId);
 
@@ -7265,13 +7301,30 @@ export class Config {
    * model. Bare selectors stay bare and authType-qualified selectors keep their
    * authType prefix so selector-aware runtime paths can route cross-auth calls.
    */
-  getFastModel(): string | undefined {
+  getFastModel({ requirePinnedEndpoint = false } = {}): string | undefined {
     const selector = this.resolveFastModelSelector();
     if (!selector) return undefined;
 
     const available = selector.authType
       ? this.getAllConfiguredModels([selector.authType])
       : this.getAllConfiguredModels();
+    const pinnedEndpoint = this.fastModel?.trim().split('\0')[1];
+    if (
+      requirePinnedEndpoint &&
+      pinnedEndpoint !== undefined &&
+      !available.some(
+        (model) =>
+          model.id === selector.modelId &&
+          model.baseUrl === pinnedEndpoint &&
+          !model.voiceOnly &&
+          !model.imageOnly &&
+          !model.visionOnly,
+      )
+    ) {
+      throw new Error(
+        'Fast model is no longer configured at the selected endpoint',
+      );
+    }
     if (
       !available.some(
         (model) =>
@@ -10787,9 +10840,24 @@ export class Config {
     return this.agentTeamEnabled;
   }
 
-  isUnifiedAgentLoopEnabled(): boolean {
-    if (process.env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] === '1') return true;
-    return this.unifiedAgentLoopEnabled;
+  isUnifiedAgentLoopEnabled(surface: AgentLoopSurface): boolean {
+    return resolveAgentLoopSwitch({
+      env: process.env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'],
+      setting: this.unifiedAgentLoopEnabled,
+      surface,
+      surfaceDefault: UNIFIED_SURFACE_DEFAULTS[surface],
+      variable: 'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
+    });
+  }
+
+  isEventBusAgentLoopEnabled(surface: AgentLoopSurface): boolean {
+    return resolveAgentLoopSwitch({
+      env: process.env['QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'],
+      setting: this.eventBusAgentLoopEnabled,
+      surface,
+      surfaceDefault: EVENT_BUS_SURFACE_DEFAULTS[surface],
+      variable: 'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP',
+    });
   }
 
   /**
@@ -11053,6 +11121,19 @@ export class Config {
     this.refreshWorkflowMode();
   }
 
+  /**
+   * Applies a reloaded `tools.workflowsEnabled`. When the settings leave it
+   * unset, workflows the bundled review skill turned on stay on: that enable
+   * never came from settings, and undoing it on an unrelated settings change
+   * would end the review's background runs. A value the settings do give
+   * replaces it.
+   */
+  applyWorkflowsEnabledSetting(enabled: boolean | undefined): void {
+    if (enabled === undefined && this.workflowsEnabledByReviewSkill) return;
+    this.workflowsEnabledByReviewSkill = false;
+    this.setWorkflowsEnabled(enabled);
+  }
+
   isWorkflowModeSupported(): boolean {
     return (
       !isDerivedConfig(this) &&
@@ -11271,6 +11352,7 @@ export class Config {
       return;
     }
     if (await this.registerWorkflowTool(this.getToolRegistry())) {
+      this.workflowsEnabledByReviewSkill ||= this.workflowsEnabled !== true;
       this.setWorkflowsEnabled(true);
       await this.getLlmClient().setTools();
     }
@@ -12296,17 +12378,24 @@ export class Config {
       : this.allowPrivateNetworkHooks;
   }
 
-  isTrustedFolder(): boolean {
-    const context = ideContextStore.get();
-    if (context?.workspaceState?.isTrusted !== undefined) {
-      return context.workspaceState.isTrusted;
-    }
+  private getIdeWorkspaceTrust(): boolean | undefined {
+    const dir = this.getTargetDir();
+    const scope = ideContextStore.getWorkspaceTrustScope(dir);
+    const isTrusted = this.experimentalZedIntegration
+      ? scope?.isTrusted
+      : ideContextStore.get()?.workspaceState?.isTrusted;
+    if (isTrusted === undefined || scope?.root === undefined) return isTrusted;
+    return this.trustFileDecisionBelowIdeRoot?.(dir, scope.root) ?? isTrusted;
+  }
 
-    return this.trustedFolder ?? !this.folderTrust;
+  isTrustedFolder(): boolean {
+    return (
+      this.getIdeWorkspaceTrust() ?? this.trustedFolder ?? !this.folderTrust
+    );
   }
 
   isExplicitlyTrustedFolder(): boolean {
-    const ideTrust = ideContextStore.get()?.workspaceState?.isTrusted;
+    const ideTrust = this.getIdeWorkspaceTrust();
     return (
       (this.folderTrust || ideTrust !== undefined) && this.isTrustedFolder()
     );

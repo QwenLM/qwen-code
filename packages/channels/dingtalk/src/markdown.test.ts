@@ -183,6 +183,19 @@ describe('DingTalk markdown utilities', () => {
       ).toBeLessThanOrEqual(20);
     });
 
+    it.each([
+      ['a'.repeat(19) + '\u{1f680}', 'a'.repeat(19)],
+      ['a'.repeat(18) + '\u{1f680}', 'a'.repeat(18) + '\u{1f680}'],
+      ['\u{1f680}'.repeat(11), '\u{1f680}'.repeat(10)],
+    ])(
+      'keeps complete surrogate pairs within 20 UTF-16 units (%s)',
+      (text, expected) => {
+        const title = extractTitle(text);
+        expect(title).toBe(expected);
+        expect(title.length).toBeLessThanOrEqual(20);
+      },
+    );
+
     it('returns Reply for empty text', () => {
       expect(extractTitle('')).toBe('Reply');
       expect(extractTitle('###')).toBe('Reply');

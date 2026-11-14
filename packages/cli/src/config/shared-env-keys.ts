@@ -92,6 +92,12 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // must not be able to turn them on, nor to unset an operator's kill switch.
   'QWEN_CODE_ENABLE_LSP',
   'QWEN_CODE_DISABLE_LSP',
+  // The agent-loop rollout switches are the same class of opt-in experiment:
+  // a project `.env` must not force the shared loop or the event-bus kernel on
+  // (or off) ahead of the operator's explicit setting. The operator's launch
+  // environment and the parity suites' spawned child env are unaffected.
+  'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
+  'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP',
   // The name-only lock is a deployment policy. A project that wants it sets
   // tools.workflowNameOnly, which a workspace may only turn on; a project
   // .env must not be able to unset the operator's exported value.

@@ -10,7 +10,9 @@ import org.springframework.transaction.support.TransactionTemplate;
 /** Reclaims released public projection bodies, including those of still-live Sessions. */
 final class ManagedProjectionResourceCollector {
     private static final int BATCH = 32;
-    private static final String KINDS = "X'6d616e616765642d6d6573736167652d7061727473'";
+    private static final String KINDS = "X'6d616e616765642d6d6573736167652d7061727473',"
+            + "X'6d616e616765642d736964652d71756572792d696e707574',"
+            + "X'6d616e616765642d736964652d71756572792d6368756e6b'";
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
 
@@ -51,7 +53,10 @@ final class ManagedProjectionResourceCollector {
     private boolean collect(String tenant, String session, String key) {
         JdbcManagedSessionStore.lockBounded(() -> ToolPublicationRetentionStore.lockTenant(
                 jdbc, tenant, JdbcManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS));
-        if (ManagedLegacySessionGuard.isPrivate(jdbc, tenant, session)) {
+        // A current read, not the consistent fast path: this transaction's first
+        // plain read would fix its REPEATABLE READ view before lockSessionHead,
+        // hiding a lease committed while it waits on the head lock (R2-1).
+        if (ManagedLegacySessionGuard.isPrivateCurrentRead(jdbc, tenant, session)) {
             return false;
         }
         ToolPublicationRetentionStore.lockSessionHead(jdbc, tenant, session);

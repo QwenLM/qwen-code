@@ -177,6 +177,31 @@ export function createJavaManagedAgentProvider(
     return { sessionId: result.sessionId };
   }
   return {
+    sideQueries: {
+      context: (sessionId, options) =>
+        client.sideQueryContext(sessionId, options.signal),
+      create: (sessionId, request, options) =>
+        client.createSideQuery(
+          sessionId,
+          request,
+          options.idempotencyKey,
+          options.signal,
+        ),
+      list: (sessionId, options) =>
+        client.listSideQueries(
+          { sessionId, cursor: options.cursor, limit: options.limit },
+          options.signal,
+        ),
+      get: (sessionId, queryId, options) =>
+        client.getSideQuery(sessionId, queryId, options.signal),
+      stream: (sessionId, queryId, options) =>
+        client.streamSideQuery(
+          { sessionId, queryId, afterRevision: options.afterRevision },
+          options.signal,
+        ),
+      cancel: (sessionId, queryId, options) =>
+        client.cancelSideQuery(sessionId, queryId, options.signal),
+    },
     userMessages: {
       query: (sessionId, options) =>
         client.queryUserMessages(sessionId, options.signal),
@@ -285,6 +310,9 @@ export function createJavaManagedAgentProvider(
     mcp: {
       list: (sessionId, request) =>
         client.getSessionMcp(sessionId, request.signal),
+    },
+    clientFiles: {
+      transport: () => client.clientFilesTransport(),
     },
     extensions: {
       storageScope: options.productScope?.trim()
@@ -794,6 +822,12 @@ export function createJavaManagedAgentProvider(
       get: (sessionId, itemId, request) =>
         client.getToolDetails(sessionId, itemId, request.signal),
     },
+    terminal: {
+      ticket: (sessionId, terminalId, request) =>
+        client.terminalTicket(sessionId, terminalId, request.signal),
+      webSocketUrl: (sessionId, terminalId) =>
+        client.terminalWebSocketUrl(sessionId, terminalId),
+    },
     toolResults: {
       canDownload: saveArtifact !== undefined,
       getResult: (sessionId, itemId, request) =>
@@ -1168,6 +1202,14 @@ function toSessionSummary(
         ? { diagnostics: true }
         : {}),
       ...(session.capabilities?.artifacts === true ? { artifacts: true } : {}),
+      ...(session.capabilities?.btw === true ? { btw: true } : {}),
+      ...(session.capabilities?.recap === true ? { recap: true } : {}),
+      ...(session.capabilities?.terminal !== undefined
+        ? { terminal: session.capabilities.terminal }
+        : {}),
+      ...(session.capabilities?.clientFiles === true
+        ? { clientFiles: true }
+        : {}),
       canSend:
         sessionActive &&
         !active &&

@@ -1,3 +1,4 @@
+import { randomUUID } from './utils/random-uuid.js';
 import { useWorkspaceFileChanges } from './components/artifacts/useWorkspaceFileChanges';
 import {
   filterWorkspaceFileChanges,
@@ -29,6 +30,7 @@ import type {
   WebShellUnavailableModel,
   WebShellUnavailableModelTooltipMount,
 } from './unavailableModels';
+import type { WebShellModelPickerOptions } from './model-picker';
 import './styles/globals.css';
 import {
   useMessageNavigation,
@@ -114,6 +116,7 @@ import type {
   DaemonSessionMonitorTaskStatus,
   DaemonSessionShellTaskStatus,
   DaemonSessionTaskWithWorkflowStatus,
+  DaemonSessionWorkflowTaskStatus,
   DaemonSessionArtifact,
   DaemonSessionSummary,
   DaemonStandaloneCreationRecovery,
@@ -156,11 +159,11 @@ import {
   isRetryableTurnErrorKind,
   transcriptBlocksToDaemonMessages,
 } from './adapters/transcriptToMessages';
-import type {
-  MessageListProps,
-  MessageListHandle,
-} from './components/MessageList';
-import { TranscriptViewport } from './components/TranscriptViewport';
+import type { MessageListHandle } from './components/MessageList';
+import {
+  TranscriptViewport,
+  type TranscriptViewportProps,
+} from './components/TranscriptViewport';
 import { reorderChildrenUnderParents } from './components/messages/agentForest';
 import { SubagentDetailsProvider } from './subagentDetailsContext';
 import { TurnCallsProvider } from './turnCallsContext';
@@ -168,11 +171,9 @@ import { useModelConfigurations } from './hooks/useModelConfigurations';
 import { useModelRefresh } from './hooks/useModelRefresh';
 import { MonitorDetailsProvider } from './monitorDetailsContext';
 import { WorkflowDetailsProvider } from './workflowDetailsContext';
+import { createToolRevealStore, ToolRevealProvider } from './toolRevealContext';
 import { findMonitorTaskForTool } from './utils/monitorTasks';
-import {
-  hasActiveBackgroundAgent,
-  isComposerTask,
-} from './utils/composerTasks';
+import { isComposerTask } from './utils/composerTasks';
 import {
   getTaskActivityKey,
   hasActiveTaskActivity,
@@ -217,7 +218,11 @@ import {
 } from './hooks/useComposerCore';
 import type { PromptFile, PromptImage } from './adapters/promptTypes';
 import type { AttachmentPreviewRequest } from './adapters/messageTypes';
-import { StatusBar, type StatusBarHandle } from './components/StatusBar';
+import {
+  ComposerTaskChips,
+  type ComposerTaskChipsHandle,
+} from './components/ComposerTaskChips';
+import { ComposerUsageStats } from './components/ComposerUsageStats';
 import { GoalStatusStrip } from './components/GoalStatusStrip';
 import { SessionRecoveryBanner } from './components/SessionRecoveryBanner';
 import { SessionLimitBanner } from './components/SessionLimitBanner';
@@ -267,6 +272,7 @@ import type {
 import type { WorkspaceSelectorOption } from './components/WorkspaceSelector';
 import { DropdownMenuItem } from './components/ui/dropdown-menu';
 import {
+  managedSelectionFromRoute,
   managedSelectionFromUrl,
   saveManagedSelection,
 } from './components/managed/managed-session-storage';
@@ -461,7 +467,10 @@ import {
 import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameTranscriptSnapshot } from './hooks/useAnimationFrameTranscriptBlocks';
 import { useBackgroundTasks } from './hooks/useBackgroundTasks';
-import { getSubagentDetailsUnavailableReason } from './components/messages/toolFormatting';
+import {
+  getSubagentDetailsUnavailableReason,
+  toolContainsCallId,
+} from './components/messages/toolFormatting';
 import { isSessionDisconnectedError } from './utils/sessionErrors';
 import {
   projectStreamingTailMessages,
@@ -1282,7 +1291,7 @@ function buildDisplayMessages(
 }
 
 type LiveMessageListProps = Omit<
-  MessageListProps,
+  TranscriptViewportProps,
   'messages' | 'transcriptBlockCount'
 > & {
   baselineBlocks: readonly DaemonTranscriptBlock[];
@@ -1448,6 +1457,8 @@ export interface WebShellProps {
   settings?: WebShellSettingsOptions;
   /** Model add/delete interactions across WebShell. Not a backend permission policy. */
   modelManagement?: WebShellModelManagementOptions;
+  /** Host-owned header and per-model display content in composer pickers. */
+  modelPicker?: WebShellModelPickerOptions;
   /** Extra catalog models shown disabled in the composer picker. */
   unavailableModels?: readonly WebShellUnavailableModel[];
   /** Host-owned hint for a disabled model. DOM/Solid hosts mount into the container. */
@@ -1696,6 +1707,15 @@ export interface WebShellProps {
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   /** Artifact-card rendering overrides. */
   artifact?: WebShellArtifactCustomization;
+  /**
+   * 与普通会话对齐 Managed 对话区文案与能力提示口径（宿主已有外壳时置 true）。
+   */
+  alignManagedChatWithHost?: boolean;
+  /**
+   * 宿主外壳已展示会话身份（如宿主侧栏）时置 false，Managed 对话区不重复渲染
+   * 自有的会话标题 / 工作区 / 状态徽章。默认 true 保持独立整页行为。
+   */
+  showManagedSessionHeader?: boolean;
   /** Custom renderer for the welcome header. Receives version, cwd, model, and mode. */
   renderWelcomeHeader?: WelcomeHeaderRenderer;
   /** Custom renderer shown below the chat composer in the empty welcome state. */
@@ -2867,11 +2887,16 @@ function getChatWidthStyle(
   chatMaxWidth: number | undefined,
 ): CSSProperties {
   const contentWidth = `${getChatMaxWidth(chatMaxWidth)}px`;
-  const shellWidth = `calc(${contentWidth} + ${CHAT_SHELL_HORIZONTAL_PADDING}px)`;
+  // Reserve timeline gutters where they fit without over-shrinking phone layouts.
+  const responsiveContentWidth = `min(${contentWidth}, clamp(440px, 85cqw, calc(100cqw - 128px)))`;
+  const regularShellWidth = `calc(${contentWidth} + ${CHAT_SHELL_HORIZONTAL_PADDING}px)`;
+  const shellWidth = `calc(${responsiveContentWidth} + ${CHAT_SHELL_HORIZONTAL_PADDING}px)`;
   return {
     '--chat-regular-content-width': contentWidth,
-    '--chat-regular-shell-width': shellWidth,
+    '--chat-regular-shell-width': regularShellWidth,
     '--chat-content-width': mode === 'wide' ? '100%' : contentWidth,
+    '--chat-responsive-content-width':
+      mode === 'wide' ? '100%' : responsiveContentWidth,
     '--chat-shell-width': mode === 'wide' ? '100%' : shellWidth,
   } as CSSProperties;
 }
@@ -3444,6 +3469,22 @@ function findToolCall(
   return undefined;
 }
 
+/** The id of the tool-group message whose row (or nested row) is `callId`. */
+function findToolMessageId(
+  messages: readonly Message[],
+  callId: string,
+): string | undefined {
+  for (const message of messages) {
+    if (
+      message.role === 'tool_group' &&
+      message.tools.some((tool) => toolContainsCallId(tool, callId))
+    ) {
+      return message.id;
+    }
+  }
+  return undefined;
+}
+
 function transcriptEventsToMessages(events: readonly DaemonEvent[]): Message[] {
   const state = createDaemonTranscriptState({
     maxBlocks: Math.max(2_000, events.length),
@@ -3617,6 +3658,10 @@ export function App({
   artifact,
   fileDropAction,
   renderToolHeaderExtra,
+  alignManagedChatWithHost,
+
+  showManagedSessionHeader,
+
   renderWelcomeHeader,
   renderWelcomeFooter,
   mobileWelcomeFooterMiddle = false,
@@ -3641,6 +3686,7 @@ export function App({
   sidebar,
   settings: settingsPresentation,
   modelManagement,
+  modelPicker,
   unavailableModels,
   mountUnavailableModelTooltip,
   header,
@@ -3707,11 +3753,18 @@ export function App({
   const navigation = useWebShellNavigation();
   const navigationRef = useRef(navigation);
   navigationRef.current = navigation;
+  const standaloneShell = useContext(StandaloneContext);
   const [managedHome, setManagedHome] = useState(
     () =>
       managedAgentProvider !== undefined &&
-      managedSelectionFromUrl(
-        navigation?.route.page !== 'chat' || !navigation.route.sessionId,
+      managedSelectionFromRoute(
+        navigation?.route,
+        // Classify with the same rule WorkspaceSessionProvider applies. A
+        // route-less host reaches App two ways: the standalone embedding
+        // (StandaloneContext), which gates App in only for local targets, and
+        // the managed-only shell, which wraps App itself and defaults to the
+        // managed home. Only the former counts as a local target here.
+        standaloneShell,
       ).open,
   );
   const managedMode = managedAgentProvider !== undefined && managedHome;
@@ -3794,9 +3847,10 @@ export function App({
   const environmentPanelItems =
     environmentPanel?.items ?? DEFAULT_ENVIRONMENT_PANEL_ITEMS;
   // The environment panel is only reachable through the chat header toggle,
-  // so its sections replace the composer git entry / footer task pills only
-  // when that header is actually enabled. Embeddings that omit the header keep
-  // the legacy entries.
+  // so its sections replace the composer git entry (and give background
+  // agents a home, which the composer task chips rely on) only when that
+  // header is actually enabled. Embeddings that omit the header keep the
+  // legacy entries.
   const environmentPanelReachable =
     chatHeaderEnabled &&
     environmentHeaderItemVisible &&
@@ -3995,6 +4049,7 @@ export function App({
   const customization = useMemo(
     () => ({
       onRefreshModels,
+      modelPicker,
       allowedApprovalModes,
       artifact,
       filterArtifact,
@@ -4005,8 +4060,11 @@ export function App({
       builtinAtProviders,
       atProviders,
       renderToolHeaderExtra,
+      alignManagedChatWithHost,
+      showManagedSessionHeader,
       renderWelcomeHeader,
       renderWelcomeFooter,
+      composerPlaceholders,
       parseUserMessageContent,
       renderUserMessageContent,
       renderComposerTag,
@@ -4034,6 +4092,7 @@ export function App({
     }),
     [
       onRefreshModels,
+      modelPicker,
       allowedApprovalModes,
       artifact,
       filterArtifact,
@@ -4044,8 +4103,11 @@ export function App({
       builtinAtProviders,
       atProviders,
       renderToolHeaderExtra,
+      alignManagedChatWithHost,
+      showManagedSessionHeader,
       renderWelcomeHeader,
       renderWelcomeFooter,
+      composerPlaceholders,
       parseUserMessageContent,
       renderUserMessageContent,
       renderComposerTag,
@@ -4935,6 +4997,21 @@ export function App({
     resolveWorkspaceMaintenanceTargetCwd,
     workspaceContextActive,
   ]);
+  const composerWorkspaceCwd = workspaceContextActive
+    ? (ordinaryWorkspaces.find((entry) => entry.cwd === lockedWorkspaceCwd)
+        ?.cwd ??
+      (connection.sessionId
+        ? connection.workspaceCwd
+        : resolveWorkspaceMaintenanceTargetCwd()))
+    : undefined;
+  const modelPickerScope = useMemo(
+    () => ({
+      sessionId: connection.sessionId,
+      workspaceCwd: composerWorkspaceCwd,
+      daemonBaseUrl: workspace.baseUrl,
+    }),
+    [connection.sessionId, composerWorkspaceCwd, workspace.baseUrl],
+  );
   // The chat header always answers "which workspace is this session in?": the
   // workspace's name when there is one, and nothing when the session lives
   // outside every workspace (standalone, Live), which the header shows as the
@@ -5954,7 +6031,7 @@ export function App({
     pushToast('error', t('sideTask.createFailed'));
   }, [createSideTask, pushToast, t]);
   const openWebPreviewTab = useCallback(() => {
-    const id = `web-preview:${crypto.randomUUID()}`;
+    const id = `web-preview:${randomUUID()}`;
     setArtifactPanelTabs((tabs) => [
       ...tabs,
       {
@@ -5987,7 +6064,7 @@ export function App({
     [],
   );
   const openTerminalTab = useCallback(() => {
-    const id = `terminal:${crypto.randomUUID()}`;
+    const id = `terminal:${randomUUID()}`;
     const count = artifactPanelTabsRef.current.filter(
       (tab) => tab.kind === 'terminal',
     ).length;
@@ -6743,6 +6820,18 @@ export function App({
     },
     [getDefaultReviewPanelWidth, t],
   );
+  // The composer reading refreshes in the background, so it reads the route
+  // directly: a failed read must not raise a notice the way the session
+  // action does.
+  const loadComposerUsageStats = useCallback(
+    (sessionId: string) => workspace.client.sessionStats(sessionId),
+    [workspace.client],
+  );
+  const openComposerUsagePanel = useCallback(() => {
+    if (connection.sessionId) {
+      openTokenUsagePanel(connection.sessionId, sessionActions);
+    }
+  }, [connection.sessionId, openTokenUsagePanel, sessionActions]);
   const openTrajectoryPanel = useCallback(
     (sourceSessionId: string) => {
       const tab: ArtifactPanelTab = {
@@ -9418,8 +9507,9 @@ export function App({
     () => (renderFooter ? footerHostTasks.map(mapToWebShellTaskInfo) : []),
     [footerHostTasks, renderFooter],
   );
-  const statusBarRef = useRef<StatusBarHandle>(null);
+  const composerTaskChipsRef = useRef<ComposerTaskChipsHandle>(null);
   const messageListRef = useRef<MessageListHandle | null>(null);
+  const toolRevealStore = useMemo(createToolRevealStore, []);
   const locateWaitingActivity = useCallback((messageId: string) => {
     messageListRef.current?.scrollToMessage(messageId);
   }, []);
@@ -10764,8 +10854,9 @@ export function App({
   if (managedHistoryRevision !== navigation?.historyRevision) {
     setManagedHistoryRevision(navigation?.historyRevision);
     if (managedAgentProvider) {
-      const selection = managedSelectionFromUrl(
-        navigation?.route.page !== 'chat' || !navigation.route.sessionId,
+      const selection = managedSelectionFromRoute(
+        navigation?.route,
+        standaloneShell,
       );
       setManagedHome(selection.open);
       if (managedSessionId !== selection.sessionId) {
@@ -10991,31 +11082,7 @@ export function App({
         if (item === 'workflows') return workflowsEnabled;
         if (item === 'prWatches') return prWatchesAvailable;
         return true;
-      }) ||
-        (sidebarOptions.footer !== false &&
-          sidebarOptions.footer?.items?.some((item) => {
-            if (item === 'collapse') return false;
-            if (item === 'settings') return settingsAvailable;
-            if (item === 'sessionsOverview' || item === 'splitView') {
-              return isSidebarFooterItemAvailable(
-                item,
-                projectFeaturesAvailable,
-                isLargeScreen,
-              );
-            }
-            if (item === 'workspacesOverview') return !lockedWorkspaceCwd;
-            if (item === 'localFiles' || item === 'desktopRelay')
-              return isPageOriginDaemon(workspace.baseUrl);
-            if (item === 'update') {
-              return (
-                !isDesktopShell() &&
-                Boolean(
-                  connection.capabilities?.features?.includes('daemon_update'),
-                )
-              );
-            }
-            return true;
-          })),
+      }),
     );
   const navigationRailVisible =
     sidebarOptions.enabled &&
@@ -12012,7 +12079,7 @@ export function App({
         store.dispatch([
           {
             type: 'status',
-            promptId: `local-command:${crypto.randomUUID()}`,
+            promptId: `local-command:${randomUUID()}`,
             text: change.version
               ? t('extensions.install.installedWithVersion', {
                   name,
@@ -12030,7 +12097,7 @@ export function App({
         store.dispatch([
           {
             type: 'status',
-            promptId: `local-command:${crypto.randomUUID()}`,
+            promptId: `local-command:${randomUUID()}`,
             text: t(key, { name, version: change.version ?? '' }),
           },
         ]);
@@ -14586,7 +14653,7 @@ export function App({
     (
       text: string,
       images?: PromptImage[],
-      localCommandId = `local-command:echo:${crypto.randomUUID()}`,
+      localCommandId = `local-command:echo:${randomUUID()}`,
     ): boolean =>
       appendOrDeferLocalUserMessage(
         streamingStateRef.current !== 'idle',
@@ -14610,7 +14677,7 @@ export function App({
   // mid-turn with only the echo skipped.
   const echoLocalCommandIfIdle = useCallback(
     (text: string): string => {
-      const localCommandId = `local-command:echo:${crypto.randomUUID()}`;
+      const localCommandId = `local-command:echo:${randomUUID()}`;
       beginLocalCommand(store, localCommandId);
       if (streamingStateRef.current === 'idle') {
         store.appendLocalUserMessage(text, undefined, {
@@ -14633,7 +14700,7 @@ export function App({
       store.dispatch([
         {
           type: 'status',
-          promptId: localCommandId ?? `local-command:${crypto.randomUUID()}`,
+          promptId: localCommandId ?? `local-command:${randomUUID()}`,
           text,
           ...(data !== undefined ? { data } : {}),
           clearActiveText: false,
@@ -15490,7 +15557,7 @@ export function App({
       store.dispatch([
         {
           type: 'status',
-          promptId: `local-command:${crypto.randomUUID()}`,
+          promptId: `local-command:${randomUUID()}`,
           text: t('clear.blocked'),
         },
       ]);
@@ -15585,7 +15652,7 @@ export function App({
             store.dispatch([
               {
                 type: 'status',
-                promptId: `local-command:${crypto.randomUUID()}`,
+                promptId: `local-command:${randomUUID()}`,
                 text: t('mode.autoApproved', { tool: approval.title || '' }),
               },
             ]);
@@ -16332,7 +16399,7 @@ export function App({
           store.dispatch([
             {
               type: 'status',
-              promptId: `local-command:${crypto.randomUUID()}`,
+              promptId: `local-command:${randomUUID()}`,
               text: t('branch.success', {
                 name: result.displayName,
               }),
@@ -18600,6 +18667,61 @@ export function App({
     },
     [handleOpenMonitorDetails, handleOpenShellDetails, openTasksPanel],
   );
+  // A workflow chip scrolls the transcript to the call that started the run
+  // and opens its inline view. A run with no row in this transcript (started
+  // from the runs page, a rerun, or history that is not loaded) opens in the
+  // tasks dialog instead, which renders the same run view.
+  const locateWorkflowTask = useCallback(
+    (task: DaemonSessionWorkflowTaskStatus) => {
+      const callId = task.toolUseId;
+      const messageId = callId
+        ? findToolMessageId(messages, callId)
+        : undefined;
+      if (callId && messageId) {
+        toolRevealStore.request(callId);
+        if (messageListRef.current?.scrollToMessage(messageId, callId)) return;
+        toolRevealStore.cancel(callId);
+      }
+      openTasksPanel();
+    },
+    [messages, openTasksPanel, toolRevealStore],
+  );
+  const openComposerTask = useCallback(
+    (task: DaemonSessionTaskWithWorkflowStatus) => {
+      switch (task.kind) {
+        case 'workflow':
+          locateWorkflowTask(task);
+          return;
+        case 'shell':
+          handleOpenShellDetails(task);
+          return;
+        case 'monitor':
+          handleOpenMonitorDetails(task);
+          return;
+        case 'agent': {
+          if (!connection.sessionId) return;
+          const tool = task.toolUseId
+            ? findToolCall(messages, task.toolUseId)
+            : undefined;
+          openSubagentPanelForSession(
+            tool ?? agentTaskAsToolCall(task),
+            connection.sessionId,
+            connection.workspaceCwd,
+          );
+          return;
+        }
+      }
+    },
+    [
+      connection.sessionId,
+      connection.workspaceCwd,
+      handleOpenMonitorDetails,
+      handleOpenShellDetails,
+      locateWorkflowTask,
+      messages,
+      openSubagentPanelForSession,
+    ],
+  );
 
   const refreshGoal = useCallback(async () => {
     const owner = sessionOwnerGuard.capture();
@@ -19078,7 +19200,7 @@ export function App({
         // transcript belongs to the session the user navigated to.
         if (!detachedGoalSession) {
           store.appendLocalUserMessage(text, undefined, {
-            localCommandId: `local-command:${crypto.randomUUID()}`,
+            localCommandId: `local-command:${randomUUID()}`,
           });
         }
         const action = operation.kind === 'set' ? 'replace' : operation.kind;
@@ -19161,7 +19283,6 @@ export function App({
       ),
     [hiddenSlashCommands],
   );
-  const hideSettings = hiddenCommands.has('settings');
 
   const handleSubmit = useCallback(
     (
@@ -19549,7 +19670,7 @@ export function App({
               store.dispatch([
                 {
                   type: 'status',
-                  promptId: `local-command:${crypto.randomUUID()}`,
+                  promptId: `local-command:${randomUUID()}`,
                   text: [
                     t('language.current', {
                       language: languageLabel(selectedLanguage),
@@ -19580,7 +19701,7 @@ export function App({
                 store.dispatch([
                   {
                     type: 'status',
-                    promptId: `local-command:${crypto.randomUUID()}`,
+                    promptId: `local-command:${randomUUID()}`,
                     text: [
                       t('language.set'),
                       '',
@@ -19620,7 +19741,7 @@ export function App({
                 store.dispatch([
                   {
                     type: result.status === 'error' ? 'error' : 'status',
-                    promptId: `local-command:${crypto.randomUUID()}`,
+                    promptId: `local-command:${randomUUID()}`,
                     text: translateCopyMessage(result.message, t),
                   },
                 ]);
@@ -19898,7 +20019,7 @@ export function App({
             if (toolsArg === 'desc' || toolsArg === 'descriptions') {
               setShowToolsDialog(true);
             } else {
-              const localCommandId = `local-command:echo:${crypto.randomUUID()}`;
+              const localCommandId = `local-command:echo:${randomUUID()}`;
               if (echoOrDeferLocalCommand(text, images, localCommandId))
                 return true;
               const owner = sessionOwnerGuard.capture();
@@ -20044,7 +20165,7 @@ export function App({
                   break;
                 }
               }
-              const localCommandId = `local-command:${crypto.randomUUID()}`;
+              const localCommandId = `local-command:${randomUUID()}`;
               if (parseError) {
                 store.appendLocalUserMessage(text, undefined, {
                   localCommandId,
@@ -20100,7 +20221,7 @@ export function App({
                 });
               return true;
             }
-            const localCommandId = `local-command:echo:${crypto.randomUUID()}`;
+            const localCommandId = `local-command:echo:${randomUUID()}`;
             if (echoOrDeferLocalCommand(text, images, localCommandId))
               return true;
             store.dispatch([
@@ -20183,7 +20304,7 @@ export function App({
                 store.dispatch([
                   {
                     type: 'status',
-                    promptId: `local-command:${crypto.randomUUID()}`,
+                    promptId: `local-command:${randomUUID()}`,
                     text: t('rename.success', { name: displayName }),
                   },
                 ]);
@@ -20365,7 +20486,7 @@ export function App({
           }
           if (cmd === 'bug') {
             const bugTitle = text.slice(match[0].length).trim();
-            const localCommandId = `local-command:${crypto.randomUUID()}`;
+            const localCommandId = `local-command:${randomUUID()}`;
             if (echoOrDeferLocalCommand(text, images, localCommandId))
               return true;
             const owner = sessionOwnerGuard.capture();
@@ -20905,9 +21026,9 @@ export function App({
     hasQueuedPrompts,
   ]);
 
-  const handleFocusTaskPill = useCallback((): boolean => {
+  const handleFocusTaskChips = useCallback((): boolean => {
     if (interactionBlocked) return false;
-    return statusBarRef.current?.focusTaskPill() ?? false;
+    return composerTaskChipsRef.current?.focus() ?? false;
   }, [interactionBlocked]);
 
   const handleReturnToEditor = useCallback((text?: string) => {
@@ -21161,7 +21282,7 @@ export function App({
       store.dispatch([
         {
           type: 'status',
-          promptId: `local-command:${crypto.randomUUID()}`,
+          promptId: `local-command:${randomUUID()}`,
           text: t('retry.none'),
         },
       ]);
@@ -21743,7 +21864,7 @@ export function App({
             store.dispatch([
               {
                 type: 'status',
-                promptId: `local-command:${crypto.randomUUID()}`,
+                promptId: `local-command:${randomUUID()}`,
                 text: t('settings.models.runtimeSyncFailed'),
               },
             ]);
@@ -21754,7 +21875,7 @@ export function App({
             store.dispatch([
               {
                 type: 'status',
-                promptId: `local-command:${crypto.randomUUID()}`,
+                promptId: `local-command:${randomUUID()}`,
                 text: t('settings.requiresRestart'),
               },
             ]);
@@ -21837,7 +21958,7 @@ export function App({
             store.dispatch([
               {
                 type: 'status',
-                promptId: `local-command:${crypto.randomUUID()}`,
+                promptId: `local-command:${randomUUID()}`,
                 text: t('settings.requiresRestart'),
               },
             ]);
@@ -22018,7 +22139,7 @@ export function App({
           store.dispatch([
             {
               type: 'status',
-              promptId: `local-command:${crypto.randomUUID()}`,
+              promptId: `local-command:${randomUUID()}`,
               text: t('settings.requiresRestart'),
             },
           ]);
@@ -22761,8 +22882,6 @@ export function App({
   }, [artifactPanelOpen, environmentPanelFits]);
   const environmentPanelMounted =
     !isChatEmptyState && !activePanel && mainView === 'chat';
-  const chatWidthToggleMin = getChatMaxWidth(chatMaxWidth);
-
   const appClassName = [
     styles.app,
     styles.appChat,
@@ -23471,7 +23590,7 @@ export function App({
                 store.dispatch([
                   type === 'error'
                     ? { type: 'error', text }
-                    : { type: 'status', promptId: `local-command:${crypto.randomUUID()}`, text },
+                    : { type: 'status', promptId: `local-command:${randomUUID()}`, text },
                 ]);
               }}
               onClose={handleCloseAuthDialog}
@@ -23525,7 +23644,7 @@ export function App({
                   store.dispatch([
                     {
                       type: 'status',
-                      promptId: `local-command:${crypto.randomUUID()}`,
+                      promptId: `local-command:${randomUUID()}`,
                       text:
                         sessionIds.length === 1
                           ? `${t('delete.deleted')} (${sessionIds[0]!.slice(0, 8)})`
@@ -23558,7 +23677,7 @@ export function App({
                   store.dispatch([
                     {
                       type: 'status',
-                      promptId: `local-command:${crypto.randomUUID()}`,
+                      promptId: `local-command:${randomUUID()}`,
                       text: `${t('release.released')} (${sessionId.slice(0, 8)})`,
                     },
                   ]);
@@ -24499,7 +24618,10 @@ export function App({
                           configurations: modelConfigurations.models,
                           onUpdateContextWindow: handleModelContextWindowUpdate,
                           currentModelId:
-                            connection.currentModel ?? undefined,
+                            (connection.sessionId
+                              ? connection.currentModel
+                              : currentModel || connection.currentModel) ??
+                            undefined,
                           loading:
                             providersState.loading ||
                             modelConfigurations.loading,
@@ -24631,6 +24753,13 @@ export function App({
                             : returnToChat
                         }
                         initialFocusRef={panelHeadingRef}
+                        // A cleared session keeps clientId and workspaceCwd,
+                        // so the workspace comparison alone would still send
+                        // an id the daemon no longer knows (400).
+                        clientId={
+                          connection.sessionId ? connection.clientId : undefined
+                        }
+                        sessionWorkspaceCwd={connection.workspaceCwd}
                       />
                     ) : activePanel === 'channel-events' ? (
                       <ChannelEventsPage
@@ -25247,10 +25376,13 @@ export function App({
                       managedAgentProvider={managedAgentProvider}
                       creationSkills={managedCreationSkills}
                       interactive={managedChatVisible}
+                      // sidebar:false 表示外壳由宿主提供（宿主外壳即如此）。此处传 null 而非 undefined：
+                      // 按 navigationTarget 的既有约定，null 保持 home 布局但不挂载内置侧栏槽位，
+                      // 托管页因此与 ChatPane 一样不渲染自己的导航与「新建/刷新」工具条。
                       navigationTarget={
                         sidebarOptions.enabled
                           ? managedNavigationTarget
-                          : undefined
+                          : null
                       }
                       archivedNavigationTarget={managedArchivedNavigationTarget}
                       onArchivedSessionsStatusChange={setManagedArchivedStatus}
@@ -25261,6 +25393,9 @@ export function App({
               <div
                 className={[
                   styles.chatViewWrap,
+                  approvalOverlayActive && mainView === 'chat'
+                    ? styles.chatViewWithApproval
+                    : undefined,
                   hasMobileComposerBottom
                     ? styles.chatViewWithMobileComposerBottom
                     : undefined,
@@ -25361,6 +25496,7 @@ export function App({
                                   terminalBackgroundShellTaskIds
                                 }
                                 pendingApproval={pendingToolApproval}
+                                approvalOverlayActive={approvalOverlayActive}
                                 onShowContextDetail={
                                   contextUsageAvailable
                                     ? openCurrentContextUsagePanel
@@ -25485,7 +25621,9 @@ export function App({
                             );
                             const messageListWithWorkflowDetails = (
                               <WorkflowDetailsProvider tasks={sessionTasks}>
-                                {messageListWithTurnCalls}
+                                <ToolRevealProvider store={toolRevealStore}>
+                                  {messageListWithTurnCalls}
+                                </ToolRevealProvider>
                               </WorkflowDetailsProvider>
                             );
                             const messageListWithSubagentDetails = (
@@ -25657,7 +25795,8 @@ export function App({
                       {/* Workspace-level hooks trust decision uses the same
                           approval slot and card as tool approvals; it is not
                           a session permission request. */}
-                      {!managedMode &&
+                      {workspaceContextActive &&
+                        !managedMode &&
                         !pendingToolApproval &&
                         mainView === 'chat' && (
                           <div className={styles.approvalOverlay}>
@@ -25965,6 +26104,18 @@ export function App({
                             )}
                           </div>
                         )}
+                        {!CustomFooter && (
+                          <ComposerTaskChips
+                            ref={composerTaskChipsRef}
+                            tasks={sessionTasks}
+                            // Headerless embeds have no environment panel to
+                            // list background agents, and keep them out of
+                            // their task surfaces.
+                            includeAgents={environmentTasksReplacementEnabled}
+                            onSelectTask={openComposerTask}
+                            onReturnToInput={handleReturnToEditor}
+                          />
+                        )}
                         {(queuedPrompts.length > 0 ||
                           liveGoalSnapshot?.goal) && (
                           <div
@@ -26122,7 +26273,7 @@ export function App({
                           }
                           voiceStatusRevision={mainVoiceStatusRevision}
                           queuedMessages={queuedTexts}
-                          onFocusFooter={handleFocusTaskPill}
+                          onFocusFooter={handleFocusTaskChips}
                           onPopQueuedMessages={editLastQueuedPrompt}
                           onClearQueuedMessages={clearQueuedPrompts}
                           currentMode={executionMode}
@@ -26174,7 +26325,6 @@ export function App({
                           }
                           chatWidthMode={chatWidthMode}
                           showChatWidthToggle={!isChatEmptyState}
-                          chatWidthToggleMin={chatWidthToggleMin}
                           visibleToolbarActions={visibleComposerToolbarActions}
                           // Before the session exists the workspace and git
                           // chips sit under the composer, next to the prompt
@@ -26202,6 +26352,7 @@ export function App({
                           }
                           modelRefresh={modelRefresh}
                           availableModels={availableModels}
+                          modelPickerScope={modelPickerScope}
                           unavailableModels={unavailableModels}
                           mountUnavailableModelTooltip={
                             mountUnavailableModelTooltip
@@ -26265,16 +26416,7 @@ export function App({
                           workspaceSelectionDisabled={
                             !composerWorkspaceSelectEnabled
                           }
-                          atWorkspaceCwd={
-                            workspaceContextActive
-                              ? (ordinaryWorkspaces.find(
-                                  (entry) => entry.cwd === lockedWorkspaceCwd,
-                                )?.cwd ??
-                                (connection.sessionId
-                                  ? connection.workspaceCwd
-                                  : resolveWorkspaceMaintenanceTargetCwd()))
-                              : undefined
-                          }
+                          atWorkspaceCwd={composerWorkspaceCwd}
                           composerScopeKey={
                             effectiveSessionContext?.kind === 'standalone'
                               ? 'standalone'
@@ -26410,53 +26552,24 @@ export function App({
                             onSelectModel={handleModelSelect}
                           />
                         )
-                      ) : (
-                        <StatusBar
-                          onSelectMode={() =>
-                            setShowApprovalModeDialog((v) => !v)
-                          }
-                          onSelectModel={() =>
-                            isStandaloneModelPickerUnavailable({
-                              sessionId: connection.sessionId,
-                              sessionContextKind: effectiveSessionContext?.kind,
-                              models: connection.models,
-                            })
-                              ? pushToast('info', t('model.unavailable'))
-                              : setModelDialogMode((v) =>
-                                  v ? null : 'main',
-                                )
-                          }
-                          onShowContext={() =>
-                            showContextUsage('/context', false)
-                          }
-                          onOpenSettings={() => openPanel('settings')}
-                          ref={statusBarRef}
-                          onOpenTasks={() => openTasksPanel()}
-                          onReturnToInput={handleReturnToEditor}
-                          // The pill filters composer tasks itself; it also
-                          // counts background agents, which the
-                          // pre-filtered list would have dropped. The full
-                          // snapshot reaches the pill only while a
-                          // background agent is still running in the
-                          // shipped entry, where the environment panel
-                          // replaces the footer task list; the empty chat
-                          // and headerless embeds keep the pre-filtered
-                          // composer tasks, so agents never reach them.
-                          tasks={
-                            isChatEmptyState ||
-                            !environmentTasksReplacementEnabled
-                              ? backgroundTasks
-                              : hasActiveBackgroundAgent(sessionTasks)
-                                ? sessionTasks
-                                : []
-                          }
-                          hideSettings={
-                            hideSettings || !workspaceContextActive
-                          }
-                          onToggleShortcuts={handleToggleShortcuts}
-                          compact={true}
-                        />
-                      )}
+                      ) : null}
+                      {!CustomFooter &&
+                        tokenUsageHeaderItemVisible &&
+                        !isChatEmptyState &&
+                        connection.status === 'connected' &&
+                        connection.sessionId && (
+                          <ComposerUsageStats
+                            sessionId={connection.sessionId}
+                            loadStats={loadComposerUsageStats}
+                            refreshSignal={connection.tokenCount}
+                            running={
+                              streamingState !== 'idle' ||
+                              sessionHasActivePrompt ||
+                              sessionActiveWorkState === 'active'
+                            }
+                            onOpen={openComposerUsagePanel}
+                          />
+                        )}
                       {isChatEmptyState && welcomeFooter && (
                         <div
                           className={[

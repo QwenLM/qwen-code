@@ -215,6 +215,18 @@ export interface HttpManagedSessionStores {
   approvalSelection(): Promise<ManagedSessionApprovalSelection | undefined>;
   modelConfig(expectedDigest: string, kind?: 'legacy-close'): Promise<unknown>;
   memory(query: ManagedMemoryQuery): Promise<unknown>;
+  automationsCreate(
+    definition: ManagedAutomationDefinitionInput,
+    idempotencyKey: string,
+  ): Promise<ManagedAutomationResult>;
+  automationsList(
+    cursor?: string,
+    limit?: number,
+  ): Promise<ManagedAutomationPage>;
+  automationsRetire(
+    automationId: string,
+    idempotencyKey: string,
+  ): Promise<ManagedAutomationResult>;
   claimUserMessages(
     promptId: string,
     initialOnly?: boolean,
@@ -261,6 +273,114 @@ export class ManagedSessionStoreHttpError extends ManagedSessionRecordError {
 export class ManagedSessionStoreTransportError extends ManagedSessionRecordError {}
 
 /**
+ * The fixed-interval /loop definition the internal `automations:create`
+ * route admits (the H6 snake_case wire shape). The Session id is forced to
+ * the bound Session by the route, so the tool omits it.
+ */
+export interface ManagedAutomationDefinitionInput {
+  readonly cron: string;
+  readonly prompt: string;
+  readonly goal?: string;
+  readonly timezone?: string;
+  readonly session_mode: 'persistent';
+  readonly overlap?: string;
+  readonly catch_up?: string;
+  readonly catch_up_limit?: number;
+  readonly enabled?: boolean;
+  readonly gate?: unknown;
+}
+
+/** One H6 definition as the internal routes answer it (PublicAutomation). */
+export interface ManagedPublicAutomation {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly cron: string;
+  readonly timezone: string;
+  readonly goal: string | null;
+  readonly state: string;
+  readonly enabled: boolean;
+}
+
+/** A create/retire answer: the definition plus the Idempotency-Key replay mark. */
+export interface ManagedAutomationResult {
+  readonly automation: ManagedPublicAutomation;
+  readonly replayed: boolean;
+}
+
+/** One page of the bound Session's definitions (PublicList). */
+export interface ManagedAutomationPage {
+  readonly data: readonly ManagedPublicAutomation[];
+  readonly hasMore: boolean;
+  readonly nextCursor: string | null;
+}
+
+async function readAutomationJson(response: Response): Promise<unknown> {
+  try {
+    return (await response.json()) as unknown;
+  } catch (error) {
+    if (error instanceof TypeError || error instanceof DOMException)
+      throw new ManagedSessionStoreTransportError(
+        'Managed automation response failed.',
+      );
+    if (error instanceof SyntaxError)
+      throw corrupt('Managed automation response is invalid JSON.');
+    throw error;
+  }
+}
+
+function asPublicAutomation(value: unknown): ManagedPublicAutomation {
+  const record = asRecord(value, 'automation definition');
+  if (
+    typeof record['id'] !== 'string' ||
+    typeof record['session_id'] !== 'string' ||
+    typeof record['cron'] !== 'string' ||
+    typeof record['timezone'] !== 'string' ||
+    typeof record['state'] !== 'string' ||
+    typeof record['enabled'] !== 'boolean'
+  )
+    throw corrupt('invalid automation definition.');
+  return {
+    id: record['id'],
+    sessionId: record['session_id'],
+    cron: record['cron'],
+    timezone: record['timezone'],
+    goal: typeof record['goal'] === 'string' ? record['goal'] : null,
+    state: record['state'],
+    enabled: record['enabled'],
+  };
+}
+
+function parseAutomationResult(
+  value: unknown,
+  route: string,
+): ManagedAutomationResult {
+  const record = asRecord(value, `automation result from ${route}`);
+  if (typeof record['replayed'] !== 'boolean')
+    throw corrupt(`invalid automation result from ${route}.`);
+  return {
+    automation: asPublicAutomation(record['body']),
+    replayed: record['replayed'],
+  };
+}
+
+function parseAutomationPage(
+  value: unknown,
+  route: string,
+): ManagedAutomationPage {
+  const record = asRecord(value, `automation list from ${route}`);
+  if (!Array.isArray(record['data']) || typeof record['has_more'] !== 'boolean')
+    throw corrupt(`invalid automation list from ${route}.`);
+  const next = record['next_cursor'];
+  if (next !== null && next !== undefined && typeof next !== 'string')
+    throw corrupt(`invalid automation list cursor from ${route}.`);
+  return {
+    data: record['data'].map((entry) => asPublicAutomation(entry)),
+    hasMore: record['has_more'],
+    nextCursor: typeof next === 'string' ? next : null,
+  };
+}
+
+/**
  * Failures that leave the commit's outcome unknown: the request may have
  * reached the store. A retry is safe only against a proved head, which the
  * writer re-establishes after its lease lapses.
@@ -273,6 +393,20 @@ function isUncertainStoreFailure(error: unknown): boolean {
     error instanceof TypeError ||
     (error instanceof DOMException &&
       ['AbortError', 'TimeoutError'].includes(error.name))
+  );
+}
+
+/**
+ * True when the Store refused this seal, with a 4xx other than 429, so it
+ * did not land. Any other failure, including one raised after a 2xx answer,
+ * may have left the head sealed.
+ */
+function sealRefused(error: unknown): boolean {
+  return (
+    error instanceof ManagedSessionStoreHttpError &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    error.status !== 429
   );
 }
 
@@ -322,6 +456,11 @@ export function createHttpManagedSessionStores(
     modelConfig: (expectedDigest, kind) =>
       client.modelConfig(expectedDigest, kind),
     memory: (query) => client.memory(query),
+    automationsCreate: (definition, idempotencyKey) =>
+      client.automationsCreate(definition, idempotencyKey),
+    automationsList: (cursor, limit) => client.automationsList(cursor, limit),
+    automationsRetire: (automationId, idempotencyKey) =>
+      client.automationsRetire(automationId, idempotencyKey),
     claimUserMessages: (promptId, initialOnly) =>
       client.claimUserMessages(promptId, initialOnly),
   };
@@ -701,7 +840,7 @@ const LEGACY_EXTENSION_CLOSURE_KINDS = new Set([
 class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
   private readonly staged = new Map<
     string,
-    { ref: ManagedSessionDurableRef; bytes: Buffer }
+    { ref: ManagedSessionDurableRef; bytes: Buffer; external?: boolean }
   >();
   private client: ManagedSessionStoreHttpClient | undefined;
 
@@ -715,11 +854,6 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
   ): Promise<ManagedSessionDurableRef> {
     const safeKind = assertManagedSessionStableId(kind, 'resource kind');
     const maxBytes = managedSessionInlineResourceBytes(safeKind);
-    if (source.byteLength > maxBytes) {
-      throw new ManagedSessionRecordError(
-        `resource bytes exceed the ${maxBytes}-byte inline limit (kind=${safeKind}, bytes=${source.byteLength}); OSS storage is not enabled.`,
-      );
-    }
     const bytes = Buffer.from(source);
     const ref: ManagedSessionDurableRef = {
       resourceId: randomUUID(),
@@ -728,6 +862,16 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
       byteLength: bytes.byteLength,
       digest: sha256(bytes),
     };
+    if (source.byteLength > maxBytes) {
+      if (this.client === undefined) {
+        throw new ManagedSessionRecordError(
+          `resource bytes exceed the ${maxBytes}-byte inline limit (kind=${safeKind}, bytes=${source.byteLength}); OSS storage is not enabled.`,
+        );
+      }
+      await this.client.externalizeResource(ref, bytes);
+      this.staged.set(ref.resourceId, { ref, bytes, external: true });
+      return ref;
+    }
     this.staged.set(ref.resourceId, { ref, bytes });
     return ref;
   }
@@ -834,7 +978,7 @@ class HttpManagedSessionResourceStore implements ManagedSessionResourceStore {
         schemaVersion: ref.schemaVersion,
         byteLength: ref.byteLength,
         digest: ref.digest,
-        ...(staged === undefined
+        ...(staged === undefined || staged.external
           ? {}
           : { bytesBase64: staged.bytes.toString('base64') }),
       };
@@ -951,6 +1095,14 @@ class ManagedSessionStoreHttpClient {
     preparedCommitSha256: string;
   };
   private sealed = false;
+  /** Settles once every seal started so far has answered. */
+  private sealsAnswered?: Promise<void>;
+  /**
+   * The last failure of a seal that may have landed; acquireWriter refuses
+   * while it is set. A writer-conflict refusal clears it, and once a seal
+   * succeeds `sealed` refuses first.
+   */
+  private uncertainSeal?: Error;
   private locallyStopped = false;
   private lifecycleAuthority?: ManagedSessionLifecycleAuthority;
   /**
@@ -1073,6 +1225,107 @@ class ManagedSessionStoreHttpClient {
         reader.releaseLock();
       }
     });
+  }
+
+  /**
+   * Fixed-interval /loop: create an H6 definition bound to this Session.
+   * The Idempotency-Key derives from the tool execution's identity, so a
+   * re-drive meets the claim or the replay rather than minting a second
+   * definition. A transport fault is not retried here — the tool execution
+   * stays pending and its re-drive reuses the key (design decision 9).
+   */
+  async automationsCreate(
+    definition: ManagedAutomationDefinitionInput,
+    idempotencyKey: string,
+  ): Promise<ManagedAutomationResult> {
+    await this.assertWritable();
+    return this.withRetry(
+      false,
+      'POST',
+      '/automations:create',
+      async (timeoutMs) => {
+        const response = await this.request(
+          '/automations:create',
+          'POST',
+          {
+            workspaceId: this.sessionKey.workspaceId,
+            writerId: this.writerId,
+            writerGeneration: this.grant!.writerGeneration,
+            definition,
+          },
+          timeoutMs,
+          'application/json',
+          { 'Idempotency-Key': idempotencyKey },
+        );
+        return parseAutomationResult(
+          await readAutomationJson(response),
+          'POST /automations:create',
+        );
+      },
+    );
+  }
+
+  /** One page of the bound Session's definitions (ungated, Session-scoped). */
+  async automationsList(
+    cursor?: string,
+    limit?: number,
+  ): Promise<ManagedAutomationPage> {
+    await this.assertWritable();
+    return this.withRetry(
+      false,
+      'POST',
+      '/automations:list',
+      async (timeoutMs) => {
+        const response = await this.request(
+          '/automations:list',
+          'POST',
+          {
+            workspaceId: this.sessionKey.workspaceId,
+            writerId: this.writerId,
+            writerGeneration: this.grant!.writerGeneration,
+            ...(cursor === undefined ? {} : { cursor }),
+            ...(limit === undefined ? {} : { limit }),
+          },
+          timeoutMs,
+        );
+        return parseAutomationPage(
+          await readAutomationJson(response),
+          'POST /automations:list',
+        );
+      },
+    );
+  }
+
+  /** Retire a definition of the bound Session; a retired id answers the replay. */
+  async automationsRetire(
+    automationId: string,
+    idempotencyKey: string,
+  ): Promise<ManagedAutomationResult> {
+    await this.assertWritable();
+    return this.withRetry(
+      false,
+      'POST',
+      '/automations:retire',
+      async (timeoutMs) => {
+        const response = await this.request(
+          '/automations:retire',
+          'POST',
+          {
+            workspaceId: this.sessionKey.workspaceId,
+            writerId: this.writerId,
+            writerGeneration: this.grant!.writerGeneration,
+            automationId,
+          },
+          timeoutMs,
+          'application/json',
+          { 'Idempotency-Key': idempotencyKey },
+        );
+        return parseAutomationResult(
+          await readAutomationJson(response),
+          'POST /automations:retire',
+        );
+      },
+    );
   }
 
   async modelConfig(
@@ -1268,6 +1521,11 @@ class ManagedSessionStoreHttpClient {
         'the HTTP Managed Session writer is already opened or sealed.',
       );
     }
+    // A seal that failed without the Store refusing it may have landed, and
+    // the Store gives a sealed head a new writer generation on acquire. Stay
+    // unsettled until a later seal succeeds or meets a writer conflict.
+    if (this.uncertainSeal !== undefined)
+      throw new ManagedSessionAppendUnsettledError(this.uncertainSeal);
     const grant = parseWriterGrant(
       await this.json('/writers:acquire', 'POST', {
         workspaceId: this.sessionKey.workspaceId,
@@ -2462,6 +2720,49 @@ class ManagedSessionStoreHttpClient {
     );
   }
 
+  async externalizeResource(
+    ref: ManagedSessionDurableRef,
+    bytes: Buffer,
+  ): Promise<void> {
+    await this.ensureWriter();
+    const grant = this.requireGrant();
+    const query =
+      `workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}` +
+      `&writerId=${encodeURIComponent(this.writerId)}` +
+      `&writerGeneration=${grant.writerGeneration}`;
+    const allocatePath = '/resources:allocate';
+    await this.withRetry(true, 'POST', allocatePath, async (timeoutMs) => {
+      await this.request(
+        allocatePath,
+        'POST',
+        {
+          workspaceId: this.sessionKey.workspaceId,
+          writerId: this.writerId,
+          writerGeneration: grant.writerGeneration,
+          resourceId: ref.resourceId,
+          kind: ref.kind,
+          schemaVersion: ref.schemaVersion,
+          byteLength: ref.byteLength,
+          digest: ref.digest,
+        },
+        timeoutMs,
+      );
+    });
+    const uploadPath = `/resources/${encodeURIComponent(ref.resourceId)}:upload?${query}`;
+    await this.withRetry(true, 'POST', uploadPath, async (timeoutMs) => {
+      await this.request(
+        uploadPath,
+        'POST',
+        { bytesBase64: bytes.toString('base64') },
+        timeoutMs,
+      );
+    });
+    const finalizePath = `/resources/${encodeURIComponent(ref.resourceId)}:finalize?${query}`;
+    await this.withRetry(true, 'POST', finalizePath, async (timeoutMs) => {
+      await this.request(finalizePath, 'POST', undefined, timeoutMs);
+    });
+  }
+
   async readResource(ref: ManagedSessionDurableRef): Promise<Buffer> {
     await this.ensureWriter();
     const path = `/resources/${encodeURIComponent(ref.resourceId)}?workspaceId=${encodeURIComponent(this.sessionKey.workspaceId)}`;
@@ -2597,8 +2898,31 @@ class ManagedSessionStoreHttpClient {
   async seal(): Promise<void> {
     if (this.retirementJoin)
       throw corrupt('original CSI retirement owns the final boundary.');
-    await this.acquirePromise?.catch(() => undefined);
-    return this.sealGrant();
+    // The seal joins sealsAnswered before it waits on acquirePromise, so a
+    // reacquire that starts meanwhile still waits for it.
+    const sealing = (async () => {
+      await this.acquirePromise?.catch(() => undefined);
+      await this.sealGrant();
+    })();
+    const answered = sealing.then(
+      () => undefined,
+      (error: unknown) => {
+        if (!sealRefused(error)) this.uncertainSeal = asError(error);
+        // Most refusals come before the Store replays a seal that landed, so
+        // they say nothing about an earlier one. A writer conflict comes
+        // after that replay: the head has left this writer generation, so no
+        // seal of it can still decide the Session.
+        else if (
+          error instanceof ManagedSessionStoreHttpError &&
+          error.remoteCode === 'managed_session_writer_conflict'
+        )
+          this.uncertainSeal = undefined;
+      },
+    );
+    this.sealsAnswered = Promise.all([this.sealsAnswered, answered]).then(
+      () => undefined,
+    );
+    return sealing;
   }
 
   private async sealGrant(): Promise<void> {
@@ -2784,6 +3108,19 @@ class ManagedSessionStoreHttpClient {
     const expired = this.grant;
     this.stopRenewal();
     await this.renewPromise?.catch(() => undefined);
+    // A seal on its way to the Store decides this writer's end first. The
+    // Store gives a sealed head a new writer generation on acquire, so an
+    // acquire that lands after the seal would reopen the Session behind it,
+    // and one that lands first would make the seal meet a newer writer. A
+    // seal that starts during this wait replaces sealsAnswered, so wait
+    // again until none has. Then acquireWriter refuses a sealed client, and
+    // one whose seal may have landed.
+    let answered = this.sealsAnswered;
+    while (answered !== undefined) {
+      await answered;
+      answered =
+        answered === this.sealsAnswered ? undefined : this.sealsAnswered;
+    }
     // A renewal in flight may have answered after the caller saw the lease
     // lapse; it moved the lease forward and re-armed the timer, so keep that
     // grant. Dropping it for an acquire, which a Store holding the Session's
@@ -3172,6 +3509,7 @@ class ManagedSessionStoreHttpClient {
     body?: Readonly<Record<string, unknown>>,
     timeoutMs = this.requestTimeoutMs,
     accept = 'application/json',
+    extraHeaders?: Readonly<Record<string, string>>,
   ): Promise<Response> {
     if (this.ownershipRelease && path !== '/writers:release-ownership')
       throw corrupt('ownership release has fenced this writer.');
@@ -3202,6 +3540,7 @@ class ManagedSessionStoreHttpClient {
               }
             : {}),
           ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+          ...(extraHeaders ?? {}),
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         signal: AbortSignal.timeout(timeoutMs),

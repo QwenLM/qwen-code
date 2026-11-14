@@ -1,0 +1,655 @@
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ManagedClientFilesBridge } from './managed-client-files-bridge.js';
+import type { JsonRpcRequest, JsonRpcResponse } from './mcp-server.js';
+
+interface Peer {
+  server: Server;
+  baseUrl: string;
+  registered: Array<Record<string, unknown>>;
+  unregistered: Array<Record<string, unknown>>;
+  responses: Array<Record<string, unknown>>;
+  /** How many times the SSE downlink was opened. */
+  streamOpens: number;
+  /** Resolves once the browser posts its first response. */
+  firstResponse: Promise<Record<string, unknown>>;
+  /** Push one JSON-RPC request down the SSE downlink. */
+  push(requestId: string, payload: JsonRpcRequest): void;
+}
+
+interface PeerOptions {
+  /** A binding left active by an earlier load, before register runs. */
+  initialGeneration?: number;
+  /** The generation register creates (defaults to 1). */
+  registerGeneration?: number;
+  /** Answer the stream route with this status instead of opening SSE. */
+  streamStatus?: number;
+  /** End the SSE response cleanly right after opening it (idle timeout). */
+  endStream?: boolean;
+  /** Force the binding's connection identity to this value, simulating a
+   * concurrent tab that replaced this bridge's registration. */
+  hijackConnectionId?: string;
+  /** Override only the connection identity the STATUS route reports, while the
+   * register reply still names this bridge. Simulates a concurrent tab that
+   * replaces the binding after register settled, so only the poll-time identity
+   * fence (not the reply-time one) can catch it. */
+  statusConnectionId?: string;
+  /** Refuse any /responses POST whose responseJson exceeds this many bytes with
+   * 400 client_files_payload_too_large, mirroring the relay's requirePayloadSize. */
+  payloadBound?: number;
+  /** Refuse every /responses POST with this status + code (production envelope),
+   * e.g. a 409 identity-fence refusal, to exercise the non-payload failure path. */
+  responseRefusal?: { status: number; code: string };
+  /** Answer the reopen status probe with 500 this many times (after the first
+   * downlink has opened) before succeeding, to exercise the transient-probe
+   * retry instead of a permanent end. */
+  reopenProbeFailures?: number;
+}
+
+function startPeer(opts: PeerOptions = {}): Promise<Peer> {
+  const registered: Array<Record<string, unknown>> = [];
+  const unregistered: Array<Record<string, unknown>> = [];
+  const responses: Array<Record<string, unknown>> = [];
+  const peerState = { streamOpens: 0 };
+  let reopenProbeFailuresRemaining = opts.reopenProbeFailures ?? 0;
+  let resolveFirst: (value: Record<string, unknown>) => void;
+  const firstResponse = new Promise<Record<string, unknown>>((resolve) => {
+    resolveFirst = resolve;
+  });
+  let streamRes: import('node:http').ServerResponse | undefined;
+  // Like the real control plane: register creates the binding, then blocks
+  // on the Harness discovery that the browser drain must answer.
+  let binding:
+    | { generation: number; state: string; connectionId?: string }
+    | undefined =
+    opts.initialGeneration !== undefined
+      ? { generation: opts.initialGeneration, state: 'active' }
+      : undefined;
+  const registerGeneration = opts.registerGeneration ?? 1;
+  let resolveRegister: (() => void) | undefined;
+  const registerDone = new Promise<void>((resolve) => {
+    resolveRegister = resolve;
+  });
+  const server = createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => (body += chunk));
+    req.on('end', async () => {
+      const parsed = body ? (JSON.parse(body) as Record<string, unknown>) : {};
+      const path = req.url ?? '';
+      if (path.endsWith('/client-files/register')) {
+        registered.push(parsed);
+        const connectionId =
+          opts.hijackConnectionId ??
+          (parsed.connectionId as string | undefined);
+        binding = {
+          generation: registerGeneration,
+          state: 'active',
+          connectionId,
+        };
+        if (
+          opts.streamStatus === undefined &&
+          opts.hijackConnectionId === undefined &&
+          opts.statusConnectionId === undefined
+        )
+          await registerDone;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            generation: registerGeneration,
+            toolCount: 1,
+            connectionId,
+          }),
+        );
+        return;
+      }
+      if (path.endsWith('/client-files/status')) {
+        // Transient reopen-probe failures: only after the first downlink has
+        // opened, so the initial binding poll is unaffected.
+        if (peerState.streamOpens >= 1 && reopenProbeFailuresRemaining > 0) {
+          reopenProbeFailuresRemaining -= 1;
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(
+            JSON.stringify({ error: { code: 'transient_probe_failure' } }),
+          );
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        if (!binding) {
+          res.end('');
+          return;
+        }
+        // Mirror the server's ownership gate: the live generation/identity is
+        // echoed only to a caller that proves it already knows the identity.
+        // statusConnectionId simulates a concurrent tab having replaced the
+        // binding, so the reported identity differs from the caller's.
+        const liveConnectionId =
+          opts.statusConnectionId !== undefined
+            ? opts.statusConnectionId
+            : binding.connectionId;
+        const owned =
+          parsed.connectionId !== undefined &&
+          parsed.connectionId === liveConnectionId;
+        res.end(
+          JSON.stringify(
+            owned
+              ? {
+                  generation: binding.generation,
+                  state: binding.state,
+                  connectionId: liveConnectionId,
+                  owned: true,
+                }
+              : { state: binding.state, owned: false },
+          ),
+        );
+        return;
+      }
+      if (path.endsWith('/client-files/unregister')) {
+        unregistered.push(parsed);
+        // A stale teardown (connection identity no longer current) is a no-op.
+        const stale =
+          binding !== undefined &&
+          parsed.connectionId !== undefined &&
+          parsed.connectionId !== binding.connectionId;
+        if (binding && !stale) binding.state = 'closed';
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ registered: false }));
+        return;
+      }
+      if (path.endsWith('/client-files/requests/stream')) {
+        peerState.streamOpens += 1;
+        if (opts.streamStatus !== undefined) {
+          res.writeHead(opts.streamStatus, {
+            'Content-Type': 'application/json',
+          });
+          res.end(JSON.stringify({ code: 'client_files_generation_conflict' }));
+          return;
+        }
+        res.writeHead(200, {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-store',
+        });
+        res.write(': open\n\n');
+        streamRes = res;
+        // End only the first downlink cleanly; a reopen stays open so the
+        // reconnect can be observed and exercised.
+        if (opts.endStream && peerState.streamOpens === 1) res.end();
+        return;
+      }
+      if (path.endsWith('/client-files/responses')) {
+        responses.push(parsed);
+        resolveFirst(parsed);
+        resolveRegister?.();
+        if (opts.responseRefusal) {
+          res.writeHead(opts.responseRefusal.status, {
+            'Content-Type': 'application/json',
+          });
+          res.end(
+            JSON.stringify({ error: { code: opts.responseRefusal.code } }),
+          );
+          return;
+        }
+        const responseJson = parsed.responseJson as string | undefined;
+        if (
+          opts.payloadBound !== undefined &&
+          responseJson !== undefined &&
+          // The relay bounds UTF-8 bytes, not UTF-16 code units; a multi-byte
+          // payload must be measured the same way here or the fake under-counts.
+          Buffer.byteLength(responseJson, 'utf8') > opts.payloadBound
+        ) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          // The production envelope: ApiExceptionHandler wraps the code as
+          // {error:{code}}, so the committed case pins the real wire shape.
+          res.end(
+            JSON.stringify({
+              error: { code: 'client_files_payload_too_large' },
+            }),
+          );
+          return;
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ settled: true }));
+        return;
+      }
+      res.writeHead(404);
+      res.end();
+    });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      const port = (server.address() as AddressInfo).port;
+      resolve({
+        server,
+        baseUrl: `http://127.0.0.1:${port}/api/agent/web-shell/v1`,
+        registered,
+        unregistered,
+        responses,
+        get streamOpens() {
+          return peerState.streamOpens;
+        },
+        firstResponse,
+        push(requestId, payload) {
+          streamRes?.write(
+            `event: request\ndata: ${JSON.stringify({
+              requestId,
+              payloadJson: JSON.stringify(payload),
+            })}\n\n`,
+          );
+        },
+      });
+    });
+  });
+}
+
+describe('ManagedClientFilesBridge', () => {
+  const peers: Peer[] = [];
+  const bridges: ManagedClientFilesBridge[] = [];
+
+  afterEach(async () => {
+    await Promise.all(bridges.splice(0).map((bridge) => bridge.disconnect()));
+    await Promise.all(
+      peers.splice(0).map(
+        (peer) =>
+          new Promise<void>((resolve) => {
+            peer.server.close(() => resolve());
+            peer.server.closeAllConnections();
+          }),
+      ),
+    );
+  });
+
+  async function peer(opts: PeerOptions = {}) {
+    const created = await startPeer(opts);
+    peers.push(created);
+    return created;
+  }
+
+  function bridge(
+    peer: Peer,
+    server: {
+      handle: (m: JsonRpcRequest) => Promise<JsonRpcResponse | undefined>;
+    },
+  ) {
+    const created = new ManagedClientFilesBridge({
+      baseUrl: peer.baseUrl,
+      sessionId: 'session-1',
+      server,
+      fetch: (url, init) => fetch(url, init),
+    });
+    bridges.push(created);
+    return created;
+  }
+
+  it('registers, answers a downlink request, and posts the response', async () => {
+    const p = await peer();
+    const handled: JsonRpcRequest[] = [];
+    const b = bridge(p, {
+      async handle(message) {
+        handled.push(message);
+        return {
+          jsonrpc: '2.0',
+          id: message.id ?? null,
+          result: { tools: [] },
+        };
+      },
+    });
+    void b.connect();
+    await vi.waitFor(() => expect(p.registered.length).toBe(1));
+    p.push('7', { jsonrpc: '2.0', id: '7', method: 'tools/list' });
+    const response = await p.firstResponse;
+    expect(response.rpcRequestId).toBe('7');
+    expect(response.generation).toBe(1);
+    expect(JSON.parse(response.responseJson as string)).toMatchObject({
+      id: '7',
+      result: { tools: [] },
+    });
+    expect(handled[0].method).toBe('tools/list');
+    await vi.waitFor(() =>
+      expect(b.getState()).toMatchObject({ phase: 'connected', generation: 1 }),
+    );
+  });
+
+  it('registers a connection id without crypto.randomUUID (non-secure context)', async () => {
+    const cryptoObject = globalThis.crypto;
+    const descriptor = Object.getOwnPropertyDescriptor(
+      cryptoObject,
+      'randomUUID',
+    );
+    Object.defineProperty(cryptoObject, 'randomUUID', {
+      value: undefined,
+      configurable: true,
+    });
+    try {
+      const p = await peer();
+      const b = bridge(p, {
+        async handle() {
+          return undefined;
+        },
+      });
+      void b.connect();
+      await vi.waitFor(() => expect(p.registered.length).toBe(1));
+      expect(p.registered[0]!.connectionId).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      );
+    } finally {
+      if (descriptor) {
+        Object.defineProperty(cryptoObject, 'randomUUID', descriptor);
+      } else {
+        delete (cryptoObject as { randomUUID?: unknown }).randomUUID;
+      }
+    }
+  });
+
+  it('reports a notification as offline without a response payload', async () => {
+    const p = await peer();
+    const b = bridge(p, {
+      async handle() {
+        return undefined;
+      },
+    });
+    void b.connect();
+    await vi.waitFor(() => expect(p.registered.length).toBe(1));
+    p.push('n-1', { jsonrpc: '2.0', method: 'notifications/initialized' });
+    const response = await p.firstResponse;
+    expect(response.rpcRequestId).toBe('n-1');
+    expect(response.errorCode).toBe('client_files_offline');
+    expect(response.responseJson).toBeUndefined();
+  });
+
+  it('disconnect unregisters and stops the bridge', async () => {
+    const p = await peer();
+    const b = bridge(p, {
+      async handle() {
+        return undefined;
+      },
+    });
+    void b.connect();
+    await vi.waitFor(() => expect(p.registered.length).toBe(1));
+    await b.disconnect();
+    expect(p.unregistered.length).toBe(1);
+    expect(b.getState().phase).toBe('stopped');
+  });
+
+  it('surfaces a register refusal as a failed state', async () => {
+    const p = await peer();
+    p.server.removeAllListeners('request');
+    p.server.on('request', (_req, res) => {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ code: 'client_files_disabled' }));
+    });
+    const b = bridge(p, {
+      async handle() {
+        return undefined;
+      },
+    });
+    await b.connect();
+    expect(b.getState()).toMatchObject({ phase: 'failed' });
+  });
+
+  it('adopts the generation register creates, not a stale active binding', async () => {
+    const p = await peer({ initialGeneration: 1, registerGeneration: 2 });
+    const b = bridge(p, {
+      async handle(message) {
+        return {
+          jsonrpc: '2.0',
+          id: message.id ?? null,
+          result: { tools: [] },
+        };
+      },
+    });
+    void b.connect();
+    await vi.waitFor(() => expect(p.registered.length).toBe(1));
+    p.push('7', { jsonrpc: '2.0', id: '7', method: 'tools/list' });
+    const response = await p.firstResponse;
+    expect(response.generation).toBe(2);
+    await vi.waitFor(() =>
+      expect(b.getState()).toMatchObject({ phase: 'connected', generation: 2 }),
+    );
+  });
+
+  it('reopens the downlink after a clean end while the binding is active', async () => {
+    const p = await peer({ endStream: true });
+    const b = bridge(p, {
+      async handle(message) {
+        return {
+          jsonrpc: '2.0',
+          id: message.id ?? null,
+          result: { tools: [] },
+        };
+      },
+    });
+    void b.connect();
+    await vi.waitFor(() => expect(p.streamOpens).toBeGreaterThanOrEqual(2));
+    p.push('7', { jsonrpc: '2.0', id: '7', method: 'tools/list' });
+    const response = await p.firstResponse;
+    expect(response.rpcRequestId).toBe('7');
+    await vi.waitFor(() =>
+      expect(b.getState()).toMatchObject({ phase: 'connected', generation: 1 }),
+    );
+  });
+
+  it('a transient reopen-probe failure retries instead of ending the bridge', async () => {
+    // The first downlink ends cleanly and the reopen probe answers 500 once
+    // before succeeding. The server keeps the binding active, so the bridge
+    // must retry and reopen, not permanently fail on the transient blip.
+    // Treating every non-2xx probe as a lost binding turns this red.
+    const p = await peer({ endStream: true, reopenProbeFailures: 1 });
+    const b = bridge(p, {
+      async handle(message) {
+        return {
+          jsonrpc: '2.0',
+          id: message.id ?? null,
+          result: { tools: [] },
+        };
+      },
+    });
+    void b.connect();
+    await vi.waitFor(() => expect(p.streamOpens).toBeGreaterThanOrEqual(2));
+    p.push('7', { jsonrpc: '2.0', id: '7', method: 'tools/list' });
+    const response = await p.firstResponse;
+    expect(response.rpcRequestId).toBe('7');
+    await vi.waitFor(() =>
+      expect(b.getState()).toMatchObject({ phase: 'connected', generation: 1 }),
+    );
+  });
+
+  it('handles a fast stream refusal without an unhandled rejection', async () => {
+    const p = await peer({ streamStatus: 409 });
+    const b = bridge(p, {
+      async handle() {
+        return undefined;
+      },
+    });
+    await b.connect();
+    expect(b.getState()).toMatchObject({ phase: 'failed' });
+  });
+
+  it('does not serve a concurrent tab that replaced its registration', async () => {
+    // The binding ends up carrying another tab's connection identity; this
+    // bridge must fail rather than drain that tab's requests onto its own
+    // directory handle.
+    const p = await peer({ hijackConnectionId: 'other-tab' });
+    const handled: JsonRpcRequest[] = [];
+    const b = bridge(p, {
+      async handle(message) {
+        handled.push(message);
+        return { jsonrpc: '2.0', id: message.id ?? null, result: {} };
+      },
+    });
+    await b.connect();
+    expect(b.getState()).toMatchObject({ phase: 'failed' });
+    expect(handled).toEqual([]);
+    expect(p.responses).toEqual([]);
+    // The poll-time identity fence must refuse the hijacked binding before any
+    // downlink opens; the reply-time check alone would also land on `failed`
+    // with empty lists, so only the stream count separates the two paths.
+    expect(p.streamOpens).toBe(0);
+  });
+
+  it('the poll-time identity fence refuses a binding replaced after register settled', async () => {
+    // The register reply names this bridge, so the reply-time fence passes; but
+    // the status poll reports another tab's identity. Only the poll-time
+    // connectionId clause in waitForBinding can refuse it. Deleting that clause
+    // lets the bridge adopt the foreign generation and open a downlink, so this
+    // case (failed + zero stream opens) turns red.
+    const p = await peer({ statusConnectionId: 'other-tab' });
+    const handled: JsonRpcRequest[] = [];
+    const b = bridge(p, {
+      async handle(message) {
+        handled.push(message);
+        return { jsonrpc: '2.0', id: message.id ?? null, result: {} };
+      },
+    });
+    await b.connect();
+    expect(b.getState()).toMatchObject({ phase: 'failed' });
+    expect(handled).toEqual([]);
+    expect(p.responses).toEqual([]);
+    expect(p.streamOpens).toBe(0);
+  });
+
+  it('a payload-too-large answer is not silently dropped', async () => {
+    // The relay refuses the oversized answer with 400 payload_too_large; the
+    // bridge must deliver a small isError result (so the model can page with
+    // offset/limit) instead of letting the request expire at its TTL while the
+    // panel stays connected. Removing the !posted.ok branch leaves a single
+    // refused POST and turns this red.
+    const p = await peer({ payloadBound: 61_440 });
+    const b = bridge(p, {
+      async handle(message) {
+        return {
+          jsonrpc: '2.0',
+          id: message.id ?? null,
+          result: { content: [{ type: 'text', text: 'x'.repeat(200_000) }] },
+        };
+      },
+    });
+    void b.connect();
+    await vi.waitFor(() => expect(p.registered.length).toBe(1));
+    p.push('r1', {
+      jsonrpc: '2.0',
+      id: 'r1',
+      method: 'tools/call',
+      params: { name: 'read_file', arguments: { path: 'big.txt' } },
+    });
+    // The oversized answer is refused; the bridge must re-post a small isError
+    // result rather than drop it silently (a single refused POST = red).
+    await vi.waitFor(() =>
+      expect(p.responses.length).toBeGreaterThanOrEqual(2),
+    );
+    const bounded = JSON.parse(p.responses[1].responseJson as string) as {
+      result?: { isError?: boolean };
+    };
+    expect(bounded.result?.isError).toBe(true);
+  });
+
+  it('a non-payload refused answer surfaces as failed and unregisters', async () => {
+    // A 409 identity-fence refusal (not payload_too_large) must be thrown so the
+    // bridge enters failed and releases the registration, not stay connected.
+    // Replacing the other-refusal throw with a silent return turns this red.
+    const p = await peer({
+      responseRefusal: {
+        status: 409,
+        code: 'client_files_generation_conflict',
+      },
+    });
+    const b = bridge(p, {
+      async handle(message) {
+        return {
+          jsonrpc: '2.0',
+          id: message.id ?? null,
+          result: { content: [{ type: 'text', text: 'ok' }] },
+        };
+      },
+    });
+    void b.connect();
+    await vi.waitFor(() => expect(p.registered.length).toBe(1));
+    p.push('r1', {
+      jsonrpc: '2.0',
+      id: 'r1',
+      method: 'tools/call',
+      params: { name: 'read_file', arguments: { path: 'a.txt' } },
+    });
+    await vi.waitFor(() =>
+      expect(b.getState()).toMatchObject({ phase: 'failed' }),
+    );
+    await vi.waitFor(() =>
+      expect(p.unregistered.length).toBeGreaterThanOrEqual(1),
+    );
+  });
+
+  it('a TTL-settled answer (request_not_found) keeps the registration healthy', async () => {
+    // A slow tool call can outlive its request TTL: the relay then refuses the
+    // answer with 404 request_not_found. That is not a lost binding — the
+    // registration is healthy, so the bridge must stay connected and not
+    // unregister. Treating every non-2xx as fatal (the pre-fix behavior) turns
+    // this red.
+    const p = await peer({
+      responseRefusal: {
+        status: 404,
+        code: 'client_files_request_not_found',
+      },
+    });
+    const b = bridge(p, {
+      async handle(message) {
+        return { jsonrpc: '2.0', id: message.id ?? null, result: {} };
+      },
+    });
+    void b.connect();
+    await vi.waitFor(() => expect(p.registered.length).toBe(1));
+    // Answer the discovery so register settles; its answer is refused as
+    // TTL-settled but must not tear the registration down.
+    p.push('d1', { jsonrpc: '2.0', id: 'd1', method: 'tools/list' });
+    await vi.waitFor(() =>
+      expect(b.getState()).toMatchObject({ phase: 'connected' }),
+    );
+    p.push('r1', {
+      jsonrpc: '2.0',
+      id: 'r1',
+      method: 'tools/call',
+      params: { name: 'read_file', arguments: { path: 'a.txt' } },
+    });
+    // The discovery answer and the tool-call answer are both refused as
+    // TTL-settled; neither may tear the registration down.
+    await vi.waitFor(() =>
+      expect(p.responses.length).toBeGreaterThanOrEqual(2),
+    );
+    expect(b.getState()).toMatchObject({ phase: 'connected' });
+    expect(p.unregistered.length).toBe(0);
+  });
+
+  it('disconnect during a pending register ends stopped, not failed', async () => {
+    const p = await peer();
+    const phases: string[] = [];
+    const b = bridge(p, {
+      async handle() {
+        return undefined;
+      },
+    });
+    b.onState((state) => phases.push(state.phase));
+    void b.connect();
+    // The binding is created and the drain opens, but discovery is never
+    // answered, so connect parks awaiting the register promise. Disconnect
+    // aborts it: an abort is a clean stop, not a failure.
+    await vi.waitFor(() => expect(p.streamOpens).toBeGreaterThanOrEqual(1));
+    await b.disconnect();
+    expect(phases).not.toContain('failed');
+    expect(phases[phases.length - 1]).toBe('stopped');
+    expect(b.getState().phase).toBe('stopped');
+  });
+
+  it('unregisters the owned binding when the downlink fails after register', async () => {
+    const p = await peer({ streamStatus: 409 });
+    const b = bridge(p, {
+      async handle() {
+        return undefined;
+      },
+    });
+    await b.connect();
+    expect(b.getState()).toMatchObject({ phase: 'failed' });
+    // The register created a live binding; the failure exit must release it
+    // exactly once, fenced by this connection's identity.
+    expect(p.unregistered.length).toBe(1);
+    expect(p.unregistered[0].sessionId).toBe('session-1');
+    expect(p.unregistered[0].connectionId).toBeTypeOf('string');
+  });
+});

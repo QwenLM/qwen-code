@@ -41,6 +41,11 @@ import {
   isValidGoalTokenBudget,
   installSessionWorkflowRevisionWriteThrough,
 } from './config.js';
+import {
+  AGENT_LOOP_SURFACES,
+  UNIFIED_SURFACE_DEFAULTS,
+  EVENT_BUS_SURFACE_DEFAULTS,
+} from './agent-loop-rollout.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
 import { Storage } from './storage.js';
 import { ideContextStore } from '../ide/ideContext.js';
@@ -127,6 +132,7 @@ import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-stat
 import * as runtimeStatus from '../utils/runtimeStatus.js';
 import * as sessionRegistry from '../services/session-registry.js';
 import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
+import { resolveModelConfig } from '../models/modelConfigResolver.js';
 
 /**
  * A settled registration for the shared record, the shape
@@ -1244,6 +1250,45 @@ describe('Server Config (config.ts)', () => {
         expect(
           QwenSubscriptionSession.prototype.getModels,
         ).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.each([
+      { fallback: undefined, expected: 'qwen4' },
+      { fallback: 'removed-user-model', expected: 'qwen4' },
+      { fallback: 'qwen3.8-flash', expected: 'qwen3.8-flash' },
+    ])(
+      'initializes subscription model $expected with startup fallback $fallback',
+      async ({ fallback, expected }) => {
+        const { config: generationConfig, sources } = resolveModelConfig({
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          settings: { model: 'qwen4' },
+          env: {},
+        });
+        const config = makeConfig({
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          model: 'qwen4',
+          generationConfig,
+          generationConfigSources: sources,
+        });
+
+        await config.refreshAuth(
+          AuthType.QWEN_SUBSCRIPTION,
+          true,
+          fallback,
+          true,
+        );
+
+        expect(config.getContentGeneratorConfig()).toMatchObject({
+          authType: AuthType.QWEN_SUBSCRIPTION,
+          model: expected,
+        });
+        expect(
+          config
+            .getAvailableModelsForAuthType(AuthType.QWEN_SUBSCRIPTION)
+            .map(({ id }) => id),
+        ).toEqual(['qwen3.8-max', 'qwen3.8-flash']);
+        expect(config.getWarnings()).toEqual([]);
       },
     );
 
@@ -7312,6 +7357,157 @@ describe('Server Config (config.ts)', () => {
       expect(makeConfig().getWorkflowKeywordTriggerEnabled()).toBe(true);
     });
 
+    describe('isEventBusAgentLoopEnabled', () => {
+      beforeEach(() => {
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
+      });
+      afterEach(() => vi.unstubAllEnvs());
+
+      it('defaults to off for every surface', () => {
+        for (const surface of AGENT_LOOP_SURFACES) {
+          expect(makeConfig().isEventBusAgentLoopEnabled(surface)).toBe(false);
+        }
+      });
+
+      it('honors the constructor parameter', () => {
+        expect(
+          makeConfig({
+            eventBusAgentLoopEnabled: true,
+          }).isEventBusAgentLoopEnabled('headless'),
+        ).toBe(true);
+        expect(
+          makeConfig({
+            eventBusAgentLoopEnabled: false,
+          }).isEventBusAgentLoopEnabled('headless'),
+        ).toBe(false);
+      });
+
+      it('is enabled by QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP=1 even when the parameter is off', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', '1');
+        expect(
+          makeConfig({
+            eventBusAgentLoopEnabled: false,
+          }).isEventBusAgentLoopEnabled('headless'),
+        ).toBe(true);
+      });
+
+      it('is forced off by QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP=0 even when the parameter is on', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', '0');
+        expect(
+          makeConfig({
+            eventBusAgentLoopEnabled: true,
+          }).isEventBusAgentLoopEnabled('headless'),
+        ).toBe(false);
+      });
+
+      it('forces only the surfaces named in an env list', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', 'headless,acp=0');
+        const config = makeConfig({ eventBusAgentLoopEnabled: true });
+        expect(config.isEventBusAgentLoopEnabled('headless')).toBe(true);
+        expect(config.isEventBusAgentLoopEnabled('acp')).toBe(false);
+        expect(config.isEventBusAgentLoopEnabled('ink')).toBe(true);
+      });
+    });
+
+    describe('isUnifiedAgentLoopEnabled', () => {
+      beforeEach(() => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
+      });
+      afterEach(() => vi.unstubAllEnvs());
+
+      it('defaults to off for every surface', () => {
+        for (const surface of AGENT_LOOP_SURFACES) {
+          expect(makeConfig().isUnifiedAgentLoopEnabled(surface)).toBe(false);
+        }
+      });
+
+      it('honors the constructor parameter', () => {
+        expect(
+          makeConfig({
+            unifiedAgentLoopEnabled: true,
+          }).isUnifiedAgentLoopEnabled('acp'),
+        ).toBe(true);
+        expect(
+          makeConfig({
+            unifiedAgentLoopEnabled: false,
+          }).isUnifiedAgentLoopEnabled('acp'),
+        ).toBe(false);
+      });
+
+      it('is enabled by QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1 even when the parameter is off', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', '1');
+        expect(
+          makeConfig({
+            unifiedAgentLoopEnabled: false,
+          }).isUnifiedAgentLoopEnabled('acp'),
+        ).toBe(true);
+      });
+
+      it('is forced off by QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=0 even when the parameter is on', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', '0');
+        expect(
+          makeConfig({
+            unifiedAgentLoopEnabled: true,
+          }).isUnifiedAgentLoopEnabled('acp'),
+        ).toBe(false);
+      });
+
+      it('forces only the surfaces named in an env list', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'acp=1,ink=0');
+        const config = makeConfig();
+        expect(config.isUnifiedAgentLoopEnabled('acp')).toBe(true);
+        expect(config.isUnifiedAgentLoopEnabled('ink')).toBe(false);
+        expect(config.isUnifiedAgentLoopEnabled('headless')).toBe(false);
+      });
+
+      it('resolves each surface independently', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'opentui');
+        const config = makeConfig();
+        expect(config.isUnifiedAgentLoopEnabled('opentui')).toBe(true);
+        expect(config.isUnifiedAgentLoopEnabled('agent-core')).toBe(false);
+        expect(config.isUnifiedAgentLoopEnabled('speculation')).toBe(false);
+      });
+    });
+
+    describe('loop-switch default tables are independent', () => {
+      // Snapshot the tables as found so cleanup restores them rather than a
+      // hardcoded false — the first rollout flip must not be erased here.
+      const savedUnified = { ...UNIFIED_SURFACE_DEFAULTS };
+      const savedEventBus = { ...EVENT_BUS_SURFACE_DEFAULTS };
+      afterEach(() => {
+        for (const surface of AGENT_LOOP_SURFACES) {
+          UNIFIED_SURFACE_DEFAULTS[surface] = savedUnified[surface];
+          EVENT_BUS_SURFACE_DEFAULTS[surface] = savedEventBus[surface];
+        }
+        vi.unstubAllEnvs();
+      });
+
+      it('flipping a unified surface default does not flip the event-bus default', () => {
+        // The next rollout step flips one surface's unified default. The kernel
+        // must stay at its own table's value for that surface unless its own
+        // table is flipped — re-merging the two tables reds this case.
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
+        UNIFIED_SURFACE_DEFAULTS.headless = true;
+        const config = makeConfig();
+        expect(config.isUnifiedAgentLoopEnabled('headless')).toBe(true);
+        expect(config.isEventBusAgentLoopEnabled('headless')).toBe(
+          savedEventBus.headless,
+        );
+      });
+
+      it('flipping an event-bus surface default does not flip the unified default', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
+        EVENT_BUS_SURFACE_DEFAULTS.headless = true;
+        const config = makeConfig();
+        expect(config.isEventBusAgentLoopEnabled('headless')).toBe(true);
+        expect(config.isUnifiedAgentLoopEnabled('headless')).toBe(
+          savedUnified.headless,
+        );
+      });
+    });
+
     describe('bundled review workflow activation', () => {
       beforeEach(() => {
         vi.stubEnv('QWEN_CODE_ENABLE_WORKFLOWS', undefined);
@@ -7347,6 +7543,26 @@ describe('Server Config (config.ts)', () => {
         expect(config.isWorkflowsEnabled()).toBe(false);
         await config.enableReviewWorkflow();
         expect(config.isWorkflowsEnabled()).toBe(true);
+      });
+
+      it('keeps a review activation through a settings reload that leaves the flag unset', async () => {
+        const config = await workflowConfig();
+        await config.enableReviewWorkflow();
+        await config.enableReviewWorkflow();
+        config.applyWorkflowsEnabledSetting(undefined);
+        expect(config.isWorkflowsEnabled()).toBe(true);
+        // A value the settings do give replaces the activation.
+        config.applyWorkflowsEnabledSetting(false);
+        expect(config.isWorkflowsEnabled()).toBe(false);
+        config.applyWorkflowsEnabledSetting(undefined);
+        expect(config.isWorkflowsEnabled()).toBe(false);
+      });
+
+      it('turns off settings-enabled workflows when the reloaded settings drop the flag', async () => {
+        const config = await workflowConfig({ workflowsEnabled: true });
+        await config.enableReviewWorkflow();
+        config.applyWorkflowsEnabledSetting(undefined);
+        expect(config.isWorkflowsEnabled()).toBe(false);
       });
 
       it.each(['registered', 'deferred', 'disabled'] as const)(
@@ -8423,6 +8639,31 @@ describe('Server Config (config.ts)', () => {
       if (refresh) await config.refreshAuth(params.authType);
       expect(config.getFastModel()).toBe(expected);
     });
+
+    it.each([true, false])(
+      'rejects a stale fast endpoint in strict mode (same-id alternative: %s)',
+      (alternative) => {
+        const config = makeConfig({
+          authType: AuthType.USE_OPENAI,
+          model: 'main',
+          fastModel: 'openai:shared\0https://removed.example/v1',
+          modelProvidersConfig: {
+            openai: [
+              {
+                id: alternative ? 'shared' : 'other',
+                baseUrl: 'https://moved.example/v1',
+              },
+            ],
+          },
+        });
+        expect(() =>
+          config.getFastModel({ requirePinnedEndpoint: true }),
+        ).toThrow('no longer configured at the selected endpoint');
+        expect(config.getFastModel()).toBe(
+          alternative ? 'openai:shared' : undefined,
+        );
+      },
+    );
 
     const readAuxModel = (
       config: Config,

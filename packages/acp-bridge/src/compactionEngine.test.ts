@@ -331,6 +331,26 @@ describe('TurnBoundaryCompactionEngine', () => {
     },
   );
 
+  it('preserves hook metadata through text compaction', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    const frame: BridgeEvent = {
+      v: 1,
+      id: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: { hookLifecycle: { executionId: 'hook', phase: 'started' } },
+        },
+      },
+    };
+    engine.ingest(frame);
+    engine.ingest(makeTextChunk(2, 'answer'));
+    engine.ingest(makeTurnComplete(3));
+    expect(engine.snapshot().compactedTurns[0]).toEqual(frame);
+  });
+
   describe('basic compaction', () => {
     it('merges consecutive text chunks into a single event on turn_complete', () => {
       const engine = new TurnBoundaryCompactionEngine();
