@@ -76,6 +76,8 @@ import type {
   DaemonForkSessionResult,
   DaemonRestoredSession,
   DaemonSession,
+  DaemonWorktreeBranchResult,
+  DaemonWorktreeHandoffResult,
   DaemonSessionArchiveState,
   DaemonSessionExportFormat,
   DaemonSessionExportResult,
@@ -4028,6 +4030,84 @@ export class DaemonClient {
           throw await this.failOnError(res, 'POST /session/:id/worktree-reset');
         }
         return (await res.json()) as DaemonSession;
+      },
+      this.resolveSessionSpawnTimeoutMs(),
+    );
+  }
+
+  /**
+   * Turn a detached managed worktree into a named branch at its current HEAD
+   * ("Create branch here", `POST /session/:id/worktree-branch`, capability
+   * `session_worktree_branch_v1`). The session, checkout, and marker owner
+   * stay; only the branch metadata changes. Typed 409 bodies:
+   * `worktree_branch_unsupported` (not a managed worktree session),
+   * `worktree_already_branched` (the worktree already has a branch), and
+   * `branch_already_exists` (the requested name is taken).
+   */
+  async createWorktreeBranch(
+    sessionId: string,
+    name: string,
+    req: { workspaceCwd?: string } = {},
+  ): Promise<DaemonWorktreeBranchResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/worktree-branch`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({
+          name,
+          ...(req.workspaceCwd !== undefined ? { cwd: req.workspaceCwd } : {}),
+        }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /session/:id/worktree-branch',
+          );
+        }
+        return (await res.json()) as DaemonWorktreeBranchResult;
+      },
+      this.resolveSessionSpawnTimeoutMs(),
+    );
+  }
+
+  /**
+   * Move the same session between its managed worktree and the local
+   * checkout, carrying the work ("Hand off",
+   * `POST /session/:id/worktree-handoff`, capability
+   * `session_worktree_handoff_v1`). `to: 'local'` checks the worktree's
+   * branch out in the local checkout (creating one first for a detached
+   * worktree with commits; `name` overrides the auto-name) and applies its
+   * tracked dirty changes; the local checkout must be clean
+   * (`local_checkout_dirty`). `to: 'worktree'` creates a detached managed
+   * worktree from the session's current checkout with its dirty state.
+   * Refuses while a prompt is active.
+   */
+  async handoffWorktreeSession(
+    sessionId: string,
+    to: 'local' | 'worktree',
+    req: { name?: string; workspaceCwd?: string } = {},
+  ): Promise<DaemonWorktreeHandoffResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/worktree-handoff`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({
+          to,
+          ...(req.name !== undefined ? { name: req.name } : {}),
+          ...(req.workspaceCwd !== undefined ? { cwd: req.workspaceCwd } : {}),
+        }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /session/:id/worktree-handoff',
+          );
+        }
+        return (await res.json()) as DaemonWorktreeHandoffResult;
       },
       this.resolveSessionSpawnTimeoutMs(),
     );

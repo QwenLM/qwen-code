@@ -645,6 +645,8 @@ export type {
   DaemonGeneratedUiStatus,
   DaemonSessionArchiveState,
   DaemonWorktreeInfo,
+  DaemonWorktreeBranchResult,
+  DaemonWorktreeHandoffResult,
   DaemonBranchInfo,
   DaemonSessionIssueInfo,
   DaemonSessionPrInfo,

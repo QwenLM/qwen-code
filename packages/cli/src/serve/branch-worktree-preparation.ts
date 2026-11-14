@@ -433,7 +433,10 @@ export function recoverBranchWorktreePreparations(args: {
         journalRepoTop !== runtimeRepoTop ||
         path.resolve(journal.repoTop, '.qwen', 'worktrees', journal.slug) !==
           path.resolve(journal.worktreePath) ||
-        journal.worktreeBranch !== worktreeBranchForSlug(journal.slug)
+        // Detached managed worktrees record '' (no branch ref); named
+        // ones must still match their canonical worktree-<slug> branch.
+        (journal.worktreeBranch !== '' &&
+          journal.worktreeBranch !== worktreeBranchForSlug(journal.slug))
       ) {
         args.warn?.('branch worktree recovery journal identity mismatch', {
           targetSessionId: journal.targetSessionId,

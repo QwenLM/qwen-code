@@ -4740,6 +4740,10 @@ export function App({
   useEffect(() => {
     gitModeIntentRef.current = gitModeIntent;
   }, [gitModeIntent]);
+  // True once the user explicitly picked a git mode for the current draft;
+  // the worktree default must not overwrite an explicit choice. Cleared at
+  // draft boundaries (session created/opened, workspace switched).
+  const gitModeIntentTouchedRef = useRef(false);
 
   useEffect(() => {
     if (
@@ -13742,6 +13746,32 @@ export function App({
       view: 'log',
     });
   }, [connection.sessionId, gitDiffWorkspaceCwd, sessionWorktree]);
+  // "Create branch here": the daemon branches the detached checkout in
+  // place; only the local branch metadata changes.
+  const handleCreateWorktreeBranch = useCallback(
+    async (name: string) => {
+      const sessionIdAtCall = connection.sessionId;
+      const result = await sessionActions.createWorktreeBranch(name);
+      // The user may have switched sessions while the request was in
+      // flight; never apply the response to a different session's state.
+      if (connectionRef.current.sessionId !== sessionIdAtCall) return;
+      setSessionWorktree((current) =>
+        current ? { ...current, branch: result.worktree.branch } : current,
+      );
+    },
+    [sessionActions, connection.sessionId],
+  );
+  // "Hand off": the daemon moves the session between checkouts; the local
+  // worktree association follows the response (null => back on local).
+  const handleHandoff = useCallback(
+    async (to: 'local' | 'worktree') => {
+      const sessionIdAtCall = connection.sessionId;
+      const result = await sessionActions.handoffWorktree(to);
+      if (connectionRef.current.sessionId !== sessionIdAtCall) return;
+      setSessionWorktree(result.worktree ?? undefined);
+    },
+    [sessionActions, connection.sessionId],
+  );
   // Every modal the shell itself tracks, plus host-registered interaction
   // blocks. View navigation hotkeys gate on this rather than dialogOpen,
   // because dialogOpen also counts activePanel and the Session Overview is
@@ -14805,6 +14835,39 @@ export function App({
     workspaceSettings.find(
       (setting) => setting.key === 'ui.accessibility.enableLoadingPhrases',
     )?.values.effective !== false;
+  const defaultWorktreeForNewSessions =
+    workspaceSettings.find(
+      (setting) => setting.key === 'worktree.defaultForNewSessions',
+    )?.values.effective === true;
+  const handleGitModeIntentChange = useCallback((intent: SessionGitIntent) => {
+    gitModeIntentTouchedRef.current = true;
+    gitModeIntentRef.current = intent;
+    setGitModeIntent(intent);
+  }, []);
+  // An explicit choice belongs to one draft: reset the touched flag at
+  // draft boundaries (session created/opened, workspace switched), not on
+  // transient eligibility drops — a git-status blip must not let the
+  // default overwrite an explicit current-branch choice.
+  useEffect(() => {
+    gitModeIntentTouchedRef.current = false;
+  }, [connection.sessionId, activeWorkspaceCwd]);
+  // Apply the worktree default on the rising edge of eligibility + setting
+  // (settings load asynchronously, so the default may land after the chip
+  // first renders). An explicit selection wins.
+  const gitModeDefaultConditionRef = useRef(false);
+  useEffect(() => {
+    const condition = gitModeEligible && defaultWorktreeForNewSessions;
+    if (
+      condition &&
+      !gitModeDefaultConditionRef.current &&
+      !gitModeIntentTouchedRef.current &&
+      gitModeIntentRef.current.mode === 'current'
+    ) {
+      gitModeIntentRef.current = { mode: 'worktree' };
+      setGitModeIntent({ mode: 'worktree' });
+    }
+    gitModeDefaultConditionRef.current = condition;
+  }, [gitModeEligible, defaultWorktreeForNewSessions]);
   const liveSetup = useLiveVoiceSetup(
     workspaceSettings.some(
       (setting) => setting.key === 'experimental.liveVoice.enabled',
@@ -22675,7 +22738,11 @@ export function App({
     ? getDefaultChatWidthMode()
     : chatWidthMode;
   const activeGitBranch = sessionWorktree
-    ? (selectedWorkspaceGitStatus?.branch ?? sessionWorktree.branch)
+    ? // A detached managed worktree has no branch (live status reports
+      // null, creation metadata ''); show its slug instead.
+      selectedWorkspaceGitStatus?.branch ||
+      sessionWorktree.branch ||
+      sessionWorktree.slug
     : sessionBranch
       ? (selectedWorkspaceGitStatus?.branch ?? sessionBranch.name)
       : connection.sessionId
@@ -26297,7 +26364,7 @@ export function App({
                               : undefined
                           }
                           gitModeIntent={gitModeEligible ? gitModeIntent : undefined}
-                          onGitModeIntentChange={gitModeEligible ? setGitModeIntent : undefined}
+                          onGitModeIntentChange={gitModeEligible ? handleGitModeIntentChange : undefined}
                           gitStatus={
                             workspaceContextActive
                               ? selectedWorkspaceGitStatus
@@ -26321,6 +26388,24 @@ export function App({
                           onOpenLog={
                             gitDiffWorkspaceCwd
                               ? handleOpenLog
+                              : undefined
+                          }
+                          onCreateWorktreeBranch={
+                            sessionWorktree &&
+                            !sessionWorktree.branch &&
+                            workspace.capabilities?.features?.includes(
+                              'session_worktree_branch_v1',
+                            )
+                              ? handleCreateWorktreeBranch
+                              : undefined
+                          }
+                          onHandoff={
+                            connection.sessionId &&
+                            workspaceContextActive &&
+                            workspace.capabilities?.features?.includes(
+                              'session_worktree_handoff_v1',
+                            )
+                              ? handleHandoff
                               : undefined
                           }
                           chatWidthMode={chatWidthMode}

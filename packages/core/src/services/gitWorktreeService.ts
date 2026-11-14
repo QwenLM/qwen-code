@@ -1372,6 +1372,88 @@ export class GitWorktreeService {
   }
 
   /**
+   * Snapshot the source checkout's uncommitted state without modifying its
+   * working tree or index: `git stash create` for tracked changes (staged +
+   * unstaged) plus the untracked file list. Each probe fails open so a
+   * capture problem degrades to committed-state-only worktrees.
+   */
+  private async captureDirtyState(): Promise<{
+    stashCommit: string;
+    untrackedFiles: string[];
+    repoTop: string;
+  }> {
+    // NOTE: `git stash create` does NOT support --include-untracked;
+    // untracked files are handled separately via file copy.
+    let stashCommit = '';
+    try {
+      stashCommit = (await (await this.getGit()).stash(['create'])).trim();
+    } catch {
+      // Ignore — proceed without dirty state if stash create fails
+    }
+    // The service may be rooted at a subdirectory of the repository;
+    // --full-name keeps untracked paths repository-relative so the overlay
+    // lands them at the same offset inside the worktree. When the repo top
+    // cannot be resolved, skip the untracked overlay rather than pair
+    // repo-relative paths with a subdirectory base (every copy would miss
+    // and be swallowed); the tracked stash carry still applies.
+    const repoTop = await this.getRepoTopLevel().catch(() => null);
+    let untrackedFiles: string[] = [];
+    if (repoTop === null) {
+      debugLogger.warn(
+        'captureDirtyState: repository top unavailable; skipping untracked carry',
+      );
+    } else {
+      try {
+        const raw = await (
+          await this.getGit()
+        ).raw(['ls-files', '--others', '--exclude-standard', '--full-name']);
+        untrackedFiles = raw.trim().split('\n').filter(Boolean);
+      } catch {
+        // Non-fatal: proceed without untracked files
+      }
+    }
+    return {
+      stashCommit,
+      untrackedFiles,
+      repoTop: repoTop ?? this.sourceRepoPath,
+    };
+  }
+
+  /**
+   * Overlay a captured dirty state onto a worktree: apply the tracked
+   * changes, then copy untracked files. Fail-open per step — the worktree
+   * stays usable with whatever applied.
+   */
+  private async applyDirtyState(
+    worktreePath: string,
+    dirtyState: {
+      stashCommit: string;
+      untrackedFiles: string[];
+      repoTop: string;
+    },
+  ): Promise<void> {
+    const { simpleGit } = await loadSimpleGit();
+    const wtGit = simpleGit(worktreePath).env(gitEnv());
+    if (dirtyState.stashCommit) {
+      try {
+        await wtGit.raw(['stash', 'apply', dirtyState.stashCommit]);
+      } catch {
+        // Non-fatal: worktree still usable with committed state only
+      }
+    }
+    for (const relPath of dirtyState.untrackedFiles) {
+      try {
+        const src = path.join(dirtyState.repoTop, relPath);
+        const dst = path.join(worktreePath, relPath);
+        await fs.mkdir(path.dirname(dst), { recursive: true });
+        await fs.copyFile(src, dst);
+      } catch {
+        // Non-fatal: skip files that can't be copied
+      }
+    }
+  }
+
+  /**
    * Sets up all worktrees for a session.
    * This is the main entry point for worktree creation.
    */
@@ -1447,30 +1529,10 @@ export class GitWorktreeService {
     };
     await fs.writeFile(configPath, JSON.stringify(configFile, null, 2));
 
-    // Capture the current dirty state (tracked: staged + unstaged changes)
-    // without modifying the source working tree or index.
-    // NOTE: `git stash create` does NOT support --include-untracked;
-    // untracked files are handled separately below via file copy.
-    let dirtyStateSnapshot = '';
-    try {
-      dirtyStateSnapshot = (
-        await (await this.getGit()).stash(['create'])
-      ).trim();
-    } catch {
-      // Ignore — proceed without dirty state if stash create fails
-    }
-
-    // Discover untracked files so they can be copied into each worktree.
-    // `git ls-files --others --exclude-standard` is read-only and safe.
-    let untrackedFiles: string[] = [];
-    try {
-      const raw = await (
-        await this.getGit()
-      ).raw(['ls-files', '--others', '--exclude-standard']);
-      untrackedFiles = raw.trim().split('\n').filter(Boolean);
-    } catch {
-      // Non-fatal: proceed without untracked files
-    }
+    // Capture the current dirty state (tracked: staged + unstaged changes,
+    // plus untracked files) once, without modifying the source working tree
+    // or index, then overlay it onto each worktree below.
+    const dirtyState = await this.captureDirtyState();
 
     // Create worktrees for each entry
     for (const name of config.worktreeNames) {
@@ -1512,33 +1574,14 @@ export class GitWorktreeService {
     // see the same files the user currently has on disk.
     if (result.success) {
       for (const worktree of result.worktrees) {
-        const { simpleGit } = await loadSimpleGit();
-        const wtGit = simpleGit(worktree.path);
+        // 1. Apply tracked dirty changes and copy untracked files.
+        await this.applyDirtyState(worktree.path, dirtyState);
 
-        // 1. Apply tracked dirty changes (staged + unstaged)
-        if (dirtyStateSnapshot) {
-          try {
-            await wtGit.raw(['stash', 'apply', dirtyStateSnapshot]);
-          } catch {
-            // Non-fatal: worktree still usable with committed state only
-          }
-        }
-
-        // 2. Copy untracked files into the worktree
-        for (const relPath of untrackedFiles) {
-          try {
-            const src = path.join(this.sourceRepoPath, relPath);
-            const dst = path.join(worktree.path, relPath);
-            await fs.mkdir(path.dirname(dst), { recursive: true });
-            await fs.copyFile(src, dst);
-          } catch {
-            // Non-fatal: skip files that can't be copied
-          }
-        }
-
-        // 3. Create a baseline commit capturing the full starting state
+        // 2. Create a baseline commit capturing the full starting state
         //    (committed + dirty + untracked). This allows us to later diff
         //    only the agent's changes, excluding the pre-existing dirty state.
+        const { simpleGit } = await loadSimpleGit();
+        const wtGit = simpleGit(worktree.path).env(gitEnv());
         try {
           await wtGit.add(['--all']);
           await wtGit.commit(BASELINE_COMMIT_MESSAGE, {
@@ -2120,7 +2163,10 @@ export class GitWorktreeService {
       );
       return null;
     }
-    if (!branch || branch === 'HEAD') return null;
+    if (!branch) return null;
+    // A detached worktree is registered but has no branch ref; report it
+    // with the empty-string branch convention so callers can re-attach.
+    if (branch === 'HEAD') return { branch: '', headCommit };
     return { branch, headCommit };
   }
 
@@ -2453,6 +2499,20 @@ export class GitWorktreeService {
       symlinkDirectories?: readonly string[];
       /** The caller owns the pr-<N> shape (PR-backed startup). */
       prBacked?: boolean;
+      /**
+       * Apply the source checkout's uncommitted changes (tracked staged +
+       * unstaged, and untracked files) to the new worktree, so a session
+       * starts from the same files the user has on disk. Fail-open per
+       * step; no baseline commit is created.
+       */
+      carryDirtyState?: boolean;
+      /**
+       * Create the worktree in detached HEAD instead of on a named
+       * `worktree-<slug>` branch (Codex-style managed worktrees: several
+       * sessions without polluting the branch list). The returned
+       * `WorktreeInfo.branch` is `''` while detached.
+       */
+      detached?: boolean;
     },
   ): Promise<CreateWorktreeResult> {
     const validationError = GitWorktreeService.validateUserWorktreeSlug(
@@ -2484,25 +2544,32 @@ export class GitWorktreeService {
       await this.ensureWorktreesGitignored();
 
       const base = baseBranch || (await this.getCurrentBranch());
-      const branchName = worktreeBranchForSlug(slug);
+      const detached = options?.detached === true;
+      const branchName = detached ? '' : worktreeBranchForSlug(slug);
 
-      // Refuse to clobber a pre-existing branch with the same name. Use
-      // `git show-ref --verify --quiet refs/heads/<branch>` (exit 0 →
-      // branch exists). The previous `-B` form would have force-reset
-      // such a branch and silently dropped unmerged commits.
-      const branchExists = await this.localBranchExists(branchName);
-      if (branchExists) {
-        const error =
-          `Cannot create worktree "${slug}": branch ${branchName} already exists. ` +
-          `Choose a different name, or delete the branch first ` +
-          `(e.g. \`git branch -d ${branchName}\`).`;
-        debugLogger.warn(`createUserWorktree: ${error}`);
-        return { success: false, error };
+      if (!detached) {
+        // Refuse to clobber a pre-existing branch with the same name. Use
+        // `git show-ref --verify --quiet refs/heads/<branch>` (exit 0 →
+        // branch exists). The previous `-B` form would have force-reset
+        // such a branch and silently dropped unmerged commits.
+        const branchExists = await this.localBranchExists(branchName);
+        if (branchExists) {
+          const error =
+            `Cannot create worktree "${slug}": branch ${branchName} already exists. ` +
+            `Choose a different name, or delete the branch first ` +
+            `(e.g. \`git branch -d ${branchName}\`).`;
+          debugLogger.warn(`createUserWorktree: ${error}`);
+          return { success: false, error };
+        }
       }
 
       await (
         await this.getGit()
-      ).raw(['worktree', 'add', '-b', branchName, worktreePath, base]);
+      ).raw(
+        detached
+          ? ['worktree', 'add', '--detach', worktreePath, base]
+          : ['worktree', 'add', '-b', branchName, worktreePath, base],
+      );
 
       // Configure core.hooksPath so commits inside the worktree run the
       // main repo's hooks (the new worktree's .git directory has no hooks
@@ -2531,6 +2598,11 @@ export class GitWorktreeService {
         });
       }
 
+      if (options?.carryDirtyState === true) {
+        const dirtyState = await this.captureDirtyState();
+        await this.applyDirtyState(worktreePath, dirtyState);
+      }
+
       const worktree: WorktreeInfo = {
         id: slug,
         name: slug,
@@ -2545,6 +2617,75 @@ export class GitWorktreeService {
       debugLogger.warn(`createUserWorktree: ${message}`);
       return { success: false, error: message };
     }
+  }
+
+  /**
+   * Detaches a checkout at its current HEAD, releasing any branch it holds
+   * so another checkout can check that branch out (git forbids the same
+   * branch in two worktrees). Uncommitted changes survive the detach.
+   */
+  async detachCheckout(checkoutPath: string): Promise<void> {
+    const { simpleGit } = await loadSimpleGit();
+    await simpleGit(checkoutPath).env(gitEnv()).raw(['checkout', '--detach']);
+  }
+
+  /**
+   * Checks out an existing branch in a checkout (handoff carry). Throws on
+   * git's own refusals (dirty tree, branch checked out elsewhere) so the
+   * caller can map them to a typed refusal.
+   */
+  async checkoutBranchInCheckout(
+    checkoutPath: string,
+    branchName: string,
+  ): Promise<void> {
+    const { simpleGit } = await loadSimpleGit();
+    await simpleGit(checkoutPath).env(gitEnv()).raw(['checkout', branchName]);
+  }
+
+  /**
+   * Captures a checkout's uncommitted tracked changes as a stash commit
+   * without touching its working tree or index (`git stash create`).
+   * Returns '' when there is nothing to capture. Untracked files are not
+   * included — callers copy them separately when needed.
+   */
+  async createStashSnapshot(checkoutPath: string): Promise<string> {
+    const { simpleGit } = await loadSimpleGit();
+    return (
+      await simpleGit(checkoutPath).env(gitEnv()).stash(['create'])
+    ).trim();
+  }
+
+  /** Applies a stash commit snapshot in a checkout (`git stash apply`). */
+  async applyStashSnapshot(
+    checkoutPath: string,
+    snapshot: string,
+  ): Promise<void> {
+    const { simpleGit } = await loadSimpleGit();
+    await simpleGit(checkoutPath)
+      .env(gitEnv())
+      .raw(['stash', 'apply', snapshot]);
+  }
+
+  /**
+   * Turns a detached worktree into a named branch at its current HEAD
+   * ("Create branch here", Codex parity). Throws when the checkout is not
+   * detached or the branch name is already taken — callers validate first
+   * and map the failure to a typed refusal.
+   */
+  async createWorktreeBranch(
+    worktreePath: string,
+    branchName: string,
+  ): Promise<void> {
+    const { simpleGit } = await loadSimpleGit();
+    const wtGit = simpleGit(worktreePath).env(gitEnv());
+    const abbrev = (await wtGit.revparse(['--abbrev-ref', 'HEAD'])).trim();
+    if (abbrev !== 'HEAD') {
+      throw new Error(`Worktree at ${worktreePath} is not detached`);
+    }
+    if (await this.localBranchExists(branchName)) {
+      throw new Error(`Branch ${branchName} already exists`);
+    }
+    await wtGit.raw(['switch', '-c', branchName]);
   }
 
   /**
@@ -2919,7 +3060,7 @@ export class GitWorktreeService {
    * fast path attempts the create (which itself will fail loudly if the
    * branch exists for some reason this check missed).
    */
-  private async localBranchExists(branchName: string): Promise<boolean> {
+  async localBranchExists(branchName: string): Promise<boolean> {
     try {
       const out = await (
         await this.getGit()
@@ -2998,12 +3139,37 @@ export class GitWorktreeService {
     const worktreePath = this.getUserWorktreePath(slug);
     const branchName = worktreeBranchForSlug(slug);
 
+    // A detached worktree has no branch whose safe-delete refusal would
+    // protect committed work: the `git branch -d` below can never fire for
+    // it, and removing the checkout would leave the agent's commits
+    // unreachable. Refuse the removal itself when HEAD carries commits no
+    // other ref reaches — the detached counterpart of the named-branch
+    // protection. An explicit force delete opts out, as it does for branches.
+    if (
+      options.deleteBranch &&
+      !options.forceDeleteBranch &&
+      (await this.isDetachedWorktree(worktreePath)) &&
+      (await this.hasUnmergedWorktreeCommits(slug))
+    ) {
+      return {
+        success: false,
+        error: 'Worktree has unmerged commits',
+        branchPreserved: true,
+      };
+    }
+
     const removed = await this.removeWorktree(worktreePath);
     if (!removed.success) {
       return removed;
     }
 
     if (!options.deleteBranch) {
+      return { success: true };
+    }
+
+    // A detached worktree (Codex-style managed session) has no branch to
+    // delete; neither does a named worktree whose branch is already gone.
+    if (!(await this.localBranchExists(branchName))) {
       return { success: true };
     }
 
@@ -3123,9 +3289,28 @@ export class GitWorktreeService {
           worktreeGit.revparse(['HEAD']),
           worktreeGit.revparse(['--abbrev-ref', 'HEAD']),
         ]);
+        // A detached managed worktree reports 'HEAD'; a named one must
+        // still sit on its own worktree-<slug> branch.
         return (
           head.trim() === expectedBaseCommit &&
-          branch.trim() === worktreeBranchForSlug(slug)
+          (branch.trim() === 'HEAD' ||
+            branch.trim() === worktreeBranchForSlug(slug))
+        );
+      };
+      // The worktree still sits at the base commit: named worktrees are
+      // pinned by their branch ref, detached ones by HEAD itself.
+      const atBase = async () => {
+        const branch = (
+          await worktreeGit.revparse(['--abbrev-ref', 'HEAD'])
+        ).trim();
+        if (branch === 'HEAD') {
+          return (
+            (await worktreeGit.revparse(['HEAD'])).trim() === expectedBaseCommit
+          );
+        }
+        return (
+          (await this.getPreparedUserWorktreeBranchTip(slug)) ===
+          expectedBaseCommit
         );
       };
       if (!(await checkoutMatches())) {
@@ -3190,15 +3375,13 @@ export class GitWorktreeService {
       if (!(await isClean())) {
         return { success: false, error: 'Worktree contains changes' };
       }
-      let branchTip = await this.getPreparedUserWorktreeBranchTip(slug);
-      if (branchTip !== expectedBaseCommit) {
+      if (!(await atBase())) {
         return { success: false, error: 'Worktree branch changed' };
       }
       if (!(await isClean())) {
         return { success: false, error: 'Worktree contains changes' };
       }
-      branchTip = await this.getPreparedUserWorktreeBranchTip(slug);
-      if (branchTip !== expectedBaseCommit) {
+      if (!(await atBase())) {
         return { success: false, error: 'Worktree branch changed' };
       }
       const finalPath = await fs.realpath(expectedPath);
@@ -3288,6 +3471,25 @@ export class GitWorktreeService {
   }
 
   /**
+   * Whether the checkout at `worktreePath` is in detached HEAD. A missing
+   * or unreadable checkout reads as not detached: the removal path then
+   * fails or proceeds on its own filesystem merits.
+   */
+  private async isDetachedWorktree(worktreePath: string): Promise<boolean> {
+    try {
+      const { simpleGit } = await loadSimpleGit();
+      const abbrev = (
+        await simpleGit(worktreePath)
+          .env(gitEnv())
+          .revparse(['--abbrev-ref', 'HEAD'])
+      ).trim();
+      return abbrev === 'HEAD';
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Reports whether the tip of a user worktree's branch is reachable
    * only from itself — i.e. the branch carries commits that no other
    * local branch or remote ref points at, so dropping the branch would
@@ -3302,11 +3504,30 @@ export class GitWorktreeService {
     const branchName = worktreeBranchForSlug(slug);
     try {
       const git = await this.getGit();
-      const tipSha = (await git.revparse([branchName])).trim();
+      // A detached managed worktree has no branch ref; judge by its HEAD
+      // instead. When the checkout is unreadable (already removed, etc.),
+      // fall back to the named branch ref below.
+      let detached = false;
+      let tipSha = '';
+      try {
+        const { simpleGit } = await loadSimpleGit();
+        const wtGit = simpleGit(this.getUserWorktreePath(slug)).env(gitEnv());
+        const abbrev = (await wtGit.revparse(['--abbrev-ref', 'HEAD'])).trim();
+        if (abbrev === 'HEAD') {
+          detached = true;
+          tipSha = (await wtGit.revparse(['HEAD'])).trim();
+        }
+      } catch {
+        // Fall through to the branch-ref probe.
+      }
+      if (!detached) {
+        tipSha = (await git.revparse([branchName])).trim();
+      }
       if (!tipSha) return true;
       // List every local branch and remote-tracking ref whose tip is at
-      // or above the worktree branch's tip. If anything other than the
-      // worktree branch itself appears, the commits are covered.
+      // or above the worktree's tip. If anything other than the worktree
+      // branch itself appears, the commits are covered. A detached HEAD
+      // has no own ref to exclude.
       const refs = (
         await git.raw([
           'for-each-ref',
@@ -3319,7 +3540,9 @@ export class GitWorktreeService {
       )
         .split('\n')
         .map((s) => s.trim())
-        .filter((s) => s.length > 0 && s !== `refs/heads/${branchName}`);
+        .filter(
+          (s) => s.length > 0 && (detached || s !== `refs/heads/${branchName}`),
+        );
       return refs.length === 0;
     } catch (error) {
       // Fail-closed but log so a corrupted ref store or permission

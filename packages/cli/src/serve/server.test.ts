@@ -843,6 +843,8 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_session_metadata',
   'session_worktree_persistence_v1',
   'session_worktree_reset_v1',
+  'session_worktree_branch_v1',
+  'session_worktree_handoff_v1',
   // Baseline (always advertised) — presence means the `/voice/stream`
   // endpoint exists; the WS errors if no voice model is configured.
   'voice_transcribe',
@@ -955,6 +957,8 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_session_metadata' &&
       f !== 'session_worktree_persistence_v1' &&
       f !== 'session_worktree_reset_v1' &&
+      f !== 'session_worktree_branch_v1' &&
+      f !== 'session_worktree_handoff_v1' &&
       f !== 'voice_transcribe' &&
       f !== 'realtime_voice' &&
       f !== 'realtime_voice_web',
@@ -1037,6 +1041,8 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_session_metadata',
   'session_worktree_persistence_v1',
   'session_worktree_reset_v1',
+  'session_worktree_branch_v1',
+  'session_worktree_handoff_v1',
   'workspace_qualified_acp',
   'client_mcp_over_ws',
   'cdp_tunnel_over_ws',
@@ -15767,6 +15773,8 @@ describe('createServeApp', () => {
       mockWt.realpath = (p) => p;
       mockWt.createMarker = createMarker;
       mockWt.writeSidecar = writeSidecar;
+      const baseCommit = 'b'.repeat(40);
+      mockBranchOps.getHeadCommit = () => Promise.resolve(baseCommit);
 
       try {
         const res = await request(app)
@@ -15787,8 +15795,15 @@ describe('createServeApp', () => {
         expect(bridge.changeSessionCwdCalls[0]?.allowedRoots).toEqual([
           path.join(WS_BOUND, '.qwen', 'worktrees'),
         ]);
-        expect(mockCreate).toHaveBeenCalledWith('my-task', 'main');
+        expect(mockCreate).toHaveBeenCalledWith('my-task', 'main', {
+          carryDirtyState: true,
+          detached: true,
+        });
         expect(createMarker).toHaveBeenCalledWith(worktreePath, 'fake-0');
+        // The sidecar must record the base the worktree starts from:
+        // handoff back to local promotes a branch only when HEAD moved
+        // past originalHeadCommit, so an empty base would silently skip
+        // the promotion and leave the agent's commits in the worktree.
         expect(writeSidecar).toHaveBeenCalledWith(
           expect.stringMatching(/fake-0\.worktree\.json$/),
           {
@@ -15797,11 +15812,12 @@ describe('createServeApp', () => {
             worktreeBranch: 'worktree-my-task',
             originalCwd: WS_BOUND,
             workspaceCwd: WS_BOUND,
-            originalBranch: '',
-            originalHeadCommit: '',
+            originalBranch: 'main',
+            originalHeadCommit: baseCommit,
           },
         );
       } finally {
+        mockBranchOps.getHeadCommit = undefined;
         mockWt.createMarker = undefined;
         mockWt.writeSidecar = undefined;
         mockWt.realpath = undefined;

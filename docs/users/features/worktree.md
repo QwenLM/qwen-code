@@ -218,11 +218,12 @@ The same three guards apply to the `WorktreeExitDialog → Remove` button.
 
 ## Settings
 
-Two settings shape the general-purpose worktree experience:
+Three settings shape the general-purpose worktree experience:
 
 | Key                               | Type       | Default     | Effect                                                                                                                                                                                                                                                                     |
 | --------------------------------- | ---------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `ui.hideBuiltinWorktreeIndicator` | boolean    | `false`     | Hides the built-in `⎇ worktree-… (…)` Footer row. The `worktree` field is still delivered to custom status line scripts. Set to `true` only if your status line already renders the worktree — otherwise you lose all UI affordance.                                       |
+| `worktree.defaultForNewSessions`  | boolean    | `true`      | Web Shell only: a new session in a trusted Git workspace defaults to Worktree mode in the composer (the worktree is created when the first message is sent). Set to `false` to default to the current branch. Explicit mode selection and the daemon API are unchanged.    |
 | `worktree.symlinkDirectories`     | `string[]` | `undefined` | Directories under the main repo to symlink into every general-purpose worktree on creation. Paths are relative to the repo root; absolute paths and any entry containing `..` are rejected. Missing sources and existing destinations are silently skipped (no overwrite). |
 
 Example:

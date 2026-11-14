@@ -946,6 +946,25 @@ describe('restoreWorktreeContext', () => {
     expect(await readWorktreeSession(filePath)).toEqual(live);
   });
 
+  it('names detached HEAD in the context message when the branch is empty', async () => {
+    const live = await liveSession('repo-detached', { worktreeBranch: '' });
+    await writeWorktreeSession(filePath, live);
+    await fs.writeFile(
+      path.join(live.worktreePath, '.qwen-session'),
+      'session-owner',
+      'utf8',
+    );
+    const result = await restoreWorktreeContext(
+      filePath,
+      undefined,
+      'session-owner',
+    );
+
+    expect(result.session).toEqual(live);
+    expect(result.contextMessage).toContain('(detached HEAD)');
+    expect(result.contextMessage).not.toContain('(branch:');
+  });
+
   it('restores a sidecar caught in the link-then-unlink publish window', async () => {
     // createWorktreeSession publishes by hard-linking the staged inode onto
     // the sidecar path and only then unlinking the staged name, so a crash

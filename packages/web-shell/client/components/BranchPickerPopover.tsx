@@ -192,6 +192,16 @@ interface BranchPickerPopoverProps {
   onOpenWorktrees?: () => void;
   /** Opens the commit history graph. */
   onOpenLog?: () => void;
+  /**
+   * "Create branch here": turn the session's detached managed worktree
+   * into a named branch. Offered only for detached worktree sessions.
+   */
+  onCreateWorktreeBranch?: (name: string) => Promise<void>;
+  /**
+   * "Hand off": move the session between its managed worktree and the
+   * local checkout. Direction follows gitCwd (worktree path => 'local').
+   */
+  onHandoff?: (to: 'local' | 'worktree') => Promise<void>;
   children: React.ReactNode;
 }
 
@@ -423,6 +433,8 @@ export function BranchPickerPopover({
   onOpenCommit,
   onOpenWorktrees,
   onOpenLog,
+  onCreateWorktreeBranch,
+  onHandoff,
   children,
 }: BranchPickerPopoverProps) {
   const { t } = useI18n();
@@ -443,6 +455,8 @@ export function BranchPickerPopover({
   const [newBranchName, setNewBranchName] = useState('');
   const [checkoutRefMode, setCheckoutRefMode] = useState(false);
   const [checkoutRefValue, setCheckoutRefValue] = useState('');
+  const [createBranchMode, setCreateBranchMode] = useState(false);
+  const [createBranchValue, setCreateBranchValue] = useState('');
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [pullBlocked, setPullBlocked] = useState(false);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
@@ -598,8 +612,10 @@ export function BranchPickerPopover({
       setSearch('');
       setNewBranchMode(false);
       setCheckoutRefMode(false);
+      setCreateBranchMode(false);
       setNewBranchName('');
       setCheckoutRefValue('');
+      setCreateBranchValue('');
       setView('branches');
       setRemotes(null);
       setRemotesError(null);
@@ -791,6 +807,51 @@ export function BranchPickerPopover({
     if (!checkoutRefValue.trim()) return;
     await handleCheckout(checkoutRefValue.trim());
   }, [checkoutRefValue, handleCheckout]);
+
+  const handleCreateWorktreeBranch = useCallback(async () => {
+    const name = createBranchValue.trim();
+    if (!name || !validateBranchName(name) || busyAction) return;
+    setBusyAction('createWorktreeBranch');
+    try {
+      await onCreateWorktreeBranch?.(name);
+      setCreateBranchMode(false);
+      setCreateBranchValue('');
+      onOpenChange(false);
+      onBranchChanged?.();
+    } catch (err) {
+      showStatus(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setBusyAction(null);
+    }
+  }, [
+    createBranchValue,
+    busyAction,
+    onCreateWorktreeBranch,
+    onOpenChange,
+    onBranchChanged,
+    showStatus,
+  ]);
+
+  const handleHandoff = useCallback(async () => {
+    if (busyAction || !onHandoff) return;
+    setBusyAction('handoff');
+    try {
+      await onHandoff(gitCwd ? 'local' : 'worktree');
+      onOpenChange(false);
+      onBranchChanged?.();
+    } catch (err) {
+      showStatus(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setBusyAction(null);
+    }
+  }, [
+    busyAction,
+    onHandoff,
+    gitCwd,
+    onOpenChange,
+    onBranchChanged,
+    showStatus,
+  ]);
 
   const handlePush = useCallback(async () => {
     if (busyAction) return;
@@ -1428,12 +1489,16 @@ export function BranchPickerPopover({
     t('branchPicker.action.viewChanges').toLowerCase().includes(q) ||
     t('branchPicker.action.manageRemotes').toLowerCase().includes(q) ||
     t('branchPicker.action.worktrees').toLowerCase().includes(q) ||
+    t('branchPicker.action.createBranchHere').toLowerCase().includes(q) ||
+    t('branchPicker.action.handoffToLocal').toLowerCase().includes(q) ||
+    t('branchPicker.action.moveToWorktree').toLowerCase().includes(q) ||
     t('branchPicker.action.history').toLowerCase().includes(q);
 
   useEffect(() => {
     if (!actionsVisible) {
       setNewBranchMode(false);
       setCheckoutRefMode(false);
+      setCreateBranchMode(false);
     }
   }, [actionsVisible]);
 
@@ -1714,6 +1779,80 @@ export function BranchPickerPopover({
                           {t('branchPicker.action.manageRemotes')}
                         </span>
                       </button>
+                      {onCreateWorktreeBranch &&
+                        gitSessionId !== undefined &&
+                        data?.detached && (
+                          <>
+                            <button
+                              type="button"
+                              className={styles.actionItem}
+                              disabled={!!busyAction}
+                              onClick={() =>
+                                setCreateBranchMode(!createBranchMode)
+                              }
+                              data-testid="branch-picker-create-branch"
+                            >
+                              <GitBranchIcon
+                                size={14}
+                                className={styles.actionIcon}
+                              />
+                              <span className={styles.actionLabel}>
+                                {t('branchPicker.action.createBranchHere')}
+                              </span>
+                            </button>
+                            {createBranchMode && (
+                              <div className={styles.inlineInput}>
+                                <input
+                                  className={styles.inlineInputField}
+                                  placeholder={t(
+                                    'branchPicker.createBranchPlaceholder',
+                                  )}
+                                  value={createBranchValue}
+                                  onChange={(e) =>
+                                    setCreateBranchValue(e.target.value)
+                                  }
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter')
+                                      void handleCreateWorktreeBranch();
+                                    if (e.key === 'Escape')
+                                      setCreateBranchMode(false);
+                                  }}
+                                  autoFocus
+                                  data-testid="branch-picker-create-branch-input"
+                                />
+                              </div>
+                            )}
+                          </>
+                        )}
+                      {onHandoff && (
+                        <>
+                          <button
+                            type="button"
+                            className={styles.actionItem}
+                            disabled={!!busyAction}
+                            onClick={() => void handleHandoff()}
+                            data-testid="branch-picker-handoff"
+                          >
+                            <ArrowLeftIcon
+                              size={14}
+                              className={styles.actionIcon}
+                            />
+                            <span className={styles.actionLabel}>
+                              {gitCwd
+                                ? t('branchPicker.action.handoffToLocal')
+                                : t('branchPicker.action.moveToWorktree')}
+                            </span>
+                          </button>
+                          {!gitCwd && (
+                            <ActionHintLabel
+                              hint={{
+                                text: t('branchPicker.moveToWorktreeHint'),
+                                tone: 'info',
+                              }}
+                            />
+                          )}
+                        </>
+                      )}
                       {onOpenWorktrees && (
                         <button
                           type="button"

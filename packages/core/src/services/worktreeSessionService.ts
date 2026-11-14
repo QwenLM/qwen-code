@@ -906,10 +906,14 @@ export async function restoreWorktreeContext(
     }
   }
 
+  // '' is the detached managed-worktree convention: no branch to name.
+  const branchFragment = session.worktreeBranch
+    ? `(branch: ${session.worktreeBranch})`
+    : '(detached HEAD)';
   return {
     session,
     contextMessage:
       `[Resumed] Active worktree: "${session.slug}" at ${session.worktreePath} ` +
-      `(branch: ${session.worktreeBranch}). Continue using this path for all file operations.`,
+      `${branchFragment}. Continue using this path for all file operations.`,
   };
 }

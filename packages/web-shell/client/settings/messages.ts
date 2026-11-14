@@ -462,4 +462,7 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.label.agents.arena.preserveArtifacts': '保留 Arena 产物',
   'settings.description.agents.arena.preserveArtifacts':
     '启用后，Arena worktree 和会话状态文件会在会话结束或主智能体退出后保留。',
+  'settings.label.worktree.defaultForNewSessions': '新会话默认使用 Worktree',
+  'settings.description.worktree.defaultForNewSessions':
+    '开启（默认）时，受信任 Git workspace 中的新 Web Shell 会话默认进入隔离 worktree：composer 缺省为 Worktree 模式，首条消息发送时创建 worktree。设为 false 则缺省使用当前分支。仅影响 Web Shell composer 的缺省值；显式模式选择与 daemon API 不变。',
 };

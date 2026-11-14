@@ -327,7 +327,7 @@ export function GitModePopover({
               {selectedMode === 'branch'
                 ? `$ git checkout -b ${branchName || '…'} ← ${branch}`
                 : selectedMode === 'worktree'
-                  ? '$ git worktree add .qwen/worktrees/<slug>'
+                  ? '$ git worktree add --detach .qwen/worktrees/<slug>'
                   : `$ git checkout ${branch}`}
             </span>
             {selectedMode === 'branch' && (

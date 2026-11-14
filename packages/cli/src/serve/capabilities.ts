@@ -588,6 +588,12 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // restore surface reports the superseded / interrupted / missing-marker
   // classifications as typed 409s.
   session_worktree_reset_v1: { since: 'v1' },
+  // "Create branch here": `POST /session/:id/worktree-branch` turns a
+  // detached managed worktree into a named branch at its current HEAD.
+  session_worktree_branch_v1: { since: 'v1' },
+  // "Hand off": `POST /session/:id/worktree-handoff` moves the same session
+  // between its managed worktree and the local checkout, carrying the work.
+  session_worktree_handoff_v1: { since: 'v1' },
   // Workspace-qualified ACP transport (issue #6378 Phase 4):
   // `/workspaces/:workspace/acp` mounts a per-runtime ACP dispatcher (HTTP +
   // WebSocket) for each registered workspace, with per-runtime device-flow and

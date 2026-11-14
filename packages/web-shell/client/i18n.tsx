@@ -613,8 +613,14 @@ const EN: Messages = {
   'branchPicker.action.checkoutRef': 'Checkout Tag or Revision…',
   'branchPicker.action.viewChanges': 'View Changes',
   'branchPicker.action.worktrees': 'Worktrees…',
+  'branchPicker.action.createBranchHere': 'Create branch here',
+  'branchPicker.action.handoffToLocal': 'Hand off to local',
+  'branchPicker.action.moveToWorktree': 'Move to worktree',
+  'branchPicker.moveToWorktreeHint':
+    'Your local checkout keeps its uncommitted changes; handing back later requires a clean local checkout.',
   'branchPicker.action.history': 'History',
   'branchPicker.newBranchPlaceholder': 'Branch name',
+  'branchPicker.createBranchPlaceholder': 'New branch name',
   'branchPicker.invalidBranchName':
     'Invalid branch name — avoid spaces, ~, ^, :, ? * and leading -',
   'branchPicker.checkoutRefPlaceholder': 'Tag name or commit SHA',
@@ -5801,8 +5807,14 @@ const ZH: Messages = {
   'branchPicker.action.checkoutRef': '检出标签或修订…',
   'branchPicker.action.viewChanges': '查看变更',
   'branchPicker.action.worktrees': '管理 Worktree…',
+  'branchPicker.action.createBranchHere': '在此创建分支',
+  'branchPicker.action.handoffToLocal': '移交到本地检出',
+  'branchPicker.action.moveToWorktree': '移入 worktree',
+  'branchPicker.moveToWorktreeHint':
+    '本地检出会保留其未提交改动；之后移交回本地需要本地检出干净。',
   'branchPicker.action.history': '提交历史',
   'branchPicker.newBranchPlaceholder': '分支名称',
+  'branchPicker.createBranchPlaceholder': '新分支名称',
   'branchPicker.invalidBranchName':
     '无效的分支名称 — 避免空格、~、^、:、? * 以及以 - 开头',
   'branchPicker.checkoutRefPlaceholder': '标签名或提交 SHA',

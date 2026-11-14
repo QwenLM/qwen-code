@@ -313,6 +313,28 @@ function redactSdkSurfaceReplay<
 const MAX_BRANCH_NAME_BYTES = 1000;
 const MAX_BRANCH_COMPONENT_BYTES = 200;
 
+// Mirrors validateBranchName in GitModePopover.tsx; keep the two in sync.
+function isValidGitBranchName(name: string): boolean {
+  return !(
+    /[^\p{L}\p{N}._/-]/u.test(name) ||
+    name.includes('..') ||
+    name.includes('//') ||
+    name.startsWith('.') ||
+    name.startsWith('-') ||
+    name.startsWith('/') ||
+    name.endsWith('/') ||
+    name.endsWith('.') ||
+    name.endsWith('.git') ||
+    name.includes('@{') ||
+    name.split('/').some((c) => c.startsWith('.') || c.endsWith('.lock')) ||
+    name.toUpperCase() === GIT_RESERVED_BRANCH ||
+    Buffer.byteLength(name, 'utf8') > MAX_BRANCH_NAME_BYTES ||
+    name
+      .split('/')
+      .some((c) => Buffer.byteLength(c, 'utf8') > MAX_BRANCH_COMPONENT_BYTES)
+  );
+}
+
 interface RegisterSessionRoutesDeps {
   boundWorkspace: string;
   bridge: AcpSessionBridge;
@@ -3105,6 +3127,8 @@ export function registerSessionRoutes(
     let worktreeMeta:
       | { slug: string; path: string; branch: string }
       | undefined;
+    let worktreeBaseBranch: string | undefined;
+    let worktreeBaseCommit: string | undefined;
     let worktreeDurablyAttached = false;
     let spawnCompleted = false;
 
@@ -3144,29 +3168,7 @@ export function registerSessionRoutes(
           return;
         }
         // Validate git branch name characters and reserved names.
-        // Mirrors validateBranchName in GitModePopover.tsx; keep in sync.
-        if (
-          /[^\p{L}\p{N}._/-]/u.test(branchName) ||
-          branchName.includes('..') ||
-          branchName.includes('//') ||
-          branchName.startsWith('.') ||
-          branchName.startsWith('-') ||
-          branchName.startsWith('/') ||
-          branchName.endsWith('/') ||
-          branchName.endsWith('.') ||
-          branchName.endsWith('.git') ||
-          branchName.includes('@{') ||
-          branchName
-            .split('/')
-            .some((c) => c.startsWith('.') || c.endsWith('.lock')) ||
-          branchName.toUpperCase() === GIT_RESERVED_BRANCH ||
-          Buffer.byteLength(branchName, 'utf8') > MAX_BRANCH_NAME_BYTES ||
-          branchName
-            .split('/')
-            .some(
-              (c) => Buffer.byteLength(c, 'utf8') > MAX_BRANCH_COMPONENT_BYTES,
-            )
-        ) {
+        if (!isValidGitBranchName(branchName)) {
           res.status(400).json({
             error: `Invalid branch name: ${branchName}`,
             code: 'branch_invalid_name',
@@ -3384,8 +3386,15 @@ export function registerSessionRoutes(
         const baseBranch = await wtService
           .getCurrentBranch()
           .catch(() => undefined);
+        // Record the base the worktree starts from: the handoff back to
+        // local promotes a branch only when HEAD moved past this commit.
+        worktreeBaseBranch = baseBranch;
+        worktreeBaseCommit = await getHeadCommit(workspaceCwd);
         assertRuntimeGenerationOpen?.();
-        const wtResult = await wtService.createUserWorktree(slug, baseBranch);
+        const wtResult = await wtService.createUserWorktree(slug, baseBranch, {
+          carryDirtyState: true,
+          detached: true,
+        });
         if (!wtResult.success || !wtResult.worktree) {
           res.status(500).json({
             error: wtResult.error ?? 'Failed to create worktree',
@@ -3727,8 +3736,8 @@ export function registerSessionRoutes(
               worktreeBranch: worktreeMeta.branch,
               originalCwd: workspaceCwd,
               workspaceCwd,
-              originalBranch: '',
-              originalHeadCommit: '',
+              originalBranch: worktreeBaseBranch ?? '',
+              originalHeadCommit: worktreeBaseCommit ?? '',
             },
           );
           assertRuntimeGenerationOpen?.();
@@ -4783,6 +4792,478 @@ export function registerSessionRoutes(
   };
   app.post('/session/:id/worktree-reset', mutate(), worktreeResetHandler);
 
+  // "Create branch here" (Codex parity): turn a detached managed worktree
+  // into a named branch at its current HEAD, in place. No session transfer —
+  // the checkout, marker owner, and session id all stay; only the branch
+  // metadata changes. Serialized against reset/restore by the same
+  // worktree-keyed ownership lock.
+  const worktreeBranchHandler = async (
+    req: Request,
+    res: Response,
+  ): Promise<void> => {
+    const route = 'POST /session/:id/worktree-branch';
+    const sessionId = requireSessionId(req, res);
+    if (!sessionId) return;
+    if (parseVirtualSubagentSessionId(sessionId)) {
+      res.status(400).json({
+        error:
+          'Virtual subagent sessions do not support worktree branch creation',
+        code: 'unsupported_action',
+        sessionId,
+      });
+      return;
+    }
+    const body = safeBody(req);
+    const name = body['name'];
+    if (
+      typeof name !== 'string' ||
+      name.length === 0 ||
+      !isValidGitBranchName(name)
+    ) {
+      res.status(400).json({
+        error: '`name` must be a valid git branch name',
+        code: 'branch_invalid_name',
+      });
+      return;
+    }
+    let resolvedRuntime:
+      | { runtime: WorkspaceRuntime; workspaceCwd: string }
+      | undefined;
+    try {
+      resolvedRuntime = await resolveRuntimeForSessionRestore(
+        body,
+        res,
+        route,
+        sessionId,
+      );
+    } catch (err) {
+      if (sendConversationRuntimeError(res, err)) return;
+      sendBridgeError(res, err, { route, sessionId });
+      return;
+    }
+    if (resolvedRuntime === undefined) return;
+    const { runtime, workspaceCwd } = resolvedRuntime;
+    const assertRuntimeGenerationOpen =
+      captureRuntimeGenerationAssertion(runtime);
+    try {
+      await runOwnerRuntimeActivity(runtime, () =>
+        archiveCoordinator.runSharedMany([sessionId], async () => {
+          const sessionService = createWorkspaceRuntimeSessionService(runtime);
+          let storageSessionId = await resolveSessionIdForRestore(
+            sessionService,
+            sessionId,
+          );
+          if (storageSessionId === undefined) {
+            // A freshly created session may have no transcript yet (the
+            // user branches before the first prompt); the live bridge
+            // summary is authoritative for it. Throws when unknown.
+            runtime.bridge.getSessionSummary(sessionId);
+            storageSessionId = sessionId;
+          }
+          if (runtime.bridge.setSessionWorktree === undefined) {
+            throw new Error('Bridge does not support worktree branch creation');
+          }
+          const sidecarPath =
+            sessionService.getWorktreeSessionPath(storageSessionId);
+          const preRead = await readWorktreeSessionStrict(sidecarPath);
+          if (
+            preRead.state === 'missing' ||
+            (preRead.state === 'valid' &&
+              preRead.session.workspaceCwd === undefined)
+          ) {
+            res.status(409).json({
+              error: 'Session has no managed worktree',
+              code: 'worktree_branch_unsupported',
+              sessionId: storageSessionId,
+            });
+            return;
+          }
+          if (preRead.state !== 'valid') {
+            throw new WorktreeResetInvalidStateError(storageSessionId);
+          }
+          const { realTarget } = await resolveWorktreeOwnershipTarget(
+            runtime,
+            workspaceCwd,
+            preRead.session,
+            storageSessionId,
+          );
+          const releaseOwnership = await acquireWorktreeOwnershipOp(realTarget);
+          try {
+            // Re-read under the lock: a concurrent reset may have moved
+            // ownership or branched the checkout since the pre-read.
+            const lockedRead = await readWorktreeSessionStrict(sidecarPath);
+            if (lockedRead.state !== 'valid') {
+              throw new WorktreeResetInvalidStateError(storageSessionId);
+            }
+            const sidecar = lockedRead.session;
+            if (sidecar.worktreeBranch !== '') {
+              res.status(409).json({
+                error: 'Worktree already has a branch',
+                code: 'worktree_already_branched',
+                sessionId: storageSessionId,
+              });
+              return;
+            }
+            // A superseded sidecar means a reset moved the checkout to a
+            // replacement session; the marker must still name this session.
+            if (sidecar.supersededBy !== undefined) {
+              throw new WorktreeResetInvalidStateError(storageSessionId);
+            }
+            const branchMarker =
+              await readWorktreeSessionMarkerStrict(realTarget);
+            if (
+              branchMarker.state !== 'valid' ||
+              branchMarker.sessionId !== storageSessionId
+            ) {
+              throw new WorktreeResetInvalidStateError(storageSessionId);
+            }
+            const wtService = new GitWorktreeService(workspaceCwd);
+            if (await wtService.localBranchExists(name)) {
+              res.status(409).json({
+                error: `Branch ${name} already exists`,
+                code: 'branch_already_exists',
+                sessionId: storageSessionId,
+              });
+              return;
+            }
+            assertRuntimeGenerationOpen?.();
+            await wtService.createWorktreeBranch(realTarget, name);
+            await writeWorktreeSession(sidecarPath, {
+              ...sidecar,
+              worktreeBranch: name,
+            });
+            runtime.bridge.setSessionWorktree(storageSessionId, {
+              slug: sidecar.slug,
+              path: realTarget,
+              branch: name,
+            });
+            res.status(200).json({
+              sessionId: storageSessionId,
+              worktree: {
+                slug: sidecar.slug,
+                path: realTarget,
+                branch: name,
+              },
+            });
+          } finally {
+            releaseOwnership();
+          }
+        }),
+      );
+    } catch (err) {
+      if (!res.headersSent) {
+        sendBridgeError(res, err, { route, sessionId });
+      }
+    }
+  };
+  app.post('/session/:id/worktree-branch', mutate(), worktreeBranchHandler);
+
+  // "Hand off" (Codex parity): move the SAME session between its managed
+  // worktree and the local checkout, carrying the work. Design D6 documents
+  // the protocol and the v1 limitations (local-clean stands in for occupancy;
+  // no crash-window atomic rollback).
+  const worktreeHandoffHandler = async (
+    req: Request,
+    res: Response,
+  ): Promise<void> => {
+    const route = 'POST /session/:id/worktree-handoff';
+    const sessionId = requireSessionId(req, res);
+    if (!sessionId) return;
+    if (parseVirtualSubagentSessionId(sessionId)) {
+      res.status(400).json({
+        error: 'Virtual subagent sessions do not support worktree handoff',
+        code: 'unsupported_action',
+        sessionId,
+      });
+      return;
+    }
+    const body = safeBody(req);
+    const to = body['to'];
+    if (to !== 'local' && to !== 'worktree') {
+      res.status(400).json({
+        error: "`to` must be 'local' or 'worktree'",
+        code: 'invalid_handoff_target',
+      });
+      return;
+    }
+    const name = body['name'];
+    if (
+      name !== undefined &&
+      (typeof name !== 'string' || !isValidGitBranchName(name))
+    ) {
+      res.status(400).json({
+        error: '`name` must be a valid git branch name',
+        code: 'branch_invalid_name',
+      });
+      return;
+    }
+    let resolvedRuntime:
+      | { runtime: WorkspaceRuntime; workspaceCwd: string }
+      | undefined;
+    try {
+      resolvedRuntime = await resolveRuntimeForSessionRestore(
+        body,
+        res,
+        route,
+        sessionId,
+      );
+    } catch (err) {
+      if (sendConversationRuntimeError(res, err)) return;
+      sendBridgeError(res, err, { route, sessionId });
+      return;
+    }
+    if (resolvedRuntime === undefined) return;
+    const { runtime, workspaceCwd } = resolvedRuntime;
+    const assertRuntimeGenerationOpen =
+      captureRuntimeGenerationAssertion(runtime);
+    try {
+      await runOwnerRuntimeActivity(runtime, () =>
+        archiveCoordinator.runSharedMany([sessionId], async () => {
+          const sessionService = createWorkspaceRuntimeSessionService(runtime);
+          let storageSessionId = await resolveSessionIdForRestore(
+            sessionService,
+            sessionId,
+          );
+          if (storageSessionId === undefined) {
+            runtime.bridge.getSessionSummary(sessionId);
+            storageSessionId = sessionId;
+          }
+          const sidecarPath =
+            sessionService.getWorktreeSessionPath(storageSessionId);
+          const realWorkspace = fs.realpathSync(workspaceCwd);
+
+          if (to === 'local') {
+            const preRead = await readWorktreeSessionStrict(sidecarPath);
+            if (
+              preRead.state === 'missing' ||
+              (preRead.state === 'valid' &&
+                preRead.session.workspaceCwd === undefined)
+            ) {
+              res.status(409).json({
+                error: 'Session has no managed worktree',
+                code: 'worktree_handoff_unsupported',
+                sessionId: storageSessionId,
+              });
+              return;
+            }
+            if (preRead.state !== 'valid') {
+              throw new WorktreeResetInvalidStateError(storageSessionId);
+            }
+            const { realTarget } = await resolveWorktreeOwnershipTarget(
+              runtime,
+              workspaceCwd,
+              preRead.session,
+              storageSessionId,
+            );
+            const releaseOwnership =
+              await acquireWorktreeOwnershipOp(realTarget);
+            try {
+              const lockedRead = await readWorktreeSessionStrict(sidecarPath);
+              if (lockedRead.state !== 'valid') {
+                throw new WorktreeResetInvalidStateError(storageSessionId);
+              }
+              const sidecar = lockedRead.session;
+              // A superseded sidecar means a reset moved the checkout to a
+              // replacement session; the marker must still name this session.
+              if (sidecar.supersededBy !== undefined) {
+                throw new WorktreeResetInvalidStateError(storageSessionId);
+              }
+              const handoffMarker =
+                await readWorktreeSessionMarkerStrict(realTarget);
+              if (
+                handoffMarker.state !== 'valid' ||
+                handoffMarker.sessionId !== storageSessionId
+              ) {
+                throw new WorktreeResetInvalidStateError(storageSessionId);
+              }
+              let localCwd: string;
+              try {
+                localCwd = fs.realpathSync(sidecar.originalCwd);
+              } catch {
+                throw new WorktreeResetInvalidStateError(storageSessionId);
+              }
+              const localService = new GitWorktreeService(localCwd);
+              if (await localService.hasWorktreeChanges(localCwd)) {
+                res.status(409).json({
+                  error: 'Local checkout has uncommitted changes',
+                  code: 'local_checkout_dirty',
+                  sessionId: storageSessionId,
+                });
+                return;
+              }
+              const wtService = new GitWorktreeService(workspaceCwd);
+              // Carry the work before moving the session: branch checkout
+              // first, then the tracked dirty snapshot. Untracked files stay
+              // in the worktree, which is left behind (nothing is lost).
+              const snapshot = await wtService.createStashSnapshot(realTarget);
+              let branch = sidecar.worktreeBranch;
+              const info =
+                await wtService.getRegisteredWorktreeBranch(realTarget);
+              const head = info?.headCommit ?? '';
+              const base = sidecar.originalHeadCommit;
+              if (!branch && head && base && head !== base) {
+                branch = name ?? worktreeBranchForSlug(sidecar.slug);
+                // Same typed refusal as the explicit-name path: an occupied
+                // auto name must not degrade into a generic bridge error.
+                if (await wtService.localBranchExists(branch)) {
+                  res.status(409).json({
+                    error: `Branch ${branch} already exists`,
+                    code: 'branch_already_exists',
+                    sessionId: storageSessionId,
+                  });
+                  return;
+                }
+                await wtService.createWorktreeBranch(realTarget, branch);
+              }
+              if (branch) {
+                try {
+                  // Release the branch from the worktree first: git forbids
+                  // the same branch checked out in two worktrees at once.
+                  // The session is leaving, so the worktree stays detached
+                  // at the same commit (its dirty state survives).
+                  await wtService.detachCheckout(realTarget);
+                  await localService.checkoutBranchInCheckout(localCwd, branch);
+                } catch (error) {
+                  res.status(409).json({
+                    error: `Cannot check out ${branch} in the local checkout`,
+                    code: 'handoff_checkout_failed',
+                    detail:
+                      error instanceof Error ? error.message : String(error),
+                    sessionId: storageSessionId,
+                  });
+                  return;
+                }
+              }
+              if (snapshot) {
+                await localService.applyStashSnapshot(localCwd, snapshot);
+              }
+              assertRuntimeGenerationOpen?.();
+              const repoTop =
+                (await wtService.getRepoTopLevel().catch(() => null)) ??
+                realWorkspace;
+              const changed = await runtime.bridge.changeSessionCwd(
+                storageSessionId,
+                {
+                  path: localCwd,
+                  allowedRoots: [realWorkspace, fs.realpathSync(repoTop)],
+                },
+              );
+              if (changed.newCwd !== localCwd) {
+                throw new Error('Handoff relocation was rejected');
+              }
+              await clearWorktreeSessionDurable(sidecarPath);
+              runtime.bridge.clearSessionWorktree?.(storageSessionId);
+              res.status(200).json({
+                sessionId: storageSessionId,
+                worktree: null,
+                currentCwd: changed.newCwd,
+              });
+            } finally {
+              releaseOwnership();
+            }
+            return;
+          }
+
+          // to === 'worktree'
+          const preRead = await readWorktreeSessionStrict(sidecarPath);
+          if (preRead.state === 'valid') {
+            res.status(409).json({
+              error: 'Session already has a managed worktree',
+              code: 'worktree_handoff_unsupported',
+              sessionId: storageSessionId,
+            });
+            return;
+          }
+          const execution =
+            runtime.bridge.getSessionExecutionSnapshot(storageSessionId);
+          let sourceCwd: string;
+          try {
+            sourceCwd = fs.realpathSync(execution.effectiveCwd);
+          } catch {
+            throw new WorktreeResetInvalidStateError(storageSessionId);
+          }
+          const releaseOwnership = await acquireWorktreeOwnershipOp(sourceCwd);
+          try {
+            const sourceService = new GitWorktreeService(sourceCwd);
+            const currentBranch = await sourceService
+              .getCurrentBranch()
+              .catch(() => undefined);
+            const sourceInfo =
+              await sourceService.getRegisteredWorktreeBranch(sourceCwd);
+            const slug = GitWorktreeService.generateAutoSlug();
+            const created = await sourceService.createUserWorktree(
+              slug,
+              currentBranch,
+              { detached: true, carryDirtyState: true },
+            );
+            if (!created.success || !created.worktree) {
+              res.status(500).json({
+                error: created.error ?? 'Failed to create worktree',
+                code: 'worktree_create_failed',
+                sessionId: storageSessionId,
+              });
+              return;
+            }
+            const worktree = created.worktree;
+            try {
+              await createWorktreeSessionMarkerExclusive(
+                worktree.path,
+                storageSessionId,
+              );
+              await writeWorktreeSession(sidecarPath, {
+                slug,
+                worktreePath: worktree.path,
+                worktreeBranch: '',
+                originalCwd: sourceCwd,
+                workspaceCwd,
+                originalBranch: currentBranch ?? '',
+                originalHeadCommit: sourceInfo?.headCommit ?? '',
+              });
+              assertRuntimeGenerationOpen?.();
+              const changed = await runtime.bridge.changeSessionCwd(
+                storageSessionId,
+                {
+                  path: worktree.path,
+                  allowedRoots: [sourceService.getUserWorktreesDir()],
+                },
+              );
+              if (changed.newCwd !== worktree.path) {
+                throw new Error('Handoff relocation was rejected');
+              }
+              runtime.bridge.setSessionWorktree?.(storageSessionId, {
+                slug,
+                path: worktree.path,
+                branch: '',
+              });
+              res.status(200).json({
+                sessionId: storageSessionId,
+                worktree: { slug, path: worktree.path, branch: '' },
+                currentCwd: changed.newCwd,
+              });
+            } catch (error) {
+              // Roll back the fresh worktree, sidecar, and marker; the
+              // session stays in the local checkout.
+              await clearWorktreeSessionDurable(sidecarPath).catch(
+                () => undefined,
+              );
+              await sourceService
+                .removeUserWorktree(slug, { deleteBranch: true })
+                .catch(() => undefined);
+              throw error;
+            }
+          } finally {
+            releaseOwnership();
+          }
+        }),
+      );
+    } catch (err) {
+      if (!res.headersSent) {
+        sendBridgeError(res, err, { route, sessionId });
+      }
+    }
+  };
+  app.post('/session/:id/worktree-handoff', mutate(), worktreeHandoffHandler);
+
   app.get('/session/:id/subagents/:subagentRef', async (req, res) => {
     const route = 'GET /session/:id/subagents/:subagentRef';
     const sessionId = requireSessionId(req, res);
@@ -5163,7 +5644,8 @@ export function registerSessionRoutes(
                   targetSessionId,
                   slug,
                   worktreePath,
-                  worktreeBranch: worktreeBranchForSlug(slug),
+                  // Detached managed worktree: no branch ref exists.
+                  worktreeBranch: '',
                   repoTop: base.repoTop,
                   baseCommit: base.headCommit,
                   sidecarPath,
@@ -5172,6 +5654,7 @@ export function registerSessionRoutes(
                 const worktreeResult = await worktreeService.createUserWorktree(
                   slug,
                   base.headCommit,
+                  { carryDirtyState: true, detached: true },
                 );
                 if (!worktreeResult.success || !worktreeResult.worktree) {
                   await cleanupPrepared();
