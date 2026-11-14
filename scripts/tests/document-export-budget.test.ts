@@ -244,6 +244,27 @@ describe('document export budgets', () => {
     const stringCopy =
       'const note = "const MAX_DOCUMENT_DURATION_MS = documentExportBudgetMs(process.env);";';
     expect(stringCopy).not.toMatch(WIRING_PIN);
+    const ceilingStringCopy =
+      'const note = "MAX_DOCUMENT_DURATION_MS + 30_000, );";';
+    expect(ceilingStringCopy).not.toMatch(CASE_CEILING_PIN);
+
+    // Newline preservation is load-bearing: the line anchors correspond to
+    // the real file's line structure, so blanking must keep every newline
+    // (and the length). A multi-line comment is the shape that distinguishes
+    // preserving newlines from collapsing them; the gate's own comments are
+    // all single-line, so this fixture must be synthetic.
+    const multiLineComment = [
+      'const a = 1;',
+      '/*',
+      ' * comment',
+      ' */',
+      'const b = 2;',
+    ].join('\n');
+    const blankedMulti = blankComments(multiLineComment);
+    expect(blankedMulti).toHaveLength(multiLineComment.length);
+    expect(blankedMulti.split('\n')).toHaveLength(
+      multiLineComment.split('\n').length,
+    );
 
     // The \s* / ,? tolerance must keep absorbing Prettier reflow.
     const reflowedWiring =
