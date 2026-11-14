@@ -463,11 +463,13 @@ jobs:
           RUNNER_ENVIRONMENT: '${{ runner.environment }}'
           QWEN_SANDBOX: "${{ matrix.sandbox == 'sandbox:docker' && 'docker' || 'false' }}"
           # Read by Config.isUnifiedAgentLoopEnabled and
-          # Config.isEventBusAgentLoopEnabled in every CLI the tests spawn.
+          # Config.isEventBusAgentLoopEnabled in every CLI the tests spawn;
+          # both override in either direction, so each leg pins its arm with a
+          # concrete value instead of relying on the experimental default.
           # InteractiveSession forwards these into inheritEnv:false children,
           # so the parity suites pin both arms explicitly to override them.
-          QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP: "${{ matrix.agent-loop != 'current' && '1' || '' }}"
-          QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP: "${{ matrix.agent-loop == 'kernel' && '1' || '' }}"
+          QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP: "${{ matrix.agent-loop != 'current' && '1' || '0' }}"
+          QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP: "${{ matrix.agent-loop == 'kernel' && '1' || '0' }}"
           BUILD_SANDBOX_FLAGS: '--label org.qwen-code.ci.sandbox=true'
           SANDBOX_FLAGS: '--label org.qwen-code.ci.owner=${E2E_CONTAINER_OWNER}'
         run: |-

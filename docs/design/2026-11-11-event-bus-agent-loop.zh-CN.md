@@ -162,7 +162,7 @@ signal 中止时，适配器发布一次 `loop.cancelled`。Conversation 在独�
 1. **PR 1 —— 原语。** `event-bus/{bus,events,state}.ts` + 单元测试（移植 preview 的 `bus.test.ts`；新增串行投递、跨 run 隔离、失败重发布、迟到轮次测试）。尚无消费方；零行为变化。本设计文档随此 PR 落地。`runtime.ts`（handler 接线）与 `handler-support.ts` 随 PR 2 的 handler 一起到来。
 2. **PR 2 —— opt-in 标志后的 handler。** 把 `runAgentLoop` 内部重新表达为 Conversation/Llm/Tool handler 加 host 适配器，由新增的 `AgentLoopOptions.useEventBus` 标志选择（默认关，因此在统一循环内过程式路径仍是默认，直到 parity 被证明）。`runModelRound`/`runToolBatch` 保留导出与签名（ACP #15509 依赖它们），并被 handler 原样复用。一个等价测试对脚本化场景同时跑两条路径，断言结果与 host 回调顺序完全一致；headless parity 套件与 ACP 轮测试是验收门。
 3. **PR 3 —— 流式派发评估（可选，独立门控）。** preview 在流仍在运行时执行 `tool_use` 块。main 在轮结束后跑批次，且审批按批排序；流式派发改变审批时机与输出交错。此切片先写下 parity 差异并取得明确决定；架构移植本身不依赖它。
-4. **PR 4 —— headless opt-in。** `experimental.eventBusAgentLoop` 设置（环境变量覆盖 `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP=1`，由 `Config.isEventBusAgentLoopEnabled()` 读取）最先让 headless 的共享循环轮次传入 `useEventBus`。AgentCore 和 OpenTUI 在统一循环迁移的后续阶段接入。该设置默认关闭，生效需要同时开启 `experimental.unifiedAgentLoop`。开启 `QWEN_DEBUG_LOG_FILE` 后，适配器记录带 prompt ID 的 `[EVENT_BUS]` 执行标记。
+4. **PR 4 —— headless opt-in。** `experimental.eventBusAgentLoop` 设置（环境变量覆盖 `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP`，可双向强制该开关 —— `1` 开、`0` 关 —— 由 `Config.isEventBusAgentLoopEnabled()` 读取）最先让 headless 的共享循环轮次传入 `useEventBus`。AgentCore 和 OpenTUI 在统一循环迁移的后续阶段接入。该设置默认关闭，生效需要同时开启 `experimental.unifiedAgentLoop`。开启 `QWEN_DEBUG_LOG_FILE` 后，适配器记录带 prompt ID 的 `[EVENT_BUS]` 执行标记。
 5. **取消与有界收尾**（#17045 K 块）。`loop.cancelled` 和*取消*一节所述的收尾上限；`loop.output` 从词汇表中删除。
 6. **后续 —— surface 收敛**继续在 unified-agent-loop 计划下进行（TUI、OpenTUI、AgentCore、speculation、Hosted）。总线让循环级挂接（hooks、Mods、保护、录制）成为单点，这正是该计划的既定目标；这里不排任何 surface 工作。
 

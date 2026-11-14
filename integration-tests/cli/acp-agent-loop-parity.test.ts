@@ -6,12 +6,12 @@
 
 /**
  * An ACP session runs each scripted scenario three times: with
- * `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` unset, set, and set together with
- * `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP`. The runs must send the model the
- * same requests, send the client the same `session/update` notifications and
- * end each prompt the same way, and the third must run each of the session's
- * rounds on the event-bus kernel. Differences the shared loop makes on
- * purpose are asserted separately below.
+ * `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` pinned to `0`, to `1`, and to `1`
+ * together with `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP` pinned to `1`. The
+ * runs must send the model the same requests, send the client the same
+ * `session/update` notifications and end each prompt the same way, and the
+ * third must run each of the session's rounds on the event-bus kernel.
+ * Differences the shared loop makes on purpose are asserted separately below.
  */
 
 import { spawn } from 'node:child_process';
@@ -383,10 +383,12 @@ const allowOnce = () => ({
         // The debug log records the rounds each loop ran.
         QWEN_DEBUG_LOG_FILE: '1',
       };
-      delete env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'];
-      if (shared) env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] = '1';
-      delete env['QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'];
-      if (kernel) env['QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'] = '1';
+      // Pin every arm rather than relying on the setting alone: the nightly
+      // legs export these switches, InteractiveSession forwards them into the
+      // isolated env, and once a surface defaults on, an unset variable no
+      // longer runs the current loop.
+      env['QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP'] = shared ? '1' : '0';
+      env['QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP'] = kernel ? '1' : '0';
       delete env[PRIVATE_ACP_CAPABILITY_ENV];
       if (scenario.trustedParent) {
         env[PRIVATE_ACP_CAPABILITY_ENV] = PARENT_CAPABILITY;

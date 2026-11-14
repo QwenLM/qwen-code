@@ -6,9 +6,10 @@
 
 /**
  * Headless runs each scripted scenario twice, with
- * `experimental.unifiedAgentLoop` off and on, and the two runs must send the
- * model the same requests and print the same stream-json frames. Differences
- * the shared loop makes on purpose are asserted separately below.
+ * `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` set to `0` and to `1`, and the two
+ * runs must send the model the same requests and print the same stream-json
+ * frames. Differences the shared loop makes on purpose are asserted separately
+ * below.
  */
 
 import { spawn } from 'node:child_process';
@@ -331,6 +332,10 @@ describe('agent loop parity (experimental.unifiedAgentLoop)', () => {
       stdio: 'pipe',
       env: {
         ...process.env,
+        // Pin every arm rather than relying on the settings alone: once a
+        // surface defaults on, an unset variable no longer runs the other path.
+        QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP: shared ? '1' : '0',
+        QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP: kernel ? '1' : '0',
         QWEN_DEBUG_LOG_FILE: '1',
         QWEN_HOME: runtimeDir,
         QWEN_RUNTIME_DIR: runtimeDir,

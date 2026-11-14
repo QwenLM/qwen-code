@@ -86,7 +86,7 @@ describe.each([
       QWEN_CODE_SYSTEM_SETTINGS_PATH: join(cwd, 'system.json'),
       QWEN_CODE_SYSTEM_DEFAULTS_PATH: join(cwd, 'system.json'),
       QWEN_CODE_DISABLE_WORKFLOWS: '0',
-      QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP: '0',
+      QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP: shared ? '1' : '0',
       QWEN_CODE_DISABLE_CRON: '1',
       OPENAI_API_KEY: 'fake-key',
       OPENAI_BASE_URL: server.baseUrl,

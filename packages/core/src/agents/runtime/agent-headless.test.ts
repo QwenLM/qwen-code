@@ -2889,7 +2889,7 @@ describe('subagent.ts', () => {
             const { scope, emitter } = await createScope({ max_turns: 3 });
             vi.stubEnv(
               'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
-              shared ? '1' : undefined,
+              shared ? '1' : '0',
             );
             const controller = new AbortController();
             vi.useFakeTimers();
@@ -3654,11 +3654,11 @@ describe('subagent.ts', () => {
           for (const { shared, kernel } of LOOPS) {
             vi.stubEnv(
               'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
-              shared ? '1' : undefined,
+              shared ? '1' : '0',
             );
             vi.stubEnv(
               'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP',
-              kernel ? '1' : undefined,
+              kernel ? '1' : '0',
             );
             mockSendMessageStream.mockReset();
             const run = new AbortController();
