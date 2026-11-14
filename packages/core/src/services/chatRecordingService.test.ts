@@ -329,6 +329,103 @@ describe('ChatRecordingService', () => {
     await expect(target.recordSessionModel(payload)).resolves.toBe(true);
   }
 
+  describe('startup context recording', () => {
+    it('records the prelude as a system record with its message', async () => {
+      const prelude = {
+        role: 'user' as const,
+        parts: [{ text: '<system-reminder>\nprelude\n</system-reminder>' }],
+      };
+
+      svc.recordStartupContext(prelude);
+      user('hello');
+      const record = await flushed();
+
+      expect(record).toMatchObject({
+        type: 'system',
+        subtype: 'startup_context',
+        message: prelude,
+      });
+      expect(record.message).not.toBe(prelude);
+    });
+
+    it('does not create a transcript for a session with no turns', async () => {
+      svc.recordStartupContext({
+        role: 'user',
+        parts: [{ text: '<system-reminder>\nprelude\n</system-reminder>' }],
+      });
+      await svc.flush();
+
+      expect(writes()).toHaveLength(0);
+
+      user('hello');
+
+      expect(subtypes(await flushedAll())).toEqual([
+        'startup_context',
+        undefined,
+      ]);
+    });
+
+    it('parents the first real record on the flushed prelude', async () => {
+      svc.recordStartupContext({
+        role: 'user',
+        parts: [{ text: '<system-reminder>\nprelude\n</system-reminder>' }],
+      });
+      user('hello');
+
+      const [preludeRecord, userRecord] = await flushedAll();
+      expect(preludeRecord!.parentUuid).toBeNull();
+      expect(userRecord!.parentUuid).toBe(preludeRecord!.uuid);
+    });
+
+    it('parents the first strict record on the flushed prelude', async () => {
+      svc.recordStartupContext({
+        role: 'user',
+        parts: [{ text: '<system-reminder>\nprelude\n</system-reminder>' }],
+      });
+      await recordModel('scratch-model');
+      user('hello');
+
+      const [preludeRecord, modelRecord, userRecord] = await flushedAll();
+      expect(subtypes([preludeRecord!, modelRecord!, userRecord!])).toEqual([
+        'startup_context',
+        'session_model',
+        undefined,
+      ]);
+      expect(preludeRecord!.parentUuid).toBeNull();
+      expect(modelRecord!.parentUuid).toBe(preludeRecord!.uuid);
+      expect(userRecord!.parentUuid).toBe(modelRecord!.uuid);
+    });
+
+    it('records a mid-session context reminder after the prelude, in order', async () => {
+      const reminder = {
+        role: 'user' as const,
+        parts: [
+          { text: '<system-reminder>\nlate MCP tools\n</system-reminder>' },
+        ],
+      };
+      svc.recordStartupContext({
+        role: 'user',
+        parts: [{ text: '<system-reminder>\nprelude\n</system-reminder>' }],
+      });
+      svc.recordContextReminder(reminder);
+      user('hello');
+
+      const [preludeRecord, reminderRecord, userRecord] = await flushedAll();
+      expect(subtypes([preludeRecord!, reminderRecord!, userRecord!])).toEqual([
+        'startup_context',
+        'context_reminder',
+        undefined,
+      ]);
+      expect(reminderRecord).toMatchObject({
+        type: 'system',
+        message: reminder,
+      });
+      expect(reminderRecord!.message).not.toBe(reminder);
+      expect(reminderRecord!.parentUuid).toBe(preludeRecord!.uuid);
+      expect(userRecord!.parentUuid).toBe(reminderRecord!.uuid);
+    });
+  });
+
   describe('persisted last user prompt notifications', () => {
     it('publishes the recorded timestamp only after a successful human write', async () => {
       const notify = vi.fn();

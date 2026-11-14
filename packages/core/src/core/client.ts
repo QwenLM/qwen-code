@@ -193,6 +193,8 @@ import {
   getDirectoryContextString,
   getInitialChatHistory,
   getStartupContextLength,
+  isSystemReminderContent,
+  parseAvailableSkillsFromPrelude,
   wrapSystemReminder,
   type AgentAvailabilityEntry,
 } from './environmentContext.js';
@@ -810,6 +812,12 @@ export class LlmClient {
       snapshotEntries.map(LlmClient.skillEntryKey),
     );
     this.skillRemindersInitialized = true;
+  }
+
+  private seedSkillReminderDedupFromPrelude(prelude: Content): void {
+    this.seedSkillReminderDedupFromSnapshot(
+      parseAvailableSkillsFromPrelude(prelude),
+    );
   }
 
   private async seedAgentReminderDedupFromCurrent(): Promise<void> {
@@ -2415,6 +2423,11 @@ export class LlmClient {
     );
     this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     await this.seedAgentReminderDedupFromCurrent();
+    if (startupContext) {
+      this.config
+        .getChatRecordingService()
+        ?.recordStartupContext?.(startupContext);
+    }
     this.getChat().setHistory(
       startupContext ? [startupContext, ...remaining] : remaining,
       this.getChat().getCompletedToolCallIds(),
@@ -2457,6 +2470,9 @@ export class LlmClient {
     this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     await this.seedAgentReminderDedupFromCurrent();
     if (startupContext) {
+      this.config
+        .getChatRecordingService()
+        ?.recordStartupContext?.(startupContext);
       this.getChat().setHistory(
         [startupContext, ...currentHistory],
         this.getChat().getCompletedToolCallIds(),
@@ -2723,6 +2739,16 @@ export class LlmClient {
     }
   }
 
+  /**
+   * Appends a mid-session context reminder and records it, so a resumed
+   * session replays it where the model first saw it.
+   */
+  private addContextReminder(text: string): void {
+    const content: Content = { role: 'user', parts: [{ text }] };
+    this.getChat().addHistory(content);
+    this.config.getChatRecordingService()?.recordContextReminder?.(content);
+  }
+
   private drainPendingMcpServerInstructionsReminder(): void {
     if (this.pendingMcpServerInstructions.size === 0) {
       return;
@@ -2733,10 +2759,7 @@ export class LlmClient {
     if (!reminder) {
       return;
     }
-    this.getChat().addHistory({
-      role: 'user',
-      parts: [{ text: reminder }],
-    });
+    this.addContextReminder(reminder);
     for (const [serverName, text] of this.pendingMcpServerInstructions) {
       this.announcedMcpServerInstructions.set(serverName, text);
     }
@@ -2819,10 +2842,7 @@ export class LlmClient {
       return;
     }
 
-    this.getChat().addHistory({
-      role: 'user',
-      parts: [{ text: reminder }],
-    });
+    this.addContextReminder(reminder);
 
     for (const name of removedMcpToolNames) {
       this.announcedMcpToolNames.delete(name);
@@ -2930,10 +2950,7 @@ export class LlmClient {
     if (!reminder) {
       return;
     }
-    this.getChat().addHistory({
-      role: 'user',
-      parts: [{ text: reminder }],
-    });
+    this.addContextReminder(reminder);
   }
 
   private async drainAgentReminders(): Promise<void> {
@@ -2979,10 +2996,7 @@ export class LlmClient {
     if (!reminder) {
       return;
     }
-    this.getChat().addHistory({
-      role: 'user',
-      parts: [{ text: reminder }],
-    });
+    this.addContextReminder(reminder);
 
     for (const name of removedAgentNames) {
       this.announcedAgentReminderNames.delete(name);
@@ -3134,6 +3148,9 @@ export class LlmClient {
           (isDeferredToolBridgeAvailable(toolRegistry) &&
             deferredSummary.some(({ name }) => name === ToolNames.AGENT)),
       );
+      const storedPrelude = Boolean(
+        extraHistory?.[0] && isSystemReminderContent(extraHistory[0]),
+      );
       [history, snapshotEntries] = await profiler.time(
         'initial_chat_history',
         () =>
@@ -3141,13 +3158,29 @@ export class LlmClient {
             gitStatus: this.getCachedGitStatus(),
           }),
       );
+      if (!storedPrelude && history[0] && isSystemReminderContent(history[0])) {
+        try {
+          this.config
+            .getChatRecordingService()
+            ?.recordStartupContext?.(history[0]);
+        } catch (error) {
+          debugLogger.warn('Failed to record startup context', error);
+        }
+      }
       this.config
         .getMemoryManager()
         .restoreMemoryBodiesPresentInHistory(
           collectResidentMemoryBodies(history),
         );
       profiler.timeSync('skill_reminder_seed', () => {
-        this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
+        // A replayed prelude is the listing the model actually saw; seed from
+        // that block rather than re-announcing every currently available
+        // skill/command on the first turn.
+        if (storedPrelude && extraHistory?.[0]) {
+          this.seedSkillReminderDedupFromPrelude(extraHistory[0]);
+        } else {
+          this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
+        }
       });
       await profiler.time('agent_reminder_seed', () =>
         this.seedAgentReminderDedupFromCurrent(),

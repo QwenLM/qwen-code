@@ -28,6 +28,19 @@ export function escapeXml(text: string): string {
     .replace(/'/g, '&apos;');
 }
 
+/**
+ * Inverse of {@link escapeXml}. `&amp;` is decoded last so an escaped
+ * literal `&lt;` (written as `&amp;lt;`) does not turn into a tag.
+ */
+export function unescapeXml(text: string): string {
+  return text
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
 /** Bound escaped UTF-16 length without splitting an entity or a code point. */
 export function escapeXmlWithinBudget(
   value: string,

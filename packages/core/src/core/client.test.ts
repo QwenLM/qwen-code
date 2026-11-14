@@ -1852,6 +1852,67 @@ describe('Gemini Client (client.ts)', () => {
       expect(enableSpy).toHaveBeenCalledTimes(2);
     });
 
+    it('records a generated startup prelude but not a replayed one', async () => {
+      const recorder = { recordStartupContext: vi.fn() };
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(
+        recorder as unknown as ReturnType<Config['getChatRecordingService']>,
+      );
+      const prelude = userText(
+        '<system-reminder>\nstartup prelude\n</system-reminder>',
+      );
+      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([[prelude], []]);
+
+      await client.startChat();
+
+      expect(recorder.recordStartupContext).toHaveBeenCalledWith(prelude);
+
+      recorder.recordStartupContext.mockClear();
+      const stored = userText(
+        '<system-reminder>\nstored prelude\n</system-reminder>',
+      );
+      const resumed = [stored, userText('resumed')];
+      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([resumed, []]);
+
+      await client.startChat(resumed, SessionStartSource.Resume);
+
+      expect(recorder.recordStartupContext).not.toHaveBeenCalled();
+    });
+
+    it('seeds skill dedup from a stored prelude listing', async () => {
+      const stored: Content = {
+        role: 'user',
+        parts: [
+          { text: '<system-reminder>\nstored prelude\n</system-reminder>' },
+          {
+            text: [
+              '<system-reminder>',
+              'The following skills are available for use with the Skill tool.',
+              '<available_skills>',
+              '<skill>',
+              '<name>',
+              'existing',
+              '</name>',
+              '<location>',
+              'project',
+              '</location>',
+              '</skill>',
+              '</available_skills>',
+              '</system-reminder>',
+            ].join('\n'),
+          },
+        ],
+      };
+      const resumed = [stored, userText('resumed')];
+      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([resumed, []]);
+
+      await client.startChat(resumed, SessionStartSource.Resume);
+
+      expect(
+        (client as unknown as { announcedSkillReminderKeys: Set<string> })
+          .announcedSkillReminderKeys,
+      ).toEqual(new Set(['skill:existing']));
+    });
+
     it('clears trusted user answers when a chat is rebuilt', async () => {
       client.recordTrustedUserAnswers('ask-1', [{ question: 'Continue?' }], {
         '0': 'No',
@@ -3587,6 +3648,16 @@ describe('Gemini Client (client.ts)', () => {
         .spyOn(client.getChat(), 'setSystemInstruction')
         .mockImplementation(() => {});
       const addHistorySpy = quietChat();
+      const recorderMethods: Record<
+        string | symbol,
+        ReturnType<typeof vi.fn>
+      > = {};
+      const recorder = new Proxy(recorderMethods, {
+        get: (methods, name) => (methods[name] ??= vi.fn()),
+      });
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(
+        recorder as unknown as ReturnType<Config['getChatRecordingService']>,
+      );
       vi.mocked(getCoreSystemPrompt).mockClear();
 
       await client.setTools();
@@ -3603,6 +3674,10 @@ describe('Gemini Client (client.ts)', () => {
         [],
       );
       expect(addHistorySpy).toHaveBeenCalledWith(
+        mcpReminder('mcp__addition-server__add', ''),
+      );
+      // Recorded too, so a resumed session replays it in place.
+      expect(recorderMethods['recordContextReminder']).toHaveBeenCalledWith(
         mcpReminder('mcp__addition-server__add', ''),
       );
     });
@@ -16370,6 +16445,7 @@ Other open files:
         seedSkillReminderDedupFromSnapshot(
           entries: AvailableSkillEntry[],
         ): void;
+        seedSkillReminderDedupFromPrelude(prelude: Content): void;
       };
 
     async function drain() {
@@ -16430,6 +16506,37 @@ Other open files:
       await drainWith(makeEntries(['skill-a', 'skill-b']));
 
       expect(mockChat.addHistory).not.toHaveBeenCalled();
+    });
+
+    it('seeds from a replayed prelude listing instead of re-announcing it', async () => {
+      priv().seedSkillReminderDedupFromPrelude({
+        role: 'user',
+        parts: [
+          {
+            text: [
+              '<system-reminder>',
+              'The following skills are available for use with the Skill tool.',
+              '<available_skills>',
+              '<skill>',
+              '<name>',
+              'skill-a',
+              '</name>',
+              '<location>',
+              'project',
+              '</location>',
+              '</skill>',
+              '</available_skills>',
+              '</system-reminder>',
+            ].join('\n'),
+          },
+        ],
+      });
+
+      await drainWith(makeEntries(['skill-a', 'skill-b']));
+
+      expect(mockChat.addHistory).toHaveBeenCalledTimes(1);
+      expect(addedText()).toContain('skill-b');
+      expect(addedText()).not.toContain('desc-skill-a');
     });
 
     it('drain with a genuinely new skill emits a reminder', async () => {

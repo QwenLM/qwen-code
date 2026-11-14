@@ -1435,3 +1435,65 @@ describe('prompt resolution across tool-loop continuations', () => {
     expect(findApiHistoryPromptIndex(history, 'session########1')).toBe(-1);
   });
 });
+
+describe('startup context replay', () => {
+  const base = {
+    parentUuid: null,
+    sessionId: 'session',
+    timestamp: '2026-11-06T00:00:00Z',
+    cwd: '/tmp',
+    version: 'test',
+  };
+  const prelude = (text: string): Content => ({
+    role: 'user',
+    parts: [{ text: `<system-reminder>\n${text}\n</system-reminder>` }],
+  });
+  const systemRecord = (uuid: string, message: Content): ChatRecord => ({
+    ...base,
+    uuid,
+    type: 'system',
+    subtype: 'startup_context',
+    message,
+  });
+  const userRecord = (uuid: string, text: string): ChatRecord => ({
+    ...base,
+    uuid,
+    type: 'user',
+    message: { role: 'user', parts: [{ text }] },
+  });
+
+  it('prepends the latest prelude and does not replay it as a turn', () => {
+    const messages = [
+      systemRecord('old', prelude('old')),
+      userRecord('u1', 'hello'),
+      systemRecord('new', prelude('new')),
+      userRecord('u2', 'again'),
+    ];
+    const turns = buildApiHistoryFromConversation({
+      messages: [messages[1]!, messages[3]!],
+    });
+
+    expect(
+      buildSessionHistoryFromConversation({ messages }).apiHistory,
+    ).toEqual([prelude('new'), ...turns]);
+  });
+
+  it('replays a context reminder where it was recorded', () => {
+    const reminder = prelude('late MCP tools');
+    const messages = [
+      systemRecord('start', prelude('start')),
+      {
+        ...systemRecord('late', reminder),
+        subtype: 'context_reminder' as const,
+      },
+      userRecord('u1', 'hello'),
+    ];
+    const [turn] = buildApiHistoryFromConversation({
+      messages: [messages[2]!],
+    });
+
+    expect(
+      buildSessionHistoryFromConversation({ messages }).apiHistory,
+    ).toEqual([prelude('start'), reminder, turn]);
+  });
+});
