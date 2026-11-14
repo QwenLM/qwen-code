@@ -9,6 +9,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { Content } from '@google/genai';
+import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/utils/api-history-metadata.js';
 import { AuthType } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -304,6 +305,142 @@ describe('Hosted context compression', () => {
     ).toEqual(modelConfiguration);
     expect(config.switchModel).not.toHaveBeenCalled();
   });
+
+  it.each(
+    [false, true].flatMap((snapshot) =>
+      [
+        {
+          stopReason: 'harness_interruption',
+          work: true,
+          expectedRoles: ['user', 'model', 'user'],
+        },
+        { stopReason: 'harness_interruption', work: false, expectedRoles: [] },
+        { stopReason: 'cancelled', work: true, expectedRoles: [] },
+      ].map((row) => ({ ...row, snapshot })),
+    ),
+  )(
+    'keeps compact source groups whole: $stopReason, work=$work, snapshot=$snapshot',
+    async ({ stopReason, work, expectedRoles, snapshot }) => {
+      const promptId = randomUUID();
+      const instruction = 'review COMPACT_REPRO then fix findings';
+      const callId = `${promptId}:agent`;
+      const sessionId = session.authority.sessionHeader.sessionKey.sessionId;
+      const messages: Content[] = [
+        { role: 'user', parts: [{ text: instruction }] },
+        {
+          role: 'model',
+          parts: [{ functionCall: { id: callId, name: 'agent', args: {} } }],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: callId,
+                name: 'agent',
+                response: { output: 'Child started' },
+              },
+            },
+          ],
+        },
+      ];
+      if (!work) messages.splice(1);
+      for (const [index, message] of messages.entries())
+        await session.sink.write({
+          uuid: randomUUID(),
+          parentUuid: null,
+          sessionId,
+          timestamp: new Date().toISOString(),
+          cwd: root,
+          version: 'test',
+          type: (['user', 'assistant', 'tool_result'] as const)[index]!,
+          daemonPromptId: promptId,
+          message,
+        });
+      await session.sink.write({
+        uuid: randomUUID(),
+        parentUuid: null,
+        sessionId,
+        timestamp: new Date().toISOString(),
+        cwd: root,
+        version: 'test',
+        type: 'system',
+        subtype: 'turn_result',
+        daemonPromptId: promptId,
+        systemPayload: {
+          promptId,
+          state: 'cancelled',
+          stopReason,
+          endedAt: Date.now(),
+        },
+      });
+      if (snapshot) {
+        const projected = await session.sink.projectModelHistory();
+        const group = projected.apiHistory.filter((entry) =>
+          entry.parts?.some(
+            (part) =>
+              part.text === instruction ||
+              part.functionCall?.id === callId ||
+              part.functionResponse?.id === callId,
+          ),
+        );
+        await session.sink.write({
+          uuid: randomUUID(),
+          parentUuid: null,
+          sessionId,
+          timestamp: new Date().toISOString(),
+          cwd: root,
+          version: 'test',
+          type: 'system',
+          subtype: 'chat_compression',
+          systemPayload: {
+            info: candidate.info,
+            compressedHistory: [...candidate.newHistory, ...group],
+            summaryPrefixLength: 2,
+            promptIds: [
+              null,
+              null,
+              ...group.map((entry) => getApiHistoryPromptId(entry) ?? null),
+            ],
+          },
+        });
+      }
+      engine();
+      const project = vi.spyOn(session.sink, 'project');
+      const projectModel = vi.spyOn(session.sink, 'projectModelRecords');
+      const cut = session.authority.committedSequence;
+      const request = {
+        ...intent(),
+        expectedCompactionRevision: compression.revision,
+      };
+      await compression.admit(request);
+      expect(project).not.toHaveBeenCalled();
+      expect(projectModel).toHaveBeenCalledExactlyOnceWith(cut);
+      await compression.wait();
+      expect(compression.status(request.operationId)?.status).toBe('completed');
+      const history = chat.setHistory.mock.calls[0]![0];
+      expect(
+        history.some((entry) =>
+          entry.parts?.some(
+            (part) =>
+              part.text ===
+              (snapshot ? 'remember: blue' : 'original blue history'),
+          ),
+        ),
+      ).toBe(true);
+      const interruptedGroup = history.filter((entry) =>
+        entry.parts?.some(
+          (part) =>
+            part.text === instruction ||
+            part.functionCall?.id === callId ||
+            part.functionResponse?.id === callId,
+        ),
+      );
+      expect(interruptedGroup.map((entry) => entry.role)).toEqual(
+        expectedRoles,
+      );
+    },
+  );
 
   it('durably compresses without a user Turn and replays the exact operation', async () => {
     const summarize = engine();

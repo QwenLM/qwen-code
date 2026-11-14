@@ -503,7 +503,7 @@ class QwenHostedHarnessConnectorTest {
         var pending = cleanupStatus(false);
         when(live.loadSession(any())).thenReturn(fresh);
         when(live.getStatus(fresh, SUBMIT_PROMPT_ID)).thenReturn(pending);
-        var worker = java.util.concurrent.Executors.newSingleThreadExecutor();
+        var worker = java.util.concurrent.Executors.newFixedThreadPool(2);
         try {
             var loading = worker.submit(() -> connector.recheckRecoveryCleanup("tenant-a", SESSION_ID, SUBMIT_PROMPT_ID));
             assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
@@ -511,14 +511,19 @@ class QwenHostedHarnessConnectorTest {
             when(mismatch.getActualBootId()).thenReturn(NEW_BOOT_ID);
             ReflectionTestUtils.invokeMethod(connector, "adoptGeneration", mismatch);
             ReflectionTestUtils.setField(connector, "client", live);
-            if (publishWinner) {
-                assertThat(connector.recheckRecoveryCleanup("tenant-a", SESSION_ID, SUBMIT_PROMPT_ID)).isTrue();
+            var winner = publishWinner ? worker.submit(() -> connector.recheckRecoveryCleanup(
+                    "tenant-a", SESSION_ID, SUBMIT_PROMPT_ID)) : null;
+            if (winner != null) {
+                awaitQueuedOnTheSingleSlot(connector);
             }
             release.countDown();
             try {
                 loading.get(10, TimeUnit.SECONDS);
             } catch (java.util.concurrent.ExecutionException rejected) {
                 assertThat(rejected.getCause()).isInstanceOf(RuntimeException.class);
+            }
+            if (winner != null) {
+                assertThat(winner.get(10, TimeUnit.SECONDS)).isTrue();
             }
             var cached = connector.cachedRecoveryAttachment("tenant-a", SESSION_ID);
             if (cached != null) {
@@ -2221,16 +2226,17 @@ class QwenHostedHarnessConnectorTest {
             }
             return live;
         });
-        var worker = java.util.concurrent.Executors.newSingleThreadExecutor();
+        var worker = java.util.concurrent.Executors.newFixedThreadPool(2);
         try {
             var recovery = worker.submit(() -> connector.recoverForWake("tenant-a", SESSION_ID));
             assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
-            assertThat(connector.activateForWake("tenant-a", SESSION_ID)).isTrue();
-            assertThat((java.util.Set<?>) ReflectionTestUtils.getField(connector, "pendingRecovery")).hasSize(1);
+            var activation = worker.submit(() -> connector.activateForWake("tenant-a", SESSION_ID));
+            awaitQueuedOnTheSingleSlot(connector);
             release.countDown();
             assertThatThrownBy(() -> recovery.get(10, TimeUnit.SECONDS))
                     .hasCauseInstanceOf(IllegalStateException.class)
                     .hasRootCauseMessage("Hosted Harness generation moved during passive load");
+            assertThat(activation.get(10, TimeUnit.SECONDS)).isTrue();
             Map<?, ?> attached = (Map<?, ?>) ReflectionTestUtils.getField(connector, "attachments");
             assertThat(attached).hasSize(1);
             assertThat(attached.values().iterator().next()).isSameAs(live);
@@ -3673,6 +3679,211 @@ class QwenHostedHarnessConnectorTest {
         assertThatThrownBy(() -> connector.recoverManagedRuntime("tenant-a",
                 SESSION_ID, false)).isSameAs(conflict);
         verify(client, never()).close();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"recovery", "load", "passive", "message-stop", "automation-stop"})
+    void concurrentRecoverySharesTheFirstLoadAndItsParkedSnapshot(String firstPath)
+            throws Exception {
+        var client = mock(HostedHarnessClient.class);
+        var capabilities = mock(HostedHarnessCapabilities.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        var ref = mock(HarnessSessionRef.class);
+        when(ref.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(ref.getHarnessLastEventId()).thenReturn(42L);
+        when(ref.getHarnessEventEpoch()).thenReturn("parked-epoch");
+        var recovery = mock(HarnessRuntimeRecovery.class);
+        when(recovery.getCheckpointId()).thenReturn("parked-checkpoint");
+        when(ref.getRuntimeRecovery()).thenReturn(recovery);
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var loads = new AtomicInteger();
+        when(client.loadSession(any())).thenAnswer(call -> {
+            loads.incrementAndGet();
+            entered.countDown();
+            assertThat(release.await(10, TimeUnit.SECONDS)).isTrue();
+            return ref;
+        });
+        var connector = connector(client);
+        var workers = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            var first = workers.submit(() -> switch (firstPath) {
+                case "load" -> connector.createOrLoad("tenant-a", SESSION_ID, true);
+                case "passive" -> connector.createOrLoad("tenant-a", SESSION_ID, true, true);
+                case "message-stop" -> {
+                    connector.runMessageOperation("tenant-a", SESSION_ID, Map.of("kind", "stop"));
+                    yield connector.recoverManagedRuntime("tenant-a", SESSION_ID, false);
+                }
+                case "automation-stop" -> {
+                    connector.runAutomationOperation("tenant-a", SESSION_ID, Map.of("kind", "cancel_run"));
+                    yield connector.recoverManagedRuntime("tenant-a", SESSION_ID, false);
+                }
+                default -> connector.recoverManagedRuntime("tenant-a", SESSION_ID, false);
+            });
+            assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
+            var second = workers.submit(() -> connector.recoverManagedRuntime("tenant-a", SESSION_ID, false));
+            awaitQueuedOrDuplicateLoad(connector, loads);
+            assertThat(loads.get()).as("one load while another same-key caller waits").isEqualTo(1);
+            release.countDown();
+            var initial = first.get(10, TimeUnit.SECONDS);
+            var shared = second.get(10, TimeUnit.SECONDS);
+            assertThat(shared).isEqualTo(initial);
+            assertThat(shared.runtimeRecovery()).isNotNull();
+            assertThat(shared.runtimeRecovery().checkpointId()).isEqualTo("parked-checkpoint");
+            assertThat(shared.lastEventId()).isEqualTo(42L);
+            assertThat(shared.eventEpoch()).isEqualTo("parked-epoch");
+            verify(client).loadSession(any());
+            assertThat((Map<?, ?>) ReflectionTestUtils.getField(connector, "attachmentLocks")).isEmpty();
+        } finally {
+            release.countDown();
+            workers.shutdownNow();
+            assertThat(workers.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+        }
+    }
+
+    @Test
+    void cancellationTakeoverWaitsForRecoveryButStillLoadsItsOriginalPrompt() throws Exception {
+        var client = mock(HostedHarnessClient.class);
+        var capabilities = mock(HostedHarnessCapabilities.class);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(capabilities.getFeatures()).thenReturn(List.of("targeted-cancel/1"));
+        var ref = mock(HarnessSessionRef.class);
+        when(ref.getHarnessBootId()).thenReturn(BOOT_ID);
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var loads = new AtomicInteger();
+        when(client.loadSession(any())).thenAnswer(call -> {
+            if (loads.incrementAndGet() == 1) {
+                entered.countDown();
+                assertThat(release.await(10, TimeUnit.SECONDS)).isTrue();
+            }
+            return ref;
+        });
+        var connector = connector(client);
+        var workers = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            var first = workers.submit(() -> connector.recoverManagedRuntime("tenant-a", SESSION_ID, false));
+            assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
+            var second = workers.submit(() -> connector.recoverManagedCancellation(
+                    "tenant-a", SESSION_ID, SUBMIT_PROMPT_ID));
+            awaitQueuedOnTheSingleSlot(connector);
+            assertThat(loads.get()).isEqualTo(1);
+            release.countDown();
+            first.get(10, TimeUnit.SECONDS);
+            second.get(10, TimeUnit.SECONDS);
+            var requests = ArgumentCaptor.forClass(LoadHarnessSession.class);
+            verify(client, times(2)).loadSession(requests.capture());
+            assertThat(ReflectionTestUtils.<Map<String, Object>>invokeMethod(requests.getAllValues().get(1), "toJson"))
+                    .containsEntry("cancellationTakeover", true)
+                    .containsEntry("cancellationPromptId", SUBMIT_PROMPT_ID);
+            assertThat((Map<?, ?>) ReflectionTestUtils.getField(connector, "attachmentLocks")).isEmpty();
+        } finally {
+            release.countDown();
+            workers.shutdownNow();
+            assertThat(workers.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+        }
+    }
+
+    @Test
+    void failedRecoveryKeepsQueuedCallersSerializedAndReclaimsItsSlot() throws Exception {
+        var client = mock(HostedHarnessClient.class);
+        var capabilities = mock(HostedHarnessCapabilities.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        var ref = mock(HarnessSessionRef.class);
+        when(ref.getHarnessBootId()).thenReturn(BOOT_ID);
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var loads = new AtomicInteger();
+        var failure = new IllegalStateException("first load failed");
+        when(client.loadSession(any())).thenAnswer(call -> {
+            if (loads.incrementAndGet() == 1) {
+                entered.countDown();
+                assertThat(release.await(10, TimeUnit.SECONDS)).isTrue();
+                throw failure;
+            }
+            return ref;
+        });
+        var connector = connector(client);
+        var workers = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            var first = workers.submit(() -> connector.recoverManagedRuntime("tenant-a", SESSION_ID, false));
+            assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
+            var second = workers.submit(() -> connector.recoverManagedRuntime("tenant-a", SESSION_ID, false));
+            awaitQueuedOnTheSingleSlot(connector);
+            assertThat(loads.get()).isEqualTo(1);
+            release.countDown();
+            assertThatThrownBy(() -> first.get(10, TimeUnit.SECONDS)).hasCause(failure);
+            assertThat(second.get(10, TimeUnit.SECONDS).bootId()).isEqualTo(BOOT_ID);
+            verify(client, times(2)).loadSession(any());
+            assertThat((Map<?, ?>) ReflectionTestUtils.getField(connector, "attachmentLocks")).isEmpty();
+        } finally {
+            release.countDown();
+            workers.shutdownNow();
+            assertThat(workers.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+        }
+    }
+
+    @Test
+    void recoveryOfAnotherTenantDoesNotWaitForTheSameSessionId() throws Exception {
+        var client = mock(HostedHarnessClient.class);
+        var capabilities = mock(HostedHarnessCapabilities.class);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.capabilities()).thenReturn(capabilities);
+        var ref = mock(HarnessSessionRef.class);
+        when(ref.getHarnessBootId()).thenReturn(BOOT_ID);
+        var store = sessions();
+        when(store.requireSession("tenant-b", SESSION_ID)).thenReturn(
+                new SessionRecord("tenant-b", SESSION_ID, "qwen-code", null,
+                        "ACTIVE", null, null, 0, 0, 1, 1, null, 1));
+        var connector = new QwenHostedHarnessConnector(properties(), store, mock(JdbcWorkspaceExecutionStore.class));
+        ReflectionTestUtils.setField(connector, "client", client);
+        var entered = new CountDownLatch(1);
+        var release = new CountDownLatch(1);
+        var loads = new AtomicInteger();
+        when(client.loadSession(any())).thenAnswer(call -> {
+            if (loads.incrementAndGet() == 1) {
+                entered.countDown();
+                assertThat(release.await(10, TimeUnit.SECONDS)).isTrue();
+            }
+            return ref;
+        });
+        var workers = java.util.concurrent.Executors.newFixedThreadPool(2);
+        try {
+            var first = workers.submit(() -> connector.recoverManagedRuntime("tenant-a", SESSION_ID, false));
+            assertThat(entered.await(10, TimeUnit.SECONDS)).isTrue();
+            var second = workers.submit(() -> connector.recoverManagedRuntime("tenant-b", SESSION_ID, false));
+            assertThat(second.get(5, TimeUnit.SECONDS).bootId()).isEqualTo(BOOT_ID);
+            release.countDown();
+            first.get(10, TimeUnit.SECONDS);
+            assertThat(loads.get()).isEqualTo(2);
+            assertThat((Map<?, ?>) ReflectionTestUtils.getField(connector, "attachmentLocks")).isEmpty();
+        } finally {
+            release.countDown();
+            workers.shutdownNow();
+            assertThat(workers.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+        }
+    }
+
+    private static void awaitQueuedOrDuplicateLoad(QwenHostedHarnessConnector connector,
+            AtomicInteger loads) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (System.nanoTime() < deadline) {
+            if (loads.get() > 1) {
+                return;
+            }
+            var slots = (Map<?, ?>) ReflectionTestUtils.getField(connector, "attachmentLocks");
+            for (var slot : slots.values()) {
+                var lock = (ReentrantLock) ReflectionTestUtils.getField(slot, "lock");
+                if (lock.hasQueuedThreads()) {
+                    return;
+                }
+            }
+            Thread.sleep(10);
+        }
+        throw new AssertionError("the second caller neither queued nor entered a duplicate load");
     }
 
     @Test

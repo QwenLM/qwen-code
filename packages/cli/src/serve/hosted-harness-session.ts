@@ -191,6 +191,11 @@ import {
   readerWithVerified,
 } from './hosted-restore-kept-bytes.js';
 import {
+  excludedHostedPrompts,
+  isExcludedHostedRecord,
+  normalizeHostedTurnRecords,
+} from './hosted-turn-history.js';
+import {
   isChildSessionRun,
   parseChildRun,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-run-record.js';
@@ -1546,33 +1551,15 @@ function acceptedInputSequence(
   return sequence;
 }
 
-/**
- * The prompts whose turns settled without an answer (`error` or
- * `cancelled`). Turn results are `turn.settled` journal events, not
- * projected messages, so they never reach any record-based exclusion in
- * the model runner: the history is filtered against the journal here —
- * what ended without an answer is over, and its instruction never merges
- * into a later turn the way a crashing text turn's naked user record
- * otherwise would (the no-toolProfile path's older design already did
- * this; tool-profile Sessions now follow it).
- */
-function unansweredPrompts(session: HostedSession): Set<string> {
+function unansweredPrompts(
+  session: HostedSession,
+  records: readonly ChatRecord[],
+): Set<string> {
   const authority = session.managed.authority;
-  const prompts = new Set<string>();
-  for (const event of authority.eventsInSequenceRange(
-    1,
-    authority.committedSequence,
-  )) {
-    if (
-      event.kind === 'turn.settled' &&
-      (event.payload['outcome'] === 'error' ||
-        event.payload['outcome'] === 'cancelled')
-    ) {
-      const turnId = event.payload['turnId'];
-      if (typeof turnId === 'string') prompts.add(turnId);
-    }
-  }
-  return prompts;
+  return excludedHostedPrompts(
+    authority.eventsInSequenceRange(1, authority.committedSequence),
+    records,
+  );
 }
 
 /** Which input sources ride the wake pump — the one predicate the probe,
@@ -4088,14 +4075,19 @@ async function executeHostedTurn(
     async (modelScope) =>
       harness.run(async () => {
         const projected = await session.managed.sink.project();
-        const modelRecords = await session.managed.sink.projectModelRecords();
+        const rawModelRecords =
+          await session.managed.sink.projectModelRecords();
+        const unanswered = unansweredPrompts(session, projected);
+        const modelRecords = normalizeHostedTurnRecords(
+          rawModelRecords,
+          unanswered,
+        );
         const settledPrompts = new Set(
           authority
             .eventsInSequenceRange(1, authority.committedSequence)
             .filter((event) => event.kind === 'turn.settled')
             .map((event) => event.payload['turnId']),
         );
-        const unanswered = unansweredPrompts(session);
         const history = (
           session.toolProfile
             ? modelRecords.filter(
@@ -4106,14 +4098,7 @@ async function executeHostedTurn(
                     entry.daemonPromptId === promptId),
               )
             : modelRecords
-        ).filter(
-          (entry) =>
-            !(
-              entry.type === 'user' &&
-              entry.daemonPromptId !== undefined &&
-              unanswered.has(entry.daemonPromptId)
-            ),
-        );
+        ).filter((entry) => !isExcludedHostedRecord(entry, unanswered));
         let parentUuid = projected.at(-1)?.uuid ?? null;
         if (!resumeFromToolResults && !resumeApproval && !resumeModel) {
           const continuation = isHostedWakeContinuationId(promptId);
@@ -4294,7 +4279,7 @@ async function executeHostedTurn(
                   sessionId,
                   cwd,
                   history,
-                  excludedPromptIds: unansweredPrompts(session),
+                  excludedPromptIds: unansweredPrompts(session, projected),
                   classifierUserText: () =>
                     readHostedClassifierUserText(session),
                   setLoopClassifier: (classify) => {
@@ -11948,7 +11933,13 @@ export function registerHostedHarnessSessionRoutes(
       try {
         const harness = createManagedHarnessHandle(session.managed);
         let projected = await session.managed.sink.project();
-        let modelRecords = await session.managed.sink.projectModelRecords();
+        const initialRawRecords =
+          await session.managed.sink.projectModelRecords();
+        let unanswered = unansweredPrompts(session, projected);
+        let modelRecords = normalizeHostedTurnRecords(
+          initialRawRecords,
+          unanswered,
+        );
         const settledPrompts = new Set(
           session.managed.authority
             .eventsInSequenceRange(
@@ -11962,7 +11953,7 @@ export function registerHostedHarnessSessionRoutes(
         // tool rounds stay in history, and only the parked round's results
         // become the resume request. Otherwise a turn that parked after two
         // tool rounds would resume with an unanswered call in between.
-        const deriveRound = () => {
+        const deriveRound = (unanswered: ReadonlySet<string>) => {
           const turnRecords = projected.filter(
             (entry) => entry.daemonPromptId === promptId,
           );
@@ -11983,18 +11974,13 @@ export function registerHostedHarnessSessionRoutes(
           const parkedRound = new Set(
             turnRecords.slice(lastCallIndex + 1).map((entry) => entry.uuid),
           );
-          const unanswered = unansweredPrompts(session);
           const history = modelRecords.filter(
             (entry) =>
               (entry.type === 'system' ||
                 settledPrompts.has(entry.daemonPromptId) ||
                 (entry.daemonPromptId === promptId &&
                   !parkedRound.has(entry.uuid))) &&
-              !(
-                entry.type === 'user' &&
-                entry.daemonPromptId !== undefined &&
-                unanswered.has(entry.daemonPromptId)
-              ),
+              !isExcludedHostedRecord(entry, unanswered),
           );
           const resumeParts = turnRecords
             .slice(lastCallIndex + 1)
@@ -12005,7 +11991,7 @@ export function registerHostedHarnessSessionRoutes(
         // An agent wait that never folded may legitimately hold no tool
         // result yet (#13708) — the fold itself produces it below, so the
         // no-results guard runs only after the resume arm has had its say.
-        let { history, resumeParts } = deriveRound();
+        let { history, resumeParts } = deriveRound(unanswered);
         let parentUuid = projected.at(-1)?.uuid ?? null;
         const messageRecord = (
           type: 'assistant' | 'tool_result',
@@ -12167,8 +12153,11 @@ export function registerHostedHarnessSessionRoutes(
             });
             if (outstanding.length > 0 || filled > 0) {
               projected = await session.managed.sink.project();
-              modelRecords = await session.managed.sink.projectModelRecords();
-              ({ history, resumeParts } = deriveRound());
+              const rawRecords =
+                await session.managed.sink.projectModelRecords();
+              unanswered = unansweredPrompts(session, projected);
+              modelRecords = normalizeHostedTurnRecords(rawRecords, unanswered);
+              ({ history, resumeParts } = deriveRound(unanswered));
             }
           }
           // H4e-b3: the command wait resumes exactly like the agent wait —
@@ -12222,8 +12211,11 @@ export function registerHostedHarnessSessionRoutes(
             });
             if (outstanding.length > 0 || filled > 0) {
               projected = await session.managed.sink.project();
-              modelRecords = await session.managed.sink.projectModelRecords();
-              ({ history, resumeParts } = deriveRound());
+              const rawRecords =
+                await session.managed.sink.projectModelRecords();
+              unanswered = unansweredPrompts(session, projected);
+              modelRecords = normalizeHostedTurnRecords(rawRecords, unanswered);
+              ({ history, resumeParts } = deriveRound(unanswered));
             }
           }
           // A sibling the Runtime reconciliation does not own (a team
@@ -12246,8 +12238,10 @@ export function registerHostedHarnessSessionRoutes(
           });
           if (answered > 0) {
             projected = await session.managed.sink.project();
-            modelRecords = await session.managed.sink.projectModelRecords();
-            ({ history, resumeParts } = deriveRound());
+            const rawRecords = await session.managed.sink.projectModelRecords();
+            unanswered = unansweredPrompts(session, projected);
+            modelRecords = normalizeHostedTurnRecords(rawRecords, unanswered);
+            ({ history, resumeParts } = deriveRound(unanswered));
           }
           if (resumeParts.length === 0) {
             throw new Error(
@@ -12311,7 +12305,7 @@ export function registerHostedHarnessSessionRoutes(
             sessionId,
             cwd,
             history,
-            excludedPromptIds: unansweredPrompts(session),
+            excludedPromptIds: unansweredPrompts(session, projected),
             classifierUserText: () => readHostedClassifierUserText(session),
             setLoopClassifier: (classify) => {
               session.loopClassify = classify;

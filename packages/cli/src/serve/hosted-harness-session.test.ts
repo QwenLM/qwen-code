@@ -5,6 +5,13 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/utils/api-history-metadata.js';
+import { CompressionStatus } from '@qwen-code/qwen-code-core/core/turn.js';
+import {
+  filterHostedTurnHistory,
+  normalizeHostedTurnRecords,
+} from './hosted-turn-history.js';
+import { buildSessionHistoryFromConversation } from '@qwen-code/qwen-code-core/services/session-api-history.js';
 import {
   mkdir,
   mkdtemp,
@@ -922,6 +929,177 @@ async function hookApp(
     release,
     clientId: created.body.clientId,
   };
+}
+
+async function writeSettledToolHistory(
+  managed: ManagedSession,
+  promptId: string,
+  outcome: 'completed' | 'cancelled' | 'error',
+  stopReason: string,
+) {
+  const content = Buffer.from(
+    JSON.stringify([{ type: 'text', text: 'review X then fix findings' }]),
+  );
+  await managed.authority.submitInput(
+    {
+      operation: 'submitInput',
+      commandId: promptId,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+      contentDigest: createHash('sha256').update(content).digest('hex'),
+    },
+    {
+      inputId: promptId,
+      turnId: promptId,
+      source: 'hosted-harness',
+      contentRef: await managed.resources.publish('managed-input', content),
+      admissionRef: await managed.resources.publish(
+        'managed-admission',
+        Buffer.from('{}'),
+      ),
+      deadline: null,
+      wakeReason: 'input',
+    },
+  );
+  await createManagedHarnessHandle(managed).ensureRunnable();
+  const messages: Array<Pick<ChatRecord, 'type' | 'message'>> = [
+    {
+      type: 'user',
+      message: {
+        role: 'user',
+        parts: [{ text: 'review X then fix findings' }],
+      },
+    },
+    {
+      type: 'assistant',
+      message: {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: `${promptId}:background-agent`,
+              name: 'agent',
+              args: {},
+            },
+          },
+        ],
+      },
+    },
+    {
+      type: 'tool_result',
+      message: {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: `${promptId}:background-agent`,
+              name: 'agent',
+              response: { output: 'Child agent started in the background' },
+            },
+          },
+        ],
+      },
+    },
+  ];
+  let parentUuid: string | null = null;
+  for (const message of messages) {
+    const uuid = randomUUID();
+    await managed.sink.write({
+      uuid,
+      parentUuid,
+      sessionId: SESSION_ID,
+      timestamp: new Date().toISOString(),
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      daemonPromptId: promptId,
+      ...message,
+    } as ChatRecord);
+    parentUuid = uuid;
+  }
+  await managed.sink.write({
+    uuid: randomUUID(),
+    parentUuid,
+    sessionId: SESSION_ID,
+    timestamp: new Date().toISOString(),
+    type: 'system',
+    subtype: 'turn_result',
+    cwd: state.root,
+    version: 'hosted-harness/1',
+    daemonPromptId: promptId,
+    systemPayload: {
+      promptId,
+      state: outcome,
+      stopReason,
+      endedAt: Date.now(),
+    },
+  } as ChatRecord);
+}
+
+/** A settled cancelled group beside a completed one, covered by an old-format
+ * compression snapshot whose promptIds are legacy rewind marks (not journal
+ * turn ids). Returns the snapshot record's uuid. */
+async function writeCancelledGroupWithLegacySnapshot(
+  managed: ManagedSession,
+): Promise<string> {
+  await writeSettledToolHistory(
+    managed,
+    'prior-cancel',
+    'cancelled',
+    'cancelled',
+  );
+  await writeSettledToolHistory(
+    managed,
+    'prior-complete',
+    'completed',
+    'end_turn',
+  );
+  const projected = await managed.sink.projectModelHistory();
+  const savedIds = projected.apiHistory.map(
+    (entry) => getApiHistoryPromptId(entry) ?? null,
+  );
+  const snapshotId = randomUUID();
+  await managed.sink.write({
+    uuid: snapshotId,
+    parentUuid: null,
+    sessionId: SESSION_ID,
+    timestamp: new Date().toISOString(),
+    cwd: state.root,
+    version: 'hosted-harness/1',
+    type: 'system',
+    subtype: 'chat_compression',
+    systemPayload: {
+      info: {
+        compressionStatus: CompressionStatus.COMPRESSED,
+        originalTokenCount: 100,
+        newTokenCount: 50,
+      },
+      compressedHistory: projected.apiHistory,
+      promptIds: savedIds,
+      summaryPrefixLength: 0,
+    },
+  });
+  return snapshotId;
+}
+
+/** Rebuilds the api history the real runner would hand the model from the
+ * mocked runner's input (hosted-harness-model.ts initialMessages pipeline), so
+ * a witness can inspect the actual request rather than the raw record list. */
+function runnerApiHistory(input: {
+  history?: ChatRecord[];
+  excludedPromptIds?: ReadonlySet<string>;
+}) {
+  return filterHostedTurnHistory(
+    buildSessionHistoryFromConversation({
+      messages: normalizeHostedTurnRecords(
+        input.history ?? [],
+        input.excludedPromptIds,
+      ),
+    }).apiHistory,
+    input.excludedPromptIds,
+  );
 }
 
 describe('attributeShellReceipts', () => {
@@ -4912,6 +5090,225 @@ describe('Hosted Harness no-tool session', () => {
     vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockResolvedValue();
     return repair;
   }
+
+  it.each([
+    ['cancelled', 'harness_interruption', ['user', 'assistant', 'tool_result']],
+    ['cancelled', 'cancelled', []],
+    ['error', 'deadline_exceeded', []],
+    ['error', 'error', []],
+  ] as const)(
+    'keeps settled tool history whole after %s/%s (#14256)',
+    async (outcome, stopReason, expectedTypes) => {
+      mockBrokerBroker();
+      const server = await app(true);
+      const created = await headers(supertest(server).post('/session'))
+        .send({
+          sessionId: SESSION_ID,
+          sessionScope: 'thread',
+          managedSessionStore: store(),
+          toolProfile: 'hosted-workspace-files/1',
+        })
+        .expect(200);
+      const managed = capturedWakeSession().managed;
+      const completedId = `${PROMPT_ID}:completed`;
+      await writeSettledToolHistory(
+        managed,
+        completedId,
+        'completed',
+        'end_turn',
+      );
+      await writeSettledToolHistory(managed, PROMPT_ID, outcome, stopReason);
+      const projected = await managed.sink.projectModelHistory();
+      const savedIds = projected.apiHistory.map(
+        (entry) => getApiHistoryPromptId(entry) ?? null,
+      );
+      const snapshotId = randomUUID();
+      await managed.sink.write({
+        uuid: snapshotId,
+        parentUuid: null,
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        cwd: state.root,
+        version: 'hosted-harness/1',
+        type: 'system',
+        subtype: 'chat_compression',
+        systemPayload: {
+          info: {
+            compressionStatus: CompressionStatus.COMPRESSED,
+            originalTokenCount: 100,
+            newTokenCount: 50,
+          },
+          compressedHistory: projected.apiHistory,
+          promptIds: savedIds,
+          summaryPrefixLength: 0,
+        },
+      });
+      const prompt = [{ type: 'text', text: 'please continue' }];
+      const nextPromptId = randomUUID();
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', created.body.clientId)
+        .send({
+          prompt,
+          promptId: nextPromptId,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        })
+        .expect(202);
+      await vi.waitFor(() => expect(state.model).toHaveBeenCalledOnce(), {
+        timeout: settleTimeoutMs(),
+      });
+      const input = state.model.mock.calls[0]![0] as unknown as {
+        history: ChatRecord[];
+      };
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', created.body.clientId);
+          expect(status.body.hasActivePrompt).toBe(false);
+        },
+        { timeout: settleTimeoutMs() },
+      );
+      expect(
+        input.history
+          .filter((entry) => entry.daemonPromptId === PROMPT_ID)
+          .map((entry) => entry.type),
+      ).toEqual(expectedTypes);
+      expect(
+        input.history
+          .filter(
+            (entry) => entry.daemonPromptId === completedId && entry.message,
+          )
+          .map((entry) => entry.type),
+      ).toEqual(['user', 'assistant', 'tool_result']);
+      expect(
+        input.history.find((entry) => entry.uuid === snapshotId)?.systemPayload,
+      ).toMatchObject({
+        promptIds: expect.arrayContaining([PROMPT_ID, completedId]),
+      });
+      expect(
+        (await managed.sink.projectModelRecords()).find(
+          (entry) => entry.uuid === snapshotId,
+        )?.systemPayload,
+      ).toMatchObject({
+        promptIds: savedIds,
+      });
+      expect(
+        (await managed.sink.project())
+          .filter((entry) => entry.daemonPromptId === PROMPT_ID)
+          .map((entry) => entry.type),
+      ).toEqual(['user', 'assistant', 'tool_result']);
+      expect(
+        managed.authority
+          .eventsInSequenceRange(1, managed.authority.committedSequence)
+          .find(
+            (event) =>
+              event.kind === 'turn.settled' &&
+              event.payload['turnId'] === PROMPT_ID,
+          )?.payload,
+      ).toMatchObject({ outcome, stopReason });
+    },
+  );
+
+  it('excludes a naked interrupted instruction from the next prompt (PR #15959)', async () => {
+    mockBrokerBroker();
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-files/1',
+      })
+      .expect(200);
+    const managed = capturedWakeSession().managed;
+    const instruction = 'write INTERRUPTED_REPRO before answering';
+    const content = Buffer.from(
+      JSON.stringify([{ type: 'text', text: instruction }]),
+    );
+    await managed.authority.submitInput(
+      {
+        operation: 'submitInput',
+        commandId: PROMPT_ID,
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+        contentDigest: createHash('sha256').update(content).digest('hex'),
+      },
+      {
+        inputId: PROMPT_ID,
+        turnId: PROMPT_ID,
+        source: 'hosted-harness',
+        contentRef: await managed.resources.publish('managed-input', content),
+        admissionRef: await managed.resources.publish(
+          'managed-admission',
+          Buffer.from('{}'),
+        ),
+        deadline: null,
+        wakeReason: 'input',
+      },
+    );
+    await createManagedHarnessHandle(managed).ensureRunnable();
+    const uuid = randomUUID();
+    await managed.sink.write({
+      uuid,
+      parentUuid: null,
+      sessionId: SESSION_ID,
+      timestamp: new Date().toISOString(),
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      type: 'user',
+      daemonPromptId: PROMPT_ID,
+      message: { role: 'user', parts: [{ text: instruction }] },
+    });
+    await managed.sink.write({
+      uuid: randomUUID(),
+      parentUuid: uuid,
+      sessionId: SESSION_ID,
+      timestamp: new Date().toISOString(),
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      type: 'system',
+      subtype: 'turn_result',
+      daemonPromptId: PROMPT_ID,
+      systemPayload: {
+        promptId: PROMPT_ID,
+        state: 'cancelled',
+        stopReason: 'harness_interruption',
+        endedAt: Date.now(),
+      },
+    });
+    const prompt = [{ type: 'text', text: 'answer this new question only' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', created.body.clientId)
+      .send({
+        prompt,
+        promptId: randomUUID(),
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(() => expect(state.model).toHaveBeenCalledOnce(), {
+      timeout: settleTimeoutMs(),
+    });
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: settleTimeoutMs() },
+    );
+    const input = state.model.mock.calls[0]![0] as unknown as {
+      history: ChatRecord[];
+      prompt: string;
+    };
+    expect(input.prompt).toContain('answer this new question only');
+    expect(
+      input.history.filter((entry) => entry.daemonPromptId === PROMPT_ID),
+    ).toEqual([]);
+  });
 
   it('keeps a turn that ended unanswered out of the next wake turn history', async () => {
     await prewriteAutomationSession();
@@ -10150,6 +10547,35 @@ describe('Hosted Harness no-tool session', () => {
     expect(await channels.planReply(turnId)).toBeUndefined();
     await scheduler.deps.recoverBlocked();
     expect(state.model).not.toHaveBeenCalled();
+    const prompt = [{ type: 'text', text: 'what happened to the deployment?' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt,
+        promptId: randomUUID(),
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(() => expect(state.model).toHaveBeenCalledOnce(), {
+      timeout: settleTimeoutMs(),
+    });
+    const input = state.model.mock.calls[0]![0] as unknown as {
+      history: ChatRecord[];
+    };
+    expect(
+      input.history.find(
+        (entry) => entry.daemonPromptId === turnId && entry.type === 'user',
+      )?.message?.parts,
+    ).toEqual([{ text: 'write deploy.txt' }]);
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: settleTimeoutMs() },
+    );
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
       'X-Qwen-Client-Id',
       clientId,
@@ -39898,6 +40324,14 @@ describe('Hosted Harness Runtime turn takeover', () => {
       toolProfile: FILE_PROFILE,
     });
     expect(created.status).toBe(200);
+    const managed = (wakeDeps.last as { session: { managed: ManagedSession } })
+      .session.managed;
+    for (const [id, outcome, reason] of [
+      ['prior-crash', 'cancelled', 'harness_interruption'],
+      ['prior-cancel', 'cancelled', 'cancelled'],
+      ['prior-complete', 'completed', 'end_turn'],
+    ] as const)
+      await writeSettledToolHistory(managed, id, outcome, reason);
     const CALL_A = {
       name: 'write_file',
       callId: 'call-a',
@@ -40018,7 +40452,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
     );
     expect(continuedCall).toBeDefined();
     const input = continuedCall![0] as unknown as {
-      history: Array<{ type: string }>;
+      history: ChatRecord[];
       resumeFromToolResults: unknown[];
     };
     // Round one's tool result stays in history; only the parked round's
@@ -40027,6 +40461,15 @@ describe('Hosted Harness Runtime turn takeover', () => {
     const historyResults = input.history.filter(
       (entry) => entry.type === 'tool_result',
     );
+    for (const id of ['prior-crash', 'prior-complete'])
+      expect(
+        input.history
+          .filter((entry) => entry.daemonPromptId === id && entry.message)
+          .map((entry) => entry.type),
+      ).toEqual(['user', 'assistant', 'tool_result']);
+    expect(
+      input.history.some((entry) => entry.daemonPromptId === 'prior-cancel'),
+    ).toBe(false);
     expect(JSON.stringify(historyResults)).toContain('call-a');
     expect(JSON.stringify(historyResults)).not.toContain('call-b');
     expect(JSON.stringify(input.resumeFromToolResults)).toContain('call-b');
@@ -40035,6 +40478,336 @@ describe('Hosted Harness Runtime turn takeover', () => {
       supertest(replacement).delete(`/session/${SESSION_ID}`),
     );
   });
+
+  it('excludes a cancelled group from a legacy snapshot on the continue route (PR #15959 R3-3)', async () => {
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockResolvedValue();
+    const EXEC_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const EXEC_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'prepare')
+      .mockResolvedValueOnce(EXEC_A)
+      .mockResolvedValue(EXEC_B);
+    const execute = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'execute')
+      .mockImplementation((id, _payload, signal) => {
+        if (id === EXEC_A) {
+          return Promise.resolve({
+            executionStatus: 'success',
+            responseParts: [{ text: 'a written' }],
+          }) as never;
+        }
+        return signal?.aborted
+          ? Promise.reject(new Error('aborted'))
+          : new Promise((_, reject) =>
+              signal?.addEventListener(
+                'abort',
+                () => reject(new Error('aborted')),
+                { once: true },
+              ),
+            );
+      });
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: FILE_PROFILE,
+    });
+    expect(created.status).toBe(200);
+    const managed = (wakeDeps.last as { session: { managed: ManagedSession } })
+      .session.managed;
+    await writeCancelledGroupWithLegacySnapshot(managed);
+    const CALL_A = {
+      name: 'write_file',
+      callId: 'call-a',
+      args: { file_path: 'a.txt', content: 'a' },
+      isClientInitiated: false,
+      prompt_id: PROMPT_ID,
+    };
+    const CALL_B = {
+      ...CALL_A,
+      callId: 'call-b',
+      args: { file_path: 'b.txt', content: 'b' },
+    };
+    state.model.mockImplementationOnce(async ({ toolTurn, signal }) => {
+      await toolTurn!.execute(
+        [CALL_A],
+        [
+          {
+            functionCall: {
+              id: CALL_A.callId,
+              name: CALL_A.name,
+              args: CALL_A.args,
+            },
+          },
+        ],
+        'test-model',
+        signal,
+      );
+      await toolTurn!.execute(
+        [CALL_B],
+        [
+          {
+            functionCall: {
+              id: CALL_B.callId,
+              name: CALL_B.name,
+              args: CALL_B.args,
+            },
+          },
+        ],
+        'test-model',
+        signal,
+      );
+      return { text: 'unreached', model: 'test-model' };
+    });
+    const prompt = [{ type: 'text', text: 'write two files' }];
+    const payloadDigest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+    const admitted = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/prompt`),
+    )
+      .set('X-Qwen-Client-Id', created.body.clientId as string)
+      .send({ prompt, promptId: PROMPT_ID, payloadDigest });
+    expect(admitted.status).toBe(202);
+    await vi.waitFor(
+      () =>
+        expect(execute.mock.calls.some((call) => call[0] === EXEC_B)).toBe(
+          true,
+        ),
+      { timeout: settleTimeoutMs() },
+    );
+    await headers(supertest(server).post(`/session/${SESSION_ID}/cancel`)).set(
+      'X-Qwen-Client-Id',
+      created.body.clientId as string,
+    );
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId as string);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(true);
+      },
+      { timeout: settleTimeoutMs() },
+    );
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
+      executionStatus: 'success',
+      responseParts: [{ text: 'b written' }],
+    } as never);
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+    const { server: replacement, loaded } = await loadReplacement();
+    expect(loaded.status).toBe(200);
+    const recovery = loaded.body._meta?.[
+      'qwen.daemon.managedRuntimeRecovery'
+    ] as { checkpointId: string; activationId: string };
+    const clientId = loaded.body.clientId as string;
+    const continued = await replacementHeaders(
+      supertest(replacement).post(
+        `/session/${SESSION_ID}/managed-runtime/continue`,
+      ),
+    )
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        promptId: PROMPT_ID,
+        checkpointId: recovery.checkpointId,
+        activationId: recovery.activationId,
+      });
+    expect(continued.status).toBe(200);
+    await vi.waitFor(
+      async () => {
+        const status = await replacementHeaders(
+          supertest(replacement).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: settleTimeoutMs() },
+    );
+    const continuedCall = state.model.mock.calls.find(
+      (call) =>
+        (call[0] as { resumeFromToolResults?: unknown })
+          .resumeFromToolResults !== undefined,
+    );
+    expect(continuedCall).toBeDefined();
+    const input = continuedCall![0] as unknown as {
+      history: ChatRecord[];
+      excludedPromptIds?: ReadonlySet<string>;
+    };
+    // Inspect the api history the runner would actually send: the cancelled
+    // group's compressed copy must be absent while the completed group survives.
+    // Skipping the continue route's normalization leaves the snapshot's legacy
+    // marks unbridged, so the cancelled copy leaks into the request.
+    const api = JSON.stringify(runnerApiHistory(input));
+    expect(api).not.toContain('prior-cancel:background-agent');
+    expect(api).toContain('prior-complete:background-agent');
+    await replacementHeaders(
+      supertest(replacement).delete(`/session/${SESSION_ID}`),
+    );
+  });
+
+  it('bridges a legacy snapshot when the continue route answers a team sibling (PR #15959 R3-3)', async () => {
+    domainEnablement.childRun = true;
+    try {
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+      acquireSpy = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
+        .mockImplementation(async function (this: HostedWorkspaceBroker) {
+          this.runtime = {
+            bindingId: 'binding',
+            generation: '1',
+            workspaceGeneration: '1',
+          };
+        });
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'prepare').mockResolvedValue(
+        '66666666-6666-4666-8666-666666666666',
+      );
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+      const server = await app(true);
+      const created = await headers(supertest(server).post('/session'))
+        .send({
+          sessionId: SESSION_ID,
+          sessionScope: 'thread',
+          managedSessionStore: store(),
+          toolProfile: 'hosted-workspace-shell/1',
+          captureBytes: 1024 * 1024,
+        })
+        .expect(200);
+      const clientId = created.body.clientId as string;
+      const managed = (
+        wakeDeps.last as { session: { managed: ManagedSession } }
+      ).session.managed;
+      await writeCancelledGroupWithLegacySnapshot(managed);
+      const originalWrite = ManagedSessionRecordSink.prototype.write;
+      let killed = false;
+      vi.spyOn(ManagedSessionRecordSink.prototype, 'write').mockImplementation(
+        async function (this: ManagedSessionRecordSink, item) {
+          if (
+            !killed &&
+            item.type === 'tool_result' &&
+            JSON.stringify(item.message).includes('"team_create"')
+          ) {
+            killed = true;
+            throw new Error('Harness killed');
+          }
+          return originalWrite.call(this, item);
+        },
+      );
+      const later = {
+        name: 'task_create',
+        callId: 'call-2',
+        args: { subject: 'Audit', description: 'a' },
+        isClientInitiated: false,
+        prompt_id: PROMPT_ID,
+      };
+      const team = {
+        name: 'team_create',
+        callId: 'call-0',
+        args: { team_name: 'review' },
+        isClientInitiated: false,
+        prompt_id: PROMPT_ID,
+      };
+      state.model.mockImplementationOnce(
+        async ({ toolTurn, signal }) =>
+          toolTurn!.execute(
+            [team, CALL, later],
+            [team, CALL, later].map((call) => ({
+              functionCall: {
+                id: call.callId,
+                name: call.name,
+                args: call.args,
+              },
+            })),
+            'test-model',
+            signal,
+          ) as never,
+      );
+      const prompt = [{ type: 'text', text: 'team and a file' }];
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          prompt,
+          promptId: PROMPT_ID,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        })
+        .expect(202);
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(status.body.hasActivePrompt).toBe(false);
+          expect(status.body.recoveryBlocked).toBe(true);
+        },
+        { timeout: settleTimeoutMs() },
+      );
+      vi.mocked(ManagedSessionRecordSink.prototype.write).mockRestore();
+      expect(
+        (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
+          .status,
+      ).toBe(204);
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockResolvedValue({
+        executionStatus: 'success',
+        responseParts: [{ text: 'written' }],
+      } as never);
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'workspaceContext',
+      ).mockResolvedValue([]);
+      const { server: replacement, loaded } = await loadReplacement(
+        false,
+        'hosted-workspace-shell/1',
+      );
+      expect(loaded.status).toBe(200);
+      const recovery = loaded.body._meta?.[
+        'qwen.daemon.managedRuntimeRecovery'
+      ] as { checkpointId: string; activationId: string };
+      let resumedInput:
+        | { history?: ChatRecord[]; excludedPromptIds?: ReadonlySet<string> }
+        | undefined;
+      state.model.mockImplementationOnce(async (input) => {
+        resumedInput = input as {
+          history?: ChatRecord[];
+          excludedPromptIds?: ReadonlySet<string>;
+        };
+        return { text: 'continued', model: 'test-model' };
+      });
+      const continued = await replacementHeaders(
+        supertest(replacement).post(
+          `/session/${SESSION_ID}/managed-runtime/continue`,
+        ),
+      )
+        .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+        .send({
+          promptId: PROMPT_ID,
+          checkpointId: recovery.checkpointId,
+          activationId: recovery.activationId,
+        });
+      expect(continued.status).toBe(200);
+      await vi.waitFor(() => expect(resumedInput).toBeDefined(), {
+        timeout: settleTimeoutMs(),
+      });
+      // Answering the team sibling re-derives the history; that refresh must
+      // bridge the snapshot's legacy marks so the cancelled group's compressed
+      // copy stays out of the api history the runner would send.
+      const api = JSON.stringify(runnerApiHistory(resumedInput!));
+      expect(api).not.toContain('prior-cancel:background-agent');
+      expect(api).toContain('prior-complete:background-agent');
+      await vi.waitFor(
+        async () => {
+          const status = await replacementHeaders(
+            supertest(replacement).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+          expect(status.body.hasActivePrompt).toBe(false);
+        },
+        { timeout: settleTimeoutMs() },
+      );
+      await replacementHeaders(
+        supertest(replacement).delete(`/session/${SESSION_ID}`),
+      );
+    } finally {
+      domainEnablement.childRun = true;
+    }
+  }, 30_000);
 
   it('refuses the load with a retryable refusal when the takeover drive fails', async () => {
     await parkToolTurn();
@@ -42352,10 +43125,9 @@ describe('Hosted Harness Runtime turn takeover', () => {
   });
   // H4e-b1: a user Turn whose batch parks nothing (team calls only) dies
   // after a team call commits and before its tool_result lands. The
-  // cancellation takeover settles it; the committed call must be answered
-  // from its record, or core's orphan repair tells the next Turn's model to
-  // retry it and the retry opens a second task.
-  it('answers a committed team call of a cancelled user Turn from its record', async () => {
+  // cancellation takeover answers the committed call truthfully in audit
+  // history, while the next model request excludes the cancelled group.
+  it('preserves a cancelled team call in audit history without carrying it into the next Turn', async () => {
     domainEnablement.childRun = true;
     try {
       vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
@@ -42418,7 +43190,11 @@ describe('Hosted Harness Runtime turn takeover', () => {
         await toolTurn!.execute(
           calls,
           calls.map((call) => ({
-            functionCall: { id: call.callId, name: call.name, args: call.args },
+            functionCall: {
+              id: call.callId,
+              name: call.name,
+              args: call.args,
+            },
           })),
           'test-model',
           signal,
@@ -42449,7 +43225,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
           .status,
       ).toBe(204);
-      // The coordinator's cancellation takeover on a replacement Harness.
+      // The coordinator's explicit user-cancellation takeover.
       const replacement = await replacementApp();
       const loaded = await replacementHeaders(
         supertest(replacement).post(`/session/${SESSION_ID}/load`),
@@ -42460,7 +43236,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         cancellationTakeover: true,
       });
       expect(loaded.status).toBe(200);
-      let seen: ChatRecord[] = [];
+      let seen: ChatRecord[] | undefined;
       state.model.mockImplementationOnce(async (input) => {
         seen = [...((input as { history?: ChatRecord[] }).history ?? [])];
         return { text: 'ok', model: 'test-model' };
@@ -42476,10 +43252,28 @@ describe('Hosted Harness Runtime turn takeover', () => {
           payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(next)).digest('hex')}`,
         })
         .expect(202);
-      await vi.waitFor(() => expect(seen.length).toBeGreaterThan(0), {
+      await vi.waitFor(() => expect(seen).toBeDefined(), {
         timeout: settleTimeoutMs(),
       });
-      const answer = seen
+      const group = seen!.filter((entry) => entry.daemonPromptId === PROMPT_ID);
+      expect(group).toEqual([]);
+      const managed = (
+        wakeDeps.last as { session: { managed: ManagedSession } }
+      ).session.managed;
+      expect(
+        managed.authority
+          .eventsInSequenceRange(1, managed.authority.committedSequence)
+          .find(
+            (event) =>
+              event.kind === 'turn.settled' &&
+              event.payload['turnId'] === PROMPT_ID,
+          )?.payload,
+      ).toMatchObject({
+        outcome: 'cancelled',
+        stopReason: 'cancelled',
+      });
+      const audit = await managed.sink.project();
+      const answer = audit
         .filter(
           (record) =>
             record.daemonPromptId === PROMPT_ID &&

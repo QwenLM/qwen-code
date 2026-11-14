@@ -299,6 +299,67 @@ it.each(['before_message', 'after_message'] as const)(
   },
 );
 
+it('keeps the resumed instruction when its prompt settled cancelled before recovery (PR #15959 R3-2)', async () => {
+  const { text, successor } = await interruptedReceiptTurn('before_message');
+  const broker = { baseUrl: 'http://127.0.0.1:8080', token: 'unit-broker' };
+  // Production order: the cancel settles the Turn before the Harness dies,
+  // so the settlement is already journaled when recovery resumes it.
+  await successor.sink.write({
+    ...successor.authority.recordEnvelope,
+    sessionId,
+    uuid: randomUUID(),
+    parentUuid: null,
+    timestamp: new Date().toISOString(),
+    type: 'system',
+    subtype: 'turn_result',
+    daemonPromptId: promptId,
+    systemPayload: {
+      promptId,
+      state: 'cancelled',
+      stopReason: 'cancelled',
+      endedAt: Date.now(),
+    },
+  });
+  const responses = await recoverHostedCsiReceipts(
+    successor,
+    broker,
+    promptId,
+    text,
+  );
+  let seenExcluded: ReadonlySet<string> | undefined;
+  vi.mocked(runHostedHarnessTextTurn).mockImplementation(async (input) => {
+    seenExcluded = input.excludedPromptIds;
+    const finish = await input.modelScope!.beginMainAttempt('unit-model');
+    await input.completeFinalOutput!(
+      finish,
+      [],
+      [{ text: 'Recovered answer' }],
+      'unit-model',
+    );
+    await input.toolTurn!.consumeResults();
+    return { text: 'Recovered answer', model: 'unit-model' };
+  });
+  // The resumed Turn's terminal settlement reuses eventId turn:<promptId>,
+  // already committed by the cancel, so it may conflict (a pre-existing
+  // journal constraint). The model request is dispatched before that either
+  // way; the witness is the exclusion set it carried, not the terminal outcome.
+  await runHostedCsiTextTurn(
+    {
+      managed: successor,
+      cwd: root,
+      files: { broker, runtime: { bindingId, generation: '1' } },
+    },
+    promptId,
+    text,
+    new AbortController(),
+    responses.parts,
+  ).catch(() => undefined);
+  expect(runHostedHarnessTextTurn).toHaveBeenCalledOnce();
+  // Asserted outside the mock: the turn's error handler would otherwise
+  // swallow a failed in-mock assertion and let the carve-out mutant survive.
+  expect(seenExcluded?.has(promptId)).toBe(false);
+});
+
 function emptyHistory(): CsiFileHistoryObservation {
   return {
     state: { ownerSessionId: sessionId, snapshots: [], files: {} },
