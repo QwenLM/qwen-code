@@ -186,13 +186,6 @@ const SHARED_BATCH_LOG = 'tool batch on the shared agent loop';
 const SHARED_SUBAGENT_BATCH_LOG =
   /subagent \S+ round \d+ tool batch on the shared loop/g;
 
-/**
- * The workspace file the queued-input scenario's tool polls for. The harness
- * writes it only once the queued prompt's preview is on screen, so the tool
- * result cannot reach the agent loop before the message is in the queue.
- */
-const QUEUE_RELEASE_FILE = 'queue-release';
-
 const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
 
 async function until(
@@ -248,23 +241,32 @@ const VOLATILE_KEYS = new Set([
 // Timings, such as the telemetry recorded with each response.
 const TIMING_KEY = /(_ms|Ms)$/;
 
-// The background shell scenario's launch text names its task id, its process,
-// the project's runtime directory, and the sizes of that text. The sizes are
-// the one piece normalize() cannot recover from the normalized text: the
-// kernel picks the process id's width, which sets them. The token estimates
-// are ceilings of the same lengths, so they step with it too.
+// The sizes of a shell result's text. normalize() cannot recover them from
+// the normalized text: the kernel picks the process id's width, which sets
+// them, and the token estimates are ceilings of the same lengths, so they
+// step with it too.
+const SHELL_SIZE_VOLATILE_KEYS = [
+  'content_length',
+  'raw_content_length',
+  'processed_estimated_tokens',
+  'raw_estimated_tokens',
+];
+
+// The background shell scenario's launch text also names its task id, its
+// process and the project's runtime directory.
 const BACKGROUND_SHELL_VOLATILE: Volatile = {
-  keys: [
-    'content_length',
-    'raw_content_length',
-    'processed_estimated_tokens',
-    'raw_estimated_tokens',
-  ],
+  keys: SHELL_SIZE_VOLATILE_KEYS,
   text: [
     [/\bbg_[0-9a-f]{8}\b/g, 'bg_<ID>'],
     [/(pid: |pid |<pid>)\d+/g, '$1<PID>'],
     [/\/tmp\/[0-9a-f]{64}\//g, '/tmp/<HASH>/'],
   ],
+};
+
+// The queued-input scenario runs a foreground shell, whose result names its
+// process group and so carries the same size fields.
+const FOREGROUND_SHELL_VOLATILE: Volatile = {
+  keys: SHELL_SIZE_VOLATILE_KEYS,
 };
 
 const DATE_REMINDER =
@@ -453,6 +455,64 @@ describe('normalize', () => {
     );
     expect(plain.systemPayload.uiEvent['processed_estimated_tokens']).toBe(
       Math.ceil((launchText(99).length + 64) / 4),
+    );
+
+    // A foreground shell's result ends with its process group too, so the
+    // queued-input scenario's sizes move with the pid's width in the same
+    // way. These texts cross a multiple of four, which steps both ceilings.
+    const shellText = (pid: number) =>
+      'Command: echo queue-now && node queue-gate.cjs\n' +
+      'Directory: (root)\n' +
+      'Output: queue-now\n' +
+      'Error: (none)\n' +
+      'Exit Code: 0\n' +
+      'Signal: (none)\n' +
+      `Process Group PGID: ${pid}`;
+    const shellRecord = (pid: number) => {
+      const text = shellText(pid);
+      return [
+        {
+          type: 'system',
+          subtype: 'ui_telemetry',
+          systemPayload: {
+            uiEvent: {
+              'event.name': 'tool_call',
+              call_id: 'call_slow',
+              content_length: text.length,
+              raw_content_length: text.length,
+              raw_estimated_tokens: Math.ceil(text.length / 4),
+              processed_estimated_tokens: Math.ceil((text.length + 64) / 4),
+            },
+          },
+        },
+        {
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_slow',
+                  name: 'run_shell_command',
+                  response: { output: text },
+                },
+              },
+            ],
+          },
+        },
+      ];
+    };
+    const normalizedShell = (pid: number, volatile?: Volatile) =>
+      normalize(shellRecord(pid), '/workspace', '/scratch', volatile);
+    expect(shellText(999).length % 4).toBe(0);
+    // Without the scenario's keys the counts follow the pid's width; with
+    // them the records compare, while the PGID text is scrubbed either way.
+    expect(normalizedShell(999)).not.toEqual(normalizedShell(1_000));
+    expect(JSON.stringify(normalizedShell(999))).toContain(
+      'Process Group PGID: <PGID>',
+    );
+    expect(normalizedShell(999, FOREGROUND_SHELL_VOLATILE)).toEqual(
+      normalizedShell(1_000, FOREGROUND_SHELL_VOLATILE),
     );
   });
 });
@@ -789,20 +849,8 @@ describeTui(SUITE, () => {
           async () => (await session!.viewport()).includes(scenario.queue!.on),
           'the tool starts',
         );
+        await sleep(1_000);
         await session.send(scenario.queue.input);
-        // The queue renders its own preview row, and the input line cannot
-        // match it because that line keeps its prompt prefix. Seeing the
-        // preview proves the message is queued before the tool can finish.
-        await until(
-          async () =>
-            (await session!.viewport())
-              .split('\n')
-              .some((line) => line.trim() === scenario.queue!.input),
-          'the queued input is on screen',
-          30_000,
-          () => session!.viewport(),
-        );
-        writeFileSync(join(workspace, QUEUE_RELEASE_FILE), '');
       }
       const expectedAfterPrompt =
         scenario.requests === 0
@@ -1187,29 +1235,13 @@ describeTui(SUITE, () => {
               : { content: 'Both read.' },
     },
     {
-      // Input submitted while a tool runs goes out with its result. The tool
-      // waits for the harness to release it after the queued prompt is on
-      // screen, so its result cannot outrun the queue.
+      // Input submitted while a tool runs goes out with its result.
       name: 'input queued while a tool runs',
       requests: 2,
       rounds: 2,
       batches: 1,
       prompts: ['Run the slow command.'],
-      files: {
-        'queue-gate.cjs': [
-          "const fs = require('node:fs');",
-          `const release = ${JSON.stringify(QUEUE_RELEASE_FILE)};`,
-          'const deadline = Date.now() + 60_000;',
-          'function poll() {',
-          '  if (fs.existsSync(release) || Date.now() > deadline) {',
-          '    process.exit(0);',
-          '  }',
-          '  setTimeout(poll, 50);',
-          '}',
-          'poll();',
-          '',
-        ].join('\n'),
-      },
+      volatile: FOREGROUND_SHELL_VOLATILE,
       queue: { on: 'queue-now', input: 'Also mention the weather.' },
       sent: 'Also mention the weather.',
       reply: (messages) =>
@@ -1219,7 +1251,8 @@ describeTui(SUITE, () => {
                 fakeToolCall(
                   'run_shell_command',
                   {
-                    command: 'echo queue-now && node queue-gate.cjs',
+                    command:
+                      'echo queue-now && node -e "setTimeout(() => {}, 5000)"',
                     is_background: false,
                   },
                   'call_slow',
@@ -1448,16 +1481,20 @@ describeTui(SUITE, () => {
     (scenario) => renderer === 'ink' || !scenario.laterTurns,
   );
 
-  // The byte-count case pins the constant; this pins the scenario's use of
+  // The byte-count case pins the constant; this pins each scenario's use of
   // it, which the parity run alone only notices when the two pids differ in
   // width.
   it('uses the normalizer the byte-count case pins', () => {
-    const scenario = allScenarios.find(
+    const background = allScenarios.find(
       (candidate) =>
         candidate.name ===
         'a background shell whose result starts a notification turn',
     );
-    expect(scenario?.volatile).toBe(BACKGROUND_SHELL_VOLATILE);
+    expect(background?.volatile).toBe(BACKGROUND_SHELL_VOLATILE);
+    const queued = allScenarios.find(
+      (candidate) => candidate.name === 'input queued while a tool runs',
+    );
+    expect(queued?.volatile).toBe(FOREGROUND_SHELL_VOLATILE);
   });
 
   it.each(scenarios)('$name', PARITY_CASE_OPTIONS, async (scenario) => {
