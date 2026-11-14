@@ -1,4 +1,4 @@
-import { randomUUID } from './random-uuid';
+import { randomUUID } from './random-uuid.js';
 import type {
   DaemonTranscriptBlock,
   DaemonTranscriptStore,

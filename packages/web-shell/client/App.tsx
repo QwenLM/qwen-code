@@ -1,4 +1,4 @@
-import { randomUUID } from './utils/random-uuid';
+import { randomUUID } from './utils/random-uuid.js';
 import { useWorkspaceFileChanges } from './components/artifacts/useWorkspaceFileChanges';
 import {
   filterWorkspaceFileChanges,

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { randomUUID } from '../utils/random-uuid';
+import { randomUUID } from '../utils/random-uuid.js';
 import { useWorkspaceFileChanges } from './artifacts/useWorkspaceFileChanges';
 import { useModelRefresh } from '../hooks/useModelRefresh';
 import { useSubscriptionLogout } from '../hooks/useSubscriptionLogout';

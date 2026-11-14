@@ -1,4 +1,4 @@
-import { randomUUID } from '../../utils/random-uuid';
+import { randomUUID } from '../../utils/random-uuid.js';
 import { useEffect, useMemo, useRef } from 'react';
 import { fileReferenceInsertText } from '../../hooks/useAtMentionSources';
 import type { FileUploadClient } from '../../hooks/useFileUpload';
