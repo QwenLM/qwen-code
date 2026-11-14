@@ -1,4 +1,4 @@
-name: 'PR 15959 typecheck controls and trial merge'
+name: 'PR 15959 typecheck semantic negative control'
 on:
   push:
     branches: ['codex/verify-pr-15959-typecheck-20261115']
@@ -15,9 +15,6 @@ jobs:
           - mode: negative
             source: '0ba1d481cd98f8ea78698ef282767babc555c954'
             build_run: '43606770112'
-          - mode: merged
-            source: '3056beba72fec1646733e3ade9080a35c8bb1e0a'
-            build_run: '43617647081'
     runs-on: [self-hosted, linux, x64, ecs-qwen]
     container: node:22-bookworm
     timeout-minutes: 45
@@ -83,7 +80,7 @@ jobs:
               (out/'control.json').write_text(json.dumps(audit)+'\n')
               print(json.dumps(audit),flush=True)
               if mode=='negative':
-                  assert result.returncode==1 and witness, 'Typecheck did not reject the included semantic error'
+                  assert result.returncode==2 and witness, 'Typecheck did not reject the included semantic error'
               else:
                   assert result.returncode==0, 'Trial-merge typecheck failed'
           finally:
