@@ -2731,6 +2731,7 @@ version = "0.0.1"
 dependencies = [
  "command-group",
  "dunce",
+ "libc",
  "open",
  "rand",
  "serde",
