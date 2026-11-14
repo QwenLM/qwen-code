@@ -75,6 +75,7 @@ vi.mock('./components/managed/java-managed-agent-provider', async () => {
 });
 
 import { ManagedAgentWebShell } from './ManagedAgentWebShell';
+import { requestToast } from './components/ToastHost';
 import { createJavaManagedAgentProvider } from './components/managed/java-managed-agent-provider';
 import shellStyles from './App.module.css';
 import { artifact } from './components/managed/managed-tool-result.test-fixtures';
@@ -185,6 +186,24 @@ describe('ManagedAgentWebShell', () => {
     }
     expect(container.textContent).not.toContain('Something went wrong');
     expect(container.querySelector('[data-web-shell-root]')).not.toBeNull();
+  });
+
+  it('hosts the window toast channel so nested notices are not dropped (R3-2)', async () => {
+    // The managed-only shell has no App toast state: without a host here,
+    // requestToast from a nested control (e.g. the local-files Change
+    // directory failure) dispatches into a document with no listener.
+    const provider = { storageKey: 'tenant-a:actor-a' } as ManagedAgentProvider;
+    await act(async () => {
+      root.render(<ManagedAgentWebShell managedAgentProvider={provider} />);
+    });
+    expect(container.querySelector('[data-web-shell-toast]')).toBeNull();
+    await act(async () => {
+      requestToast('error', 'Could not change the directory.');
+    });
+    const toast = container.querySelector('[data-web-shell-toast]');
+    expect(toast).not.toBeNull();
+    expect(toast!.textContent).toContain('Could not change the directory.');
+    expect(toast!.getAttribute('data-tone')).toBe('error');
   });
 
   it('rejects a null base URL, not just an absent one', async () => {

@@ -4,7 +4,13 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../i18n';
 import { WebShellPortalRootContext } from '../portalRoot';
-import { ToastHost, type WebShellToast } from './ToastHost';
+import {
+  ToastHost,
+  WindowToastHost,
+  requestToast,
+  MAX_TOASTS,
+  type WebShellToast,
+} from './ToastHost';
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -148,5 +154,67 @@ describe('ToastHost elevation', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('WindowToastHost', () => {
+  function renderWindowHost(): HTMLElement {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, containers: [container] });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <WindowToastHost />
+        </I18nProvider>,
+      );
+    });
+    return container;
+  }
+
+  function toasts(container: HTMLElement): HTMLElement[] {
+    return Array.from(container.querySelectorAll('[data-web-shell-toast]'));
+  }
+
+  it('renders a requested toast with its tone and message', () => {
+    const container = renderWindowHost();
+    expect(toasts(container)).toHaveLength(0);
+    act(() => {
+      requestToast('error', 'Could not change the directory.');
+    });
+    const list = toasts(container);
+    expect(list).toHaveLength(1);
+    expect(list[0]!.textContent).toContain('Could not change the directory.');
+    expect(list[0]!.getAttribute('data-tone')).toBe('error');
+  });
+
+  it('deduplicates by tone+message and ignores empty messages', () => {
+    const container = renderWindowHost();
+    act(() => {
+      requestToast('error', 'same');
+      requestToast('error', 'same');
+      requestToast('warning', 'same');
+      requestToast('error', '');
+    });
+    const list = toasts(container);
+    expect(list).toHaveLength(2);
+    expect(
+      list.filter((n) => n.getAttribute('data-tone') === 'error'),
+    ).toHaveLength(1);
+  });
+
+  it('caps the stack at MAX_TOASTS, keeping the newest', () => {
+    const container = renderWindowHost();
+    act(() => {
+      for (let i = 0; i < MAX_TOASTS + 2; i++) {
+        requestToast('info', `message-${i}`);
+      }
+    });
+    const list = toasts(container);
+    expect(list).toHaveLength(MAX_TOASTS);
+    expect(list[list.length - 1]!.textContent).toContain(
+      `message-${MAX_TOASTS + 1}`,
+    );
   });
 });

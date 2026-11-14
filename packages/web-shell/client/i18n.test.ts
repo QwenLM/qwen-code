@@ -302,6 +302,10 @@ describe('web-shell i18n catalog', () => {
       'localFiles.copied',
       'localFiles.copyFailed',
       'localFiles.changeDirectoryFailed',
+      // The two blocker messages this change rewrites are exactly the ones
+      // whose zh drift would otherwise go unseen (R3-9).
+      'localFiles.blocker.insecureContext',
+      'localFiles.blocker.workspaceIneligible',
     ];
     for (const key of keys) {
       expect(en(key)).not.toBe(key);
@@ -322,6 +326,14 @@ describe('web-shell i18n catalog', () => {
     expect(zh('localFiles.gestureToast', vars)).not.toBe(
       en('localFiles.gestureToast', vars),
     );
+    // The insecure-context instruction is function-valued too: pin its
+    // local-port branch in both locales, naming the same address.
+    const portVars = { localPort: 8080 };
+    const enPort = en('localFiles.blocker.insecureContext', portVars);
+    const zhPort = zh('localFiles.blocker.insecureContext', portVars);
+    expect(enPort).toContain('http://localhost:8080');
+    expect(zhPort).toContain('http://localhost:8080');
+    expect(zhPort).not.toBe(enPort);
   });
 
   it.each([

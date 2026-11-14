@@ -24,6 +24,7 @@ import {
   getLocalFilesDotClass,
   getLocalFilesTooltip,
   deriveLocalFilesTunnelCommand,
+  deriveLocalFilesTunnelLocalPort,
 } from './LocalFilesControl';
 
 const bridgeLifecycle = vi.hoisted(() => ({
@@ -620,6 +621,38 @@ describe('deriveLocalFilesTunnelCommand (R1-3)', () => {
     ).toBeUndefined();
     expect(deriveLocalFilesTunnelCommand('')).toBeUndefined();
   });
+  it('refuses hosts carrying shell metacharacters or a leading dash (R3-15)', () => {
+    // The WHATWG parser preserves these in the hostname; the command is
+    // pasted into a shell, and a leading '-' would reach ssh's option parser.
+    for (const host of [
+      'http://`id`/',
+      'http://a;b/',
+      'http://$(id)/',
+      'http://-oProxyCommand=x/',
+      'http://a|b/',
+      'http://a&b/',
+    ]) {
+      expect(deriveLocalFilesTunnelCommand(host)).toBeUndefined();
+      expect(deriveLocalFilesTunnelLocalPort(host)).toBeUndefined();
+    }
+  });
+});
+
+describe('deriveLocalFilesTunnelLocalPort (R3-15)', () => {
+  it('names the local bind the copied tunnel actually opens', () => {
+    // The blocker copy tells the user which address to open; with the
+    // privileged-port clamp that is the LOCAL port, not the remote one.
+    expect(deriveLocalFilesTunnelLocalPort('http://daemon.example/')).toBe(
+      8080,
+    );
+    expect(deriveLocalFilesTunnelLocalPort('https://daemon.example/')).toBe(
+      8443,
+    );
+    expect(deriveLocalFilesTunnelLocalPort('http://host:4170/')).toBe(4170);
+    expect(
+      deriveLocalFilesTunnelLocalPort('/api/agent/web-shell/v1'),
+    ).toBeUndefined();
+  });
 });
 
 describe('LocalFilesControl trigger and notices', () => {
@@ -922,6 +955,9 @@ describe('LocalFilesControl trigger and notices', () => {
     expect(writeText).toHaveBeenCalledWith(
       'ssh -L 8443:localhost:443 daemon.example',
     );
+    // The instruction must name the LOCAL bind the tunnel opens — the only
+    // 'localhost' token in the command is the remote side (R3-15).
+    expect(document.body.textContent).toContain('http://localhost:8443');
   });
 
   it('offers new session in needs-session and calls the session action', async () => {

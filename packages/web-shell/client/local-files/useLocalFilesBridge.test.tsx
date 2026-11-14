@@ -543,6 +543,33 @@ describe('useLocalFilesBridge forcePicker', () => {
     });
     await h.flush();
     expect(h.get().status.rootName).toBe('project');
+
+    // Identity probe: both handles share the basename 'project', so only a
+    // real tool call through the new socket proves WHICH directory the
+    // rebuild serves. Binding the retained handle instead of the picker
+    // result keeps every count above green but reads the old directory here.
+    const firstValues = (
+      first as unknown as { values: ReturnType<typeof vi.fn> }
+    ).values;
+    const secondValues = (
+      second as unknown as { values: ReturnType<typeof vi.fn> }
+    ).values;
+    firstValues.mockClear();
+    secondValues.mockClear();
+    socket.emit({
+      type: 'mcp_message',
+      id: 'probe-1',
+      server: 'local-files',
+      payload: {
+        jsonrpc: '2.0',
+        id: 'probe-1',
+        method: 'tools/call',
+        params: { name: 'list_directory', arguments: { path: '' } },
+      },
+    });
+    await h.flush();
+    expect(secondValues).toHaveBeenCalled();
+    expect(firstValues).not.toHaveBeenCalled();
     h.unmount();
   });
 
@@ -568,8 +595,11 @@ describe('useLocalFilesBridge forcePicker', () => {
     h.unmount();
   });
 
-  it('Change directory during a transient resolving blip keeps the live bridge', async () => {
+  it('Change directory during a transient resolving blip keeps the live bridge, then force-rebuilds', async () => {
     const first = fakeHandle('project', { query: 'granted' });
+    // A DIFFERENT entry with the same basename: the deferred rebuild must be
+    // forced, or the rebind's basename exemption keeps serving the old one.
+    const second = fakeHandle('project', { query: 'granted' });
     const pick = vi.fn(async () => first);
     const h = renderWithPick(pick);
     await h.flush();
@@ -584,21 +614,64 @@ describe('useLocalFilesBridge forcePicker', () => {
     expect(h.get().status.phase).toBe('connected');
 
     pick.mockClear();
+    pick.mockImplementation(async () => second);
     await act(async () => {
       await h.get().connect({ forcePicker: true });
     });
     await h.flush();
     // The click reaches the picker and must not overwrite the live connected
-    // status with unavailable/workspace-resolving.
+    // status with unavailable/workspace-resolving, nor tear down the bridge
+    // mid-blip.
     expect(pick).toHaveBeenCalledOnce();
-    expect(h.get().status.phase).toBe('connected');
-
-    // Blip clears: still connected, and the live socket was never closed.
-    h.rerender({ withheldBlocker: undefined });
-    await h.flush();
     expect(h.get().status.phase).toBe('connected');
     expect(h.sockets).toHaveLength(1);
     expect(h.sockets[0]!.closeCount).toBe(0);
+
+    // Blip clears: the parked obligation forces the rebuild onto the NEW
+    // same-named directory — a second socket, the old one closed.
+    h.rerender({ withheldBlocker: undefined });
+    await h.flush();
+    expect(h.sockets).toHaveLength(2);
+    expect(h.sockets[0]!.closeCount).toBe(1);
+    const socket = h.sockets[1]!;
+    socket.emitOpen();
+    socket.emit({
+      jsonrpc: '2.0',
+      id: 'local-files-acp-initialize',
+      result: {},
+    });
+    await h.flush();
+    socket.emit({
+      type: 'mcp_registered',
+      server: 'local-files',
+      toolCount: 4,
+    });
+    await h.flush();
+    expect(h.get().status.phase).toBe('connected');
+
+    // Identity probe: the rebuilt bridge must serve the newly picked entry.
+    const firstValues = (
+      first as unknown as { values: ReturnType<typeof vi.fn> }
+    ).values;
+    const secondValues = (
+      second as unknown as { values: ReturnType<typeof vi.fn> }
+    ).values;
+    firstValues.mockClear();
+    secondValues.mockClear();
+    socket.emit({
+      type: 'mcp_message',
+      id: 'probe-blip',
+      server: 'local-files',
+      payload: {
+        jsonrpc: '2.0',
+        id: 'probe-blip',
+        method: 'tools/call',
+        params: { name: 'list_directory', arguments: { path: '' } },
+      },
+    });
+    await h.flush();
+    expect(secondValues).toHaveBeenCalled();
+    expect(firstValues).not.toHaveBeenCalled();
     h.unmount();
   });
 
@@ -630,11 +703,14 @@ describe('useLocalFilesBridge forcePicker', () => {
     pick.mockImplementation(async () => {
       throw new DOMException('aborted', 'AbortError');
     });
+    let result: { kind: 'repick-failed' } | undefined;
     await act(async () => {
-      await h.get().connect({ forcePicker: true });
+      result = await h.get().connect({ forcePicker: true });
     });
     await h.flush();
     expect(pick).toHaveBeenCalledOnce();
+    // A dismissed picker is not a failure: the handler must stay silent.
+    expect(result).toBeUndefined();
     expect(h.get().status.phase).toBe('connected');
     expect(h.get().status.rootName).toBe('first');
     h.unmount();
@@ -651,15 +727,59 @@ describe('useLocalFilesBridge forcePicker', () => {
     pick.mockImplementation(async () => {
       throw new Error('picker broke');
     });
+    let result: { kind: 'repick-failed' } | undefined;
     await act(async () => {
-      await h.get().connect({ forcePicker: true });
+      result = await h.get().connect({ forcePicker: true });
     });
     await h.flush();
     expect(pick).toHaveBeenCalledOnce();
+    // The return contract is what makes the failure non-silent: the control
+    // toasts on exactly this discriminant.
+    expect(result).toEqual({ kind: 'repick-failed' });
     // The old bridge is still connected: the failed re-pick must not write a
     // failed status nor strand a later retry on the same-entry short-circuit.
     expect(h.get().status.phase).toBe('connected');
     expect(h.get().status.rootName).toBe('first');
+    h.unmount();
+  });
+
+  it('a soft-failed save on Change directory keeps the live bridge and reports repick-failed', async () => {
+    const first = fakeHandle('proj-a', { query: 'granted' });
+    const second = fakeHandle('proj-b', { query: 'granted' });
+    const pick = vi.fn(async () => first);
+    const store = fakeStore();
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(pick),
+      store,
+    });
+    await h.flush();
+    await connectAndDrive(h);
+    expect(h.sockets).toHaveLength(1);
+
+    // The re-pick's save soft-fails (quota/eviction): the record must keep
+    // holding the directory the live bridge serves, never the rejected one.
+    pick.mockClear();
+    pick.mockImplementation(async () => second);
+    store.save = async (handle) => {
+      store.saves.push(handle);
+      return false;
+    };
+    let result: { kind: 'repick-failed' } | undefined;
+    await act(async () => {
+      result = await h.get().connect({ forcePicker: true });
+    });
+    await h.flush();
+    expect(result).toEqual({ kind: 'repick-failed' });
+    expect(store.saves).toEqual([first, second]);
+    expect(await store.load()).toBe(first);
+    expect(store.clears).toBe(0);
+    // The live bridge is untouched: no teardown, no rebuild, still proj-a.
+    expect(h.sockets).toHaveLength(1);
+    expect(h.sockets[0]!.closeCount).toBe(0);
+    expect(h.get().status.phase).toBe('connected');
+    expect(h.get().status.rootName).toBe('proj-a');
     h.unmount();
   });
 });

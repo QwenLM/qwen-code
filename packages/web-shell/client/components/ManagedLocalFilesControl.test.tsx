@@ -128,6 +128,51 @@ describe('ManagedLocalFilesControl', () => {
     expect(toastSpy).not.toHaveBeenCalled();
   });
 
+  it('exposes the state as an accessible description, name unchanged (R3-4)', () => {
+    bridge.status = {
+      phase: 'failed',
+      blocker: null,
+      rootName: 'my-dir',
+      toolCount: 1,
+    };
+    render(
+      <ManagedLocalFilesControl
+        provider={provider(true)}
+        sessionId="session-1"
+        triggerClassName="trigger"
+      />,
+    );
+    const trigger = screen.getByLabelText('localFiles.trigger');
+    // The accessible name stays the stable trigger label…
+    expect(trigger.getAttribute('aria-label')).toBe('localFiles.trigger');
+    // …while the state is reachable as a description for assistive tech.
+    const describedBy = trigger.getAttribute('aria-describedby');
+    expect(describedBy).toBeTruthy();
+    const description = document.getElementById(describedBy!);
+    expect(description?.textContent).toBe(
+      'localFiles.trigger — localFiles.status.failed (my-dir)',
+    );
+    expect(trigger.querySelector('.bg-destructive')).not.toBeNull();
+  });
+
+  it('renders the warning-token dot for a grant that needs a gesture (R3-4)', () => {
+    bridge.status = {
+      phase: 'needs-gesture',
+      blocker: null,
+      rootName: 'my-dir',
+    };
+    render(
+      <ManagedLocalFilesControl
+        provider={provider(true)}
+        sessionId="session-1"
+        triggerClassName="trigger"
+      />,
+    );
+    const trigger = screen.getByLabelText('localFiles.trigger');
+    const dot = trigger.querySelector('span[aria-hidden="true"]');
+    expect(dot?.className).toContain('var(--warning-color)');
+  });
+
   it('omits the session row when no name is passed', () => {
     bridge.status = {
       phase: 'connected',

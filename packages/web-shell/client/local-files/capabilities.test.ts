@@ -65,8 +65,9 @@ describe('detectLocalFilesCapability', () => {
   });
 
   it('blocks an insecure origin — a daemon reached over plain http', () => {
+    // The realistic shape: a non-secure origin never exposes the picker.
     const capability = detectLocalFilesCapability(
-      topLevel({ isSecureContext: false }),
+      topLevel({ isSecureContext: false, showDirectoryPicker: undefined }),
     );
     expect(capability.blocker).toBe('insecure-context');
   });
@@ -82,10 +83,13 @@ describe('detectLocalFilesCapability', () => {
     ).toBe('unsupported-browser');
   });
 
-  it('reports the browser blocker first, because that is what the user can act on', () => {
+  it('diagnoses the insecure origin before the missing picker it causes', () => {
+    // A secure context is a precondition for the picker: reporting
+    // "unsupported browser" here would hide the SSH-tunnel guidance for the
+    // plain-http deployment the insecure-context blocker exists for.
     const capability = detectLocalFilesCapability(
       topLevel({ isSecureContext: false, showDirectoryPicker: undefined }),
     );
-    expect(capability.blocker).toBe('unsupported-browser');
+    expect(capability.blocker).toBe('insecure-context');
   });
 });

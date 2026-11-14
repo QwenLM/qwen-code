@@ -116,28 +116,58 @@ export function getLocalFilesTooltip(
   return `${t('localFiles.trigger')} — ${t(statusKey)}${name}`;
 }
 
+interface LocalFilesTunnelTarget {
+  host: string;
+  remotePort: number;
+  localPort: number;
+}
+
 /**
- * Derive the SSH tunnel command for the insecure-context blocker. The local
- * bind port must be unprivileged (a non-root user cannot bind 80/443), so a
- * privileged remote port is mapped to a high local port; the remote port stays
- * the daemon's. IPv6 hostnames are unbracketed because ssh takes a bare host.
- * Returns undefined for a relative/base-less URL (no tunnel to derive).
+ * Parse the daemon URL into an SSH tunnel target. The local bind port must be
+ * unprivileged (a non-root user cannot bind 80/443), so a privileged remote
+ * port is mapped to a high local port; the remote port stays the daemon's.
+ * IPv6 hostnames are unbracketed because ssh takes a bare host.
+ *
+ * The host is allowlisted because the command is pasted into a shell: the
+ * WHATWG URL parser preserves shell metacharacters in the host (`http://a;b/`
+ * parses with hostname `a;b`), and a leading `-` would reach ssh's own option
+ * parser. `:` stays allowed for bare IPv6 addresses. Returns undefined for a
+ * relative/base-less URL or a host outside the allowlist (no safe tunnel).
  */
-export function deriveLocalFilesTunnelCommand(
+function parseLocalFilesTunnelTarget(
   baseUrl: string,
-): string | undefined {
+): LocalFilesTunnelTarget | undefined {
   try {
     const url = new URL(baseUrl);
     if (!url.hostname) return undefined;
+    const host = url.hostname.replace(/^\[|\]$/g, '');
+    if (!/^[A-Za-z0-9._:-]+$/.test(host) || host.startsWith('-')) {
+      return undefined;
+    }
     const remotePort = Number(
       url.port || (url.protocol === 'https:' ? '443' : '80'),
     );
     const localPort = remotePort < 1024 ? remotePort + 8000 : remotePort;
-    const host = url.hostname.replace(/^\[|\]$/g, '');
-    return `ssh -L ${localPort}:localhost:${remotePort} ${host}`;
+    return { host, remotePort, localPort };
   } catch {
     return undefined;
   }
+}
+
+/** Derive the SSH tunnel command for the insecure-context blocker. */
+export function deriveLocalFilesTunnelCommand(
+  baseUrl: string,
+): string | undefined {
+  const target = parseLocalFilesTunnelTarget(baseUrl);
+  if (target === undefined) return undefined;
+  return `ssh -L ${target.localPort}:localhost:${target.remotePort} ${target.host}`;
+}
+
+/** The local port the copied tunnel binds — the address the user must open. */
+export function deriveLocalFilesTunnelLocalPort(
+  baseUrl: string,
+): number | undefined {
+  return parseLocalFilesTunnelTarget(baseUrl)?.localPort;
 }
 
 export interface LocalFilesPanelProps {
@@ -155,6 +185,8 @@ export interface LocalFilesPanelProps {
   onCopyCommand?: (command: string) => void;
   /** SSH tunnel command for the insecure-context blocker, when derivable. */
   tunnelCommand?: string;
+  /** Local port the tunnel binds; the blocker copy names the address to open. */
+  tunnelLocalPort?: number;
 }
 
 /**
@@ -171,6 +203,7 @@ export function LocalFilesPanel({
   onNewSession,
   onCopyCommand,
   tunnelCommand,
+  tunnelLocalPort,
 }: LocalFilesPanelProps) {
   const { t } = useI18n();
   const busy = BUSY.includes(status.phase);
@@ -230,7 +263,13 @@ export function LocalFilesPanel({
       {status.phase === 'unavailable' && status.blocker ? (
         <div className="flex flex-col gap-2">
           <p className="text-xs text-muted-foreground">
-            {t(BLOCKER_KEY[status.blocker])}
+            {t(
+              BLOCKER_KEY[status.blocker],
+              status.blocker === 'insecure-context' &&
+                tunnelLocalPort !== undefined
+                ? { localPort: tunnelLocalPort }
+                : undefined,
+            )}
           </p>
           {status.blocker === 'cross-origin-frame' ? (
             <Button
@@ -556,6 +595,10 @@ export function LocalFilesControl({
     () => deriveLocalFilesTunnelCommand(baseUrl),
     [baseUrl],
   );
+  const tunnelLocalPort = useMemo(
+    () => deriveLocalFilesTunnelLocalPort(baseUrl),
+    [baseUrl],
+  );
 
   const dotClass = getLocalFilesDotClass(status);
   // The state is colour + a native tooltip, both invisible to assistive tech.
@@ -619,6 +662,7 @@ export function LocalFilesControl({
           }}
           onCopyCommand={handleCopyCommand}
           tunnelCommand={tunnelCommand}
+          tunnelLocalPort={tunnelLocalPort}
         />
       </PopoverContent>
     </Popover>

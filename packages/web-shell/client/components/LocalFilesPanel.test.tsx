@@ -432,6 +432,36 @@ describe('LocalFilesPanel usability affordances', () => {
     expect(buttonByLabel('Copy SSH tunnel command')).toBeUndefined();
   });
 
+  it('names the local tunnel port in the instruction (R3-15)', () => {
+    // With the privileged-port clamp the command's only 'localhost' token is
+    // the REMOTE side; the instruction must name the local bind to open.
+    mountExtra(
+      { phase: 'unavailable', blocker: 'insecure-context' },
+      {
+        onCopyCommand: vi.fn(),
+        tunnelCommand: 'ssh -L 8080:localhost:80 host',
+        tunnelLocalPort: 8080,
+      },
+    );
+    expect(text()).toContain('not a secure context');
+    expect(text()).toContain('http://localhost:8080');
+  });
+
+  it('names the local tunnel port in Chinese (R3-15)', () => {
+    mountExtra(
+      { phase: 'unavailable', blocker: 'insecure-context' },
+      {
+        onCopyCommand: vi.fn(),
+        tunnelCommand: 'ssh -L 8080:localhost:80 host',
+        tunnelLocalPort: 8080,
+      },
+      'zh-CN',
+    );
+    expect(text()).not.toContain('localFiles.');
+    expect(text()).toContain('安全上下文');
+    expect(text()).toContain('http://localhost:8080');
+  });
+
   it('renders no copy buttons when the host provides no copy handler', () => {
     mountExtra({ phase: 'unavailable', blocker: 'unsupported-daemon' });
     expect(buttonByLabel('Copy startup command')).toBeUndefined();

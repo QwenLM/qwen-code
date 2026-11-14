@@ -669,6 +669,8 @@ describe('useManagedLocalFilesBridge', () => {
     await waitFor(() =>
       expect(vi.mocked(pickDirectoryHandle)).toHaveBeenCalled(),
     );
+    // A successful change must never clear the grant it just persisted.
+    expect(storeSpies.clear).not.toHaveBeenCalled();
     await act(async () => {
       await result.current.disconnect();
     });
@@ -688,11 +690,23 @@ describe('useManagedLocalFilesBridge', () => {
         win: fakeWin,
       }),
     );
+    // Self-contained setup: the first connect goes through the picker (no
+    // stored grant), then the retained-grant reuse preconditions are made
+    // explicit so the second connect discriminates on forcePicker alone —
+    // not on mock implementations leaked from neighbouring tests.
+    storeSpies.load.mockResolvedValue(
+      undefined as unknown as FileSystemDirectoryHandle,
+    );
     act(() => {
       void result.current.connect();
     });
     await waitFor(() => expect(result.current.status.phase).toBe('connected'));
     expect(vi.mocked(pickDirectoryHandle)).toHaveBeenCalledTimes(1);
+    vi.mocked(ensureReadwritePermission).mockResolvedValue({
+      state: 'granted',
+      requested: false,
+    });
+    storeSpies.load.mockResolvedValue(fakeHandle);
     // The affordance only renders while connected. The re-entrancy guard must
     // be scoped to grant acquisition, not held for the bridge's connected
     // lifetime, or this click is a silent no-op (R1-1). Restoring the awaited
@@ -708,7 +722,7 @@ describe('useManagedLocalFilesBridge', () => {
     });
   });
 
-  it('a soft-failed save on Change directory clears this mount’s stale record', async () => {
+  it('a soft-failed save on Change directory keeps the live bridge and reports repick-failed', async () => {
     const peer = await startPeer();
     servers.push(peer.server);
     const fakeWin = {
@@ -729,9 +743,7 @@ describe('useManagedLocalFilesBridge', () => {
       void result.current.connect();
     });
     await waitFor(() => expect(result.current.status.phase).toBe('connected'));
-    // The slot holds this mount's old directory; the re-pick's save will
-    // soft-fail, so the stale record must be cleared or a reload would bind
-    // the directory the user changed away from (R2-3).
+    const firstId = peer.registeredConnectionId();
     storeSpies.load.mockResolvedValue(fakeHandle);
     storeSpies.save.mockResolvedValueOnce(false);
     const newHandle = {
@@ -742,17 +754,26 @@ describe('useManagedLocalFilesBridge', () => {
       kind: 'picked',
       handle: newHandle,
     }));
+    let outcome: { kind: 'repick-failed' } | undefined;
     await act(async () => {
-      await result.current.connect({ forcePicker: true });
+      outcome = await result.current.connect({ forcePicker: true });
     });
-    expect(storeSpies.clear).toHaveBeenCalledOnce();
-    await waitFor(() => expect(result.current.status.rootName).toBe('new-dir'));
+    // The change is rejected wholesale: the live bridge keeps serving the old
+    // directory, the record keeps holding it, and the handler gets the toast
+    // discriminant. Persisting the new handle must have been attempted.
+    expect(outcome).toEqual({ kind: 'repick-failed' });
+    expect(storeSpies.save).toHaveBeenCalledWith(newHandle);
+    expect(storeSpies.clear).not.toHaveBeenCalled();
+    expect(peer.unregistered).toEqual([]);
+    expect(peer.registeredConnectionId()).toBe(firstId);
+    expect(result.current.status.phase).toBe('connected');
+    expect(result.current.status.rootName).toBe('my-dir');
     await act(async () => {
       await result.current.disconnect();
     });
   });
 
-  it('a soft-failed save leaves a peer’s different-directory record alone', async () => {
+  it('re-confirming the bound entry keeps the registration and never saves or clears', async () => {
     const peer = await startPeer();
     servers.push(peer.server);
     const fakeWin = {
@@ -773,14 +794,53 @@ describe('useManagedLocalFilesBridge', () => {
       void result.current.connect();
     });
     await waitFor(() => expect(result.current.status.phase).toBe('connected'));
-    // A peer tab re-granted a different directory into the shared slot; the
-    // identity guard must not delete that grant (mirror of the case above).
-    const peerHandle = {
-      name: 'peer-dir',
-      isSameEntry: async (other: unknown) => other === peerHandle,
-    } as unknown as FileSystemDirectoryHandle;
-    storeSpies.load.mockResolvedValue(peerHandle);
+    const firstId = peer.registeredConnectionId();
+    storeSpies.load.mockResolvedValue(fakeHandle);
+    storeSpies.save.mockClear();
+    // Even a soft-failing save must not matter: the same-entry short-circuit
+    // returns before the save, so neither teardown nor record clear can fire.
     storeSpies.save.mockResolvedValueOnce(false);
+    // The default picker returns the already-bound handle (fixed PICKER_ID
+    // reopens the last choice): confirming without navigating is a no-op.
+    let outcome: { kind: 'repick-failed' } | undefined = {
+      kind: 'repick-failed',
+    };
+    await act(async () => {
+      outcome = await result.current.connect({ forcePicker: true });
+    });
+    expect(outcome).toBeUndefined();
+    expect(storeSpies.save).not.toHaveBeenCalled();
+    expect(storeSpies.clear).not.toHaveBeenCalled();
+    expect(peer.unregistered).toEqual([]);
+    expect(peer.registeredConnectionId()).toBe(firstId);
+    expect(result.current.status.phase).toBe('connected');
+    await act(async () => {
+      await result.current.disconnect();
+    });
+  });
+
+  it('a successful Change directory save persists the picked handle and never clears', async () => {
+    const peer = await startPeer();
+    servers.push(peer.server);
+    const fakeWin = {
+      location: { origin: 'http://localhost' },
+    } as unknown as Window;
+    const { result } = renderHook(() =>
+      useManagedLocalFilesBridge({
+        sessionId: 'session-1',
+        baseUrl: peer.baseUrl,
+        fetch: peerFetch,
+        win: fakeWin,
+      }),
+    );
+    storeSpies.load.mockResolvedValue(
+      undefined as unknown as FileSystemDirectoryHandle,
+    );
+    act(() => {
+      void result.current.connect();
+    });
+    await waitFor(() => expect(result.current.status.phase).toBe('connected'));
+    storeSpies.load.mockResolvedValue(fakeHandle);
     const newHandle = {
       name: 'new-dir',
       isSameEntry: async (other: unknown) => other === newHandle,
@@ -789,9 +849,16 @@ describe('useManagedLocalFilesBridge', () => {
       kind: 'picked',
       handle: newHandle,
     }));
+    let outcome: { kind: 'repick-failed' } | undefined = {
+      kind: 'repick-failed',
+    };
     await act(async () => {
-      await result.current.connect({ forcePicker: true });
+      outcome = await result.current.connect({ forcePicker: true });
     });
+    expect(outcome).toBeUndefined();
+    // WHICH handle was persisted is the contract: the picked one, not the
+    // retained one; and a committed save is never followed by a clear.
+    expect(storeSpies.save).toHaveBeenCalledWith(newHandle);
     expect(storeSpies.clear).not.toHaveBeenCalled();
     await waitFor(() => expect(result.current.status.rootName).toBe('new-dir'));
     await act(async () => {
@@ -821,12 +888,50 @@ describe('useManagedLocalFilesBridge', () => {
       kind: 'failed',
       message: 'boom',
     });
+    let outcome: { kind: 'repick-failed' } | undefined;
     await act(async () => {
-      await result.current.connect({ forcePicker: true });
+      outcome = await result.current.connect({ forcePicker: true });
     });
     // The re-pick must actually have run (guard not held), and its failure must
-    // not misreport the still-running bridge.
+    // not misreport the still-running bridge. The return contract is what
+    // makes the failure non-silent: the control toasts on this discriminant.
     expect(vi.mocked(pickDirectoryHandle)).toHaveBeenCalledTimes(2);
+    expect(outcome).toEqual({ kind: 'repick-failed' });
+    expect(result.current.status.phase).toBe('connected');
+    await act(async () => {
+      await result.current.disconnect();
+    });
+  });
+
+  it('a cancelled forcePicker re-pick stays silent and keeps the bridge', async () => {
+    const peer = await startPeer();
+    servers.push(peer.server);
+    const fakeWin = {
+      location: { origin: 'http://localhost' },
+    } as unknown as Window;
+    const { result } = renderHook(() =>
+      useManagedLocalFilesBridge({
+        sessionId: 'session-1',
+        baseUrl: peer.baseUrl,
+        fetch: peerFetch,
+        win: fakeWin,
+      }),
+    );
+    act(() => {
+      void result.current.connect();
+    });
+    await waitFor(() => expect(result.current.status.phase).toBe('connected'));
+    // The module-mocked picker reports cancellation the way the real
+    // pickDirectoryHandle translates an AbortError.
+    vi.mocked(pickDirectoryHandle).mockResolvedValueOnce({ kind: 'cancelled' });
+    let outcome: { kind: 'repick-failed' } | undefined = {
+      kind: 'repick-failed',
+    };
+    await act(async () => {
+      outcome = await result.current.connect({ forcePicker: true });
+    });
+    // A dismissed picker is not a failure: the handler must stay silent.
+    expect(outcome).toBeUndefined();
     expect(result.current.status.phase).toBe('connected');
     await act(async () => {
       await result.current.disconnect();

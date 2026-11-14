@@ -266,6 +266,15 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
    */
   const connectWroteStatusRef = useRef(false);
   /**
+   * A forced rebuild parked by a Change-directory pick that landed during a
+   * transient resolving blip: the live bridge must survive the blip, but the
+   * rebind that follows the verdict must rebuild with force — its basename
+   * exemption cannot tell the new same-named directory from the old one.
+   */
+  const pendingForceRebuildRef = useRef<FileSystemDirectoryHandle | undefined>(
+    undefined,
+  );
+  /**
    * A revoke — or just its panel reconcile — handed to a connect's finally
    * because that connect may still write.
    */
@@ -712,6 +721,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       // blocker clears, or the panel renders no Connect affordance for the
       // life of the mount. needs-gesture must survive (its handle is not in
       // handleRef either, but its phase is not unavailable).
+      pendingForceRebuildRef.current = undefined;
       setStatus((prev) => (prev.phase === 'unavailable' ? IDLE : prev));
       return;
     }
@@ -740,6 +750,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         if (staleRebind()) return;
         if (!persisted) {
           handleRef.current = undefined;
+          pendingForceRebuildRef.current = undefined;
           stopBridge();
           setStatus(IDLE);
           return;
@@ -766,6 +777,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       if (permission.state !== 'granted') {
         // Stop the previous session's bridge first: stop() emits 'stopped'
         // (mapped to idle), so the needs-gesture status must come after it.
+        pendingForceRebuildRef.current = undefined;
         stopBridge();
         setStatus({
           phase: 'needs-gesture',
@@ -774,7 +786,12 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         });
         return;
       }
-      startBridge(handle);
+      // A Change-directory pick parked during a resolving blip owes a forced
+      // rebuild: startBridge's keep-bridge exemption compares basenames and
+      // cannot tell the new same-named directory from the old one.
+      const forceRebuild = pendingForceRebuildRef.current !== undefined;
+      pendingForceRebuildRef.current = undefined;
+      startBridge(handle, forceRebuild ? { force: true } : undefined);
       // A rebind keeps serving the in-memory grant, so this effect owns the
       // latch over it: set when the record is a peer's entry, cleared when
       // the record is provably this mount's own again (the exemption exit
@@ -985,6 +1002,16 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         saveEpochRef.current += 1;
         if (connectSavedRef.current) foreignRecordRef.current = false;
         if (stale()) return;
+        // A change that failed to persist must not leave the old directory as
+        // the stored grant while the panel serves the new one: reject the
+        // re-pick wholesale, keep the live bridge, and report the failure so
+        // the handler can surface it. connectSavedRef stays false so a parked
+        // pendingRevoke still runs in finally; the bind stamp is withdrawn
+        // because this connect bound nothing.
+        if (forcePicker && !connectSavedRef.current) {
+          connectBoundHandleRef.current = undefined;
+          return { kind: 'repick-failed' } as const;
+        }
         detachedRef.current = false;
         releasedRecordRef.current = false;
         connectWroteStatusRef.current = true;
@@ -995,11 +1022,14 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         if (forcePicker && (await sameBoundEntry(result.handle))) {
           if (stale()) return;
           handleRef.current = result.handle;
+          pendingForceRebuildRef.current = undefined;
           return;
         }
         // During a transient resolving blip, do not tear down the live,
         // correctly-routed bridge for the forced rebuild; keep the fresh grant
-        // and let the rebind effect rebuild once the verdict settles. Hard
+        // and park a forced-rebuild obligation the rebind effect consumes once
+        // the verdict settles. Without the obligation the rebind's basename
+        // exemption would keep serving the OLD same-named directory. Hard
         // verdicts still withhold through startBridge below.
         if (
           forcePicker &&
@@ -1009,8 +1039,10 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         ) {
           handleRef.current = result.handle;
           handleEpochRef.current += 1;
+          pendingForceRebuildRef.current = result.handle;
           return;
         }
+        pendingForceRebuildRef.current = undefined;
         startBridge(result.handle, { force: true });
       } finally {
         connectInFlightRef.current = false;

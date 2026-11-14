@@ -264,25 +264,36 @@ export function useManagedLocalFilesBridge(
             return;
           }
           const previousHandle = handleRef.current;
+          // Re-confirming the already-bound entry is not a change: the picker
+          // reopens the last choice (fixed PICKER_ID), so pressing Select
+          // without navigating must not tear down and re-register the live
+          // bridge. Identity, not basename — a same-named folder elsewhere is
+          // a real change; a throwing isSameEntry fails closed (not same).
+          if (forcePicker && previousHandle) {
+            let same = false;
+            try {
+              same = await previousHandle.isSameEntry(picked.handle);
+            } catch {
+              same = false;
+            }
+            if (stale()) return;
+            if (same) {
+              handleRef.current = picked.handle;
+              return;
+            }
+          }
           handle = picked.handle;
           handleRef.current = handle;
           const saved = (await storeRef.current?.save(handle)) ?? false;
           if (stale()) return;
+          // A change that failed to persist must not leave the old directory
+          // as the stored grant while the panel serves the new one: reject the
+          // re-pick wholesale and keep the live bridge, exactly as the daemon
+          // hook does. The record still holds the directory the bridge serves,
+          // so a reload stays consistent and the handler's toast fires.
           if (forcePicker && !saved) {
-            // The change is served in-memory but was not persisted (quota /
-            // eviction). Clear this mount's stale record so a reload does not
-            // silently bind the directory the user changed away from; use the
-            // same entry-identity guard as the teardown path (R2-3).
-            const stored = await storeRef.current?.load();
-            if (stored && previousHandle) {
-              let same = false;
-              try {
-                same = await previousHandle.isSameEntry(stored);
-              } catch {
-                same = false;
-              }
-              if (same) await storeRef.current?.clear();
-            }
+            handleRef.current = previousHandle;
+            return { kind: 'repick-failed' } as const;
           }
         }
         if (stale()) return;

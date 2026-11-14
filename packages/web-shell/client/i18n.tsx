@@ -2344,8 +2344,10 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'localFiles.status.resolving': 'Resolving…',
   'localFiles.needsSessionHint':
     'Start a session first. The bridge binds to exactly one session, so no other session can reach your files.',
-  'localFiles.blocker.insecureContext':
-    'This page is not a secure context, so the browser will not grant local file access. Serve the Web Shell over https, or forward the daemon port with SSH and open the http://localhost address in the copied tunnel command.',
+  'localFiles.blocker.insecureContext': (v) =>
+    v?.localPort !== undefined
+      ? `This page is not a secure context, so the browser will not grant local file access. Serve the Web Shell over https, or run the copied SSH tunnel command and open http://localhost:${v.localPort}.`
+      : 'This page is not a secure context, so the browser will not grant local file access. Serve the Web Shell over https, or forward the daemon port with SSH and open http://localhost.',
   'localFiles.blocker.crossOriginFrame':
     'Local file access is blocked inside a cross-origin frame. Open the Web Shell in its own browser tab to connect a directory.',
   'localFiles.blocker.unsupportedBrowser':
@@ -7503,8 +7505,10 @@ const ZH: Messages = {
   'localFiles.status.resolving': '解析中…',
   'localFiles.needsSessionHint':
     '请先创建一个会话。桥只绑定一个会话，因此其他会话无法访问你的文件。',
-  'localFiles.blocker.insecureContext':
-    '当前页面不是安全上下文，浏览器不会授予本地文件访问权。请通过 https 访问 Web Shell，或用 SSH 转发 daemon 端口后打开所复制隧道命令中的 http://localhost 地址。',
+  'localFiles.blocker.insecureContext': (v) =>
+    v?.localPort !== undefined
+      ? `当前页面不是安全上下文，浏览器不会授予本地文件访问权。请通过 https 访问 Web Shell，或运行所复制的 SSH 隧道命令后打开 http://localhost:${v.localPort}。`
+      : '当前页面不是安全上下文，浏览器不会授予本地文件访问权。请通过 https 访问 Web Shell，或用 SSH 转发 daemon 端口后打开 http://localhost。',
   'localFiles.blocker.crossOriginFrame':
     '跨源 iframe 中本地文件访问被禁用。请在独立的浏览器标签页中打开 Web Shell 再连接目录。',
   'localFiles.blocker.unsupportedBrowser':
