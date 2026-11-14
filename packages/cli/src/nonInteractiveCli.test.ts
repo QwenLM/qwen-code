@@ -10466,6 +10466,38 @@ describe('runNonInteractive', () => {
     );
   });
 
+  it('emits a terminal error result for stream-json session turn limits', async () => {
+    setupMetricsMock();
+    Object.assign(mockConfig, { isUnifiedAgentLoopEnabled: () => true });
+    vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    mockLlmClient.sendMessageStream.mockReturnValueOnce(
+      createStreamFromEvents([{ type: LlmEventType.MaxSessionTurns }]),
+    );
+
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Second question',
+        'prompt-client-turn-cap-stream-json',
+      ),
+    ).resolves.toBe(1);
+
+    const messages = processStdoutSpy.mock.calls
+      .map((call) => String(call[0]))
+      .join('')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    expect(messages.at(-1)).toMatchObject({
+      type: 'result',
+      is_error: true,
+      error: { message: expect.stringContaining('Reached max session turns') },
+    });
+  });
+
   // Intended difference: headless charges a drain item one turn, while the
   // client counts each of its rounds, and only the shared loop honours the
   // client's limit.
