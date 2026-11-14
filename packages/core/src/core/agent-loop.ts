@@ -68,6 +68,8 @@ export interface AgentLoopResult {
   turn?: Turn;
   /** The function responses of the last tool batch. */
   parts?: Part[];
+  /** The same responses by call, as the batch returned them. */
+  responses?: ToolBatchResult['responses'];
 }
 
 export interface AgentLoopRound {
@@ -176,9 +178,28 @@ export interface AgentLoopHost {
     event: ServerLlmStreamEvent,
     discardedCalls: readonly ToolCallRequestInfo[],
   ): ModelEventResult | Promise<ModelEventResult>;
-  onRoundEnd?(round: number): void;
-  /** The request for a round after the first; defaults to the tool results. */
-  nextRound?(round: number, parts: Part[]): AgentLoopRound;
+  /**
+   * After each model round, before its tool batch, with the round's calls
+   * and its stop. The loop waits for this hook before starting the batch.
+   * Returning a stop reason ends the loop there; a stop of the round itself
+   * takes precedence.
+   */
+  onRoundEnd?(
+    round: number,
+    model: {
+      calls: readonly ToolCallRequestInfo[];
+      stop?: AgentLoopStopReason;
+    },
+  ): ModelEventResult | Promise<ModelEventResult>;
+  /**
+   * Builds the next request, which defaults to the previous batch's parts.
+   * When recording was deferred, `responses` carries the recording callbacks.
+   */
+  nextRound?(
+    round: number,
+    parts: Part[],
+    responses?: ToolBatchResult['responses'],
+  ): AgentLoopRound;
   /**
    * The calls of a batch that run; the rest get `skippedOutput`. `batch`
    * holds every call of the batch, including replays and repeated ids.
@@ -227,12 +248,18 @@ export interface AgentLoopToolExecutor {
         settled: readonly AgentLoopSettledCall[],
       ): boolean;
       output(callId: string, chunk: ToolResultDisplay): void;
+      /** Whether the owning loop has already settled. */
+      isFinished?(): boolean;
     },
   ): Promise<AgentLoopSettledCall[]>;
 }
 
 export interface AgentLoopOptions {
-  client: LlmClient;
+  /**
+   * Sends the rounds. An agent with its own chat passes its round source;
+   * its calls then do not count toward the session's tool calls.
+   */
+  client: LlmClient | ModelRoundSource;
   config: Config;
   /** Cancels the loop; the model rounds use it. */
   signal: AbortSignal;
@@ -247,9 +274,16 @@ export interface AgentLoopOptions {
   scheduler?: Partial<SchedulerOptions>;
   executor?: AgentLoopToolExecutor;
   runtimeView?: RuntimeContentGeneratorView;
+  /** Passed to each tool batch; see {@link ToolBatchOptions}. */
+  duplicateStateForCall?: ToolBatchOptions['duplicateStateForCall'];
+  keepCancelledResults?: boolean;
+  /** Leave recording to the host via `nextRound` or the loop result. */
+  deferRecording?: boolean;
   /**
    * Run the loop on the event-bus implementation instead of the procedural
-   * one. Opt-in; the two are behaviorally equivalent. See
+   * one. Opt-in; the two are behaviorally equivalent, except that a run
+   * whose signal aborted ends as `cancelled` once it has not settled within
+   * a cap, and its host hears nothing after that. See
    * docs/design/2026-11-11-event-bus-agent-loop.md.
    */
   useEventBus?: boolean;
@@ -268,10 +302,7 @@ export async function runAgentLoop(
     return runAgentLoopOnBus(options);
   }
   const { client, config, signal, host = {} } = options;
-  const duplicates = options.duplicates ?? {
-    handled: new Map(client.getHistoryToolCallFingerprints()),
-    responded: new Set<string>(),
-  };
+  const duplicates = options.duplicates ?? defaultDuplicates(client);
   const executor =
     options.executor ??
     createSchedulerExecutor(config, options.scheduler, options.runtimeView);
@@ -279,37 +310,69 @@ export async function runAgentLoop(
   for (let index = 0; ; index++) {
     const rounds = index + 1;
     host.onRoundStart?.(index, round.promptId);
-    const { turn, calls, stop } = await runModelRound(
-      client,
-      round,
-      signal,
-      host,
-    );
-    host.onRoundEnd?.(index);
+    const {
+      turn,
+      calls,
+      stop: modelStop,
+    } = await runModelRound(client, round, signal, host);
+    const hostStop = await host.onRoundEnd?.(index, {
+      calls,
+      ...(modelStop ? { stop: modelStop } : {}),
+    });
+    const stop = modelStop ?? hostStop;
     if (stop) return { reason: stop, rounds, turn };
     if (calls.length === 0) return { reason: 'completed', rounds, turn };
 
-    const batch = await runToolBatch(calls, {
-      config,
-      client,
-      signal,
-      toolSignal: options.toolSignal,
-      host,
-      duplicates,
-      executor,
-    });
+    const batch = await runToolBatch(
+      calls,
+      batchOptions(options, duplicates, executor),
+    );
+    const { parts, responses } = batch;
     if (batch.stop) {
-      return { reason: batch.stop, rounds, turn, parts: batch.parts };
+      return { reason: batch.stop, rounds, turn, parts, responses };
     }
     if (options.maxRounds !== undefined && rounds >= options.maxRounds) {
-      return { reason: 'next_round', rounds, turn, parts: batch.parts };
+      return { reason: 'next_round', rounds, turn, parts, responses };
     }
-    round = host.nextRound?.(rounds, batch.parts) ?? {
-      parts: batch.parts,
+    round = host.nextRound?.(rounds, parts, responses) ?? {
+      parts,
       promptId: round.promptId,
       options: { type: SendMessageType.ToolResult },
     };
   }
+}
+
+/** Provider replay bookkeeping seeded from the session's history. */
+export function defaultDuplicates(
+  client: LlmClient | ModelRoundSource,
+): AgentLoopDuplicateState {
+  return {
+    handled: new Map(
+      isModelRoundSource(client) ? [] : client.getHistoryToolCallFingerprints(),
+    ),
+    responded: new Set<string>(),
+  };
+}
+
+/** The options of a loop's tool batch. */
+export function batchOptions(
+  options: AgentLoopOptions,
+  duplicates: AgentLoopDuplicateState,
+  executor: AgentLoopToolExecutor,
+): ToolBatchOptions {
+  const { client } = options;
+  return {
+    config: options.config,
+    ...(isModelRoundSource(client) ? {} : { client }),
+    signal: options.signal,
+    toolSignal: options.toolSignal,
+    host: options.host,
+    duplicates,
+    duplicateStateForCall: options.duplicateStateForCall,
+    executor,
+    keepCancelledResults: options.keepCancelledResults,
+    deferRecording: options.deferRecording,
+  };
 }
 
 /**
@@ -337,6 +400,7 @@ export async function runModelRound(
   round: AgentLoopRound,
   signal: AbortSignal,
   host: Pick<AgentLoopHost, 'onModelEvent'>,
+  isFinished?: () => boolean,
 ): Promise<{
   turn?: Turn;
   calls: ToolCallRequestInfo[];
@@ -361,6 +425,7 @@ export async function runModelRound(
         finished = true;
         return { turn: next.value, calls, stop };
       }
+      if (isFinished?.()) return { calls: [], stop: 'cancelled' };
       const event = next.value;
       let discardedCalls: ToolCallRequestInfo[] = [];
       if (
@@ -374,6 +439,7 @@ export async function runModelRound(
         stop ??= stopReasonOf(event.type);
       }
       const surfaceStop = await host.onModelEvent?.(event, discardedCalls);
+      if (isFinished?.()) return { calls: [], stop: 'cancelled' };
       if (surfaceStop) return { calls, stop: stop ?? surfaceStop };
     }
   } finally {
@@ -399,6 +465,8 @@ export interface ToolBatchOptions {
   /** Keeps distinct classes of calls from claiming each other's provider IDs. */
   duplicateStateForCall?(request: ToolCallRequestInfo): AgentLoopDuplicateState;
   executor: AgentLoopToolExecutor;
+  /** Whether the owning loop has already settled. */
+  isFinished?(): boolean;
   /**
    * Finish and record a batch `signal` cancelled and return its results,
    * with the stop reason `cancelled`, for a surface that keeps them.
@@ -436,7 +504,7 @@ export async function runToolBatch(
   calls: ToolCallRequestInfo[],
   options: ToolBatchOptions,
 ): Promise<ToolBatchResult> {
-  const { config, client, signal, duplicates, executor } = options;
+  const { config, client, signal, duplicates, executor, isFinished } = options;
   const host = options.host ?? {};
   const toolSignal = options.toolSignal ?? signal;
   const duplicateStateFor = (request: ToolCallRequestInfo) =>
@@ -559,15 +627,19 @@ export async function runToolBatch(
       ? []
       : await executor.run(toRun, toolSignal, {
           beforeLaunch: (request, settled) => {
+            if (isFinished?.()) return false;
             offerUntil(
               toRun.findIndex(({ callId }) => callId === request.callId) + 1,
               settled,
             );
             return launches.get(request.callId) === true;
           },
-          output: (callId, chunk) =>
-            outputHandlers.get(callId)?.(callId, chunk),
+          output: (callId, chunk) => {
+            if (!isFinished?.()) outputHandlers.get(callId)?.(callId, chunk);
+          },
+          ...(isFinished && { isFinished }),
         });
+  if (isFinished?.()) return { parts: [], stop: 'cancelled' };
   offerUntil(toRun.length, completed);
   const completedByCallId = new Map(
     completed.map((call) => [call.request.callId, call]),
@@ -635,7 +707,15 @@ export async function runToolBatch(
       artifacts: response.artifacts,
     })),
     new Map(ordered.map(({ request }) => [request.callId, request.prompt_id])),
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    isFinished,
   );
+  if (isFinished?.()) return { parts: [], stop: 'cancelled' };
   const parts: Part[] = [];
   const responses: NonNullable<ToolBatchResult['responses']> = [];
   ordered.forEach(({ request, executionRequest, response, status }, index) => {
@@ -720,6 +800,7 @@ export function createSchedulerExecutor(
   options: Partial<SchedulerOptions> = {},
   runtimeView?: RuntimeContentGeneratorView,
 ): AgentLoopToolExecutor {
+  const { onToolResultFullTurnModel } = options;
   return {
     run: (requests, signal, hooks) =>
       new Promise<CompletedToolCall[]>((resolve, reject) => {
@@ -733,11 +814,20 @@ export function createSchedulerExecutor(
           onEditorClose: () => {},
           ...options,
           config,
+          isFinished: hooks.isFinished,
+          ...(hooks.isFinished &&
+            onToolResultFullTurnModel && {
+              onToolResultFullTurnModel: (model) =>
+                !hooks.isFinished?.() &&
+                onToolResultFullTurnModel.call(options, model),
+            }),
           outputUpdateHandler: (callId, chunk) => {
+            if (hooks.isFinished?.()) return;
             options.outputUpdateHandler?.(callId, chunk);
             hooks.output(parents.get(callId) ?? callId, chunk);
           },
           onToolCallsUpdate: (toolCalls) => {
+            if (hooks.isFinished?.()) return;
             for (const call of toolCalls) {
               const { callId, parentCallId } = call.request;
               if (!batch.has(callId)) {
@@ -755,7 +845,9 @@ export function createSchedulerExecutor(
           beforeToolLaunch: (call: ScheduledToolCall) =>
             hooks.beforeLaunch(call.request, [...settled.values()]),
           onAllToolCallsComplete: async (completedCalls) => {
-            await options.onAllToolCallsComplete?.(completedCalls);
+            if (!hooks.isFinished?.()) {
+              await options.onAllToolCallsComplete?.(completedCalls);
+            }
             resolve(completedCalls);
           },
         });

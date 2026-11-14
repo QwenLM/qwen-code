@@ -105,8 +105,8 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     clientSecret: 'channels.editor.field.dingtalk.clientSecret',
   },
   'dingtalk-webhook': {
-    webhookUrl: 'channels.editor.field.dingtalkWebhook.webhookUrl',
-    signingSecret: 'channels.editor.field.dingtalkWebhook.signingSecret',
+    webhookUrl: 'channels.editor.field.webhook.webhookUrl',
+    signingSecret: 'channels.editor.field.webhook.signingSecret',
   },
   weixin: {
     groupPolicy: 'channels.editor.field.weixin.groupPolicy',
@@ -120,6 +120,10 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
   feishu: {
     clientId: 'channels.editor.field.feishu.clientId',
     clientSecret: 'channels.editor.field.feishu.clientSecret',
+  },
+  'feishu-webhook': {
+    webhookUrl: 'channels.editor.field.webhook.webhookUrl',
+    signingSecret: 'channels.editor.field.webhook.signingSecret',
   },
   dws: {
     privatePolicy: 'channels.editor.field.dws.privatePolicy',
