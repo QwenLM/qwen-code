@@ -1,0 +1,105 @@
+name: 'PR 15959 segment receipt original-production reproduction'
+on:
+  push:
+    branches: ['codex/verify-pr-15959-segment-receipt-repro']
+permissions:
+  contents: read
+jobs:
+  segment-receipt:
+    runs-on: [self-hosted, linux, x64, ecs-qwen]
+    container: maven:3.9.11-eclipse-temurin-21
+    timeout-minutes: 55
+    env:
+      NODE_OPTIONS: '--max-old-space-size=6144'
+      MAVEN_OPTS: '-Xmx2048m'
+      MAVEN_ARGS: '-Dmaven.repo.local=/tmp/pr15959-m2'
+    services:
+      mysql:
+        image: mysql:8.4.6
+        env:
+          MYSQL_ROOT_PASSWORD: verify-fixture
+          MYSQL_ROOT_HOST: '%'
+          MYSQL_DATABASE: qwen_verify
+        options: >-
+          --tmpfs /var/lib/mysql
+          --health-cmd="mysqladmin ping --host=127.0.0.1 --user=root --password=verify-fixture --silent"
+          --health-interval=10s --health-timeout=5s --health-retries=12
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          ref: '3d6f45c42b153019def0792518b6373289a3ed2a'
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Prepare and attest isolated tools and database
+        timeout-minutes: 6
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq python3 default-mysql-client
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          mkdir -p .verify-evidence
+          test "$(git rev-parse HEAD)" = '3d6f45c42b153019def0792518b6373289a3ed2a'
+          git rev-parse HEAD | tee .verify-evidence/source-sha.txt
+          java -version 2>&1 | tee .verify-evidence/java-version.txt
+          mvn -version | tee .verify-evidence/maven-version.txt
+          mysql --host=mysql --user=root --password=verify-fixture -e 'SET GLOBAL max_allowed_packet = 134217728; SELECT VERSION(), @@transaction_isolation, @@innodb_use_native_aio, @@GLOBAL.max_allowed_packet; SHOW GRANTS;' | tee .verify-evidence/mysql-settings.txt
+          printf '%s\n' 'Task service uses image default AIO/binlog; selected cases do not exercise large-object or server-wide deadlock counters. Full CI retains its normal flags.' > .verify-evidence/service-deviation.txt
+      - name: Install sibling SDK from candidate source
+        timeout-minutes: 10
+        run: |
+          set -o pipefail
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install 2>&1 | tee .verify-evidence/sdk-install.log
+      - name: Observe original segment receipt values on real MySQL
+        timeout-minutes: 22
+        run: |
+          python3 - <<'PY'
+          import json, re, shutil, subprocess, xml.etree.ElementTree as ET
+          from pathlib import Path
+          out = Path('.verify-evidence')
+          module = Path('packages/managed-agent-server')
+          command = ['mvn', '--batch-mode', '--no-transfer-progress', '-Pmysql-integration',
+              '-Dtest=__no_selected_unit_test__', '-Dsurefire.failIfNoSpecifiedTests=false',
+              '-Dit.test=ToolPublicationAsyncVerificationMySqlIT#asynchronousSegmentVerificationPreservesTheSegmentReceipt',
+              '-Dmysql.url=jdbc:mysql://mysql:3306/qwen_verify?allowPublicKeyRetrieval=true&useSSL=false',
+              '-Dmysql.user=root', '-Dmysql.password=verify-fixture', 'clean', 'verify', 'checkstyle:check']
+          (out / 'command.json').write_text(json.dumps(command) + '\n')
+          with (out / 'maven.log').open('wb') as log:
+              run = subprocess.run(command, cwd=module, stdout=log, stderr=subprocess.STDOUT, timeout=1200)
+          (out / 'maven.rc').write_text(str(run.returncode) + '\n')
+          reports = module / 'verification/target/failsafe-reports'
+          assert reports.exists(), 'No real MySQL report produced'
+          shutil.copytree(reports, out / 'failsafe-reports')
+          cases = []
+          for report in reports.glob('TEST-*.xml'):
+              for case in ET.parse(report).getroot().iter('testcase'):
+                  failures = [node.attrib.get('message', '') + '\n' + (node.text or '') for node in case.findall('failure')]
+                  cases.append({'class': case.attrib['classname'], 'name': case.attrib['name'],
+                      'skipped': case.find('skipped') is not None, 'errors': len(case.findall('error')),
+                      'failures': failures})
+          (out / 'cases.json').write_text(json.dumps(cases, indent=2) + '\n')
+          assert run.returncode == 1 and len(cases) == 2
+          actual = []
+          for case in cases:
+              assert case['class'].endswith('.ToolPublicationAsyncVerificationMySqlIT')
+              assert case['name'].startswith('asynchronousSegmentVerificationPreservesTheSegmentReceipt(')
+              assert not case['skipped'] and not case['errors'] and len(case['failures']) == 1
+              match = re.search(r'but was:\s*(\{[^\n]+\})', case['failures'][0])
+              assert match, 'The actual returned receipt must be retained'
+              receipt = json.loads(match[1])
+              assert set(receipt) == {'resourceId', 'kind', 'schemaVersion', 'byteLength', 'digest'}
+              assert receipt['kind'] == 'managed-tool-segment' and receipt['byteLength'] == len(b'captured output')
+              actual.append(receipt)
+          (out / 'actual-receipts.json').write_text(json.dumps(actual, indent=2) + '\n')
+          subprocess.run(['git', 'diff', '--exit-code'], check=True)
+          print('EXPECTED-RED original production: both real MySQL stream receipts have resource shape, not the required segment identity', flush=True)
+          print(json.dumps({'mavenExit': run.returncode, 'realMysqlCases': len(cases), 'unexpectedFailures': 0, 'actualReceipts': actual}), flush=True)
+          PY
+      - name: Preserve executed evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pr15959-segment-receipt-reproduction
+          path: .verify-evidence/
+          include-hidden-files: true
