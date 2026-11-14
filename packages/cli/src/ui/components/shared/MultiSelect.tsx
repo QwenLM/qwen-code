@@ -154,11 +154,7 @@ export function MultiSelect<T>({
         const itemNumberText = `${String(itemIndex + 1).padStart(
           numberColumnWidth,
         )}.`;
-        const checkboxText = item.disabled
-          ? '[x]'
-          : isChecked
-            ? checkedText
-            : uncheckedText;
+        const checkboxText = isChecked ? checkedText : uncheckedText;
 
         let textColor = theme.text.primary;
         if (item.disabled) {
