@@ -53,6 +53,7 @@ import {
   startSessionPrRefreshTimer,
 } from './session-pr-refresh.js';
 import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
+import { slowHostBudgetMs } from '../../test-utils/slow-test-host.js';
 
 // dispose() stops the next tick but does not await the sweep already in
 // flight, so a sweep can still be writing under the temp tree while teardown
@@ -2564,1462 +2565,71 @@ describe('refreshWorkspaceSessionPrStates', () => {
 });
 
 // The timer cases chain real-clock vi.waitFor budgets (the rotation case
-// declares 10s + 10s + 30s plus up to 20 interval advances that yield real
-// event-loop turns for the refresh tail's real fs) and the Aone ones spawn
-// the real-git origin probe; the 15s off-ECS default would let the runner
-// decide the outcome before those waits on a contended host. vi.waitFor
-// measures real time even under vi.useFakeTimers(), so the fake clock does
-// not renew it. 120s leaves headroom for the extreme macOS nightly load.
-describe('startSessionPrRefreshTimer', { timeout: 120_000 }, () => {
-  let baseDir: string;
-  let trustedCwd: string;
-  let untrustedCwd: string;
+// declares 10s + 10s + 30s plus up to 20 interval advances interleaved with
+// real MessageChannel macrotask yields for the refresh tail's real fs) and
+// the Aone ones spawn the real-git origin probe; the 15s off-ECS default
+// would let the runner decide the outcome before those waits on a contended
+// host. vi.waitFor measures real time even under vi.useFakeTimers(), so the
+// fake clock does not renew it. slowHostBudgetMs keeps the fast ceiling on
+// idle hosts and leaves 120s headroom for the extreme macOS nightly load.
+describe(
+  'startSessionPrRefreshTimer',
+  { timeout: slowHostBudgetMs(15_000, 120_000) },
+  () => {
+    let baseDir: string;
+    let trustedCwd: string;
+    let untrustedCwd: string;
 
-  beforeEach(async () => {
-    vi.clearAllMocks();
-    baseDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-pr-timer-base-'));
-    trustedCwd = await fsp.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-pr-timer-trusted-'),
-    );
-    untrustedCwd = await fsp.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-pr-timer-untrusted-'),
-    );
-    process.env['QWEN_RUNTIME_DIR'] = baseDir;
-  });
-
-  afterEach(async () => {
-    vi.useRealTimers();
-    delete process.env['QWEN_RUNTIME_DIR'];
-    for (const dir of [baseDir, trustedCwd, untrustedCwd]) {
-      await removeTempTree(dir);
-    }
-  });
-
-  function timerRuntime(
-    workspaceId: string,
-    workspaceCwd: string,
-    trusted: boolean,
-    primary: boolean = trusted,
-  ): WorkspaceRuntime {
-    return {
-      workspaceId,
-      workspaceCwd,
-      sessionRuntimeBaseDir: baseDir,
-      primary,
-      trusted,
-      env: { mode: 'parent-process', overlayKeys: [] },
-      bridge: { markSessionCatalogChanged: vi.fn() },
-    } as unknown as WorkspaceRuntime;
-  }
-
-  async function seedPendingBinding(
-    runtime: WorkspaceRuntime,
-    sessionId: string,
-    prNumber = 42,
-  ): Promise<string> {
-    const service = createWorkspaceRuntimeSessionService(runtime);
-    const chatsDir = path.join(
-      new Storage(runtime.workspaceCwd).getProjectDir(),
-      'chats',
-    );
-    await fsp.mkdir(chatsDir, { recursive: true });
-    await fsp.writeFile(
-      path.join(chatsDir, `${sessionId}.jsonl`),
-      `${JSON.stringify({
-        uuid: `${sessionId}-user-1`,
-        parentUuid: null,
-        sessionId,
-        timestamp: '2026-08-01T00:00:00.000Z',
-        type: 'user',
-        message: { role: 'user', parts: [{ text: 'hello' }] },
-        cwd: runtime.workspaceCwd,
-      })}\n`,
-      'utf8',
-    );
-    const prPath = service.getPrSessionPathForArchiveState(sessionId, 'active');
-    await upsertSessionPr(prPath, {
-      number: prNumber,
-      url: `https://github.com/o/r/pull/${prNumber}`,
-      state: 'open',
-    });
-    return prPath;
-  }
-
-  it('returns undefined when disabled via QWEN_SESSION_PR_REFRESH_MINUTES=0', () => {
-    const registry = createWorkspaceRegistry([
-      timerRuntime('trusted', trustedCwd, true),
-    ]);
-
-    expect(
-      startSessionPrRefreshTimer({
-        workspaceRegistry: registry,
-        env: { QWEN_SESSION_PR_REFRESH_MINUTES: '0' },
-      }),
-    ).toBeUndefined();
-  });
-
-  it('drainNow keeps watch files the single-workspace scan cannot see', async () => {
-    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
-    const registry = createWorkspaceRegistry([trustedRuntime]);
-    await seedPendingBinding(trustedRuntime, SESSION_A, 42);
-    const watchDir = await fsp.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-pr-watch-drain-now-'),
-    );
-    // A watch file with no binder in this scan. A targeted drain scans one
-    // workspace, so every other workspace's bindings are absent from the rows:
-    // declaring the coverage complete would delete this file as unbound.
-    const orphan = { host: 'github.com', repo: 'other/repo', number: 99 };
-    writePrWatchStateSync(watchDir, orphan, {
-      pr: orphan,
-      state: 'open',
-      headSha: 'a'.repeat(40),
-      checks: 'passing',
-    });
-    const handle = startSessionPrRefreshTimer({
-      workspaceRegistry: registry,
-      env: {},
-      observationEnabled: true,
-      getPrDrainDeps: () => ({
-        watchDir,
-        locks: new PathMutexRegistry(),
-        scanBindings: async () => ({
-          bindings: [
-            {
-              sessionId: SESSION_A,
-              workspaceCwd: trustedCwd,
-              prs: [{ number: 42, url: 'https://github.com/o/r/pull/42' }],
-            },
-          ],
-          partial: false,
-        }),
-        resolveRuntime: () => trustedRuntime,
-        isSessionLive: () => false,
-        wakeSession: async () => ({ kind: 'unavailable' as const }),
-        admitPrompt: async () => ({ deduplicated: false }),
-        readPushedHeads: async () => undefined,
-      }),
-    });
-    try {
-      await handle?.drainNow(trustedCwd);
-      expect(readPrWatchStateSync(watchDir, orphan).kind).toBe('state');
-    } finally {
-      handle?.dispose();
-      await removeTempTree(watchDir);
-    }
-  });
-
-  it('drainNow reads no drain deps while the observation switch is off', async () => {
-    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
-    const registry = createWorkspaceRegistry([trustedRuntime]);
-    const getPrDrainDeps = vi.fn(() => undefined);
-    // No observationEnabled: production is governed by the internal constant,
-    // which is off. A resume must not deliver from watch files a previous
-    // owner left behind.
-    const handle = startSessionPrRefreshTimer({
-      workspaceRegistry: registry,
-      env: {},
-      getPrDrainDeps,
-    });
-    try {
-      await handle?.drainNow(trustedCwd);
-      expect(getPrDrainDeps).not.toHaveBeenCalled();
-    } finally {
-      handle?.dispose();
-    }
-  });
-
-  it('drainNow skips an untrusted non-primary workspace', async () => {
-    // The tick only watches trusted-or-primary workspaces. An on-demand drain
-    // must apply the same filter: the ledger runs git in the checkout, and an
-    // untrusted non-primary is never observed in the first place.
-    const untrusted = timerRuntime('un', untrustedCwd, false, false);
-    const primary = timerRuntime('trusted', trustedCwd, true);
-    const registry = createWorkspaceRegistry([primary, untrusted]);
-    const scanBindings = vi.fn(async () => ({ bindings: [], partial: false }));
-    const handle = startSessionPrRefreshTimer({
-      workspaceRegistry: registry,
-      env: {},
-      observationEnabled: true,
-      getPrDrainDeps: () => ({
-        watchDir: untrustedCwd,
-        locks: new PathMutexRegistry(),
-        scanBindings,
-        resolveRuntime: () => untrusted,
-        isSessionLive: () => false,
-        wakeSession: async () => ({ kind: 'unavailable' as const }),
-        admitPrompt: async () => ({ deduplicated: false }),
-        readPushedHeads: async () => undefined,
-      }),
-    });
-    try {
-      await handle?.drainNow(untrustedCwd);
-      expect(scanBindings).not.toHaveBeenCalled();
-    } finally {
-      handle?.dispose();
-    }
-  });
-
-  it('drainNow is inert without drain deps or a registered workspace', async () => {
-    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
-    const registry = createWorkspaceRegistry([trustedRuntime]);
-    const scanBindings = vi.fn(async () => ({ bindings: [], partial: false }));
-    const handle = startSessionPrRefreshTimer({
-      workspaceRegistry: registry,
-      env: {},
-      observationEnabled: true,
-      getPrDrainDeps: () => undefined,
-    });
-    try {
-      await handle?.drainNow(trustedCwd);
-      expect(scanBindings).not.toHaveBeenCalled();
-      const withDeps = startSessionPrRefreshTimer({
-        workspaceRegistry: registry,
-        env: {},
-        observationEnabled: true,
-        getPrDrainDeps: () => ({
-          watchDir: trustedCwd,
-          locks: new PathMutexRegistry(),
-          scanBindings,
-          resolveRuntime: () => trustedRuntime,
-          isSessionLive: () => false,
-          wakeSession: async () => ({ kind: 'unavailable' as const }),
-          admitPrompt: async () => ({ deduplicated: false }),
-          readPushedHeads: async () => undefined,
-        }),
-      });
-      try {
-        await withDeps?.drainNow('/not-registered');
-        expect(scanBindings).not.toHaveBeenCalled();
-      } finally {
-        withDeps?.dispose();
-      }
-    } finally {
-      handle?.dispose();
-    }
-  });
-
-  it('stopWatch hands back the owner record an on-demand drain claimed', async () => {
-    // The first tick is a minute away, so no observation has run and the
-    // timer's active watch directory is still unset. The drain claims the
-    // owner record regardless, so shutdown must learn about the claim from
-    // drainNow: a leaked record reads as "held by a live pid" to a successor,
-    // whose entire watch then stays inert until this process dies.
-    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
-    const registry = createWorkspaceRegistry([trustedRuntime]);
-    const watchDir = await fsp.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-pr-watch-drain-now-stop-'),
-    );
-    const handle = startSessionPrRefreshTimer({
-      workspaceRegistry: registry,
-      env: {},
-      observationEnabled: true,
-      getPrDrainDeps: () => ({
-        watchDir,
-        locks: new PathMutexRegistry(),
-        scanBindings: async () => ({ bindings: [], partial: false }),
-        resolveRuntime: () => trustedRuntime,
-        isSessionLive: () => false,
-        wakeSession: async () => ({ kind: 'unavailable' as const }),
-        admitPrompt: async () => ({ deduplicated: false }),
-        readPushedHeads: async () => undefined,
-      }),
-    });
-    try {
-      // No timer advance: the claim has to come from drainNow alone. Proving
-      // it exists first keeps the release assertion below from passing just
-      // because nothing ever claimed.
-      await handle?.drainNow(trustedCwd);
-      await expect(
-        fsp.access(prWatchOwnerPath(watchDir)),
-      ).resolves.toBeUndefined();
-      await handle?.stopWatch();
-      await expect(fsp.access(prWatchOwnerPath(watchDir))).rejects.toThrow();
-      // A resume arriving after shutdown must not claim it back — nothing
-      // would release that record again.
-      await handle?.drainNow(trustedCwd);
-      await expect(fsp.access(prWatchOwnerPath(watchDir))).rejects.toThrow();
-    } finally {
-      handle?.dispose();
-      await removeTempTree(watchDir);
-    }
-  });
-
-  it('drainNow serves a trusted non-primary workspace', async () => {
-    // Every other positive case lets primary default to trusted, so the trusted
-    // half of the filter was never exercised on its own. The scan call is the
-    // positive evidence that the drain tick actually ran.
-    const secondaryCwd = await fsp.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-pr-watch-secondary-'),
-    );
-    const primary = timerRuntime('primary', trustedCwd, true);
-    const secondary = timerRuntime('secondary', secondaryCwd, true, false);
-    const registry = createWorkspaceRegistry([primary, secondary]);
-    const watchDir = await fsp.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-pr-watch-drain-now-secondary-'),
-    );
-    const scanBindings = vi.fn(async (_runtime: WorkspaceRuntime) => ({
-      bindings: [],
-      partial: false,
-    }));
-    const handle = startSessionPrRefreshTimer({
-      workspaceRegistry: registry,
-      env: {},
-      observationEnabled: true,
-      getPrDrainDeps: () => ({
-        watchDir,
-        locks: new PathMutexRegistry(),
-        scanBindings,
-        resolveRuntime: () => secondary,
-        isSessionLive: () => false,
-        wakeSession: async () => ({ kind: 'unavailable' as const }),
-        admitPrompt: async () => ({ deduplicated: false }),
-        readPushedHeads: async () => undefined,
-      }),
-    });
-    try {
-      await handle?.drainNow(secondaryCwd);
-      // The trusted non-primary workspace is scanned. The drain now scans every
-      // watched workspace, so assert this one was reached rather than a count.
-      expect(
-        scanBindings.mock.calls.some(
-          ([runtime]) => runtime.workspaceCwd === secondaryCwd,
-        ),
-      ).toBe(true);
-      await expect(
-        fsp.access(prWatchOwnerPath(watchDir)),
-      ).resolves.toBeUndefined();
-    } finally {
-      handle?.dispose();
-      await removeTempTree(watchDir);
-      await removeTempTree(secondaryCwd);
-    }
-  });
-
-  it('drainNow clears the resumed session Gone mark only when given its id', async () => {
-    // The reset this seam exists for. Without the clear, a session excluded by
-    // an earlier archive or worktree loss stays filtered out for the whole
-    // rejoin horizon even after the user resumes it.
-    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
-    const registry = createWorkspaceRegistry([trustedRuntime]);
-    await seedPendingBinding(trustedRuntime, SESSION_A, 42);
-    const watchDir = await fsp.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-pr-watch-drain-now-gone-'),
-    );
-    const clock = Date.parse('2026-11-08T00:00:00.000Z');
-    const identity = { host: 'github.com', repo: 'o/r', number: 42 };
-    writePrWatchStateSync(watchDir, identity, {
-      pr: identity,
-      observedAt: new Date(clock).toISOString(),
-      state: 'open',
-      headSha: 'a'.repeat(40),
-      checks: 'passing',
-      pending: [
-        {
-          type: 'ci_failure',
-          key: 'k-drain-now-gone',
-          summary: 'CI failing',
-          detectedAt: new Date(clock).toISOString(),
-        },
-      ],
-    });
-    let live = false;
-    const wakeSession = vi.fn(async () => ({ kind: 'gone' as const }));
-    const admitPrompt = vi.fn(async () => ({ deduplicated: false }));
-    const handle = startSessionPrRefreshTimer({
-      workspaceRegistry: registry,
-      env: {},
-      now: () => clock,
-      observationEnabled: true,
-      getPrDrainDeps: () => ({
-        watchDir,
-        locks: new PathMutexRegistry(),
-        scanBindings: async () => ({
-          bindings: [
-            {
-              sessionId: SESSION_A,
-              workspaceCwd: trustedCwd,
-              prs: [{ number: 42, url: 'https://github.com/o/r/pull/42' }],
-            },
-          ],
-          partial: false,
-        }),
-        resolveRuntime: () => trustedRuntime,
-        isSessionLive: () => live,
-        wakeSession,
-        admitPrompt,
-        readPushedHeads: async () => undefined,
-        // The drain reads its own `now ?? Date.now`. Without this the fixture's
-        // literal detectedAt ages against the real wall clock and the case
-        // starts failing seven days after that date.
-        now: () => clock,
-      }),
-    });
-    const settle = async (): Promise<void> => {
-      for (let i = 0; i < 20; i++) {
-        await new Promise((resolve) => setImmediate(resolve));
-      }
-    };
-    try {
-      // Dormant and the wake reports Gone: the recipient is marked, not admitted.
-      await handle?.drainNow(trustedCwd);
-      await vi.waitFor(() => expect(wakeSession).toHaveBeenCalledTimes(1));
-      await settle();
-      expect(admitPrompt).not.toHaveBeenCalled();
-
-      // The session is live again, but a drain that does not name it must still
-      // respect the mark. If the mark had never been set this arm would admit,
-      // so the pair below is self-proving rather than vacuous.
-      live = true;
-      await handle?.drainNow(trustedCwd);
-      await settle();
-      expect(admitPrompt).not.toHaveBeenCalled();
-
-      // Naming the restored session clears the mark and delivers.
-      await handle?.drainNow(trustedCwd, SESSION_A);
-      await settle();
-      expect(admitPrompt).toHaveBeenCalledTimes(1);
-    } finally {
-      handle?.dispose();
-      await removeTempTree(watchDir);
-    }
-  });
-
-  it('drainNow keeps a leader in another workspace ahead of a live local binder', async () => {
-    // Recipient choice and the persisted delivered ring are global, while
-    // coveragePartial gates only delete/drop. Scanning just the resumed
-    // workspace would hide the more recent binder, deliver to the local one,
-    // and record the key — consuming the transition the leader is owed.
-    const cwdA = await fsp.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-pr-watch-leader-a-'),
-    );
-    const cwdB = await fsp.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-pr-watch-leader-b-'),
-    );
-    const runtimeA = timerRuntime('ws-a', cwdA, true);
-    const runtimeB = timerRuntime('ws-b', cwdB, true, false);
-    const registry = createWorkspaceRegistry([runtimeA, runtimeB]);
-    const watchDir = await fsp.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-pr-watch-leader-dir-'),
-    );
-    const clock = Date.parse('2026-11-08T00:00:00.000Z');
-    const identity = { host: 'github.com', repo: 'o/r', number: 42 };
-    const key = 'k-leader-other-workspace';
-    writePrWatchStateSync(watchDir, identity, {
-      pr: identity,
-      observedAt: new Date(clock).toISOString(),
-      state: 'open',
-      headSha: 'a'.repeat(40),
-      checks: 'passing',
-      pending: [
-        {
-          type: 'ci_failure',
-          key,
-          summary: 'CI failing',
-          detectedAt: new Date(clock).toISOString(),
-        },
-      ],
-    });
-    const prs = [{ number: 42, url: 'https://github.com/o/r/pull/42' }];
-    const wakeSession = vi.fn(async () => ({
-      kind: 'restored' as const,
-      release: async () => {},
-    }));
-    const admitPrompt = vi.fn(
-      async (
-        _runtime: WorkspaceRuntime,
-        _sessionId: string,
-        _text: string,
-        _key: string,
-      ) => ({ deduplicated: false }),
-    );
-    const handle = startSessionPrRefreshTimer({
-      workspaceRegistry: registry,
-      env: {},
-      now: () => clock,
-      observationEnabled: true,
-      getPrDrainDeps: () => ({
-        watchDir,
-        locks: new PathMutexRegistry(),
-        scanBindings: async (runtime: WorkspaceRuntime) => ({
-          bindings:
-            runtime.workspaceCwd === cwdA
-              ? [
-                  {
-                    sessionId: 'S_alt',
-                    workspaceCwd: cwdA,
-                    updatedAt: new Date(clock - 60_000).toISOString(),
-                    prs,
-                  },
-                ]
-              : [
-                  {
-                    sessionId: 'S_leader',
-                    workspaceCwd: cwdB,
-                    updatedAt: new Date(clock).toISOString(),
-                    prs,
-                  },
-                ],
-          partial: false,
-        }),
-        resolveRuntime: (cwd: string) => (cwd === cwdA ? runtimeA : runtimeB),
-        // The leader is dormant, the local binder is live: only the complete
-        // row set keeps the drain from preferring the live one.
-        isSessionLive: (_runtime: WorkspaceRuntime, sessionId: string) =>
-          sessionId === 'S_alt',
-        wakeSession,
-        admitPrompt,
-        readPushedHeads: async () => undefined,
-        now: () => clock,
-      }),
-    });
-    try {
-      await handle?.drainNow(cwdA);
-      for (let i = 0; i < 20; i++) {
-        await new Promise((resolve) => setImmediate(resolve));
-      }
-      // The transition goes to the leader, not to the live local binder. With
-      // a one-workspace row set the leader is invisible and this admission
-      // would name S_alt instead, consuming what the leader is owed.
-      expect(wakeSession).toHaveBeenCalledWith('S_leader', cwdB);
-      expect(admitPrompt).toHaveBeenCalledTimes(1);
-      expect(admitPrompt.mock.calls[0]?.[1]).toBe('S_leader');
-      const after = readPrWatchStateSync(watchDir, identity);
-      expect(after.kind).toBe('state');
-      if (after.kind !== 'state') throw new Error('unreachable');
-      expect(after.state.delivered ?? []).toContain(key);
-    } finally {
-      handle?.dispose();
-      await removeTempTree(watchDir);
-      await removeTempTree(cwdA);
-      await removeTempTree(cwdB);
-    }
-  });
-
-  it('threads the watch log into the listing write seam', async () => {
-    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
-    const registry = createWorkspaceRegistry([trustedRuntime]);
-    await seedPendingBinding(trustedRuntime, SESSION_A, 42);
-    const watchDir = await fsp.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-pr-watch-log-seam-'),
-    );
-    // A directory where the watch file belongs makes every read fail. The
-    // observation logs its own wording and skips; only the listing write says
-    // "listing write skipped", so asserting that substring cannot be satisfied
-    // by the observation's log alone.
-    const identity = { host: 'github.com', repo: 'o/r', number: 42 };
-    await fsp.mkdir(prWatchFilePath(watchDir, identity));
-    const logged: string[] = [];
-    const now = () => Date.parse('2026-11-08T00:00:00.000Z');
-    fetchGitHubPullRequestsMock.mockResolvedValue({
-      kind: 'ok',
-      pullRequests: [pr(42, 'closed')],
-    });
-    vi.useFakeTimers();
-    const handle = startSessionPrRefreshTimer({
-      workspaceRegistry: registry,
-      env: {},
-      now,
-      observationEnabled: true,
-      getPrWatchDeps: () => ({
-        watchDir,
-        locks: new PathMutexRegistry(),
-        allowedHosts: new Set(['github.com']),
-        viewPullRequest: async (url: string) => ({
-          kind: 'ok' as const,
-          view: {
-            url,
-            title: 'PR 42',
-            headSha: 'a'.repeat(40),
-            state: 'open' as const,
-            checks: 'passing' as const,
-            failingChecks: [] as string[],
-          },
-        }),
-        now,
-        log: (m: string) => logged.push(m),
-      }),
-    });
-    try {
-      await vi.advanceTimersByTimeAsync(60_000);
-      await vi.waitFor(() => {
-        expect(logged.some((m) => m.includes('listing write skipped'))).toBe(
-          true,
-        );
-      });
-    } finally {
-      handle?.dispose();
-      await removeTempTree(watchDir);
-    }
-  });
-
-  it('never reads the PR-watch deps while the observation switch is off', async () => {
-    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
-    const registry = createWorkspaceRegistry([trustedRuntime]);
-    await seedPendingBinding(trustedRuntime, SESSION_A);
-    fetchGitHubPullRequestsMock.mockResolvedValue({
-      kind: 'ok',
-      pullRequests: [pr(42, 'open')],
-    });
-    const getPrWatchDeps = vi.fn(() => undefined);
-    vi.useFakeTimers();
-
-    const handle = startSessionPrRefreshTimer({
-      workspaceRegistry: registry,
-      env: {},
-      getPrWatchDeps,
-    });
-    await vi.advanceTimersByTimeAsync(60_000); // crosses the first-run delay
-    await vi.waitFor(() => {
-      expect(fetchGitHubPullRequestsMock).toHaveBeenCalled();
-    });
-    // The switch is off: the tick refreshes state but never touches the
-    // PR-watch seam (no claim, no view, no watch-file write).
-    expect(getPrWatchDeps).not.toHaveBeenCalled();
-    handle?.dispose();
-  });
-
-  it('stopWatch reads no watch seam while the switch is off', async () => {
-    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
-    const registry = createWorkspaceRegistry([trustedRuntime]);
-    const getPrWatchDeps = vi.fn(() => undefined);
-    const getPrDrainDeps = vi.fn(() => undefined);
-    fetchGitHubPullRequestsMock.mockResolvedValue({
-      kind: 'ok',
-      pullRequests: [],
-    });
-    vi.useFakeTimers();
-    const handle = startSessionPrRefreshTimer({
-      workspaceRegistry: registry,
-      env: {},
-      getPrWatchDeps,
-      getPrDrainDeps,
-    });
-    try {
-      await vi.advanceTimersByTimeAsync(60_000);
-      getPrWatchDeps.mockClear();
-      getPrDrainDeps.mockClear();
-      const store = await import('./pr-watch-store.js');
-      const release = vi.spyOn(store, 'releaseOwnedPrWatchSync');
-      await handle?.stopWatch();
-      // Shutdown must not read a seam the off state never reads, nor even
-      // attempt to release an owner record this daemon never claimed.
-      expect(getPrWatchDeps).not.toHaveBeenCalled();
-      expect(getPrDrainDeps).not.toHaveBeenCalled();
-      expect(release).not.toHaveBeenCalled();
-      release.mockRestore();
-    } finally {
-      handle?.dispose();
-    }
-  });
-
-  it('stopWatch stops the refresh timer while the switch is off', async () => {
-    // The off path's early return calls the same dispose(); pin it by effect.
-    // Stop before any tick runs, like 'stops ticking after dispose' — once a
-    // sweep is in flight its `running` guard skips later ticks under fake
-    // timers, so a post-sweep count would not distinguish armed from stopped.
-    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
-    const registry = createWorkspaceRegistry([trustedRuntime]);
-    await seedPendingBinding(trustedRuntime, SESSION_A);
-    fetchGitHubPullRequestsMock.mockResolvedValue({
-      kind: 'ok',
-      pullRequests: [pr(42, 'merged')],
-    });
-    vi.useFakeTimers();
-    const handle = startSessionPrRefreshTimer({
-      workspaceRegistry: registry,
-      env: {},
-      getPrWatchDeps: () => undefined,
-      getPrDrainDeps: () => undefined,
-    });
-    try {
-      await handle?.stopWatch();
-      // Far past the first-run delay and many default intervals: a still-armed
-      // timer would have swept long before this point.
-      await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000);
-      expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
-    } finally {
-      handle?.dispose();
-    }
-  });
-
-  it('stopWatch releases the owner record after the watch has run', async () => {
-    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
-    const registry = createWorkspaceRegistry([trustedRuntime]);
-    await seedPendingBinding(trustedRuntime, SESSION_A, 42);
-    const watchDir = await fsp.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-pr-watch-stop-'),
-    );
-    const now = () => Date.parse('2026-11-08T00:00:00.000Z');
-    const view = vi.fn(async (url: string) => ({
-      kind: 'ok' as const,
-      view: {
-        url,
-        title: 'PR 42',
-        headSha: 'a'.repeat(40),
-        state: 'open' as const,
-        checks: 'passing' as const,
-        failingChecks: [] as string[],
-      },
-    }));
-    fetchGitHubPullRequestsMock.mockResolvedValue({
-      kind: 'ok',
-      pullRequests: [],
-    });
-    vi.useFakeTimers();
-    const handle = startSessionPrRefreshTimer({
-      workspaceRegistry: registry,
-      env: { QWEN_SESSION_PR_REFRESH_MINUTES: '1' },
-      now,
-      observationEnabled: true,
-      getPrWatchDeps: () => ({
-        watchDir,
-        locks: new PathMutexRegistry(),
-        allowedHosts: new Set(['github.com']),
-        viewPullRequest: view,
-        now,
-      }),
-    });
-    try {
-      await vi.advanceTimersByTimeAsync(60_000);
-      // The observation claimed the watch; shutdown must hand it back.
-      await vi.waitFor(() => {
-        expect(
-          readPrWatchStateSync(watchDir, {
-            host: 'github.com',
-            repo: 'o/r',
-            number: 42,
-          }).kind,
-        ).toBe('state');
-      });
-      await handle?.stopWatch();
-      await expect(fsp.access(prWatchOwnerPath(watchDir))).rejects.toThrow();
-      // Pin the stop-timer arm by its effect, not its mechanism: three more
-      // intervals must produce no further view or listing, and must not
-      // re-claim the record this daemon just handed back.
-      const viewsAtStop = view.mock.calls.length;
-      const listingsAtStop = fetchGitHubPullRequestsMock.mock.calls.length;
-      expect(viewsAtStop).toBeGreaterThan(0);
-      await vi.advanceTimersByTimeAsync(3 * 60_000);
-      expect(view.mock.calls.length).toBe(viewsAtStop);
-      expect(fetchGitHubPullRequestsMock.mock.calls.length).toBe(
-        listingsAtStop,
+    beforeEach(async () => {
+      vi.clearAllMocks();
+      baseDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-pr-timer-base-'),
       );
-      await expect(fsp.access(prWatchOwnerPath(watchDir))).rejects.toThrow();
-    } finally {
-      handle?.dispose();
-      await removeTempTree(watchDir);
-    }
-  });
-
-  it('stopWatch keeps the owner record while an observation is in flight', async () => {
-    // The observation holds the claim for the whole tick, but it is not drain
-    // work: the drain state cannot see it. Releasing on drain-idle alone would
-    // let a successor claim and deliver while this daemon is still viewing.
-    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
-    const registry = createWorkspaceRegistry([trustedRuntime]);
-    await seedPendingBinding(trustedRuntime, SESSION_A, 42);
-    const watchDir = await fsp.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-pr-watch-stop-inflight-'),
-    );
-    const now = () => Date.parse('2026-11-08T00:00:00.000Z');
-    fetchGitHubPullRequestsMock.mockResolvedValue({
-      kind: 'ok',
-      pullRequests: [],
-    });
-    let openView: () => void = () => {};
-    const viewGate = new Promise<void>((resolve) => {
-      openView = resolve;
-    });
-    let viewStarted: () => void = () => {};
-    const started = new Promise<void>((resolve) => {
-      viewStarted = resolve;
-    });
-    vi.useFakeTimers();
-    const handle = startSessionPrRefreshTimer({
-      workspaceRegistry: registry,
-      env: { QWEN_SESSION_PR_REFRESH_MINUTES: '1' },
-      now,
-      observationEnabled: true,
-      getPrWatchDeps: () => ({
-        watchDir,
-        locks: new PathMutexRegistry(),
-        allowedHosts: new Set(['github.com']),
-        viewPullRequest: async (url: string) => {
-          viewStarted();
-          await viewGate;
-          return {
-            kind: 'ok' as const,
-            view: {
-              url,
-              title: 'PR 42',
-              headSha: 'a'.repeat(40),
-              state: 'open' as const,
-              checks: 'passing' as const,
-              failingChecks: [] as string[],
-            },
-          };
-        },
-        now,
-      }),
-    });
-    try {
-      await vi.advanceTimersByTimeAsync(60_000);
-      // Parked mid-view: the claim is held, no drain tick has started.
-      await started;
-      let stopped = false;
-      const stopping = handle?.stopWatch().then(() => {
-        stopped = true;
-      });
-      await vi.advanceTimersByTimeAsync(0);
-      expect(stopped).toBe(false);
-      await expect(
-        fsp.access(prWatchOwnerPath(watchDir)),
-      ).resolves.toBeUndefined();
-      openView();
-      await vi.advanceTimersByTimeAsync(1_000);
-      await stopping;
-      await expect(fsp.access(prWatchOwnerPath(watchDir))).rejects.toThrow();
-    } finally {
-      handle?.dispose();
-      await removeTempTree(watchDir);
-    }
-  });
-
-  it('stopWatch waits for a restore the tick dispatches after shutdown began', async () => {
-    // The full combination: shutdown lands mid-observation, the tick then
-    // enters the drain and dispatches a dormant restore that outlives it.
-    // Drain-idle sampled alongside the tick is already true, so the record
-    // would be released while that restore is still admitting.
-    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
-    const registry = createWorkspaceRegistry([trustedRuntime]);
-    await seedPendingBinding(trustedRuntime, SESSION_A, 42);
-    const watchDir = await fsp.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-pr-watch-stop-restore-'),
-    );
-    const clock = Date.parse('2026-11-08T00:00:00.000Z');
-    const now = () => clock;
-    const identity = { host: 'github.com', repo: 'o/r', number: 42 };
-    writePrWatchStateSync(watchDir, identity, {
-      pr: identity,
-      observedAt: new Date(clock).toISOString(),
-      state: 'open',
-      headSha: 'a'.repeat(40),
-      checks: 'passing',
-      pending: [
-        {
-          type: 'ci_failure',
-          key: 'k-stop-restore',
-          summary: 'CI failing',
-          detectedAt: new Date(clock).toISOString(),
-        },
-      ],
-    });
-    let openView: () => void = () => {};
-    const viewGate = new Promise<void>((resolve) => {
-      openView = resolve;
-    });
-    let viewStarted: () => void = () => {};
-    const started = new Promise<void>((resolve) => {
-      viewStarted = resolve;
-    });
-    let openWake: () => void = () => {};
-    const wakeGate = new Promise<void>((resolve) => {
-      openWake = resolve;
-    });
-    const wakeSession = vi.fn(() =>
-      wakeGate.then(() => ({
-        kind: 'restored' as const,
-        release: async () => {},
-      })),
-    );
-    fetchGitHubPullRequestsMock.mockResolvedValue({
-      kind: 'ok',
-      pullRequests: [],
-    });
-    vi.useFakeTimers();
-    const handle = startSessionPrRefreshTimer({
-      workspaceRegistry: registry,
-      env: { QWEN_SESSION_PR_REFRESH_MINUTES: '1' },
-      now,
-      observationEnabled: true,
-      getPrWatchDeps: () => ({
-        watchDir,
-        locks: new PathMutexRegistry(),
-        allowedHosts: new Set(['github.com']),
-        viewPullRequest: async (url: string) => {
-          viewStarted();
-          await viewGate;
-          return {
-            kind: 'ok' as const,
-            view: {
-              url,
-              title: 'PR 42',
-              headSha: 'a'.repeat(40),
-              state: 'open' as const,
-              checks: 'passing' as const,
-              failingChecks: [] as string[],
-            },
-          };
-        },
-        now,
-      }),
-      getPrDrainDeps: () => ({
-        watchDir,
-        locks: new PathMutexRegistry(),
-        scanBindings: async () => ({
-          bindings: [
-            {
-              sessionId: SESSION_A,
-              workspaceCwd: trustedCwd,
-              prs: [{ number: 42, url: 'https://github.com/o/r/pull/42' }],
-            },
-          ],
-          partial: false,
-        }),
-        resolveRuntime: () => trustedRuntime,
-        isSessionLive: () => false,
-        wakeSession,
-        admitPrompt: async () => ({ deduplicated: false }),
-        readPushedHeads: async () => undefined,
-        now,
-      }),
-    });
-    try {
-      await vi.advanceTimersByTimeAsync(60_000);
-      await started;
-      let stopped = false;
-      const stopping = handle?.stopWatch().then(() => {
-        stopped = true;
-      });
-      await vi.advanceTimersByTimeAsync(0);
-      expect(stopped).toBe(false);
-      // Let the observation finish and the tick run on into the drain. The
-      // state sweep below is only reached once the drain tick has returned.
-      openView();
-      await vi.waitFor(() => {
-        expect(fetchGitHubPullRequestsMock).toHaveBeenCalled();
-      });
-      await vi.waitFor(() => expect(wakeSession).toHaveBeenCalledTimes(1));
-      await vi.advanceTimersByTimeAsync(0);
-      // The tick is over, its restore is not: the record must still be held.
-      expect(stopped).toBe(false);
-      await expect(
-        fsp.access(prWatchOwnerPath(watchDir)),
-      ).resolves.toBeUndefined();
-      openWake();
-      await vi.advanceTimersByTimeAsync(1_000);
-      await stopping;
-      await expect(fsp.access(prWatchOwnerPath(watchDir))).rejects.toThrow();
-    } finally {
-      handle?.dispose();
-      await removeTempTree(watchDir);
-    }
-  });
-
-  it('never reads the PR-drain deps while the observation switch is off', async () => {
-    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
-    const registry = createWorkspaceRegistry([trustedRuntime]);
-    await seedPendingBinding(trustedRuntime, SESSION_A);
-    fetchGitHubPullRequestsMock.mockResolvedValue({
-      kind: 'ok',
-      pullRequests: [pr(42, 'open')],
-    });
-    const getPrDrainDeps = vi.fn(() => undefined);
-    vi.useFakeTimers();
-
-    const handle = startSessionPrRefreshTimer({
-      workspaceRegistry: registry,
-      env: {},
-      getPrDrainDeps,
-    });
-    await vi.advanceTimersByTimeAsync(60_000); // crosses the first-run delay
-    await vi.waitFor(() => {
-      expect(fetchGitHubPullRequestsMock).toHaveBeenCalled();
-    });
-    // The switch is off: the drain seam is never read (no drain, no admission,
-    // no restore, no deletion), exactly like the observation seam.
-    expect(getPrDrainDeps).not.toHaveBeenCalled();
-    handle?.dispose();
-  });
-
-  it('drains the tick transitions behind the same gate, only for covered workspaces', async () => {
-    const untrustedPrimary = timerRuntime('up', untrustedCwd, false, true);
-    const trustedNonPrimary = timerRuntime('tn', trustedCwd, true, false);
-    const unCwd = await fsp.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-pr-timer-un-'),
-    );
-    const untrustedNonPrimary = timerRuntime('un', unCwd, false, false);
-    const registry = createWorkspaceRegistry([
-      untrustedPrimary,
-      trustedNonPrimary,
-      untrustedNonPrimary,
-    ]);
-    await seedPendingBinding(trustedNonPrimary, SESSION_A, 42);
-    const watchDir = await fsp.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-pr-watch-drain-timer-'),
-    );
-    const clock = Date.parse('2026-11-08T00:00:00.000Z');
-    const now = () => clock;
-    const identity = { host: 'github.com', repo: 'o/r', number: 42 };
-    // The transition the observation queues; the view below reports the same
-    // head, so the observation preserves it and the drain delivers it.
-    writePrWatchStateSync(watchDir, identity, {
-      pr: identity,
-      observedAt: new Date(clock).toISOString(),
-      state: 'open',
-      headSha: 'a'.repeat(40),
-      checks: 'passing',
-      pending: [
-        {
-          type: 'ci_failure',
-          key: 'k-timer-drain',
-          summary: 'CI failing',
-          detectedAt: new Date(clock).toISOString(),
-        },
-      ],
-    });
-    const locks = new PathMutexRegistry();
-    const view = vi.fn(async (url: string) => ({
-      kind: 'ok' as const,
-      view: {
-        url,
-        title: 'PR 42',
-        headSha: 'a'.repeat(40),
-        state: 'open' as const,
-        checks: 'passing' as const,
-        failingChecks: [] as string[],
-      },
-    }));
-    const scanBindings = vi.fn(async (runtime: WorkspaceRuntime) => ({
-      bindings: runtime.trusted
-        ? [
-            {
-              sessionId: SESSION_A,
-              workspaceCwd: runtime.workspaceCwd,
-              prs: [{ number: 42, url: 'https://github.com/o/r/pull/42' }],
-            },
-          ]
-        : [],
-      partial: false,
-    }));
-    const admitPrompt = vi.fn(
-      async (
-        _runtime: WorkspaceRuntime,
-        _sessionId: string,
-        _promptText: string,
-        _idempotencyKey: string,
-      ) => ({ deduplicated: false }),
-    );
-    fetchGitHubPullRequestsMock.mockResolvedValue({
-      kind: 'ok',
-      pullRequests: [],
-    });
-    vi.useFakeTimers();
-
-    const handle = startSessionPrRefreshTimer({
-      workspaceRegistry: registry,
-      env: { QWEN_SESSION_PR_REFRESH_MINUTES: '1' },
-      now,
-      observationEnabled: true,
-      getPrWatchDeps: () => ({
-        watchDir,
-        locks,
-        allowedHosts: new Set(['github.com']),
-        viewPullRequest: view,
-        now,
-      }),
-      getPrDrainDeps: () => ({
-        watchDir,
-        locks,
-        scanBindings,
-        resolveRuntime: (cwd: string) =>
-          [untrustedPrimary, trustedNonPrimary].find(
-            (r) => r.workspaceCwd === cwd,
-          ),
-        isSessionLive: () => true,
-        wakeSession: async () => ({ kind: 'unavailable' as const }),
-        admitPrompt,
-        readPushedHeads: async () => undefined,
-        now,
-      }),
-    });
-    try {
-      await vi.advanceTimersByTimeAsync(60_000);
-      await vi.waitFor(() => {
-        expect(admitPrompt).toHaveBeenCalledTimes(1);
-      });
-      expect(admitPrompt.mock.calls[0][3]).toBe('k-timer-drain');
-      // The drain sees the covered list (trusted plus primary), never the
-      // untrusted non-primary workspace the timer filters out.
-      const scannedCwds = scanBindings.mock.calls.map((c) => c[0].workspaceCwd);
-      expect(scannedCwds).toContain(trustedCwd);
-      expect(scannedCwds).toContain(untrustedCwd);
-      expect(scannedCwds).not.toContain(unCwd);
-      const stored = readPrWatchStateSync(watchDir, identity);
-      expect(stored.kind).toBe('state');
-      if (stored.kind === 'state') {
-        expect(stored.state.pending).toBeUndefined();
-        expect(stored.state.delivered).toContain('k-timer-drain');
-      }
-    } finally {
-      handle?.dispose();
-      await removeTempTree(watchDir);
-      await removeTempTree(unCwd);
-    }
-  });
-
-  it('observes before a slow refresh consumes the tick deadline', async () => {
-    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
-    const registry = createWorkspaceRegistry([trustedRuntime]);
-    await seedPendingBinding(trustedRuntime, SESSION_A);
-    const watchDir = await fsp.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-pr-watch-timer-'),
-    );
-    let clock = 0;
-    const now = () => clock;
-    const view = vi.fn(async (url: string) => ({
-      kind: 'ok' as const,
-      view: {
-        url,
-        title: 'PR 42',
-        headSha: 'a'.repeat(40),
-        state: 'open' as const,
-        checks: 'passing' as const,
-        failingChecks: [] as string[],
-      },
-    }));
-    // The old refresh's slim listing burns 40s, past the 30s observation
-    // deadline (1-minute interval). Observation must run first to get views.
-    fetchGitHubPullRequestsMock.mockImplementation(async () => {
-      clock += 40_000;
-      return { kind: 'ok', pullRequests: [] };
-    });
-    vi.useFakeTimers();
-
-    const handle = startSessionPrRefreshTimer({
-      workspaceRegistry: registry,
-      env: { QWEN_SESSION_PR_REFRESH_MINUTES: '1' },
-      now,
-      observationEnabled: true,
-      getPrWatchDeps: () => ({
-        watchDir,
-        locks: new PathMutexRegistry(),
-        allowedHosts: new Set(['github.com']),
-        viewPullRequest: view,
-        now,
-      }),
-    });
-    try {
-      await vi.advanceTimersByTimeAsync(60_000); // crosses the first-run delay
-      // Wait for BOTH: the refresh runs after the observation in the same tick,
-      // so asserting it outside the wait races the awaits in between on a
-      // saturated runner. The ordering is still pinned by the clock — were the
-      // refresh first, its 40s would pass the 30s deadline and `view` would
-      // never be called. The explicit timeout replaces waitFor's 1s default,
-      // which also expired under load.
-      await vi.waitFor(
-        () => {
-          expect(view).toHaveBeenCalled();
-          expect(fetchGitHubPullRequestsMock).toHaveBeenCalled();
-        },
-        { timeout: 10_000 },
+      trustedCwd = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-pr-timer-trusted-'),
       );
-    } finally {
-      handle?.dispose();
-      await removeTempTree(watchDir);
-    }
-  });
+      untrustedCwd = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-pr-timer-untrusted-'),
+      );
+      process.env['QWEN_RUNTIME_DIR'] = baseDir;
+    });
 
-  it('sweeps trusted workspaces and the untrusted primary, never the untrusted non-primary, and rotates the order each tick', async () => {
-    // One primary (untrusted), a trusted non-primary, and an untrusted
-    // non-primary. The filter `trusted || primary` must admit the first two
-    // and exclude the third; each disjunct is load-bearing.
-    const untrustedPrimary = timerRuntime('up', untrustedCwd, false, true);
-    const trustedNonPrimary = timerRuntime('tn', trustedCwd, true, false);
-    const unCwd = await fsp.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-pr-timer-un-'),
-    );
-    const untrustedNonPrimary = timerRuntime('un', unCwd, false, false);
-    const registry = createWorkspaceRegistry([
-      untrustedPrimary,
-      trustedNonPrimary,
-      untrustedNonPrimary,
-    ]);
-    // Distinct PRs so the per-tick dedup does not collapse the workspaces.
-    await seedPendingBinding(untrustedPrimary, SESSION_A, 42);
-    await seedPendingBinding(trustedNonPrimary, SESSION_B, 43);
-    await seedPendingBinding(untrustedNonPrimary, SESSION_A, 44);
-    const watchDir = await fsp.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-pr-watch-rotate-'),
-    );
-    let clock = 0;
-    const now = () => clock;
-    // Each view burns 40s, past the 30s half-interval deadline, so only the
-    // FIRST workspace in the rotated order is viewed per tick. Rotation then
-    // decides which workspace that is.
-    const view = vi.fn(async (url: string) => {
-      clock += 40_000;
+    afterEach(async () => {
+      vi.useRealTimers();
+      delete process.env['QWEN_RUNTIME_DIR'];
+      for (const dir of [baseDir, trustedCwd, untrustedCwd]) {
+        await removeTempTree(dir);
+      }
+    });
+
+    function timerRuntime(
+      workspaceId: string,
+      workspaceCwd: string,
+      trusted: boolean,
+      primary: boolean = trusted,
+    ): WorkspaceRuntime {
       return {
-        kind: 'ok' as const,
-        view: {
-          url,
-          title: 'PR',
-          headSha: 'a'.repeat(40),
-          state: 'open' as const,
-          checks: 'passing' as const,
-          failingChecks: [] as string[],
-        },
-      };
-    });
-    fetchGitHubPullRequestsMock.mockResolvedValue({
-      kind: 'ok',
-      pullRequests: [],
-    });
-    vi.useFakeTimers();
-
-    const handle = startSessionPrRefreshTimer({
-      workspaceRegistry: registry,
-      env: { QWEN_SESSION_PR_REFRESH_MINUTES: '1' },
-      now,
-      observationEnabled: true,
-      getPrWatchDeps: () => ({
-        watchDir,
-        locks: new PathMutexRegistry(),
-        allowedHosts: new Set(['github.com']),
-        viewPullRequest: view,
-        now,
-      }),
-    });
-    try {
-      // Tick 1: rotation 0 → untrusted primary first, views PR 42.
-      await vi.advanceTimersByTimeAsync(60_000);
-      // The explicit timeout replaces waitFor's 1s default, which expires
-      // under load on the contended macOS nightly hosts (same shape as the
-      // sibling observation-order case above).
-      await vi.waitFor(
-        () => {
-          expect(view).toHaveBeenCalledTimes(1);
-        },
-        { timeout: 10_000 },
-      );
-      // Tick 1's refresh tail runs after the view and awaits real fs; the
-      // re-entrancy guard silently skips the next interval while it is still
-      // in flight (the race `sweepDone` documents). This tick commits no
-      // sidecar, so the issue lookup that ends the tail is the signal.
-      await vi.waitFor(
-        () => {
-          expect(fetchGitHubPullRequestIssuesMock).toHaveBeenCalledTimes(1);
-        },
-        { timeout: 10_000 },
-      );
-      await vi.advanceTimersByTimeAsync(0);
-      // Tick 2: rotation 1 → trusted non-primary first, views PR 43.
-      // The re-entrancy guard skips an interval whose predecessor's refresh
-      // tail is still in flight (real fs under load), and a skipped tick
-      // does not advance the rotation counter — so keep advancing intervals
-      // until the second view lands instead of assuming the very next one
-      // runs; the executed tick's rotation is 1 either way, and the order
-      // stays [42, 43]. advanceTimersByTimeAsync drains fake timers and
-      // microtasks but starves the tail's real fs I/O under extreme macOS
-      // nightly load, so between advances yield REAL macrotasks via a
-      // MessageChannel (not intercepted by fake timers, unlike setImmediate)
-      // to let the tail complete; allow plenty of advances for the worst load.
-      const yieldRealMacrotask = (): Promise<void> =>
-        new Promise((resolve) => {
-          const { port1, port2 } = new MessageChannel();
-          port1.onmessage = () => {
-            port1.close();
-            resolve();
-          };
-          port2.postMessage(0);
-        });
-      for (let i = 0; i < 20 && view.mock.calls.length < 2; i++) {
-        await vi.advanceTimersByTimeAsync(60_000);
-        for (let k = 0; k < 10; k++) {
-          await yieldRealMacrotask();
-        }
-      }
-      await vi.waitFor(
-        () => {
-          expect(view).toHaveBeenCalledTimes(2);
-        },
-        { timeout: 30_000 },
-      );
-      expect(view.mock.calls.map((call) => call[0])).toEqual([
-        'https://github.com/o/r/pull/42',
-        'https://github.com/o/r/pull/43',
-      ]);
-      // The untrusted non-primary's PR 44 is never viewed.
-    } finally {
-      handle?.dispose();
-      await removeTempTree(watchDir);
-      await removeTempTree(unCwd);
+        workspaceId,
+        workspaceCwd,
+        sessionRuntimeBaseDir: baseDir,
+        primary,
+        trusted,
+        env: { mode: 'parent-process', overlayKeys: [] },
+        bridge: { markSessionCatalogChanged: vi.fn() },
+      } as unknown as WorkspaceRuntime;
     }
-  });
 
-  it('sweeps only trusted workspaces after the first-run delay', async () => {
-    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
-    const untrustedRuntime = timerRuntime('untrusted', untrustedCwd, false);
-    const registry = createWorkspaceRegistry([
-      trustedRuntime,
-      untrustedRuntime,
-    ]);
-    const trustedPrPath = await seedPendingBinding(trustedRuntime, SESSION_A);
-    const untrustedPrPath = await seedPendingBinding(
-      untrustedRuntime,
-      SESSION_B,
-    );
-    fetchGitHubPullRequestsMock.mockResolvedValue({
-      kind: 'ok',
-      pullRequests: [pr(42, 'merged')],
-    });
-    vi.useFakeTimers();
-
-    const handle = startSessionPrRefreshTimer({
-      workspaceRegistry: registry,
-      env: {},
-    });
-    expect(handle).toBeDefined();
-    // The first sweep is delayed to stay out of boot's way.
-    await vi.advanceTimersByTimeAsync(30_000);
-    expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
-
-    await vi.advanceTimersByTimeAsync(30_000); // crosses the first-run delay
-    await vi.waitFor(() => {
-      expect(fetchGitHubPullRequestsMock).toHaveBeenCalledTimes(1);
-    });
-    expect(fetchGitHubPullRequestsMock).toHaveBeenCalledWith(
-      trustedCwd,
-      undefined,
-      { state: 'all', limit: 500, slim: true },
-    );
-    await vi.waitFor(async () => {
-      expect((await readSessionPrs(trustedPrPath))?.[0]?.state).toBe('merged');
-    });
-    // The untrusted workspace's sidecar must never be read or rewritten.
-    expect((await readSessionPrs(untrustedPrPath))?.[0]?.state).toBe('open');
-
-    handle?.dispose();
-  });
-
-  it('skips an overlapping tick while a sweep is still running', async () => {
-    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
-    const registry = createWorkspaceRegistry([trustedRuntime]);
-    const prPath = await seedPendingBinding(trustedRuntime, SESSION_A);
-    let releaseFetch!: () => void;
-    fetchGitHubPullRequestsMock.mockReturnValue(
-      new Promise((resolve) => {
-        releaseFetch = () =>
-          resolve({ kind: 'ok', pullRequests: [pr(42, 'merged')] });
-      }),
-    );
-    vi.useFakeTimers();
-
-    const handle = startSessionPrRefreshTimer({
-      workspaceRegistry: registry,
-      env: { QWEN_SESSION_PR_REFRESH_MINUTES: '1' },
-    });
-    expect(handle).toBeDefined();
-
-    // The first tick reaches the (hung) gh fetch and holds `running`; every
-    // tick that lands while it is in flight must be skipped, not start a
-    // second sweep.
-    await vi.advanceTimersByTimeAsync(60_000);
-    await vi.waitFor(() => {
-      expect(fetchGitHubPullRequestsMock).toHaveBeenCalledTimes(1);
-    });
-    await vi.advanceTimersByTimeAsync(3 * 60_000);
-    expect(fetchGitHubPullRequestsMock).toHaveBeenCalledTimes(1);
-
-    releaseFetch();
-    await vi.waitFor(async () => {
-      expect((await readSessionPrs(prPath))?.[0]?.state).toBe('merged');
-    });
-    handle?.dispose();
-  });
-
-  it('stops ticking after dispose', async () => {
-    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
-    const registry = createWorkspaceRegistry([trustedRuntime]);
-    await seedPendingBinding(trustedRuntime, SESSION_A);
-    fetchGitHubPullRequestsMock.mockResolvedValue({
-      kind: 'ok',
-      pullRequests: [pr(42, 'merged')],
-    });
-    vi.useFakeTimers();
-
-    const handle = startSessionPrRefreshTimer({
-      workspaceRegistry: registry,
-      env: {},
-    });
-    expect(handle).toBeDefined();
-    handle?.dispose();
-
-    // Far past the first-run delay and several default intervals: a
-    // still-armed timer would have swept long before this point.
-    await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000);
-    expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
-  });
-
-  it('commits every sweep under the archive lane resolved at tick time', async () => {
-    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
-    const registry = createWorkspaceRegistry([trustedRuntime]);
-    const prPath = await seedPendingBinding(trustedRuntime, SESSION_A);
-    fetchGitHubPullRequestsMock.mockResolvedValue({
-      kind: 'ok',
-      pullRequests: [pr(42, 'merged')],
-    });
-    // The daemon parks the coordinator on the serve app, which exists only
-    // after the timer starts — so it is looked up per tick, not captured.
-    const app: { archiveCoordinator?: SessionArchiveCoordinator } = {};
-    const getArchiveCoordinator = vi.fn(() => app.archiveCoordinator);
-    vi.useFakeTimers();
-
-    const handle = startSessionPrRefreshTimer({
-      workspaceRegistry: registry,
-      env: {},
-      getArchiveCoordinator,
-    });
-    app.archiveCoordinator = new SessionArchiveCoordinator();
-    const runSharedMany = vi.spyOn(app.archiveCoordinator, 'runSharedMany');
-
-    await vi.advanceTimersByTimeAsync(60_000);
-    await vi.waitFor(async () => {
-      expect((await readSessionPrs(prPath))?.[0]?.state).toBe('merged');
-    });
-    expect(getArchiveCoordinator).toHaveBeenCalled();
-    expect(runSharedMany).toHaveBeenCalledWith(
-      [SESSION_A],
-      expect.any(Function),
-    );
-
-    handle?.dispose();
-  });
-
-  // Seeds `total` detailUrl-shaped pending bindings (all non-merged, so they
-  // stay pending across sweeps) across ceil(total/10) sessions — one sidecar
-  // caps at SESSION_PR_LIST_LIMIT — in a git repo whose origin is Aone, so
-  // the sweep's platform detection keys on the a1 path.
-  async function seedAoneTimerWorkspace(
-    runtime: WorkspaceRuntime,
-    total: number,
-  ): Promise<void> {
-    execSync('git init', { cwd: runtime.workspaceCwd, stdio: 'pipe' });
-    execSync(
-      'git remote add origin git@gitlab.alibaba-inc.com:jspt/agentic_coding.git',
-      { cwd: runtime.workspaceCwd, stdio: 'pipe' },
-    );
-    const service = createWorkspaceRuntimeSessionService(runtime);
-    const chatsDir = path.join(
-      new Storage(runtime.workspaceCwd).getProjectDir(),
-      'chats',
-    );
-    await fsp.mkdir(chatsDir, { recursive: true });
-    let number = 1;
-    let sessionIdx = 0;
-    while (number <= total) {
-      const sessionId = `00000000-0000-4000-8000-${String(300 + sessionIdx).padStart(12, '0')}`;
-      sessionIdx += 1;
+    async function seedPendingBinding(
+      runtime: WorkspaceRuntime,
+      sessionId: string,
+      prNumber = 42,
+    ): Promise<string> {
+      const service = createWorkspaceRuntimeSessionService(runtime);
+      const chatsDir = path.join(
+        new Storage(runtime.workspaceCwd).getProjectDir(),
+        'chats',
+      );
+      await fsp.mkdir(chatsDir, { recursive: true });
       await fsp.writeFile(
         path.join(chatsDir, `${sessionId}.jsonl`),
         `${JSON.stringify({
@@ -4037,304 +2647,1721 @@ describe('startSessionPrRefreshTimer', { timeout: 120_000 }, () => {
         sessionId,
         'active',
       );
-      for (let i = 0; i < 10 && number <= total; i++, number++) {
-        await upsertSessionPr(prPath, {
-          number,
-          url: `https://code.alibaba-inc.com/jspt/agentic_coding/codereview/${number}`,
+      await upsertSessionPr(prPath, {
+        number: prNumber,
+        url: `https://github.com/o/r/pull/${prNumber}`,
+        state: 'open',
+      });
+      return prPath;
+    }
+
+    it('returns undefined when disabled via QWEN_SESSION_PR_REFRESH_MINUTES=0', () => {
+      const registry = createWorkspaceRegistry([
+        timerRuntime('trusted', trustedCwd, true),
+      ]);
+
+      expect(
+        startSessionPrRefreshTimer({
+          workspaceRegistry: registry,
+          env: { QWEN_SESSION_PR_REFRESH_MINUTES: '0' },
+        }),
+      ).toBeUndefined();
+    });
+
+    it('drainNow keeps watch files the single-workspace scan cannot see', async () => {
+      const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+      const registry = createWorkspaceRegistry([trustedRuntime]);
+      await seedPendingBinding(trustedRuntime, SESSION_A, 42);
+      const watchDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-pr-watch-drain-now-'),
+      );
+      // A watch file with no binder in this scan. A targeted drain scans one
+      // workspace, so every other workspace's bindings are absent from the rows:
+      // declaring the coverage complete would delete this file as unbound.
+      const orphan = { host: 'github.com', repo: 'other/repo', number: 99 };
+      writePrWatchStateSync(watchDir, orphan, {
+        pr: orphan,
+        state: 'open',
+        headSha: 'a'.repeat(40),
+        checks: 'passing',
+      });
+      const handle = startSessionPrRefreshTimer({
+        workspaceRegistry: registry,
+        env: {},
+        observationEnabled: true,
+        getPrDrainDeps: () => ({
+          watchDir,
+          locks: new PathMutexRegistry(),
+          scanBindings: async () => ({
+            bindings: [
+              {
+                sessionId: SESSION_A,
+                workspaceCwd: trustedCwd,
+                prs: [{ number: 42, url: 'https://github.com/o/r/pull/42' }],
+              },
+            ],
+            partial: false,
+          }),
+          resolveRuntime: () => trustedRuntime,
+          isSessionLive: () => false,
+          wakeSession: async () => ({ kind: 'unavailable' as const }),
+          admitPrompt: async () => ({ deduplicated: false }),
+          readPushedHeads: async () => undefined,
+        }),
+      });
+      try {
+        await handle?.drainNow(trustedCwd);
+        expect(readPrWatchStateSync(watchDir, orphan).kind).toBe('state');
+      } finally {
+        handle?.dispose();
+        await removeTempTree(watchDir);
+      }
+    });
+
+    it('drainNow reads no drain deps while the observation switch is off', async () => {
+      const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+      const registry = createWorkspaceRegistry([trustedRuntime]);
+      const getPrDrainDeps = vi.fn(() => undefined);
+      // No observationEnabled: production is governed by the internal constant,
+      // which is off. A resume must not deliver from watch files a previous
+      // owner left behind.
+      const handle = startSessionPrRefreshTimer({
+        workspaceRegistry: registry,
+        env: {},
+        getPrDrainDeps,
+      });
+      try {
+        await handle?.drainNow(trustedCwd);
+        expect(getPrDrainDeps).not.toHaveBeenCalled();
+      } finally {
+        handle?.dispose();
+      }
+    });
+
+    it('drainNow skips an untrusted non-primary workspace', async () => {
+      // The tick only watches trusted-or-primary workspaces. An on-demand drain
+      // must apply the same filter: the ledger runs git in the checkout, and an
+      // untrusted non-primary is never observed in the first place.
+      const untrusted = timerRuntime('un', untrustedCwd, false, false);
+      const primary = timerRuntime('trusted', trustedCwd, true);
+      const registry = createWorkspaceRegistry([primary, untrusted]);
+      const scanBindings = vi.fn(async () => ({
+        bindings: [],
+        partial: false,
+      }));
+      const handle = startSessionPrRefreshTimer({
+        workspaceRegistry: registry,
+        env: {},
+        observationEnabled: true,
+        getPrDrainDeps: () => ({
+          watchDir: untrustedCwd,
+          locks: new PathMutexRegistry(),
+          scanBindings,
+          resolveRuntime: () => untrusted,
+          isSessionLive: () => false,
+          wakeSession: async () => ({ kind: 'unavailable' as const }),
+          admitPrompt: async () => ({ deduplicated: false }),
+          readPushedHeads: async () => undefined,
+        }),
+      });
+      try {
+        await handle?.drainNow(untrustedCwd);
+        expect(scanBindings).not.toHaveBeenCalled();
+      } finally {
+        handle?.dispose();
+      }
+    });
+
+    it('drainNow is inert without drain deps or a registered workspace', async () => {
+      const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+      const registry = createWorkspaceRegistry([trustedRuntime]);
+      const scanBindings = vi.fn(async () => ({
+        bindings: [],
+        partial: false,
+      }));
+      const handle = startSessionPrRefreshTimer({
+        workspaceRegistry: registry,
+        env: {},
+        observationEnabled: true,
+        getPrDrainDeps: () => undefined,
+      });
+      try {
+        await handle?.drainNow(trustedCwd);
+        expect(scanBindings).not.toHaveBeenCalled();
+        const withDeps = startSessionPrRefreshTimer({
+          workspaceRegistry: registry,
+          env: {},
+          observationEnabled: true,
+          getPrDrainDeps: () => ({
+            watchDir: trustedCwd,
+            locks: new PathMutexRegistry(),
+            scanBindings,
+            resolveRuntime: () => trustedRuntime,
+            isSessionLive: () => false,
+            wakeSession: async () => ({ kind: 'unavailable' as const }),
+            admitPrompt: async () => ({ deduplicated: false }),
+            readPushedHeads: async () => undefined,
+          }),
         });
+        try {
+          await withDeps?.drainNow('/not-registered');
+          expect(scanBindings).not.toHaveBeenCalled();
+        } finally {
+          withDeps?.dispose();
+        }
+      } finally {
+        handle?.dispose();
+      }
+    });
+
+    it('stopWatch hands back the owner record an on-demand drain claimed', async () => {
+      // The first tick is a minute away, so no observation has run and the
+      // timer's active watch directory is still unset. The drain claims the
+      // owner record regardless, so shutdown must learn about the claim from
+      // drainNow: a leaked record reads as "held by a live pid" to a successor,
+      // whose entire watch then stays inert until this process dies.
+      const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+      const registry = createWorkspaceRegistry([trustedRuntime]);
+      const watchDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-pr-watch-drain-now-stop-'),
+      );
+      const handle = startSessionPrRefreshTimer({
+        workspaceRegistry: registry,
+        env: {},
+        observationEnabled: true,
+        getPrDrainDeps: () => ({
+          watchDir,
+          locks: new PathMutexRegistry(),
+          scanBindings: async () => ({ bindings: [], partial: false }),
+          resolveRuntime: () => trustedRuntime,
+          isSessionLive: () => false,
+          wakeSession: async () => ({ kind: 'unavailable' as const }),
+          admitPrompt: async () => ({ deduplicated: false }),
+          readPushedHeads: async () => undefined,
+        }),
+      });
+      try {
+        // No timer advance: the claim has to come from drainNow alone. Proving
+        // it exists first keeps the release assertion below from passing just
+        // because nothing ever claimed.
+        await handle?.drainNow(trustedCwd);
+        await expect(
+          fsp.access(prWatchOwnerPath(watchDir)),
+        ).resolves.toBeUndefined();
+        await handle?.stopWatch();
+        await expect(fsp.access(prWatchOwnerPath(watchDir))).rejects.toThrow();
+        // A resume arriving after shutdown must not claim it back — nothing
+        // would release that record again.
+        await handle?.drainNow(trustedCwd);
+        await expect(fsp.access(prWatchOwnerPath(watchDir))).rejects.toThrow();
+      } finally {
+        handle?.dispose();
+        await removeTempTree(watchDir);
+      }
+    });
+
+    it('drainNow serves a trusted non-primary workspace', async () => {
+      // Every other positive case lets primary default to trusted, so the trusted
+      // half of the filter was never exercised on its own. The scan call is the
+      // positive evidence that the drain tick actually ran.
+      const secondaryCwd = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-pr-watch-secondary-'),
+      );
+      const primary = timerRuntime('primary', trustedCwd, true);
+      const secondary = timerRuntime('secondary', secondaryCwd, true, false);
+      const registry = createWorkspaceRegistry([primary, secondary]);
+      const watchDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-pr-watch-drain-now-secondary-'),
+      );
+      const scanBindings = vi.fn(async (_runtime: WorkspaceRuntime) => ({
+        bindings: [],
+        partial: false,
+      }));
+      const handle = startSessionPrRefreshTimer({
+        workspaceRegistry: registry,
+        env: {},
+        observationEnabled: true,
+        getPrDrainDeps: () => ({
+          watchDir,
+          locks: new PathMutexRegistry(),
+          scanBindings,
+          resolveRuntime: () => secondary,
+          isSessionLive: () => false,
+          wakeSession: async () => ({ kind: 'unavailable' as const }),
+          admitPrompt: async () => ({ deduplicated: false }),
+          readPushedHeads: async () => undefined,
+        }),
+      });
+      try {
+        await handle?.drainNow(secondaryCwd);
+        // The trusted non-primary workspace is scanned. The drain now scans every
+        // watched workspace, so assert this one was reached rather than a count.
+        expect(
+          scanBindings.mock.calls.some(
+            ([runtime]) => runtime.workspaceCwd === secondaryCwd,
+          ),
+        ).toBe(true);
+        await expect(
+          fsp.access(prWatchOwnerPath(watchDir)),
+        ).resolves.toBeUndefined();
+      } finally {
+        handle?.dispose();
+        await removeTempTree(watchDir);
+        await removeTempTree(secondaryCwd);
+      }
+    });
+
+    it('drainNow clears the resumed session Gone mark only when given its id', async () => {
+      // The reset this seam exists for. Without the clear, a session excluded by
+      // an earlier archive or worktree loss stays filtered out for the whole
+      // rejoin horizon even after the user resumes it.
+      const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+      const registry = createWorkspaceRegistry([trustedRuntime]);
+      await seedPendingBinding(trustedRuntime, SESSION_A, 42);
+      const watchDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-pr-watch-drain-now-gone-'),
+      );
+      const clock = Date.parse('2026-11-08T00:00:00.000Z');
+      const identity = { host: 'github.com', repo: 'o/r', number: 42 };
+      writePrWatchStateSync(watchDir, identity, {
+        pr: identity,
+        observedAt: new Date(clock).toISOString(),
+        state: 'open',
+        headSha: 'a'.repeat(40),
+        checks: 'passing',
+        pending: [
+          {
+            type: 'ci_failure',
+            key: 'k-drain-now-gone',
+            summary: 'CI failing',
+            detectedAt: new Date(clock).toISOString(),
+          },
+        ],
+      });
+      let live = false;
+      const wakeSession = vi.fn(async () => ({ kind: 'gone' as const }));
+      const admitPrompt = vi.fn(async () => ({ deduplicated: false }));
+      const handle = startSessionPrRefreshTimer({
+        workspaceRegistry: registry,
+        env: {},
+        now: () => clock,
+        observationEnabled: true,
+        getPrDrainDeps: () => ({
+          watchDir,
+          locks: new PathMutexRegistry(),
+          scanBindings: async () => ({
+            bindings: [
+              {
+                sessionId: SESSION_A,
+                workspaceCwd: trustedCwd,
+                prs: [{ number: 42, url: 'https://github.com/o/r/pull/42' }],
+              },
+            ],
+            partial: false,
+          }),
+          resolveRuntime: () => trustedRuntime,
+          isSessionLive: () => live,
+          wakeSession,
+          admitPrompt,
+          readPushedHeads: async () => undefined,
+          // The drain reads its own `now ?? Date.now`. Without this the fixture's
+          // literal detectedAt ages against the real wall clock and the case
+          // starts failing seven days after that date.
+          now: () => clock,
+        }),
+      });
+      const settle = async (): Promise<void> => {
+        for (let i = 0; i < 20; i++) {
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+      };
+      try {
+        // Dormant and the wake reports Gone: the recipient is marked, not admitted.
+        await handle?.drainNow(trustedCwd);
+        await vi.waitFor(() => expect(wakeSession).toHaveBeenCalledTimes(1));
+        await settle();
+        expect(admitPrompt).not.toHaveBeenCalled();
+
+        // The session is live again, but a drain that does not name it must still
+        // respect the mark. If the mark had never been set this arm would admit,
+        // so the pair below is self-proving rather than vacuous.
+        live = true;
+        await handle?.drainNow(trustedCwd);
+        await settle();
+        expect(admitPrompt).not.toHaveBeenCalled();
+
+        // Naming the restored session clears the mark and delivers.
+        await handle?.drainNow(trustedCwd, SESSION_A);
+        await settle();
+        expect(admitPrompt).toHaveBeenCalledTimes(1);
+      } finally {
+        handle?.dispose();
+        await removeTempTree(watchDir);
+      }
+    });
+
+    it('drainNow keeps a leader in another workspace ahead of a live local binder', async () => {
+      // Recipient choice and the persisted delivered ring are global, while
+      // coveragePartial gates only delete/drop. Scanning just the resumed
+      // workspace would hide the more recent binder, deliver to the local one,
+      // and record the key — consuming the transition the leader is owed.
+      const cwdA = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-pr-watch-leader-a-'),
+      );
+      const cwdB = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-pr-watch-leader-b-'),
+      );
+      const runtimeA = timerRuntime('ws-a', cwdA, true);
+      const runtimeB = timerRuntime('ws-b', cwdB, true, false);
+      const registry = createWorkspaceRegistry([runtimeA, runtimeB]);
+      const watchDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-pr-watch-leader-dir-'),
+      );
+      const clock = Date.parse('2026-11-08T00:00:00.000Z');
+      const identity = { host: 'github.com', repo: 'o/r', number: 42 };
+      const key = 'k-leader-other-workspace';
+      writePrWatchStateSync(watchDir, identity, {
+        pr: identity,
+        observedAt: new Date(clock).toISOString(),
+        state: 'open',
+        headSha: 'a'.repeat(40),
+        checks: 'passing',
+        pending: [
+          {
+            type: 'ci_failure',
+            key,
+            summary: 'CI failing',
+            detectedAt: new Date(clock).toISOString(),
+          },
+        ],
+      });
+      const prs = [{ number: 42, url: 'https://github.com/o/r/pull/42' }];
+      const wakeSession = vi.fn(async () => ({
+        kind: 'restored' as const,
+        release: async () => {},
+      }));
+      const admitPrompt = vi.fn(
+        async (
+          _runtime: WorkspaceRuntime,
+          _sessionId: string,
+          _text: string,
+          _key: string,
+        ) => ({ deduplicated: false }),
+      );
+      const handle = startSessionPrRefreshTimer({
+        workspaceRegistry: registry,
+        env: {},
+        now: () => clock,
+        observationEnabled: true,
+        getPrDrainDeps: () => ({
+          watchDir,
+          locks: new PathMutexRegistry(),
+          scanBindings: async (runtime: WorkspaceRuntime) => ({
+            bindings:
+              runtime.workspaceCwd === cwdA
+                ? [
+                    {
+                      sessionId: 'S_alt',
+                      workspaceCwd: cwdA,
+                      updatedAt: new Date(clock - 60_000).toISOString(),
+                      prs,
+                    },
+                  ]
+                : [
+                    {
+                      sessionId: 'S_leader',
+                      workspaceCwd: cwdB,
+                      updatedAt: new Date(clock).toISOString(),
+                      prs,
+                    },
+                  ],
+            partial: false,
+          }),
+          resolveRuntime: (cwd: string) => (cwd === cwdA ? runtimeA : runtimeB),
+          // The leader is dormant, the local binder is live: only the complete
+          // row set keeps the drain from preferring the live one.
+          isSessionLive: (_runtime: WorkspaceRuntime, sessionId: string) =>
+            sessionId === 'S_alt',
+          wakeSession,
+          admitPrompt,
+          readPushedHeads: async () => undefined,
+          now: () => clock,
+        }),
+      });
+      try {
+        await handle?.drainNow(cwdA);
+        for (let i = 0; i < 20; i++) {
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+        // The transition goes to the leader, not to the live local binder. With
+        // a one-workspace row set the leader is invisible and this admission
+        // would name S_alt instead, consuming what the leader is owed.
+        expect(wakeSession).toHaveBeenCalledWith('S_leader', cwdB);
+        expect(admitPrompt).toHaveBeenCalledTimes(1);
+        expect(admitPrompt.mock.calls[0]?.[1]).toBe('S_leader');
+        const after = readPrWatchStateSync(watchDir, identity);
+        expect(after.kind).toBe('state');
+        if (after.kind !== 'state') throw new Error('unreachable');
+        expect(after.state.delivered ?? []).toContain(key);
+      } finally {
+        handle?.dispose();
+        await removeTempTree(watchDir);
+        await removeTempTree(cwdA);
+        await removeTempTree(cwdB);
+      }
+    });
+
+    it('threads the watch log into the listing write seam', async () => {
+      const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+      const registry = createWorkspaceRegistry([trustedRuntime]);
+      await seedPendingBinding(trustedRuntime, SESSION_A, 42);
+      const watchDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-pr-watch-log-seam-'),
+      );
+      // A directory where the watch file belongs makes every read fail. The
+      // observation logs its own wording and skips; only the listing write says
+      // "listing write skipped", so asserting that substring cannot be satisfied
+      // by the observation's log alone.
+      const identity = { host: 'github.com', repo: 'o/r', number: 42 };
+      await fsp.mkdir(prWatchFilePath(watchDir, identity));
+      const logged: string[] = [];
+      const now = () => Date.parse('2026-11-08T00:00:00.000Z');
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [pr(42, 'closed')],
+      });
+      vi.useFakeTimers();
+      const handle = startSessionPrRefreshTimer({
+        workspaceRegistry: registry,
+        env: {},
+        now,
+        observationEnabled: true,
+        getPrWatchDeps: () => ({
+          watchDir,
+          locks: new PathMutexRegistry(),
+          allowedHosts: new Set(['github.com']),
+          viewPullRequest: async (url: string) => ({
+            kind: 'ok' as const,
+            view: {
+              url,
+              title: 'PR 42',
+              headSha: 'a'.repeat(40),
+              state: 'open' as const,
+              checks: 'passing' as const,
+              failingChecks: [] as string[],
+            },
+          }),
+          now,
+          log: (m: string) => logged.push(m),
+        }),
+      });
+      try {
+        await vi.advanceTimersByTimeAsync(60_000);
+        await vi.waitFor(() => {
+          expect(logged.some((m) => m.includes('listing write skipped'))).toBe(
+            true,
+          );
+        });
+      } finally {
+        handle?.dispose();
+        await removeTempTree(watchDir);
+      }
+    });
+
+    it('never reads the PR-watch deps while the observation switch is off', async () => {
+      const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+      const registry = createWorkspaceRegistry([trustedRuntime]);
+      await seedPendingBinding(trustedRuntime, SESSION_A);
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [pr(42, 'open')],
+      });
+      const getPrWatchDeps = vi.fn(() => undefined);
+      vi.useFakeTimers();
+
+      const handle = startSessionPrRefreshTimer({
+        workspaceRegistry: registry,
+        env: {},
+        getPrWatchDeps,
+      });
+      await vi.advanceTimersByTimeAsync(60_000); // crosses the first-run delay
+      await vi.waitFor(() => {
+        expect(fetchGitHubPullRequestsMock).toHaveBeenCalled();
+      });
+      // The switch is off: the tick refreshes state but never touches the
+      // PR-watch seam (no claim, no view, no watch-file write).
+      expect(getPrWatchDeps).not.toHaveBeenCalled();
+      handle?.dispose();
+    });
+
+    it('stopWatch reads no watch seam while the switch is off', async () => {
+      const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+      const registry = createWorkspaceRegistry([trustedRuntime]);
+      const getPrWatchDeps = vi.fn(() => undefined);
+      const getPrDrainDeps = vi.fn(() => undefined);
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [],
+      });
+      vi.useFakeTimers();
+      const handle = startSessionPrRefreshTimer({
+        workspaceRegistry: registry,
+        env: {},
+        getPrWatchDeps,
+        getPrDrainDeps,
+      });
+      try {
+        await vi.advanceTimersByTimeAsync(60_000);
+        getPrWatchDeps.mockClear();
+        getPrDrainDeps.mockClear();
+        const store = await import('./pr-watch-store.js');
+        const release = vi.spyOn(store, 'releaseOwnedPrWatchSync');
+        await handle?.stopWatch();
+        // Shutdown must not read a seam the off state never reads, nor even
+        // attempt to release an owner record this daemon never claimed.
+        expect(getPrWatchDeps).not.toHaveBeenCalled();
+        expect(getPrDrainDeps).not.toHaveBeenCalled();
+        expect(release).not.toHaveBeenCalled();
+        release.mockRestore();
+      } finally {
+        handle?.dispose();
+      }
+    });
+
+    it('stopWatch stops the refresh timer while the switch is off', async () => {
+      // The off path's early return calls the same dispose(); pin it by effect.
+      // Stop before any tick runs, like 'stops ticking after dispose' — once a
+      // sweep is in flight its `running` guard skips later ticks under fake
+      // timers, so a post-sweep count would not distinguish armed from stopped.
+      const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+      const registry = createWorkspaceRegistry([trustedRuntime]);
+      await seedPendingBinding(trustedRuntime, SESSION_A);
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [pr(42, 'merged')],
+      });
+      vi.useFakeTimers();
+      const handle = startSessionPrRefreshTimer({
+        workspaceRegistry: registry,
+        env: {},
+        getPrWatchDeps: () => undefined,
+        getPrDrainDeps: () => undefined,
+      });
+      try {
+        await handle?.stopWatch();
+        // Far past the first-run delay and many default intervals: a still-armed
+        // timer would have swept long before this point.
+        await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000);
+        expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
+      } finally {
+        handle?.dispose();
+      }
+    });
+
+    it('stopWatch releases the owner record after the watch has run', async () => {
+      const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+      const registry = createWorkspaceRegistry([trustedRuntime]);
+      await seedPendingBinding(trustedRuntime, SESSION_A, 42);
+      const watchDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-pr-watch-stop-'),
+      );
+      const now = () => Date.parse('2026-11-08T00:00:00.000Z');
+      const view = vi.fn(async (url: string) => ({
+        kind: 'ok' as const,
+        view: {
+          url,
+          title: 'PR 42',
+          headSha: 'a'.repeat(40),
+          state: 'open' as const,
+          checks: 'passing' as const,
+          failingChecks: [] as string[],
+        },
+      }));
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [],
+      });
+      vi.useFakeTimers();
+      const handle = startSessionPrRefreshTimer({
+        workspaceRegistry: registry,
+        env: { QWEN_SESSION_PR_REFRESH_MINUTES: '1' },
+        now,
+        observationEnabled: true,
+        getPrWatchDeps: () => ({
+          watchDir,
+          locks: new PathMutexRegistry(),
+          allowedHosts: new Set(['github.com']),
+          viewPullRequest: view,
+          now,
+        }),
+      });
+      try {
+        await vi.advanceTimersByTimeAsync(60_000);
+        // The observation claimed the watch; shutdown must hand it back.
+        await vi.waitFor(() => {
+          expect(
+            readPrWatchStateSync(watchDir, {
+              host: 'github.com',
+              repo: 'o/r',
+              number: 42,
+            }).kind,
+          ).toBe('state');
+        });
+        await handle?.stopWatch();
+        await expect(fsp.access(prWatchOwnerPath(watchDir))).rejects.toThrow();
+        // Pin the stop-timer arm by its effect, not its mechanism: three more
+        // intervals must produce no further view or listing, and must not
+        // re-claim the record this daemon just handed back.
+        const viewsAtStop = view.mock.calls.length;
+        const listingsAtStop = fetchGitHubPullRequestsMock.mock.calls.length;
+        expect(viewsAtStop).toBeGreaterThan(0);
+        await vi.advanceTimersByTimeAsync(3 * 60_000);
+        expect(view.mock.calls.length).toBe(viewsAtStop);
+        expect(fetchGitHubPullRequestsMock.mock.calls.length).toBe(
+          listingsAtStop,
+        );
+        await expect(fsp.access(prWatchOwnerPath(watchDir))).rejects.toThrow();
+      } finally {
+        handle?.dispose();
+        await removeTempTree(watchDir);
+      }
+    });
+
+    it('stopWatch keeps the owner record while an observation is in flight', async () => {
+      // The observation holds the claim for the whole tick, but it is not drain
+      // work: the drain state cannot see it. Releasing on drain-idle alone would
+      // let a successor claim and deliver while this daemon is still viewing.
+      const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+      const registry = createWorkspaceRegistry([trustedRuntime]);
+      await seedPendingBinding(trustedRuntime, SESSION_A, 42);
+      const watchDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-pr-watch-stop-inflight-'),
+      );
+      const now = () => Date.parse('2026-11-08T00:00:00.000Z');
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [],
+      });
+      let openView: () => void = () => {};
+      const viewGate = new Promise<void>((resolve) => {
+        openView = resolve;
+      });
+      let viewStarted: () => void = () => {};
+      const started = new Promise<void>((resolve) => {
+        viewStarted = resolve;
+      });
+      vi.useFakeTimers();
+      const handle = startSessionPrRefreshTimer({
+        workspaceRegistry: registry,
+        env: { QWEN_SESSION_PR_REFRESH_MINUTES: '1' },
+        now,
+        observationEnabled: true,
+        getPrWatchDeps: () => ({
+          watchDir,
+          locks: new PathMutexRegistry(),
+          allowedHosts: new Set(['github.com']),
+          viewPullRequest: async (url: string) => {
+            viewStarted();
+            await viewGate;
+            return {
+              kind: 'ok' as const,
+              view: {
+                url,
+                title: 'PR 42',
+                headSha: 'a'.repeat(40),
+                state: 'open' as const,
+                checks: 'passing' as const,
+                failingChecks: [] as string[],
+              },
+            };
+          },
+          now,
+        }),
+      });
+      try {
+        await vi.advanceTimersByTimeAsync(60_000);
+        // Parked mid-view: the claim is held, no drain tick has started.
+        await started;
+        let stopped = false;
+        const stopping = handle?.stopWatch().then(() => {
+          stopped = true;
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(stopped).toBe(false);
+        await expect(
+          fsp.access(prWatchOwnerPath(watchDir)),
+        ).resolves.toBeUndefined();
+        openView();
+        await vi.advanceTimersByTimeAsync(1_000);
+        await stopping;
+        await expect(fsp.access(prWatchOwnerPath(watchDir))).rejects.toThrow();
+      } finally {
+        handle?.dispose();
+        await removeTempTree(watchDir);
+      }
+    });
+
+    it('stopWatch waits for a restore the tick dispatches after shutdown began', async () => {
+      // The full combination: shutdown lands mid-observation, the tick then
+      // enters the drain and dispatches a dormant restore that outlives it.
+      // Drain-idle sampled alongside the tick is already true, so the record
+      // would be released while that restore is still admitting.
+      const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+      const registry = createWorkspaceRegistry([trustedRuntime]);
+      await seedPendingBinding(trustedRuntime, SESSION_A, 42);
+      const watchDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-pr-watch-stop-restore-'),
+      );
+      const clock = Date.parse('2026-11-08T00:00:00.000Z');
+      const now = () => clock;
+      const identity = { host: 'github.com', repo: 'o/r', number: 42 };
+      writePrWatchStateSync(watchDir, identity, {
+        pr: identity,
+        observedAt: new Date(clock).toISOString(),
+        state: 'open',
+        headSha: 'a'.repeat(40),
+        checks: 'passing',
+        pending: [
+          {
+            type: 'ci_failure',
+            key: 'k-stop-restore',
+            summary: 'CI failing',
+            detectedAt: new Date(clock).toISOString(),
+          },
+        ],
+      });
+      let openView: () => void = () => {};
+      const viewGate = new Promise<void>((resolve) => {
+        openView = resolve;
+      });
+      let viewStarted: () => void = () => {};
+      const started = new Promise<void>((resolve) => {
+        viewStarted = resolve;
+      });
+      let openWake: () => void = () => {};
+      const wakeGate = new Promise<void>((resolve) => {
+        openWake = resolve;
+      });
+      const wakeSession = vi.fn(() =>
+        wakeGate.then(() => ({
+          kind: 'restored' as const,
+          release: async () => {},
+        })),
+      );
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [],
+      });
+      vi.useFakeTimers();
+      const handle = startSessionPrRefreshTimer({
+        workspaceRegistry: registry,
+        env: { QWEN_SESSION_PR_REFRESH_MINUTES: '1' },
+        now,
+        observationEnabled: true,
+        getPrWatchDeps: () => ({
+          watchDir,
+          locks: new PathMutexRegistry(),
+          allowedHosts: new Set(['github.com']),
+          viewPullRequest: async (url: string) => {
+            viewStarted();
+            await viewGate;
+            return {
+              kind: 'ok' as const,
+              view: {
+                url,
+                title: 'PR 42',
+                headSha: 'a'.repeat(40),
+                state: 'open' as const,
+                checks: 'passing' as const,
+                failingChecks: [] as string[],
+              },
+            };
+          },
+          now,
+        }),
+        getPrDrainDeps: () => ({
+          watchDir,
+          locks: new PathMutexRegistry(),
+          scanBindings: async () => ({
+            bindings: [
+              {
+                sessionId: SESSION_A,
+                workspaceCwd: trustedCwd,
+                prs: [{ number: 42, url: 'https://github.com/o/r/pull/42' }],
+              },
+            ],
+            partial: false,
+          }),
+          resolveRuntime: () => trustedRuntime,
+          isSessionLive: () => false,
+          wakeSession,
+          admitPrompt: async () => ({ deduplicated: false }),
+          readPushedHeads: async () => undefined,
+          now,
+        }),
+      });
+      try {
+        await vi.advanceTimersByTimeAsync(60_000);
+        await started;
+        let stopped = false;
+        const stopping = handle?.stopWatch().then(() => {
+          stopped = true;
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(stopped).toBe(false);
+        // Let the observation finish and the tick run on into the drain. The
+        // state sweep below is only reached once the drain tick has returned.
+        openView();
+        await vi.waitFor(() => {
+          expect(fetchGitHubPullRequestsMock).toHaveBeenCalled();
+        });
+        await vi.waitFor(() => expect(wakeSession).toHaveBeenCalledTimes(1));
+        await vi.advanceTimersByTimeAsync(0);
+        // The tick is over, its restore is not: the record must still be held.
+        expect(stopped).toBe(false);
+        await expect(
+          fsp.access(prWatchOwnerPath(watchDir)),
+        ).resolves.toBeUndefined();
+        openWake();
+        await vi.advanceTimersByTimeAsync(1_000);
+        await stopping;
+        await expect(fsp.access(prWatchOwnerPath(watchDir))).rejects.toThrow();
+      } finally {
+        handle?.dispose();
+        await removeTempTree(watchDir);
+      }
+    });
+
+    it('never reads the PR-drain deps while the observation switch is off', async () => {
+      const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+      const registry = createWorkspaceRegistry([trustedRuntime]);
+      await seedPendingBinding(trustedRuntime, SESSION_A);
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [pr(42, 'open')],
+      });
+      const getPrDrainDeps = vi.fn(() => undefined);
+      vi.useFakeTimers();
+
+      const handle = startSessionPrRefreshTimer({
+        workspaceRegistry: registry,
+        env: {},
+        getPrDrainDeps,
+      });
+      await vi.advanceTimersByTimeAsync(60_000); // crosses the first-run delay
+      await vi.waitFor(() => {
+        expect(fetchGitHubPullRequestsMock).toHaveBeenCalled();
+      });
+      // The switch is off: the drain seam is never read (no drain, no admission,
+      // no restore, no deletion), exactly like the observation seam.
+      expect(getPrDrainDeps).not.toHaveBeenCalled();
+      handle?.dispose();
+    });
+
+    it('drains the tick transitions behind the same gate, only for covered workspaces', async () => {
+      const untrustedPrimary = timerRuntime('up', untrustedCwd, false, true);
+      const trustedNonPrimary = timerRuntime('tn', trustedCwd, true, false);
+      const unCwd = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-pr-timer-un-'),
+      );
+      const untrustedNonPrimary = timerRuntime('un', unCwd, false, false);
+      const registry = createWorkspaceRegistry([
+        untrustedPrimary,
+        trustedNonPrimary,
+        untrustedNonPrimary,
+      ]);
+      await seedPendingBinding(trustedNonPrimary, SESSION_A, 42);
+      const watchDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-pr-watch-drain-timer-'),
+      );
+      const clock = Date.parse('2026-11-08T00:00:00.000Z');
+      const now = () => clock;
+      const identity = { host: 'github.com', repo: 'o/r', number: 42 };
+      // The transition the observation queues; the view below reports the same
+      // head, so the observation preserves it and the drain delivers it.
+      writePrWatchStateSync(watchDir, identity, {
+        pr: identity,
+        observedAt: new Date(clock).toISOString(),
+        state: 'open',
+        headSha: 'a'.repeat(40),
+        checks: 'passing',
+        pending: [
+          {
+            type: 'ci_failure',
+            key: 'k-timer-drain',
+            summary: 'CI failing',
+            detectedAt: new Date(clock).toISOString(),
+          },
+        ],
+      });
+      const locks = new PathMutexRegistry();
+      const view = vi.fn(async (url: string) => ({
+        kind: 'ok' as const,
+        view: {
+          url,
+          title: 'PR 42',
+          headSha: 'a'.repeat(40),
+          state: 'open' as const,
+          checks: 'passing' as const,
+          failingChecks: [] as string[],
+        },
+      }));
+      const scanBindings = vi.fn(async (runtime: WorkspaceRuntime) => ({
+        bindings: runtime.trusted
+          ? [
+              {
+                sessionId: SESSION_A,
+                workspaceCwd: runtime.workspaceCwd,
+                prs: [{ number: 42, url: 'https://github.com/o/r/pull/42' }],
+              },
+            ]
+          : [],
+        partial: false,
+      }));
+      const admitPrompt = vi.fn(
+        async (
+          _runtime: WorkspaceRuntime,
+          _sessionId: string,
+          _promptText: string,
+          _idempotencyKey: string,
+        ) => ({ deduplicated: false }),
+      );
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [],
+      });
+      vi.useFakeTimers();
+
+      const handle = startSessionPrRefreshTimer({
+        workspaceRegistry: registry,
+        env: { QWEN_SESSION_PR_REFRESH_MINUTES: '1' },
+        now,
+        observationEnabled: true,
+        getPrWatchDeps: () => ({
+          watchDir,
+          locks,
+          allowedHosts: new Set(['github.com']),
+          viewPullRequest: view,
+          now,
+        }),
+        getPrDrainDeps: () => ({
+          watchDir,
+          locks,
+          scanBindings,
+          resolveRuntime: (cwd: string) =>
+            [untrustedPrimary, trustedNonPrimary].find(
+              (r) => r.workspaceCwd === cwd,
+            ),
+          isSessionLive: () => true,
+          wakeSession: async () => ({ kind: 'unavailable' as const }),
+          admitPrompt,
+          readPushedHeads: async () => undefined,
+          now,
+        }),
+      });
+      try {
+        await vi.advanceTimersByTimeAsync(60_000);
+        await vi.waitFor(() => {
+          expect(admitPrompt).toHaveBeenCalledTimes(1);
+        });
+        expect(admitPrompt.mock.calls[0][3]).toBe('k-timer-drain');
+        // The drain sees the covered list (trusted plus primary), never the
+        // untrusted non-primary workspace the timer filters out.
+        const scannedCwds = scanBindings.mock.calls.map(
+          (c) => c[0].workspaceCwd,
+        );
+        expect(scannedCwds).toContain(trustedCwd);
+        expect(scannedCwds).toContain(untrustedCwd);
+        expect(scannedCwds).not.toContain(unCwd);
+        const stored = readPrWatchStateSync(watchDir, identity);
+        expect(stored.kind).toBe('state');
+        if (stored.kind === 'state') {
+          expect(stored.state.pending).toBeUndefined();
+          expect(stored.state.delivered).toContain('k-timer-drain');
+        }
+      } finally {
+        handle?.dispose();
+        await removeTempTree(watchDir);
+        await removeTempTree(unCwd);
+      }
+    });
+
+    it('observes before a slow refresh consumes the tick deadline', async () => {
+      const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+      const registry = createWorkspaceRegistry([trustedRuntime]);
+      await seedPendingBinding(trustedRuntime, SESSION_A);
+      const watchDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-pr-watch-timer-'),
+      );
+      let clock = 0;
+      const now = () => clock;
+      const view = vi.fn(async (url: string) => ({
+        kind: 'ok' as const,
+        view: {
+          url,
+          title: 'PR 42',
+          headSha: 'a'.repeat(40),
+          state: 'open' as const,
+          checks: 'passing' as const,
+          failingChecks: [] as string[],
+        },
+      }));
+      // The old refresh's slim listing burns 40s, past the 30s observation
+      // deadline (1-minute interval). Observation must run first to get views.
+      fetchGitHubPullRequestsMock.mockImplementation(async () => {
+        clock += 40_000;
+        return { kind: 'ok', pullRequests: [] };
+      });
+      vi.useFakeTimers();
+
+      const handle = startSessionPrRefreshTimer({
+        workspaceRegistry: registry,
+        env: { QWEN_SESSION_PR_REFRESH_MINUTES: '1' },
+        now,
+        observationEnabled: true,
+        getPrWatchDeps: () => ({
+          watchDir,
+          locks: new PathMutexRegistry(),
+          allowedHosts: new Set(['github.com']),
+          viewPullRequest: view,
+          now,
+        }),
+      });
+      try {
+        await vi.advanceTimersByTimeAsync(60_000); // crosses the first-run delay
+        // Wait for BOTH: the refresh runs after the observation in the same tick,
+        // so asserting it outside the wait races the awaits in between on a
+        // saturated runner. The ordering is still pinned by the clock — were the
+        // refresh first, its 40s would pass the 30s deadline and `view` would
+        // never be called. The explicit timeout replaces waitFor's 1s default,
+        // which also expired under load.
+        await vi.waitFor(
+          () => {
+            expect(view).toHaveBeenCalled();
+            expect(fetchGitHubPullRequestsMock).toHaveBeenCalled();
+          },
+          { timeout: 10_000 },
+        );
+      } finally {
+        handle?.dispose();
+        await removeTempTree(watchDir);
+      }
+    });
+
+    it('sweeps trusted workspaces and the untrusted primary, never the untrusted non-primary, and rotates the order each tick', async () => {
+      // One primary (untrusted), a trusted non-primary, and an untrusted
+      // non-primary. The filter `trusted || primary` must admit the first two
+      // and exclude the third; each disjunct is load-bearing.
+      const untrustedPrimary = timerRuntime('up', untrustedCwd, false, true);
+      const trustedNonPrimary = timerRuntime('tn', trustedCwd, true, false);
+      const unCwd = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-pr-timer-un-'),
+      );
+      const untrustedNonPrimary = timerRuntime('un', unCwd, false, false);
+      const registry = createWorkspaceRegistry([
+        untrustedPrimary,
+        trustedNonPrimary,
+        untrustedNonPrimary,
+      ]);
+      // Distinct PRs so the per-tick dedup does not collapse the workspaces.
+      await seedPendingBinding(untrustedPrimary, SESSION_A, 42);
+      await seedPendingBinding(trustedNonPrimary, SESSION_B, 43);
+      await seedPendingBinding(untrustedNonPrimary, SESSION_A, 44);
+      const watchDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-pr-watch-rotate-'),
+      );
+      let clock = 0;
+      const now = () => clock;
+      // Each view burns 40s, past the 30s half-interval deadline, so only the
+      // FIRST workspace in the rotated order is viewed per tick. Rotation then
+      // decides which workspace that is.
+      const view = vi.fn(async (url: string) => {
+        clock += 40_000;
+        return {
+          kind: 'ok' as const,
+          view: {
+            url,
+            title: 'PR',
+            headSha: 'a'.repeat(40),
+            state: 'open' as const,
+            checks: 'passing' as const,
+            failingChecks: [] as string[],
+          },
+        };
+      });
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [],
+      });
+      vi.useFakeTimers();
+
+      const handle = startSessionPrRefreshTimer({
+        workspaceRegistry: registry,
+        env: { QWEN_SESSION_PR_REFRESH_MINUTES: '1' },
+        now,
+        observationEnabled: true,
+        getPrWatchDeps: () => ({
+          watchDir,
+          locks: new PathMutexRegistry(),
+          allowedHosts: new Set(['github.com']),
+          viewPullRequest: view,
+          now,
+        }),
+      });
+      try {
+        // Tick 1: rotation 0 → untrusted primary first, views PR 42.
+        await vi.advanceTimersByTimeAsync(60_000);
+        // The explicit timeout replaces waitFor's 1s default, which expires
+        // under load on the contended macOS nightly hosts (same shape as the
+        // sibling observation-order case above).
+        await vi.waitFor(
+          () => {
+            expect(view).toHaveBeenCalledTimes(1);
+          },
+          { timeout: 10_000 },
+        );
+        // Tick 1's refresh tail runs after the view and awaits real fs; the
+        // re-entrancy guard silently skips the next interval while it is still
+        // in flight (the race `sweepDone` documents). This tick commits no
+        // sidecar, so the issue lookup that ends the tail is the signal.
+        await vi.waitFor(
+          () => {
+            expect(fetchGitHubPullRequestIssuesMock).toHaveBeenCalledTimes(1);
+          },
+          { timeout: 10_000 },
+        );
+        await vi.advanceTimersByTimeAsync(0);
+        // Tick 2: rotation 1 → trusted non-primary first, views PR 43.
+        // The re-entrancy guard skips an interval whose predecessor's refresh
+        // tail is still in flight (real fs under load), and a skipped tick
+        // does not advance the rotation counter — so keep advancing intervals
+        // until the second view lands instead of assuming the very next one
+        // runs; the executed tick's rotation is 1 either way, and the order
+        // stays [42, 43]. advanceTimersByTimeAsync drains fake timers and
+        // microtasks but starves the tail's real fs I/O under extreme macOS
+        // nightly load, so between advances yield REAL macrotasks via a
+        // MessageChannel (not intercepted by fake timers, unlike setImmediate)
+        // to let the tail complete; allow plenty of advances for the worst load.
+        const yieldRealMacrotask = (): Promise<void> =>
+          new Promise((resolve) => {
+            const { port1, port2 } = new MessageChannel();
+            port1.onmessage = () => {
+              port1.close();
+              resolve();
+            };
+            port2.postMessage(0);
+          });
+        for (let i = 0; i < 20 && view.mock.calls.length < 2; i++) {
+          await vi.advanceTimersByTimeAsync(60_000);
+          for (let k = 0; k < 10; k++) {
+            await yieldRealMacrotask();
+          }
+        }
+        await vi.waitFor(
+          () => {
+            expect(view).toHaveBeenCalledTimes(2);
+          },
+          { timeout: 30_000 },
+        );
+        expect(view.mock.calls.map((call) => call[0])).toEqual([
+          'https://github.com/o/r/pull/42',
+          'https://github.com/o/r/pull/43',
+        ]);
+        // The untrusted non-primary's PR 44 is never viewed.
+      } finally {
+        handle?.dispose();
+        await removeTempTree(watchDir);
+        await removeTempTree(unCwd);
+      }
+    });
+
+    it('sweeps only trusted workspaces after the first-run delay', async () => {
+      const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+      const untrustedRuntime = timerRuntime('untrusted', untrustedCwd, false);
+      const registry = createWorkspaceRegistry([
+        trustedRuntime,
+        untrustedRuntime,
+      ]);
+      const trustedPrPath = await seedPendingBinding(trustedRuntime, SESSION_A);
+      const untrustedPrPath = await seedPendingBinding(
+        untrustedRuntime,
+        SESSION_B,
+      );
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [pr(42, 'merged')],
+      });
+      vi.useFakeTimers();
+
+      const handle = startSessionPrRefreshTimer({
+        workspaceRegistry: registry,
+        env: {},
+      });
+      expect(handle).toBeDefined();
+      // The first sweep is delayed to stay out of boot's way.
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(30_000); // crosses the first-run delay
+      await vi.waitFor(() => {
+        expect(fetchGitHubPullRequestsMock).toHaveBeenCalledTimes(1);
+      });
+      expect(fetchGitHubPullRequestsMock).toHaveBeenCalledWith(
+        trustedCwd,
+        undefined,
+        { state: 'all', limit: 500, slim: true },
+      );
+      await vi.waitFor(async () => {
+        expect((await readSessionPrs(trustedPrPath))?.[0]?.state).toBe(
+          'merged',
+        );
+      });
+      // The untrusted workspace's sidecar must never be read or rewritten.
+      expect((await readSessionPrs(untrustedPrPath))?.[0]?.state).toBe('open');
+
+      handle?.dispose();
+    });
+
+    it('skips an overlapping tick while a sweep is still running', async () => {
+      const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+      const registry = createWorkspaceRegistry([trustedRuntime]);
+      const prPath = await seedPendingBinding(trustedRuntime, SESSION_A);
+      let releaseFetch!: () => void;
+      fetchGitHubPullRequestsMock.mockReturnValue(
+        new Promise((resolve) => {
+          releaseFetch = () =>
+            resolve({ kind: 'ok', pullRequests: [pr(42, 'merged')] });
+        }),
+      );
+      vi.useFakeTimers();
+
+      const handle = startSessionPrRefreshTimer({
+        workspaceRegistry: registry,
+        env: { QWEN_SESSION_PR_REFRESH_MINUTES: '1' },
+      });
+      expect(handle).toBeDefined();
+
+      // The first tick reaches the (hung) gh fetch and holds `running`; every
+      // tick that lands while it is in flight must be skipped, not start a
+      // second sweep.
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.waitFor(() => {
+        expect(fetchGitHubPullRequestsMock).toHaveBeenCalledTimes(1);
+      });
+      await vi.advanceTimersByTimeAsync(3 * 60_000);
+      expect(fetchGitHubPullRequestsMock).toHaveBeenCalledTimes(1);
+
+      releaseFetch();
+      await vi.waitFor(async () => {
+        expect((await readSessionPrs(prPath))?.[0]?.state).toBe('merged');
+      });
+      handle?.dispose();
+    });
+
+    it('stops ticking after dispose', async () => {
+      const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+      const registry = createWorkspaceRegistry([trustedRuntime]);
+      await seedPendingBinding(trustedRuntime, SESSION_A);
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [pr(42, 'merged')],
+      });
+      vi.useFakeTimers();
+
+      const handle = startSessionPrRefreshTimer({
+        workspaceRegistry: registry,
+        env: {},
+      });
+      expect(handle).toBeDefined();
+      handle?.dispose();
+
+      // Far past the first-run delay and several default intervals: a
+      // still-armed timer would have swept long before this point.
+      await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1000);
+      expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
+    });
+
+    it('commits every sweep under the archive lane resolved at tick time', async () => {
+      const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+      const registry = createWorkspaceRegistry([trustedRuntime]);
+      const prPath = await seedPendingBinding(trustedRuntime, SESSION_A);
+      fetchGitHubPullRequestsMock.mockResolvedValue({
+        kind: 'ok',
+        pullRequests: [pr(42, 'merged')],
+      });
+      // The daemon parks the coordinator on the serve app, which exists only
+      // after the timer starts — so it is looked up per tick, not captured.
+      const app: { archiveCoordinator?: SessionArchiveCoordinator } = {};
+      const getArchiveCoordinator = vi.fn(() => app.archiveCoordinator);
+      vi.useFakeTimers();
+
+      const handle = startSessionPrRefreshTimer({
+        workspaceRegistry: registry,
+        env: {},
+        getArchiveCoordinator,
+      });
+      app.archiveCoordinator = new SessionArchiveCoordinator();
+      const runSharedMany = vi.spyOn(app.archiveCoordinator, 'runSharedMany');
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.waitFor(async () => {
+        expect((await readSessionPrs(prPath))?.[0]?.state).toBe('merged');
+      });
+      expect(getArchiveCoordinator).toHaveBeenCalled();
+      expect(runSharedMany).toHaveBeenCalledWith(
+        [SESSION_A],
+        expect.any(Function),
+      );
+
+      handle?.dispose();
+    });
+
+    // Seeds `total` detailUrl-shaped pending bindings (all non-merged, so they
+    // stay pending across sweeps) across ceil(total/10) sessions — one sidecar
+    // caps at SESSION_PR_LIST_LIMIT — in a git repo whose origin is Aone, so
+    // the sweep's platform detection keys on the a1 path.
+    async function seedAoneTimerWorkspace(
+      runtime: WorkspaceRuntime,
+      total: number,
+    ): Promise<void> {
+      execSync('git init', { cwd: runtime.workspaceCwd, stdio: 'pipe' });
+      execSync(
+        'git remote add origin git@gitlab.alibaba-inc.com:jspt/agentic_coding.git',
+        { cwd: runtime.workspaceCwd, stdio: 'pipe' },
+      );
+      const service = createWorkspaceRuntimeSessionService(runtime);
+      const chatsDir = path.join(
+        new Storage(runtime.workspaceCwd).getProjectDir(),
+        'chats',
+      );
+      await fsp.mkdir(chatsDir, { recursive: true });
+      let number = 1;
+      let sessionIdx = 0;
+      while (number <= total) {
+        const sessionId = `00000000-0000-4000-8000-${String(300 + sessionIdx).padStart(12, '0')}`;
+        sessionIdx += 1;
+        await fsp.writeFile(
+          path.join(chatsDir, `${sessionId}.jsonl`),
+          `${JSON.stringify({
+            uuid: `${sessionId}-user-1`,
+            parentUuid: null,
+            sessionId,
+            timestamp: '2026-08-01T00:00:00.000Z',
+            type: 'user',
+            message: { role: 'user', parts: [{ text: 'hello' }] },
+            cwd: runtime.workspaceCwd,
+          })}\n`,
+          'utf8',
+        );
+        const prPath = service.getPrSessionPathForArchiveState(
+          sessionId,
+          'active',
+        );
+        for (let i = 0; i < 10 && number <= total; i++, number++) {
+          await upsertSessionPr(prPath, {
+            number,
+            url: `https://code.alibaba-inc.com/jspt/agentic_coding/codereview/${number}`,
+          });
+        }
       }
     }
-  }
 
-  function attachTimerGuard(
-    target: WorkspaceRuntime,
-  ): WorkspaceGenerationGuard {
-    const guard = createWorkspaceGenerationGuard();
-    (target as { generationGuard?: WorkspaceGenerationGuard }).generationGuard =
-      guard;
-    return guard;
-  }
-
-  // The sweep's observable completion signal: the bridge notification fires
-  // only after the LAST sidecar commit of the tick. Waiting on it before
-  // crossing the next interval is what keeps these timer tests deterministic
-  // under full-suite load — advancing the fake clock the instant the VIEW
-  // count lands races the tick's real-fs commit tail, and the re-entrancy
-  // guard then silently skips the next tick (intermittent red).
-  const sweepDone = (runtime: WorkspaceRuntime, times: number): Promise<void> =>
-    vi.waitFor(
-      () => {
-        expect(
-          runtime.bridge.markSessionCatalogChanged as ReturnType<typeof vi.fn>,
-        ).toHaveBeenCalledTimes(times);
-      },
-      { timeout: 30_000 },
-    );
-
-  it('rotates the Aone view window across timer ticks', async () => {
-    // 30 pending (> the 25 cap): tick 1 must view the first window, tick 2
-    // a DIFFERENT window — the timer advances sweepStart, so the union of
-    // the two windows covers all 30. A dropped sweepStart passthrough (a
-    // fixed prefix) would re-view the same first 25 both ticks.
-    const total = 30;
-    const runtime = timerRuntime('aone', trustedCwd, true);
-    await seedAoneTimerWorkspace(runtime, total);
-    const perTickViews: number[][] = [];
-    let current: number[] = [];
-    const view = vi.fn(async (_repoPath: string, id: number) => {
-      current.push(id);
-      return {
-        number: id,
-        url: `https://code.alibaba-inc.com/jspt/agentic_coding/codereview/${id}`,
-        // Non-terminal: nothing leaves the pending set between ticks.
-        state: 'open' as const,
-      };
-    });
-    const backend: AoneMrBackend = { view };
-    const registry = {
-      listAll: () => [runtime],
-    } as unknown as WorkspaceRegistry;
-    vi.useFakeTimers();
-
-    const handle = startSessionPrRefreshTimer({
-      workspaceRegistry: registry,
-      env: {},
-      aoneBackend: backend,
-    });
-
-    await vi.advanceTimersByTimeAsync(60_000); // crosses the first-run delay
-    await vi.waitFor(() => {
-      expect(view).toHaveBeenCalledTimes(AONE_MAX_MR_VIEW_CALLS_PER_RUN);
-    });
-    await sweepDone(runtime, 1); // tick 1 fully committed before next tick
-    perTickViews.push(current);
-    current = [];
-
-    await vi.advanceTimersByTimeAsync(5 * 60_000); // next interval
-    await vi.waitFor(() => {
-      expect(view).toHaveBeenCalledTimes(2 * AONE_MAX_MR_VIEW_CALLS_PER_RUN);
-    });
-    await sweepDone(runtime, 2);
-    perTickViews.push(current);
-
-    const union = new Set(perTickViews.flat());
-    // Both windows together cover every pending number; a fixed prefix would
-    // cap the union at the window size.
-    expect(union.size).toBe(total);
-    handle?.dispose();
-  });
-
-  it('prunes the sweep offset of a workspace removed from the registry', async () => {
-    // If the offset survived removal, re-adding the workspace would resume the
-    // stale window; pruning resets it to 0, so the re-added workspace's first
-    // sweep re-views the first window (ids 21..25 included, which a stale
-    // offset-25 window would skip).
-    const total = 30;
-    const runtime = timerRuntime('aone', trustedCwd, true);
-    await seedAoneTimerWorkspace(runtime, total);
-    const perTickViews: number[][] = [];
-    let current: number[] = [];
-    const view = vi.fn(async (_repoPath: string, id: number) => {
-      current.push(id);
-      return {
-        number: id,
-        url: `https://code.alibaba-inc.com/jspt/agentic_coding/codereview/${id}`,
-        state: 'open' as const,
-      };
-    });
-    const backend: AoneMrBackend = { view };
-    const runtimes: WorkspaceRuntime[] = [runtime];
-    const registry = {
-      listAll: () => runtimes,
-    } as unknown as WorkspaceRegistry;
-    vi.useFakeTimers();
-
-    const handle = startSessionPrRefreshTimer({
-      workspaceRegistry: registry,
-      env: {},
-      aoneBackend: backend,
-    });
-
-    // Tick 1: workspace swept, offset advances past 0.
-    await vi.advanceTimersByTimeAsync(60_000);
-    await vi.waitFor(() => {
-      expect(view).toHaveBeenCalledTimes(AONE_MAX_MR_VIEW_CALLS_PER_RUN);
-    });
-    await sweepDone(runtime, 1); // tick 1 fully committed before removal
-    perTickViews.push(current);
-    current = [];
-
-    // Tick 2: workspace removed → not swept, its offset must be pruned.
-    runtimes.length = 0;
-    await vi.advanceTimersByTimeAsync(5 * 60_000);
-    await vi.advanceTimersByTimeAsync(10);
-
-    // Tick 3: workspace re-added → a pruned offset restarts at the first
-    // window (ids 21..25 present); a stale offset would start mid-set.
-    runtimes.push(runtime);
-    await vi.advanceTimersByTimeAsync(5 * 60_000);
-    await vi.waitFor(() => {
-      expect(view).toHaveBeenCalledTimes(2 * AONE_MAX_MR_VIEW_CALLS_PER_RUN);
-    });
-    // Tick 3 re-views the first window, already 'open' from tick 1, so it
-    // commits nothing and the catalog notification does not refire — wait on
-    // the view count and let the tick's synchronous tail settle instead of
-    // sweepDone.
-    await vi.advanceTimersByTimeAsync(10);
-    perTickViews.push(current);
-
-    const readded = new Set(perTickViews[1]);
-    expect(readded.size).toBe(AONE_MAX_MR_VIEW_CALLS_PER_RUN);
-    for (const id of [21, 22, 23, 24, 25]) {
-      expect(readded.has(id)).toBe(true);
+    function attachTimerGuard(
+      target: WorkspaceRuntime,
+    ): WorkspaceGenerationGuard {
+      const guard = createWorkspaceGenerationGuard();
+      (
+        target as { generationGuard?: WorkspaceGenerationGuard }
+      ).generationGuard = guard;
+      return guard;
     }
-    handle?.dispose();
-  });
 
-  it('advances the rotation by the consumed count when the budget truncates', async () => {
-    // R1-4 witness: the timer must advance the offset by however many views
-    // the sweep actually STARTED (aoneConsumed), not the fixed cap. Each
-    // fake view hangs for the full per-call timeout against the injected
-    // clock, so the 60s budget truncates the window well below the cap; the
-    // next sweep must then begin at the truncation point. Mutant
-    // `sweepStart + AONE_MAX_MR_VIEW_CALLS_PER_RUN` would start the second
-    // window cap positions ahead and leave the truncated tail unviewed.
-    const total = 30;
-    const runtime = timerRuntime('aone', trustedCwd, true);
-    await seedAoneTimerWorkspace(runtime, total);
-    const perTickViews: number[][] = [];
-    let current: number[] = [];
-    let clock = 0;
-    const view = vi.fn(async (_repoPath: string, id: number) => {
-      current.push(id);
-      clock += 20_000; // each view burns the per-call timeout
-      return {
-        number: id,
-        url: `https://code.alibaba-inc.com/jspt/agentic_coding/codereview/${id}`,
-        state: 'open' as const,
-      };
-    });
-    const backend: AoneMrBackend = { view };
-    const registry = {
-      listAll: () => [runtime],
-    } as unknown as WorkspaceRegistry;
-    vi.useFakeTimers();
-
-    const handle = startSessionPrRefreshTimer({
-      workspaceRegistry: registry,
-      env: {},
-      aoneBackend: backend,
-      now: () => clock,
-    });
-
-    // Tick 1: budget admits far fewer views than the cap.
-    await vi.advanceTimersByTimeAsync(60_000);
-    await vi.waitFor(() => {
-      expect(view.mock.calls.length).toBeGreaterThan(0);
-      expect(view.mock.calls.length).toBeLessThan(
-        AONE_MAX_MR_VIEW_CALLS_PER_RUN,
+    // The sweep's observable completion signal: the bridge notification fires
+    // only after the LAST sidecar commit of the tick. Waiting on it before
+    // crossing the next interval is what keeps these timer tests deterministic
+    // under full-suite load — advancing the fake clock the instant the VIEW
+    // count lands races the tick's real-fs commit tail, and the re-entrancy
+    // guard then silently skips the next tick (intermittent red).
+    const sweepDone = (
+      runtime: WorkspaceRuntime,
+      times: number,
+    ): Promise<void> =>
+      vi.waitFor(
+        () => {
+          expect(
+            runtime.bridge.markSessionCatalogChanged as ReturnType<
+              typeof vi.fn
+            >,
+          ).toHaveBeenCalledTimes(times);
+        },
+        { timeout: 30_000 },
       );
-    });
-    await sweepDone(runtime, 1);
-    const consumed = current.length;
-    expect(consumed).toBeLessThan(AONE_MAX_MR_VIEW_CALLS_PER_RUN);
-    perTickViews.push(current);
-    current = [];
 
-    // Tick 2: must begin at the truncation point, not cap positions ahead.
-    await vi.advanceTimersByTimeAsync(5 * 60_000);
-    await vi.waitFor(() => {
-      expect(view.mock.calls.length).toBeGreaterThan(consumed);
-    });
-    await sweepDone(runtime, 2);
-    perTickViews.push(current);
+    it('rotates the Aone view window across timer ticks', async () => {
+      // 30 pending (> the 25 cap): tick 1 must view the first window, tick 2
+      // a DIFFERENT window — the timer advances sweepStart, so the union of
+      // the two windows covers all 30. A dropped sweepStart passthrough (a
+      // fixed prefix) would re-view the same first 25 both ticks.
+      const total = 30;
+      const runtime = timerRuntime('aone', trustedCwd, true);
+      await seedAoneTimerWorkspace(runtime, total);
+      const perTickViews: number[][] = [];
+      let current: number[] = [];
+      const view = vi.fn(async (_repoPath: string, id: number) => {
+        current.push(id);
+        return {
+          number: id,
+          url: `https://code.alibaba-inc.com/jspt/agentic_coding/codereview/${id}`,
+          // Non-terminal: nothing leaves the pending set between ticks.
+          state: 'open' as const,
+        };
+      });
+      const backend: AoneMrBackend = { view };
+      const registry = {
+        listAll: () => [runtime],
+      } as unknown as WorkspaceRegistry;
+      vi.useFakeTimers();
 
-    // Pending numbers are the consecutive 1..30, so the window that begins
-    // at the truncation offset picks up exactly where tick 1's window left
-    // off. A cap-advance mutant would start the second window cap positions
-    // ahead and leave a gap.
-    expect(perTickViews[1][0]).toBe(
-      perTickViews[0][perTickViews[0].length - 1] + 1,
-    );
-    handle?.dispose();
-  });
+      const handle = startSessionPrRefreshTimer({
+        workspaceRegistry: registry,
+        env: {},
+        aoneBackend: backend,
+      });
 
-  it('keeps the offset unmoved when a sweep throws, retrying the window', async () => {
-    // R4-4 witness: a workspace whose sweep throws (non-draining) must keep
-    // its offset so the next tick retries the same window. Mutant "advance
-    // the offset in the catch / move the write into finally" would skip the
-    // failed window. Tick 1 views window 1; tick 2 throws (generation guard
-    // closed); tick 3 must start where tick 1 left off (offset 25), not cap
-    // positions further ahead.
-    const total = 30;
-    const runtime = timerRuntime('aone', trustedCwd, true);
-    await seedAoneTimerWorkspace(runtime, total);
-    const perTickViews: number[][] = [];
-    let current: number[] = [];
-    const view = vi.fn(async (_repoPath: string, id: number) => {
-      current.push(id);
-      return {
-        number: id,
-        url: `https://code.alibaba-inc.com/jspt/agentic_coding/codereview/${id}`,
-        state: 'open' as const,
-      };
-    });
-    const backend: AoneMrBackend = { view };
-    const registry = {
-      listAll: () => [runtime],
-    } as unknown as WorkspaceRegistry;
-    vi.useFakeTimers();
+      await vi.advanceTimersByTimeAsync(60_000); // crosses the first-run delay
+      await vi.waitFor(() => {
+        expect(view).toHaveBeenCalledTimes(AONE_MAX_MR_VIEW_CALLS_PER_RUN);
+      });
+      await sweepDone(runtime, 1); // tick 1 fully committed before next tick
+      perTickViews.push(current);
+      current = [];
 
-    const handle = startSessionPrRefreshTimer({
-      workspaceRegistry: registry,
-      env: {},
-      aoneBackend: backend,
+      await vi.advanceTimersByTimeAsync(5 * 60_000); // next interval
+      await vi.waitFor(() => {
+        expect(view).toHaveBeenCalledTimes(2 * AONE_MAX_MR_VIEW_CALLS_PER_RUN);
+      });
+      await sweepDone(runtime, 2);
+      perTickViews.push(current);
+
+      const union = new Set(perTickViews.flat());
+      // Both windows together cover every pending number; a fixed prefix would
+      // cap the union at the window size.
+      expect(union.size).toBe(total);
+      handle?.dispose();
     });
 
-    // Tick 1: window 1 viewed, offset advances to 25.
-    await vi.advanceTimersByTimeAsync(60_000);
-    await vi.waitFor(() => {
+    it('prunes the sweep offset of a workspace removed from the registry', async () => {
+      // If the offset survived removal, re-adding the workspace would resume the
+      // stale window; pruning resets it to 0, so the re-added workspace's first
+      // sweep re-views the first window (ids 21..25 included, which a stale
+      // offset-25 window would skip).
+      const total = 30;
+      const runtime = timerRuntime('aone', trustedCwd, true);
+      await seedAoneTimerWorkspace(runtime, total);
+      const perTickViews: number[][] = [];
+      let current: number[] = [];
+      const view = vi.fn(async (_repoPath: string, id: number) => {
+        current.push(id);
+        return {
+          number: id,
+          url: `https://code.alibaba-inc.com/jspt/agentic_coding/codereview/${id}`,
+          state: 'open' as const,
+        };
+      });
+      const backend: AoneMrBackend = { view };
+      const runtimes: WorkspaceRuntime[] = [runtime];
+      const registry = {
+        listAll: () => runtimes,
+      } as unknown as WorkspaceRegistry;
+      vi.useFakeTimers();
+
+      const handle = startSessionPrRefreshTimer({
+        workspaceRegistry: registry,
+        env: {},
+        aoneBackend: backend,
+      });
+
+      // Tick 1: workspace swept, offset advances past 0.
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.waitFor(() => {
+        expect(view).toHaveBeenCalledTimes(AONE_MAX_MR_VIEW_CALLS_PER_RUN);
+      });
+      await sweepDone(runtime, 1); // tick 1 fully committed before removal
+      perTickViews.push(current);
+      current = [];
+
+      // Tick 2: workspace removed → not swept, its offset must be pruned.
+      runtimes.length = 0;
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      await vi.advanceTimersByTimeAsync(10);
+
+      // Tick 3: workspace re-added → a pruned offset restarts at the first
+      // window (ids 21..25 present); a stale offset would start mid-set.
+      runtimes.push(runtime);
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      await vi.waitFor(() => {
+        expect(view).toHaveBeenCalledTimes(2 * AONE_MAX_MR_VIEW_CALLS_PER_RUN);
+      });
+      // Tick 3 re-views the first window, already 'open' from tick 1, so it
+      // commits nothing and the catalog notification does not refire — wait on
+      // the view count and let the tick's synchronous tail settle instead of
+      // sweepDone.
+      await vi.advanceTimersByTimeAsync(10);
+      perTickViews.push(current);
+
+      const readded = new Set(perTickViews[1]);
+      expect(readded.size).toBe(AONE_MAX_MR_VIEW_CALLS_PER_RUN);
+      for (const id of [21, 22, 23, 24, 25]) {
+        expect(readded.has(id)).toBe(true);
+      }
+      handle?.dispose();
+    });
+
+    it('advances the rotation by the consumed count when the budget truncates', async () => {
+      // R1-4 witness: the timer must advance the offset by however many views
+      // the sweep actually STARTED (aoneConsumed), not the fixed cap. Each
+      // fake view hangs for the full per-call timeout against the injected
+      // clock, so the 60s budget truncates the window well below the cap; the
+      // next sweep must then begin at the truncation point. Mutant
+      // `sweepStart + AONE_MAX_MR_VIEW_CALLS_PER_RUN` would start the second
+      // window cap positions ahead and leave the truncated tail unviewed.
+      const total = 30;
+      const runtime = timerRuntime('aone', trustedCwd, true);
+      await seedAoneTimerWorkspace(runtime, total);
+      const perTickViews: number[][] = [];
+      let current: number[] = [];
+      let clock = 0;
+      const view = vi.fn(async (_repoPath: string, id: number) => {
+        current.push(id);
+        clock += 20_000; // each view burns the per-call timeout
+        return {
+          number: id,
+          url: `https://code.alibaba-inc.com/jspt/agentic_coding/codereview/${id}`,
+          state: 'open' as const,
+        };
+      });
+      const backend: AoneMrBackend = { view };
+      const registry = {
+        listAll: () => [runtime],
+      } as unknown as WorkspaceRegistry;
+      vi.useFakeTimers();
+
+      const handle = startSessionPrRefreshTimer({
+        workspaceRegistry: registry,
+        env: {},
+        aoneBackend: backend,
+        now: () => clock,
+      });
+
+      // Tick 1: budget admits far fewer views than the cap.
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.waitFor(() => {
+        expect(view.mock.calls.length).toBeGreaterThan(0);
+        expect(view.mock.calls.length).toBeLessThan(
+          AONE_MAX_MR_VIEW_CALLS_PER_RUN,
+        );
+      });
+      await sweepDone(runtime, 1);
+      const consumed = current.length;
+      expect(consumed).toBeLessThan(AONE_MAX_MR_VIEW_CALLS_PER_RUN);
+      perTickViews.push(current);
+      current = [];
+
+      // Tick 2: must begin at the truncation point, not cap positions ahead.
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      await vi.waitFor(() => {
+        expect(view.mock.calls.length).toBeGreaterThan(consumed);
+      });
+      await sweepDone(runtime, 2);
+      perTickViews.push(current);
+
+      // Pending numbers are the consecutive 1..30, so the window that begins
+      // at the truncation offset picks up exactly where tick 1's window left
+      // off. A cap-advance mutant would start the second window cap positions
+      // ahead and leave a gap.
+      expect(perTickViews[1][0]).toBe(
+        perTickViews[0][perTickViews[0].length - 1] + 1,
+      );
+      handle?.dispose();
+    });
+
+    it('keeps the offset unmoved when a sweep throws, retrying the window', async () => {
+      // R4-4 witness: a workspace whose sweep throws (non-draining) must keep
+      // its offset so the next tick retries the same window. Mutant "advance
+      // the offset in the catch / move the write into finally" would skip the
+      // failed window. Tick 1 views window 1; tick 2 throws (generation guard
+      // closed); tick 3 must start where tick 1 left off (offset 25), not cap
+      // positions further ahead.
+      const total = 30;
+      const runtime = timerRuntime('aone', trustedCwd, true);
+      await seedAoneTimerWorkspace(runtime, total);
+      const perTickViews: number[][] = [];
+      let current: number[] = [];
+      const view = vi.fn(async (_repoPath: string, id: number) => {
+        current.push(id);
+        return {
+          number: id,
+          url: `https://code.alibaba-inc.com/jspt/agentic_coding/codereview/${id}`,
+          state: 'open' as const,
+        };
+      });
+      const backend: AoneMrBackend = { view };
+      const registry = {
+        listAll: () => [runtime],
+      } as unknown as WorkspaceRegistry;
+      vi.useFakeTimers();
+
+      const handle = startSessionPrRefreshTimer({
+        workspaceRegistry: registry,
+        env: {},
+        aoneBackend: backend,
+      });
+
+      // Tick 1: window 1 viewed, offset advances to 25.
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.waitFor(() => {
+        expect(view).toHaveBeenCalledTimes(AONE_MAX_MR_VIEW_CALLS_PER_RUN);
+      });
+      await sweepDone(runtime, 1);
+      perTickViews.push(current);
+      current = [];
+
+      // Tick 2: guard closed → sweep throws non-draining → offset must NOT
+      // advance. No new views fire. The guard assert sits AFTER the sweep's
+      // real-fs sidecar scan, so wait on the assert itself — a spy on the
+      // test-owned closed guard — before concluding the tick threw: asserting
+      // the view count alone races the scan, and the guard can be re-opened
+      // before the sweep reaches the assert, so no throw ever happens.
+      const closedGuard = attachTimerGuard(runtime);
+      closedGuard.close();
+      const assertOpen = vi.spyOn(closedGuard, 'assertOpen');
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      await vi.waitFor(
+        () => {
+          expect(assertOpen).toHaveBeenCalled();
+        },
+        { timeout: 30_000 },
+      );
       expect(view).toHaveBeenCalledTimes(AONE_MAX_MR_VIEW_CALLS_PER_RUN);
+
+      // Tick 3: guard re-opened → sweep retries the window tick 1 left off at
+      // (offset 25), not the window a cap-advance would have jumped to.
+      attachTimerGuard(runtime);
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      await vi.waitFor(() => {
+        expect(view).toHaveBeenCalledTimes(2 * AONE_MAX_MR_VIEW_CALLS_PER_RUN);
+      });
+      await sweepDone(runtime, 2);
+      perTickViews.push(current);
+
+      // Offset stayed put across the thrown tick: tick 3's window picks up
+      // exactly where tick 1's left off (pending numbers are the consecutive
+      // 1..30). A cap-advance mutant would have jumped the window cap
+      // positions ahead on the thrown tick.
+      expect(perTickViews[1][0]).toBe(
+        perTickViews[0][perTickViews[0].length - 1] + 1,
+      );
+      handle?.dispose();
     });
-    await sweepDone(runtime, 1);
-    perTickViews.push(current);
-    current = [];
-
-    // Tick 2: guard closed → sweep throws non-draining → offset must NOT
-    // advance. No new views fire. The guard assert sits AFTER the sweep's
-    // real-fs sidecar scan, so wait on the assert itself — a spy on the
-    // test-owned closed guard — before concluding the tick threw: asserting
-    // the view count alone races the scan, and the guard can be re-opened
-    // before the sweep reaches the assert, so no throw ever happens.
-    const closedGuard = attachTimerGuard(runtime);
-    closedGuard.close();
-    const assertOpen = vi.spyOn(closedGuard, 'assertOpen');
-    await vi.advanceTimersByTimeAsync(5 * 60_000);
-    await vi.waitFor(
-      () => {
-        expect(assertOpen).toHaveBeenCalled();
-      },
-      { timeout: 30_000 },
-    );
-    expect(view).toHaveBeenCalledTimes(AONE_MAX_MR_VIEW_CALLS_PER_RUN);
-
-    // Tick 3: guard re-opened → sweep retries the window tick 1 left off at
-    // (offset 25), not the window a cap-advance would have jumped to.
-    attachTimerGuard(runtime);
-    await vi.advanceTimersByTimeAsync(5 * 60_000);
-    await vi.waitFor(() => {
-      expect(view).toHaveBeenCalledTimes(2 * AONE_MAX_MR_VIEW_CALLS_PER_RUN);
-    });
-    await sweepDone(runtime, 2);
-    perTickViews.push(current);
-
-    // Offset stayed put across the thrown tick: tick 3's window picks up
-    // exactly where tick 1's left off (pending numbers are the consecutive
-    // 1..30). A cap-advance mutant would have jumped the window cap
-    // positions ahead on the thrown tick.
-    expect(perTickViews[1][0]).toBe(
-      perTickViews[0][perTickViews[0].length - 1] + 1,
-    );
-    handle?.dispose();
-  });
-});
+  },
+);

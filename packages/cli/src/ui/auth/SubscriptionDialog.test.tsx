@@ -6,6 +6,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { setTimeout as settle } from 'node:timers/promises';
 import { renderWithProviders } from '../../test-utils/render.js';
+import { slowHostBudgetMs } from '../../test-utils/slow-test-host.js';
 import type { SubscriptionState } from './use-subscription.js';
 import { SubscriptionDialog } from './SubscriptionDialog.js';
 
@@ -13,14 +14,15 @@ import { SubscriptionDialog } from './SubscriptionDialog.js';
 // keypress-to-render chain can exceed vi.waitFor's 1s default budget (the
 // canCheckAgain=true keyboard case failed three of four nights). 5s still
 // timed out under the extreme contention of dispatch 43574338804 (cli 2/3,
-// 734s of test time across workers), so use the repo's 15s contended-host
-// budget. The case ceiling below keeps the chained waits under it.
-const WAIT_FOR_TIMEOUT = 15_000;
+// 734s of test time across workers), so raise to 15s on a slow host via the
+// repo's slowHostBudgetMs helper (idle hosts keep the fast budget). The case
+// ceiling below keeps the chained waits under it.
+const WAIT_FOR_TIMEOUT = slowHostBudgetMs(5_000, 15_000);
 // Keep the chained per-wait budgets under the case ceiling: the off-ECS
 // lane default is 15s and the purchase-polling case chains three waits, so
 // vitest would otherwise decide the outcome before the last wait's own
 // timer (same rule as packages/core/src/test-utils/latency-budget.ts).
-vi.setConfig({ testTimeout: 60_000 });
+vi.setConfig({ testTimeout: slowHostBudgetMs(15_000, 60_000) });
 
 const flow = vi.hoisted(() => ({
   state: { status: 'waiting' } as SubscriptionState,
@@ -138,8 +140,12 @@ it.each([false, true])(
     flow.state = { status: 'purchase-required', plan: 'Free' };
     flow.canCheckAgain = canCheckAgain;
     const onBack = vi.fn();
+    const onSwitchProvider = vi.fn();
     const ui = renderWithProviders(
-      <SubscriptionDialog onBack={onBack} onSwitchProvider={vi.fn()} />,
+      <SubscriptionDialog
+        onBack={onBack}
+        onSwitchProvider={onSwitchProvider}
+      />,
     );
     try {
       expect(ui.lastFrame()).toContain('Use another account');
@@ -174,6 +180,12 @@ it.each([false, true])(
       );
       expect(onBack).not.toHaveBeenCalled();
       expect(flow.cancel).not.toHaveBeenCalled();
+      // The re-send loop above must not mask a mis-routed press: pin that no
+      // OTHER menu item was activated (a regression that lands Enter on the
+      // stale selection would fire one of these instead of switchAccount).
+      expect(flow.openPlans).not.toHaveBeenCalled();
+      expect(flow.checkAgain).not.toHaveBeenCalled();
+      expect(onSwitchProvider).not.toHaveBeenCalled();
     } finally {
       ui.unmount();
     }

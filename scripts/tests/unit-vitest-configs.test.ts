@@ -51,6 +51,7 @@ type ExemptionConfig = {
     outputFile?: { junit?: string };
     reporters?: (string | [string, unknown])[];
     testTimeout?: number;
+    hookTimeout?: number;
     pool?: 'threads' | 'forks' | 'vmThreads';
     poolOptions?: { threads?: { maxThreads?: number } };
   };
