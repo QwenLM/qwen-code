@@ -172,7 +172,7 @@ describe('DualOutputBridge', () => {
       expect(data['version']).toBe('1.2.3');
       expect(data['protocol_version']).toBe(DUAL_OUTPUT_PROTOCOL_VERSION);
       expect(data['supported_events']).toEqual([...SUPPORTED_EVENTS]);
-      expect(DUAL_OUTPUT_PROTOCOL_VERSION).toBe(2);
+      expect(DUAL_OUTPUT_PROTOCOL_VERSION).toBe(3);
     });
 
     it('writes bounded tool result content to the sidecar file', async () => {

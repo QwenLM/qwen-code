@@ -54,6 +54,19 @@ import { observeHeadlessToolResultProjection } from '../tool-result-boundary-dia
 export interface MessageState {
   messageId: string | null;
   blocks: ContentBlock[];
+  /**
+   * Number of content blocks already delivered for this message id. Block
+   * types cannot share one snapshot, so a type change closes the snapshot
+   * and starts a new one under the SAME id: the next block's stream index is
+   * this count, not 0.
+   *
+   * The `(message.id, index)` promise describes the `content_block_*` frames,
+   * whose index is turn-global. A snapshot's `message.content` holds only that
+   * fragment's blocks and carries no base offset, so the same index addresses
+   * the fragment-local block there; consumers concatenate snapshots rather
+   * than replacing by index.
+   */
+  emittedBlockCount: number;
   openBlocks: Set<number>;
   usage: Usage;
   messageStarted: boolean;
@@ -177,6 +190,7 @@ export abstract class BaseJsonOutputAdapter {
     return {
       messageId: null,
       blocks: [],
+      emittedBlockCount: 0,
       openBlocks: new Set<number>(),
       usage: this.createUsage(),
       messageStarted: false,
@@ -302,14 +316,18 @@ export abstract class BaseJsonOutputAdapter {
       return;
     }
 
-    const index = state.blocks.length - 1;
-    if (!state.openBlocks.has(index)) {
+    const blockIndex = state.blocks.length - 1;
+    // `openBlocks` holds stream indexes, which carry the running offset after
+    // a block-type transition; probing it with the array position would miss
+    // and leave the block unclosed until finalization.
+    const streamIndex = state.emittedBlockCount + blockIndex;
+    if (!state.openBlocks.has(streamIndex)) {
       return;
     }
 
     if (lastBlock.type === 'text' || lastBlock.type === 'thinking') {
-      this.onBlockClosed(state, index, actualParentToolUseId);
-      this.closeBlock(state, index);
+      this.onBlockClosed(state, streamIndex, actualParentToolUseId);
+      this.closeBlock(state, streamIndex);
     }
   }
 
@@ -365,9 +383,20 @@ export abstract class BaseJsonOutputAdapter {
       return;
     }
 
-    // Finalize current message and start new one
+    // Close the current snapshot and continue the turn's stream under the
+    // same message id: one model response stays one message for consumers
+    // that pair a final `assistant` snapshot with the streamed blocks by
+    // `message.id` (#15875). Only the pending block type and the block counts
+    // reset, so the next block keeps a distinct stream index.
     this.finalizeAssistantMessageInternal(state, parentToolUseId);
-    this.startAssistantMessageInternal(state);
+    state.emittedBlockCount += state.blocks.length;
+    state.blocks = [];
+    state.openBlocks = new Set<number>();
+    // Usage accumulates on `Finished` and belongs to the message, which now
+    // spans every snapshot under one id; resetting it here would let the last
+    // frame of a message report zeros after an earlier frame reported totals.
+    state.messageStarted = false;
+    state.finalized = false;
     state.currentBlockType = targetType;
   }
 
@@ -378,6 +407,7 @@ export abstract class BaseJsonOutputAdapter {
    */
   protected startAssistantMessageInternal(state: MessageState): void {
     state.messageId = randomUUID();
+    state.emittedBlockCount = 0;
     state.blocks = [];
     state.openBlocks = new Set<number>();
     state.usage = this.createUsage();
@@ -634,8 +664,8 @@ export abstract class BaseJsonOutputAdapter {
           }
           const retainedIndex = retainedBlocks.length;
           retainedBlocks.push(block);
-          if (state.openBlocks.has(index)) {
-            retainedOpenBlocks.add(retainedIndex);
+          if (state.openBlocks.has(state.emittedBlockCount + index)) {
+            retainedOpenBlocks.add(state.emittedBlockCount + retainedIndex);
           }
         }
         state.blocks = retainedBlocks;
@@ -889,7 +919,7 @@ export abstract class BaseJsonOutputAdapter {
     const isNewBlock = !current || current.type !== 'text';
     if (isNewBlock) {
       current = { type: 'text', text: '' } satisfies TextBlock;
-      const index = state.blocks.length;
+      const index = state.emittedBlockCount + state.blocks.length;
       state.blocks.push(current);
       this.openBlock(state, index, current);
       this.onTextBlockCreated(state, index, current, parentToolUseId);
@@ -897,7 +927,7 @@ export abstract class BaseJsonOutputAdapter {
 
     // current is guaranteed to be defined here (either existing or newly created)
     current!.text += fragment;
-    const index = state.blocks.length - 1;
+    const index = state.emittedBlockCount + state.blocks.length - 1;
     this.onTextAppended(state, index, fragment, parentToolUseId);
   }
 
@@ -946,7 +976,7 @@ export abstract class BaseJsonOutputAdapter {
         thinking: '',
         signature: subject,
       } satisfies ThinkingBlock;
-      const index = state.blocks.length;
+      const index = state.emittedBlockCount + state.blocks.length;
       state.blocks.push(current);
       this.openBlock(state, index, current);
       this.onThinkingBlockCreated(state, index, current, actualParentToolUseId);
@@ -954,7 +984,7 @@ export abstract class BaseJsonOutputAdapter {
 
     // current is guaranteed to be defined here (either existing or newly created)
     current!.thinking = `${current!.thinking ?? ''}${fragment}`;
-    const index = state.blocks.length - 1;
+    const index = state.emittedBlockCount + state.blocks.length - 1;
     this.onThinkingAppended(state, index, fragment, actualParentToolUseId);
   }
 
@@ -975,7 +1005,7 @@ export abstract class BaseJsonOutputAdapter {
     this.ensureMessageStarted(state, parentToolUseId);
     this.finalizePendingBlocks(state, parentToolUseId);
 
-    const index = state.blocks.length;
+    const index = state.emittedBlockCount + state.blocks.length;
     const block: ToolUseBlock = {
       type: 'tool_use',
       id: request.callId,
@@ -1031,7 +1061,7 @@ export abstract class BaseJsonOutputAdapter {
     toolCall: NonNullable<AgentResultDisplay['toolCalls']>[number],
     _parentToolUseId: string,
   ): { block: ToolUseBlock; index: number } {
-    const index = state.blocks.length;
+    const index = state.emittedBlockCount + state.blocks.length;
     const block: ToolUseBlock = {
       type: 'tool_use',
       id: toolCall.callId,

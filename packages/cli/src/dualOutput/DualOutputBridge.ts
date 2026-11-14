@@ -52,8 +52,10 @@ export const SUPPORTED_EVENTS = [
  * History:
  *   1 — initial release (session_start, session_end, full stream-json).
  *   2 — textual tool_result content is bounded for transport.
+ *   3 — one `message.id` per model response, with block indexes continuing
+ *       across the snapshots that share it.
  */
-export const DUAL_OUTPUT_PROTOCOL_VERSION = 2;
+export const DUAL_OUTPUT_PROTOCOL_VERSION = 3;
 
 /**
  * Maximum bytes buffered in the Node.js WriteStream before the bridge

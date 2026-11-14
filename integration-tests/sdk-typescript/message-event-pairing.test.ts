@@ -715,9 +715,10 @@ describe('Message Start/Stop Event Pairing (E2E)', () => {
 
       expect(events.length).toBeGreaterThanOrEqual(2);
 
-      // Pair content_block_start/stop sequentially (not by index, since
-      // block-type transitions reset the blocks array and reuse index 0).
-      // Each start is matched with the next stop that follows it.
+      // Blocks are numbered across a turn, so an index is not reused after a
+      // block-type transition. Pair the frames by position anyway: the
+      // index identifies the block, not the ordering of the surrounding
+      // message frames.
       const starts = events.filter((e) => e.type === 'content_block_start');
       const stops = events.filter((e) => e.type === 'content_block_stop');
       expect(starts.length).toBe(stops.length);

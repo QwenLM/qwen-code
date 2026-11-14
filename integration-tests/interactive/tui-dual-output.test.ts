@@ -394,7 +394,11 @@ it.each(cases)(
       expect(frames[0]).toMatchObject({
         type: 'system',
         subtype: 'session_start',
-        data: { protocol_version: 2 },
+        // Literal on purpose: importing the constant is a value import into
+        // packages/cli, and this suite's worker then loads the CLI's whole
+        // runtime graph — which cannot resolve `@qwen-code/sdk/daemon/ui` here.
+        // `DualOutputBridge.test.ts` pins the constant itself.
+        data: { protocol_version: 3 },
       });
       expect(frames.at(-1)).toMatchObject({
         type: 'system',

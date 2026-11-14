@@ -243,6 +243,50 @@ describe('StreamJsonOutputAdapter', () => {
         expect(deltaCall).toBeDefined();
       });
 
+      it('should keep stream indexes distinct across block-type transitions', () => {
+        // One model response stays one message id, so a consumer pairs blocks
+        // by `(message.id, index)`. Each transition closes the previous
+        // snapshot and empties `blocks`; the emitted index must keep the
+        // running offset or the tool block restarts at 0 and collides with
+        // the thinking block (#15875).
+        adapter.processEvent({
+          type: LlmEventType.Thought,
+          value: { subject: 'Planning', description: 'Thinking' },
+        });
+        adapter.processEvent({ type: LlmEventType.Content, value: 'Text' });
+        adapter.processEvent({
+          type: LlmEventType.ToolCallRequest,
+          value: {
+            callId: 'call-1',
+            name: 'read_file',
+            args: { path: 'a.txt' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-1',
+          },
+        });
+
+        const blockStarts: number[] = [];
+        for (const call of stdoutWriteSpy.mock.calls as unknown[][]) {
+          let parsed: {
+            type: string;
+            event: { type: string; index: number };
+          };
+          try {
+            parsed = JSON.parse(call[0] as string);
+          } catch {
+            continue;
+          }
+          if (
+            parsed.type === 'stream_event' &&
+            parsed.event?.type === 'content_block_start'
+          ) {
+            blockStarts.push(parsed.event.index);
+          }
+        }
+
+        expect(blockStarts).toEqual([0, 1, 2]);
+      });
+
       it('should emit message_stop on finalization', () => {
         adapter.processEvent({
           type: LlmEventType.Content,
@@ -1330,6 +1374,73 @@ describe('StreamJsonOutputAdapter', () => {
         );
         expect(uniqueTypes.size).toBeLessThanOrEqual(1);
       }
+    });
+
+    it('keeps one message id across a thinking-to-text transition', () => {
+      adapter.processEvent({
+        type: LlmEventType.Thought,
+        value: { subject: 'Thinking', description: 'Thought' },
+      });
+      adapter.processEvent({
+        type: LlmEventType.Content,
+        value: 'Answer',
+      });
+
+      adapter.finalizeAssistantMessage();
+
+      const snapshots = stdoutWriteSpy.mock.calls
+        .map((call: unknown[]) => JSON.parse(call[0] as string))
+        .filter(
+          (payload: { type?: string; message?: { content?: unknown } }) =>
+            payload.type === 'assistant' &&
+            Array.isArray(payload.message?.content) &&
+            payload.message.content.length > 0,
+        );
+
+      // One model response stays one message for consumers that pair the
+      // streamed blocks with the final snapshots by `message.id` (#15875).
+      expect(snapshots).toHaveLength(2);
+      expect(snapshots[1].message.id).toBe(snapshots[0].message.id);
+    });
+
+    it('numbers a post-transition block after the blocks already streamed', () => {
+      adapter = new StreamJsonOutputAdapter(mockConfig, true);
+      adapter.startAssistantMessage();
+      stdoutWriteSpy.mockClear();
+
+      adapter.processEvent({
+        type: LlmEventType.Thought,
+        value: { subject: 'Thinking', description: 'Thought' },
+      });
+      adapter.processEvent({
+        type: LlmEventType.Content,
+        value: 'Answer',
+      });
+
+      const payloads = stdoutWriteSpy.mock.calls.map((call: unknown[]) =>
+        JSON.parse(call[0] as string),
+      );
+      const blockStarts = payloads.filter(
+        (payload: { event?: { type?: string } }) =>
+          payload.event?.type === 'content_block_start',
+      );
+      const blockStops = payloads.filter(
+        (payload: { event?: { type?: string } }) =>
+          payload.event?.type === 'content_block_stop',
+      );
+
+      // A second snapshot reusing index 0 would make (message.id, index)
+      // ambiguous, so the text block continues the turn's block numbering.
+      expect(
+        blockStarts.map(
+          (payload: { event: { index: number } }) => payload.event.index,
+        ),
+      ).toEqual([0, 1]);
+      expect(
+        blockStops.map(
+          (payload: { event: { index: number } }) => payload.event.index,
+        ),
+      ).toEqual([0]);
     });
 
     it('should merge consecutive text fragments', () => {
