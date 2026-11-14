@@ -186,6 +186,13 @@ const SHARED_BATCH_LOG = 'tool batch on the shared agent loop';
 const SHARED_SUBAGENT_BATCH_LOG =
   /subagent \S+ round \d+ tool batch on the shared loop/g;
 
+/**
+ * The workspace file the queued-input scenario's tool polls for. The harness
+ * writes it only once the queued prompt's preview is on screen, so the tool
+ * result cannot reach the agent loop before the message is in the queue.
+ */
+const QUEUE_RELEASE_FILE = 'queue-release';
+
 const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms));
 
 async function until(
@@ -782,8 +789,20 @@ describeTui(SUITE, () => {
           async () => (await session!.viewport()).includes(scenario.queue!.on),
           'the tool starts',
         );
-        await sleep(1_000);
         await session.send(scenario.queue.input);
+        // The queue renders its own preview row, and the input line cannot
+        // match it because that line keeps its prompt prefix. Seeing the
+        // preview proves the message is queued before the tool can finish.
+        await until(
+          async () =>
+            (await session!.viewport())
+              .split('\n')
+              .some((line) => line.trim() === scenario.queue!.input),
+          'the queued input is on screen',
+          30_000,
+          () => session!.viewport(),
+        );
+        writeFileSync(join(workspace, QUEUE_RELEASE_FILE), '');
       }
       const expectedAfterPrompt =
         scenario.requests === 0
@@ -1168,12 +1187,29 @@ describeTui(SUITE, () => {
               : { content: 'Both read.' },
     },
     {
-      // Input submitted while a tool runs goes out with its result.
+      // Input submitted while a tool runs goes out with its result. The tool
+      // waits for the harness to release it after the queued prompt is on
+      // screen, so its result cannot outrun the queue.
       name: 'input queued while a tool runs',
       requests: 2,
       rounds: 2,
       batches: 1,
       prompts: ['Run the slow command.'],
+      files: {
+        'queue-gate.cjs': [
+          "const fs = require('node:fs');",
+          `const release = ${JSON.stringify(QUEUE_RELEASE_FILE)};`,
+          'const deadline = Date.now() + 60_000;',
+          'function poll() {',
+          '  if (fs.existsSync(release) || Date.now() > deadline) {',
+          '    process.exit(0);',
+          '  }',
+          '  setTimeout(poll, 50);',
+          '}',
+          'poll();',
+          '',
+        ].join('\n'),
+      },
       queue: { on: 'queue-now', input: 'Also mention the weather.' },
       sent: 'Also mention the weather.',
       reply: (messages) =>
@@ -1183,8 +1219,7 @@ describeTui(SUITE, () => {
                 fakeToolCall(
                   'run_shell_command',
                   {
-                    command:
-                      'echo queue-now && node -e "setTimeout(() => {}, 5000)"',
+                    command: 'echo queue-now && node queue-gate.cjs',
                     is_background: false,
                   },
                   'call_slow',
