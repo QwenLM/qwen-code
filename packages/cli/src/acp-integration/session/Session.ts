@@ -354,6 +354,7 @@ import {
   CHANNEL_TASK_RESULT_PARTIAL_META_KEY,
   CHANNEL_TURN_NOTICE_META_KEY,
   CHANNEL_WORKFLOW_ORIGIN_META_KEY,
+  MID_TURN_DRAIN_BATCH,
   parseChannelWorkflowOrigin,
   type ChannelWorkflowOrigin,
 } from '@qwen-code/channel-base';
@@ -1684,7 +1685,9 @@ const MID_TURN_KEEP_RESOLVE_TIMEOUT_MS = 2_000;
 // full drain budget.
 const ACTIVE_TURN_POLL_INTERVAL_MS = 10;
 const CHANNEL_TASK_POLL_INTERVAL_MS = 100;
-const MAX_MID_TURN_DRAIN_ITEMS = 10;
+// Shared with the ACP bridge that produces the drain response, so the
+// producer's batch and this consumer's cap cannot drift apart.
+const MAX_MID_TURN_DRAIN_ITEMS = MID_TURN_DRAIN_BATCH;
 const MID_TURN_ATTACHMENT_PROCESSING_FAILURE_TEXT =
   '[Attachment could not be processed]';
 const MAX_MID_TURN_RESOURCE_TEXT_LENGTH = 100_000;
