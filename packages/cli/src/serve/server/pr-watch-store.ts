@@ -83,12 +83,17 @@ export const PR_WATCH_CI_FIRED_CAP = 16;
 export const PR_WATCH_DELIVERED_CAP = 64;
 export const PR_WATCH_PENDING_CAP = 16;
 
-const TRANSITION_TYPES = new Set<PrTransitionType>([
-  'ci_failure',
-  'merge_conflict',
-  'head_change',
-  'state_change',
-]);
+/**
+ * The closed transition vocabulary. Exported so the operator setting's
+ * validation and the persisted-entry check cannot drift apart.
+ */
+export const PR_TRANSITION_TYPES: ReadonlySet<PrTransitionType> =
+  new Set<PrTransitionType>([
+    'ci_failure',
+    'merge_conflict',
+    'head_change',
+    'state_change',
+  ]);
 const ROLE_GROUPS = new Set<PrWatchRoleGroup>([
   'review',
   'verify',
@@ -175,7 +180,7 @@ function parsePendingEntry(value: unknown): PrWatchPendingEntry | null {
   const entry = value as Partial<PrWatchPendingEntry>;
   if (
     !isNonEmptyString(entry.type) ||
-    !TRANSITION_TYPES.has(entry.type as PrTransitionType) ||
+    !PR_TRANSITION_TYPES.has(entry.type as PrTransitionType) ||
     !isNonEmptyString(entry.key) ||
     typeof entry.summary !== 'string' ||
     !isTimestamp(entry.detectedAt)

@@ -42,6 +42,20 @@ export interface PrWatchObservation {
   failingChecks?: string[];
 }
 
+/**
+ * One PR's consecutive failed-view streak. `lastSeenAt` is the last tick that
+ * observed a failure and lets the tick prune streaks whose PR left the watch
+ * set; retention, not "absent this tick", because the rotation deliberately
+ * skips PRs and workspaces.
+ */
+export interface PrWatchViewFailureStreak {
+  count: number;
+  warned: boolean;
+  lastSeenAt?: number;
+}
+
+const PR_WATCH_VIEW_FAILURE_RETENTION_MS = 24 * 60 * 60 * 1000;
+
 export interface DetectedPrTransition {
   type: PrTransitionType;
   key: string;
@@ -97,6 +111,16 @@ export function detectPrTransitions(
   previous: PrWatchState | undefined,
   observation: PrWatchObservation,
   detectedAt: string,
+  /**
+   * The subscribed transition types. Absent means every type, which is what
+   * the direct unit tests and any caller without a subscription want;
+   * production always passes a non-empty set, because an empty one means the
+   * watch is off and no observation runs at all.
+   *
+   * The filter lives here rather than at the two call sites (the view path
+   * and the listing write) so the two producers cannot drift apart.
+   */
+  events?: ReadonlySet<PrTransitionType>,
 ): PrWatchDetection {
   const transitions: DetectedPrTransition[] = [];
   const prevHead = previous?.headSha;
@@ -188,9 +212,19 @@ export function detectPrTransitions(
     }
   }
 
+  // An unsubscribed type is neither queued nor returned. `ciFired` above is
+  // deliberately NOT filtered: an unsubscribed ci_failure still records its
+  // head, so subscribing later does not fire retroactively for a head that
+  // was already failing — the same rule that makes a first observation
+  // initialise silently.
+  const subscribed =
+    events === undefined
+      ? transitions
+      : transitions.filter((transition) => events.has(transition.type));
+
   const pending = [
     ...(previous?.pending ?? []),
-    ...transitions.map(({ type, key, summary, detectedAt: at, headSha }) => ({
+    ...subscribed.map(({ type, key, summary, detectedAt: at, headSha }) => ({
       type,
       key,
       summary,
@@ -221,7 +255,7 @@ export function detectPrTransitions(
     ...(pending.length > 0 ? { pending } : {}),
   };
 
-  return { state, transitions };
+  return { state, transitions: subscribed };
 }
 
 /** View cap per workspace sweep (master design §1). */
@@ -257,6 +291,25 @@ export interface PrWatchObservationDeps {
   locks: PathMutexRegistry;
   /** Normalised allowed hosts (see {@link normalizeWatchHost}). */
   allowedHosts: ReadonlySet<string>;
+  /**
+   * The subscribed transition types (master §6). Absent records every type,
+   * which is what the direct sweep tests want; the daemon always passes the
+   * operator's non-empty set, since an empty one means no observation runs.
+   */
+  events?: ReadonlySet<PrTransitionType>;
+  /**
+   * The operator's subscription per watch host, when the deprecated channel
+   * alias is in effect. Takes precedence over {@link events}; a host it does
+   * not cover subscribes nothing, so its PRs cost no view at all.
+   */
+  eventsForHost?: (host: string) => ReadonlySet<PrTransitionType>;
+  /**
+   * Cross-tick consecutive-failure streaks, keyed by PR. A PR that two
+   * consecutive sweeps fail to view gets one warning naming it and the error
+   * class; the streak resets on a successful view, so a recovered PR that
+   * fails again warns again. In-memory and per timer.
+   */
+  viewFailures?: Map<string, PrWatchViewFailureStreak>;
   /** The swept workspace's environment (its own GH_TOKEN/GH_CONFIG_DIR). */
   env?: Readonly<Record<string, string | undefined>>;
   /** Test seam; defaults to {@link fetchGitHubPullRequestView}. */
@@ -295,6 +348,8 @@ interface ViewTarget {
   identity: PrWatchIdentity;
   key: string;
   url: string;
+  /** The effective subscription for this target's host. */
+  events?: ReadonlySet<PrTransitionType>;
 }
 
 function observationFromView(view: GitHubPullRequestView): PrWatchObservation {
@@ -325,6 +380,26 @@ export async function observeWorkspacePrBindings(
   const log = deps.log ?? (() => {});
   const now = deps.now ?? Date.now;
   const view = deps.viewPullRequest ?? fetchGitHubPullRequestView;
+  const recordViewFailure = (
+    target: ViewTarget,
+    detail: string,
+    errorClass: string,
+  ): void => {
+    const streak = deps.viewFailures?.get(target.key) ?? {
+      count: 0,
+      warned: false,
+    };
+    streak.count += 1;
+    if (streak.count >= 2 && !streak.warned) {
+      streak.warned = true;
+      log(
+        `PR watch: ${streak.count} consecutive view failures for ${target.identity.repo}#${target.identity.number} (${errorClass}); the PR gets no transitions until a view succeeds`,
+      );
+    }
+    streak.lastSeenAt = now();
+    deps.viewFailures?.set(target.key, streak);
+    log(detail);
+  };
 
   // Build the unique view set: open bound PRs plus closed PRs the listing
   // did not return; merged is terminal by the newest observation.
@@ -339,6 +414,13 @@ export async function observeWorkspacePrBindings(
         log(
           `PR watch: skipping binding on non-allowed host ${identity.host} for ${identity.repo}#${identity.number}`,
         );
+        continue;
+      }
+      const events =
+        deps.eventsForHost?.(normalizeWatchHost(identity.host)) ?? deps.events;
+      if (events !== undefined && events.size === 0) {
+        // Under the alias, a host no channel covers subscribes nothing. Skip
+        // the view instead of spending one for a transition nobody receives.
         continue;
       }
       const existing = readPrWatchStateSync(deps.watchDir, identity);
@@ -359,7 +441,7 @@ export async function observeWorkspacePrBindings(
         // outside the listing stays in the view rotation to catch a reopen.
         continue;
       }
-      targets.set(key, { identity, key, url: entry.url });
+      targets.set(key, { identity, key, url: entry.url, events });
     }
   }
 
@@ -389,15 +471,19 @@ export async function observeWorkspacePrBindings(
       result = await view(target.url, deps.watchDir, deps.env);
     } catch (error) {
       failed += 1;
-      log(
+      recordViewFailure(
+        target,
         `PR watch: view failed for ${target.identity.repo}#${target.identity.number}: ${String(error)}`,
+        error instanceof Error ? error.name : typeof error,
       );
       continue;
     }
     if (result.kind !== 'ok') {
       failed += 1;
-      log(
+      recordViewFailure(
+        target,
         `PR watch: view unavailable for ${target.identity.repo}#${target.identity.number}: ${result.kind}`,
+        result.kind,
       );
       continue;
     }
@@ -421,6 +507,10 @@ export async function observeWorkspacePrBindings(
         `PR watch: ${target.identity.repo}#${target.identity.number} resolved to renamed repository ${viewIdentity.repo}; keeping the binding's own watch file`,
       );
     }
+    // A successful view ends the streak here, not after the state write: the
+    // warning is about the view, and a read-only or slow-view tick that cannot
+    // persist must not leave a warned streak permanently dark.
+    deps.viewFailures?.delete(target.key);
     const filePath = prWatchFilePath(deps.watchDir, target.identity);
     try {
       await deps.locks.runExclusive(filePath, async () => {
@@ -453,6 +543,7 @@ export async function observeWorkspacePrBindings(
           previous,
           observationFromView(result.view),
           detectedAt,
+          target.events,
         );
         if (
           (previous?.pending?.length ?? 0) + detection.transitions.length >
@@ -480,6 +571,8 @@ export interface PrWatchObservationTickDeps {
   watchDir: string;
   locks: PathMutexRegistry;
   allowedHosts: ReadonlySet<string>;
+  /** Per-host subscription; see {@link PrWatchObservationDeps.eventsForHost}. */
+  eventsForHost?: (host: string) => ReadonlySet<PrTransitionType>;
   viewPullRequest?: typeof fetchGitHubPullRequestView;
   now?: () => number;
   log?: (message: string) => void;
@@ -505,6 +598,8 @@ export interface PrWatchObservationTickOptions {
    * closed PR the listing covered leave the view rotation.
    */
   listedKeysByWorkspace?: ReadonlyMap<string, ReadonlySet<string>>;
+  /** Cross-tick failed-view streaks; see {@link PrWatchObservationDeps.viewFailures}. */
+  viewFailures?: Map<string, PrWatchViewFailureStreak>;
 }
 
 /**
@@ -555,6 +650,8 @@ export async function runPrWatchObservationTick(
         watchDir: deps.watchDir,
         locks: deps.locks,
         allowedHosts: deps.allowedHosts,
+        eventsForHost: deps.eventsForHost,
+        viewFailures: options.viewFailures,
         // Master §1: a workspace's own GH_TOKEN/GH_CONFIG_DIR applies to its
         // PRs, but the untrusted primary's views run with the daemon's own
         // environment (undefined → ghEnv falls back to process.env), so a
@@ -580,6 +677,17 @@ export async function runPrWatchObservationTick(
       sweepStart + result.consumed,
     );
     observed += result.observed;
+  }
+  // The daemon runs indefinitely, so a streak for a PR that left the watch
+  // set (merged, unbound, workspace removed) must age out; otherwise a re-bound
+  // key resumes at `warned` and never logs a new streak.
+  if (options.viewFailures !== undefined) {
+    const cutoff = now() - PR_WATCH_VIEW_FAILURE_RETENTION_MS;
+    for (const [key, streak] of options.viewFailures) {
+      if (streak.lastSeenAt !== undefined && streak.lastSeenAt < cutoff) {
+        options.viewFailures.delete(key);
+      }
+    }
   }
   return { claimed: true, observed };
 }

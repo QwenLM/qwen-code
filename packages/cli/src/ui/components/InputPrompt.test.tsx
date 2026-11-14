@@ -47,6 +47,7 @@ import { renderSoftwareCursor } from '../utils/software-cursor.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { StreamingState } from '../types.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
+import { FeedbackDialog } from '../FeedbackDialog.js';
 import {
   useAgentViewActions,
   useAgentViewState,
@@ -112,6 +113,7 @@ vi.mock('../contexts/UIActionsContext.js', () => ({
   useUIActions: vi.fn(() => ({
     handleRetryLastPrompt: vi.fn(),
     temporaryCloseFeedbackDialog: vi.fn(),
+    submitFeedback: vi.fn(),
     popAllQueuedMessages: vi.fn(() => null),
     invalidateSubmittedPromptProvenance: vi.fn(),
   })),
@@ -274,6 +276,7 @@ describe('InputPrompt', () => {
     mockedUseUIActions.mockReturnValue({
       handleRetryLastPrompt: vi.fn(),
       temporaryCloseFeedbackDialog: vi.fn(),
+      submitFeedback: vi.fn(),
       popAllQueuedMessages: vi.fn(() => null),
       invalidateSubmittedPromptProvenance: vi.fn(),
     } as unknown as ReturnType<typeof useUIActions>);
@@ -732,10 +735,74 @@ describe('InputPrompt', () => {
     stdin.write('1');
 
     await waitFor(() => {
+      expect(useUIActions().submitFeedback).toHaveBeenCalledWith(1);
       expect(handleVoiceKeypress).not.toHaveBeenCalled();
     });
     expect(props.buffer.handleInput).not.toHaveBeenCalled();
     unmount();
+  });
+
+  describe('feedback input ownership', () => {
+    beforeEach(() => {
+      mockedUseUIState.mockReturnValue({
+        isFeedbackDialogOpen: true,
+        messageQueue: [],
+        pendingLlmHistoryItems: [],
+      } as unknown as ReturnType<typeof useUIState>);
+    });
+
+    it('preserves every character after typing dismisses feedback in one burst', async () => {
+      const { stdin, unmount } = renderWithProviders(
+        <>
+          <FeedbackDialog />
+          <InputPrompt {...props} />
+        </>,
+      );
+      stdin.write('BURST_01230123_END');
+
+      await waitFor(() => {
+        expect(
+          vi
+            .mocked(props.buffer.handleInput)
+            .mock.calls.map(([key]) => key.sequence)
+            .join(''),
+        ).toBe('BURST_01230123_END');
+      });
+      expect(useUIActions().submitFeedback).not.toHaveBeenCalled();
+      expect(useUIActions().temporaryCloseFeedbackDialog).toHaveBeenCalledTimes(
+        1,
+      );
+      unmount();
+    });
+
+    it.each(['0', '1', '2', '3'])(
+      'consumes only the initial feedback choice %s in a burst',
+      async (choice) => {
+        const { stdin, unmount } = renderWithProviders(
+          <>
+            <FeedbackDialog />
+            <InputPrompt {...props} />
+          </>,
+        );
+        stdin.write(`${choice}text0123`);
+
+        await waitFor(() => {
+          expect(
+            vi
+              .mocked(props.buffer.handleInput)
+              .mock.calls.map(([key]) => key.sequence)
+              .join(''),
+          ).toBe('text0123');
+        });
+        expect(useUIActions().submitFeedback).toHaveBeenCalledExactlyOnceWith(
+          Number(choice),
+        );
+        expect(
+          useUIActions().temporaryCloseFeedbackDialog,
+        ).not.toHaveBeenCalled();
+        unmount();
+      },
+    );
   });
 
   describe('voice microphone permission', () => {
