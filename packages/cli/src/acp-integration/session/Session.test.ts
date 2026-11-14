@@ -7793,7 +7793,7 @@ describe('Session', () => {
       );
     });
 
-    it('waits for the managed skill review itself, though not for Extract or Dream', async () => {
+    it('does not hold the turn open on the managed skill review', async () => {
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue([
         { role: 'user', parts: [{ text: 'hello' }] },
         { role: 'model', parts: [{ text: 'response' }] },
@@ -7801,16 +7801,17 @@ describe('Session', () => {
       mockChat.sendMessageStream = vi
         .fn()
         .mockResolvedValue(createEmptyStream());
-      // The review is what this round owes the caller, so an unsettled review
-      // must hold the turn open — and it must do so through the promise
-      // `runManagedAutoMemoryBackgroundTasks` returned (the gate runs inside
-      // that call, so the host never evaluates it twice), not through the
-      // drained queue.
+      // Nothing on the ACP path reads the review's result, and the review
+      // agent takes no abort signal, so awaiting it would hold
+      // `session/prompt` for up to the auto-skill timeout. An unsettled review
+      // must leave the turn free to finish.
       const reviewNeverSettles = new Promise<number>(() => {});
       mockLlmClient.runManagedAutoMemoryBackgroundTasks.mockReturnValue(
         reviewNeverSettles,
       );
-      mockLlmClient.consumePendingMemoryTaskPromises.mockReturnValue([]);
+      mockLlmClient.consumePendingMemoryTaskPromises.mockReturnValue([
+        reviewNeverSettles,
+      ]);
 
       const outcome = await Promise.race([
         session
@@ -7823,7 +7824,50 @@ describe('Session', () => {
           setTimeout(() => resolve('turn-still-waiting'), 50),
         ),
       ]);
-      expect(outcome).toBe('turn-still-waiting');
+      expect(outcome).toBe('turn-finished');
+      expect(
+        mockLlmClient.runManagedAutoMemoryBackgroundTasks,
+      ).toHaveBeenCalledWith(core.SendMessageType.UserQuery, {
+        skipMemoryExtraction: false,
+      });
+      expect(mockLlmClient.consumePendingMemoryTaskPromises).toHaveBeenCalled();
+    });
+
+    it('does not hold the turn open when managed auto memory is off', async () => {
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue([
+        { role: 'user', parts: [{ text: 'hello' }] },
+        { role: 'model', parts: [{ text: 'response' }] },
+      ]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      vi.mocked(mockConfig.getManagedAutoMemoryEnabled)
+        .mockReturnValueOnce(false)
+        .mockReturnValueOnce(false);
+      const reviewNeverSettles = new Promise<number>(() => {});
+      mockLlmClient.runManagedAutoSkillReview.mockReturnValue(
+        reviewNeverSettles,
+      );
+      mockLlmClient.consumePendingMemoryTaskPromises.mockReturnValue([
+        reviewNeverSettles,
+      ]);
+
+      const outcome = await Promise.race([
+        session
+          .prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          })
+          .then(() => 'turn-finished'),
+        new Promise<string>((resolve) =>
+          setTimeout(() => resolve('turn-still-waiting'), 50),
+        ),
+      ]);
+      expect(outcome).toBe('turn-finished');
+      expect(mockLlmClient.runManagedAutoSkillReview).toHaveBeenCalledOnce();
+      expect(
+        mockLlmClient.runManagedAutoMemoryBackgroundTasks,
+      ).not.toHaveBeenCalled();
     });
 
     it("schedules no extraction or Dream after a channel's turn", async () => {

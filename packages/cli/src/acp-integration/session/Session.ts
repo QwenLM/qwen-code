@@ -11648,26 +11648,25 @@ export class Session implements SessionContext {
   }
 
   /**
-   * Schedules the managed skill review on a legacy ACP turn and returns the
-   * drain of the promise it queued.
+   * Schedules the managed skill review on a legacy ACP turn and drains the
+   * promise it queued.
    *
    * The review promise is queued on the client, so take it back the same way
    * the shared round does: retaining every promise for the life of a
    * long-running `qwen serve` process is a leak, and ACP has nothing to report
-   * them to. The caller awaits the returned promise at the end of the turn, so
-   * the drain really does delay completion instead of discarding what it
-   * awaited.
+   * them to. The drain is what bounds that queue; awaiting the review on top of
+   * it would hold `session/prompt` open for up to `DEFAULT_AUTO_SKILL_TIMEOUT_MS`
+   * (unbounded when `agentTimeoutMinutes` is 0) even though no ACP consumer
+   * reads the result, and the path takes no abort signal to shorten it. The
+   * shared round above and the client's own callers discard the same promise.
    */
-  async #runManagedAutoSkillReview(): Promise<void> {
+  #runManagedAutoSkillReview(): void {
     const llmClient = this.config.getLlmClient();
-    const review = llmClient.runManagedAutoSkillReview();
+    llmClient.runManagedAutoSkillReview();
     // Extract and Dream are fire-and-forget (design doc §6) — draining the
     // whole queue here would hold the turn open on those background agents,
     // which can run for minutes.
     void llmClient.consumePendingMemoryTaskPromises();
-    if (review) {
-      await review;
-    }
   }
 
   async #recordPromptCompletionEffects(
@@ -11725,34 +11724,27 @@ export class Session implements SessionContext {
     // side keeps `toolCallCount` fed so `qwen serve` produces an auto-skill
     // candidate.
     if (!this.config.getManagedAutoMemoryEnabled()) {
-      await this.#runManagedAutoSkillReview();
+      this.#runManagedAutoSkillReview();
       return;
     }
     const llmClient = this.config.getLlmClient();
     llmClient.captureCacheSafeParams();
-    // Capture the review promise before the queue is consumed: the review is
-    // pushed onto that same queue, and a waiting host must await the review
-    // without inheriting Extract and Dream.
     // Capture the review promise from the same call that schedules the rest
     // of the background work. Calling the gate separately first would make
     // runManagedAutoMemoryBackgroundTasks evaluate it a second time on flags
     // the first call just reset (skillsModifiedInSession is always cleared),
     // dispatching a review the `skills_modified_in_session` gate declined.
-    const sharedRoundReview = llmClient.runManagedAutoMemoryBackgroundTasks(
-      SendMessageType.UserQuery,
-      { skipMemoryExtraction: channelTurn },
-    );
+    llmClient.runManagedAutoMemoryBackgroundTasks(SendMessageType.UserQuery, {
+      skipMemoryExtraction: channelTurn,
+    });
     // ACP reports no memory updates, so take the tasks the client queued for
     // that report instead of leaving them to pile up over the session. Extract
     // and Dream are fire-and-forget (design doc §6); the turn must not wait on
     // them, or `session/prompt` would stay open until those agents finish. The
-    // only part this round owes the caller is the skill review, which
-    // `runManagedAutoMemoryBackgroundTasks` already returned and scheduled
-    // above.
+    // skill review joins them: no ACP consumer reads its result, and awaiting
+    // it would hold the turn for up to `DEFAULT_AUTO_SKILL_TIMEOUT_MS` with no
+    // abort path.
     void llmClient.consumePendingMemoryTaskPromises();
-    if (sharedRoundReview) {
-      await sharedRoundReview;
-    }
   }
 
   async #buildNextMessageAfterToolRun(
