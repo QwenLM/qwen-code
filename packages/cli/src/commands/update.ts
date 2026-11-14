@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { commandMetadata } from './command-metadata.js';
 import type { CommandModule } from 'yargs';
 import { initializeI18n, resolveLanguageSetting, t } from '../i18n/index.js';
 
@@ -22,9 +23,9 @@ const UPDATE_ERROR_ECHO_LIMIT = 500;
 const UPDATE_FAILURE_ECHO_LIMIT = 4096;
 
 export const updateCommand: CommandModule<object, UpdateArgs> = {
-  command: 'update',
+  ...commandMetadata.update,
   get describe() {
-    return t('Check for Qwen Code updates and install if available');
+    return t(commandMetadata.update.describe);
   },
   builder: (yargs) =>
     yargs.option('target-version', {

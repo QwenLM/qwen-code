@@ -12415,6 +12415,69 @@ describe('setApprovalMode with folder trust', () => {
       (vi.mocked(logRipgrepFallback).mock.calls[0][1] as RipgrepFallbackEvent)
         .error;
 
+    it('loads ACP resources while the ripgrep probe is pending and joins it before publishing tools', async () => {
+      let finishProbe!: (available: boolean) => void;
+      const probe = new Promise<boolean>((resolve) => {
+        finishProbe = resolve;
+      });
+      vi.mocked(canUseRipgrep).mockReturnValueOnce(probe);
+      const config = makeConfig({ experimentalZedIntegration: true });
+      const refresh = vi.spyOn(config.getExtensionManager(), 'refreshCache');
+      const createRegistry = vi.spyOn(config, 'createToolRegistry');
+      let initialized = false;
+      const initializing = config.initialize().then(() => {
+        initialized = true;
+      });
+
+      await vi.waitFor(() => expect(createRegistry).toHaveBeenCalled());
+      expect(refresh).toHaveBeenCalled();
+      expect(initialized).toBe(false);
+      expect(canUseRipgrep).toHaveBeenCalledOnce();
+      finishProbe(true);
+      await initializing;
+
+      expect(grepRegistrations()).toHaveLength(1);
+    });
+
+    it('cancels and drains an ACP probe when resource initialization fails', async () => {
+      let signal: AbortSignal | undefined;
+      vi.mocked(canUseRipgrep).mockImplementationOnce(
+        (_builtin, abortSignal) =>
+          new Promise<boolean>((_resolve, reject) => {
+            signal = abortSignal;
+            abortSignal!.addEventListener('abort', () =>
+              reject(abortSignal!.reason),
+            );
+          }),
+      );
+      const config = makeConfig({ experimentalZedIntegration: true });
+      const failure = new Error('resource load failed');
+      vi.spyOn(
+        config.getExtensionManager(),
+        'refreshCache',
+      ).mockRejectedValueOnce(failure);
+
+      await expect(config.initialize()).rejects.toBe(failure);
+
+      expect(signal?.aborted).toBe(true);
+      expect(logRipgrepFallback).not.toHaveBeenCalled();
+    });
+
+    it('keeps ACP fallback diagnostics and retries a failed probe when rebuilding tools', async () => {
+      vi.mocked(canUseRipgrep)
+        .mockRejectedValueOnce(new Error('probe failed'))
+        .mockResolvedValueOnce(true);
+      const config = await initConfig({ experimentalZedIntegration: true });
+
+      expect(canUseRipgrep).toHaveBeenCalledOnce();
+      expect(fallbackError()).toBe('probe failed');
+
+      await config.createToolRegistry();
+
+      expect(canUseRipgrep).toHaveBeenCalledTimes(2);
+      expect(logRipgrepFallback).toHaveBeenCalledOnce();
+    });
+
     it('registers the background-agent roster tool', async () => {
       await initConfig();
 

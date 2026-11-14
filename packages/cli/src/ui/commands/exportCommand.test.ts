@@ -18,8 +18,8 @@ import {
   toHtml,
   toJson,
   toJsonl,
-  generateExportFilename,
 } from '../utils/export/index.js';
+import { generateExportFilename } from '../utils/export/utils.js';
 
 const mockSessionServiceMocks = vi.hoisted(() => ({
   loadSession: vi.fn(),
@@ -60,6 +60,9 @@ vi.mock('../utils/export/index.js', () => ({
   toHtml: vi.fn(),
   toJson: vi.fn(),
   toJsonl: vi.fn(),
+}));
+
+vi.mock('../utils/export/utils.js', () => ({
   generateExportFilename: vi.fn(),
 }));
 

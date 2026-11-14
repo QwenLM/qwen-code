@@ -4231,6 +4231,8 @@ export class Config {
   private async initializeOnce(
     options?: ConfigInitializeOptions,
   ): Promise<void> {
+    const ripgrepAbort = new AbortController();
+    let ripgrepAvailability: Promise<boolean> | undefined;
     try {
       if (this.shellExecutionSandbox)
         this.shellExecutionSandbox = await probeShellSandbox(
@@ -4253,9 +4255,28 @@ export class Config {
           : undefined,
       );
       await this.bindSessionExecutionEngine();
+      // Overlap ACP's binary health check with resource I/O in this request.
+      if (
+        this.getExperimentalZedIntegration() &&
+        this.getUseRipgrep() &&
+        this.sessionExecutionEngine !== 'managed' &&
+        !this.getExecutionEnvironment() &&
+        !this.shellExecutionSandbox &&
+        !this.getBareMode()
+      ) {
+        ripgrepAvailability = canUseRipgrep(
+          this.getUseBuiltinRipgrep(),
+          AbortSignal.any([
+            ripgrepAbort.signal,
+            this.executionShutdown.signal,
+            ...(options?.signal ? [options.signal] : []),
+          ]),
+        );
+        void ripgrepAvailability.catch(() => undefined);
+      }
       registerSessionProjectDir(this.sessionId, this.storage.getProjectDir());
       this.sessionProjectDirRegistered = true;
-      await this.initializeInternal(options);
+      await this.initializeInternal(options, ripgrepAvailability);
       this.workflowModeReady = true;
       if (this.initialWorkflowMode !== undefined) {
         const enabled = this.initialWorkflowMode;
@@ -4293,6 +4314,9 @@ export class Config {
         });
       }
       throw error;
+    } finally {
+      ripgrepAbort.abort();
+      await ripgrepAvailability?.catch(() => undefined);
     }
   }
 
@@ -4319,6 +4343,7 @@ export class Config {
 
   private async initializeInternal(
     options?: ConfigInitializeOptions,
+    ripgrepAvailability?: Promise<boolean>,
   ): Promise<void> {
     this.debugLogger.info('Config initialization started');
     await this.proxyDispatcherReady;
@@ -4888,6 +4913,7 @@ export class Config {
     this.toolRegistry = await this.createToolRegistry(
       options?.sendSdkMcpMessage,
       skipInlineMcpDiscovery ? { skipDiscovery: true } : undefined,
+      ripgrepAvailability,
     );
     options?.signal?.throwIfAborted();
     recordStartupEvent('config_initialize_tool_registry_end');
@@ -13601,6 +13627,7 @@ export class Config {
   async createToolRegistry(
     sendSdkMcpMessage?: SendSdkMcpMessage,
     options?: { skipDiscovery?: boolean; forSubAgent?: boolean },
+    ripgrepAvailability?: Promise<boolean>,
   ): Promise<ToolRegistry> {
     const registry = new ToolRegistry(
       this,
@@ -13892,7 +13919,8 @@ export class Config {
       let errorString: undefined | string = undefined;
       recordStartupEvent('config_initialize_ripgrep_probe_start');
       try {
-        useRipgrep = await canUseRipgrep(this.getUseBuiltinRipgrep());
+        useRipgrep = await (ripgrepAvailability ??
+          canUseRipgrep(this.getUseBuiltinRipgrep()));
       } catch (error: unknown) {
         errorString = getErrorMessage(error);
       }
