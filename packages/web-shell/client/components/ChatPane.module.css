@@ -204,6 +204,52 @@
   margin-bottom: 8px;
 }
 
+.scrollToBottomLayer {
+  position: absolute;
+  bottom: calc(100% + 10px);
+  right: 0;
+  left: 0;
+  z-index: 3;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.scrollToBottomButton {
+  display: inline-flex;
+  box-sizing: border-box;
+  width: 34px;
+  height: 34px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--background) 96%, transparent);
+  box-shadow: 0 8px 24px color-mix(in srgb, #000 10%, transparent);
+  color: var(--foreground);
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+  pointer-events: auto;
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease,
+    transform 120ms ease;
+}
+
+.scrollToBottomButton:hover,
+.scrollToBottomButton:focus-visible {
+  border-color: color-mix(in srgb, var(--foreground) 24%, var(--border));
+  box-shadow: 0 10px 28px color-mix(in srgb, #000 14%, transparent);
+  outline: none;
+}
+
+.scrollToBottomIcon {
+  width: 18px;
+  height: 18px;
+  stroke-width: 1.8;
+}
+
 .composerHidden {
   display: none;
 }

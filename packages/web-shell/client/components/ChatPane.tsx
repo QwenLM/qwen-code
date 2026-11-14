@@ -906,6 +906,11 @@ export function ChatPane({
     ? (connection.planExecutionMode ?? 'default')
     : (connection.currentMode ?? 'default');
   const [modeControlsBusy, setModeControlsBusy] = useState(false);
+  const [canScrollToBottom, setCanScrollToBottom] = useState(false);
+  const handleCanScrollToBottomChange = useCallback(
+    (canScroll: boolean) => setCanScrollToBottom(canScroll),
+    [],
+  );
   const modeTransitionRef = useRef<{
     owner: { isCurrent: () => boolean };
     requestId?: string;
@@ -1937,6 +1942,7 @@ export function ChatPane({
                   onTurnOutputOpen={handleRightPanelOpen}
                   onImagePreview={handleImagePreview}
                   onAttachmentPreview={handleAttachmentPreview}
+                  onCanScrollToBottomChange={handleCanScrollToBottomChange}
                   onError={reportError}
                   generateContent={
                     connection.capabilities?.features.includes(
@@ -1953,6 +1959,30 @@ export function ChatPane({
       </div>
 
       <div className={styles.footer}>
+        {canScrollToBottom && (
+          <div className={styles.scrollToBottomLayer}>
+            <button
+              type="button"
+              className={styles.scrollToBottomButton}
+              aria-label={t('chat.scrollToBottom')}
+              onClick={() => transcriptViewportRef.current?.scrollToBottom()}
+            >
+              <svg
+                className={styles.scrollToBottomIcon}
+                viewBox="0 0 24 24"
+                aria-hidden="true"
+              >
+                <path
+                  d="M12 5v13M6.5 12.5 12 18l5.5-5.5"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </button>
+          </div>
+        )}
         {pendingToolApproval && (
           <div className={styles.approval} data-testid="pane-approval">
             <ToolApproval
