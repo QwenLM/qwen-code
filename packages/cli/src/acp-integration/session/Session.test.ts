@@ -3709,6 +3709,79 @@ describe('Session', () => {
     );
   });
 
+  describe('hook lifecycle subscriptions', () => {
+    it('handles late bus creation, replacement, session isolation and disposal', async () => {
+      session.dispose();
+      const listeners = new Set<
+        (bus: InstanceType<typeof core.MessageBus>) => void
+      >();
+      const config = {
+        ...mockConfig,
+        onMessageBusChange: (
+          listener: (bus: InstanceType<typeof core.MessageBus>) => void,
+        ) => {
+          listeners.add(listener);
+          return () => listeners.delete(listener);
+        },
+      } as unknown as Config;
+      session = new Session(
+        'test-session-id',
+        config,
+        mockClient,
+        mockSettings,
+      );
+      const first = new core.MessageBus();
+      const second = new core.MessageBus();
+      const event = {
+        v: 1 as const,
+        kind: 'hook' as const,
+        executionId: 'exec',
+        runtimeId: 'runtime',
+        sessionId: 'test-session-id',
+        promptId: 'history-turn',
+        agentId: null,
+        eventName: 'Stop',
+        hookType: 'command' as const,
+        source: 'project' as const,
+        name: 'safe',
+        startedAt: 100,
+        phase: 'started' as const,
+      };
+      const progress = {
+        type: core.MessageBusType.HOOK_PROGRESS as const,
+        phase: 'start' as const,
+        eventName: 'Stop',
+        hookName: 'SECRET_COMMAND',
+        hookType: 'command' as const,
+        invocationId: 'old-progress-id',
+        index: 0,
+        total: 1,
+        hookLifecycle: event,
+      };
+      vi.mocked(mockClient.sessionUpdate).mockClear();
+      for (const listener of listeners) listener(first);
+      await first.publish({
+        ...progress,
+        hookLifecycle: { ...event, sessionId: 'other' },
+      });
+      expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
+      await first.publish(progress);
+      expect(mockClient.sessionUpdate).toHaveBeenCalledOnce();
+      expect(
+        JSON.stringify(vi.mocked(mockClient.sessionUpdate).mock.calls),
+      ).not.toContain('SECRET');
+      for (const listener of listeners) listener(second);
+      await first.publish(progress);
+      expect(mockClient.sessionUpdate).toHaveBeenCalledOnce();
+      await second.publish(progress);
+      expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(2);
+      session.dispose();
+      await second.publish(progress);
+      expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(2);
+      expect(listeners.size).toBe(0);
+    });
+  });
+
   describe('request lifecycle subscriptions', () => {
     const started: RequestLifecycleEvent = {
       v: 1,
@@ -47126,7 +47199,10 @@ describe('Session', () => {
           expect(messageBus.request).toHaveBeenCalledWith(
             expect.objectContaining({
               eventName: 'PreToolUse',
-              owner,
+              owner: {
+                ...owner,
+                historyPromptId: 'test-session-id########1',
+              },
               input: expect.objectContaining({
                 tool_name: 'read_file',
                 tool_input: { path: '/tmp/test.txt' },

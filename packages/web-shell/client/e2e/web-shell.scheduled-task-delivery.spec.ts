@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page, type TestInfo } from '@playwright/test';
 import type { DaemonScheduledTask } from '../daemon/workspace/types';
 import {
   createWebShellDaemonScenario,
@@ -51,7 +51,7 @@ async function install(
     channelsFail?: boolean;
     contactsFail?: boolean;
     deferPrimaryContacts?: boolean;
-    configuredWebhook?: boolean;
+    configuredWebhook?: 'dingtalk-webhook' | 'feishu-webhook';
   } = {},
 ) {
   const scenario = createWebShellDaemonScenario({
@@ -96,15 +96,18 @@ async function install(
       ...(options.configuredWebhook
         ? [
             {
-              type: 'dingtalk-webhook',
-              displayName: 'DingTalk webhook',
+              type: options.configuredWebhook,
+              displayName:
+                options.configuredWebhook === 'feishu-webhook'
+                  ? 'Feishu Webhook'
+                  : 'DingTalk Webhook',
               manageable: true,
               fields: [],
               outboundOnly: true,
               defaultDeliveryTarget: {
                 type: 'chat' as const,
                 id: 'default',
-                label: 'Configured DingTalk group',
+                label: 'Configured group',
               },
             },
           ]
@@ -153,7 +156,7 @@ async function install(
                   config: {
                     type:
                       options.configuredWebhook && name === 'ops-bot'
-                        ? 'dingtalk-webhook'
+                        ? options.configuredWebhook
                         : 'dingtalk',
                   },
                   secrets: {},
@@ -228,6 +231,9 @@ async function install(
     );
     return route.fulfill({ json: next });
   });
+  await page.route('**/workspace/models', (route) =>
+    route.fulfill({ json: { models: [] } }),
+  );
   await page.goto('/scheduled-tasks?language=en-US');
   await expect(
     page.getByRole('button', { name: 'New scheduled task', exact: true }),
@@ -264,13 +270,18 @@ async function selectDelivery(page: Page) {
     .selectOption(JSON.stringify(target));
 }
 
-test('uses a configured destination without contacts and switches back to manual delivery @smoke', async ({
-  page,
-  baseURL,
-}, info) => {
+async function useConfiguredDestination(
+  page: Page,
+  baseURL: string,
+  info: TestInfo,
+  type: 'dingtalk-webhook' | 'feishu-webhook',
+) {
   const errors: string[] = [];
   page.on('pageerror', (error) => errors.push(error.message));
-  const state = await install(page, baseURL!, { configuredWebhook: true });
+  page.on('console', (message) => {
+    if (message.type() === 'error') errors.push(message.text());
+  });
+  const state = await install(page, baseURL, { configuredWebhook: type });
   await createForm(page);
   const channels = page.getByRole('combobox', {
     name: 'Delivery Channel',
@@ -342,7 +353,16 @@ test('uses a configured destination without contacts and switches back to manual
   await expect.poll(() => state.writes.length).toBe(2);
   expect(state.writes[1]!.body.delivery).toBeNull();
   expect(errors).toEqual([]);
-});
+}
+
+for (const type of ['dingtalk-webhook', 'feishu-webhook'] as const) {
+  test(`uses a ${type} configured destination without contacts and switches back to manual delivery @smoke`, async ({
+    page,
+    baseURL,
+  }, info) => {
+    await useConfiguredDestination(page, baseURL!, info, type);
+  });
+}
 
 test('preserves an unsupported saved configured target until explicit repair @smoke', async ({
   page,
@@ -353,7 +373,7 @@ test('preserves an unsupported saved configured target until explicit repair @sm
     target: { channelName: 'ops-bot', type: 'user' as const, id: ' old-id ' },
   };
   const state = await install(page, baseURL!, {
-    configuredWebhook: true,
+    configuredWebhook: 'dingtalk-webhook',
     tasks: [task({ delivery: saved })],
   });
   await page.getByRole('button', { name: 'Edit', exact: true }).click();
