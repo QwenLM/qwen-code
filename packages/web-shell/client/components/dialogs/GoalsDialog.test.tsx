@@ -103,16 +103,50 @@ async function mount(
   opts: {
     onCreateGoal?: (
       condition: string,
+      workspaceCwd?: string,
     ) => boolean | void | Promise<boolean | void>;
-    onOpenSession?: (sessionId: string) => void;
+    onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
     onError?: (error: unknown, message: string) => void;
     droppedCount?: number;
+    workspaces?: Array<{
+      id: string;
+      cwd: string;
+      primary: boolean;
+      trusted: boolean;
+      displayName?: string;
+    }>;
+    lockedWorkspace?: {
+      id: string;
+      cwd: string;
+      primary: boolean;
+      trusted: boolean;
+      displayName?: string;
+    };
+    defaultWorkspaceCwd?: string;
+    /** Per-workspace listGoals responses, keyed by the action id the dialog
+     * passes (undefined → '' for the primary's unqualified route). */
+    listGoalsByWorkspace?: Record<
+      string,
+      { goals: MockGoal[]; droppedCount: number }
+    >;
   } = {},
 ) {
-  actions.listGoals.mockResolvedValue({
-    goals,
-    droppedCount: opts.droppedCount ?? 0,
-  });
+  if (opts.listGoalsByWorkspace) {
+    const byWorkspace = opts.listGoalsByWorkspace;
+    actions.listGoals.mockImplementation(async (workspaceId?: string) =>
+      Promise.resolve(
+        byWorkspace[workspaceId ?? ''] ?? {
+          goals: [],
+          droppedCount: 0,
+        },
+      ),
+    );
+  } else {
+    actions.listGoals.mockResolvedValue({
+      goals,
+      droppedCount: opts.droppedCount ?? 0,
+    });
+  }
   actions.clearGoal.mockResolvedValue({ cleared: true });
   actions.controlGoal.mockResolvedValue({
     snapshot: { v: 2, activity: 'idle', goal: null },
@@ -127,6 +161,13 @@ async function mount(
           onCreateGoal={opts.onCreateGoal ?? vi.fn()}
           onOpenSession={opts.onOpenSession ?? vi.fn()}
           onError={opts.onError ?? vi.fn()}
+          {...(opts.workspaces ? { workspaces: opts.workspaces } : {})}
+          {...(opts.lockedWorkspace
+            ? { lockedWorkspace: opts.lockedWorkspace }
+            : {})}
+          {...(opts.defaultWorkspaceCwd !== undefined
+            ? { defaultWorkspaceCwd: opts.defaultWorkspaceCwd }
+            : {})}
         />
       </I18nProvider>,
     );
@@ -418,7 +459,7 @@ describe('GoalsDialog', () => {
 
     click(findButton('fix-ci'));
 
-    expect(onOpenSession).toHaveBeenCalledWith('sess-1');
+    expect(onOpenSession).toHaveBeenCalledWith('sess-1', undefined);
   });
 
   it('clears a goal immediately and reloads the list', async () => {
@@ -591,7 +632,7 @@ describe('GoalsDialog', () => {
     click(findButton('Set goal'));
     await flush();
 
-    expect(onCreateGoal).toHaveBeenCalledWith(condition);
+    expect(onCreateGoal).toHaveBeenCalledWith(condition, undefined);
   });
 
   it('accepts a clear word as a literal objective in the create form', async () => {
@@ -603,7 +644,7 @@ describe('GoalsDialog', () => {
     click(findButton('Set goal'));
     await flush();
 
-    expect(onCreateGoal).toHaveBeenCalledWith('Clear');
+    expect(onCreateGoal).toHaveBeenCalledWith('Clear', undefined);
   });
 
   it('discards the typed condition when the form is cancelled', async () => {
@@ -634,7 +675,7 @@ describe('GoalsDialog', () => {
     click(findButton('Set goal'));
     await flush();
 
-    expect(onCreateGoal).toHaveBeenCalledWith('ship it');
+    expect(onCreateGoal).toHaveBeenCalledWith('ship it', undefined);
     expect(document.querySelector('textarea')).toBeNull();
   });
 
@@ -975,7 +1016,7 @@ describe('GoalsDialog', () => {
     click(findButton('Set goal'));
     await flush();
 
-    expect(onCreateGoal).toHaveBeenCalledWith('ship it');
+    expect(onCreateGoal).toHaveBeenCalledWith('ship it', undefined);
     const textarea = document.querySelector('textarea');
     expect(textarea).not.toBeNull();
     expect(textarea!.value).toBe('ship it');
@@ -992,5 +1033,263 @@ describe('GoalsDialog', () => {
     await flush();
 
     expect(document.querySelector('textarea')).toBeNull();
+  });
+});
+
+/** Set the workspace select the way React's onChange expects. */
+function setSelect(value: string) {
+  const select = document.querySelector('select');
+  if (!select) throw new Error('select not found');
+  act(() => {
+    const setter = Object.getOwnPropertyDescriptor(
+      window.HTMLSelectElement.prototype,
+      'value',
+    )!.set!;
+    setter.call(select, value);
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+}
+
+describe('GoalsDialog multi-workspace', () => {
+  const primaryWs = {
+    id: 'ws-primary',
+    cwd: '/w-primary',
+    primary: true,
+    trusted: true,
+  };
+  const secondaryWs = {
+    id: 'ws-2',
+    cwd: '/w-secondary',
+    primary: false,
+    trusted: true,
+    displayName: 'Secondary',
+  };
+  const untrustedWs = {
+    id: 'ws-untrusted',
+    cwd: '/w-untrusted',
+    primary: false,
+    trusted: false,
+  };
+
+  it('aggregates goals from every operable workspace and badges each card', async () => {
+    await mount([], {
+      workspaces: [primaryWs, secondaryWs],
+      listGoalsByWorkspace: {
+        '': {
+          goals: [baseGoal({ sessionId: 'p1', condition: 'primary goal' })],
+          droppedCount: 0,
+        },
+        'ws-2': {
+          goals: [
+            baseGoal({
+              sessionId: 's1',
+              condition: 'secondary goal',
+              displayName: 'sec-session',
+            }),
+          ],
+          droppedCount: 0,
+        },
+      },
+    });
+
+    expect(actions.listGoals).toHaveBeenCalledWith(undefined);
+    expect(actions.listGoals).toHaveBeenCalledWith('ws-2');
+    expect(document.body.textContent).toContain('primary goal');
+    expect(document.body.textContent).toContain('secondary goal');
+    const badges = document.querySelectorAll('[data-testid="goal-workspace"]');
+    expect(badges).toHaveLength(2);
+    expect(badges[0]!.textContent).toContain('w-primary');
+    expect(badges[1]!.textContent).toContain('Secondary');
+  });
+
+  it('sorts the merged list newest-first across workspaces', async () => {
+    await mount([], {
+      workspaces: [primaryWs, secondaryWs],
+      listGoalsByWorkspace: {
+        '': {
+          goals: [
+            baseGoal({ sessionId: 'p1', condition: 'older', setAt: 1000 }),
+          ],
+          droppedCount: 0,
+        },
+        'ws-2': {
+          goals: [
+            baseGoal({ sessionId: 's1', condition: 'newer', setAt: 2000 }),
+          ],
+          droppedCount: 0,
+        },
+      },
+    });
+
+    const titles = Array.from(
+      document.querySelectorAll('[role="listitem"]'),
+    ).map((card) => card.textContent);
+    expect(titles[0]).toContain('newer');
+    expect(titles[1]).toContain('older');
+  });
+
+  it('excludes an untrusted secondary without requesting its goals', async () => {
+    await mount([], {
+      workspaces: [primaryWs, secondaryWs, untrustedWs],
+      listGoalsByWorkspace: {
+        '': { goals: [], droppedCount: 0 },
+        'ws-2': { goals: [], droppedCount: 0 },
+      },
+    });
+
+    expect(actions.listGoals).toHaveBeenCalledWith(undefined);
+    expect(actions.listGoals).toHaveBeenCalledWith('ws-2');
+    expect(actions.listGoals).not.toHaveBeenCalledWith('ws-untrusted');
+  });
+
+  it('keeps the other workspaces goals when one listing fails', async () => {
+    await mount([], {
+      workspaces: [primaryWs, secondaryWs],
+      listGoalsByWorkspace: {
+        '': {
+          goals: [baseGoal({ sessionId: 'p1', condition: 'primary goal' })],
+          droppedCount: 0,
+        },
+        'ws-2': { goals: [], droppedCount: 0 },
+      },
+    });
+
+    actions.listGoals.mockImplementation(async (workspaceId?: string) => {
+      if (workspaceId === 'ws-2') throw new Error('secondary unreachable');
+      return {
+        goals: [baseGoal({ sessionId: 'p1', condition: 'primary goal' })],
+        droppedCount: 0,
+      };
+    });
+    click(findButton('Refresh'));
+    await flush();
+
+    expect(document.body.textContent).toContain('primary goal');
+    expect(document.body.textContent).toContain('secondary unreachable');
+  });
+
+  it('sums dropped counts across workspaces', async () => {
+    await mount([], {
+      workspaces: [primaryWs, secondaryWs],
+      listGoalsByWorkspace: {
+        '': { goals: [], droppedCount: 1 },
+        'ws-2': { goals: [], droppedCount: 2 },
+      },
+    });
+
+    const degraded = document.querySelector('[data-testid="goals-dropped"]');
+    expect(degraded).not.toBeNull();
+    expect(degraded!.textContent).toContain('3');
+  });
+
+  it('offers a workspace picker defaulting to the selected workspace', async () => {
+    const onCreateGoal = vi.fn().mockResolvedValue(undefined);
+    await mount([], {
+      workspaces: [primaryWs, secondaryWs],
+      defaultWorkspaceCwd: '/w-secondary',
+      onCreateGoal,
+      listGoalsByWorkspace: {},
+    });
+
+    click(findButton('New goal'));
+    const select = document.querySelector('select');
+    expect(select).not.toBeNull();
+    expect(select!.value).toBe('/w-secondary');
+    expect(Array.from(select!.options).map((o) => o.value)).toEqual([
+      '/w-primary',
+      '/w-secondary',
+    ]);
+
+    setSelect('/w-primary');
+    setTextarea('ship it');
+    click(findButton('Set goal'));
+    await flush();
+
+    expect(onCreateGoal).toHaveBeenCalledWith('ship it', '/w-primary');
+  });
+
+  it('falls back to the primary when the default workspace is not operable', async () => {
+    await mount([], {
+      workspaces: [primaryWs, secondaryWs],
+      defaultWorkspaceCwd: '/w-untrusted',
+      listGoalsByWorkspace: {},
+    });
+
+    click(findButton('New goal'));
+    expect(document.querySelector('select')!.value).toBe('/w-primary');
+  });
+
+  it('shows no picker or badges for a single workspace', async () => {
+    await mount([baseGoal()], { workspaces: [primaryWs] });
+
+    expect(actions.listGoals).toHaveBeenCalledWith();
+    expect(actions.listGoals).toHaveBeenCalledTimes(1);
+    expect(document.querySelector('[data-testid="goal-workspace"]')).toBeNull();
+
+    click(findButton('New goal'));
+    expect(document.querySelector('select')).toBeNull();
+  });
+
+  it('lists only the locked workspace, without picker or badges', async () => {
+    await mount([], {
+      workspaces: [primaryWs, secondaryWs],
+      lockedWorkspace: secondaryWs,
+      listGoalsByWorkspace: {
+        'ws-2': {
+          goals: [baseGoal({ sessionId: 's1', condition: 'locked goal' })],
+          droppedCount: 0,
+        },
+      },
+    });
+
+    expect(actions.listGoals).toHaveBeenCalledWith('ws-2');
+    expect(actions.listGoals).toHaveBeenCalledTimes(1);
+    expect(document.body.textContent).toContain('locked goal');
+    expect(document.querySelector('[data-testid="goal-workspace"]')).toBeNull();
+
+    click(findButton('New goal'));
+    expect(document.querySelector('select')).toBeNull();
+  });
+
+  it('opens a goal session in its own workspace', async () => {
+    const onOpenSession = vi.fn();
+    await mount([], {
+      workspaces: [primaryWs, secondaryWs],
+      onOpenSession,
+      listGoalsByWorkspace: {
+        '': { goals: [], droppedCount: 0 },
+        'ws-2': {
+          goals: [
+            baseGoal({
+              sessionId: 's1',
+              condition: 'secondary goal',
+              displayName: 'sec-session',
+            }),
+          ],
+          droppedCount: 0,
+        },
+      },
+    });
+
+    click(findButton('sec-session'));
+
+    expect(onOpenSession).toHaveBeenCalledWith('s1', '/w-secondary');
+  });
+
+  it('shows no workspace picker when editing an existing goal', async () => {
+    await mount([], {
+      workspaces: [primaryWs, secondaryWs],
+      listGoalsByWorkspace: {
+        '': { goals: [], droppedCount: 0 },
+        'ws-2': {
+          goals: [baseGoal({ sessionId: 's1', condition: 'secondary goal' })],
+          droppedCount: 0,
+        },
+      },
+    });
+
+    click(document.querySelector('button[aria-label="Edit goal"]'));
+    expect(document.querySelector('textarea')).not.toBeNull();
+    expect(document.querySelector('select')).toBeNull();
   });
 });

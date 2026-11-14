@@ -123,6 +123,23 @@
   outline-offset: -1px;
 }
 
+.select {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: inherit;
+}
+
+.select:focus {
+  outline: 2px solid var(--primary);
+  outline-offset: -1px;
+}
+
 .formHint {
   font-size: 12px;
   line-height: 1.5;
@@ -280,6 +297,44 @@
   background: var(--muted);
   border-radius: 999px;
   padding: 3px 10px;
+}
+
+/* Which workspace a goal belongs to, shown only by the aggregated
+ * multi-workspace view. Truncates a long name rather than wrapping the row. */
+.workspacePill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 180px;
+  width: fit-content;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--primary) 30%, transparent);
+  border-radius: 999px;
+  padding: 2px 9px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.workspaceIcon {
+  display: inline-flex;
+  flex-shrink: 0;
+  opacity: 0.85;
+}
+
+.workspaceName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.workspaceIcon svg {
+  width: 12px;
+  height: 12px;
+  stroke-width: 1.8;
 }
 
 .meta {
