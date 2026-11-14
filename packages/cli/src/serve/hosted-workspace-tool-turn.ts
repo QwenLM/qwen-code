@@ -68,6 +68,7 @@ import {
   HOSTED_TODO_MAX_ITEMS,
 } from './hosted-workspace-tool-input.js';
 import {
+  HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
   HOSTED_WORKSPACE_FILE_PROFILE,
   HOSTED_WORKSPACE_SHELL_PROFILE,
   HOSTED_WORKSPACE_SHELL_PROFILE_V3,
@@ -2315,6 +2316,33 @@ export class HostedWorkspaceToolTurn {
       recoveryBroker?: HostedWorkspaceBroker;
     },
   ) {
+    if (
+      extras?.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE &&
+      (publicationOrShell !== undefined ||
+        shell !== undefined ||
+        [
+          extras.mcp,
+          extras.hooks,
+          extras.memory,
+          extras.childRuns,
+          extras.monitors,
+          extras.backgroundLane,
+          extras.childAgents,
+          extras.messages,
+          extras.teams,
+          extras.commands,
+          extras.skills,
+          extras.extensionConfig,
+          extras.allowedToolNames,
+        ].some((lane) => lane !== undefined) ||
+        (extras.extensionAgents?.length ?? 0) > 0 ||
+        extras.memoryOnly === true ||
+        extras.publicPlanMode === true ||
+        extras.memberPlanMode === true)
+    )
+      throw new Error(
+        'External files profile does not support optional lanes.',
+      );
     this.configuredOptions = options;
     this.memory = extras?.memory;
     this.memoryOnly = extras?.memoryOnly === true;
@@ -2592,6 +2620,13 @@ export class HostedWorkspaceToolTurn {
     if (this.childDepth === 1) {
       this.questionChild = await this.questionWaitAdmitted();
       if (this.questionChild) await waitForTurn(this.warmed, signal);
+    }
+    if (this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE) {
+      this.advertised = hostedWorkspaceDeclarations(
+        [...HOSTED_WORKSPACE_FILE_TOOLS, HOSTED_GLOB_TOOL],
+        !this.fileBackupsEnabled,
+      );
+      return this.advertised;
     }
     if (
       this.profile === HOSTED_WORKSPACE_FILE_PROFILE ||
@@ -3146,6 +3181,7 @@ export class HostedWorkspaceToolTurn {
       !this.hooks &&
       !this.mcp &&
       (this.profile === HOSTED_WORKSPACE_FILE_PROFILE ||
+        this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE ||
         isHostedWorkspaceReadProfile(this.profile))
     ) {
       this.uncertain = true;
@@ -3165,16 +3201,23 @@ export class HostedWorkspaceToolTurn {
           items.every(
             (item) =>
               item.state === 'settled' &&
-              ['read_file', 'write_file', 'edit', 'glob', 'web_fetch'].includes(
-                item.toolName,
-              ),
+              [
+                'read_file',
+                'write_file',
+                'edit',
+                'glob',
+                ...(this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE
+                  ? []
+                  : ['web_fetch']),
+              ].includes(item.toolName),
           ) &&
           (saved ||
             items.every((item) =>
               [
                 'read_file',
                 'glob',
-                ...(isHostedWorkspaceReadProfile(this.profile)
+                ...(isHostedWorkspaceReadProfile(this.profile) ||
+                this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE
                   ? []
                   : ['web_fetch']),
               ].includes(item.toolName),

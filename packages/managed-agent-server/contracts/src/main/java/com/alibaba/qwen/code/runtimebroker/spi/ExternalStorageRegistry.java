@@ -23,6 +23,25 @@ public interface ExternalStorageRegistry {
      */
     public Optional<RegisteredExternalStorage> find(String tenantId, String tenantWorkspaceId);
 
+    /** Decodes the persisted identity/alias document, never provider-supplied evidence. */
+    static RegisteredExternalStorage decodeRegistration(String encoded) {
+        var root = com.alibaba.qwen.code.runtimebroker.JsonCodec.parseObject(
+                encoded.getBytes(java.nio.charset.StandardCharsets.UTF_8), "External registration");
+        if (!root.keySet().equals(java.util.Set.of("identity", "alias"))
+                || !(root.get("identity") instanceof java.util.Map<?, ?> identity)
+                || !(root.get("alias") instanceof java.util.Map<?, ?> alias)
+                || !identity.keySet().equals(java.util.Set.of("providerId", "physicalKey", "registrationRevision"))
+                || !alias.keySet().equals(java.util.Set.of("tenantWorkspaceId", "aliasPath", "mountRoot"))
+                || !(identity.get("registrationRevision") instanceof Number revision)
+                || !(revision instanceof Long || revision instanceof Integer)) {
+            throw new IllegalArgumentException("Invalid external storage registration.");
+        }
+        return new RegisteredExternalStorage((String) identity.get("providerId"),
+                (String) identity.get("physicalKey"), revision.longValue(),
+                (String) alias.get("tenantWorkspaceId"), (String) alias.get("aliasPath"),
+                (String) alias.get("mountRoot"));
+    }
+
     /** One persisted registration, in the shape the boot document needs. */
     public record RegisteredExternalStorage(String providerId, String physicalKey,
             long registrationRevision, String tenantWorkspaceId,
@@ -35,13 +54,26 @@ public interface ExternalStorageRegistry {
         public static final long MAX_REGISTRATION_REVISION = 9_007_199_254_740_991L;
 
         public RegisteredExternalStorage {
-            if (providerId == null || physicalKey == null
-                    || tenantWorkspaceId == null || aliasPath == null
-                    || mountRoot == null || registrationRevision < 1
+            if (providerId == null || !providerId.matches("[A-Za-z0-9._-]{1,128}")
+                    || physicalKey == null || !physicalKey.matches("[A-Za-z0-9._-]{1,128}")
+                    || tenantWorkspaceId == null || !tenantWorkspaceId.matches("[A-Za-z0-9._-]{1,128}")
+                    || !registeredPath(aliasPath) || !registeredPath(mountRoot) || registrationRevision < 1
                     || registrationRevision > MAX_REGISTRATION_REVISION) {
                 throw new IllegalArgumentException(
                         "Invalid external storage registration record.");
             }
+        }
+
+        public String ownerKey() {
+            return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(
+                    "external-storage/1", providerId, physicalKey);
+        }
+
+        private static boolean registeredPath(String value) {
+            return value != null && value.length() <= 2048 && value.startsWith("/")
+                    && !value.equals("/") && java.util.Arrays.stream(value.substring(1).split("/", -1))
+                            .allMatch(part -> part.matches("[A-Za-z0-9._-]+")
+                                    && !part.equals(".") && !part.equals(".."));
         }
 
         /** Registration content never belongs in a log line or an error body. */

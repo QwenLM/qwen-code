@@ -29,6 +29,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -211,6 +212,35 @@ class WorkspaceLifecycleStoreTest {
                 });
         fixture.jdbc.update("UPDATE ma_operation SET claim_until = 0");
         assertThatThrownBy(() -> execution.authorizeLifecycle(session, WorkspaceLifecycleStore.authority(operation)))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
+                    assertThat(error.getStatusCode()).isEqualTo(409);
+                    assertThat(error.getCode()).isEqualTo("workspace_lifecycle_claim_fenced");
+                    assertThat(error.isRetryable()).isFalse();
+                });
+    }
+
+    @Test
+    void externalAuthorizationPreservesThePermanentLifecycleFence() {
+        var fixture = fixture();
+        String storage = fixture.jdbc.queryForObject(
+                "SELECT storage_id FROM ma_workspace WHERE tenant_id = ? AND workspace_id = ?",
+                (row, index) -> new String(row.getBytes(1), java.nio.charset.StandardCharsets.UTF_8),
+                "tenant".getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                "workspace".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        fixture.jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key,"
+                        + " tenant_id, storage_id, storage_kind) VALUES (?, ?, ?, 'tenant', ?, 'EXTERNAL')",
+                RuntimeAdmissionFences.storageAliasKey("tenant", storage),
+                RuntimeAdmissionFences.storageFenceKey("tenant"),
+                RuntimeAdmissionFences.storageFenceKey(storage), storage);
+        fixture.jdbc.update("UPDATE ma_session SET tool_profile = ?",
+                WorkspaceToolProfiles.EXTERNAL_FILES);
+        var execution = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(
+                new JdbcWorkspaceExecutionStore(fixture.jdbc,
+                        new DataSourceTransactionManager(fixture.jdbc.getDataSource())));
+
+        assertThatThrownBy(() -> execution.authorizeExternal(
+                fixture.store.requireSession("tenant", fixture.session),
+                new RuntimeLifecycleAuthority("missing-operation", 1)))
                 .isInstanceOfSatisfying(RuntimeBrokerException.class, error -> {
                     assertThat(error.getStatusCode()).isEqualTo(409);
                     assertThat(error.getCode()).isEqualTo("workspace_lifecycle_claim_fenced");

@@ -87,6 +87,49 @@ class ManagedAgentSessionCapabilitiesTest {
     }
 
     @Test
+    void anUnprovableExternalRegistrationDoesNotFailTheWholeSessionPage() {
+        var store = mock(AgentStateStore.class);
+        var workspaces = mock(JdbcManagedWorkspaceRegistry.class);
+        var harness = mock(HarnessConnector.class);
+        var service = new ManagedAgentService(store, new RequestDigests(),
+                mock(HarnessCoordinator.class), harness, workspaces,
+                new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        var workspace = new ContextBinding("tenant", "workspace", 1,
+                "storage", ".", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
+        var external = new SessionRecord("tenant", "external", "qwen-code", "1", "External",
+                "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1, workspace, "default",
+                WorkspaceToolProfiles.EXTERNAL_FILES, null, 1);
+        var local = new SessionRecord("tenant", "local", "qwen-code", "1", "Local",
+                "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1, workspace, "default",
+                WorkspaceToolProfiles.FILES, null, 1);
+        when(store.workspaceFilesEnabled()).thenReturn(true);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(workspaces.canRead("tenant", "actor", "workspace")).thenReturn(true);
+        when(workspaces.findReadable(eq("tenant"), eq("actor"), anyCollection()))
+                .thenReturn(Map.of("workspace",
+                        new JdbcManagedWorkspaceRegistry.ReadableGrant("workspace", 1, "storage", true)));
+        when(store.sessionsWithExecutionRegistryFacts(eq("tenant"), any()))
+                .thenReturn(Set.of("external", "local"));
+        when(store.requireSession("tenant", "external")).thenReturn(external);
+        when(store.listSessions("tenant", "actor", null, null, 10, "all"))
+                .thenReturn(new SessionPage(List.of(external, local), false));
+        // The durable registration read refuses an unreadable or undecodable
+        // record by throwing. Rendering a capability flag must not propagate
+        // that: one bad row would otherwise fail the listing for every Session.
+        when(workspaces.externalFilesAllowed(workspace)).thenThrow(
+                new com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException(503,
+                        "managed_runtime_unavailable", "External registration is unreadable", true));
+
+        var page = service.listWebShellSessions("tenant", "actor", null, 10).data();
+
+        assertThat(page).hasSize(2);
+        // Unproven eligibility advertises no context change; the mutating path
+        // still calls the throwing admission check, so nothing is admitted.
+        assertThat(page.getFirst().capabilities().modelChange()).isFalse();
+        assertThat(page.getFirst().capabilities().approvalModeChange()).isFalse();
+    }
+
+    @Test
     void recoveryProjectionKeepsAnUnsettledLifecycleOperationOnSingleSessionReads() {
         var store = mock(AgentStateStore.class);
         var service = new ManagedAgentService(store, new RequestDigests(),

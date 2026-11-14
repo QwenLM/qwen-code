@@ -75,6 +75,8 @@ import { parseHostedFileHistoryRecord } from './hosted-file-history-protocol.js'
 import { readHostedApprovalDefinition } from './hosted-tool-approval.js';
 import { readHostedSkills } from './hosted-skill-catalog.js';
 import {
+  HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+  hasHostedExternalFilesExcludedOptions,
   isHostedWorkspaceProfile,
   isHostedWorkspaceShellProfile,
 } from './hosted-workspace-profiles.js';
@@ -850,6 +852,9 @@ export async function verifyRecoverySession(
         definition['engine'] === 'managed' &&
           definition['sessionId'] === source.sessionId &&
           definition['mcpServers'] === undefined &&
+          (definition['toolProfile'] !==
+            HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE ||
+            !hasHostedExternalFilesExcludedOptions(definition)) &&
           (definition['toolProfile'] === undefined ||
             isHostedWorkspaceProfile(definition['toolProfile'])),
         'unsupported Hosted profile',
