@@ -23,7 +23,7 @@ import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.http.RuntimeBrokerHttpServer;
-import com.alibaba.qwen.code.runtimebroker.managedschema.JdbcRuntimeBrokerSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.provisioning.staticruntime.StaticRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.security.ProtectedSecret;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
@@ -1208,7 +1208,7 @@ public class RuntimeBrokerHttpServerTest {
         var innerSource = new org.h2.jdbcx.JdbcDataSource();
         innerSource.setURL("jdbc:h2:mem:broker-http-store-outage-" + java.util.UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-        JdbcRuntimeBrokerSchema.initialize(innerSource);
+        ManagedSchema.initialize(innerSource);
         ToolExecutionRepository inner = new JdbcToolExecutionRepository(innerSource);
         AtomicBoolean failing = new AtomicBoolean(true);
         AtomicReference<String> failingMethod = new AtomicReference<>("findByIdempotencyKey");
@@ -1399,7 +1399,7 @@ public class RuntimeBrokerHttpServerTest {
         var csiSource = new org.h2.jdbcx.JdbcDataSource();
         csiSource.setURL("jdbc:h2:mem:csi-outage-" + java.util.UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-        JdbcRuntimeBrokerSchema.initialize(csiSource);
+        ManagedSchema.initialize(csiSource);
         try (var connection = csiSource.getConnection();
                 var statement = connection.prepareStatement(
                         "INSERT INTO ma_session (tenant_id, session_id, agent_id, tool_profile,"
@@ -1527,7 +1527,7 @@ public class RuntimeBrokerHttpServerTest {
         var healthySource = new org.h2.jdbcx.JdbcDataSource();
         healthySource.setURL("jdbc:h2:mem:csi-private-outage-" + java.util.UUID.randomUUID()
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-        JdbcRuntimeBrokerSchema.initialize(healthySource);
+        ManagedSchema.initialize(healthySource);
         // JDBC provision admission requires the pinned CSI Session root the
         // control plane writes before the broker provisions.
         try (var connection = healthySource.getConnection();
@@ -1883,7 +1883,7 @@ public class RuntimeBrokerHttpServerTest {
             var source = new org.h2.jdbcx.JdbcDataSource();
             source.setURL("jdbc:h2:mem:broker-http-" + java.util.UUID.randomUUID()
                     + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-            JdbcRuntimeBrokerSchema.initialize(source);
+            ManagedSchema.initialize(source);
             bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
             this.executions = new JdbcToolExecutionRepository(source);
             // Resident Workspace admission reads the ACTIVE Session root the

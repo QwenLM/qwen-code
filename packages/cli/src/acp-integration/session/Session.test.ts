@@ -22,13 +22,16 @@ import {
   resolveHomeLoopResolverRoots,
   Session,
 } from './Session.js';
+import { deferredToolUpdateContext } from './acp-tool-batch.js';
 import {
   getStartupContextLength,
   markCompressedHistory,
 } from '@qwen-code/qwen-code-core/core/environmentContext.js';
 import { detectTurnInterruption } from '@qwen-code/qwen-code-core/core/turn-interruption.js';
 import { FinishReason } from '@qwen-code/qwen-code-core/core/genai-compat.js';
+import type { UserTurnInput } from '@qwen-code/qwen-code-core/core/client.js';
 import { markToolCallArgumentsIncomplete } from '@qwen-code/qwen-code-core/core/incomplete-tool-call-args.js';
+import { runAgentLoop } from '@qwen-code/qwen-code-core/core/agent-loop.js';
 import { ManagedRuntimeOutcomeUnknownError } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import {
   getApiHistoryPromptId,
@@ -148,9 +151,22 @@ const structuredErrorCauses = vi.hoisted(() => new WeakMap<object, unknown>());
 const runAcpToolBatchSpy = vi.hoisted(() => vi.fn());
 
 // The shared tool batch has its own tests; here it runs each call's tool.
-vi.mock('./acp-tool-batch.js', () => ({
+vi.mock('./acp-tool-batch.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./acp-tool-batch.js')>()),
   runAcpToolBatch: (...args: unknown[]) => runAcpToolBatchSpy(...args),
 }));
+
+// The shared loop runs as it is; the spy sees each `runAgentLoop` call.
+vi.mock(
+  '@qwen-code/qwen-code-core/core/agent-loop.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/core/agent-loop.js')
+      >();
+    return { ...actual, runAgentLoop: vi.fn(actual.runAgentLoop) };
+  },
+);
 
 // Session imports getStructuredErrorCause from the turn module, not the barrel.
 vi.mock('@qwen-code/qwen-code-core/core/turn.js', async (importOriginal) => {
@@ -645,6 +661,7 @@ describe('Session', () => {
   let mockLlmClient: {
     getChat: ReturnType<typeof vi.fn>;
     getHistoryTail: ReturnType<typeof vi.fn>;
+    getHistoryToolCallFingerprints: ReturnType<typeof vi.fn>;
     getTrustedUserAnswers: ReturnType<typeof vi.fn>;
     recordTrustedUserAnswers: ReturnType<typeof vi.fn>;
     setHistory: ReturnType<typeof vi.fn>;
@@ -910,6 +927,9 @@ describe('Session', () => {
     mockLlmClient = {
       getChat: vi.fn().mockReturnValue(mockChat),
       getHistoryTail: vi.fn().mockReturnValue([]),
+      getHistoryToolCallFingerprints: vi.fn(() =>
+        mockChat.getHistoryToolCallFingerprints(),
+      ),
       getTrustedUserAnswers: vi.fn().mockReturnValue([]),
       recordTrustedUserAnswers: vi.fn(),
       setHistory: vi.fn((history: Content[]) => mockChat.setHistory(history)),
@@ -2312,6 +2332,49 @@ describe('Session', () => {
     expect(mockConfig.reloadModelProvidersConfig).not.toHaveBeenCalled();
   });
 
+  it('keeps a deferred tool update on its original prompt or background turn', async () => {
+    const update = {
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'old-tool',
+      status: 'completed',
+    } as const;
+    const owner = {
+      version: 1,
+      sessionId: 'test-session-id',
+      promptId: 'old-prompt',
+      originatorClientId: 'old-client',
+    } as const;
+    await core.runWithInvocationContext(owner, () =>
+      deferredToolUpdateContext.run(true, () => session.sendUpdate(update)),
+    );
+    expect(mockClient.sessionUpdate).toHaveBeenLastCalledWith({
+      sessionId: owner.sessionId,
+      update: {
+        ...update,
+        _meta: {
+          promptId: owner.promptId,
+          originatorClientId: owner.originatorClientId,
+        },
+      },
+    });
+
+    const turn = {
+      turnId: 'old-background-turn',
+      taskId: 'task',
+      kind: 'agent',
+      startedAt: 1,
+    } as const;
+    await core.backgroundTurnContext.run(
+      { sessionId: owner.sessionId, active: false, turn },
+      () =>
+        deferredToolUpdateContext.run(true, () => session.sendUpdate(update)),
+    );
+    expect(mockClient.sessionUpdate).toHaveBeenLastCalledWith({
+      sessionId: owner.sessionId,
+      update: { ...update, _meta: { backgroundTurn: turn } },
+    });
+  });
+
   it('bounds textual tool results at the live ACP delivery boundary', async () => {
     const source = `head-${'x'.repeat(499_999)}-tail`;
     await session.sendUpdate({
@@ -3708,6 +3771,79 @@ describe('Session', () => {
     );
   });
 
+  describe('hook lifecycle subscriptions', () => {
+    it('handles late bus creation, replacement, session isolation and disposal', async () => {
+      session.dispose();
+      const listeners = new Set<
+        (bus: InstanceType<typeof core.MessageBus>) => void
+      >();
+      const config = {
+        ...mockConfig,
+        onMessageBusChange: (
+          listener: (bus: InstanceType<typeof core.MessageBus>) => void,
+        ) => {
+          listeners.add(listener);
+          return () => listeners.delete(listener);
+        },
+      } as unknown as Config;
+      session = new Session(
+        'test-session-id',
+        config,
+        mockClient,
+        mockSettings,
+      );
+      const first = new core.MessageBus();
+      const second = new core.MessageBus();
+      const event = {
+        v: 1 as const,
+        kind: 'hook' as const,
+        executionId: 'exec',
+        runtimeId: 'runtime',
+        sessionId: 'test-session-id',
+        promptId: 'history-turn',
+        agentId: null,
+        eventName: 'Stop',
+        hookType: 'command' as const,
+        source: 'project' as const,
+        name: 'safe',
+        startedAt: 100,
+        phase: 'started' as const,
+      };
+      const progress = {
+        type: core.MessageBusType.HOOK_PROGRESS as const,
+        phase: 'start' as const,
+        eventName: 'Stop',
+        hookName: 'SECRET_COMMAND',
+        hookType: 'command' as const,
+        invocationId: 'old-progress-id',
+        index: 0,
+        total: 1,
+        hookLifecycle: event,
+      };
+      vi.mocked(mockClient.sessionUpdate).mockClear();
+      for (const listener of listeners) listener(first);
+      await first.publish({
+        ...progress,
+        hookLifecycle: { ...event, sessionId: 'other' },
+      });
+      expect(mockClient.sessionUpdate).not.toHaveBeenCalled();
+      await first.publish(progress);
+      expect(mockClient.sessionUpdate).toHaveBeenCalledOnce();
+      expect(
+        JSON.stringify(vi.mocked(mockClient.sessionUpdate).mock.calls),
+      ).not.toContain('SECRET');
+      for (const listener of listeners) listener(second);
+      await first.publish(progress);
+      expect(mockClient.sessionUpdate).toHaveBeenCalledOnce();
+      await second.publish(progress);
+      expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(2);
+      session.dispose();
+      await second.publish(progress);
+      expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(2);
+      expect(listeners.size).toBe(0);
+    });
+  });
+
   describe('request lifecycle subscriptions', () => {
     const started: RequestLifecycleEvent = {
       v: 1,
@@ -4892,12 +5028,27 @@ describe('Session', () => {
     });
   });
 
-  describe('shared agent loop round (experimental.unifiedAgentLoop)', () => {
+  describe.each([false, true])('shared loop round (kernel=%s)', (kernel) => {
     type RoundEvent = core.ServerLlmStreamEvent;
+
+    beforeEach(() => {
+      vi.mocked(runAgentLoop).mockClear();
+    });
+
+    afterEach(() => {
+      // Each round ran in its own `runAgentLoop` call, on the kernel when on.
+      for (const [options] of vi.mocked(runAgentLoop).mock.calls) {
+        expect(options).toMatchObject({ maxRounds: 1, useEventBus: kernel });
+      }
+    });
 
     /** Streams each round's events from LlmClient, then empty rounds. */
     function useSharedRounds(...rounds: RoundEvent[][]) {
       mockConfig.isUnifiedAgentLoopEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.isEventBusAgentLoopEnabled = vi.fn().mockReturnValue(kernel);
+      agentTelemetry.getActiveInteractionSpan.mockReturnValue(
+        agentTelemetry.span,
+      );
       Object.assign(mockLlmClient, {
         admitUserPrompt: vi.fn().mockResolvedValue({ blocked: false }),
       });
@@ -5026,13 +5177,23 @@ describe('Session', () => {
       expect(send).toHaveBeenCalledOnce();
       expect(send.mock.calls[0][3]).toMatchObject({
         type: core.SendMessageType.UserQuery,
-        userTurnRecordedByHost: true,
+        userTurn: {
+          promptId: send.mock.calls[0][2],
+          todoWorkChain: { promptId: send.mock.calls[0][2] },
+          fileHistory: { promptId: send.mock.calls[0][2] },
+        },
         workflowModeEligible: true,
-        interactionSpanByHost: true,
+        interactionSpan: agentTelemetry.span,
         promptAdmission: { blocked: false },
         // Recall searches the prompt text, not the resolved request.
         memoryRecallQuery: 'hello',
       });
+      // The host recorded the user message before the send, so the client does
+      // not record it again.
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledOnce();
+      expect(mockChatRecordingService.recordUserMessage.mock.calls[0][0]).toBe(
+        'hello',
+      );
       expect(mockConfig.prepareWorkflowMode).not.toHaveBeenCalled();
       // The client runs its own tool-call guards for the shared tool batch.
       expect(send.mock.calls[0][3]).not.toHaveProperty('toolLoopGuardsByHost');
@@ -5224,6 +5385,30 @@ describe('Session', () => {
       expect(
         (parts as Part[]).map((part) => part.functionResponse?.id),
       ).toContain('call-read');
+    });
+
+    it('ends the loop call of a round whose turn left before its batch', async () => {
+      useTool(core.Kind.Read, 'read_file');
+      const send = useSharedRounds();
+      send.mockImplementationOnce(() =>
+        (async function* () {
+          yield toolCall({
+            id: 'call-read',
+            name: 'read_file',
+            args: { file_path: '/tmp/a.txt' },
+          });
+          await session.cancelPendingPrompt();
+          yield finished();
+        })(),
+      );
+
+      const result = await prompt();
+
+      expect(result.stopReason).toBe('cancelled');
+      expect(runAcpToolBatchSpy).not.toHaveBeenCalled();
+      await expect(
+        vi.mocked(runAgentLoop).mock.results[0].value,
+      ).resolves.toMatchObject({ reason: 'surface_ended' });
     });
 
     it("skips memory extraction on every round of a channel's turn", async () => {
@@ -6142,7 +6327,7 @@ describe('Session', () => {
           expect(send).toHaveBeenCalledOnce();
           expect(send.mock.calls[0][3]).toMatchObject({
             type: core.SendMessageType.Retry,
-            userTurnRecordedByHost: true,
+            userTurn: { promptId: send.mock.calls[0][2] },
             historyPromptId: promptId,
           });
           // A retry runs UserPromptSubmit, as before; a continue does not.
@@ -6303,6 +6488,10 @@ describe('Session', () => {
         > = [];
         let pushCount = 0;
         mockConfig.isUnifiedAgentLoopEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.isEventBusAgentLoopEnabled = vi.fn().mockReturnValue(kernel);
+        agentTelemetry.getActiveInteractionSpan.mockReturnValue(
+          agentTelemetry.span,
+        );
         Object.assign(mockChat, {
           getUserContentPushCount: vi.fn(() => pushCount),
         });
@@ -6375,8 +6564,8 @@ describe('Session', () => {
         expect(sends[1][0]).toEqual([{ text: 'nightly report' }]);
         expect(sends[1][3]).toMatchObject({
           type: core.SendMessageType.Cron,
-          userTurnRecordedByHost: true,
-          interactionSpanByHost: true,
+          userTurn: { promptId: sends[1][2] },
+          interactionSpan: agentTelemetry.span,
           toolCallPreparations: true,
         });
         expect(sends[1][3]['stopPolicies']).toHaveLength(1);
@@ -6510,6 +6699,36 @@ describe('Session', () => {
         expect(agentText()).not.toContain('cron error');
       });
 
+      it('ends the loop call of a cron round whose turn left before its batch', async () => {
+        fireCron('nightly report');
+        useTool(core.Kind.Read, 'read_file');
+        const sends = automaticRounds(
+          (index) =>
+            index === 1
+              ? [
+                  toolCall({
+                    id: 'call-read',
+                    name: 'read_file',
+                    args: { file_path: '/tmp/a.txt' },
+                  }),
+                ]
+              : [finished()],
+          () => true,
+          async (index) => {
+            if (index === 1) await session.cancelPendingPrompt();
+          },
+        );
+
+        await prompt();
+        await vi.waitFor(() => expect(sends).toHaveLength(2));
+
+        // The cron round's loop call ends without a batch.
+        await expect(
+          vi.mocked(runAgentLoop).mock.results[1].value,
+        ).resolves.toMatchObject({ reason: 'surface_ended' });
+        expect(runAcpToolBatchSpy).not.toHaveBeenCalled();
+      });
+
       it('keeps a cron prompt whose request never went out out of the record', async () => {
         fireCron('nightly report');
         const sends = automaticRounds(
@@ -6548,9 +6767,9 @@ describe('Session', () => {
         expect(execute).toHaveBeenCalledOnce();
         expect(sends[2][3]).toMatchObject({
           type: core.SendMessageType.ToolResult,
-          interactionSpanByHost: true,
+          interactionSpan: agentTelemetry.span,
         });
-        expect(sends[2][3]).not.toHaveProperty('userTurnRecordedByHost');
+        expect(sends[2][3]).not.toHaveProperty('userTurn');
         expect(sends[2][0]).toContainEqual(
           expect.objectContaining({
             functionResponse: expect.objectContaining({ id: 'call-1' }),
@@ -6582,9 +6801,20 @@ describe('Session', () => {
         expect(sends).toHaveLength(1);
         expect(sends[0][3]).toMatchObject({
           type: core.SendMessageType.Notification,
-          userTurnRecordedByHost: true,
+          userTurn: { promptId: sends[0][2] },
         });
-        expect(sends[0][3]).not.toHaveProperty('interactionSpanByHost');
+        // Already persisted, so the turn tells the client not to record it and
+        // keeps the task identity on the strict record the host wrote.
+        expect(
+          mockChatRecordingService.recordNotificationStrict,
+        ).toHaveBeenCalledOnce();
+        expect(
+          mockChatRecordingService.recordNotificationStrict.mock.calls[0]![2],
+        ).toMatchObject({ taskId: 'task-1' });
+        expect(
+          mockChatRecordingService.recordNotification,
+        ).not.toHaveBeenCalled();
+        expect(sends[0][3]).not.toHaveProperty('interactionSpan');
         expect(sends[0][0]).toContainEqual({ text: '<task-notification />' });
         expect(
           backgroundResponses().map(
@@ -10715,16 +10945,19 @@ describe('Session', () => {
       expect(execute).toHaveBeenCalled();
       expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
       expect(send).toHaveBeenCalledOnce();
-      const [parts, , , options] = send.mock.calls[0] as unknown as [
+      const [parts, , promptId, options] = send.mock.calls[0] as unknown as [
         Part[],
         AbortSignal,
         string,
-        { type: string; userTurnRecordedByHost?: boolean },
+        { type: string; userTurn?: UserTurnInput },
       ];
       expect(parts[0]?.functionResponse?.id).toBe('call-auq');
       expect(options).toMatchObject({
         type: core.SendMessageType.Retry,
-        userTurnRecordedByHost: true,
+        userTurn: {
+          promptId,
+          fileHistory: { promptId },
+        },
       });
       expect(options).not.toHaveProperty('promptAdmission');
     });
@@ -31460,7 +31693,21 @@ describe('Session', () => {
           ]);
         });
 
-        describe('on the shared agent loop round', () => {
+        describe.each([false, true])('shared round (kernel=%s)', (kernel) => {
+          beforeEach(() => {
+            mockConfig.isEventBusAgentLoopEnabled = vi
+              .fn()
+              .mockReturnValue(kernel);
+            vi.mocked(runAgentLoop).mockClear();
+          });
+
+          afterEach(() => {
+            // Each round ran on the kernel when it is on.
+            for (const [options] of vi.mocked(runAgentLoop).mock.calls) {
+              expect(options).toMatchObject({ useEventBus: kernel });
+            }
+          });
+
           /** Streams `plan A`, then holds the response until it is cut. */
           function openSharedResponse(endsWithError = false) {
             let markStreaming!: () => void;
@@ -39417,7 +39664,21 @@ describe('Session', () => {
         expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
       });
 
-      describe('on the shared agent loop round', () => {
+      describe.each([false, true])('shared round (kernel=%s)', (kernel) => {
+        beforeEach(() => {
+          mockConfig.isEventBusAgentLoopEnabled = vi
+            .fn()
+            .mockReturnValue(kernel);
+          vi.mocked(runAgentLoop).mockClear();
+        });
+
+        afterEach(() => {
+          // Each round ran on the kernel when it is on.
+          for (const [options] of vi.mocked(runAgentLoop).mock.calls) {
+            expect(options).toMatchObject({ useEventBus: kernel });
+          }
+        });
+
         const activeGoalSnapshot = (activity: 'idle' | 'running') => ({
           v: 2,
           activity,
@@ -39516,7 +39777,7 @@ describe('Session', () => {
             goalPermit: permit,
             goalTurnKey: turnKey,
             goalOrigin: 'runtime',
-            userTurnRecordedByHost: true,
+            userTurn: { promptId: sends[0][2] },
           });
           // The round's own signal: a cut or a cancel is left to the session.
           expect(sends[0][3]['goalSignal']).toBe(sends[0][1]);
@@ -39556,7 +39817,7 @@ describe('Session', () => {
             goalPermit: permit,
             goalTurnKey: expect.stringMatching(/^goal-user:/),
             goalOrigin: 'user',
-            userTurnRecordedByHost: true,
+            userTurn: { promptId: sends[0][2] },
           });
           expect(
             mockChatRecordingService.recordUserMessage,
@@ -47229,7 +47490,10 @@ describe('Session', () => {
           expect(messageBus.request).toHaveBeenCalledWith(
             expect.objectContaining({
               eventName: 'PreToolUse',
-              owner,
+              owner: {
+                ...owner,
+                historyPromptId: 'test-session-id########1',
+              },
               input: expect.objectContaining({
                 tool_name: 'read_file',
                 tool_input: { path: '/tmp/test.txt' },
