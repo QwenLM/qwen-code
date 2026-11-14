@@ -33926,9 +33926,13 @@ describe('createAcpSessionBridge', () => {
       await new Promise((r) => setImmediate(r));
 
       await bridge.closeSession(session.sessionId);
+      // `closeSession` already awaits the whole close, so the count is
+      // settled once it resolves; assert before draining so a regression
+      // that leaves the bus open fails here instead of timing out on the
+      // unbounded drain.
+      expect(bridge.sessionCount).toBe(0);
       await drain;
 
-      expect(bridge.sessionCount).toBe(0);
       const closedEvent = events.find((e) => e.type === 'session_closed');
       expect(closedEvent).toBeDefined();
       expect((closedEvent?.data as { reason: string }).reason).toBe(
@@ -34077,10 +34081,7 @@ describe('createAcpSessionBridge', () => {
       const handle = makeChannel({
         initializeImpl: () => activeWorkInitializeResponse(),
         loadSessionImpl: () => lateRestore.promise,
-        extMethodImpl: (method) =>
-          method === SERVE_CONTROL_EXT_METHODS.sessionClose
-            ? { closed: true, holds: [] }
-            : {},
+        extMethodImpl: activeWorkCloseImpl,
       });
       const bridge = makeBridge({
         sessionScope: 'thread',
@@ -34133,10 +34134,7 @@ describe('createAcpSessionBridge', () => {
     it('atomically refuses a required-idle close until active work settles', async () => {
       const handle = makeChannel({
         initializeImpl: () => activeWorkInitializeResponse(),
-        extMethodImpl: async (method) =>
-          method === SERVE_CONTROL_EXT_METHODS.sessionClose
-            ? { closed: true, holds: [] }
-            : {},
+        extMethodImpl: activeWorkCloseImpl,
       });
       const bridge = makeBridge({ channelFactory: async () => handle.channel });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
