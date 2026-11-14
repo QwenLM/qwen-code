@@ -187,6 +187,16 @@ export default {
   'open full Qwen Code documentation in your browser':
     'ブラウザで Qwen Code のドキュメントを開く',
   'Configuration not available.': '設定が利用できません',
+  'Configuration not available. Cannot show memory.':
+    '設定を利用できないため、メモリを表示できません。',
+  'Loaded memory from {{count}} {{name}} file{{plural}}.':
+    '{{count}} 個の {{name}} ファイルからメモリを読み込みました。',
+  'Current combined memory content:\n\`\`\`markdown\n{{content}}\n\`\`\`':
+    '現在の統合メモリ内容：\n\`\`\`markdown\n{{content}}\n\`\`\`',
+  'Hierarchical memory (QWEN.md or other context files) is loaded but content is empty.':
+    '階層メモリ（QWEN.md または他のコンテキストファイル）は読み込まれましたが、内容が空です。',
+  'No hierarchical memory (QWEN.md or other context files) is currently loaded.':
+    '現在、階層メモリ（QWEN.md または他のコンテキストファイル）は読み込まれていません。',
   'Connect an LLM provider': 'LLM プロバイダーに接続',
   'Copy the last AI response to clipboard (/copy N for Nth-latest)':
     '最新のAI応答をクリップボードにコピー（/copy N で新しい方からN番目）',

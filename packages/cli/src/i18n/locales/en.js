@@ -506,6 +506,16 @@ export default {
   'open full Qwen Code documentation in your browser':
     'open full Qwen Code documentation in your browser',
   'Configuration not available.': 'Configuration not available.',
+  'Configuration not available. Cannot show memory.':
+    'Configuration not available. Cannot show memory.',
+  'Loaded memory from {{count}} {{name}} file{{plural}}.':
+    'Loaded memory from {{count}} {{name}} file{{plural}}.',
+  'Current combined memory content:\n\`\`\`markdown\n{{content}}\n\`\`\`':
+    'Current combined memory content:\n\`\`\`markdown\n{{content}}\n\`\`\`',
+  'Hierarchical memory (QWEN.md or other context files) is loaded but content is empty.':
+    'Hierarchical memory (QWEN.md or other context files) is loaded but content is empty.',
+  'No hierarchical memory (QWEN.md or other context files) is currently loaded.':
+    'No hierarchical memory (QWEN.md or other context files) is currently loaded.',
   'Connect an LLM provider': 'Connect an LLM provider',
   'Copy to clipboard: reply, code (by lang), LaTeX, or Mermaid. N = Nth-latest message, index = block number':
     'Copy to clipboard: reply, code (by lang), LaTeX, or Mermaid. N = Nth-latest message, index = block number',

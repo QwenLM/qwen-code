@@ -490,6 +490,16 @@ export default {
   'open full Qwen Code documentation in your browser':
     '在浏览器中打开完整的 Qwen Code 文档',
   'Configuration not available.': '配置不可用',
+  'Configuration not available. Cannot show memory.':
+    '配置不可用，无法显示记忆。',
+  'Loaded memory from {{count}} {{name}} file{{plural}}.':
+    '已从 {{count}} 个 {{name}} 文件加载记忆。',
+  'Current combined memory content:\n\`\`\`markdown\n{{content}}\n\`\`\`':
+    '当前合并的记忆内容：\n\`\`\`markdown\n{{content}}\n\`\`\`',
+  'Hierarchical memory (QWEN.md or other context files) is loaded but content is empty.':
+    '层级记忆（QWEN.md 或其他上下文文件）已加载，但内容为空。',
+  'No hierarchical memory (QWEN.md or other context files) is currently loaded.':
+    '当前未加载层级记忆（QWEN.md 或其他上下文文件）。',
   'Connect an LLM provider': '连接 LLM 提供商',
   'Copy to clipboard: reply, code (by lang), LaTeX, or Mermaid. N = Nth-latest message, index = block number':
     '复制到剪贴板：AI 回复、代码块（可按语言筛选）、LaTeX 或 Mermaid。N 为倒数第 N 条消息，index 为代码块序号',
