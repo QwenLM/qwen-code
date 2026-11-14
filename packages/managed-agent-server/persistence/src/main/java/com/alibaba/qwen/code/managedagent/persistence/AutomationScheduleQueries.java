@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore;
 import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.ScheduleCursor;
 import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.SchedulePage;
 import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.ScheduleRow;
@@ -43,5 +44,55 @@ final class AutomationScheduleQueries {
         boolean hasMore = rows.size() > limit;
         return new SchedulePage(hasMore ? rows.subList(0, limit) : rows,
                 hasMore);
+    }
+
+    /**
+     * Session-scoped page for the internal writer-binding routes: the binding
+     * already authorized this exact Session, so the filter is the Session
+     * itself, applied before the page limit (a controller-side post-filter
+     * would cut the page first and derive a wrong cursor). No actor/workspace
+     * reachability is re-derived here.
+     */
+    static SchedulePage listSession(JdbcTemplate jdbc, RowMapper<ScheduleRow> mapper,
+            String tenantId, String sessionId, ScheduleCursor cursor, int limit) {
+        // Retired definitions are history, not capacity: the internal list
+        // feeds the model's inline tool_result, so the page is bounded by the
+        // live capacity (32), never by the Session's lifetime creations.
+        String select = "SELECT " + ManagedSchemaProjection.SCHEDULE.columns("s")
+                + " FROM ma_schedule s WHERE s.tenant_id = ? AND s.session_id = ?"
+                + " AND s.state = '" + AutomationLedgerStore.STATE_LIVE + "'";
+        List<ScheduleRow> rows = cursor == null
+                ? jdbc.query(select + " ORDER BY s.gmt_create DESC,"
+                        + " s.schedule_id DESC LIMIT ?", mapper, tenantId,
+                        sessionId, limit + 1)
+                : jdbc.query(select + " AND (s.gmt_create < ?"
+                        + " OR (s.gmt_create = ? AND s.schedule_id < ?))"
+                        + " ORDER BY s.gmt_create DESC, s.schedule_id DESC"
+                        + " LIMIT ?", mapper, tenantId, sessionId,
+                        cursor.createdAt(), cursor.createdAt(),
+                        cursor.scheduleId(), limit + 1);
+        boolean hasMore = rows.size() > limit;
+        return new SchedulePage(hasMore ? rows.subList(0, limit) : rows,
+                hasMore);
+    }
+
+    static int countLive(JdbcTemplate jdbc, String tenantId, String sessionId,
+            String liveState) {
+        Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM"
+                        + " ma_schedule WHERE tenant_id = ?"
+                        + " AND session_id = ? AND state = ?", Integer.class,
+                tenantId, sessionId, liveState);
+        return count == null ? 0 : count;
+    }
+
+    /** Live, enabled, unblocked definitions whose lease is free or expired. */
+    static List<ScheduleRow> findArmed(JdbcTemplate jdbc, RowMapper<ScheduleRow> mapper,
+            String liveState, long now, int limit) {
+        return jdbc.query("SELECT " + ManagedSchemaProjection.SCHEDULE.columns() + " FROM ma_schedule"
+                        + " WHERE state = ? AND is_enabled = TRUE"
+                        + " AND blocked_reason IS NULL"
+                        + " AND (lease_until IS NULL OR lease_until < ?)"
+                        + " ORDER BY gmt_modified, schedule_id LIMIT ?", mapper,
+                liveState, now, limit);
     }
 }

@@ -1432,6 +1432,7 @@ export interface HookExecutionResult {
 export interface HookExecutionPlan {
   eventName: HookEventName;
   hookConfigs: HookConfig[];
+  hookSources?: HooksConfigSource[];
   sequential: boolean;
 }
 

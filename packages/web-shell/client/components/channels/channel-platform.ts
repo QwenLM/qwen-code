@@ -6,39 +6,64 @@
 
 import type { DaemonChannelTypeDescriptor } from '@qwen-code/sdk/daemon';
 
+const DINGTALK_PLATFORM = { type: 'dingtalk', displayName: 'DingTalk' };
+const FEISHU_PLATFORM = { type: 'feishu', displayName: 'Feishu' };
+
+export const CHANNEL_METHOD_PLATFORMS: Record<
+  string,
+  { type: string; displayName: string } | undefined
+> = {
+  dingtalk: DINGTALK_PLATFORM,
+  'dingtalk-webhook': DINGTALK_PLATFORM,
+  feishu: FEISHU_PLATFORM,
+  'feishu-webhook': FEISHU_PLATFORM,
+};
+
 export const PLATFORM_MARKS: Record<string, string> = {
   dingtalk: 'D',
+  'dingtalk-webhook': 'D',
   dws: 'DWS',
+  weixin: 'WX',
   wecom: 'W',
   'wecom-callback': 'WC',
   feishu: 'F',
+  'feishu-webhook': 'F',
   github: 'GH',
   gitlab: 'GL',
   email: 'E',
+  qq: 'QQ',
 };
 
 const SUPPORTED_CHANNEL_TYPES = new Set([
   'dingtalk',
+  'dingtalk-webhook',
   'dws',
+  'weixin',
   'wecom',
   'wecom-callback',
   'feishu',
+  'feishu-webhook',
   'github',
   'gitlab',
   'email',
+  'qq',
 ]);
 
 export function isSupportedChannelType(
   type: unknown,
 ): type is
   | 'dingtalk'
+  | 'dingtalk-webhook'
   | 'dws'
+  | 'weixin'
   | 'wecom'
   | 'wecom-callback'
   | 'feishu'
+  | 'feishu-webhook'
   | 'github'
   | 'gitlab'
-  | 'email' {
+  | 'email'
+  | 'qq' {
   return typeof type === 'string' && SUPPORTED_CHANNEL_TYPES.has(type);
 }
 
@@ -49,11 +74,12 @@ export function isChannelPlatformAvailable(
 }
 
 /**
- * Channels whose traffic is always repository-scoped group traffic. Every
- * envelope sets `isGroup`, so the direct-message policy never gates them, and
- * their group IDs are repository full names (`owner/repo`).
+ * Channels whose traffic is always repository-scoped group traffic. Both the
+ * GitHub and GitLab adapters build every envelope with `isGroup: true`, so the
+ * direct-message policy never gates them. Their group IDs are repository paths
+ * — GitHub `owner/repo`, GitLab `group[/subgroup…]/project`.
  */
-const REPOSITORY_ONLY_CHANNEL_TYPES = new Set(['github']);
+const REPOSITORY_ONLY_CHANNEL_TYPES = new Set(['github', 'gitlab']);
 
 export function isRepositoryOnlyChannelType(type: unknown): boolean {
   return typeof type === 'string' && REPOSITORY_ONLY_CHANNEL_TYPES.has(type);

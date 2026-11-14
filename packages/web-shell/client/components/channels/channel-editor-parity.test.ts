@@ -108,6 +108,68 @@ describe('bound-delivery rule parity (editor mirror vs daemon authority)', () =>
   });
 });
 
+const REQUIRE_BOUND_WATCH_CASES = [
+  {
+    name: 'gate on with delivery off',
+    gate: true,
+    delivery: false,
+    code: 'requiresBoundDeliveryForWatchGate',
+    daemon: /requires deliverToBoundSessions/,
+  },
+  {
+    name: 'gate on with delivery on',
+    gate: true,
+    delivery: true,
+    code: undefined,
+    daemon: undefined,
+  },
+  {
+    name: 'gate off with delivery off',
+    gate: false,
+    delivery: false,
+    code: undefined,
+    daemon: undefined,
+  },
+] as const;
+
+describe('requireBoundWatch rule parity (editor mirror vs daemon authority)', () => {
+  it.each(REQUIRE_BOUND_WATCH_CASES)(
+    '$name',
+    ({ gate, delivery, code, daemon }) => {
+      const config = {
+        type: 'github',
+        useLocalGh: true,
+        deliverToBoundSessions: delivery,
+        requireBoundWatch: gate,
+      };
+      const instance: DaemonChannelInstanceSnapshot = {
+        name: 'parity',
+        config,
+        secrets: {},
+        startsWithServe: false,
+        runtime: { state: 'stopped' },
+      };
+      const draft = createChannelEditorDraft(descriptor, instance);
+      draft.name = 'parity';
+
+      const clientCode = validateChannelEditorDraft(
+        descriptor,
+        draft,
+        [],
+        instance,
+      )['requireBoundWatch'];
+      expect(clientCode).toBe(code);
+
+      const daemonMessage = management.validateConfig?.(config);
+      if (daemon) {
+        expect(daemonMessage).toMatch(daemon);
+      } else {
+        expect(daemonMessage).toBeUndefined();
+      }
+    },
+  );
+});
+
 const REPO_FILTER_CASES = [
   {
     name: 'active allowlist with an empty list',

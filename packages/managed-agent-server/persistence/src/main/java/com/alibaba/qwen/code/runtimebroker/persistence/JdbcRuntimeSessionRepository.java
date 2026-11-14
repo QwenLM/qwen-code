@@ -427,6 +427,12 @@ public final class JdbcRuntimeSessionRepository
     @Override
     public List<RuntimeSessionRecord> findActiveByHarnessSession(String tenantId, String harnessSessionId,
             RuntimeSessionRecord after, int limit) {
+        return findActiveByHarnessSession(tenantId, harnessSessionId, after, limit, null);
+    }
+
+    @Override
+    public List<RuntimeSessionRecord> findActiveByHarnessSession(String tenantId, String harnessSessionId,
+            RuntimeSessionRecord after, int limit, String excludeTurnKind) {
         BrokerValues.requireId(tenantId, "tenantId");
         BrokerValues.requireId(harnessSessionId, "harnessSessionId");
         if (limit < 1 || limit > 100) {
@@ -438,6 +444,7 @@ public final class JdbcRuntimeSessionRepository
                     + " FROM ma_runtime_session WHERE harness_session_id = ? AND tenant_id = ?"
                     + " AND session_state NOT IN ('RELEASED', 'FAILED')"
                     + " AND (scope_key > ? OR scope_key = ? AND runtime_session_id > ?)"
+                    + (excludeTurnKind == null ? "" : " AND turn_kind <> ?")
                     + " ORDER BY scope_key, runtime_session_id LIMIT ?")) {
                 String afterScope = after == null ? "" : JdbcRepositorySupport.scopeKey(after.getSession().getScope());
                 JdbcRepositorySupport.setIdentity(statement, 1, harnessSessionId);
@@ -445,7 +452,12 @@ public final class JdbcRuntimeSessionRepository
                 statement.setString(3, afterScope);
                 statement.setString(4, afterScope);
                 JdbcRepositorySupport.setIdentity(statement, 5, after == null ? "" : after.getRuntimeSessionId());
-                statement.setInt(6, limit);
+                if (excludeTurnKind == null) {
+                    statement.setInt(6, limit);
+                } else {
+                    statement.setString(6, excludeTurnKind);
+                    statement.setInt(7, limit);
+                }
                 try (ResultSet rows = statement.executeQuery()) {
                     while (rows.next()) {
                         result.add(mapSession(rows));

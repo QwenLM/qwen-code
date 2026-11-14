@@ -210,6 +210,195 @@ describe('HTTP Managed Session store', () => {
     },
   );
 
+  describe('fixed-interval loop automation routes', () => {
+    const automation = {
+      id: 'asch_abc',
+      object: 'automation',
+      session_id: SESSION_KEY.sessionId,
+      definition_revision: 1,
+      digest: `sha256:${'b'.repeat(64)}`,
+      goal: 'watch the build',
+      cron: '*/5 * * * *',
+      timezone: 'UTC',
+      session_mode: 'persistent',
+      overlap: 'skip',
+      catch_up: 'none',
+      catch_up_limit: null,
+      enabled: true,
+      state: 'active',
+      created_at: 1,
+      updated_at: 1,
+      gate: null,
+      gate_status: null,
+    };
+    const parsedAutomation = {
+      id: 'asch_abc',
+      sessionId: SESSION_KEY.sessionId,
+      cron: '*/5 * * * *',
+      timezone: 'UTC',
+      goal: 'watch the build',
+      state: 'active',
+      enabled: true,
+    };
+    const openStores = (fetchFn: typeof fetch) =>
+      createHttpManagedSessionStores({
+        baseUrl: 'http://127.0.0.1:8080',
+        sessionKey: SESSION_KEY,
+        writerId: 'harness-a',
+        writerToken: TOKEN_A,
+        fetchFn,
+      });
+
+    it('creates a definition with the writer binding and the derived Idempotency-Key', async () => {
+      const server = new FakeManagedSessionStore();
+      const fetchFn = vi.fn<typeof fetch>(async (input, init) =>
+        requestUrl(input).endsWith('/automations:create')
+          ? jsonResponse({ body: automation, replayed: false })
+          : server.fetch(input, init),
+      );
+      const stores = openStores(fetchFn);
+      try {
+        await stores.journalStore.open({ sessionKey: SESSION_KEY });
+        const definition = {
+          cron: '*/5 * * * *',
+          prompt: 'check the build',
+          session_mode: 'persistent' as const,
+        };
+        const result = await stores.automationsCreate(
+          definition,
+          'loop:call-1:create',
+        );
+        expect(result).toEqual({
+          automation: parsedAutomation,
+          replayed: false,
+        });
+        const requests = fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).endsWith('/automations:create'),
+        );
+        expect(requests).toHaveLength(1);
+        const init = requests[0]![1];
+        expect(JSON.parse(String(init?.body))).toEqual({
+          workspaceId: SESSION_KEY.workspaceId,
+          writerId: 'harness-a',
+          writerGeneration: 1,
+          definition,
+        });
+        expect(new Headers(init?.headers).get('Idempotency-Key')).toBe(
+          'loop:call-1:create',
+        );
+      } finally {
+        await stores.stopLocal();
+      }
+    });
+
+    it('does not retry a create whose reply was lost; the re-drive reuses the key', async () => {
+      const server = new FakeManagedSessionStore();
+      const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+        if (requestUrl(input).endsWith('/automations:create'))
+          throw new TypeError('lost create reply');
+        return server.fetch(input, init);
+      });
+      const stores = openStores(fetchFn);
+      try {
+        await stores.journalStore.open({ sessionKey: SESSION_KEY });
+        await expect(
+          stores.automationsCreate(
+            {
+              cron: '*/5 * * * *',
+              prompt: 'check the build',
+              session_mode: 'persistent',
+            },
+            'loop:call-1:create',
+          ),
+        ).rejects.toBeInstanceOf(ManagedSessionStoreTransportError);
+        expect(
+          fetchFn.mock.calls.filter(([input]) =>
+            requestUrl(input).endsWith('/automations:create'),
+          ),
+        ).toHaveLength(1);
+      } finally {
+        await stores.stopLocal();
+      }
+    });
+
+    it('lists a page of the bound Session definitions with the cursor contract', async () => {
+      const server = new FakeManagedSessionStore();
+      const fetchFn = vi.fn<typeof fetch>(async (input, init) =>
+        requestUrl(input).endsWith('/automations:list')
+          ? jsonResponse({
+              object: 'list',
+              data: [automation],
+              has_more: true,
+              next_cursor: 'cursor-2',
+            })
+          : server.fetch(input, init),
+      );
+      const stores = openStores(fetchFn);
+      try {
+        await stores.journalStore.open({ sessionKey: SESSION_KEY });
+        const page = await stores.automationsList('cursor-1', 100);
+        expect(page).toEqual({
+          data: [parsedAutomation],
+          hasMore: true,
+          nextCursor: 'cursor-2',
+        });
+        const requests = fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).endsWith('/automations:list'),
+        );
+        expect(requests).toHaveLength(1);
+        expect(JSON.parse(String(requests[0]![1]?.body))).toEqual({
+          workspaceId: SESSION_KEY.workspaceId,
+          writerId: 'harness-a',
+          writerGeneration: 1,
+          cursor: 'cursor-1',
+          limit: 100,
+        });
+      } finally {
+        await stores.stopLocal();
+      }
+    });
+
+    it('retires a definition with the writer binding and the derived Idempotency-Key', async () => {
+      const server = new FakeManagedSessionStore();
+      const fetchFn = vi.fn<typeof fetch>(async (input, init) =>
+        requestUrl(input).endsWith('/automations:retire')
+          ? jsonResponse({
+              body: { ...automation, state: 'retired' },
+              replayed: true,
+            })
+          : server.fetch(input, init),
+      );
+      const stores = openStores(fetchFn);
+      try {
+        await stores.journalStore.open({ sessionKey: SESSION_KEY });
+        const result = await stores.automationsRetire(
+          'asch_abc',
+          'loop:call-2:retire',
+        );
+        expect(result).toEqual({
+          automation: { ...parsedAutomation, state: 'retired' },
+          replayed: true,
+        });
+        const requests = fetchFn.mock.calls.filter(([input]) =>
+          requestUrl(input).endsWith('/automations:retire'),
+        );
+        expect(requests).toHaveLength(1);
+        const init = requests[0]![1];
+        expect(JSON.parse(String(init?.body))).toEqual({
+          workspaceId: SESSION_KEY.workspaceId,
+          writerId: 'harness-a',
+          writerGeneration: 1,
+          automationId: 'asch_abc',
+        });
+        expect(new Headers(init?.headers).get('Idempotency-Key')).toBe(
+          'loop:call-2:retire',
+        );
+      } finally {
+        await stores.stopLocal();
+      }
+    });
+  });
+
   it('reads a model configuration only with an acquired writer and a bound digest', async () => {
     const server = new FakeManagedSessionStore();
     const digest = `sha256:${'a'.repeat(64)}`;
@@ -3127,9 +3316,14 @@ describe('HTTP Managed Session store', () => {
       });
       expect(ref.byteLength).toBe(bytes.length);
       expect(server.commits).toHaveLength(0);
-      await expect(
-        stores.resourceStore.publish('ordinary', bytes),
-      ).rejects.toThrow('inline limit');
+      // Over-cap resources externalize over the OSS routes under the same
+      // writer grant instead of rejecting; the cold reads below prove the
+      // bytes landed server-side without a journal commit.
+      const ordinary = await stores.resourceStore.publish('ordinary', bytes);
+      expect(ordinary.byteLength).toBe(bytes.length);
+      expect((await stores.toolResultResources.read(ordinary)).byteLength).toBe(
+        bytes.length,
+      );
       const checkpoint = await stores.resourceStore.publish(
         'managed-checkpoint',
         Buffer.alloc(MANAGED_SESSION_LIMITS.maxEventBytes, 0x61),
@@ -3137,12 +3331,16 @@ describe('HTTP Managed Session store', () => {
       expect((await stores.resourceStore.read(checkpoint)).byteLength).toBe(
         MANAGED_SESSION_LIMITS.maxEventBytes,
       );
-      await expect(
-        stores.resourceStore.publish(
-          'managed-checkpoint',
-          Buffer.alloc(MANAGED_SESSION_LIMITS.maxEventBytes + 1),
-        ),
-      ).rejects.toThrow('kind=managed-checkpoint, bytes=1048577');
+      const oversizedCheckpoint = await stores.resourceStore.publish(
+        'managed-checkpoint',
+        Buffer.alloc(MANAGED_SESSION_LIMITS.maxEventBytes + 1),
+      );
+      expect(oversizedCheckpoint.byteLength).toBe(
+        MANAGED_SESSION_LIMITS.maxEventBytes + 1,
+      );
+      expect(
+        (await stores.toolResultResources.read(oversizedCheckpoint)).byteLength,
+      ).toBe(MANAGED_SESSION_LIMITS.maxEventBytes + 1);
       const attachment = await stores.resourceStore.publish(
         'managed-input',
         Buffer.alloc(7 * 1024 * 1024, 0x61),
@@ -3150,12 +3348,14 @@ describe('HTTP Managed Session store', () => {
       expect((await stores.resourceStore.read(attachment)).byteLength).toBe(
         7 * 1024 * 1024,
       );
-      await expect(
-        stores.resourceStore.publish(
-          'managed-input',
-          Buffer.alloc(8 * 1024 * 1024 + 1),
-        ),
-      ).rejects.toThrow('inline limit');
+      const oversizedInput = await stores.resourceStore.publish(
+        'managed-input',
+        Buffer.alloc(8 * 1024 * 1024 + 1),
+      );
+      expect(oversizedInput.byteLength).toBe(8 * 1024 * 1024 + 1);
+      expect(
+        (await stores.toolResultResources.read(oversizedInput)).byteLength,
+      ).toBe(8 * 1024 * 1024 + 1);
       const snapshot = await stores.resourceStore.publish(
         'hosted-model-request',
         Buffer.alloc(9 * 1024 * 1024, 0x61),
@@ -3163,12 +3363,15 @@ describe('HTTP Managed Session store', () => {
       expect((await stores.resourceStore.read(snapshot)).byteLength).toBe(
         9 * 1024 * 1024,
       );
-      await expect(
-        stores.resourceStore.publish(
-          'hosted-model-request',
-          Buffer.alloc(32 * 1024 * 1024 + 1),
-        ),
-      ).rejects.toThrow('inline limit');
+      const oversizedSnapshot = await stores.resourceStore.publish(
+        'hosted-model-request',
+        Buffer.alloc(32 * 1024 * 1024 + 1),
+      );
+      expect(oversizedSnapshot.byteLength).toBe(32 * 1024 * 1024 + 1);
+      expect(
+        (await stores.toolResultResources.read(oversizedSnapshot)).byteLength,
+      ).toBe(32 * 1024 * 1024 + 1);
+      expect(server.commits).toHaveLength(0);
       await expect(
         stores.toolResultResources.publish('ordinary', bytes),
       ).rejects.toThrow('Unsupported');
@@ -8686,21 +8889,218 @@ describe('HTTP Managed Session store', () => {
     await session.close();
   });
 
-  it('rejects resources that require the unimplemented OSS path', async () => {
+  it('externalizes resources that exceed the inline limit over the OSS routes', async () => {
+    const server = new FakeManagedSessionStore();
+    const routes: string[] = [];
     const stores = createHttpManagedSessionStores({
       baseUrl: 'http://127.0.0.1:8080',
       sessionKey: SESSION_KEY,
       writerId: 'harness-a',
       writerToken: TOKEN_A,
-      fetchFn: vi.fn<typeof fetch>(),
+      fetchFn: vi.fn<typeof fetch>(async (input, init) => {
+        const pathname = new URL(requestUrl(input)).pathname;
+        if (
+          pathname.endsWith('/resources:allocate') ||
+          pathname.endsWith(':upload') ||
+          pathname.endsWith(':finalize')
+        )
+          routes.push(pathname);
+        return server.fetch(input, init);
+      }),
     });
+    await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    try {
+      const bytes = Buffer.alloc(64 * 1024 + 1, 0x5a);
+      const ref = await stores.resourceStore.publish('managed-context', bytes);
+      expect(ref.byteLength).toBe(bytes.byteLength);
+      expect(routes).toHaveLength(3);
+      expect(routes[0]!.endsWith('/resources:allocate')).toBe(true);
+      expect(routes[1]!.endsWith(`/resources/${ref.resourceId}:upload`)).toBe(
+        true,
+      );
+      expect(routes[2]!.endsWith(`/resources/${ref.resourceId}:finalize`)).toBe(
+        true,
+      );
+      await expect(stores.resourceStore.read(ref)).resolves.toEqual(bytes);
+      expect(server.commits).toHaveLength(0);
+    } finally {
+      await stores.close();
+    }
+  });
 
-    await expect(
-      stores.resourceStore.publish(
-        'managed-context',
-        Buffer.alloc(64 * 1024 + 1),
-      ),
-    ).rejects.toThrow(/OSS storage is not enabled/);
+  it('externalizes an oversized resource through allocate, upload and finalize in order', async () => {
+    const server = new FakeManagedSessionStore();
+    const requests: Array<{ url: string; body?: Record<string, unknown> }> = [];
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://127.0.0.1:8080',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: vi.fn<typeof fetch>(async (input, init) => {
+        const pathname = new URL(requestUrl(input)).pathname;
+        if (
+          pathname.endsWith('/resources:allocate') ||
+          pathname.endsWith(':upload') ||
+          pathname.endsWith(':finalize')
+        )
+          requests.push({
+            url: requestUrl(input),
+            ...(init?.body === undefined
+              ? {}
+              : {
+                  body: JSON.parse(String(init.body)) as Record<
+                    string,
+                    unknown
+                  >,
+                }),
+          });
+        return server.fetch(input, init);
+      }),
+    });
+    await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    try {
+      const bytes = Buffer.alloc(64 * 1024 + 1, 0x5a);
+      const ref = await stores.resourceStore.publish('managed-context', bytes);
+      expect(ref).toMatchObject({
+        kind: 'managed-context',
+        schemaVersion: 1,
+        byteLength: bytes.byteLength,
+        digest: createHash('sha256').update(bytes).digest('hex'),
+      });
+      expect(requests).toHaveLength(3);
+      const [allocate, upload, finalize] = requests;
+      expect(
+        new URL(allocate!.url).pathname.endsWith('/resources:allocate'),
+      ).toBe(true);
+      expect(allocate!.body).toEqual({
+        workspaceId: SESSION_KEY.workspaceId,
+        writerId: 'harness-a',
+        writerGeneration: 1,
+        resourceId: ref.resourceId,
+        kind: 'managed-context',
+        schemaVersion: 1,
+        byteLength: bytes.byteLength,
+        digest: ref.digest,
+      });
+      const uploadUrl = new URL(upload!.url);
+      expect(
+        uploadUrl.pathname.endsWith(`/resources/${ref.resourceId}:upload`),
+      ).toBe(true);
+      expect(Object.fromEntries(uploadUrl.searchParams)).toEqual({
+        workspaceId: SESSION_KEY.workspaceId,
+        writerId: 'harness-a',
+        writerGeneration: '1',
+      });
+      expect(upload!.body).toEqual({ bytesBase64: bytes.toString('base64') });
+      const finalizeUrl = new URL(finalize!.url);
+      expect(
+        finalizeUrl.pathname.endsWith(`/resources/${ref.resourceId}:finalize`),
+      ).toBe(true);
+      expect(Object.fromEntries(finalizeUrl.searchParams)).toEqual({
+        workspaceId: SESSION_KEY.workspaceId,
+        writerId: 'harness-a',
+        writerGeneration: '1',
+      });
+      expect(finalize!.body).toBeUndefined();
+      // The staged ref reads back locally, and a cold read proves the bytes
+      // landed server-side without a journal commit.
+      await expect(stores.resourceStore.read(ref)).resolves.toEqual(bytes);
+      await expect(stores.toolResultResources.read(ref)).resolves.toEqual(
+        bytes,
+      );
+      expect(server.commits).toHaveLength(0);
+    } finally {
+      await stores.close();
+    }
+  });
+
+  it.each(['allocate', 'upload', 'finalize'])(
+    'retries a transient %s failure while externalizing a resource',
+    async (stage) => {
+      const server = new FakeManagedSessionStore();
+      let failuresRemaining = 1;
+      let attempts = 0;
+      const stores = createHttpManagedSessionStores({
+        baseUrl: 'http://127.0.0.1:8080',
+        sessionKey: SESSION_KEY,
+        writerId: 'harness-a',
+        writerToken: TOKEN_A,
+        fetchFn: vi.fn<typeof fetch>(async (input, init) => {
+          const pathname = new URL(requestUrl(input)).pathname;
+          const hit =
+            stage === 'allocate'
+              ? pathname.endsWith('/resources:allocate')
+              : pathname.endsWith(`:${stage}`);
+          if (hit) {
+            attempts++;
+            if (failuresRemaining > 0) {
+              failuresRemaining--;
+              return jsonResponse(
+                {
+                  error: {
+                    code: 'store_unavailable',
+                    message: 'backend down',
+                  },
+                },
+                500,
+              );
+            }
+          }
+          return server.fetch(input, init);
+        }),
+      });
+      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      try {
+        const bytes = Buffer.alloc(64 * 1024 + 1, 0x77);
+        const ref = await stores.resourceStore.publish(
+          'managed-context',
+          bytes,
+        );
+        expect(attempts).toBe(2);
+        await expect(stores.toolResultResources.read(ref)).resolves.toEqual(
+          bytes,
+        );
+      } finally {
+        await stores.close();
+      }
+    },
+  );
+
+  it('surfaces a 400 invalid_request from the upload route without finalizing', async () => {
+    const server = new FakeManagedSessionStore();
+    const routes: string[] = [];
+    const stores = createHttpManagedSessionStores({
+      baseUrl: 'http://127.0.0.1:8080',
+      sessionKey: SESSION_KEY,
+      writerId: 'harness-a',
+      writerToken: TOKEN_A,
+      fetchFn: vi.fn<typeof fetch>(async (input, init) => {
+        const pathname = new URL(requestUrl(input)).pathname;
+        if (pathname.endsWith(':upload')) {
+          routes.push('upload');
+          // Strip the payload so the store's base64 bounds refuse it.
+          return server.fetch(input, { ...init, body: JSON.stringify({}) });
+        }
+        if (pathname.endsWith(':finalize')) routes.push('finalize');
+        return server.fetch(input, init);
+      }),
+    });
+    await stores.journalStore.open({ sessionKey: SESSION_KEY });
+    try {
+      await expect(
+        stores.resourceStore.publish(
+          'managed-context',
+          Buffer.alloc(64 * 1024 + 1, 0x5a),
+        ),
+      ).rejects.toMatchObject({
+        status: 400,
+        remoteCode: 'invalid_request',
+      } satisfies Partial<ManagedSessionStoreHttpError>);
+      // A 400 is terminal: one upload attempt, no finalize behind it.
+      expect(routes).toEqual(['upload']);
+    } finally {
+      await stores.close();
+    }
   });
 
   it('commits and reuses every part of a private outcome manifest after reopen', async () => {
@@ -8970,8 +9370,11 @@ class FakeManagedSessionStore {
         `/internal/managed-session-store/v1/sessions/${SESSION_KEY.sessionId}`
           .length,
     );
+    const resourceMutation =
+      suffix.startsWith('/resources/') &&
+      (suffix.endsWith(':upload') || suffix.endsWith(':finalize'));
     expect(headers.get('Accept')).toBe(
-      suffix.startsWith('/resources/')
+      suffix.startsWith('/resources/') && !resourceMutation
         ? 'application/octet-stream, application/json'
         : 'application/json',
     );
@@ -9213,6 +9616,96 @@ class FakeManagedSessionStore {
         ...this.receiptOverrides,
       });
     }
+    if (suffix === '/resources:allocate') {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      if (!this.externalizeGrant(url, body))
+        return jsonResponse(
+          {
+            error: {
+              code: 'managed_session_writer_conflict',
+              message: 'The writer grant is stale or unavailable.',
+            },
+          },
+          409,
+        );
+      const resourceId = String(body['resourceId']);
+      this.resourceAllocations.set(resourceId, {
+        kind: String(body['kind']),
+        schemaVersion: Number(body['schemaVersion']),
+        byteLength: Number(body['byteLength']),
+        digest: String(body['digest']),
+      });
+      return jsonResponse({ resourceId });
+    }
+    if (suffix.startsWith('/resources/') && suffix.endsWith(':upload')) {
+      const resourceId = decodeURIComponent(
+        suffix.slice('/resources/'.length, -':upload'.length),
+      );
+      const allocation = this.resourceAllocations.get(resourceId);
+      if (allocation === undefined || !this.externalizeGrant(url))
+        return jsonResponse(
+          {
+            error: {
+              code: 'managed_session_resource_not_found',
+              message: 'Resource not found.',
+            },
+          },
+          404,
+        );
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      const encoded = body['bytesBase64'];
+      const bytes =
+        typeof encoded === 'string' && encoded.length > 0
+          ? Buffer.from(encoded, 'base64')
+          : undefined;
+      // The re-encode round trip rejects blank, padded or non-base64 bodies
+      // without a regex that could overflow on multi-megabyte payloads.
+      if (
+        bytes === undefined ||
+        bytes.toString('base64') !== encoded ||
+        bytes.byteLength !== allocation.byteLength ||
+        createHash('sha256').update(bytes).digest('hex') !== allocation.digest
+      )
+        return jsonResponse(
+          {
+            error: {
+              code: 'invalid_request',
+              message: 'bytesBase64 must carry the allocated resource bytes.',
+            },
+          },
+          400,
+        );
+      this.resourceUploads.set(resourceId, bytes);
+      return jsonResponse({ resourceId });
+    }
+    if (suffix.startsWith('/resources/') && suffix.endsWith(':finalize')) {
+      const resourceId = decodeURIComponent(
+        suffix.slice('/resources/'.length, -':finalize'.length),
+      );
+      const allocation = this.resourceAllocations.get(resourceId);
+      const bytes = this.resourceUploads.get(resourceId);
+      if (
+        allocation === undefined ||
+        bytes === undefined ||
+        !this.externalizeGrant(url)
+      )
+        return jsonResponse(
+          {
+            error: {
+              code: 'managed_session_resource_not_found',
+              message: 'Resource not found.',
+            },
+          },
+          404,
+        );
+      this.resources.set(resourceId, {
+        bytes,
+        kind: allocation.kind,
+        schemaVersion: allocation.schemaVersion,
+        digest: allocation.digest,
+      });
+      return jsonResponse({ resourceId });
+    }
     if (suffix.startsWith('/resources/')) {
       const resourceId = decodeURIComponent(suffix.slice('/resources/'.length));
       const resource = this.resources.get(resourceId);
@@ -9265,6 +9758,28 @@ class FakeManagedSessionStore {
       digest: string;
     }
   >();
+  private readonly resourceAllocations = new Map<
+    string,
+    {
+      kind: string;
+      schemaVersion: number;
+      byteLength: number;
+      digest: string;
+    }
+  >();
+  private readonly resourceUploads = new Map<string, Buffer<ArrayBuffer>>();
+
+  // The externalize routes carry the writer identity in the allocate body
+  // and in the upload/finalize query; both must match the live grant.
+  private externalizeGrant(url: URL, body?: Record<string, unknown>): boolean {
+    const identity = body ?? Object.fromEntries(url.searchParams);
+    return (
+      this.state === 'ACTIVE' &&
+      identity['workspaceId'] === SESSION_KEY.workspaceId &&
+      identity['writerId'] === this.writerId &&
+      Number(identity['writerGeneration']) === this.writerGeneration
+    );
+  }
 
   private grant(): Record<string, unknown> {
     return {
