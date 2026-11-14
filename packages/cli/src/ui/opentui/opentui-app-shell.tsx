@@ -1870,19 +1870,33 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             </box>
           ) : activeModal ? (
             activeModal.kind === 'choice' ? (
-              <ExtensionPluginChoice
-                key={`choice-${activeModal.id}`}
-                permission={activeModal}
-                width={dialogContentWidth(terminalWidth)}
+              <box
+                flexDirection="column"
+                marginLeft={2}
+                width={dialogAreaWidth(terminalWidth)}
                 height={dialogRegionHeight}
-              />
+              >
+                <ExtensionPluginChoice
+                  key={`choice-${activeModal.id}`}
+                  permission={activeModal}
+                  width={dialogContentWidth(terminalWidth)}
+                  height={dialogRegionHeight}
+                />
+              </box>
             ) : activeModal.kind === 'setting' ? (
-              <ExtensionSettingInput
-                key={`setting-${activeModal.id}`}
-                permission={activeModal}
-                width={dialogContentWidth(terminalWidth)}
+              <box
+                flexDirection="column"
+                marginLeft={2}
+                width={dialogAreaWidth(terminalWidth)}
                 height={dialogRegionHeight}
-              />
+              >
+                <ExtensionSettingInput
+                  key={`setting-${activeModal.id}`}
+                  permission={activeModal}
+                  width={dialogContentWidth(terminalWidth)}
+                  height={dialogRegionHeight}
+                />
+              </box>
             ) : activeModal.kind === 'shell' ? (
               <OpenTuiShellConfirmation
                 key={`shell-${activeModal.id}`}

@@ -3017,6 +3017,20 @@ describe('OpenTuiApp shell wiring', () => {
             ? mocks.state.extensionChoiceProps
             : mocks.state.extensionSettingProps;
         expect(props?.['width']).toBe(expectedWidth);
+        const marker = screen.getByText(
+          kind === 'choice'
+            ? 'extension-choice:Owned marketplace'
+            : 'extension-setting:Owned width setting',
+        );
+        expect(typeof props?.['height']).toBe('number');
+        expect(
+          JSON.parse(marker.parentElement?.getAttribute('data-p') ?? '{}'),
+        ).toMatchObject({
+          flexDirection: 'column',
+          marginLeft: 2,
+          width: expectedWidth + 4,
+          height: props?.['height'],
+        });
         await act(async () =>
           (
             props!['permission'] as { resolve: (value: string) => void }
