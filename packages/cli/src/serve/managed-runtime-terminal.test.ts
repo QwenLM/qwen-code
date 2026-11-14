@@ -18,9 +18,15 @@ import {
   WebTerminalRegistry,
   WEB_TERMINAL_FAILURE_EXIT_CODE,
 } from '@qwen-code/qwen-code-core/services/web-terminal-registry.js';
+import { slowHostBudgetMs } from '../test-utils/slow-test-host.js';
 
 const IDENTITY = { token: 'test-token', leaseId: 'lease-1', epoch: 7 };
 const WORKSPACE_CWD = process.cwd();
+// The ecs-qwen pool runs several jobs at once; a slow-but-healthy PTY spawn or
+// replay can outlast a flat 15s watchdog even though that pool's suite ceiling
+// is 60s. Keep the fast arm for idle hosts.
+const WAIT_TIMEOUT_MS = slowHostBudgetMs(15_000, 45_000);
+const REPLAY_TEST_TIMEOUT_MS = slowHostBudgetMs(30_000, 90_000);
 
 const AUTH_HEADERS = {
   Authorization: 'Bearer test-token',
@@ -89,7 +95,7 @@ function open(
     const timer = setTimeout(() => {
       ws.terminate();
       reject(new Error('terminal attach timed out'));
-    }, 15_000);
+    }, WAIT_TIMEOUT_MS);
     ws.once('open', () => {
       clearTimeout(timer);
       resolve(ws);
@@ -124,7 +130,7 @@ function waitForOutput(ws: WebSocket, marker: string): Promise<string> {
     const timer = setTimeout(() => {
       ws.off('message', onMessage);
       reject(new Error(`output marker ${marker} timed out`));
-    }, 15_000);
+    }, WAIT_TIMEOUT_MS);
     const onMessage = (data: Buffer | string) => {
       // Terminal output arrives as binary UTF-8 frames; control frames are
       // NUL-prefixed text and never contain the marker.
@@ -309,17 +315,21 @@ describe('ManagedRuntimeTerminals', () => {
     await Promise.all(pending);
   });
 
-  it('replays scrollback on reconnect of the same Session', async () => {
-    const port = await start();
-    const first = await attachAndEcho(port, 'replay', 'session-a');
-    first.terminate();
-    // The snapshot replay carries the earlier output without new input. The
-    // server writes it in the same turn as the upgrade response, so the replay
-    // listener must exist before 'open' resolves.
-    const { ws: second, opened } = open(port, 'replay', 'session-a');
-    const replayed = waitForOutput(second, 'mwt-echo-ok');
-    await Promise.all([opened, replayed]);
-  });
+  it(
+    'replays scrollback on reconnect of the same Session',
+    async () => {
+      const port = await start();
+      const first = await attachAndEcho(port, 'replay', 'session-a');
+      first.terminate();
+      // The snapshot replay carries the earlier output without new input. The
+      // server writes it in the same turn as the upgrade response, so the
+      // replay listener must exist before 'open' resolves.
+      const { ws: second, opened } = open(port, 'replay', 'session-a');
+      const replayed = waitForOutput(second, 'mwt-echo-ok');
+      await Promise.all([opened, replayed]);
+    },
+    REPLAY_TEST_TIMEOUT_MS,
+  );
 
   it('admission reads lifecycle state without joining the scrollback', async () => {
     const port = await start();
