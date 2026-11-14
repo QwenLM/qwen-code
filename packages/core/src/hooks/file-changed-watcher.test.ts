@@ -12,7 +12,12 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { FSWatcher } from 'chokidar';
 import { FileChangedWatcher } from './file-changed-watcher.js';
 
-const waitOptions = { timeout: 5000, interval: 25 };
+// The macOS nightly legs run on contended 3-core hosts: FSEvents delivery
+// plus the watcher's awaitWriteFinish stability polling (200ms threshold,
+// 50ms poll) can stretch past 5s under saturation, and the real-file cases
+// then read zero notifications (three different cases across the 11-10 to
+// 11-13 nightlies). 15s matches the repo's other contended-host waits.
+const waitOptions = { timeout: 15_000, interval: 25 };
 
 describe('FileChangedWatcher with real files', () => {
   let root: string;
