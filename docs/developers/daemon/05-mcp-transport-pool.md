@@ -97,6 +97,12 @@ interface PoolEntryOptions {
 
 `defaultPoolEntryOptions(transport)` (`mcp-pool-entry.ts`) returns stdio/ws defaults `{fixed 5s, 3 attempts}` and http/sse defaults `{exponential 1s → 16s, 5 attempts}`. Remote transports get longer retry budgets because their failures are more often transient.
 
+## Explicit catalog rediscovery
+
+An equivalent metadata update remains a no-op: it must not clear or rewrite a session's registered catalog. Explicit tool rediscovery is different because the registry clears tools, prompts and resources before reconciling connections. After reconciliation finishes, the manager replays the cached snapshots into each retained session view whose catalog was cleared. This replay also runs when discovery joins an in-flight reconciliation, without reconnecting the transport or changing the view's current filters and trust settings. Newly acquired handles publish their snapshots during attachment; replaced or removed handles are not replayed. Single-server rediscovery only replays the selected server, while explicit bulk rediscovery restores all retained catalogs.
+
+Replay failures are logged and isolated per server so healthy catalogs still recover. Spawning completes before handles are returned; draining requires no attached sessions, and restarts of attached entries keep them active.
+
 ## Workflow
 
 ### `acquire`
