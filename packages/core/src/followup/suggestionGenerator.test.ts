@@ -264,6 +264,19 @@ describe('shouldFilterSuggestion', () => {
     ).toBeNull();
   });
 
+  it('keeps CJK bounds and counts only word-like segments for these scripts', () => {
+    // CJK mixed with Thai keeps the CJK character bounds: 33 characters and
+    // 8 words, so only the 30-character cap rejects it.
+    expect(getFilterReason('好ช่วยรันเทสต์ทั้งหมดอีกครั้งหนึ่ง')).toBe(
+      'too_many_words',
+    );
+    // 9 word-like segments (ICU splits คัดลอก) and 16 segments in all: the
+    // slashes are not words, so this stays inside the 12-word window.
+    expect(
+      getFilterReason('เพิ่ม/ลบ/แก้ไข/ย้าย/คัดลอก/วาง/บันทึก/ส่ง'),
+    ).toBeNull();
+  });
+
   // Thai mixed with paths or commands: few whitespace words, but many
   // segments and over the 60-character fallback.
   const MIXED_WITH_SPACES = [

@@ -116,7 +116,7 @@ The fast model is also shown in `/about` output under "Fast Model".
 
 Suggestions go through quality filters to ensure they are useful:
 
-- Must be 2-12 words (CJK: 2-30 characters), under 100 characters total. Thai, Lao, Khmer and Myanmar text written without spaces is counted by dictionary word segmentation instead (up to 12 words, or up to 60 characters on Node builds without full ICU)
+- Must be 2-12 words (CJK: 2-30 characters), under 100 characters total. Thai, Lao, Khmer and Myanmar text written without spaces is counted by dictionary word segmentation instead (up to 12 words). On Node builds without full ICU, the 12-word window for these scripts is replaced by a 60-character bound
 - Cannot be evaluative ("looks good", "thanks")
 - Cannot use AI voice ("Let me...", "I'll...")
 - Cannot be multiple sentences or contain formatting (markdown, newlines)
