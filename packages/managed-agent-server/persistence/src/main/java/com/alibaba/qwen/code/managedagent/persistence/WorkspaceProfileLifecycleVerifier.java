@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.transport.ManagedHoldFamily;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
@@ -347,8 +348,8 @@ public class WorkspaceProfileLifecycleVerifier {
     }
 
     private static boolean hold(ToolExecutionRecord execution) {
-        Object mode = execution.getReference().get("dispatchMode");
-        return "background_v3_process".equals(mode) || "background_v3_monitor".equals(mode);
+        return ManagedHoldFamily.ofDispatchMode(
+                execution.getReference().get("dispatchMode")) != null;
     }
 
     private static void known(JsonNode record) {
