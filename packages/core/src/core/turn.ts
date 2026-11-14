@@ -996,11 +996,14 @@ export class Turn {
               // size its retry too large. Fall back to candidatesTokenCount
               // when total or prompt is missing, zero-coerced (OpenAI
               // converters stamp totalTokenCount unconditionally with
-              // `|| 0`), or non-finite — the subtraction must never
-              // certify a budget nothing was taken from (#16417 R1-1).
+              // `|| 0`), or non-finite. A MAX_TOKENS cut always consumed
+              // output tokens, so both arms refuse to certify a budget
+              // nothing was taken from — a zero or non-finite count is a
+              // coerced/missing value, not a measurement (#16417 R1-1/R4-1).
               const usage = resp.usageMetadata;
               const total = usage?.totalTokenCount;
               const prompt = usage?.promptTokenCount;
+              const candidates = usage?.candidatesTokenCount;
               const usedTokens =
                 total !== undefined &&
                 prompt !== undefined &&
@@ -1008,7 +1011,11 @@ export class Turn {
                 Number.isFinite(prompt) &&
                 total > prompt
                   ? total - prompt
-                  : usage?.candidatesTokenCount;
+                  : candidates !== undefined &&
+                      Number.isFinite(candidates) &&
+                      candidates > 0
+                    ? candidates
+                    : undefined;
               const limitTokens = this.chat.getLastRequestMaxOutputTokens?.();
               if (usedTokens !== undefined && limitTokens !== undefined) {
                 tc.outputBudgetAtTruncation = { usedTokens, limitTokens };

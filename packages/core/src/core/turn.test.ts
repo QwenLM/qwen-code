@@ -1248,6 +1248,58 @@ describe('Turn', () => {
       });
     });
 
+    // R4-1: a MAX_TOKENS cut always consumed output tokens, so a zero or
+    // non-finite candidatesTokenCount is a coerced/missing value — the
+    // fallback must refuse to certify "used 0 of the N-token limit".
+    it('leaves the budget unset when candidatesTokenCount is zero-coerced (#16417 R4-1)', async () => {
+      const budgetTurn = new Turn(
+        {
+          sendMessageStream: mockSendMessageStream,
+          getHistory: mockGetHistory,
+          getHistoryLength: mockGetHistoryLength,
+          getHistoryTailShallow: mockGetHistoryTailShallow,
+          maybeIncludeSchemaDepthContext: mockMaybeIncludeSchemaDepthContext,
+          getLastRequestMaxOutputTokens: () => 4096,
+        } as unknown as LlmChat,
+        'prompt-budget-zero-coerced',
+      );
+      mockSendMessageStream.mockResolvedValue(
+        streamOf(
+          chunk({
+            functionCalls: [
+              {
+                name: 'write_file',
+                args: { file_path: '/x.txt', content: 'y' },
+              },
+            ],
+          }),
+          chunk({
+            candidates: [
+              { content: { parts: [] }, finishReason: 'MAX_TOKENS' },
+            ],
+            // OpenAI converters stamp every count with `|| 0` when the
+            // usage payload is missing.
+            usageMetadata: {
+              totalTokenCount: 0,
+              promptTokenCount: 0,
+              candidatesTokenCount: 0,
+            },
+          }),
+        ),
+      );
+      await collect(
+        budgetTurn.run(
+          'test-model',
+          [{ text: 'Test' }],
+          new AbortController().signal,
+        ),
+      );
+
+      const tc = budgetTurn.pendingToolCalls[0];
+      expect(tc.wasOutputTruncated).toBe(true);
+      expect(tc.outputBudgetAtTruncation).toBeUndefined();
+    });
+
     it('leaves the budget unset when the chat lacks the getter (#16417)', async () => {
       await runCallsThenFinish('MAX_TOKENS', {
         name: 'write_file',

@@ -8951,6 +8951,10 @@ describe('CoreToolScheduler truncated output protection', () => {
       firstBatch(onAllToolCallsComplete)[0],
     );
     expect(message).toContain('used 4096 of the 8192-token output limit');
+    // R3-1: usage at exactly half the limit corroborates the cut (>=), so
+    // the size-each-part guidance is present — the positive arm the
+    // far-below-limit test leaves unpinned.
+    expect(message).toContain('size each part well under');
   });
 
   it('rejects without budget numbers when the truncation lacks them', async () => {
