@@ -167,10 +167,6 @@
       "context": 131072,
       "output": 65536
     },
-    "deepseek-v3.1-terminus": {
-      "context": 163840,
-      "output": 65536
-    },
     "deepseek-v4-1-flash": {
       "context": 1000000,
       "output": 384000
