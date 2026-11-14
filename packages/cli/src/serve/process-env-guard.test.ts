@@ -76,6 +76,17 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/hosted-loop-session.ts',
+    {
+      reason:
+        'The loop arming gate is a process-scoped deployment contract fixed when the Harness starts; it gates arming only and defaults off until the acceptance evidence lands. The fire-time resolver also reads QWEN_HOME to locate the user-owned global loop.md, mirroring the interactive resolver’s QWEN_HOME-aware home candidate.',
+      accesses: {
+        'key:QWEN_MANAGED_AGENT_LOOP_ENABLED': 1,
+        'key:QWEN_HOME': 1,
+      },
+    },
+  ],
+  [
     'packages/cli/src/serve/hosted-harness-session.ts',
     {
       reason:
@@ -344,8 +355,8 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     'packages/cli/src/serve/managed-runtime-attestation-worker.ts',
     {
       reason:
-        'The Runtime worker scrubs the loader variables that only started its own process, so the commands it runs do not inherit them.',
-      accesses: { whole: 1 },
+        'The Runtime worker scrubs the loader variables that only started its own process, so the commands it runs do not inherit them, and passes its environment to the terminal host that spawns PTY sessions.',
+      accesses: { whole: 2 },
     },
   ],
   [
@@ -485,13 +496,14 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'The sandbox launcher assembles the sandboxed child environment: ' +
         'it passes through the process environment, forwards provider keys, ' +
         'proxy settings, and debug switches, and reads the SANDBOX_* control ' +
-        'variables. It entered the scanned serve/ layer via the #9146 ' +
-        'leaf-layer move.',
+        'variables. Every debugger decision funnels through one ' +
+        '`isDebugEnabled()` read of DEBUG. It entered the scanned serve/ ' +
+        'layer via the #9146 leaf-layer move.',
       accesses: {
         'computed:envVar': 2,
         'key:BUILD_SANDBOX': 2,
         'key:COLORTERM': 2,
-        'key:DEBUG': 5,
+        'key:DEBUG': 1,
         'key:DEBUG_MODE': 1,
         'key:DEBUG_PORT': 2,
         'key:GEMINI_API_KEY': 2,
@@ -605,6 +617,17 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'The PR-state refresh interval (QWEN_SESSION_PR_REFRESH_MINUTES) is a ' +
         'process-scoped operator switch; embedded callers may omit the ' +
         'environment argument.',
+      accesses: { whole: 1 },
+    },
+  ],
+  [
+    'packages/cli/src/serve/server/pr-watch-deps.ts',
+    {
+      reason:
+        'The watch reads the daemon’s own gh configuration, whose directory ' +
+        'precedence (GH_CONFIG_DIR, XDG_CONFIG_HOME, APPDATA, HOME) is ' +
+        'process-scoped: it describes the daemon’s gh login, not any one ' +
+        'workspace’s overlay.',
       accesses: { whole: 1 },
     },
   ],

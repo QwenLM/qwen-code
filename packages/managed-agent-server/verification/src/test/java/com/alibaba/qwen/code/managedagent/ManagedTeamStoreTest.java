@@ -3,8 +3,8 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitResource;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
@@ -61,10 +61,10 @@ class ManagedTeamStoreTest {
     private static final JsonNode TEMPLATES = templates();
 
     @Autowired
-    private ManagedSessionStore sessionStore;
+    private JdbcManagedSessionStore sessionStore;
 
     @Autowired
-    private ManagedExtensionRecordStore records;
+    private JdbcManagedExtensionRecordStore records;
 
     @Autowired
     @Qualifier("managedJdbcTemplate")
@@ -421,7 +421,7 @@ class ManagedTeamStoreTest {
     private void assertRefused(String label, String sessionId,
             String message, ThrowingCallable commit) {
         assertRefused(label, sessionId,
-                ManagedExtensionRecordStore.ERROR_REJECTED, message, commit);
+                JdbcManagedExtensionRecordStore.ERROR_REJECTED, message, commit);
     }
 
     private void assertRefused(String label, String sessionId, String code,

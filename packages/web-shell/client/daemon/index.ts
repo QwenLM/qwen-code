@@ -129,6 +129,7 @@ export type {
   DaemonResourceOptions,
   DaemonChannelPairingActions,
   DaemonChannelsResource,
+  DaemonChannelObservedContacts,
   DaemonChannelEventEntry,
   DaemonChannelEventList,
   DaemonStatusReportOptions,

@@ -13,6 +13,7 @@ import {
   assertManagedSessionEventActor,
   assertManagedSessionTransaction,
   isManagedSessionLifecycleTransitionAllowed,
+  managedSessionDurableRefsEqual,
   managedSessionEventsDigest,
   parseManagedSessionCommitMarker,
   parseManagedSessionEvent,
@@ -267,6 +268,27 @@ describe('managed session record envelope', () => {
     expect(event.sequence).toBe(1);
     expect(event.sessionKey).toEqual(sessionKey);
     expect(event.subject).toBeUndefined();
+  });
+
+  it('accepts input.accepted with a notBefore instant, null, or absent', () => {
+    const due = parseManagedSessionEvent(
+      withPayload(inputEvent(), { notBefore: 1_700_000_060_000 }),
+    );
+    expect(due.payload['notBefore']).toBe(1_700_000_060_000);
+    const immediate = parseManagedSessionEvent(
+      withPayload(inputEvent(), { notBefore: null }),
+    );
+    expect(immediate.payload['notBefore']).toBeNull();
+    // Absent stays valid: notBefore is optional, existing producers omit it.
+    const legacy = parseManagedSessionEvent(inputEvent());
+    expect(legacy.payload['notBefore']).toBeUndefined();
+  });
+
+  it('rejects a non-time notBefore on input.accepted', () => {
+    expectEventError(
+      withPayload(inputEvent(), { notBefore: 'soon' }),
+      /notBefore/,
+    );
   });
 
   it('rejects an unknown kind rather than skipping it', () => {
@@ -996,7 +1018,7 @@ describe('managed session header', () => {
   it('refuses a newer format or reader requirement', () => {
     headerError({ formatVersion: 2 }, /is not supported by this reader/);
     headerError(
-      { minimumReader: 'managed-session/3' },
+      { minimumReader: 'managed-session/4' },
       /is not supported by this reader/,
     );
   });
@@ -1375,5 +1397,26 @@ describe('Hosted recovery envelopes', () => {
         }),
       ),
     ).toThrow();
+  });
+});
+
+describe('managedSessionDurableRefsEqual', () => {
+  it('compares every field of a reference', () => {
+    const ref: ManagedSessionDurableRef = {
+      resourceId: 'resource-a',
+      kind: 'managed-message',
+      schemaVersion: 1,
+      byteLength: 6,
+      digest: 'a'.repeat(64),
+    };
+    expect(managedSessionDurableRefsEqual(ref, { ...ref })).toBe(true);
+    for (const other of [
+      { ...ref, resourceId: 'resource-b' },
+      { ...ref, kind: 'managed-checkpoint' },
+      { ...ref, schemaVersion: 2 },
+      { ...ref, byteLength: 7 },
+      { ...ref, digest: 'b'.repeat(64) },
+    ])
+      expect(managedSessionDurableRefsEqual(ref, other)).toBe(false);
   });
 });

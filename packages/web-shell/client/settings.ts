@@ -51,6 +51,7 @@ const SETTING_KEYS = {
   'setting:todo-write': 'tools.todoWrite.enabled',
   'setting:interactive-shell': 'tools.shell.enableInteractiveShell',
   'setting:workflows': 'tools.workflowsEnabled',
+  'setting:lsp': 'tools.lspEnabled',
   'setting:workflow-size': 'tools.workflowSizeGuideline',
   'setting:workflow-name-only': 'tools.workflowNameOnly',
   'setting:permission-strategy': 'policy.permissionStrategy',
@@ -67,6 +68,7 @@ const SETTING_KEYS = {
   'setting:artifacts': 'experimental.artifact',
   'setting:tool-use-summaries': 'experimental.emitToolUseSummaries',
   'setting:unified-agent-loop': 'experimental.unifiedAgentLoop',
+  'setting:event-bus-agent-loop': 'experimental.eventBusAgentLoop',
   'setting:voice-model': 'voiceModel',
   'setting:image-model': 'imageModel',
 } as const;
