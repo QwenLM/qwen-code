@@ -9,6 +9,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 
 const { debugMock } = vi.hoisted(() => ({ debugMock: vi.fn() }));
 
@@ -36,6 +37,7 @@ import {
   persistUsageBeforeTranscriptDeletion,
   prepareUsageBeforeTranscriptDeletion,
   commitUsageBeforeTranscriptDeletion,
+  _resetReplayCacheForTest,
 } from './usageHistoryService.js';
 import { ToolCallDecision } from '../telemetry/tool-call-decision.js';
 import type { SessionMetrics } from '../telemetry/uiTelemetry.js';
@@ -742,6 +744,427 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
       );
     },
   );
+});
+
+// The live merge rescans only transcripts whose mtime/size changed and serves
+// the rest from an in-process replay cache; the scan itself JSON-parses just
+// the header and telemetry lines, skipping the large tool-result payloads.
+describe('loadUsageHistoryWithLive — replay cache + selective scan', () => {
+  useTempQwenHome('qwen-usage-replay-cache-');
+  beforeEach(() => {
+    _resetReplayCacheForTest();
+  });
+
+  const plant = (sessionId: string, tokens: number) =>
+    writeTranscript('cache-project', sessionId, {
+      cwd: '/cache/project',
+      day: '2026-06-11',
+      durationMs: 1200,
+      tokens,
+      assistant: true,
+    });
+
+  const tokensOf = (records: UsageSummaryRecord[], sessionId: string) => {
+    const r = records.find((x) => x.sessionId === sessionId);
+    return r
+      ? Object.values(r.models).reduce((sum, m) => sum + m.totalTokens, 0)
+      : undefined;
+  };
+
+  it('returns identical records on a repeated load of unchanged transcripts', async () => {
+    plant('sess-stable', 1000);
+    const first = await loadUsageHistoryWithLive();
+    const second = await loadUsageHistoryWithLive();
+    expect(second).toEqual(first);
+    expect(tokensOf(second, 'sess-stable')).toBe(1000);
+  });
+
+  it('rescans a transcript when it grows so active sessions stay current', async () => {
+    const filePath = plant('sess-grow', 1000);
+    const before = await loadUsageHistoryWithLive();
+    expect(tokensOf(before, 'sess-grow')).toBe(1000);
+
+    // Append a second api_response worth 500 tokens (size + mtime change).
+    fs.appendFileSync(
+      filePath,
+      JSON.stringify({
+        sessionId: 'sess-grow',
+        cwd: '/cache/project',
+        uuid: 'u-grow',
+        parentUuid: 'u3',
+        timestamp: '2026-06-11T00:03:00.000Z',
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: {
+          uiEvent: {
+            'event.name': 'qwen-code.api_response',
+            'event.timestamp': '2026-06-11T00:03:00.000Z',
+            response_id: 'r2',
+            model: 'qwen-max',
+            duration_ms: 800,
+            input_token_count: 300,
+            output_token_count: 150,
+            cached_content_token_count: 0,
+            thoughts_token_count: 50,
+            total_token_count: 500,
+            prompt_id: 'p2',
+          },
+        },
+      }) + '\n',
+    );
+
+    const after = await loadUsageHistoryWithLive();
+    expect(tokensOf(after, 'sess-grow')).toBe(1500);
+  });
+
+  it('drops a transcript from the cache once the file is deleted', async () => {
+    plant('sess-keep', 1000);
+    const removed = plant('sess-remove', 500);
+    const before = await loadUsageHistoryWithLive();
+    expect(before.map((r) => r.sessionId).sort()).toEqual([
+      'sess-keep',
+      'sess-remove',
+    ]);
+
+    fs.rmSync(removed);
+    const after = await loadUsageHistoryWithLive();
+    expect(after.map((r) => r.sessionId)).toEqual(['sess-keep']);
+  });
+
+  it('skips large non-telemetry payloads, even ones whose text mentions ui_telemetry', async () => {
+    const sessionId = 'sess-bigline';
+    const dir = path.join(
+      process.env['QWEN_HOME']!,
+      'projects',
+      'cache-project',
+      'chats',
+    );
+    fs.mkdirSync(dir, { recursive: true });
+    const base = { sessionId, cwd: '/cache/project' };
+    // A ~1MB tool_result tagged `subtype:"ui_telemetry"` (so the cheap substring
+    // pre-filter matches it) AND carrying its own uiEvent worth 5000 tokens with
+    // distinct response/prompt ids. Only the `type === 'system'` guard keeps it
+    // out: deleting that guard lets this non-system record inflate the total to
+    // 6000. A fixture without a uiEvent could not discriminate the guard.
+    const bigText = 'x'.repeat(1024 * 1024);
+    const records = [
+      {
+        ...base,
+        uuid: 'u1',
+        parentUuid: null,
+        timestamp: '2026-06-11T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', content: 'hi' },
+      },
+      {
+        ...base,
+        uuid: 'u2',
+        parentUuid: 'u1',
+        timestamp: '2026-06-11T00:01:00.000Z',
+        type: 'tool_result',
+        subtype: 'ui_telemetry',
+        message: { role: 'user', content: bigText },
+        systemPayload: {
+          uiEvent: {
+            'event.name': 'qwen-code.api_response',
+            'event.timestamp': '2026-06-11T00:01:00.000Z',
+            response_id: 'r-embedded',
+            model: 'qwen-max',
+            duration_ms: 900,
+            input_token_count: 3000,
+            output_token_count: 1500,
+            cached_content_token_count: 0,
+            thoughts_token_count: 500,
+            total_token_count: 5000,
+            prompt_id: 'p-embedded',
+          },
+        },
+      },
+      {
+        ...base,
+        uuid: 'u3',
+        parentUuid: 'u2',
+        timestamp: '2026-06-11T00:02:00.000Z',
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: {
+          uiEvent: {
+            'event.name': 'qwen-code.api_response',
+            'event.timestamp': '2026-06-11T00:02:00.000Z',
+            response_id: 'r1',
+            model: 'qwen-max',
+            duration_ms: 1200,
+            input_token_count: 600,
+            output_token_count: 300,
+            cached_content_token_count: 0,
+            thoughts_token_count: 100,
+            total_token_count: 1000,
+            prompt_id: 'p1',
+          },
+        },
+      },
+    ];
+    fs.writeFileSync(
+      path.join(dir, `${sessionId}.jsonl`),
+      records.map((r) => JSON.stringify(r)).join('\n') + '\n',
+    );
+
+    const merged = await loadUsageHistoryWithLive();
+    // Only the real system telemetry counts (1000). The embedded uiEvent on the
+    // non-system tool_result (5000) must be rejected by the type guard — without
+    // the guard this total would be 6000.
+    expect(tokensOf(merged, sessionId)).toBe(1000);
+  });
+
+  it('uses the regex-extracted timestamp when the trailing line is corrupt', async () => {
+    const sessionId = 'sess-corrupt-tail';
+    const dir = path.join(
+      process.env['QWEN_HOME']!,
+      'projects',
+      'cache-project',
+      'chats',
+    );
+    fs.mkdirSync(dir, { recursive: true });
+    const base = { sessionId, cwd: '/cache/project' };
+    const records = [
+      {
+        ...base,
+        uuid: 'u1',
+        parentUuid: null,
+        timestamp: '2026-06-11T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', content: 'hi' },
+      },
+      {
+        ...base,
+        uuid: 'u2',
+        parentUuid: 'u1',
+        timestamp: '2026-06-11T00:01:00.000Z',
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: {
+          uiEvent: {
+            'event.name': 'qwen-code.api_response',
+            'event.timestamp': '2026-06-11T00:01:00.000Z',
+            response_id: 'r1',
+            model: 'qwen-max',
+            duration_ms: 1200,
+            input_token_count: 600,
+            output_token_count: 300,
+            cached_content_token_count: 0,
+            thoughts_token_count: 100,
+            total_token_count: 1000,
+            prompt_id: 'p1',
+          },
+        },
+      },
+    ];
+    // A truncated append: the final physical line is unparseable but still
+    // carries its own timestamp. The scan must keep the session and use that
+    // trailing timestamp (not drop the record, not reuse the earlier one).
+    const body =
+      records.map((r) => JSON.stringify(r)).join('\n') +
+      '\n' +
+      '{"timestamp":"2026-06-11T00:02:00.000Z","type":"assis';
+    fs.writeFileSync(path.join(dir, `${sessionId}.jsonl`), body);
+
+    const merged = await loadUsageHistoryWithLive();
+    const r = merged.find((x) => x.sessionId === sessionId);
+    expect(r).toBeDefined();
+    expect(tokensOf(merged, sessionId)).toBe(1000);
+    expect(r!.timestamp).toBe(new Date('2026-06-11T00:02:00.000Z').getTime());
+  });
+
+  it('returns every session when candidates exceed the scan concurrency', async () => {
+    // More transcripts than REBUILD_CONCURRENCY (8) so the worker pool must
+    // hand off indices; none may be lost or duplicated by the parallel pass.
+    const n = 12;
+    const expected = new Map<string, number>();
+    for (let i = 0; i < n; i++) {
+      const sid = `sess-many-${String(i).padStart(2, '0')}`;
+      plant(sid, 100 + i);
+      expected.set(sid, 100 + i);
+    }
+
+    const merged = await loadUsageHistoryWithLive();
+    expect(merged.length).toBe(n);
+    for (const [sid, tokens] of expected) {
+      expect(tokensOf(merged, sid)).toBe(tokens);
+    }
+  });
+
+  it('does not cache a failed scan: a transient read error recovers on the next load', async () => {
+    const filePath = plant('sess-transient', 1000);
+    const orig = fs.createReadStream;
+    let failedOnce = false;
+    const spy = vi.spyOn(fs, 'createReadStream').mockImplementation(((
+      p: fs.PathLike,
+      opts?: Parameters<typeof fs.createReadStream>[1],
+    ) => {
+      if (!failedOnce && String(p) === filePath) {
+        failedOnce = true;
+        // An asynchronous open/read failure (EACCES-like), not a sync throw:
+        // this is the path that must NOT be memoized as "no usage".
+        const errStream = new Readable({
+          read() {
+            this.destroy(
+              Object.assign(new Error('EACCES: simulated'), { code: 'EACCES' }),
+            );
+          },
+        });
+        return errStream as unknown as fs.ReadStream;
+      }
+      return orig(p, opts);
+    }) as typeof fs.createReadStream);
+    try {
+      const first = await loadUsageHistoryWithLive();
+      expect(
+        first.find((r) => r.sessionId === 'sess-transient'),
+      ).toBeUndefined();
+      // The failure was not cached, so the next load rescans and recovers.
+      const second = await loadUsageHistoryWithLive();
+      expect(tokensOf(second, 'sess-transient')).toBe(1000);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('serves unchanged transcripts from the replay cache without re-reading them', async () => {
+    const paths = [
+      plant('sess-cache-a', 100),
+      plant('sess-cache-b', 200),
+      plant('sess-cache-c', 300),
+    ];
+    const opened: string[] = [];
+    const orig = fs.createReadStream;
+    const spy = vi.spyOn(fs, 'createReadStream').mockImplementation(((
+      p: fs.PathLike,
+      opts?: Parameters<typeof fs.createReadStream>[1],
+    ) => {
+      opened.push(String(p));
+      return orig(p, opts);
+    }) as typeof fs.createReadStream);
+    const transcriptOpens = () =>
+      opened.filter((p) => paths.includes(p)).length;
+    try {
+      await loadUsageHistoryWithLive();
+      expect(transcriptOpens()).toBe(3); // cold: every transcript read
+
+      opened.length = 0;
+      await loadUsageHistoryWithLive();
+      expect(transcriptOpens()).toBe(0); // warm: no transcript re-read
+
+      // Grow one transcript; only it may be re-read on the next load.
+      fs.appendFileSync(
+        paths[0]!,
+        JSON.stringify({
+          sessionId: 'sess-cache-a',
+          cwd: '/cache/project',
+          uuid: 'u-extra',
+          parentUuid: 'u3',
+          timestamp: '2026-06-11T00:03:00.000Z',
+          type: 'system',
+          subtype: 'ui_telemetry',
+          systemPayload: {
+            uiEvent: {
+              'event.name': 'qwen-code.api_response',
+              'event.timestamp': '2026-06-11T00:03:00.000Z',
+              response_id: 'r-extra',
+              model: 'qwen-max',
+              duration_ms: 500,
+              input_token_count: 60,
+              output_token_count: 30,
+              cached_content_token_count: 0,
+              thoughts_token_count: 10,
+              total_token_count: 100,
+              prompt_id: 'p-extra',
+            },
+          },
+        }) + '\n',
+      );
+      opened.length = 0;
+      const third = await loadUsageHistoryWithLive();
+      expect(transcriptOpens()).toBe(1); // only the grown transcript
+      expect(tokensOf(third, 'sess-cache-a')).toBe(200);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('does not JSON-parse a large trailing tool_result line', async () => {
+    const sessionId = 'sess-bigtail';
+    const dir = path.join(
+      process.env['QWEN_HOME']!,
+      'projects',
+      'cache-project',
+      'chats',
+    );
+    fs.mkdirSync(dir, { recursive: true });
+    const base = { sessionId, cwd: '/cache/project' };
+    // The FINAL record is a ~1MB tool_result — the shape a session idles on
+    // right after a big tool call. It must not be parsed after the loop.
+    const records = [
+      {
+        ...base,
+        uuid: 'u1',
+        parentUuid: null,
+        timestamp: '2026-06-11T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', content: 'hi' },
+      },
+      {
+        ...base,
+        uuid: 'u2',
+        parentUuid: 'u1',
+        timestamp: '2026-06-11T00:01:00.000Z',
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: {
+          uiEvent: {
+            'event.name': 'qwen-code.api_response',
+            'event.timestamp': '2026-06-11T00:01:00.000Z',
+            response_id: 'r1',
+            model: 'qwen-max',
+            duration_ms: 1200,
+            input_token_count: 600,
+            output_token_count: 300,
+            cached_content_token_count: 0,
+            thoughts_token_count: 100,
+            total_token_count: 1000,
+            prompt_id: 'p1',
+          },
+        },
+      },
+      {
+        ...base,
+        uuid: 'u3',
+        parentUuid: 'u2',
+        timestamp: '2026-06-11T00:02:00.000Z',
+        type: 'tool_result',
+        message: { role: 'user', content: 'x'.repeat(1024 * 1024) },
+      },
+    ];
+    fs.writeFileSync(
+      path.join(dir, `${sessionId}.jsonl`),
+      records.map((r) => JSON.stringify(r)).join('\n') + '\n',
+    );
+
+    const parseInputLengths: number[] = [];
+    const origParse = JSON.parse;
+    const spy = vi.spyOn(JSON, 'parse').mockImplementation((text: string) => {
+      parseInputLengths.push(text.length);
+      return origParse(text);
+    });
+    try {
+      const merged = await loadUsageHistoryWithLive();
+      expect(tokensOf(merged, sessionId)).toBe(1000);
+      // No parse may touch the megabyte trailing payload; header + telemetry
+      // lines are a few hundred chars each.
+      expect(Math.max(...parseInputLengths)).toBeLessThan(10_000);
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
 
 // Regression for #7384: deleting a session erased its usage from the

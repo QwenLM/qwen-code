@@ -6,6 +6,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import readline from 'node:readline';
 import { Storage } from '../config/storage.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { UiTelemetryService } from '../telemetry/uiTelemetry.js';
@@ -13,6 +14,7 @@ import type { SessionMetrics } from '../telemetry/uiTelemetry.js';
 import type { UiEvent } from '../telemetry/uiTelemetry.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { extractJsonStringField } from '../utils/sessionStorageUtils.js';
 
 const debugLogger = createDebugLogger('USAGE_HISTORY');
 
@@ -33,6 +35,13 @@ const MS_PER_DAY = 24 * 60 * 60 * 1000;
  * transcripts). Widen only alongside a cheaper scan.
  */
 const LIVE_REBUILD_WINDOW_DAYS = 35;
+/**
+ * Bounded concurrency for the transcript replay scan. Overlaps the disk reads
+ * of independent transcripts on a cold cache; the per-file summaries are still
+ * deduped in directory order afterwards, so the result is order-identical to a
+ * sequential scan.
+ */
+const REBUILD_CONCURRENCY = 8;
 
 export interface UsageSummaryRecord {
   version: 1;
@@ -228,43 +237,116 @@ export function metricsToUsageRecord(
 }
 
 /**
+ * Trailing lines up to this many characters are parsed after the loop so a
+ * `}{`-glued final line still recovers its last record's timestamp. Larger
+ * trailing lines (a session that idled right after a big tool call ends on a
+ * multi-megabyte `tool_result`) are NOT parsed — their own timestamp is
+ * already captured by the per-line field extraction below.
+ */
+const MAX_TRAILING_PARSE_CHARS = 64 * 1024;
+
+/**
  * Replays a session transcript's `ui_telemetry` records into a usage
  * summary. Returns null for an empty transcript; `record` is null when the
  * transcript has no telemetry events (or unparseable timestamps) — the
- * sessionId is still reported so callers can dedupe by session.
+ * sessionId is still reported so callers can dedupe by session. A read error
+ * is rethrown (not collapsed into null) so the caller never memoizes a failed
+ * scan as an authoritative "no usage" result.
  *
  * Single implementation shared by the rebuild migration and the
  * pre-deletion salvage (#7384) so the two can never drift.
+ *
+ * Streams the file and JSON-parses only the first record, the lines that could
+ * carry telemetry (`"ui_telemetry"` is a necessary substring of every such
+ * record), and a small trailing line. The bulk of a transcript is large
+ * tool-result payloads that contribute nothing to usage; parsing them
+ * dominated the dashboard load (multi-GB histories took ~80s). The end
+ * timestamp comes from the trailing record, or from the per-line extracted
+ * `timestamp` field when the trailing line is large or corrupt.
  */
-function summarizeTranscript(
-  records: ChatRecord[],
-): { sessionId: string; record: UsageSummaryRecord | null } | null {
-  if (records.length === 0) return null;
-  const firstRecord = records[0]!;
-  const sessionId = firstRecord.sessionId;
-  if (!sessionId) return null;
-  const project = firstRecord.cwd;
-
+async function summarizeTranscriptFile(
+  filePath: string,
+): Promise<{ sessionId: string; record: UsageSummaryRecord | null } | null> {
   const telemetry = new UiTelemetryService();
   let hasEvents = false;
-  for (const record of records) {
-    if (record.type === 'system' && record.subtype === 'ui_telemetry') {
-      const payload = record.systemPayload as { uiEvent?: UiEvent } | undefined;
-      if (
-        payload?.uiEvent &&
-        payload.uiEvent['event.name'] !== 'request_lifecycle' &&
-        payload.uiEvent['event.name'] !== 'tool_lifecycle' &&
-        payload.uiEvent['event.name'] !== 'hook_lifecycle'
-      ) {
-        telemetry.addEvent(payload.uiEvent);
-        hasEvents = true;
+  let header: ChatRecord | null = null;
+  let lastLine = '';
+  let lastTsFallback: string | undefined;
+
+  const fileStream = fs.createReadStream(filePath);
+  const rl = readline.createInterface({
+    input: fileStream,
+    crlfDelay: Infinity,
+  });
+  try {
+    for await (const line of rl) {
+      if (line.trim().length === 0) continue;
+      lastLine = line;
+      // First-match extraction: a record's own `timestamp` precedes any nested
+      // payload, so this is the record's timestamp even on huge tool-result
+      // lines. Tolerant of non-compact writers (spaces around the colon).
+      const ts = extractJsonStringField(line, 'timestamp');
+      if (ts !== undefined) lastTsFallback = ts;
+
+      if (!header) {
+        const recs = jsonl.parseLineTolerant<ChatRecord>(line, filePath);
+        if (recs.length > 0) header = recs[0]!;
+      }
+
+      if (line.includes('"ui_telemetry"')) {
+        for (const record of jsonl.parseLineTolerant<ChatRecord>(
+          line,
+          filePath,
+        )) {
+          if (record.type === 'system' && record.subtype === 'ui_telemetry') {
+            const payload = record.systemPayload as
+              | { uiEvent?: UiEvent }
+              | undefined;
+            if (
+              payload?.uiEvent &&
+              payload.uiEvent['event.name'] !== 'request_lifecycle' &&
+              payload.uiEvent['event.name'] !== 'tool_lifecycle' &&
+              payload.uiEvent['event.name'] !== 'hook_lifecycle'
+            ) {
+              telemetry.addEvent(payload.uiEvent);
+              hasEvents = true;
+            }
+          }
+        }
       }
     }
+  } catch (e) {
+    // Rethrow read errors (EMFILE/EACCES/EIO/EBUSY, …) rather than returning
+    // null: a failed scan must not be memoized as an authoritative "no usage"
+    // result, or one transient error hides the session until its file changes.
+    // The rebuild worker's catch skips the cache write, so the next load retries.
+    debugLogger.debug(`summarizeTranscriptFile: cannot read ${filePath}: ${e}`);
+    throw e;
+  } finally {
+    rl.close();
+    fileStream.destroy();
   }
+
+  if (!header) return null;
+  const sessionId = header.sessionId;
+  if (!sessionId) return null;
   if (!hasEvents) return { sessionId, record: null };
 
-  const startTime = new Date(firstRecord.timestamp).getTime();
-  const endTime = new Date(records[records.length - 1]!.timestamp).getTime();
+  // Only parse a small trailing line (cheap `}{`-glued recovery). A large
+  // trailing line is exactly the payload this scan exists to skip; its own
+  // timestamp was already extracted per-line into lastTsFallback.
+  let endTs: string | undefined;
+  if (lastLine.length <= MAX_TRAILING_PARSE_CHARS) {
+    const lastRecs = jsonl.parseLineTolerant<ChatRecord>(lastLine, filePath);
+    endTs =
+      lastRecs.length > 0
+        ? lastRecs[lastRecs.length - 1]!.timestamp
+        : lastTsFallback;
+  } else {
+    endTs = lastTsFallback;
+  }
+  const startTime = new Date(header.timestamp).getTime();
+  const endTime = endTs ? new Date(endTs).getTime() : NaN;
   if (isNaN(startTime) || isNaN(endTime)) {
     return { sessionId, record: null };
   }
@@ -272,7 +354,7 @@ function summarizeTranscript(
     sessionId,
     record: metricsToUsageRecord(
       sessionId,
-      project,
+      header.cwd,
       startTime,
       endTime,
       telemetry.getMetrics(),
@@ -284,8 +366,7 @@ export async function prepareUsageBeforeTranscriptDeletion(
   transcriptPath: string,
 ): Promise<PreparedUsageBeforeTranscriptDeletion | null> {
   try {
-    const records = await jsonl.read<ChatRecord>(transcriptPath);
-    const summarized = summarizeTranscript(records);
+    const summarized = await summarizeTranscriptFile(transcriptPath);
     if (!summarized?.record) return null;
 
     const usagePath = getUsageHistoryPath();
@@ -375,6 +456,33 @@ interface RebuildFromSessionJsonlOptions {
   skipSessionIds?: ReadonlySet<string>;
 }
 
+type TranscriptSummary = {
+  sessionId: string;
+  record: UsageSummaryRecord | null;
+} | null;
+
+interface ReplayCacheEntry {
+  mtimeMs: number;
+  size: number;
+  summarized: TranscriptSummary;
+}
+
+/**
+ * In-process, per-transcript replay cache for the read-only live merge. The
+ * daemon is long-lived, so after the first scan an unchanged transcript is
+ * never re-read: only files whose mtime/size changed (active sessions) are
+ * rescanned. Transcripts are append-only, so any growth changes the size and
+ * invalidates the entry. Kept in memory (not on disk) to preserve the
+ * "opening the dashboard never writes `~/.qwen`" invariant. Replaced wholesale
+ * each load so entries for transcripts that aged out of the window are pruned.
+ */
+let replayCache = new Map<string, ReplayCacheEntry>();
+
+/** Test-only: clear the per-transcript replay cache between cases. */
+export function _resetReplayCacheForTest(): void {
+  replayCache = new Map();
+}
+
 async function rebuildFromSessionJsonl(
   options: RebuildFromSessionJsonlOptions = {},
 ): Promise<UsageSummaryRecord[]> {
@@ -394,8 +502,10 @@ async function rebuildFromSessionJsonl(
     return [];
   }
 
-  const results: UsageSummaryRecord[] = [];
-  const seenSessionIds = new Set<string>();
+  // Only the read-only live merge uses the replay cache; the one-time
+  // persisting migration always rebuilds from disk.
+  const useCache = !persist;
+  const nextCache = useCache ? new Map<string, ReplayCacheEntry>() : null;
   let projectDirs: string[];
   try {
     projectDirs = fs.readdirSync(projectsDir);
@@ -404,6 +514,9 @@ async function rebuildFromSessionJsonl(
     return [];
   }
 
+  // Phase 1 — enumerate candidate transcripts in directory order, applying the
+  // cheap stat/name filters before any file read.
+  const candidates: Array<{ filePath: string; stats: fs.Stats }> = [];
   for (const projDir of projectDirs) {
     const chatsDir = path.join(projectsDir, projDir, 'chats');
     let files: string[];
@@ -421,57 +534,99 @@ async function rebuildFromSessionJsonl(
     }
 
     for (const file of files) {
+      const filePath = path.join(chatsDir, file);
+      let stats: fs.Stats;
       try {
-        const filePath = path.join(chatsDir, file);
-
-        let stats: fs.Stats;
-        try {
-          stats = fs.statSync(filePath);
-        } catch (e) {
-          debugLogger.debug(
-            `rebuildFromSessionJsonl: cannot stat ${filePath}: ${e}`,
-          );
-          continue;
-        }
-        // Only regular files are readable transcripts: a FIFO (or any other
-        // special file) passing the name filter would block open() forever
-        // and wedge the whole rebuild — the daemon's usage dashboard serves
-        // from this path.
-        if (!stats.isFile()) {
-          debugLogger.debug(
-            `rebuildFromSessionJsonl: skipping non-regular entry ${filePath}`,
-          );
-          continue;
-        }
-
-        // Bound the scan when merging live sessions into a persisted history:
-        // skip transcripts untouched before `sinceMs`.
-        if (sinceMs !== undefined && stats.mtimeMs < sinceMs) continue;
-
-        // Skip sessions the persisted history already records, before any file
-        // read: the transcript filename is `{sessionId}.jsonl`
-        // (chatRecordingService.ts), so the sessionId — the same value the
-        // full-read path below derives from the first record — needs no I/O.
-        if (skipSessionIds && skipSessionIds.size > 0) {
-          const fileSessionId = path.basename(file, '.jsonl');
-          if (skipSessionIds.has(fileSessionId)) continue;
-        }
-
-        const records = await jsonl.read<ChatRecord>(filePath);
-        const summarized = summarizeTranscript(records);
-        if (!summarized) continue;
-        if (seenSessionIds.has(summarized.sessionId)) continue;
-        seenSessionIds.add(summarized.sessionId);
-        if (!summarized.record) continue;
-        results.push(summarized.record);
+        stats = fs.statSync(filePath);
       } catch (e) {
         debugLogger.debug(
-          `rebuildFromSessionJsonl: failed to process ${file}: ${e}`,
+          `rebuildFromSessionJsonl: cannot stat ${filePath}: ${e}`,
         );
         continue;
       }
+      // Only regular files are readable transcripts: a FIFO (or any other
+      // special file) passing the name filter would block open() forever
+      // and wedge the whole rebuild — the daemon's usage dashboard serves
+      // from this path.
+      if (!stats.isFile()) {
+        debugLogger.debug(
+          `rebuildFromSessionJsonl: skipping non-regular entry ${filePath}`,
+        );
+        continue;
+      }
+
+      // Bound the scan when merging live sessions into a persisted history:
+      // skip transcripts untouched before `sinceMs`.
+      if (sinceMs !== undefined && stats.mtimeMs < sinceMs) continue;
+
+      // Skip sessions the persisted history already records, before any file
+      // read: the transcript filename is `{sessionId}.jsonl`
+      // (chatRecordingService.ts), so the sessionId — the same value the
+      // scan below derives from the first record — needs no I/O.
+      if (skipSessionIds && skipSessionIds.size > 0) {
+        const fileSessionId = path.basename(file, '.jsonl');
+        if (skipSessionIds.has(fileSessionId)) continue;
+      }
+
+      candidates.push({ filePath, stats });
     }
   }
+
+  // Phase 2 — summarize each candidate (replay-cache hit or selective scan)
+  // with bounded concurrency. Summaries are keyed by path so the dedup below
+  // can still walk them in directory order.
+  const summarizedByPath = new Map<string, TranscriptSummary>();
+  let cursor = 0;
+  const worker = async (): Promise<void> => {
+    while (cursor < candidates.length) {
+      const { filePath, stats } = candidates[cursor++]!;
+      try {
+        let summarized: TranscriptSummary;
+        const cached = useCache ? replayCache.get(filePath) : undefined;
+        if (
+          cached &&
+          cached.mtimeMs === stats.mtimeMs &&
+          cached.size === stats.size
+        ) {
+          summarized = cached.summarized;
+        } else {
+          summarized = await summarizeTranscriptFile(filePath);
+        }
+        if (nextCache) {
+          nextCache.set(filePath, {
+            mtimeMs: stats.mtimeMs,
+            size: stats.size,
+            summarized,
+          });
+        }
+        summarizedByPath.set(filePath, summarized);
+      } catch (e) {
+        debugLogger.debug(
+          `rebuildFromSessionJsonl: failed to process ${filePath}: ${e}`,
+        );
+      }
+    }
+  };
+  await Promise.all(
+    Array.from({ length: REBUILD_CONCURRENCY }, () => worker()),
+  );
+
+  // Phase 3 — dedup by sessionId in directory order (first occurrence wins),
+  // identical to the former sequential scan.
+  const results: UsageSummaryRecord[] = [];
+  const seenSessionIds = new Set<string>();
+  for (const { filePath } of candidates) {
+    const summarized = summarizedByPath.get(filePath);
+    if (!summarized) continue;
+    if (seenSessionIds.has(summarized.sessionId)) continue;
+    seenSessionIds.add(summarized.sessionId);
+    if (!summarized.record) continue;
+    results.push(summarized.record);
+  }
+
+  // Swap in the freshly-built cache so entries for transcripts that aged out
+  // of the window (or were deleted) are pruned rather than accumulating.
+  if (nextCache) replayCache = nextCache;
 
   // Persist rebuilt records as a one-time migration so later reads are fast.
   // Read-only callers (e.g. the daemon dashboard, which serves a GET) pass

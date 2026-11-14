@@ -231,4 +231,79 @@ describe('usage-stats route (real loader against seeded history)', () => {
     expect(res.body.summary.sessions).toBe(1);
     expect(res.body.summary.cacheReadRate).toBeCloseTo(0.9, 6);
   });
+
+  it('replays a never-persisted transcript through the real route, read-only', async () => {
+    // A daemon / Web Shell session that only exists as a transcript (no
+    // usage_record.jsonl entry). The real loader must replay it and the route
+    // must serve its totals without writing anything back to ~/.qwen.
+    const day = new Date().toISOString().slice(0, 10);
+    const chats = path.join(
+      process.env['QWEN_HOME']!,
+      'projects',
+      'replay-proj',
+      'chats',
+    );
+    fs.mkdirSync(chats, { recursive: true });
+    const sessionId = 'sess-replay';
+    const at = (m: number) => `${day}T00:0${m}:00.000Z`;
+    const base = { sessionId, cwd: '/replay/proj' };
+    const records = [
+      {
+        ...base,
+        uuid: 'u1',
+        parentUuid: null,
+        timestamp: at(0),
+        type: 'user',
+        message: { role: 'user', content: 'hi' },
+      },
+      {
+        ...base,
+        uuid: 'u2',
+        parentUuid: 'u1',
+        timestamp: at(1),
+        type: 'system',
+        subtype: 'ui_telemetry',
+        systemPayload: {
+          uiEvent: {
+            'event.name': 'qwen-code.api_response',
+            'event.timestamp': at(1),
+            response_id: 'r1',
+            model: 'qwen-max',
+            duration_ms: 1000,
+            input_token_count: 600,
+            output_token_count: 300,
+            cached_content_token_count: 0,
+            thoughts_token_count: 100,
+            total_token_count: 1000,
+            prompt_id: 'p1',
+          },
+        },
+      },
+      {
+        ...base,
+        uuid: 'u3',
+        parentUuid: 'u2',
+        timestamp: at(2),
+        type: 'assistant',
+        message: { role: 'assistant', content: 'ok' },
+      },
+    ];
+    fs.writeFileSync(
+      path.join(chats, `${sessionId}.jsonl`),
+      records.map((r) => JSON.stringify(r)).join('\n') + '\n',
+    );
+
+    const app = mount({}); // real loadUsageHistoryWithLive
+    const cold = await request(app).get('/usage/dashboard?range=today');
+    expect(cold.status).toBe(200);
+    expect(cold.body.summary.totalTokens).toBe(1000);
+    expect(cold.body.summary.sessions).toBe(1);
+
+    const warm = await request(app).get('/usage/dashboard?range=today');
+    expect(warm.body.summary).toEqual(cold.body.summary);
+
+    expect(
+      fs.existsSync(path.join(process.env['QWEN_HOME']!, 'usage_record.jsonl')),
+    ).toBe(false);
+  });
 });
