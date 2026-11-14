@@ -45,6 +45,10 @@ const VALID_TARGETS = new Set([
 
 const SEMVER_RE = /^v?\d+\.\d+\.\d+(-[\w.]+)?$/;
 
+// Cap for the captured Expand-Archive stderr so the failure message stays
+// within the updater's error echo budget (UPDATE_FAILURE_ECHO_LIMIT).
+const EXTRACT_STDERR_LIMIT = 4096;
+
 // True for a concrete version this updater can route: no dist-tags, no build
 // metadata, no leading zeros. normalizeVersion throws on anything else, so
 // every comparison against an untrusted version must gate on this first.
@@ -403,20 +407,59 @@ async function extractArchive(
 
   if (target.startsWith('win')) {
     await new Promise<void>((resolve, reject) => {
+      // A PowerShell 7 parent (especially the Store build) passes its
+      // PSModulePath down, steering Windows PowerShell 5.1 to the PS7 Archive
+      // module, which fails to load or fails mid-extraction; PS5.1 resolves
+      // its own compatible modules once the variable is absent. Env var names
+      // are case-insensitive on Windows, so match any casing.
+      const env = { ...process.env };
+      for (const key of Object.keys(env)) {
+        if (/^PSModulePath$/i.test(key)) delete env[key];
+      }
       const ps = spawn(
         'powershell.exe',
         [
           '-NoProfile',
           '-Command',
-          `Expand-Archive -Path '${escapePS(archivePath)}' -DestinationPath '${escapePS(destDir)}' -Force`,
+          // ConsoleHost encodes redirected error output with the console
+          // codepage (GBK on zh-CN machines), which our UTF-8 decode would
+          // turn to mojibake; switching the encoding to UTF-8 first keeps
+          // the diagnostics readable. windowsHide isolates the encoding
+          // change from the caller's console; the child can still change
+          // its own console code page. The catch keeps extraction working
+          // if the encoding setter throws.
+          'try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}; ' +
+            // Expand-Archive errors can be non-terminating and still exit 0;
+            // Stop turns the first error into a nonzero exit so a failure
+            // cannot masquerade as success.
+            `$ErrorActionPreference = 'Stop'; Expand-Archive -Path '${escapePS(archivePath)}' -DestinationPath '${escapePS(destDir)}' -Force`,
         ],
-        { stdio: 'ignore' },
+        { env, stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true },
       );
-      ps.on('close', (code) =>
-        code === 0
-          ? resolve()
-          : reject(new Error(`Expand-Archive exited with code ${code}`)),
-      );
+      // Streaming decode so a multi-byte UTF-8 sequence split across chunks
+      // still renders correctly.
+      const decoder = new TextDecoder();
+      let stderr = '';
+      ps.stderr?.on('data', (chunk: Buffer) => {
+        if (stderr.length < EXTRACT_STDERR_LIMIT) {
+          stderr += decoder
+            .decode(chunk, { stream: true })
+            .slice(0, EXTRACT_STDERR_LIMIT - stderr.length);
+        }
+      });
+      ps.on('close', (code) => {
+        stderr = (stderr + decoder.decode()).slice(0, EXTRACT_STDERR_LIMIT);
+        if (code === 0) {
+          resolve();
+          return;
+        }
+        const detail = stderr.trim();
+        reject(
+          new Error(
+            `Expand-Archive exited with code ${code}${detail ? `: ${detail}` : ''}`,
+          ),
+        );
+      });
       ps.on('error', reject);
     });
     const resolvedDest = fs.realpathSync(destDir);
