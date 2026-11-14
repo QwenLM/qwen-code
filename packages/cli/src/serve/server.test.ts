@@ -4783,6 +4783,7 @@ describe('createServeApp', () => {
       '/channel-events',
       '/live',
       '/scheduled-tasks',
+      '/pr-watches',
       '/goals',
       '/settings',
     ])(
