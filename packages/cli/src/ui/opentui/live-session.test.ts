@@ -4354,8 +4354,8 @@ describe.each([false, true])(
       client['recordCompletedToolCall'] ??= vi.fn();
       return {
         ...config,
-        isUnifiedAgentLoopEnabled: () => true,
-        isEventBusAgentLoopEnabled: () => kernel,
+        isUnifiedAgentLoopEnabled: vi.fn(() => true),
+        isEventBusAgentLoopEnabled: vi.fn(() => kernel),
       } as unknown as Config;
     };
     // Each round of the turn ran as one loop call, on the kernel when it is on.
@@ -4378,6 +4378,7 @@ describe.each([false, true])(
 
     it('sends the same requests and yields the same events as the current path', async () => {
       const runs = [];
+      let sharedConfig: Config | undefined;
       for (const onShared of [false, true]) {
         const send = oneToolBatchStream({
           callId: 't1',
@@ -4385,15 +4386,12 @@ describe.each([false, true])(
           args: {},
         });
         const config = createFakeConfig(send);
+        const effective = onShared ? shared(config) : config;
+        if (onShared) sharedConfig = effective;
         const events = await drain(
-          livePromptEvents(
-            onShared ? shared(config) : config,
-            'start',
-            undefined,
-            {
-              promptId: 'p1',
-            },
-          ),
+          livePromptEvents(effective, 'start', undefined, {
+            promptId: 'p1',
+          }),
         );
         runs.push({
           events,
@@ -4408,6 +4406,19 @@ describe.each([false, true])(
       expect(runs[1]).toEqual(runs[0]);
       // Only the run on the shared loop ran its two rounds as loop calls.
       expect(vi.mocked(runAgentLoop)).toHaveBeenCalledTimes(2);
+      // OpenTUI must resolve both switches for the 'opentui' surface.
+      const runtime = sharedConfig as unknown as {
+        isUnifiedAgentLoopEnabled: ReturnType<typeof vi.fn>;
+        isEventBusAgentLoopEnabled: ReturnType<typeof vi.fn>;
+      };
+      const loopCalls = runtime.isUnifiedAgentLoopEnabled.mock.calls;
+      expect(loopCalls.length).toBeGreaterThan(0);
+      expect(loopCalls.every(([surface]) => surface === 'opentui')).toBe(true);
+      const kernelCalls = runtime.isEventBusAgentLoopEnabled.mock.calls;
+      expect(kernelCalls.length).toBeGreaterThan(0);
+      expect(kernelCalls.every(([surface]) => surface === 'opentui')).toBe(
+        true,
+      );
     });
 
     it.each(['retry', 'model_fallback'])(

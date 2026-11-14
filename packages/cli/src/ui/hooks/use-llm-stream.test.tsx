@@ -25335,15 +25335,30 @@ describe('useLlmStream', () => {
 
       beforeEach(() => {
         Object.assign(mockConfig, {
-          isUnifiedAgentLoopEnabled: () => true,
-          isEventBusAgentLoopEnabled: () => kernel,
+          isUnifiedAgentLoopEnabled: vi.fn(() => true),
+          isEventBusAgentLoopEnabled: vi.fn(() => kernel),
         });
         mockRunAgentLoop.mockClear();
       });
-      // Each round ran as one loop call, on the kernel when it is on.
+      // Each round ran as one loop call, on the kernel when it is on, and
+      // every loop read that happened names the 'ink' surface.
       afterEach(() => {
         for (const [options] of mockRunAgentLoop.mock.calls) {
           expect(options).toMatchObject({ maxRounds: 1, useEventBus: kernel });
+        }
+        const runtime = mockConfig as unknown as {
+          isUnifiedAgentLoopEnabled: ReturnType<typeof vi.fn>;
+          isEventBusAgentLoopEnabled: ReturnType<typeof vi.fn>;
+        };
+        const loopCalls = runtime.isUnifiedAgentLoopEnabled.mock.calls;
+        if (loopCalls.length > 0) {
+          expect(loopCalls.every(([surface]) => surface === 'ink')).toBe(true);
+        }
+        const kernelCalls = runtime.isEventBusAgentLoopEnabled.mock.calls;
+        if (kernelCalls.length > 0) {
+          expect(kernelCalls.every(([surface]) => surface === 'ink')).toBe(
+            true,
+          );
         }
       });
 

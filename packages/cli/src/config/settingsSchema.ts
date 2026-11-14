@@ -4592,7 +4592,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Run headless sessions (`-p` and stream-json) and ACP sessions (Zed, VS Code, Web Shell, channels) on the shared agent loop (experimental). The Ink TUI and OpenTUI run their turns on it, and subagents send their model requests and run their tool calls through it. Can also be enabled via QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1 environment variable.',
+          'Run headless sessions (`-p` and stream-json) and ACP sessions (Zed, VS Code, Web Shell, channels) on the shared agent loop (experimental). The Ink TUI and OpenTUI run their turns on it, and subagents send their model requests and run their tool calls through it. The QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP environment variable overrides this setting per surface: `1` enables every surface, `0` disables every surface, and a comma-separated list such as `headless,acp=0` forces individual surfaces (headless, acp, ink, opentui, agent-core, speculation). A bare `1`/`0` is only recognized as the whole value, not inside a list; surfaces the list does not name fall back to this setting. A project `.env` or `settings.env` cannot set it.',
         showInDialog: true,
       },
       eventBusAgentLoop: {
@@ -4602,7 +4602,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Run the shared agent loop on the event-bus architecture (experimental). When experimental.unifiedAgentLoop is also enabled, this applies to headless sessions (`-p` and stream-json), the Ink TUI, OpenTUI, and subagents. Can also be enabled via QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP=1 environment variable.',
+          'Run the shared agent loop on the event-bus architecture (experimental). Applies to headless sessions (`-p` and stream-json), ACP sessions (Zed, VS Code, Web Shell, channels), the Ink TUI, OpenTUI, and subagents when experimental.unifiedAgentLoop is also enabled; other surfaces keep their current loop internals. The QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP environment variable overrides this setting: `1` enables it, `0` disables it, and a comma-separated list such as `headless=0` forces individual surfaces (headless, acp, ink, opentui, agent-core; `speculation` is reserved). Only those wired surfaces take effect today; a bare `1`/`0` is only recognized as the whole value, not inside a list, and surfaces the list does not name fall back to this setting. A project `.env` or `settings.env` cannot set it.',
         showInDialog: true,
       },
       agentCollaboration: {

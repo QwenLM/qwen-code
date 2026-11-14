@@ -64,8 +64,13 @@ import {
   HOSTED_INPUT_PREVIEW_TOOLS,
   HOSTED_TODO_WRITE_TOOL,
   HOSTED_LOOP_WAKEUP_TOOL,
+  HOSTED_CRON_CREATE_TOOL,
   HOSTED_CRON_LIST_TOOL,
   HOSTED_CRON_DELETE_TOOL,
+  cronExecutionId,
+  cronListDescription,
+  cronDeleteDescription,
+  cronDeleteIdDescription,
   HOSTED_MEMBER_PLAN_TOOL,
   HOSTED_SEND_MESSAGE_TO_CHILD_TOOL,
   HOSTED_SEND_MESSAGE_TO_PARENT_TOOL,
@@ -99,7 +104,11 @@ import {
 } from './hosted-memory-session.js';
 import { readHostedApprovalContinuation } from './hosted-approval-continuation.js';
 import { writeHostedTodos } from './hosted-todo-session.js';
-import { HostedLoopSession } from './hosted-loop-session.js';
+import {
+  HostedLoopSession,
+  LOOP_PROMPT_MAX_CHARS,
+} from './hosted-loop-session.js';
+import { HostedCronSession } from './hosted-cron-session.js';
 import { HostedCsiToolTurn } from './hosted-csi-tool-turn.js';
 import * as hostedPlan from './hosted-plan-mode.js';
 import { isSlowTestHost } from '../test-utils/slow-test-host.js';
@@ -2200,6 +2209,986 @@ it('cron_list and cron_delete drive the loop funnel end to end on shell/3', asyn
     if (gateBefore === undefined) delete process.env[gateKey];
     else process.env[gateKey] = gateBefore;
   }
+});
+
+it('cron_create/list/delete drive the automation union on shell/4', async () => {
+  const gateKey = 'QWEN_MANAGED_AGENT_LOOP_ENABLED';
+  const gateBefore = process.env[gateKey];
+  process.env[gateKey] = 'true';
+  try {
+    const created: Array<{ definition: unknown; key: string }> = [];
+    const retired: Array<{ id: string; key: string }> = [];
+    const automation = {
+      id: 'asch_x',
+      sessionId: 'session-a',
+      cron: '*/5 * * * *',
+      timezone: 'UTC',
+      goal: 'check the deploy',
+      state: 'active',
+      enabled: true,
+    };
+    const store = {
+      automationsCreate: async (definition: unknown, key: string) => {
+        created.push({ definition, key });
+        return { automation, replayed: false };
+      },
+      automationsList: async () => ({
+        data: [automation],
+        hasMore: false,
+        nextCursor: null,
+      }),
+      automationsRetire: async (id: string, key: string) => {
+        retired.push({ id, key });
+        return {
+          automation: { ...automation, state: 'retired' },
+          replayed: false,
+        };
+      },
+    };
+    const loops = new HostedLoopSession(
+      {
+        authority: session.authority,
+        resources: session.resources,
+        sink: session.sink,
+      },
+      session.authority.sessionHeader.sessionKey,
+      { cwd: root, classify: async () => ({ allowed: true, reason: null }) },
+    );
+    const crons = new HostedCronSession(store, loops, {
+      classify: async () => ({ allowed: true, reason: null }),
+    });
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      undefined,
+      { profile: 'hosted-workspace-shell/4', loops, crons },
+    );
+    const declared = await turn.declarations(new AbortController().signal);
+    expect(declared.map((tool) => tool.name)).toContain('cron_create');
+    const drive = async (name: string, args: Record<string, unknown>) => {
+      const call = { ...calls[0], callId: `call-${name}`, name, args };
+      const responses = await turn.execute(
+        [call],
+        [{ functionCall: { id: call.callId, name, args } }],
+        'model',
+        new AbortController().signal,
+      );
+      return responses[0].functionResponse?.response;
+    };
+    const createdResp = await drive('cron_create', {
+      cron: '*/5 * * * *',
+      prompt: '/loop check the deploy',
+      recurring: true,
+    });
+    expect(createdResp?.['executionStatus']).toBe('success');
+    expect(created).toHaveLength(1);
+    // The key is scoped to the Session + turn + call identity (a bounded hash),
+    // not the bare model call id, so two Sessions cannot collide on it.
+    const scopedKey = (callId: string, verb: string) =>
+      'loop:' +
+      createHash('sha256')
+        .update(
+          `${session.authority.sessionHeader.sessionKey.sessionId}\u0000prompt\u0000${callId}`,
+          'utf8',
+        )
+        .digest('hex') +
+      `:${verb}`;
+    expect(created[0]?.key).toBe(scopedKey('call-cron_create', 'create'));
+    expect(created[0]?.key).not.toBe('loop:call-cron_create:create');
+    // The union lists the definition plus a pending wakeup.
+    await drive('loop_wakeup', { delaySeconds: 60, prompt: '/loop tick' });
+    const listed = await drive('cron_list', {});
+    expect(
+      (listed?.['definitions'] as Array<{ id: string }>).map((d) => d.id),
+    ).toEqual(['asch_x']);
+    expect((listed?.['wakeups'] as unknown[]).length).toBe(1);
+    // A definition id routes to the ledger retire, not the wakeup cancel.
+    const del = await drive('cron_delete', { id: 'asch_x' });
+    expect(del?.['retired']).toBe(true);
+    expect(retired).toEqual([
+      { id: 'asch_x', key: scopedKey('call-cron_delete', 'retire') },
+    ]);
+    // A one-shot is refused with a typed tool error, not a store call.
+    const oneShot = await drive('cron_create', {
+      cron: '*/5 * * * *',
+      prompt: '/loop once',
+      recurring: false,
+    });
+    expect(oneShot?.['executionStatus']).not.toBe('success');
+    expect(created).toHaveLength(1);
+  } finally {
+    if (gateBefore === undefined) delete process.env[gateKey];
+    else process.env[gateKey] = gateBefore;
+  }
+});
+
+it('cron_create rides its arm-time review, not the interactive approval dialog', async () => {
+  const automation = {
+    id: 'asch_y',
+    sessionId: 'session-a',
+    cron: '*/5 * * * *',
+    timezone: 'UTC',
+    goal: 'check',
+    state: 'active',
+    enabled: true,
+  };
+  const store = {
+    automationsCreate: async () => ({ automation, replayed: false }),
+    automationsList: async () => ({
+      data: [],
+      hasMore: false,
+      nextCursor: null,
+    }),
+    automationsRetire: async () => ({ automation, replayed: false }),
+  };
+  const crons = new HostedCronSession(store, undefined, {
+    classify: async () => ({ allowed: true, reason: null }),
+  });
+  turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    { settings: { mode: 'auto', timeoutMs: 60_000 }, waiters },
+    { profile: 'hosted-workspace-shell/4', crons },
+  );
+  // A blocking auto-approval classifier would refuse an ordinary tool; the
+  // schedule's arm-time review is its single classification, so it is exempt.
+  turn.setPermissionClassifier(async () => ({
+    shouldBlock: true,
+    reason: 'would block an ordinary tool',
+    unavailable: false,
+    model: 'test',
+    durationMs: 0,
+    stage: 'fast',
+  }));
+  await turn.declarations(new AbortController().signal);
+  const call = {
+    ...calls[0],
+    callId: 'call-cron_create',
+    name: 'cron_create',
+    args: { cron: '*/5 * * * *', prompt: '/loop check', recurring: true },
+  };
+  const responses = await turn.execute(
+    [call],
+    [
+      {
+        functionCall: { id: call.callId, name: 'cron_create', args: call.args },
+      },
+    ],
+    'model',
+    new AbortController().signal,
+  );
+  expect(responses[0].functionResponse?.response?.['executionStatus']).toBe(
+    'success',
+  );
+});
+
+it.each(['hosted-workspace-files/4', 'hosted-workspace-team-lead/2'])(
+  'declares and drives cron_create on %s',
+  async (profile) => {
+    const automation = {
+      id: 'asch_p',
+      sessionId: 'session-a',
+      cron: '*/5 * * * *',
+      timezone: 'UTC',
+      goal: 'check',
+      state: 'active',
+      enabled: true,
+    };
+    const created: Array<{ key: string }> = [];
+    const store = {
+      automationsCreate: async (_d: unknown, key: string) => {
+        created.push({ key });
+        return { automation, replayed: false };
+      },
+      automationsList: async () => ({
+        data: [],
+        hasMore: false,
+        nextCursor: null,
+      }),
+      automationsRetire: async () => ({ automation, replayed: false }),
+    };
+    const crons = new HostedCronSession(store, undefined, {
+      classify: async () => ({ allowed: true, reason: null }),
+    });
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      undefined,
+      { profile, crons },
+    );
+    const declared = await turn.declarations(new AbortController().signal);
+    expect(declared.map((tool) => tool.name)).toContain('cron_create');
+    const call = {
+      ...calls[0],
+      callId: 'call-cron_create',
+      name: 'cron_create',
+      args: { cron: '*/5 * * * *', prompt: '/loop check', recurring: true },
+    };
+    const responses = await turn.execute(
+      [call],
+      [
+        {
+          functionCall: {
+            id: call.callId,
+            name: 'cron_create',
+            args: call.args,
+          },
+        },
+      ],
+      'model',
+      new AbortController().signal,
+    );
+    expect(responses[0].functionResponse?.response?.['executionStatus']).toBe(
+      'success',
+    );
+    expect(created).toHaveLength(1);
+  },
+);
+
+it('cron_list stays within the inline bound at full capacity with large goals', async () => {
+  const goal = 'g'.repeat(4096);
+  const definitions = Array.from({ length: 32 }, (_, i) => ({
+    id: `asch_${i}`,
+    sessionId: 'session-a',
+    cron: '*/5 * * * *',
+    timezone: 'UTC',
+    goal,
+    state: 'active',
+    enabled: true,
+  }));
+  const store = {
+    automationsCreate: async () => ({
+      automation: definitions[0],
+      replayed: false,
+    }),
+    automationsList: async () => ({
+      data: definitions,
+      hasMore: false,
+      nextCursor: null,
+    }),
+    automationsRetire: async () => ({
+      automation: definitions[0],
+      replayed: false,
+    }),
+  };
+  // A near-cap wakeup beside the 32 definitions: its prompt is admitted up
+  // to LOOP_PROMPT_MAX_CHARS, and CJK encodes at 3 bytes per character, so
+  // carrying it whole in the text and the payload overran the inline bound.
+  const loops = {
+    list: async () => [
+      {
+        id: 'loop:wakeup-cap',
+        fireAt: 1_700_000_000_000,
+        prompt: '中'.repeat(LOOP_PROMPT_MAX_CHARS),
+      },
+    ],
+    cancel: async () => false,
+  } as unknown as HostedLoopSession;
+  const crons = new HostedCronSession(store, loops, {
+    classify: async () => ({ allowed: true, reason: null }),
+  });
+  const originalCommit = commit;
+  const committedTexts: string[] = [];
+  commit = async (...args) => {
+    if (args[0] === 'tool_result') {
+      committedTexts.push(JSON.stringify(args[1]));
+    }
+    return originalCommit(...args);
+  };
+  turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    undefined,
+    { profile: 'hosted-workspace-shell/4', crons },
+  );
+  await turn.declarations(new AbortController().signal);
+  // Enforce the real inline bound on every message of this drive (a one-shot
+  // mock would be consumed by an earlier small call and never check the
+  // cron_list tool_result): carrying each 4 KiB goal in the text or the payload
+  // would exceed the bound at full capacity.
+  messageFitsInline.mockImplementation(
+    (_type, parts) =>
+      Buffer.byteLength(JSON.stringify(parts), 'utf8') <= 64 * 1024,
+  );
+  try {
+    const call = {
+      ...calls[0],
+      callId: 'call-cron_list',
+      name: 'cron_list',
+      args: {},
+    };
+    const responses = await turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: 'cron_list', args: {} } }],
+      'model',
+      new AbortController().signal,
+    );
+    const response = responses[0].functionResponse?.response;
+    expect(response?.['executionStatus']).toBe('success');
+    const listed = response?.['definitions'] as Array<Record<string, unknown>>;
+    expect(listed).toHaveLength(32);
+    for (const definition of listed) {
+      // The goal travels as a byte-bounded label slice, never the full 4 KiB.
+      const label = definition['goal'] as string;
+      expect(label.length).toBeGreaterThan(0);
+      expect(Buffer.byteLength(label, 'utf8')).toBeLessThanOrEqual(256);
+    }
+    const wakeups = response?.['wakeups'] as Array<Record<string, unknown>>;
+    expect(wakeups).toHaveLength(1);
+    expect(wakeups[0]!['id']).toBe('loop:wakeup-cap');
+    expect(wakeups[0]!['fireAt']).toBe(1_700_000_000_000);
+    expect(
+      Buffer.byteLength(wakeups[0]!['prompt'] as string, 'utf8'),
+    ).toBeLessThanOrEqual(256);
+    // The text line carries the slice too, not the whole prompt: with the
+    // payload already bounded, a full-prompt text alone can stay under the
+    // inline bound, so the bound check cannot pin it — assert the cut direct.
+    const text = committedTexts.join('\n');
+    expect(text).toContain('中'.repeat(85));
+    expect(text).not.toContain('中'.repeat(86));
+  } finally {
+    messageFitsInline.mockImplementation(() => true);
+    commit = originalCommit;
+  }
+});
+
+it('cron_list labels distinguish same-cron schedules and cut on code points', async () => {
+  const definitions = [
+    {
+      id: 'asch_ci',
+      sessionId: 'session-a',
+      cron: '*/5 * * * *',
+      timezone: 'UTC',
+      goal: 'watch CI on PR 42',
+      state: 'active',
+      enabled: true,
+    },
+    {
+      id: 'asch_logs',
+      sessionId: 'session-a',
+      cron: '*/5 * * * *',
+      timezone: 'UTC',
+      // A CJK goal over the slice bound: the cut must land on a code-point
+      // boundary, never mid-sequence (U+FFFD would re-encode over the bound).
+      goal: '夜'.repeat(200),
+      state: 'active',
+      enabled: true,
+    },
+  ];
+  const store = {
+    automationsCreate: async () => ({
+      automation: definitions[0],
+      replayed: false,
+    }),
+    automationsList: async () => ({
+      data: definitions,
+      hasMore: false,
+      nextCursor: null,
+    }),
+    automationsRetire: async () => ({
+      automation: definitions[0],
+      replayed: false,
+    }),
+  };
+  const crons = new HostedCronSession(store, undefined, {
+    classify: async () => ({ allowed: true, reason: null }),
+  });
+  const originalCommit = commit;
+  const committed: unknown[] = [];
+  commit = async (...args) => {
+    if (args[0] === 'tool_result') committed.push(args[1]);
+    return originalCommit(...args);
+  };
+  try {
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      undefined,
+      { profile: 'hosted-workspace-shell/4', crons },
+    );
+    await turn.declarations(new AbortController().signal);
+    const call = {
+      ...calls[0],
+      callId: 'call-cron_list',
+      name: 'cron_list',
+      args: {},
+    };
+    const responses = await turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: 'cron_list', args: {} } }],
+      'model',
+      new AbortController().signal,
+    );
+    const response = responses[0].functionResponse?.response;
+    const listed = response?.['definitions'] as Array<Record<string, unknown>>;
+    expect(listed[0]!['goal']).toBe('watch CI on PR 42');
+    const sliced = listed[1]!['goal'] as string;
+    expect(Buffer.byteLength(sliced, 'utf8')).toBeLessThanOrEqual(256);
+    expect(sliced).toBe('夜'.repeat(85));
+    expect(sliced).not.toContain('\uFFFD');
+    // The text line carries the same labels, so "stop the CI watch" has a
+    // referent even when two schedules share one cron expression. Read only
+    // the rendered text (functionResponse.response.output), not the whole
+    // committed parts: the definitions payload also carries id/goal and would
+    // satisfy these assertions even if the text template dropped the label.
+    const text = committed
+      .flatMap(
+        (parts) =>
+          parts as Array<{
+            functionResponse?: { response?: Record<string, unknown> };
+          }>,
+      )
+      .map((part) => part.functionResponse?.response?.['output'])
+      .filter((output): output is string => typeof output === 'string')
+      .join('\n');
+    expect(text).toContain('watch CI on PR 42');
+    expect(text).toContain('asch_ci');
+    expect(text).toContain('asch_logs');
+  } finally {
+    commit = originalCommit;
+  }
+});
+
+it('a gated cron_create on a files-only profile is refused before the classifier', async () => {
+  const store = {
+    automationsCreate: async () => {
+      throw new Error('the store must not be reached');
+    },
+    automationsList: async () => ({
+      data: [],
+      hasMore: false,
+      nextCursor: null,
+    }),
+    automationsRetire: async () => {
+      throw new Error('unused');
+    },
+  };
+  let classified = 0;
+  const crons = new HostedCronSession(store, undefined, {
+    classify: async () => {
+      classified += 1;
+      return { allowed: true, reason: null };
+    },
+    shellAvailable: false,
+    loopWakeupAvailable: false,
+  });
+  turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    undefined,
+    { profile: 'hosted-workspace-files/4', crons },
+  );
+  await turn.declarations(new AbortController().signal);
+  const call = {
+    ...calls[0],
+    callId: 'call-cron_create',
+    name: 'cron_create',
+    args: {
+      cron: '*/5 * * * *',
+      prompt: '/loop check',
+      recurring: true,
+      gate: 'test -f flag.txt',
+    },
+  };
+  const responses = await turn.execute(
+    [call],
+    [
+      {
+        functionCall: { id: call.callId, name: 'cron_create', args: call.args },
+      },
+    ],
+    'model',
+    new AbortController().signal,
+  );
+  const response = responses[0].functionResponse?.response;
+  expect(response?.['error']).toMatch(/Shell lane/u);
+  expect(classified).toBe(0);
+});
+
+it('the one-shot refusal names loop_wakeup only where the profile declares it', async () => {
+  const store = {
+    automationsCreate: async () => {
+      throw new Error('the store must not be reached');
+    },
+    automationsList: async () => ({
+      data: [],
+      hasMore: false,
+      nextCursor: null,
+    }),
+    automationsRetire: async () => {
+      throw new Error('unused');
+    },
+  };
+  for (const [profile, loopWakeupAvailable, names] of [
+    ['hosted-workspace-shell/4', true, true],
+    ['hosted-workspace-files/4', false, false],
+    ['hosted-workspace-team-lead/2', false, false],
+  ] as const) {
+    const crons = new HostedCronSession(store, undefined, {
+      classify: async () => ({ allowed: true, reason: null }),
+      loopWakeupAvailable,
+    });
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      undefined,
+      { profile, crons },
+    );
+    const declared = await turn.declarations(new AbortController().signal);
+    const declaration = declared.find((tool) => tool.name === 'cron_create');
+    expect(declaration?.description?.includes('loop_wakeup')).toBe(names);
+    const call = {
+      ...calls[0],
+      callId: 'call-cron_create',
+      name: 'cron_create',
+      args: { cron: '*/5 * * * *', prompt: '/loop check', recurring: false },
+    };
+    const responses = await turn.execute(
+      [call],
+      [
+        {
+          functionCall: {
+            id: call.callId,
+            name: 'cron_create',
+            args: call.args,
+          },
+        },
+      ],
+      'model',
+      new AbortController().signal,
+    );
+    const error = responses[0].functionResponse?.response?.['error'] as string;
+    expect(error).toContain('one-shot schedules are not supported');
+    expect(error.includes('loop_wakeup')).toBe(names);
+  }
+});
+
+it('the cron union declarations name only the creators the profile declares', async () => {
+  const store = {
+    automationsCreate: async () => {
+      throw new Error('unused');
+    },
+    automationsList: async () => ({
+      data: [],
+      hasMore: false,
+      nextCursor: null,
+    }),
+    automationsRetire: async () => {
+      throw new Error('unused');
+    },
+  };
+  // [profile, hasLoopWakeup, hasCronCreate]: files/4 and team-lead/2 carry the
+  // trio without loop_wakeup; shell/3 keeps list/delete without cron_create.
+  for (const [profile, hasLoopWakeup, hasCronCreate] of [
+    ['hosted-workspace-shell/4', true, true],
+    ['hosted-workspace-files/4', false, true],
+    ['hosted-workspace-team-lead/2', false, true],
+    ['hosted-workspace-shell/3', true, false],
+  ] as const) {
+    const crons = new HostedCronSession(store, undefined, {
+      classify: async () => ({ allowed: true, reason: null }),
+      loopWakeupAvailable: hasLoopWakeup,
+    });
+    turn = new HostedWorkspaceToolTurn(
+      { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+      session,
+      harness,
+      'prompt',
+      commit,
+      messageFitsInline,
+      undefined,
+      undefined,
+      undefined,
+      { profile, crons },
+    );
+    const declared = await turn.declarations(new AbortController().signal);
+    const list = declared.find((tool) => tool.name === 'cron_list');
+    const del = declared.find((tool) => tool.name === 'cron_delete');
+    expect(list).toBeDefined();
+    expect(del).toBeDefined();
+    const delId = (
+      del!.parametersJsonSchema as {
+        properties?: { id?: { description?: string } };
+      }
+    ).properties?.id?.description;
+    // A declaration must never name a tool the Session does not declare:
+    // naming one steers the model into a refused call that fails the turn.
+    // cron_list names both creators; cron_delete's id names both, while its
+    // summary only describes the wakeup concept ("loop wakeup", not the tool).
+    expect(list!.description?.includes('loop_wakeup')).toBe(hasLoopWakeup);
+    expect(list!.description?.includes('cron_create')).toBe(hasCronCreate);
+    expect(del!.description?.includes('loop wakeup')).toBe(hasLoopWakeup);
+    expect(del!.description?.includes('cannot be cancelled')).toBe(
+      hasLoopWakeup,
+    );
+    // The summary describes the wakeup concept and never names the tool
+    // token, on any profile — the id description carries the creator names.
+    expect(del!.description?.includes('loop_wakeup')).toBe(false);
+    expect(delId?.includes('loop_wakeup')).toBe(hasLoopWakeup);
+    expect(delId?.includes('cron_create')).toBe(hasCronCreate);
+    // The handlers are not narrowed by profile: schedules can exist on any
+    // profile (the public actor-scoped route creates them without consulting
+    // the CLI tool profile), so the schedule half is always described — even
+    // on shell/3, which lacks cron_create but can still hold live schedules.
+    expect(list!.description).toMatch(/cron schedules/);
+    expect(delId).toMatch(/schedule id/);
+  }
+});
+
+it('the cron description helpers name only the declared creators in every corner', () => {
+  // Directly pin the composed helpers across the full boolean space, including
+  // the (false, false) corner no current profile produces: a profile added to
+  // declaresCronTools() alone must not be handed text naming a tool it lacks.
+  for (const hasCronCreate of [false, true]) {
+    for (const hasLoopWakeup of [false, true]) {
+      const list = cronListDescription(hasCronCreate, hasLoopWakeup);
+      const del = cronDeleteDescription(hasLoopWakeup);
+      const delId = cronDeleteIdDescription(hasCronCreate, hasLoopWakeup);
+      expect(list.includes('cron_create')).toBe(hasCronCreate);
+      expect(list.includes('loop_wakeup')).toBe(hasLoopWakeup);
+      expect(del.includes('loop wakeup')).toBe(hasLoopWakeup);
+      // The cancellation note names "a wakeup", not "loop wakeup", so it
+      // needs its own pin — the concept phrase alone misses a leaked note.
+      expect(del.includes('cannot be cancelled')).toBe(hasLoopWakeup);
+      // The summary never names the tool token, even where wakeups exist;
+      // a leak there steers narrow profiles into a refused call.
+      expect(del.includes('loop_wakeup')).toBe(false);
+      expect(delId.includes('cron_create')).toBe(hasCronCreate);
+      expect(delId.includes('loop_wakeup')).toBe(hasLoopWakeup);
+      // Schedules are always listable/retirable regardless of profile.
+      expect(list).toMatch(/cron schedules/);
+      expect(delId).toMatch(/schedule id/);
+    }
+  }
+});
+
+it.each([429, 502, 503])(
+  'a cron_create store %s stays re-drivable and commits no tool_result',
+  async (status) => {
+    const store = {
+      automationsCreate: async () => {
+        throw new ManagedSessionStoreHttpError(
+          status,
+          'store_error',
+          'store refused',
+        );
+      },
+      automationsList: async () => ({
+        data: [],
+        hasMore: false,
+        nextCursor: null,
+      }),
+      automationsRetire: async () => {
+        throw new Error('unused');
+      },
+    };
+    const crons = new HostedCronSession(store, undefined, {
+      classify: async () => ({ allowed: true, reason: null }),
+    });
+    const originalCommit = commit;
+    let toolResultCommits = 0;
+    commit = async (...args) => {
+      if (args[0] === 'tool_result') toolResultCommits += 1;
+      return originalCommit(...args);
+    };
+    try {
+      turn = new HostedWorkspaceToolTurn(
+        { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+        session,
+        harness,
+        'prompt',
+        commit,
+        messageFitsInline,
+        undefined,
+        undefined,
+        undefined,
+        { profile: 'hosted-workspace-shell/4', crons },
+      );
+      await turn.declarations(new AbortController().signal);
+      const call = {
+        ...calls[0],
+        callId: 'call-cron_create',
+        name: 'cron_create',
+        args: { cron: '*/5 * * * *', prompt: '/loop check', recurring: true },
+      };
+      // An outcome-unknown store failure propagates as a recovery-blocking
+      // (pending) turn error rather than a terminal tool_result: no tool_result
+      // is committed, so the re-drive reuses the derived key instead of minting
+      // a second schedule.
+      await expect(
+        turn.execute(
+          [call],
+          [
+            {
+              functionCall: {
+                id: call.callId,
+                name: 'cron_create',
+                args: call.args,
+              },
+            },
+          ],
+          'model',
+          new AbortController().signal,
+        ),
+      ).rejects.toThrow(/recovery/u);
+      expect(toolResultCommits).toBe(0);
+    } finally {
+      commit = originalCommit;
+    }
+  },
+);
+
+it.each([429, 502, 503])(
+  'a cron_list store %s stays re-drivable and commits no tool_result',
+  async (status) => {
+    const store = {
+      automationsCreate: async () => {
+        throw new Error('unused');
+      },
+      automationsList: async () => {
+        throw new ManagedSessionStoreHttpError(
+          status,
+          'store_error',
+          'store refused',
+        );
+      },
+      automationsRetire: async () => {
+        throw new Error('unused');
+      },
+    };
+    const crons = new HostedCronSession(store, undefined, {
+      classify: async () => ({ allowed: true, reason: null }),
+    });
+    const originalCommit = commit;
+    let toolResultCommits = 0;
+    commit = async (...args) => {
+      if (args[0] === 'tool_result') toolResultCommits += 1;
+      return originalCommit(...args);
+    };
+    try {
+      turn = new HostedWorkspaceToolTurn(
+        { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+        session,
+        harness,
+        'prompt',
+        commit,
+        messageFitsInline,
+        undefined,
+        undefined,
+        undefined,
+        { profile: 'hosted-workspace-shell/4', crons },
+      );
+      await turn.declarations(new AbortController().signal);
+      const call = {
+        ...calls[0],
+        callId: 'call-cron_list',
+        name: 'cron_list',
+        args: {},
+      };
+      await expect(
+        turn.execute(
+          [call],
+          [{ functionCall: { id: call.callId, name: 'cron_list', args: {} } }],
+          'model',
+          new AbortController().signal,
+        ),
+      ).rejects.toThrow(/recovery/u);
+      expect(toolResultCommits).toBe(0);
+    } finally {
+      commit = originalCommit;
+    }
+  },
+);
+
+it.each([429, 502, 503])(
+  'a cron_delete store %s stays re-drivable and commits no tool_result',
+  async (status) => {
+    const store = {
+      automationsCreate: async () => {
+        throw new Error('unused');
+      },
+      automationsList: async () => ({
+        data: [],
+        hasMore: false,
+        nextCursor: null,
+      }),
+      automationsRetire: async () => {
+        throw new ManagedSessionStoreHttpError(
+          status,
+          'store_error',
+          'store refused',
+        );
+      },
+    };
+    const crons = new HostedCronSession(store, undefined, {
+      classify: async () => ({ allowed: true, reason: null }),
+    });
+    const originalCommit = commit;
+    let toolResultCommits = 0;
+    commit = async (...args) => {
+      if (args[0] === 'tool_result') toolResultCommits += 1;
+      return originalCommit(...args);
+    };
+    try {
+      turn = new HostedWorkspaceToolTurn(
+        { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+        session,
+        harness,
+        'prompt',
+        commit,
+        messageFitsInline,
+        undefined,
+        undefined,
+        undefined,
+        { profile: 'hosted-workspace-shell/4', crons },
+      );
+      await turn.declarations(new AbortController().signal);
+      const call = {
+        ...calls[0],
+        callId: 'call-cron_delete',
+        name: 'cron_delete',
+        args: { id: 'asch_target' },
+      };
+      await expect(
+        turn.execute(
+          [call],
+          [
+            {
+              functionCall: {
+                id: call.callId,
+                name: 'cron_delete',
+                args: call.args,
+              },
+            },
+          ],
+          'model',
+          new AbortController().signal,
+        ),
+      ).rejects.toThrow(/recovery/u);
+      expect(toolResultCommits).toBe(0);
+    } finally {
+      commit = originalCommit;
+    }
+  },
+);
+
+it('a definitive cron_create store 4xx settles as a terminal tool error', async () => {
+  const store = {
+    automationsCreate: async () => {
+      throw new ManagedSessionStoreHttpError(
+        409,
+        'automation_count_limit',
+        'capacity',
+      );
+    },
+    automationsList: async () => ({
+      data: [],
+      hasMore: false,
+      nextCursor: null,
+    }),
+    automationsRetire: async () => {
+      throw new Error('unused');
+    },
+  };
+  const crons = new HostedCronSession(store, undefined, {
+    classify: async () => ({ allowed: true, reason: null }),
+  });
+  turn = new HostedWorkspaceToolTurn(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    harness,
+    'prompt',
+    commit,
+    messageFitsInline,
+    undefined,
+    undefined,
+    undefined,
+    { profile: 'hosted-workspace-shell/4', crons },
+  );
+  await turn.declarations(new AbortController().signal);
+  const call = {
+    ...calls[0],
+    callId: 'call-cron_create',
+    name: 'cron_create',
+    args: { cron: '*/5 * * * *', prompt: '/loop check', recurring: true },
+  };
+  const responses = await turn.execute(
+    [call],
+    [
+      {
+        functionCall: { id: call.callId, name: 'cron_create', args: call.args },
+      },
+    ],
+    'model',
+    new AbortController().signal,
+  );
+  const response = responses[0].functionResponse?.response;
+  expect(response?.['executionStatus']).not.toBe('success');
+  // The terminal answer must carry the store's refusal text: an empty
+  // tool_result would leave the model without the reason it can act on.
+  expect(response?.['error']).toBe('capacity');
+});
+
+it('scopes the cron idempotency identity to Session, turn and call', () => {
+  // A re-drive of the same call reuses the identity.
+  expect(cronExecutionId('session-a', 'turn-1', 'call_qwen_1')).toBe(
+    cronExecutionId('session-a', 'turn-1', 'call_qwen_1'),
+  );
+  // Two Sessions in a tenant sharing a model call id must not collide: the
+  // control plane's idempotency scope is tenant + key, not Session + key.
+  expect(cronExecutionId('session-a', 'turn-1', 'call_qwen_1')).not.toBe(
+    cronExecutionId('session-b', 'turn-1', 'call_qwen_1'),
+  );
+  // A different turn with the same call id is a different execution.
+  expect(cronExecutionId('session-a', 'turn-1', 'call_qwen_1')).not.toBe(
+    cronExecutionId('session-a', 'turn-2', 'call_qwen_1'),
+  );
+  // The derived key stays within the 1-128 printable-ASCII idempotency bound.
+  const key = `loop:${cronExecutionId('session-a', 'turn-1', 'call_qwen_1')}:create`;
+  expect(key.length).toBeLessThanOrEqual(128);
+  expect(key).toMatch(/^loop:[0-9a-f]{64}:create$/u);
 });
 
 it('a lone loop_wakeup batch acquires no Runtime mount', async () => {
@@ -6254,6 +7243,7 @@ it('admits exactly the declared native tools to the version 3 input preview', ()
     'run_shell_command',
     'todo_write',
     'loop_wakeup',
+    'cron_create',
     'cron_list',
     'cron_delete',
     ...HOSTED_MEMORY_TOOLS,
@@ -6271,6 +7261,7 @@ it('admits exactly the declared native tools to the version 3 input preview', ()
     ...HOSTED_WORKSPACE_SHELL_TOOLS.map((tool) => tool.name),
     HOSTED_TODO_WRITE_TOOL.name,
     HOSTED_LOOP_WAKEUP_TOOL.name,
+    HOSTED_CRON_CREATE_TOOL.name,
     HOSTED_CRON_LIST_TOOL.name,
     HOSTED_CRON_DELETE_TOOL.name,
     ...HOSTED_MEMORY_TOOLS,

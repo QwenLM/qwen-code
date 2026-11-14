@@ -14,6 +14,7 @@ import {
   type MockInstance,
 } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core';
+import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import {
   registerCleanup,
   _resetCleanupFunctionsForTest,
@@ -25,6 +26,17 @@ import {
   EXIT_CODE_TERMINATED,
   _resetExitLifecycleForTest,
 } from './exit-lifecycle.js';
+
+vi.mock(
+  '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js')
+      >();
+    return { ...actual, prepareFileWatchersForProcessExit: vi.fn() };
+  },
+);
 
 class ExitCalled extends Error {
   readonly code: string | number | null | undefined;
@@ -45,6 +57,7 @@ describe('exitSession', () => {
   beforeEach(() => {
     _resetExitLifecycleForTest();
     _resetCleanupFunctionsForTest();
+    vi.mocked(prepareFileWatchersForProcessExit).mockReset();
     requestShutdown = vi.fn();
     config = {
       getLlmClient: () => ({ requestShutdown }),
@@ -76,17 +89,25 @@ describe('exitSession', () => {
     expect(exitSpy).toHaveBeenCalledWith(EXIT_CODE_INTERRUPT);
   });
 
-  it('signals the client before the drain so no work spawns mid-exit', async () => {
+  it('prepares watchers before client shutdown, cleanup and exit', async () => {
     const order: string[] = [];
+    vi.mocked(prepareFileWatchersForProcessExit).mockImplementation(() => {
+      expect(isExitInProgress()).toBe(true);
+      order.push('watchers');
+    });
     requestShutdown.mockImplementation(() => {
       order.push('shutdown');
     });
     registerCleanup(() => {
       order.push('cleanup');
     });
+    exitSpy.mockImplementation((code) => {
+      order.push('exit');
+      throw new ExitCalled(code);
+    });
 
     await expect(exitSession(config, 0)).rejects.toThrow(ExitCalled);
-    expect(order).toEqual(['shutdown', 'cleanup']);
+    expect(order).toEqual(['watchers', 'shutdown', 'cleanup', 'exit']);
   });
 
   it('still exits when there is no client to signal', async () => {
@@ -116,6 +137,7 @@ describe('exitSession', () => {
       new Promise((resolve) => setTimeout(resolve, 20)),
     ]);
     expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(prepareFileWatchersForProcessExit).toHaveBeenCalledTimes(1);
     expect(requestShutdown).toHaveBeenCalledTimes(1);
     expect(exitSpy).toHaveBeenCalledTimes(1);
   });
