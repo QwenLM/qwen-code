@@ -100,6 +100,7 @@
     "saxes": "6.0.0",
     "semver": "^7.7.2",
     "shell-quote": "^1.9.0",
+    "signal-exit": "^3.0.7",
     "simple-git": "^3.36.0",
     "string-width": "^7.1.0",
     "strip-ansi": "^7.1.0",

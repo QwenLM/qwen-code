@@ -52,6 +52,17 @@ describe('cleanup', () => {
     expect(asyncFn).toHaveBeenCalledTimes(1);
   });
 
+  it('should run priority functions before regular functions', async () => {
+    const calls: string[] = [];
+
+    registerCleanup(() => calls.push('regular'));
+    registerCleanup(() => calls.push('priority'), { priority: true });
+
+    await runExitCleanup();
+
+    expect(calls).toEqual(['priority', 'regular']);
+  });
+
   it('runs priority resource cleanup before earlier ordinary registrations', async () => {
     const order: string[] = [];
     registerCleanup(() => {
@@ -92,6 +103,16 @@ describe('cleanup', () => {
     const unregister = registerCleanup(cleanupFn);
 
     unregister();
+    unregister();
+    await runExitCleanup();
+
+    expect(cleanupFn).not.toHaveBeenCalled();
+  });
+
+  it('should let a caller unregister a priority cleanup', async () => {
+    const cleanupFn = vi.fn();
+    const unregister = registerCleanup(cleanupFn, { priority: true });
+
     unregister();
     await runExitCleanup();
 
