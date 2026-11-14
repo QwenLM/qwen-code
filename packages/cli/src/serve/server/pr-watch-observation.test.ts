@@ -700,6 +700,52 @@ describe('observeWorkspacePrBindings', () => {
     }
   });
 
+  it('skips a host the per-host subscription does not cover, without a view', async () => {
+    // Under the alias, an allowed host no channel covers subscribes nothing.
+    // Spending a view there would be a request nobody can receive.
+    const view = vi.fn(async (url: string) => okResult(url));
+    const result = await observeWorkspacePrBindings(
+      [binding(42, undefined, 'owner/repo', 'ghe.example.com')],
+      makeDeps(view, {
+        allowedHosts: new Set(['github.com', 'ghe.example.com']),
+        eventsForHost: (host) =>
+          host === 'github.com' ? new Set(['head_change']) : new Set(),
+      }),
+    );
+    expect(result).toEqual({ consumed: 0, observed: 0, failed: 0 });
+    expect(view).not.toHaveBeenCalled();
+  });
+
+  it('prefers the per-host subscription over the global set', async () => {
+    // The alias path passes no global set; the per-host one must be the one
+    // the detector sees, or every type would fire on an aliased host.
+    const view = vi.fn(async (url: string) => okResult(url));
+    await observeWorkspacePrBindings([binding(42)], makeDeps(view));
+    view.mockImplementation(async (url: string) =>
+      okResult(url, { headSha: 'b'.repeat(40), checks: 'failing' }),
+    );
+    const result = await observeWorkspacePrBindings(
+      [binding(42)],
+      makeDeps(view, {
+        now: () => Date.parse(T2),
+        events: new Set([
+          'head_change',
+          'ci_failure',
+          'merge_conflict',
+          'state_change',
+        ]),
+        eventsForHost: () => new Set(['ci_failure']),
+      }),
+    );
+    expect(result.observed).toBe(1);
+    const id = prWatchIdentityFromUrl(prUrl(42))!;
+    const after = readPrWatchStateSync(dir, id);
+    expect(after.kind).toBe('state');
+    if (after.kind === 'state') {
+      expect(after.state.pending?.map((p) => p.type)).toEqual(['ci_failure']);
+    }
+  });
+
   it('plumbs the view mergeable into the watch file and conflict detection', async () => {
     const id = prWatchIdentityFromUrl(prUrl(42))!;
     const view = vi.fn(async (url: string) =>

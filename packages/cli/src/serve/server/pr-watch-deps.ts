@@ -18,7 +18,10 @@ import type {
   PrWatchRecipient,
   PrWatchWakeOutcome,
 } from './pr-watch-drain.js';
-import type { SessionPrWatchConfig } from './pr-watch-config.js';
+import type {
+  HostedGithubChannel,
+  PrWatchSubscription,
+} from './pr-watch-config.js';
 import {
   scanWorkspaceBindings,
   type SessionPrBindingSummary,
@@ -68,11 +71,14 @@ type PrWatchRestore = (input: {
 export interface PrWatchDepsSources {
   workspaceRegistry: WorkspaceRegistry;
   /**
-   * The operator's resolved subscription (master §6). The caller builds no
-   * deps at all when `events` is empty, so that is the single enablement gate
-   * both the tick and the on-demand drain read.
+   * The effective subscription (master §6): the operator's explicit setting,
+   * or the deprecated per-host channel alias when none was set. The caller
+   * builds no deps at all when it subscribes nothing, so `anyEvents` is the
+   * single enablement gate both the tick and the on-demand drain read.
    */
-  config: SessionPrWatchConfig;
+  subscription: PrWatchSubscription;
+  /** Applies to both the setting and the alias. */
+  wakeDormant: boolean;
   /** Late-bound: the serve app is built after the refresh timer starts. */
   archiveCoordinator: () => SessionArchiveCoordinator | undefined;
   /**
@@ -85,11 +91,12 @@ export interface PrWatchDepsSources {
     | undefined;
   restore: PrWatchRestore;
   /**
-   * Base URLs of the GitHub channels this daemon hosts, already filtered to
-   * trusted workspaces by the caller. An untrusted workspace's settings must
-   * never widen the allowed set.
+   * The GitHub channels this daemon hosts, already filtered to trusted
+   * workspaces by the caller. Their hosts join the allowed set — an untrusted
+   * workspace's settings must never widen it — and the alias reads their
+   * events and actions from the same list.
    */
-  hostedChannelBaseUrls: () => readonly unknown[];
+  hostedGithubChannels: () => readonly HostedGithubChannel[];
   daemonLog?: DaemonLogger;
   log?: (message: string) => void;
   /**
@@ -129,6 +136,27 @@ function isGone(error: unknown): boolean {
 }
 
 /**
+ * The watch identity of a hosted channel's base URL: bare hostname, no port,
+ * no `www.`. The channel's REST root and the PR's web host differ (an API
+ * root for one host, a data-residency tenant for another), so this is the one
+ * mapping both the allowed set and the alias key on.
+ */
+export function resolveGithubChannelWatchHost(
+  baseUrl: unknown,
+): string | undefined {
+  try {
+    // resolveGithubWebOrigin returns a web ORIGIN ("https://host"), not a bare
+    // host, and normalizeWatchHost does not strip the scheme. The watch
+    // identity carries a bare hostname with no port, so take hostname.
+    return normalizeWatchHost(
+      new URL(resolveGithubWebOrigin(baseUrl)).hostname,
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * Builds both seams over one watch directory and one lock registry, so the
  * owner's in-process locks are authoritative for every file (master §2).
  *
@@ -144,17 +172,8 @@ export function createPrWatchDeps(sources: PrWatchDepsSources): PrWatchDeps {
   for (const host of readGhConfiguredHosts(process.env, log)) {
     allowedHosts.add(host);
   }
-  for (const baseUrl of sources.hostedChannelBaseUrls()) {
-    // resolveGithubWebOrigin returns a web ORIGIN ("https://host"), not a bare
-    // host, and normalizeWatchHost does not strip the scheme. The watch identity
-    // carries a bare hostname with no port, so take hostname — not host.
-    let hostname: string;
-    try {
-      hostname = new URL(resolveGithubWebOrigin(baseUrl)).hostname;
-    } catch {
-      continue;
-    }
-    allowedHosts.add(normalizeWatchHost(hostname));
+  for (const channel of sources.hostedGithubChannels()) {
+    allowedHosts.add(channel.host);
   }
 
   // Trust can be revoked while the drain still retains the workspace's rows —
@@ -211,20 +230,19 @@ export function createPrWatchDeps(sources: PrWatchDepsSources): PrWatchDeps {
     watchDir,
     locks,
     allowedHosts,
-    events: sources.config.events,
+    eventsForHost: sources.subscription.eventsForHost,
     log,
   };
 
   const drain: PrWatchDrainDeps = {
     watchDir,
     locks,
-    // Absent actions keep the legacy single winner; absent wakeDormant means
-    // the drain's own default (true). Both were declared-and-read seams with
-    // no setter until the operator setting existed.
-    ...(sources.config.actions !== undefined
-      ? { actions: sources.config.actions }
-      : {}),
-    wakeDormant: sources.config.wakeDormant,
+    // The explicit setting keeps the legacy single winner when it carries no
+    // template; the alias returns a per-type map, possibly empty, to stay
+    // role-aware. Both were declared-and-read seams with no setter until the
+    // operator setting existed.
+    actionsForEvent: sources.subscription.actionsForEvent,
+    wakeDormant: sources.wakeDormant,
     scanBindings: async (runtime) => {
       const bindings: SessionPrBindingSummary[] = [];
       const partial = await scanWorkspaceBindings(runtime, bindings);

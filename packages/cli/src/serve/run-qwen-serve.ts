@@ -7657,40 +7657,67 @@ async function runQwenServeImpl(
             | import('./server/pr-watch-deps.js').PrWatchDeps
             | undefined;
           let prWatchHostsSignature: string | undefined;
+          let prWatchBuildResolved = false;
           let prWatchSources:
             | Omit<
                 import('./server/pr-watch-deps.js').PrWatchDepsSources,
-                'hostedChannelBaseUrls'
+                'hostedGithubChannels' | 'subscription'
               >
             | undefined;
           let createPrWatchDeps:
             | typeof import('./server/pr-watch-deps.js').createPrWatchDeps
             | undefined;
-          let readHostedChannelBaseUrls: (() => readonly unknown[]) | undefined;
+          let readHostedGithubChannels:
+            | (() => ReadonlyArray<import('./server/pr-watch-config.js').HostedGithubChannel>)
+            | undefined;
+          let resolvePrWatchSubscription:
+            | typeof import('./server/pr-watch-config.js').resolvePrWatchSubscription
+            | undefined;
+          let prWatchChannelsSignature:
+            | typeof import('./server/pr-watch-config.js').prWatchChannelsSignature
+            | undefined;
           const resolvePrWatchDeps = () => {
+            if (
+              !createPrWatchDeps ||
+              !prWatchSources ||
+              !readHostedGithubChannels ||
+              !resolvePrWatchSubscription ||
+              !prWatchChannelsSignature
+            ) {
+              return undefined;
+            }
+            const channels = readHostedGithubChannels();
+            // The whole alias input, not only its hosts: editing a channel's
+            // PR Watch Events, its Bound Session Actions or its bound-delivery
+            // switch while the daemon runs must rebuild the subscription, or
+            // the read would be frozen at startup.
+            const signature = prWatchChannelsSignature(channels);
+            // One build shared by both getters: two builds would hand the
+            // observation and the drain different lock registries. A cached
+            // build with no events is a result too, so an unchanged channel
+            // list is not parsed again every tick.
+            if (prWatchBuildResolved && signature === prWatchHostsSignature) {
+              return prWatchDeps;
+            }
+            prWatchBuildResolved = true;
+            prWatchHostsSignature = signature;
             // No subscribed event means no deps, and no deps is the single
             // enablement gate both the tick and the on-demand drain read. An
             // operator who configures nothing gets no view, no watch file and
             // no ownership claim.
-            if (
-              sessionPrWatchConfig.events.size === 0 ||
-              !createPrWatchDeps ||
-              !prWatchSources ||
-              !readHostedChannelBaseUrls
-            ) {
+            const subscription = resolvePrWatchSubscription(
+              sessionPrWatchConfig,
+              channels,
+              (message) => daemonLog.warn(message),
+            );
+            if (!subscription.anyEvents) {
+              prWatchDeps = undefined;
               return undefined;
             }
-            const urls = readHostedChannelBaseUrls();
-            const signature = urls.map((url) => String(url)).join('|');
-            // One build shared by both getters: two builds would hand the
-            // observation and the drain different lock registries.
-            if (prWatchDeps && signature === prWatchHostsSignature) {
-              return prWatchDeps;
-            }
-            prWatchHostsSignature = signature;
             prWatchDeps = createPrWatchDeps({
               ...prWatchSources,
-              hostedChannelBaseUrls: () => urls,
+              subscription,
+              hostedGithubChannels: () => channels,
               // Keep the registry across rebuilds: a channel committing
               // between the observation's and the drain's read must not hand
               // them different locks for the same files.
@@ -7700,17 +7727,22 @@ async function runQwenServeImpl(
           };
           void (async () => {
             try {
-              const [depsMod, webhookRuntime, settingsRuntime] =
+              const [depsMod, webhookRuntime, settingsRuntime, configMod] =
                 await Promise.all([
                   import('./server/pr-watch-deps.js'),
                   loadChannelWebhookConfigRuntime(),
                   loadSettingsRuntimeModules(),
+                  import('./server/pr-watch-config.js'),
                 ]);
               if (refreshGeneration !== sessionPrRefreshGeneration) return;
               createPrWatchDeps = depsMod.createPrWatchDeps;
+              resolvePrWatchSubscription = configMod.resolvePrWatchSubscription;
+              prWatchChannelsSignature = configMod.prWatchChannelsSignature;
+              const resolveChannelWatchHost =
+                depsMod.resolveGithubChannelWatchHost;
               prWatchSources = {
                 workspaceRegistry,
-                config: sessionPrWatchConfig,
+                wakeDormant: sessionPrWatchConfig.wakeDormant,
                 archiveCoordinator: () =>
                   (
                     app.locals as {
@@ -7768,9 +7800,10 @@ async function runQwenServeImpl(
               };
               // Only the groups the channel grouping already attributed to a
               // trusted workspace, so an untrusted workspace's settings never
-              // widen the allowed set.
-              readHostedChannelBaseUrls = () => {
-                const urls: unknown[] = [];
+              // widen the allowed set or contribute to the alias.
+              readHostedGithubChannels = () => {
+                const channels: Array<import('./server/pr-watch-config.js').HostedGithubChannel> =
+                  [];
                 const runtimes = workspaceRegistry.listAll();
                 for (const group of channelWorkspaceGroups ?? []) {
                   const runtime = runtimes.find(
@@ -7822,10 +7855,18 @@ async function runQwenServeImpl(
                     if (!entry || typeof entry !== 'object') continue;
                     const config = entry as Record<string, unknown>;
                     if (config['type'] !== 'github') continue;
-                    urls.push(config['baseUrl']);
+                    const host = resolveChannelWatchHost(config['baseUrl']);
+                    if (host === undefined) continue;
+                    channels.push({
+                      name,
+                      host,
+                      prWatchEvents: config['prWatchEvents'],
+                      boundSessionActions: config['boundSessionActions'],
+                      deliverToBoundSessions: config['deliverToBoundSessions'],
+                    });
                   }
                 }
-                return urls;
+                return channels;
               };
             } catch (error) {
               daemonLog.warn(

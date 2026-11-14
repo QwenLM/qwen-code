@@ -134,6 +134,8 @@ export interface SessionPrRefreshOptions {
      * receive it from a closure the listing observed first.
      */
     events?: ReadonlySet<PrTransitionType>;
+    /** Per-host subscription when the deprecated channel alias is in effect. */
+    eventsForHost?: (host: string) => ReadonlySet<PrTransitionType>;
     log?: (message: string) => void;
   };
 }
@@ -218,6 +220,7 @@ async function recordListedPrStates(
   const rows: Array<{
     identity: PrWatchIdentity;
     state: 'open' | 'merged' | 'closed';
+    events?: ReadonlySet<PrTransitionType>;
   }> = [];
   for (const pr of listed) {
     const identity = prWatchIdentityFromUrl(pr.url);
@@ -232,9 +235,15 @@ async function recordListedPrStates(
     // delivers `pending` with no host check of its own — so writing a
     // transition for one would deliver an event the watch may not observe.
     if (!prWatch.allowedHosts.has(normalizeWatchHost(identity.host))) continue;
+    const events =
+      prWatch.eventsForHost?.(normalizeWatchHost(identity.host)) ??
+      prWatch.events;
+    // Under the alias, a host no channel covers subscribes nothing: record
+    // no baseline at all rather than advancing one for an unwatched PR.
+    if (events !== undefined && events.size === 0) continue;
     // The watch snapshot has no 'draft' variant — a draft is still open.
     const state = pr.state === 'draft' ? 'open' : pr.state;
-    rows.push({ identity, state });
+    rows.push({ identity, state, events });
   }
   if (rows.length === 0) return keys;
   const log = prWatch.log ?? (() => {});
@@ -245,7 +254,7 @@ async function recordListedPrStates(
   // Safe because the listing runs after the observation within a tick and
   // ticks never overlap, so it is always the newer observation of the two.
   const observedAt = new Date(now()).toISOString();
-  for (const { identity, state } of rows) {
+  for (const { identity, state, events } of rows) {
     try {
       assertGenerationOpen();
       // This ladder mirrors the one in observeWorkspacePrBindings, which owns
@@ -296,7 +305,7 @@ async function recordListedPrStates(
                     checks: base.checks ?? 'none',
                   },
                   observedAt,
-                  prWatch.events,
+                  events,
                 )
               : undefined;
           // Same diagnostic the view path emits: an evicted entry is a lost
@@ -817,6 +826,7 @@ export function startSessionPrRefreshTimer(deps: {
             locks: watchDeps.locks,
             allowedHosts: watchDeps.allowedHosts,
             events: watchDeps.events,
+            eventsForHost: watchDeps.eventsForHost,
             // Without this the seam's `log` is a declared-and-read field with
             // no setter, and every listing-write refusal stays silent — the
             // claim's contract is that a blocked outcome is always logged.

@@ -2379,6 +2379,62 @@ describe('refreshWorkspaceSessionPrStates', () => {
       });
     });
 
+    it('prefers the per-host subscription over the global set', async () => {
+      // The alias path passes no global set; the listing must use the same
+      // per-host one as the observation, or the second producer would queue a
+      // transition the first one filtered.
+      await seedBinding();
+      await withWatchDir(async (watchDir) => {
+        writePrWatchStateSync(watchDir, identity42, {
+          pr: identity42,
+          state: 'open',
+          headSha: 'c'.repeat(40),
+          checks: 'passing',
+        });
+        fetchGitHubPullRequestsMock.mockResolvedValue({
+          kind: 'ok',
+          pullRequests: [pr(42, 'merged')],
+        });
+        await refreshWorkspaceSessionPrStates(runtime, undefined, {
+          prWatch: {
+            watchDir,
+            locks: new PathMutexRegistry(),
+            allowedHosts,
+            events: new Set(['state_change']),
+            eventsForHost: () => new Set(['head_change']),
+          },
+          now: () => Date.parse('2026-11-10T00:00:00.000Z'),
+        });
+        const after = readPrWatchStateSync(watchDir, identity42);
+        expect(after.kind).toBe('state');
+        if (after.kind !== 'state') throw new Error('unreachable');
+        expect(after.state.state).toBe('merged');
+        expect(after.state.pending).toBeUndefined();
+      });
+    });
+
+    it('writes no baseline for a host the per-host subscription does not cover', async () => {
+      // Advancing a baseline for an unwatched PR would hide the first
+      // transition after the operator subscribes that host.
+      await seedBinding();
+      await withWatchDir(async (watchDir) => {
+        fetchGitHubPullRequestsMock.mockResolvedValue({
+          kind: 'ok',
+          pullRequests: [pr(42, 'merged')],
+        });
+        await refreshWorkspaceSessionPrStates(runtime, undefined, {
+          prWatch: {
+            watchDir,
+            locks: new PathMutexRegistry(),
+            allowedHosts,
+            eventsForHost: () => new Set(),
+          },
+          now: () => Date.parse('2026-11-10T00:00:00.000Z'),
+        });
+        expect(readPrWatchStateSync(watchDir, identity42).kind).toBe('absent');
+      });
+    });
+
     it('initialises silently when the watch file has no head baseline', async () => {
       await seedBinding();
       await withWatchDir(async (watchDir) => {

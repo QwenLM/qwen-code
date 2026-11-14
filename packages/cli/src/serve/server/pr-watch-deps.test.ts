@@ -36,8 +36,15 @@ vi.mock('../../commands/autofix-pr/state.js', async (importOriginal) => ({
   vouchedScanRoots: vouchedScanRootsMock,
 }));
 
-import { createPrWatchDeps } from './pr-watch-deps.js';
-import type { SessionPrWatchConfig } from './pr-watch-config.js';
+import {
+  createPrWatchDeps,
+  resolveGithubChannelWatchHost,
+} from './pr-watch-deps.js';
+import {
+  resolvePrWatchSubscription,
+  type HostedGithubChannel,
+  type SessionPrWatchConfig,
+} from './pr-watch-config.js';
 import { PathMutexRegistry } from '../fs/path-mutex-registry.js';
 import {
   autofixPrPaths,
@@ -142,7 +149,7 @@ describe('createPrWatchDeps', () => {
   function build(
     overrides: {
       runtimes?: WorkspaceRuntime[];
-      hosted?: readonly unknown[];
+      hosted?: readonly HostedGithubChannel[];
       withCoordinator?: boolean;
       activity?: ConversationRuntimeActivityGate;
       deadline?: number;
@@ -150,27 +157,58 @@ describe('createPrWatchDeps', () => {
     } = {},
   ) {
     const runtimes = overrides.runtimes ?? [runtime()];
+    const config = overrides.config ?? {
+      events: new Set(['head_change']),
+      explicit: true,
+      wakeDormant: true,
+      actions: undefined,
+    };
     return createPrWatchDeps({
       workspaceRegistry: { listAll: () => runtimes } as never,
-      config: overrides.config ?? {
-        events: new Set(['head_change']),
-        wakeDormant: true,
-        actions: undefined,
-      },
+      subscription: resolvePrWatchSubscription(config, overrides.hosted ?? []),
+      wakeDormant: config.wakeDormant,
       archiveCoordinator: () =>
         overrides.withCoordinator === false ? undefined : coordinator,
       conversationRuntimeActivity: () => overrides.activity,
       restore: restore as never,
-      hostedChannelBaseUrls: () => overrides.hosted ?? [],
+      hostedGithubChannels: () => overrides.hosted ?? [],
       ...(overrides.deadline !== undefined
         ? { promptDeadlineMs: overrides.deadline }
         : {}),
     });
   }
 
+  it('maps a channel base URL to the bare web host', () => {
+    // The channel's REST root is not the host its PRs live on: github.com's is
+    // api.github.com, and a data-residency tenant splits the two as well. The
+    // alias must key on the same notion as the allowed set.
+    expect(resolveGithubChannelWatchHost('https://api.github.com')).toBe(
+      'github.com',
+    );
+    expect(resolveGithubChannelWatchHost('https://api.acme.ghe.com')).toBe(
+      'acme.ghe.com',
+    );
+    expect(resolveGithubChannelWatchHost('https://www.ghe.example.com')).toBe(
+      'ghe.example.com',
+    );
+    // The watch identity deliberately drops the port; two channels on one
+    // hostname share one entry.
+    expect(resolveGithubChannelWatchHost('https://ghe.example.com:8443')).toBe(
+      'ghe.example.com',
+    );
+    expect(resolveGithubChannelWatchHost(undefined)).toBe('github.com');
+  });
+
   it('always allows github.com and adds the gh hosts and hosted origins', () => {
     readGhConfiguredHostsMock.mockReturnValue(new Set(['ghe.example.com']));
-    const { watch } = build({ hosted: ['https://api.acme.ghe.com'] });
+    const { watch } = build({
+      hosted: [
+        {
+          name: 'acme',
+          host: resolveGithubChannelWatchHost('https://api.acme.ghe.com')!,
+        },
+      ],
+    });
     // The bare hostname, not the origin URL: the watch identity carries no
     // scheme and no port, so an origin-shaped entry would never match.
     expect(watch.allowedHosts.has('https://acme.ghe.com')).toBe(false);
@@ -191,11 +229,12 @@ describe('createPrWatchDeps', () => {
     const { watch } = build({
       config: {
         events: new Set(['state_change']),
+        explicit: true,
         wakeDormant: true,
         actions: undefined,
       },
     });
-    expect([...(watch.events ?? [])]).toEqual(['state_change']);
+    expect([...watch.eventsForHost!('github.com')]).toEqual(['state_change']);
   });
 
   it('carries actions and wakeDormant to the drain', () => {
@@ -204,15 +243,20 @@ describe('createPrWatchDeps', () => {
     // the legacy single winner and always wakes dormant sessions.
     const actions = new Map([['review:head_change', 'Attribute it.']]);
     const { drain } = build({
-      config: { events: new Set(['head_change']), wakeDormant: false, actions },
+      config: {
+        events: new Set(['head_change']),
+        explicit: true,
+        wakeDormant: false,
+        actions,
+      },
     });
-    expect(drain.actions).toBe(actions);
+    expect(drain.actionsForEvent!('head_change', 'github.com')).toBe(actions);
     expect(drain.wakeDormant).toBe(false);
   });
 
   it('leaves actions absent so the drain keeps the legacy single winner', () => {
     const { drain } = build();
-    expect(drain.actions).toBeUndefined();
+    expect(drain.actionsForEvent!('head_change', 'github.com')).toBeUndefined();
     expect(drain.wakeDormant).toBe(true);
   });
 
@@ -221,16 +265,19 @@ describe('createPrWatchDeps', () => {
     // channel committing between the observation's and the drain's read hands
     // them different in-process locks for the same files.
     const locks = new PathMutexRegistry();
+    const config: SessionPrWatchConfig = {
+      events: new Set(['head_change']),
+      explicit: true,
+      wakeDormant: true,
+      actions: undefined,
+    };
     const { watch, drain } = createPrWatchDeps({
       workspaceRegistry: { listAll: () => [runtime()] } as never,
-      config: {
-        events: new Set(['head_change']),
-        wakeDormant: true,
-        actions: undefined,
-      },
+      subscription: resolvePrWatchSubscription(config, []),
+      wakeDormant: config.wakeDormant,
       archiveCoordinator: () => coordinator,
       restore: restore as never,
-      hostedChannelBaseUrls: () => [],
+      hostedGithubChannels: () => [],
       locks,
     });
     expect(watch.locks).toBe(locks);

@@ -283,6 +283,12 @@ export interface PrWatchObservationDeps {
    * operator's non-empty set, since an empty one means no observation runs.
    */
   events?: ReadonlySet<PrTransitionType>;
+  /**
+   * The operator's subscription per watch host, when the deprecated channel
+   * alias is in effect. Takes precedence over {@link events}; a host it does
+   * not cover subscribes nothing, so its PRs cost no view at all.
+   */
+  eventsForHost?: (host: string) => ReadonlySet<PrTransitionType>;
   /** The swept workspace's environment (its own GH_TOKEN/GH_CONFIG_DIR). */
   env?: Readonly<Record<string, string | undefined>>;
   /** Test seam; defaults to {@link fetchGitHubPullRequestView}. */
@@ -321,6 +327,8 @@ interface ViewTarget {
   identity: PrWatchIdentity;
   key: string;
   url: string;
+  /** The effective subscription for this target's host. */
+  events?: ReadonlySet<PrTransitionType>;
 }
 
 function observationFromView(view: GitHubPullRequestView): PrWatchObservation {
@@ -367,6 +375,13 @@ export async function observeWorkspacePrBindings(
         );
         continue;
       }
+      const events =
+        deps.eventsForHost?.(normalizeWatchHost(identity.host)) ?? deps.events;
+      if (events !== undefined && events.size === 0) {
+        // Under the alias, a host no channel covers subscribes nothing. Skip
+        // the view instead of spending one for a transition nobody receives.
+        continue;
+      }
       const existing = readPrWatchStateSync(deps.watchDir, identity);
       if (existing.kind === 'error') {
         // Fail closed before spending a view: master §2 skips a PR whose
@@ -385,7 +400,7 @@ export async function observeWorkspacePrBindings(
         // outside the listing stays in the view rotation to catch a reopen.
         continue;
       }
-      targets.set(key, { identity, key, url: entry.url });
+      targets.set(key, { identity, key, url: entry.url, events });
     }
   }
 
@@ -479,7 +494,7 @@ export async function observeWorkspacePrBindings(
           previous,
           observationFromView(result.view),
           detectedAt,
-          deps.events,
+          target.events,
         );
         if (
           (previous?.pending?.length ?? 0) + detection.transitions.length >
@@ -509,6 +524,8 @@ export interface PrWatchObservationTickDeps {
   allowedHosts: ReadonlySet<string>;
   /** Subscribed transition types; see {@link PrWatchObservationDeps.events}. */
   events?: ReadonlySet<PrTransitionType>;
+  /** Per-host subscription; see {@link PrWatchObservationDeps.eventsForHost}. */
+  eventsForHost?: (host: string) => ReadonlySet<PrTransitionType>;
   viewPullRequest?: typeof fetchGitHubPullRequestView;
   now?: () => number;
   log?: (message: string) => void;
@@ -585,6 +602,7 @@ export async function runPrWatchObservationTick(
         locks: deps.locks,
         allowedHosts: deps.allowedHosts,
         events: deps.events,
+        eventsForHost: deps.eventsForHost,
         // Master §1: a workspace's own GH_TOKEN/GH_CONFIG_DIR applies to its
         // PRs, but the untrusted primary's views run with the daemon's own
         // environment (undefined → ghEnv falls back to process.env), so a
