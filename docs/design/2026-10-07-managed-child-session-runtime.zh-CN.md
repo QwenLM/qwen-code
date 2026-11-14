@@ -71,11 +71,16 @@ H4b 交付该流水线的 child-agent 部分:
 
 ## 配额
 
+编码后的 Agent launch 请求超过 inline Session Store 上限时,会返回可恢复的
+`byte_limit` 工具错误。assistant 记录有独立的 inline 上限:如果该记录超限,
+Turn 仍会在返回工具拒绝前失败。本改动不改变任一上限,也不改变超限记录的语义。
+
 | 界限                       | 取值                                                                                                                                                        | 拒绝方式                             |
 | -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
 | Depth                      | 1(契约上限 8)                                                                                                                                               | launch 工具错误,`depth_limit`        |
 | 每 owner scope 活动 child  | 4                                                                                                                                                           | launch 工具错误,`count_limit`        |
 | Launch envelope            | ≤ 32 KiB UTF-8(description ≤ 512 字节)                                                                                                                      | launch 工具错误,`byte_limit`         |
+| 编码后的 launch 请求       | ≤ 64 KiB inline Session Store 请求                                                                                                                          | launch 工具错误,`byte_limit`         |
 | 每 child run 的 relay 尝试 | 有界退避,然后 `unknown`                                                                                                                                     | 台账分类,绝不重跑                    |
 | 结果复制                   | ≤ 64 KiB,与父 Session 持久内联上限钉齐(更大结果以 `byte_limit` 拒绝,run 记 `failed/quota_exceeded`——更大输出的 Artifact 暂存属后续 O 切片工作,不在此处内联) | `commitChildResult` 在 settle 前拒绝 |
 | 通知内联拷贝               | ≤ 64 KiB(先转义再带标记截断;全文字节留在 acceptance 记录上)                                                                                                 | 截断,绝不拒绝                        |
