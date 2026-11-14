@@ -251,7 +251,15 @@ describe('raw JUnit report retention', () => {
     // on every full-profile lane inside a job holding `checks: write`, so a
     // relaxation to a mutable tag must not pass unnoticed.
     expect(upload.uses).toMatch(/^actions\/upload-artifact@[0-9a-f]{40}$/);
-    expect(upload.with.path).toBe('packages/*/junit.xml');
+    // `*` does not cross `/`, so a single-level pattern cannot reach a
+    // nested workspace's report (packages/channels/base/junit.xml); `**`
+    // keeps every depth. Both workspace trees report: the side lane runs
+    // integrations/* too. The globber follows symlinks, and pnpm links each
+    // workspace into its dependents' node_modules, so the exclusion keeps
+    // every report from being packed once per link.
+    expect(upload.with.path).toBe(
+      'packages/**/junit.xml\nintegrations/**/junit.xml\n!**/node_modules/**\n',
+    );
     expect(upload.with['retention-days']).toBe(7);
     expect(upload.with['if-no-files-found']).toBe('ignore');
   });
@@ -278,6 +286,16 @@ describe('raw JUnit report retention', () => {
     const unitTests = steps.find((step) => step.id === 'unit_tests');
     expect(publisher['continue-on-error']).toBe(true);
     expect(publisher.with['fail-on-error']).toBe('false');
+    // The badge reads the same reports as the artifact upload, but it cannot
+    // copy that step's pattern: this action splits `path` on commas and globs
+    // each segment on its own, so `!**/node_modules/**` is a no-op segment and
+    // every pnpm link copy counts. List each workspace depth explicitly
+    // instead (flat packages, packages/channels/*, the cua-driver tree and
+    // integrations/*); the scripts suite checks the set against the workspace
+    // declarations.
+    expect(publisher.with.path).toBe(
+      'packages/*/junit.xml,packages/channels/*/junit.xml,packages/cua-driver/typescript/junit.xml,integrations/*/junit.xml',
+    );
     expect(upload['continue-on-error']).toBe(true);
     expect(unitTests['continue-on-error']).not.toBe(true);
     expect(unitTests.run).toContain('exit "$RC"');
@@ -1213,6 +1231,17 @@ describe('post-merge push lane', () => {
     const fetchStep = (ci.jobs.lint_and_static.steps ?? []).find(
       (s) => s.name === 'Fetch incremental lint history',
     );
+    // Whole literal, not a `pull_request` substring: appending
+    // `&& ... != 'docs_only'` keeps that token in place while dropping the
+    // fetch on docs-only PRs, which run Prettier and so need the incremental
+    // history too. Benign next to the freshness guard — continue-on-error
+    // fails closed to a full scan — but it silently gives back the cost this
+    // step exists to remove (#16918). No profile arm, for the same reason the
+    // freshness guard carries none: every profile runs a lint lane, and on a
+    // skip_ci PR the profile output is empty rather than a profile name.
+    expect(String(fetchStep?.if)).toBe(
+      "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' }}",
+    );
     // Comments stripped: the rationale above the command names the flag too,
     // and a pin satisfied by prose would go green with the flag deleted.
     const fetchCode = String(fetchStep?.run)
@@ -1480,12 +1509,13 @@ describe('post-merge push lane', () => {
     // `docs_only`, or re-adding a copy to `test` all left every suite
     // green. A required check that silently stops running ESLint or the
     // lockfile audit still reports green on every PR; pin the payload by
-    // name, order and gate. Two members deliberately carry different gates
-    // and are asserted as such below — do not "normalise" them: the size
-    // gate must run on github_ci_only PRs (a PR touching only the
-    // whitelisted helper/workflow files is exactly the one most likely to
-    // breach the 500 KB workflow limit), and the helper-checks step IS the
-    // github_ci_only fast path.
+    // name, order and gate. Run Prettier is the payload's own divergence
+    // (PRETTIER_GATE below), and two steps outside the payload deliberately
+    // carry different gates and are asserted as such below — do not
+    // "normalise" them: the size gate must run on github_ci_only PRs (a PR
+    // touching only the whitelisted helper/workflow files is exactly the one
+    // most likely to breach the 500 KB workflow limit), and the helper-checks
+    // step IS the github_ci_only fast path.
     const FULL_PAYLOAD = [
       'Audit critical runtime dependencies',
       'Check lockfile',
@@ -1622,22 +1652,33 @@ describe('post-merge push lane', () => {
     ).toEqual([...FULL_PAYLOAD].sort());
     // Whole literal, not the `ci_profile == 'full'` substring filtered above:
     // an appended `&&` clause still matches that substring while dropping the
-    // step from the unattended post-merge lane. Fourteen gates are identical;
+    // step from the unattended post-merge lane. Thirteen gates are identical;
     // Run Prettier also runs on docs_only and github_ci_only, because the
     // post-merge push lint checks every file with the lockfile's Prettier and
     // a profile that skips this lane lets a formatting-only break merge green
-    // and redden main (#16872, #16899). Its widened gate still contains the
-    // `ci_profile == 'full'` substring, so it stays in FULL_PAYLOAD above;
-    // only the literal differs.
+    // and redden main (#16872, #16899). Run ESLint also runs on
+    // github_ci_only, for the same reason on the same whitelist: ESLint's
+    // scope covers `.github/scripts/**/*.{js,mjs,cjs}`, so a PR touching only
+    // a whitelisted helper used to pass this required check and redden the
+    // next main push (#16958 item 3). It does NOT take docs_only — a
+    // documentation-only change contains nothing ESLint opens. Both widened
+    // gates still contain the `ci_profile == 'full'` substring, so both stay
+    // in FULL_PAYLOAD above; only the literals differ.
     const FULL_GATE =
       "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}";
     const PRETTIER_GATE =
       "${{ needs.classify_pr.outputs.skip_ci != 'true' && (steps.ci_profile.outputs.ci_profile == 'full' || steps.ci_profile.outputs.ci_profile == 'docs_only' || steps.ci_profile.outputs.ci_profile == 'github_ci_only') }}";
+    const ESLINT_GATE =
+      "${{ needs.classify_pr.outputs.skip_ci != 'true' && (steps.ci_profile.outputs.ci_profile == 'full' || steps.ci_profile.outputs.ci_profile == 'github_ci_only') }}";
+    const WIDENED_GATES = {
+      'Run Prettier': PRETTIER_GATE,
+      'Run ESLint': ESLINT_GATE,
+    };
     for (const n of FULL_PAYLOAD) {
       const step = stepByName.get(n);
       expect(testNames.has(n), `${n} leaked back into test`).toBe(false);
       expect(String(step.if), `${n} gate drifted`).toBe(
-        n === 'Run Prettier' ? PRETTIER_GATE : FULL_GATE,
+        WIDENED_GATES[n] ?? FULL_GATE,
       );
       expect(
         String(step.run ?? ''),
@@ -1874,6 +1915,18 @@ describe('GitHub helper tests', () => {
     );
   });
 
+  it('includes the host-load gate suite on both helper lanes', () => {
+    // The gate is node-builtin-only, so the fast lane can run it too: it
+    // decides whether a shard runs at all, and a gate that rotted untested
+    // would refuse healthy hosts or admit the contended ones silently.
+    expect(ci.env.HELPER_TESTS).toContain(
+      '.github/scripts/check-host-load.test.mjs',
+    );
+    expect(ci.env.HELPER_TESTS_DEP_FREE).toContain(
+      '.github/scripts/check-host-load.test.mjs',
+    );
+  });
+
   it('runs every invocation serially', () => {
     const helperSteps = Object.values(ci.jobs)
       .flatMap((job) => job.steps ?? [])
@@ -2028,11 +2081,21 @@ describe('GitHub helper tests', () => {
           String(step.if ?? '').includes("ci_profile == 'github_ci_only'") &&
           String(step.run ?? '').includes('node --test'),
       );
-    // One job owns the fast lane; a second copy is duplicated lint bootstrap
-    // and, when it shares the name, a byte-identity break against the shared
-    // prelude guard above.
-    expect(fastLaneSteps).toHaveLength(1);
-    for (const { jobName, step } of fastLaneSteps) {
+    // The fast lane has two steps of its own now, with different contracts.
+    // Before the install it runs the dependency-free battery and nothing else;
+    // after the install it may run suites that import npm packages, but must
+    // name them rather than fall back to the whole list.
+    const depFreeSteps = fastLaneSteps.filter(({ step }) =>
+      String(step.run).includes('env.HELPER_TESTS_DEP_FREE'),
+    );
+    const installedSteps = fastLaneSteps.filter(
+      ({ step }) => !String(step.run).includes('env.HELPER_TESTS_DEP_FREE'),
+    );
+    // One job owns the fast lane's pre-install battery; a second copy is
+    // duplicated lint bootstrap and, when it shares the name, a byte-identity
+    // break against the shared prelude guard above.
+    expect(depFreeSteps).toHaveLength(1);
+    for (const { jobName, step } of depFreeSteps) {
       const where = `${jobName}/${step.name}`;
       expect(String(step.run), where).toContain('env.HELPER_TESTS_DEP_FREE');
       // Strip the dep-free name first: `env.HELPER_TESTS` is a substring of
@@ -2041,6 +2104,25 @@ describe('GitHub helper tests', () => {
         String(step.run).replaceAll('HELPER_TESTS_DEP_FREE', ''),
         where,
       ).not.toContain('env.HELPER_TESTS');
+    }
+    // The post-install additions name their suites. `check-lint-gate-freshness`
+    // is one of them: it parses ci.yml with `yaml`, so it cannot run on the
+    // dependency-free path, and the profile that most often selects this lane
+    // is exactly the one a PR editing that script receives.
+    expect(installedSteps).toHaveLength(1);
+    for (const { jobName, step } of installedSteps) {
+      const where = `${jobName}/${step.name}`;
+      expect(String(step.run), where).toContain(
+        '.github/scripts/check-lint-gate-freshness.test.mjs',
+      );
+      expect(String(step.run), where).not.toContain('HELPER_TESTS_DEP_FREE');
+      expect(String(step.run), where).not.toContain('env.HELPER_TESTS');
+      const job = ci.jobs[jobName];
+      const names = job.steps.map((candidate) => candidate.name);
+      expect(
+        names.indexOf(step.name),
+        `${where}: the suite needs the install, so it must run after it`,
+      ).toBeGreaterThan(names.indexOf('Install dependencies'));
     }
   });
 });

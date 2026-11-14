@@ -919,6 +919,213 @@ describe('LlmChat', async () => {
     });
   });
 
+  describe('request system instructions', () => {
+    const sentRequests = () =>
+      vi.mocked(mockContentGenerator.generateContentStream).mock.calls;
+    const send = async (model: string, instruction?: string) => {
+      const stream = await chat.sendMessageStream(
+        model,
+        {
+          message: 'hello',
+          ...(instruction !== undefined && {
+            config: { systemInstruction: instruction },
+          }),
+        },
+        'request-prompt',
+      );
+      await drain(stream);
+    };
+
+    beforeEach(() => {
+      chat = newChat({ chatConfig: {} });
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => textStream(),
+      );
+      vi.mocked(mockConfig.getModel).mockReturnValue('model-a');
+      chat.setSystemInstruction('startup');
+    });
+
+    it('resolves A, B, A per send while keeping the canonical snapshot on A', async () => {
+      chat.setSystemInstructionResolver((model) => `prompt for ${model}`);
+      for (const model of ['model-a', 'model-b', 'model-a']) await send(model);
+      expect(
+        sentRequests().map(([request]) => [
+          request.model,
+          request.config?.systemInstruction,
+        ]),
+      ).toEqual([
+        ['model-a', 'prompt for model-a'],
+        ['model-b', 'prompt for model-b'],
+        ['model-a', 'prompt for model-a'],
+      ]);
+      expect(chat.getGenerationConfig().systemInstruction).toBe(
+        'prompt for model-a',
+      );
+      expect(chat['generationConfig'].systemInstruction).toBe('startup');
+    });
+
+    it('keeps dispatched parent context separate from canonical snapshots', async () => {
+      chat.setSystemInstructionResolver((model) => `prompt for ${model}`);
+      chat.setSessionStartContext('hook context');
+      await send('model-b');
+      const dispatched = chat.getDispatchedGenerationConfig();
+      expect(dispatched.systemInstruction).toContain('prompt for model-b');
+      expect(
+        String(dispatched.systemInstruction).match(/hook context/g),
+      ).toHaveLength(1);
+      expect(chat.getGenerationConfig().systemInstruction).toContain(
+        'prompt for model-a',
+      );
+      expect(structuredClone(dispatched)).toEqual(dispatched);
+      dispatched.systemInstruction = 'modified copy';
+      expect(chat.getDispatchedGenerationConfig().systemInstruction).toContain(
+        'model-b',
+      );
+      expect(chat.getDispatchedRequest()).toMatchObject({
+        model: 'model-b',
+        runtimeView: { contentGenerator: mockContentGenerator },
+      });
+    });
+
+    it('preserves explicit instructions and does not resolve fixed chats', async () => {
+      await send('model-b');
+      expect(sentRequests()[0][0].config?.systemInstruction).toBe('startup');
+      const resolver = vi.fn((model: string) => `prompt for ${model}`);
+      chat.setSystemInstructionResolver(resolver);
+      await send('model-b', 'explicit task');
+      expect(sentRequests()[1][0].config?.systemInstruction).toBe(
+        'explicit task',
+      );
+      expect(resolver).not.toHaveBeenCalled();
+    });
+
+    it('records the adapter-selected model with the dispatched parent runtime', async () => {
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_OPENAI,
+        model: 'configured',
+        extra_body: { model: 'wire-model' },
+      });
+      chat.setSystemInstructionResolver((model) => `prompt for ${model}`);
+      await send('requested');
+      expect(chat.getDispatchedRequest()).toMatchObject({
+        model: 'wire-model',
+        generationConfig: { systemInstruction: 'prompt for wire-model' },
+        runtimeView: {
+          contentGenerator: mockContentGenerator,
+          contentGeneratorConfig: { model: 'wire-model' },
+        },
+      });
+      expect(mockConfig.getContentGeneratorConfig().model).toBe('configured');
+    });
+
+    it('passes the resolved prompt to initial compression before dispatch', async () => {
+      chat.setSystemInstructionResolver((model) => `prompt for ${model}`);
+      const compress = vi.spyOn(chat, 'tryCompress');
+      await send('model-b');
+      expect(
+        compress.mock.calls[0][3]?.requestGenerationConfig?.systemInstruction,
+      ).toBe('prompt for model-b');
+    });
+
+    it('pins the instruction across HTTP attempts despite changed prompt inputs', async () => {
+      let revision = 'before';
+      const resolver = vi.fn((model: string) => `${model}: ${revision}`);
+      chat.setSystemInstructionResolver(resolver);
+      vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mockRejectedValueOnce(new Error('retry'));
+      mockRetryWithBackoff.mockImplementationOnce(async (apiCall) => {
+        try {
+          return await apiCall();
+        } catch {
+          revision = 'after';
+          return apiCall();
+        }
+      });
+      await send('model-a');
+      expect(
+        sentRequests().map(([request]) => request.config?.systemInstruction),
+      ).toEqual(['model-a: before', 'model-a: before']);
+      expect(resolver).toHaveBeenCalledTimes(1);
+    });
+
+    it('replays saved instructions instead of evaluating the live resolver', async () => {
+      let saved: LlmPreparedRequest | undefined;
+      chat.setSystemInstructionResolver((model) => `original ${model}`);
+      const initial = await chat.sendMessageStream(
+        'model-a',
+        { message: 'hello' },
+        'prepare-prompt',
+        undefined,
+        {
+          onPreparedRequest: async (request) => {
+            saved = request;
+          },
+        },
+      );
+      await drain(initial);
+      const resolver = vi.fn(() => 'changed prompt');
+      chat.setSystemInstructionResolver(resolver);
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel: vi.fn().mockResolvedValue({
+          contentGenerator: mockContentGenerator,
+          contentGeneratorConfig: mockConfig.getContentGeneratorConfig(),
+          model: 'model-a',
+          retryAuthType: AuthType.USE_GEMINI,
+        }),
+      } as unknown as ReturnType<Config['getBaseLlmClient']>);
+      await drain(
+        await chat.sendPreparedMessageStream(
+          saved!,
+          'replay-prompt',
+          new AbortController().signal,
+        ),
+      );
+      expect(sentRequests().at(-1)?.[0].config?.systemInstruction).toBe(
+        'original model-a',
+      );
+      expect(resolver).not.toHaveBeenCalled();
+    });
+
+    it('does not publish a prepared request that fails before dispatch', async () => {
+      chat.setSystemInstructionResolver((model) => `prompt for ${model}`);
+      await send('model-a');
+      await expect(
+        chat
+          .sendMessageStream(
+            'model-b',
+            { message: 'hello' },
+            'blocked-prepare',
+            undefined,
+            {
+              onPreparedRequest: async () => {
+                throw new Error('snapshot unavailable');
+              },
+            },
+          )
+          .then(drain),
+      ).rejects.toBeInstanceOf(LlmRequestPreparationError);
+      expect(chat.getDispatchedGenerationConfig().systemInstruction).toBe(
+        'prompt for model-a',
+      );
+    });
+
+    it('releases the send lock after a resolver fails before dispatch', async () => {
+      chat.setSystemInstructionResolver(() => {
+        throw new Error('render failed');
+      });
+      await expect(send('model-a')).rejects.toBeInstanceOf(
+        LlmRequestPreparationError,
+      );
+      expect(mockContentGenerator.generateContentStream).not.toHaveBeenCalled();
+      chat.setSystemInstructionResolver((model) => `prompt for ${model}`);
+      await send('model-a');
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+    });
+  });
+
   describe('setTools', () => {
     const toolNamed = (name: string): Tool => ({
       functionDeclarations: [{ name, description: `${name} description` }],
@@ -3582,10 +3789,16 @@ describe('LlmChat', async () => {
     it('does not deep-clone the full curated history when building request contents', async () => {
       chat.setHistory([userText('prior question'), modelText('prior answer')]);
       mockStream(textStream('response'));
+      const clone = globalThis.structuredClone;
       const structuredCloneSpy = vi
         .spyOn(globalThis, 'structuredClone')
-        .mockImplementation(() => {
-          throw new Error('structuredClone should not build request contents');
+        .mockImplementation((value, options) => {
+          if (Array.isArray(value)) {
+            throw new Error(
+              'structuredClone should not build request contents',
+            );
+          }
+          return clone(value, options);
         });
 
       try {
@@ -7561,6 +7774,47 @@ describe('LlmChat', async () => {
     ) => ({
       type: StreamEventType.MODEL_FALLBACK,
       info: { fromModel, toModel, statusCode: 429, fallbackIndex },
+    });
+
+    it('resolves a fallback prompt without inheriting the generated primary prompt', async () => {
+      const fallback = vi
+        .fn()
+        .mockImplementation(async () => textStream('fallback answer'));
+      wireFallbacks(
+        ['fallback-model'],
+        vi.fn().mockResolvedValue(
+          fallbackRoute('fallback-model', fallback, {
+            authType: AuthType.USE_GEMINI,
+            model: 'fallback-model',
+          }),
+        ),
+      );
+      chat.setSystemInstructionResolver((model) => `prompt for ${model}`);
+      streamMock().mockRejectedValueOnce(tpmCapacityError());
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'hello' },
+        'fallback-prompt',
+      );
+      await drain(stream);
+      expect(streamMock().mock.calls[0][0].config?.systemInstruction).toBe(
+        'prompt for test-model',
+      );
+      expect(fallback.mock.calls[0][0].config?.systemInstruction).toBe(
+        'prompt for fallback-model',
+      );
+      expect(
+        streamMock().mock.calls[0][0].config?.maxOutputTokens,
+      ).toBeGreaterThan(0);
+      expect(fallback.mock.calls[0][0].config?.maxOutputTokens).toBe(
+        streamMock().mock.calls[0][0].config?.maxOutputTokens,
+      );
+      expect(chat.getDispatchedGenerationConfig().systemInstruction).toBe(
+        'prompt for fallback-model',
+      );
+      expect(chat.getGenerationConfig().systemInstruction).toBe(
+        'prompt for gemini-pro',
+      );
     });
 
     /** The primary fails with `error`; the fallback chain stays untouched. */
@@ -15115,6 +15369,13 @@ describe('LlmChat', async () => {
     });
 
     const fixedInputSetters = [
+      [
+        'resolved system instruction',
+        (changed: boolean) =>
+          chat.setSystemInstructionResolver(() =>
+            changed ? 'x'.repeat(20_000) : 'base',
+          ),
+      ],
       [
         'system instruction',
         (changed: boolean) =>

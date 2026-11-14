@@ -202,7 +202,7 @@ final class AgentSessionAdmissions {
             if (extensionPackages == null) {
                 throw AgentSessionPolicies.workspaceExecutionUnavailable();
             }
-            if ((!WorkspaceToolProfiles.SHELL.equals(pin.toolProfile()) && !WorkspaceToolProfiles.MCP.equals(pin.toolProfile()))
+            if ((!WorkspaceToolProfiles.isPublicShell(pin.toolProfile()) && !WorkspaceToolProfiles.MCP.equals(pin.toolProfile()))
                     || !extensionLifecycleProfiles.contains(pin.toolProfile())) {
                 throw new ManagedAgentException(409, "unsupported_feature",
                         "Extension configuration requires a negotiated Shell or MCP Session lifecycle profile.");
@@ -255,7 +255,7 @@ final class AgentSessionAdmissions {
         }
         if (workspaceChildAgentsEnabled && publicChildrenSupported && !resident && (!sshWorkspace || managedExtensionExecutionEnabled)
                 && (managedExtensionExecutionEnabled || "qwen-code".equals(agentId) && pin.digest() == null)
-                && WorkspaceToolProfiles.SHELL.equals(pin.toolProfile())) {
+                && WorkspaceToolProfiles.isPublicShell(pin.toolProfile())) {
             jdbc.update("UPDATE ma_session SET public_child_agents_version=1 WHERE tenant_id=? AND session_id=?",
                     tenantId, admission.sessionId());
         }
@@ -702,7 +702,7 @@ final class AgentSessionAdmissions {
             String requestDigest, WorkspaceCommand command, boolean internalTeamLead) {
         SessionRecord session = storeRows.requireSession(tenantId, command.sessionId());
         if (!command.requestDigest().equals(requestDigest)
-                || internalTeamLead != WorkspaceToolProfiles.INTERNAL_TEAM_LEAD.equals(session.toolProfile())
+                || internalTeamLead != WorkspaceToolProfiles.isInternalTeamLead(session.toolProfile())
                 || internalTeamLead && (!"qwen-code".equals(session.agentId())
                         || session.agentDefinitionDigest() != null)) {
             throw new ManagedAgentException(409,

@@ -66,6 +66,83 @@ const DINGTALK: DaemonChannelTypeDescriptor = {
   ],
 };
 
+describe.each(['dingtalk-webhook', 'feishu-webhook'])(
+  '%s outbound-only channel editing',
+  (type) => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      type,
+      displayName: type,
+      manageable: true,
+      outboundOnly: true,
+      fields: [
+        {
+          key: 'webhookUrl',
+          label: 'Webhook URL',
+          kind: 'secret',
+          required: true,
+        },
+        { key: 'signingSecret', label: 'Signing secret', kind: 'secret' },
+      ],
+    };
+
+    it('validates and saves without inventing a receive policy', () => {
+      const draft = createChannelEditorDraft(descriptor);
+      draft.name = 'notices';
+      draft.secrets.webhookUrl = {
+        operation: 'replace',
+        value: '$GROUP_WEBHOOK_URL',
+      };
+      expect(draft.privatePolicy).toBe('');
+      expect(validateChannelEditorDraft(descriptor, draft, [])).toEqual({});
+      expect(buildChannelUpsertRequest(descriptor, draft, '1')).toEqual({
+        expectedRevision: '1',
+        config: { type },
+        secrets: {
+          webhookUrl: { operation: 'replace', value: '$GROUP_WEBHOOK_URL' },
+          signingSecret: { operation: 'clear' },
+        },
+      });
+    });
+
+    it('preserves required saved secrets but rejects clearing the endpoint', () => {
+      const instance: DaemonChannelInstanceSnapshot = {
+        name: 'notices',
+        config: { type },
+        secrets: {
+          webhookUrl: { present: true, source: 'environment' },
+          signingSecret: { present: true, source: 'literal' },
+        },
+        startsWithServe: false,
+        runtime: { state: 'stopped' },
+      };
+      const draft = createChannelEditorDraft(descriptor, instance);
+      expect(
+        validateChannelEditorDraft(descriptor, draft, [], instance),
+      ).toEqual({});
+      expect(
+        buildChannelUpsertRequest(descriptor, draft, '1', instance).secrets
+          ?.webhookUrl,
+      ).toEqual({ operation: 'preserve' });
+      expect(
+        buildChannelUpsertRequest(descriptor, draft, '1', instance).secrets
+          ?.signingSecret,
+      ).toEqual({ operation: 'preserve' });
+      draft.secrets.signingSecret = { operation: 'clear' };
+      expect(
+        validateChannelEditorDraft(descriptor, draft, [], instance),
+      ).toEqual({});
+      expect(
+        buildChannelUpsertRequest(descriptor, draft, '1', instance).secrets
+          ?.signingSecret,
+      ).toEqual({ operation: 'clear' });
+      draft.secrets.webhookUrl = { operation: 'clear' };
+      expect(
+        validateChannelEditorDraft(descriptor, draft, [], instance),
+      ).toEqual({ webhookUrl: 'required' });
+    });
+  },
+);
+
 const DINGTALK_WITH_ACCESS: DaemonChannelTypeDescriptor = {
   ...DINGTALK,
   fields: [
@@ -1085,6 +1162,52 @@ const GITHUB: DaemonChannelTypeDescriptor = {
   ],
 };
 
+// GitLab declares groupPolicy itself and receives the same injected
+// privatePolicy/allowedUsers as GitHub; its adapter is group-only too.
+const GITLAB: DaemonChannelTypeDescriptor = {
+  type: 'gitlab',
+  displayName: 'GitLab',
+  manageable: true,
+  fields: [
+    {
+      key: 'token',
+      label: 'Personal Access Token',
+      kind: 'secret',
+    },
+    {
+      key: 'groupPolicy',
+      label: 'Group Policy',
+      kind: 'enum',
+      required: true,
+      default: 'open',
+      options: [
+        { value: 'open', label: 'Open' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'disabled', label: 'Disabled' },
+      ],
+    },
+    {
+      key: 'privatePolicy',
+      label: 'Private Policy',
+      kind: 'enum',
+      required: true,
+      default: 'allowlist',
+      options: [
+        { value: 'disabled', label: 'Disabled' },
+        { value: 'allowlist', label: 'Allowlist' },
+        { value: 'pairing', label: 'Pairing' },
+        { value: 'open', label: 'Open' },
+      ],
+    },
+    {
+      key: 'allowedUsers',
+      label: 'Allowed Users',
+      kind: 'string-list',
+    },
+  ],
+};
+
 describe('GitHub watch events require bound delivery', () => {
   const BOUND: DaemonChannelTypeDescriptor = {
     ...GITHUB,
@@ -1455,6 +1578,245 @@ describe('Repository-only channel access config', () => {
     const request = buildChannelUpsertRequest(GITHUB, draft, 'rev-2', instance);
     expect(request.config).not.toHaveProperty('privatePolicy');
     expect(request.config).not.toHaveProperty('allowedUsers');
+  });
+
+  it('drops the private-access residue for GitLab too', () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'release-bot',
+      config: {
+        type: 'gitlab',
+        groupPolicy: 'open',
+        privatePolicy: 'pairing',
+        allowedUsers: ['alice'],
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(GITLAB, instance);
+
+    const request = buildChannelUpsertRequest(GITLAB, draft, 'rev-2', instance);
+    expect(request.config).not.toHaveProperty('privatePolicy');
+    expect(request.config).not.toHaveProperty('allowedUsers');
+  });
+
+  it('admits a nested GitLab project path and saves it as a group key', () => {
+    const draft = createChannelEditorDraft(GITLAB);
+    draft.name = 'release-bot';
+    draft.secrets.token = { operation: 'replace', value: 'glpat-test' };
+    draft.values.groupPolicy = 'allowlist';
+    draft.allowedGroupIds = 'mygroup/subgroup/project';
+
+    expect(validateChannelEditorDraft(GITLAB, draft, [])).toEqual({});
+    const request = buildChannelUpsertRequest(GITLAB, draft, 'rev-1');
+    expect(request.config['groups']).toEqual({
+      'mygroup/subgroup/project': {},
+    });
+  });
+
+  it('still rejects a malformed GitLab allowlist entry', () => {
+    const draft = createChannelEditorDraft(GITLAB);
+    draft.name = 'release-bot';
+    draft.secrets.token = { operation: 'replace', value: 'glpat-test' };
+    draft.values.groupPolicy = 'allowlist';
+    draft.allowedGroupIds = 'solo';
+
+    expect(validateChannelEditorDraft(GITLAB, draft, [])).toEqual({
+      allowedGroupIds: 'invalidRepoId',
+    });
+  });
+
+  it('keeps GitHub strict to owner/repo for the allowlist', () => {
+    const draft = createChannelEditorDraft(GITHUB);
+    draft.name = 'release-bot';
+    draft.secrets.token = { operation: 'replace', value: 'ghp_test' };
+    draft.values.groupPolicy = 'allowlist';
+    draft.allowedGroupIds = 'owner/repo/extra';
+
+    expect(validateChannelEditorDraft(GITHUB, draft, [])).toEqual({
+      allowedGroupIds: 'invalidRepoId',
+    });
+  });
+
+  it('keeps GitHub strict even when the off-shape key is already stored', () => {
+    // The stored-entry tolerance is GitLab-only (the newly admitted platform).
+    // GitHub must keep rejecting an off-shape key even when it is present in
+    // storage, so its behavior is unchanged by this PR.
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'release-bot',
+      config: {
+        type: 'github',
+        groupPolicy: 'allowlist',
+        groups: { 'owner/repo/extra': {} },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(GITHUB, instance);
+    expect(validateChannelEditorDraft(GITHUB, draft, [], instance)).toEqual({
+      allowedGroupIds: 'invalidRepoId',
+    });
+  });
+
+  it('keeps a nested GitLab project narrowed during a temporary switch when the save lands on Open', () => {
+    // The non-Allowlist save path projects draft-only repositories through
+    // repositoryAllowlistIds, which must use the GitLab shape: a nested path
+    // typed during this visit survives the switch back to Open. With the
+    // GitHub shape (the default if the channel type is not threaded) the
+    // 3-segment path is filtered out and its restriction silently vanishes.
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'release-bot',
+      config: {
+        type: 'gitlab',
+        groupPolicy: 'open',
+        groups: { '*': { senders: 'open' } },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(GITLAB, instance);
+    draft.values.groupPolicy = 'open';
+    draft.allowedGroupIds = 'mygroup/subgroup/newproj';
+    draft.groupOverrides['mygroup/subgroup/newproj'] = {
+      requireMention: '',
+      senders: 'allowlist',
+      allowedUsers: 'alice',
+    };
+
+    expect(validateChannelEditorDraft(GITLAB, draft, [], instance)).toEqual({});
+    const groups = buildChannelUpsertRequest(GITLAB, draft, 'rev-2', instance)
+      .config['groups'] as Record<string, unknown>;
+    expect(groups['mygroup/subgroup/newproj']).toEqual({
+      senders: 'allowlist',
+      allowedUsers: ['alice'],
+    });
+  });
+
+  it('leaves a preserved GitLab repoFilter untouched on save', () => {
+    // repoFilter is GitHub-only; a GitLab channel may carry it as a preserved
+    // unmanaged key. The save path must not canonicalize it (the daemon rejects
+    // a modified unmanaged field), matching the GitHub-gated validator.
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'release-bot',
+      config: {
+        type: 'gitlab',
+        groupPolicy: 'open',
+        repoFilterMode: 'allowlist',
+        repoFilter: ['MyGroup/SubProject'],
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(GITLAB, instance);
+    const request = buildChannelUpsertRequest(GITLAB, draft, 'rev-2', instance);
+    expect(request.config['repoFilter']).toEqual(['MyGroup/SubProject']);
+  });
+
+  it('tolerates a stored GitLab allowlist entry that predates the shape check', () => {
+    // A single-segment key was storable before GitLab joined the repository-only
+    // set; an unrelated edit must not be blocked by a shape check the entry was
+    // never validated against. The stored key is mixed-case and non-empty so
+    // this pins both halves of the tolerance: the case-insensitive comparison
+    // (the draft seeds the lower-cased 'mygroup') and the round-trip — the
+    // entry must be preserved with its sender policy, not silently dropped.
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'release-bot',
+      config: {
+        type: 'gitlab',
+        groupPolicy: 'allowlist',
+        groups: {
+          MyGroup: { senders: 'allowlist', allowedUsers: ['alice'] },
+        },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(GITLAB, instance);
+    expect(validateChannelEditorDraft(GITLAB, draft, [], instance)).toEqual({});
+    const saved = buildChannelUpsertRequest(GITLAB, draft, 'rev-2', instance)
+      .config['groups'] as Record<string, unknown>;
+    expect(saved['mygroup']).toEqual({
+      senders: 'allowlist',
+      allowedUsers: ['alice'],
+    });
+  });
+
+  it('still rejects a newly typed malformed GitLab entry', () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'release-bot',
+      config: {
+        type: 'gitlab',
+        groupPolicy: 'allowlist',
+        groups: { 'mygroup/project': {} },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(GITLAB, instance);
+    draft.allowedGroupIds = 'mygroup/project, solo';
+    expect(validateChannelEditorDraft(GITLAB, draft, [], instance)).toEqual({
+      allowedGroupIds: 'invalidRepoId',
+    });
+  });
+
+  it('still rejects a typed "*" on a channel that stores the wildcard default', () => {
+    // The stored-entry tolerance must not exempt the '*' wildcard: it is not a
+    // project id, and assignGroups skips it, so tolerating it would report a
+    // successful save that admits nothing. The storedIds filter excludes '*'.
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'release-bot',
+      config: {
+        type: 'gitlab',
+        groupPolicy: 'allowlist',
+        groups: { '*': { senders: 'open' }, 'mygroup/project': {} },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(GITLAB, instance);
+    draft.allowedGroupIds = '*';
+    expect(validateChannelEditorDraft(GITLAB, draft, [], instance)).toEqual({
+      allowedGroupIds: 'invalidRepoId',
+    });
+  });
+
+  it('keeps a stored mixed-case GitLab project and its sender policy across a re-save', () => {
+    const instance: DaemonChannelInstanceSnapshot = {
+      name: 'release-bot',
+      config: {
+        type: 'gitlab',
+        groupPolicy: 'allowlist',
+        groups: {
+          'CalcProgrammer1/OpenRGB': {
+            senders: 'allowlist',
+            allowedUsers: ['alice'],
+          },
+        },
+      },
+      secrets: { token: { present: true, source: 'literal' } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' },
+    };
+    const draft = createChannelEditorDraft(GITLAB, instance);
+    expect(validateChannelEditorDraft(GITLAB, draft, [], instance)).toEqual({});
+    const groups = buildChannelUpsertRequest(GITLAB, draft, 'rev-2', instance)
+      .config['groups'] as Record<string, unknown>;
+    // Assert the behaviour (the project survives with its settings), not the
+    // spelling the editor canonicalizes to.
+    const entry = Object.entries(groups).find(
+      ([id]) => id.toLowerCase() === 'calcprogrammer1/openrgb',
+    );
+    expect(entry).toBeDefined();
+    expect(entry?.[1]).toEqual({
+      senders: 'allowlist',
+      allowedUsers: ['alice'],
+    });
   });
 
   it('requires owner/repo for an allowlisted repository', () => {
@@ -2345,8 +2707,27 @@ describe('Per-repository overrides', () => {
     expect(
       repositoryAllowlistIds(
         'QwenLM/qwen-code, qwen-code, acme/widgets, QwenLM/Qwen-Code',
+        'github',
       ),
     ).toEqual(['qwenlm/qwen-code', 'acme/widgets']);
+  });
+
+  it('names nested GitLab project paths the allowlist can admit', () => {
+    expect(
+      repositoryAllowlistIds(
+        'MyGroup/SubGroup/Project, mygroup/project, solo, a/b/c/d',
+        'gitlab',
+      ),
+    ).toEqual(['mygroup/subgroup/project', 'mygroup/project', 'a/b/c/d']);
+  });
+
+  it('keeps GitHub strict to owner/repo while GitLab accepts nested paths', () => {
+    // The same multi-segment id is rejected for GitHub (no repository has that
+    // shape) but admitted for GitLab (a project in a subgroup).
+    expect(repositoryAllowlistIds('owner/repo/extra', 'github')).toEqual([]);
+    expect(repositoryAllowlistIds('owner/repo/extra', 'gitlab')).toEqual([
+      'owner/repo/extra',
+    ]);
   });
 
   // Invariant sweep over stored shapes x single-field edits, run through the
