@@ -38,7 +38,7 @@ drain 已完整但不可达。`runPrWatchDrainTick` 把 restore、准入、regis
 ## 非目标
 
 - `sessionPrWatch` 配置、其环境覆盖、channel 别名与移除该开关：**PR B**（主 §6/§7）。
-- 移除 adapter watch：PR B。在此之前 channel 保留自己的 poller，daemon 侧保持惰性。
+- 移除适配器的 PR 状态检测与投递：PR B（pass 本身作为 comment 载体保留）。在此之前 channel 保留自己的 poller，daemon 侧保持惰性。
 - 对交互式写入者的隔离（主 §4）：session-writer-lease 暴露面是 channel 今天的现状，仍排除在外。
 - 手动 push 账本（母设计中仍开放）：只记录经 autofix-pr helper 的 push。
 

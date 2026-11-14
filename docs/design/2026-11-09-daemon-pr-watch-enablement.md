@@ -38,7 +38,7 @@ Two further gaps were load-bearing for correctness rather than reachability, and
 ## Non-goals
 
 - `sessionPrWatch` configuration, its environment overrides, the channel alias and removing that switch: **PR B** (master §6/§7).
-- Removing the adapter watch: PR B. Until then the channel keeps its own poller and the daemon's stays inert.
+- Removing the adapter's PR-state detection and delivery: PR B (the pass itself stays as the comment carrier). Until then the channel keeps its own poller and the daemon's stays inert.
 - Fencing interactive writers (master §4): the session-writer-lease exposure is the channel's today and stays out.
 - Manual-push ledger (still open in the master design): only pushes through the autofix-pr helper are recorded.
 
