@@ -2558,11 +2558,13 @@ describe('refreshWorkspaceSessionPrStates', () => {
 });
 
 // The timer cases chain real-clock vi.waitFor budgets (the rotation case
-// declares 10s + 10s + 10s) and the Aone ones spawn the real-git origin
-// probe; the 15s off-ECS default would let the runner decide the outcome
-// before those waits on a contended host. vi.waitFor measures real time
-// even under vi.useFakeTimers(), so the fake clock does not renew it.
-describe('startSessionPrRefreshTimer', { timeout: 60_000 }, () => {
+// declares 10s + 10s + 30s plus up to 20 interval advances that yield real
+// event-loop turns for the refresh tail's real fs) and the Aone ones spawn
+// the real-git origin probe; the 15s off-ECS default would let the runner
+// decide the outcome before those waits on a contended host. vi.waitFor
+// measures real time even under vi.useFakeTimers(), so the fake clock does
+// not renew it. 120s leaves headroom for the extreme macOS nightly load.
+describe('startSessionPrRefreshTimer', { timeout: 120_000 }, () => {
   let baseDir: string;
   let trustedCwd: string;
   let untrustedCwd: string;
@@ -3811,16 +3813,19 @@ describe('startSessionPrRefreshTimer', { timeout: 60_000 }, () => {
       // does not advance the rotation counter — so keep advancing intervals
       // until the second view lands instead of assuming the very next one
       // runs; the executed tick's rotation is 1 either way, and the order
-      // stays [42, 43]. waitFor's fake-time budget cannot reach the next
-      // 60s interval on its own, hence the explicit advances.
-      for (let i = 0; i < 5 && view.mock.calls.length < 2; i++) {
+      // stays [42, 43]. Each advanceTimersByTimeAsync yields real event-loop
+      // turns so the tail's real fs can progress; under the extreme macOS
+      // nightly contention (200s+ of test time across workers) the tail can
+      // outlast a handful of advances, so allow plenty of them. waitFor's
+      // fake-time budget cannot reach the next 60s interval on its own.
+      for (let i = 0; i < 20 && view.mock.calls.length < 2; i++) {
         await vi.advanceTimersByTimeAsync(60_000);
       }
       await vi.waitFor(
         () => {
           expect(view).toHaveBeenCalledTimes(2);
         },
-        { timeout: 10_000 },
+        { timeout: 30_000 },
       );
       expect(view.mock.calls.map((call) => call[0])).toEqual([
         'https://github.com/o/r/pull/42',
