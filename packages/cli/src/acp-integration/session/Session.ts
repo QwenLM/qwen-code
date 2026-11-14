@@ -8999,7 +8999,8 @@ export class Session implements SessionContext {
               signal: roundSignal,
               // Each result is recorded as the batch settles it.
               deferRecording: false,
-              useEventBus: this.config.isEventBusAgentLoopEnabled?.('acp') === true,
+              useEventBus:
+                this.config.isEventBusAgentLoopEnabled?.('acp') === true,
               onModelEvent: host.onModelEvent!,
             },
           );
