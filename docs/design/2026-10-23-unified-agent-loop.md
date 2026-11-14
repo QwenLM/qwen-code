@@ -2,7 +2,7 @@
 
 [English](2026-10-23-unified-agent-loop.md) | [简体中文](2026-10-23-unified-agent-loop.zh-CN.md)
 
-- **Status**: accepted in #15343. The headless (PR 1, #15369), ACP (PR 2, #15509–#16190), Ink TUI (PR 3, #16206–#16704) and OpenTUI (PR 4, #16743–#16820) migrations are merged; each surface's default flip waits on the nightly unified-loop E2E gate (#16192). PR 5 (AgentCore) is in progress: 5a (#16880) and 5b (#17035) are merged. The remaining steps are tracked in #17045.
+- **Status**: accepted in #15343. The headless (PR 1, #15369), ACP (PR 2, #15509–#16190), Ink TUI (PR 3, #16206–#16704) and OpenTUI (PR 4, #16743–#16820) migrations are merged; each surface's default flip waits on the nightly unified-loop E2E gate (#16192). PR 5 (AgentCore) is in progress: 5a (#16880) and 5b (#17035) are merged. The remaining steps are tracked in #17045. PR 6a (speculation's model round, #17029) is in review.
 - **Date**: 2026-10-23, against upstream `779a4d5d0d`.
 - **Related**:
   - tracking issue #15327;
@@ -534,6 +534,21 @@ What moves:
 
 The headless suite runs each subagent scenario a third time with both settings on and compares it with the run on the shared loop; the debug log marks each subagent round on the kernel. The unit tests of the agent's tool step and run cover the current loop, the shared loop and the kernel.
 
+### Speculation on the shared loop (PR 6)
+
+Speculation's `runSpeculativeLoop` in `speculation.ts` runs the accepted suggestion ahead of the user on a forked `LlmChat` with copy-on-write file isolation. It sends each round on the chat and parses the stream's chunks itself, then runs the round's calls through its own tool gate (boundary/redirect) and executes them directly, without the scheduler. PR 6a moves only the model round: with the setting on, `runSpeculationModelRound` sends it on `runModelRound` over `turnModelRound(chat, model, { throwErrors: true })` and rebuilds the visible-text and function-call parts from the round's events; the tool gate, the direct execution, the overlay writes and the boundary handling are unchanged. `throwErrors` keeps a failed request rejecting so `startSpeculation` sets `aborted` and cleans the overlay, as the raw-chunk path does.
+
+| Speculation today                                                     | With the setting on                                                                                    |
+| --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| it parses each chunk's parts, keeping visible text and function calls | the round's `Content` and `ToolCallRequest` events become those parts                                  |
+| a retry or fallback keeps the abandoned attempt's text and calls      | a fresh retry or fallback drops them; a continuation retry keeps the text it appends to                |
+| a text part per streamed text part                                    | one text part per chunk, as the `Turn` reports it                                                      |
+| an id-less function call keeps no id                                  | the call gains the `Turn`'s generated id (not reachable on the OpenAI wire, which already assigns ids) |
+| a name-less function call is dropped                                  | dropped too: the guard reads the raw name, not the `Turn`'s `undefined_tool_name` placeholder          |
+| the request carries no abort signal; cancelling returns the iterator  | the request carries the abort signal, so a cancel also aborts the in-flight request                    |
+
+The unit suite in `speculation.test.ts` runs a text-only round, a single call, a two-call batch and a thought part with the setting off and on and compares the resulting history, tool execution and status; a branch marker pins that the shared round runs only with the setting on. Event-seam tests cover a fresh retry, an un-flagged retry, a continuation retry, a model fallback, a failed request (aborted and the overlay cleaned on both paths), a name-less call, an id-less call, a two-text-part chunk, and the request bodies (the suggestion, then the tool results), the prompt id and the abort signal. Speculation has no entry in the integration parity suite yet; that run is added when its default flip is prepared.
+
 ## Migration
 
 | PR    | Content                                                                                                                                             |
@@ -564,10 +579,11 @@ The headless suite runs each subagent scenario a third time with both settings o
 | 5b    | AgentCore: a round's calls as one shared batch, with its deferred approvals                                                                         |
 | 5c    | AgentCore: each round and its batch in one `runAgentLoop` call, on the event-bus kernel when it is on                                               |
 | 5d    | AgentCore: default on, then remove its current loop                                                                                                 |
-| 6     | speculation                                                                                                                                         |
+| 6a    | speculation: every model round on the loop's round, on a `Turn` over the forked chat; speculation keeps its tool gate and direct execution          |
+| 6b    | speculation: default on, then remove its current round                                                                                              |
 | —     | Hosted Harness: separate evaluation                                                                                                                 |
 
-PR 6 is followed by its own default-on and removal steps.
+PR 6b is speculation's default-on and removal step.
 
 A surface counts as moved when it passes its parity suite with the setting on and its known differences are listed. Each surface then changes its default on its own, without waiting for the others. Its default changes when:
 
@@ -726,6 +742,12 @@ The suites run in the integration job, the TUI suite on Ink; the OpenTUI interac
   - from PR 5a, a model fallback drops what the failed model streamed, its calls, text and thought text, so the round's answer carries only the fallback model's output, as on the other surfaces ([#15327](https://github.com/QwenLM/qwen-code/issues/15327)).
   - from PR 5a, a streamed text event carries a chunk's thought text or its visible text ([#15327](https://github.com/QwenLM/qwen-code/issues/15327)).
   - from PR 5b, within a reasoning run the batch tracks calls the agent may not run separately from executable calls, including when they share a provider ID. The first exact replay gets a duplicate response and a further replay stops the batch. Replay events come before refusals in the batch ([#15327](https://github.com/QwenLM/qwen-code/issues/15327)).
+
+- With the setting on, speculation differs from today in these intended ways:
+  - from PR 6a, a fresh retry or a model fallback drops the abandoned attempt's text and calls, so the round carries only the new attempt's output; a continuation retry keeps the text it appends to, as today ([#15327](https://github.com/QwenLM/qwen-code/issues/15327));
+  - from PR 6a, a round's visible text arrives as one part per chunk instead of one part per streamed text part ([#15327](https://github.com/QwenLM/qwen-code/issues/15327));
+  - from PR 6a, an id-less function call gains the `Turn`'s generated id on the call and its response (not reachable on the OpenAI wire, which already assigns ids) ([#15327](https://github.com/QwenLM/qwen-code/issues/15327));
+  - from PR 6a, the model request carries the abort signal, so a cancel aborts the in-flight request as well as returning the iterator ([#15327](https://github.com/QwenLM/qwen-code/issues/15327)).
 
 - Later surfaces bring their own fixes: #15324 (ACP), #15326 (OpenTUI), #14114 and #12209 (ACP).
 
