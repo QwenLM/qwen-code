@@ -172,7 +172,7 @@ permanently** and every consumer must tolerate both.
 
 **The detached convention is `branch: ''` (empty string), not `undefined`.**
 Verified hard constraint: the sidecar validator
-(`worktreeSessionService.ts:100-118`) requires `typeof worktreeBranch ===
+(`worktreeSessionService.ts`) requires `typeof worktreeBranch ===
 'string'`; an `undefined` branch makes the sidecar corrupt, and
 `restoreWorktreeContext` deletes corrupt sidecars — the whole restore chain
 would break. `''` passes validation, keeps the SDK's
@@ -221,11 +221,15 @@ and refuses while a prompt is active — under the worktree-keyed ownership
 lock, with the same superseded-sidecar and marker-ownership guards as D5
 (applied to the worktree being left). Both directions additionally refuse
 a busy session up front (`cd_while_prompt_active`, the same gate as
-worktree-reset): the snapshot/branch/checkout steps do not run on the
-bridge's prompt queue, so an in-flight turn could otherwise write files
-after the copy and leave its last edits behind. The worktree-branch route
-carries the same gate (`branch_while_prompt_active`). Capability:
-`session_worktree_handoff_v1`.
+worktree-reset) and arm the bridge's reset-pending admission barrier for
+the whole transfer: the snapshot/branch/checkout steps do not run on the
+bridge's prompt queue, and the queue-tail check only runs after the queue
+drains, so a prompt admitted mid-handoff would otherwise write files after
+the copy and lose its last edits. While the barrier is armed, sendPrompt,
+cd, workflow actions and goal control fail closed (`worktree_reset_active`,
+retryable); the barrier is cleared in the route's finally. The
+worktree-branch route carries the busy gate (`branch_while_prompt_active`).
+Capability: `session_worktree_handoff_v1`.
 
 - **Worktree → Local** (`to: 'local'`): refuse unless the local checkout
   (`sidecar.originalCwd`) is clean (`local_checkout_dirty`). Carry the work
@@ -261,11 +265,7 @@ create` snapshot applied in the local checkout after the checkout. Then
 
 v1 limitations (documented, not silent): the local-clean requirement stands
 in for "no other active session owns the local checkout" (the bridge has no
-session-list probe to check occupancy); the busy gate is a check before the
-git mutations, not a queue hold — a prompt that starts after the check can
-still overlap the copy (the bridge exposes no serialized-operation seam;
-`changeSessionCwd` re-checks at the queue tail and refuses, leaving the
-same recoverable partial shape as a crash); and the handoff does not
+session-list probe to check occupancy); the handoff does not
 implement `worktree-reset`'s crash-window atomic rollback — a crash
 mid-handoff leaves a recoverable shape (the sidecar/marker still name the
 session, and the worktree manager shows the checkout), not a self-healing
@@ -316,8 +316,8 @@ deletes oldest-first beyond `worktree.maxRetained`, snapshotting each.
   `carryDirtyState` option to `createUserWorktree` (D3). No baseline commit
   on the session path.
 - Routes: both session worktree creation sites pass the option —
-  `POST /session` (`session.ts:3388`) and the branch-worktree preparation
-  route (`session.ts:5172`).
+  `POST /session` (`session.ts`) and the branch-worktree preparation
+  route (`session.ts`).
 - Tests: `gitWorktreeService.dirty-carry.integ.test.ts` (real git fixture,
   symlinks-integ pattern) — three dirty shapes carried, source checkout and
   index untouched, HEAD stays at base, option off = today, dangling-symlink
@@ -364,52 +364,54 @@ deletes oldest-first beyond `worktree.maxRetained`, snapshotting each.
 
 **Consumer inventory** (codebase census 2026-11-14, load-bearing claims
 re-verified against the source; each entry must be migrated or explicitly
-tolerated in P3). Convention: detached session worktrees carry `branch: ''`;
-named-branch worktrees (tools, agents, startup) are unchanged.
+tolerated in P3). Sites are identified by symbol, not line number — line
+references drift with every merge. Convention: detached session worktrees
+carry `branch: ''`; named-branch worktrees (tools, agents, startup) are
+unchanged.
 
 A. Creation and metadata producers
 
-| Site                                                                                                                              | Today                                                                       | P3 migration                                                                       |
-| --------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `core/services/gitWorktreeService.ts:2487-2543` `createUserWorktree`                                                              | `-b worktree-<slug>`; same-name branch refusal; `WorktreeInfo.branch`       | Opt-in detached mode (`--detach`); branch refusal only in named mode; `branch: ''` |
-| `cli/serve/routes/session.ts:3388-3400` POST /session                                                                             | Passes `worktree.branch` through                                            | Requests detached mode; `worktreeMeta.branch = ''`                                 |
-| `cli/serve/routes/session.ts:5166-5215` branch-worktree route                                                                     | Journal `worktreeBranch = worktreeBranchForSlug(slug)`; sidecar from result | Journal + sidecar carry the `''` convention                                        |
-| `cli/startup/worktreeStartup.ts:342,528`                                                                                          | Named creation (kept)                                                       | Sidecar write tolerates `''` when reattaching a detached checkout                  |
-| `core/tools/enter-worktree.ts:164,200-229`; `core/tools/agent/agent.ts:3569`; `core/agents/runtime/workflow-orchestrator.ts:1819` | Named creation (kept)                                                       | No creation change; user/model-facing text must not claim a branch when `''`       |
+| Site                                                                                                        | Today                                                                       | P3 migration                                                                       |
+| ----------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `gitWorktreeService.ts` `createUserWorktree`                                                                | `-b worktree-<slug>`; same-name branch refusal; `WorktreeInfo.branch`       | Opt-in detached mode (`--detach`); branch refusal only in named mode; `branch: ''` |
+| `cli/serve/routes/session.ts` POST /session                                                                 | Passes `worktree.branch` through                                            | Requests detached mode; `worktreeMeta.branch = ''`                                 |
+| `cli/serve/routes/session.ts` branch-worktree route (POST /session `{branch:{worktree}}`)                   | Journal `worktreeBranch = worktreeBranchForSlug(slug)`; sidecar from result | Journal + sidecar carry the `''` convention                                        |
+| `cli/startup/worktreeStartup.ts` named creation                                                             | Named creation (kept)                                                       | No detached creation here; startup worktrees stay named                            |
+| `core/tools/enter-worktree.ts`; `core/tools/agent/agent.ts`; `core/agents/runtime/workflow-orchestrator.ts` | Named creation (kept)                                                       | No creation change; user/model-facing text must not claim a branch when `''`       |
 
 B. Lifecycle gates (highest risk — fail-closed leaks if missed)
 
-| Site                                                                           | Today                                                                 | P3 migration                                                                                                                                  |
-| ------------------------------------------------------------------------------ | --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `gitWorktreeService.ts:3122-3131` `checkoutMatches`                            | `HEAD == base && branch == worktree-<slug>`                           | `HEAD == base`; branch equality only in named mode                                                                                            |
-| `gitWorktreeService.ts:3193-3207` tip checks (×2)                              | `for-each-ref refs/heads/worktree-<slug>` tip `== base`               | Detached: covered by HEAD equality; named: unchanged                                                                                          |
-| `gitWorktreeService.ts:3262-3287` `finalizePreparedUserWorktreeBranch`         | Tip null → no-op; else `branch -d`                                    | Already tolerant (no branch → no-op); keep                                                                                                    |
-| `gitWorktreeService.ts:2990-3047` `removeUserWorktree`                         | `-d`/`-D worktree-<slug>`; `branchPreserved`                          | Detached: skip branch deletion, `branchPreserved: false` (no branch to keep); named: unchanged                                                |
-| `gitWorktreeService.ts:3296-3330` `hasUnmergedWorktreeCommits`                 | `rev-parse worktree-<slug>`, fail-closed `true` on error              | Detached: judge by HEAD reachability — exemplar `cli/serve/routes/workspace-git-worktrees.ts:714-725` (`commitIsReachable`); named: unchanged |
-| `cli/serve/server/worktree-orphan-cleanup.ts:427-469` `executeWorktreeCleanup` | `worktreeHasWork` gate + `removeUserWorktree` + `branchPreserved` log | Gate unchanged in P3 (dirty work preserved, see D3); log tolerates no-branch; P6 snapshot lifts the gate                                      |
-| `cli/serve/branch-worktree-preparation.ts:436` journal identity                | `worktreeBranch === worktreeBranchForSlug(slug)`                      | Accept the `''` detached convention alongside the named form                                                                                  |
-| `cli/startup/worktreeStartup.ts:250-282` reattach                              | Expected branch; null → "Worktree already exists"                     | `getRegisteredWorktreeBranch` reports detached as `{branch: '', headCommit}` (identity validation kept); reattach accepts `''`                |
+| Site                                                                     | Today                                                                 | P3 migration                                                                                                                                                                                                                    |
+| ------------------------------------------------------------------------ | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `gitWorktreeService.ts` `removePreparedUserWorktree` `checkoutMatches`   | `HEAD == base && branch == worktree-<slug>`                           | `HEAD == base`; branch equality only in named mode                                                                                                                                                                              |
+| `gitWorktreeService.ts` `removePreparedUserWorktree` `atBase` tip checks | `for-each-ref refs/heads/worktree-<slug>` tip `== base`               | Detached: covered by HEAD equality; named: unchanged                                                                                                                                                                            |
+| `gitWorktreeService.ts` `finalizePreparedUserWorktreeBranch`             | Tip null → no-op; else `branch -d`                                    | Already tolerant (no branch → no-op); ownership-safe because `worktree add -b` refused a pre-existing branch; keep                                                                                                              |
+| `gitWorktreeService.ts` `removeUserWorktree`                             | `-d`/`-D worktree-<slug>`; `branchPreserved`                          | Detached: refuse removal when HEAD carries unmerged commits (force opts out); never delete the slug-derived branch (never owned); named: unchanged                                                                              |
+| `gitWorktreeService.ts` `hasUnmergedWorktreeCommits`                     | `rev-parse worktree-<slug>`, fail-closed `true` on error              | Detached: judge by HEAD reachability — exemplar `cli/serve/routes/workspace-git-worktrees.ts` (`commitIsReachable`); named: unchanged                                                                                           |
+| `cli/serve/server/worktree-orphan-cleanup.ts` `executeWorktreeCleanup`   | `worktreeHasWork` gate + `removeUserWorktree` + `branchPreserved` log | Gate unchanged in P3 (dirty work preserved, see D3); a refused detached removal re-observes the filesystem and logs the preserve; P6 snapshot lifts the gate                                                                    |
+| `cli/serve/branch-worktree-preparation.ts` journal identity              | `worktreeBranch === worktreeBranchForSlug(slug)`                      | Accept the `''` detached convention alongside the named form                                                                                                                                                                    |
+| `cli/startup/worktreeStartup.ts` `setupStartupWorktree` reattach gate    | Expected branch; null → "Worktree already exists"                     | `getRegisteredWorktreeBranch` reports detached as `{branch: '', headCommit}`; the gate keeps refusing any occupant not on `worktree-<slug>`, including detached — session re-attach goes through session-restore, not this flag |
 
 C. Sidecar, restore, and display
 
-| Site                                                                                                                                                  | Today                                            | P3 migration                                       |
-| ----------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ | -------------------------------------------------- |
-| `core/services/worktreeSessionService.ts:100-118` validator                                                                                           | `worktreeBranch: string` required                | No shape change; `''` convention documented        |
-| `worktreeSessionService.ts:913` restore context message                                                                                               | `"(branch: …)"` injected into the model prompt   | Omit the fragment when `''` (or say detached HEAD) |
-| `cli/serve/server/session-restore.ts:243,401`; `session-list.ts:501`                                                                                  | Pass-through to `setSessionWorktree` / responses | Tolerate `''`                                      |
-| `cli/serve/routes/session.ts:4500,4550,4663` worktree-reset                                                                                           | Reads sidecar branch                             | Tolerate `''`                                      |
-| `cli/nonInteractiveCli.ts:1668`; `cli/ui/AppContainer.tsx:1124`; `cli/ui/opentui/opentui-app-shell.tsx:1097`; `cli/ui/hooks/useWorktreeSession.ts:53` | Branch display                                   | Show slug / detached indicator when `''`           |
+| Site                                                                                                                                          | Today                                            | P3 migration                                       |
+| --------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ | -------------------------------------------------- |
+| `core/services/worktreeSessionService.ts` validator                                                                                           | `worktreeBranch: string` required                | No shape change; `''` convention documented        |
+| `worktreeSessionService.ts` restore context message                                                                                           | `"(branch: …)"` injected into the model prompt   | Omit the fragment when `''` (or say detached HEAD) |
+| `cli/serve/server/session-restore.ts`; `session-list.ts`                                                                                      | Pass-through to `setSessionWorktree` / responses | Tolerate `''`                                      |
+| `cli/serve/routes/session.ts` worktree-reset                                                                                                  | Reads sidecar branch                             | Tolerate `''`                                      |
+| `cli/nonInteractiveCli.ts`; `cli/ui/AppContainer.tsx:1124`; `cli/ui/opentui/opentui-app-shell.tsx:1097`; `cli/ui/hooks/useWorktreeSession.ts` | Branch display                                   | Show slug / detached indicator when `''`           |
 
 D. Verified tolerant (no change needed)
 
-- `core/agents/worktree-pin.ts:127-131` — already detached-friendly (exemplar).
-- `cli/serve/routes/session-pr-backfill.ts:81-97,576` — slug-first PR parsing;
+- `core/agents/worktree-pin.ts` — already detached-friendly (exemplar).
+- `cli/serve/routes/session-pr-backfill.ts` — slug-first PR parsing;
   loses only the renamed-branch fallback.
-- `sdk-typescript DaemonSessionClient.ts:898-928` — durable identity compares
+- `sdk-typescript DaemonSessionClient.ts` — durable identity compares
   `worktree.path` only.
 - `acp-bridge/session-control-plane.ts` — pure pass-through, no git semantics.
-- `workspace-git-worktrees.ts:714-725` — already detached-aware.
-- `branch-worktree-preparation.ts:709` `resolveBranchWorktreeBaseCheckout` —
+- `workspace-git-worktrees.ts` — already detached-aware.
+- `branch-worktree-preparation.ts` `resolveBranchWorktreeBaseCheckout` —
   `getCurrentBranch().catch(() => 'HEAD')` already tolerates a detached base.
 - The 30-day agent sweep (`core/services/worktreeCleanup.ts`) only matches
   `agent-<7hex>` slugs, which POST /session rejects — session worktrees are
@@ -417,20 +419,20 @@ D. Verified tolerant (no change needed)
 
 E. Tests pinning the branch contract (update in P3)
 
-- `core/tools/enter-worktree.test.ts:108-115` (prefix contract)
-- `core/tools/exit-worktree.test.ts:258,299,310,423,458`
-- `core/services/git-worktree-marker.test.ts:431`
+- `core/tools/enter-worktree.test.ts` (prefix contract)
+- `core/tools/exit-worktree.test.ts`
+- `core/services/git-worktree-marker.test.ts`
 - `cli/serve/branch-worktree-preparation.test.ts`
 
 Hardcoded `.qwen/worktrees` root sites (migrate in P7, listed for reference):
-`gitWorktreeService.ts:1936-1945,3069-3075`; `core/config.ts:5006`;
-`worktreeSessionService.ts:647,832`; `core/utils/workspace-artifact-directory.ts:58`;
-`core/utils/workspace-artifact-path.ts:12,30`; `core/tools/enter-worktree.ts:84`;
-`core/tools/exit-worktree.ts:546-551`; `session.ts:3653,3665,5263,4173`;
-`branch-worktree-preparation.ts:434,696,735-745`;
-`workspace-route-runtime.ts:698`; `worktree-orphan-cleanup.ts:198,202`;
-`session-restore.ts:192,327`. The daemon shell guard
-(`daemon-git-worktree-guard.ts:3288-3331`) needs no root exemption today
+`gitWorktreeService.ts`; `core/config.ts`;
+`worktreeSessionService.ts`; `core/utils/workspace-artifact-directory.ts`;
+`core/utils/workspace-artifact-path.ts`; `core/tools/enter-worktree.ts`;
+`core/tools/exit-worktree.ts`; `session.ts`;
+`branch-worktree-preparation.ts`;
+`workspace-route-runtime.ts`; `worktree-orphan-cleanup.ts`;
+`session-restore.ts`. The daemon shell guard
+(`daemon-git-worktree-guard.ts`) needs no root exemption today
 because `.qwen/worktrees` sits inside the session root; P7 must re-derive
 that property for a custom root.
 

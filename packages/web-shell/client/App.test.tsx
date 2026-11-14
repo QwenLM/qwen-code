@@ -25484,6 +25484,66 @@ describe('App session callbacks', () => {
     expect(request.branch).toBeUndefined();
   });
 
+  it('defaults a detached-HEAD workspace to worktree mode', async () => {
+    mockConnection.sessionId = undefined;
+    testState.settings = [worktreeDefaultSetting(true)];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: null, detached: true }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+        mode: 'worktree',
+      });
+    });
+  });
+
+  it('re-arms the worktree default on New chat from an empty draft', async () => {
+    mockConnection.sessionId = undefined;
+    testState.settings = [worktreeDefaultSetting(true)];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    const { container } = renderApp();
+    await flush();
+    await flush();
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+        mode: 'worktree',
+      });
+    });
+
+    // "New chat" with sessionId and workspace unchanged produces no
+    // rising edge on the eligibility deps; the default must survive.
+    const newSessionButton = container.querySelector<HTMLButtonElement>(
+      '[data-testid="new-session"]',
+    )!;
+    await act(async () => {
+      newSessionButton.click();
+      await Promise.resolve();
+    });
+    await flush();
+    await flush();
+    expect(testState.latestChatEditorProps?.gitModeIntent).toEqual({
+      mode: 'worktree',
+    });
+  });
+
   it('keeps the current-branch default when the setting is off', async () => {
     mockConnection.sessionId = undefined;
     testState.settings = [worktreeDefaultSetting(false)];

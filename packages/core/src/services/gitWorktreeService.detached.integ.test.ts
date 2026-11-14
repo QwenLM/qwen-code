@@ -288,6 +288,26 @@ describe('GitWorktreeService — detached managed worktrees', () => {
     );
   });
 
+  it('prepared finalize with branchOwned=false keeps a same-slug branch at base', async () => {
+    git(repoRoot, 'branch', 'worktree-sess-fin');
+    const base = git(repoRoot, 'rev-parse', 'HEAD');
+    const created = await service.createUserWorktree('sess-fin', 'main', {
+      detached: true,
+    });
+    expect(created.success).toBe(true);
+    const removed = await service.removePreparedUserWorktree(
+      'sess-fin',
+      null,
+      base,
+      undefined,
+      false,
+    );
+    expect(removed.success).toBe(true);
+    expect(git(repoRoot, 'branch', '--list', 'worktree-sess-fin')).toBe(
+      'worktree-sess-fin',
+    );
+  });
+
   it('removeUserWorktree keeps an unrelated worktree-<slug> branch with its own commits', async () => {
     git(repoRoot, 'branch', 'worktree-sess-diverged');
     git(repoRoot, 'checkout', '-q', 'worktree-sess-diverged');

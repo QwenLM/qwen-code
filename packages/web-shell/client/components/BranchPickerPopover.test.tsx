@@ -650,6 +650,8 @@ describe('BranchPickerPopover actions', () => {
     await flush();
 
     expect(onCreateWorktreeBranch).not.toHaveBeenCalled();
+    // The rejection must be visible, not a dead key.
+    expect(document.body.textContent).toContain('Invalid branch name');
   });
 
   it('hands off to local from a worktree session', async () => {

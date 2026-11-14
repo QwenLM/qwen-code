@@ -4744,6 +4744,10 @@ export function App({
   // the worktree default must not overwrite an explicit choice. Cleared at
   // draft boundaries (session created/opened, workspace switched).
   const gitModeIntentTouchedRef = useRef(false);
+  // Bumped on every fresh draft so the worktree-default effect re-arms even
+  // when sessionId and workspace stay unchanged ("New chat" from an empty
+  // draft produces no rising edge on the eligibility deps alone).
+  const [gitDraftGeneration, setGitDraftGeneration] = useState(0);
 
   useEffect(() => {
     if (
@@ -13670,7 +13674,11 @@ export function App({
   const gitModeEligible = Boolean(
     !connection.sessionId &&
       activeWorkspaceTrusted &&
-      selectedWorkspaceGitStatus?.branch,
+      // A detached-HEAD workspace (tag/SHA checkout) reports branch:null
+      // with detached:true; it is exactly the shared-checkout shape the
+      // worktree default exists to isolate.
+      (selectedWorkspaceGitStatus?.branch ||
+        selectedWorkspaceGitStatus?.detached),
   );
   const branchWorktreeEligible = Boolean(
     connection.sessionId &&
@@ -14867,7 +14875,7 @@ export function App({
       setGitModeIntent({ mode: 'worktree' });
     }
     gitModeDefaultConditionRef.current = condition;
-  }, [gitModeEligible, defaultWorktreeForNewSessions]);
+  }, [gitModeEligible, defaultWorktreeForNewSessions, gitDraftGeneration]);
   const liveSetup = useLiveVoiceSetup(
     workspaceSettings.some(
       (setting) => setting.key === 'experimental.liveVoice.enabled',
@@ -16790,6 +16798,14 @@ export function App({
           : { mode: 'current' };
       gitModeIntentRef.current = nextGitIntent;
       setGitModeIntent(nextGitIntent);
+      // A fresh draft is a new explicit-choice boundary: re-arm the
+      // worktree default. Without the generation bump the rising-edge
+      // effect never re-fires when "New chat" leaves sessionId and
+      // workspace unchanged, silently dropping the enabled default. A
+      // caller-supplied intent counts as an explicit choice and wins.
+      gitModeIntentTouchedRef.current = opts?.gitIntent !== undefined;
+      gitModeDefaultConditionRef.current = false;
+      setGitDraftGeneration((generation) => generation + 1);
       // Close the drawer before awaiting so a failed createSession() doesn't leave
       // it stuck open with the page scroll still locked, matching loadSidebarSession.
       closeMobileDrawer();

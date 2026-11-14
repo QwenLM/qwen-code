@@ -809,8 +809,16 @@ export function BranchPickerPopover({
   }, [checkoutRefValue, handleCheckout]);
 
   const handleCreateWorktreeBranch = useCallback(async () => {
+    if (busyAction) return;
     const name = createBranchValue.trim();
-    if (!name || !validateBranchName(name) || busyAction) return;
+    if (!name) return;
+    if (!validateBranchName(name)) {
+      // An invalid-but-typed name must explain the rejection; a silent
+      // return makes Enter look like a dead key.
+      showStatus(t('branchPicker.invalidBranchName'), 'error');
+      return;
+    }
+    clearPullPanel();
     setBusyAction('createWorktreeBranch');
     try {
       await onCreateWorktreeBranch?.(name);
@@ -830,10 +838,13 @@ export function BranchPickerPopover({
     onOpenChange,
     onBranchChanged,
     showStatus,
+    clearPullPanel,
+    t,
   ]);
 
   const handleHandoff = useCallback(async () => {
     if (busyAction || !onHandoff) return;
+    clearPullPanel();
     setBusyAction('handoff');
     try {
       await onHandoff(gitCwd ? 'local' : 'worktree');
@@ -851,6 +862,7 @@ export function BranchPickerPopover({
     onOpenChange,
     onBranchChanged,
     showStatus,
+    clearPullPanel,
   ]);
 
   const handlePush = useCallback(async () => {
@@ -1803,7 +1815,14 @@ export function BranchPickerPopover({
                             {createBranchMode && (
                               <div className={styles.inlineInput}>
                                 <input
-                                  className={styles.inlineInputField}
+                                  className={`${styles.inlineInputField} ${
+                                    createBranchValue.trim() &&
+                                    !validateBranchName(
+                                      createBranchValue.trim(),
+                                    )
+                                      ? styles.inlineInputFieldInvalid
+                                      : ''
+                                  }`}
                                   placeholder={t(
                                     'branchPicker.createBranchPlaceholder',
                                   )}
@@ -1845,6 +1864,7 @@ export function BranchPickerPopover({
                           </button>
                           {!gitCwd && (
                             <ActionHintLabel
+                              block
                               hint={{
                                 text: t('branchPicker.moveToWorktreeHint'),
                                 tone: 'info',
@@ -2079,11 +2099,17 @@ export function BranchPickerPopover({
   );
 }
 
-function ActionHintLabel({ hint }: { hint?: ActionHint }) {
+function ActionHintLabel({
+  hint,
+  block,
+}: {
+  hint?: ActionHint;
+  block?: boolean;
+}) {
   if (!hint) return null;
   return (
     <span
-      className={styles.actionHint}
+      className={block ? styles.actionHintBlock : styles.actionHint}
       data-tone={hint.tone}
       data-testid="branch-picker-action-hint"
     >

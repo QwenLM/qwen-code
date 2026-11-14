@@ -494,6 +494,7 @@ export function recoverBranchWorktreePreparations(args: {
           await worktreeService.finalizePreparedUserWorktreeBranch(
             journal.slug,
             journal.baseCommit,
+            journal.worktreeBranch !== '',
           );
         if (!finalized.success) {
           args.warn?.('branch worktree recovery could not finalize branch', {
@@ -567,6 +568,7 @@ export function recoverBranchWorktreePreparations(args: {
             );
             args.assertGenerationOpen?.();
           },
+          journal.worktreeBranch !== '',
         );
         if (!removed.success) {
           args.warn?.('branch worktree recovery refused cleanup', {
@@ -600,6 +602,7 @@ export function recoverBranchWorktreePreparations(args: {
           await worktreeService.finalizePreparedUserWorktreeBranch(
             journal.slug,
             journal.baseCommit,
+            journal.worktreeBranch !== '',
           );
         if (!finalized.success) {
           args.warn?.('branch worktree recovery could not finalize branch', {

@@ -4997,7 +4997,9 @@ export function registerSessionRoutes(
     const name = body['name'];
     if (
       name !== undefined &&
-      (typeof name !== 'string' || !isValidGitBranchName(name))
+      (typeof name !== 'string' ||
+        name.length === 0 ||
+        !isValidGitBranchName(name))
     ) {
       res.status(400).json({
         error: '`name` must be a valid git branch name',
@@ -5084,6 +5086,23 @@ export function registerSessionRoutes(
               ) {
                 throw new WorktreeResetInvalidStateError(storageSessionId);
               }
+              // Fence prompt admission for the whole transfer. The busy
+              // gate below only sees prompts already active; a prompt
+              // admitted mid-handoff would write files after the snapshot
+              // and lose its last edits (the queue-tail check runs after
+              // the queue drains, so it cannot catch that interleaving).
+              // The reset-pending barrier is the bridge's existing
+              // admission fence: sendPrompt, cd, workflow actions and goal
+              // control all fail closed on it while it is armed.
+              if (
+                runtime.bridge.setSessionResetPending === undefined ||
+                runtime.bridge.clearSessionResetPending === undefined
+              ) {
+                throw new Error(
+                  'Bridge does not support handoff serialization',
+                );
+              }
+              runtime.bridge.setSessionResetPending(storageSessionId);
               let localCwd: string;
               try {
                 localCwd = fs.realpathSync(sidecar.originalCwd);
@@ -5112,15 +5131,31 @@ export function registerSessionRoutes(
                 throw new CdWhilePromptActiveError(storageSessionId);
               }
               const wtService = new GitWorktreeService(workspaceCwd);
+              const wtCheckoutService = new GitWorktreeService(realTarget);
+              const base = sidecar.originalHeadCommit;
+              // A clean-but-moved-ahead local checkout would conflict the
+              // stash apply (a diff against the old base) and leave the
+              // user's checkout with conflict markers. Refuse up front.
+              if (base) {
+                const localHead = await getHeadCommit(localCwd);
+                if (!localHead || localHead !== base) {
+                  res.status(409).json({
+                    error:
+                      'Local checkout HEAD moved past the recorded handoff base',
+                    code: 'local_head_moved',
+                    sessionId: storageSessionId,
+                  });
+                  return;
+                }
+              }
               // Carry the work before moving the session: branch checkout
-              // first, then the tracked dirty snapshot. Untracked files stay
-              // in the worktree, which is left behind (nothing is lost).
+              // first, then the tracked dirty snapshot, then the untracked
+              // overlay (stash create excludes untracked files).
               const snapshot = await wtService.createStashSnapshot(realTarget);
               let branch = sidecar.worktreeBranch;
               const info =
                 await wtService.getRegisteredWorktreeBranch(realTarget);
               const head = info?.headCommit ?? '';
-              const base = sidecar.originalHeadCommit;
               // Fail closed when the worktree HEAD or its recorded base
               // cannot be verified: skipping the promotion would report
               // success while the agent's commits stay in the worktree.
@@ -5133,8 +5168,55 @@ export function registerSessionRoutes(
                 });
                 return;
               }
+              // Everything below mutates the local checkout, the worktree,
+              // or the sidecar; a late failure (checkout hook, stash
+              // conflict, busy-turn refusal at the queue tail) must restore
+              // the pre-handoff shape so a retry is not stranded.
+              let autoBranch: string | null = null;
+              let localOriginalBranch: string | null = null;
+              let copiedUntracked: string[] = [];
+              const rollback = async () => {
+                if (copiedUntracked.length > 0) {
+                  const localTop =
+                    (await localService.getRepoTopLevel().catch(() => null)) ??
+                    localCwd;
+                  for (const rel of copiedUntracked) {
+                    try {
+                      fs.rmSync(path.join(localTop, rel), { force: true });
+                    } catch {
+                      // Best-effort: the file may already be gone.
+                    }
+                  }
+                }
+                if (localOriginalBranch !== null) {
+                  await localService
+                    .forceCheckoutBranch(localCwd, localOriginalBranch)
+                    .catch(() => undefined);
+                }
+                if (autoBranch !== null) {
+                  await wtService
+                    .deleteLocalBranch(autoBranch)
+                    .catch(() => undefined);
+                  await writeWorktreeSession(sidecarPath, {
+                    ...sidecar,
+                    worktreeBranch: '',
+                  }).catch(() => undefined);
+                }
+              };
+              // Capture the local ref before ANY mutation (the stash apply
+              // and untracked carry run even when no branch is promoted),
+              // so a late failure can restore the pre-handoff shape. A
+              // detached local checkout rolls back to its commit, not to
+              // 'HEAD' (which would stay at the promoted tip).
+              const origBranch = await localService
+                .getCurrentBranch()
+                .catch(() => null);
+              localOriginalBranch =
+                origBranch === 'HEAD'
+                  ? ((await getHeadCommit(localCwd)) ?? null)
+                  : origBranch;
               if (!branch && head !== base) {
-                branch = name ?? worktreeBranchForSlug(sidecar.slug);
+                branch = name || worktreeBranchForSlug(sidecar.slug);
                 // Same typed refusal as the explicit-name path: an occupied
                 // auto name must not degrade into a generic bridge error.
                 if (await wtService.localBranchExists(branch)) {
@@ -5146,6 +5228,14 @@ export function registerSessionRoutes(
                   return;
                 }
                 await wtService.createWorktreeBranch(realTarget, branch);
+                autoBranch = branch;
+                // Persist immediately: a later failure must not leave the
+                // branch unrecorded, or every retry re-derives the same
+                // name and hits branch_already_exists forever.
+                await writeWorktreeSession(sidecarPath, {
+                  ...sidecar,
+                  worktreeBranch: branch,
+                });
               }
               if (branch) {
                 try {
@@ -5156,6 +5246,7 @@ export function registerSessionRoutes(
                   await wtService.detachCheckout(realTarget);
                   await localService.checkoutBranchInCheckout(localCwd, branch);
                 } catch (error) {
+                  await rollback();
                   res.status(409).json({
                     error: `Cannot check out ${branch} in the local checkout`,
                     code: 'handoff_checkout_failed',
@@ -5166,31 +5257,43 @@ export function registerSessionRoutes(
                   return;
                 }
               }
-              if (snapshot) {
-                await localService.applyStashSnapshot(localCwd, snapshot);
-              }
-              assertRuntimeGenerationOpen?.();
-              const repoTop =
-                (await wtService.getRepoTopLevel().catch(() => null)) ??
-                realWorkspace;
-              const changed = await runtime.bridge.changeSessionCwd(
-                storageSessionId,
-                {
-                  path: localCwd,
-                  allowedRoots: [realWorkspace, fs.realpathSync(repoTop)],
-                },
-              );
-              if (changed.newCwd !== localCwd) {
-                throw new Error('Handoff relocation was rejected');
+              let relocatedCwd: string;
+              try {
+                if (snapshot) {
+                  await localService.applyStashSnapshot(localCwd, snapshot);
+                }
+                copiedUntracked =
+                  await wtCheckoutService.carryUntrackedFilesTo(localCwd);
+                assertRuntimeGenerationOpen?.();
+                const repoTop =
+                  (await wtService.getRepoTopLevel().catch(() => null)) ??
+                  realWorkspace;
+                const changed = await runtime.bridge.changeSessionCwd(
+                  storageSessionId,
+                  {
+                    path: localCwd,
+                    allowedRoots: [realWorkspace, fs.realpathSync(repoTop)],
+                    // This route owns the reset-pending barrier armed above.
+                    allowWhileResetPending: true,
+                  },
+                );
+                if (changed.newCwd !== localCwd) {
+                  throw new Error('Handoff relocation was rejected');
+                }
+                relocatedCwd = changed.newCwd;
+              } catch (error) {
+                await rollback();
+                throw error;
               }
               await clearWorktreeSessionDurable(sidecarPath);
               runtime.bridge.clearSessionWorktree?.(storageSessionId);
               res.status(200).json({
                 sessionId: storageSessionId,
                 worktree: null,
-                currentCwd: changed.newCwd,
+                currentCwd: relocatedCwd,
               });
             } finally {
+              runtime.bridge.clearSessionResetPending?.(storageSessionId);
               releaseOwnership();
             }
             return;
@@ -5223,6 +5326,15 @@ export function registerSessionRoutes(
             ) {
               throw new CdWhilePromptActiveError(storageSessionId);
             }
+            // Same admission fence as the to=local direction: no prompt
+            // may be admitted while the capture/creation/relocation runs.
+            if (
+              runtime.bridge.setSessionResetPending === undefined ||
+              runtime.bridge.clearSessionResetPending === undefined
+            ) {
+              throw new Error('Bridge does not support handoff serialization');
+            }
+            runtime.bridge.setSessionResetPending(storageSessionId);
             const sourceService = new GitWorktreeService(sourceCwd);
             const currentBranch = await sourceService
               .getCurrentBranch()
@@ -5241,10 +5353,20 @@ export function registerSessionRoutes(
               return;
             }
             const slug = GitWorktreeService.generateAutoSlug();
-            const created = await sourceService.createUserWorktree(
+            // Place the worktree under the workspace's managed root (the
+            // same root POST /session uses), not the session's effective
+            // cwd — a /cd into a subdirectory must not move the managed
+            // directory. Capture the dirty state from the session's own
+            // checkout, which may differ from the placement root.
+            const placementService = new GitWorktreeService(workspaceCwd);
+            const created = await placementService.createUserWorktree(
               slug,
               currentBranch,
-              { detached: true, carryDirtyState: true },
+              {
+                detached: true,
+                carryDirtyState: true,
+                dirtyStateSource: sourceCwd,
+              },
             );
             if (!created.success || !created.worktree) {
               res.status(500).json({
@@ -5264,7 +5386,11 @@ export function registerSessionRoutes(
                 slug,
                 worktreePath: worktree.path,
                 worktreeBranch: '',
-                originalCwd: sourceCwd,
+                // The ownership-checked routes accept originalCwd only at
+                // the workspace root or repo top; recording the session's
+                // effective cwd (a /cd may point into a subdirectory)
+                // would strand the session with 409s on every later route.
+                originalCwd: workspaceCwd,
                 workspaceCwd,
                 originalBranch: currentBranch ?? '',
                 originalHeadCommit: baseCommit,
@@ -5274,7 +5400,9 @@ export function registerSessionRoutes(
                 storageSessionId,
                 {
                   path: worktree.path,
-                  allowedRoots: [sourceService.getUserWorktreesDir()],
+                  allowedRoots: [placementService.getUserWorktreesDir()],
+                  // This route owns the reset-pending barrier armed above.
+                  allowWhileResetPending: true,
                 },
               );
               if (changed.newCwd !== worktree.path) {
@@ -5296,12 +5424,13 @@ export function registerSessionRoutes(
               await clearWorktreeSessionDurable(sidecarPath).catch(
                 () => undefined,
               );
-              await sourceService
+              await placementService
                 .removeUserWorktree(slug, { deleteBranch: true })
                 .catch(() => undefined);
               throw error;
             }
           } finally {
+            runtime.bridge.clearSessionResetPending?.(storageSessionId);
             releaseOwnership();
           }
         }),
@@ -5608,6 +5737,7 @@ export function registerSessionRoutes(
                       );
                       runtime.generationGuard?.assertOpen();
                     },
+                    journal!.worktreeBranch !== '',
                   );
                 if (!removed.success) {
                   daemonLog?.warn('branch worktree cleanup refused', {
@@ -5704,7 +5834,14 @@ export function registerSessionRoutes(
                 const worktreeResult = await worktreeService.createUserWorktree(
                   slug,
                   base.headCommit,
-                  { carryDirtyState: true, detached: true },
+                  {
+                    carryDirtyState: true,
+                    detached: true,
+                    // The worktree sits at the source checkout's HEAD,
+                    // which may differ from the main checkout's: capture
+                    // the session's own dirty state, not the main's.
+                    dirtyStateSource: base.checkoutCwd,
+                  },
                 );
                 if (!worktreeResult.success || !worktreeResult.worktree) {
                   await cleanupPrepared();

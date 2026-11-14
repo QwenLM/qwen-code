@@ -15758,11 +15758,13 @@ describe('createServeApp', () => {
         undefined,
         { bridge },
       );
+      // Mirror the real detached contract: createUserWorktree returns
+      // branch:'' when detached, never the slug-derived name.
       const mockCreate = vi.fn().mockResolvedValue({
         success: true,
         worktree: {
           path: worktreePath,
-          branch: 'worktree-my-task',
+          branch: '',
         },
       });
       mockWt.impl = () => ({
@@ -15786,7 +15788,7 @@ describe('createServeApp', () => {
         expect(res.body.worktree).toEqual({
           slug: 'my-task',
           path: worktreePath,
-          branch: 'worktree-my-task',
+          branch: '',
         });
         expect(res.body.worktreeState).toBe('persisted-v1');
         expect(bridge.calls[0]?.sessionScope).toBe('thread');
@@ -15809,7 +15811,7 @@ describe('createServeApp', () => {
           {
             slug: 'my-task',
             worktreePath,
-            worktreeBranch: 'worktree-my-task',
+            worktreeBranch: '',
             originalCwd: WS_BOUND,
             workspaceCwd: WS_BOUND,
             originalBranch: 'main',
