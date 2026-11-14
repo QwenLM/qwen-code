@@ -1648,6 +1648,27 @@ describe('PermissionManager', () => {
       });
       expect(await pm2.evaluate({ toolName: 'write_file' })).toBe('ask');
     });
+
+    it('identifies only matching path-scoped ask rules', () => {
+      const manager = makePm({
+        permissionsAsk: ['Read', 'Read(./secret/**)', 'Read(./other/**)'],
+      });
+      expect(
+        manager.hasPathScopedAskRule({
+          toolName: 'read_file',
+          filePath: '/project/secret/key.txt',
+        }),
+      ).toBe(true);
+      expect(
+        manager.hasPathScopedAskRule({
+          toolName: 'read_file',
+          filePath: '/project/public.txt',
+        }),
+      ).toBe(false);
+      expect(manager.hasPathScopedAskRule({ toolName: 'read_file' })).toBe(
+        false,
+      );
+    });
   });
 
   describe('command-level evaluation', () => {

@@ -9,6 +9,7 @@ import { ToolConfirmationOutcome } from '../tools/tools.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
   buildPermissionCheckContext,
+  isPathDeniedByReadRule,
   persistPermissionOutcome,
 } from './permission-helpers.js';
 
@@ -107,6 +108,42 @@ describe('buildPermissionCheckContext', () => {
       toolName: 'read_mcp_resource',
       specifier: 'asys-mcp',
     });
+  });
+});
+
+describe('isPathDeniedByReadRule', () => {
+  const manager = (decision: 'allow' | 'ask' | 'deny', invocationMatch = false) => ({
+    hasDenyOrAskRuleForTool: () => true,
+    hasRelevantRules: () => true,
+    evaluate: vi.fn(async () => decision),
+    hasPathScopedAskRule: () => invocationMatch,
+  });
+
+  it('keeps path-scoped asks visible when YOLO auto-approves them', async () => {
+    const pm = manager('ask', true);
+    await expect(
+      isPathDeniedByReadRule(
+        pm as never,
+        '/project/vendor/x.ts',
+        '/project',
+        'grep_search',
+        {},
+        true,
+      ),
+    ).resolves.toBe(false);
+  });
+
+  it('does not let an approved sibling path expose an outside result', async () => {
+    const pm = manager('ask', true);
+    await expect(
+      isPathDeniedByReadRule(
+        pm as never,
+        '/project/secrets/key.pem',
+        '/project',
+        'glob',
+        { path: './src/sub' },
+      ),
+    ).resolves.toBe(true);
   });
 });
 

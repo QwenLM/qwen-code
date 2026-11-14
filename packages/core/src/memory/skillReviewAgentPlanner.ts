@@ -55,6 +55,7 @@ type SkillScopedPermissionManager = Pick<
   | 'findMatchingDenyRule'
   | 'getToolRegistrationStatus'
   | 'hasPathScopedAskRule'
+  | 'hasDenyOrAskRuleForTool'
   | 'hasMatchingAskRule'
   | 'hasRelevantRules'
   | 'isToolDisabledByCoreToolsAllowList'
@@ -245,6 +246,9 @@ export function createSkillScopedAgentConfig(
     },
     hasPathScopedAskRule(ctx: PermissionCheckContext): boolean {
       return basePm?.hasPathScopedAskRule(ctx) ?? false;
+    },
+    hasDenyOrAskRuleForTool(toolName: string): boolean {
+      return basePm?.hasDenyOrAskRuleForTool(toolName) ?? false;
     },
     findMatchingDenyRule(ctx: PermissionCheckContext): string | undefined {
       const scoped = getScopedDenyRule(ctx, projectRoot);

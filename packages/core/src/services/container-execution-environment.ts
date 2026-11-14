@@ -157,7 +157,7 @@ export function workerContainerArguments(
     'node',
     options.image,
     '/opt/qwen-executor/execution-worker.js',
-    JSON.stringify(worker),
+    JSON.stringify({ ...worker, permissions: undefined }),
   );
   return args;
 }
@@ -334,6 +334,14 @@ class ContainerWorker {
       this.fail(new Error(`Container executor exited. ${this.stderr}`)),
     );
     child.stdin.on('error', (error) => this.fail(error));
+    child.stdin.write(
+      `${JSON.stringify({
+        initialize: {
+          permissions: worker.permissions,
+          approvalMode: worker.approvalMode,
+        },
+      })}\n`,
+    );
     const lines = createInterface({ input: child.stdout });
     lines.on('line', (line) => {
       try {
@@ -531,6 +539,7 @@ export class ContainerExecutionEnvironment implements ExecutionEnvironment {
     const workerOptions: ExecutionWorkerOptions = {
       workspace,
       sessionId: `executor-${randomUUID()}`,
+      approvalMode: config.getApprovalMode(),
       permissions: {
         allow: config.getPermissionsAllow?.() ?? [],
         ask: config.getPermissionsAsk?.() ?? [],

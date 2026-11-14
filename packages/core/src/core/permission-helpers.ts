@@ -131,6 +131,7 @@ export async function isPathDeniedByReadRule(
   targetDir: string,
   toolName = 'read_file',
   invocationParams?: Record<string, unknown>,
+  askAutoApproved = false,
 ): Promise<boolean> {
   if (!pm) return false;
 
@@ -147,6 +148,7 @@ export async function isPathDeniedByReadRule(
   const decision = await pm.evaluate(context);
   if (decision === 'deny') return true;
   if (decision !== 'ask') return false;
+  if (askAutoApproved) return false;
 
   // A bare tool-level ask rule already gated the search invocation. Only hide
   // a result for an ask decision that comes from a path-scoped rule. When the
@@ -163,9 +165,23 @@ export async function isPathDeniedByReadRule(
       invocationParams,
       targetDir,
     );
-    if (pm.hasPathScopedAskRule(invocationContext)) return false;
+    if (
+      pm.hasPathScopedAskRule(invocationContext) &&
+      invocationContext.filePath &&
+      isPathWithin(invocationContext.filePath, filePath)
+    ) {
+      return false;
+    }
   }
   return true;
+}
+
+function isPathWithin(root: string, candidate: string): boolean {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return (
+    relative === '' ||
+    (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative))
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

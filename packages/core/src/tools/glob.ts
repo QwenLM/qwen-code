@@ -309,6 +309,7 @@ class GlobToolInvocation extends BaseToolInvocation<
             this.config.getTargetDir(),
             ToolNames.GLOB,
             this.params as unknown as Record<string, unknown>,
+            this.config.getApprovalMode?.() === 'yolo',
           ))
         ) {
           filteredEntries.push(entry);
@@ -368,7 +369,7 @@ class GlobToolInvocation extends BaseToolInvocation<
 
       // Add truncation notice if needed
       if (hitCollectionLimit) {
-        resultMessage += `\n---\n[Results truncated after scanning ${allFilteredEntries.length} matching files. Results may be omitted by permission rules. Narrow the pattern or path.]`;
+        resultMessage += `\n---\n[Results truncated after scanning matching files.${permissionFilteringActive ? ' Results may be omitted by permission rules.' : ''} Narrow the pattern or path.]`;
       } else if (truncated) {
         const omittedFiles = totalFileCount - fileLimit;
         const fileTerm = omittedFiles === 1 ? 'file' : 'files';
