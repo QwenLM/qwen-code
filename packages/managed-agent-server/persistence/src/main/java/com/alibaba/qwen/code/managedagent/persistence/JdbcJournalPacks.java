@@ -39,10 +39,18 @@ import java.util.zip.GZIPOutputStream;
 public class JdbcJournalPacks {
     private static final Logger LOG = LoggerFactory.getLogger(JdbcJournalPacks.class);
     private static final byte[] MAGIC = {'Q', 'J', 'P', 'K'};
+    // A BUILDING row younger than this lease belongs to a live builder (possibly on another
+    // replica) and must not be reclaimed; only expired rows from crashed builds are reclaimable.
+    // Generous relative to a single pack build (compress + PUT + read-back), which is seconds to
+    // minutes. Publication's row-count assertions remain the correctness backstop regardless.
+    private static final long BUILDING_LEASE_MILLIS = 10L * 60L * 1000L;
     private final JdbcTemplate jdbc;
     private final ToolPublicationObjectStore objects;
     private final ManagedAgentSettings settings;
     private final JournalPackTransactions transactions;
+    // Replica-scoped identity stamped on BUILDING rows so a retry reclaims its own crashed build
+    // while a live build owned by another replica is never displaced.
+    private final String builderId = "builder-" + UUID.randomUUID();
 
     public JdbcJournalPacks(JdbcTemplate jdbc, ToolPublicationObjectStore objects,
             ManagedAgentSettings settings) {
@@ -79,6 +87,15 @@ public class JdbcJournalPacks {
                     "Journal compaction requires a configured object store.");
         }
         return objects;
+    }
+
+    /**
+     * Whether an object store is configured to supply evicted pack bytes. Read-only callers use
+     * this to stay fail-closed with a null result (and raise their own admission exception) rather
+     * than invoking {@link #resolveBytes}, whose {@code store()} throws when no store is present.
+     */
+    public boolean hasObjectStore() {
+        return objects != null;
     }
 
     /** Builds, verifies and atomically publishes one pack; returns false when nothing to do. */
@@ -186,9 +203,12 @@ public class JdbcJournalPacks {
         long now = System.currentTimeMillis();
         String objectSha = JournalStoreRows.sha256(objectBytes);
         // S1: the BUILDING catalog row commits on its own before the object PUT, so a
-        // build that rolls back or crashes still leaves a row collectOrphans can reclaim.
+        // build that rolls back or crashes still leaves a row collectOrphans can reclaim. Only
+        // BUILDING rows past the lease are reclaimable, so a live concurrent builder on another
+        // replica is never displaced; a same-range collision aborts on the unique key instead.
         transactions.insertBuilding(packId, scope, tenant, workspace, session, from, through,
-                objectKey, objectBytes.length, objectSha, now);
+                objectKey, objectBytes.length, objectSha, now, builderId,
+                now - BUILDING_LEASE_MILLIS);
         // The object build/PUT and read-back verification stay outside the SQL transaction.
         store().putIfAbsent(objectKey, objectBytes);
         byte[] readBack = readFully(store().open(objectKey, () -> {}));
