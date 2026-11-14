@@ -635,6 +635,29 @@ public class WakeRecoveryStoreTest {
         assertThat(store.findPending("workspace", 8)).isEmpty();
     }
 
+    @Test
+    void aCompleteDeferredProofIsMemoizedAcrossScans() {
+        store.setNowMillis(() -> 1_000_000L);
+        ObjectNode future = event("input.accepted", "loop-future", "loop");
+        ((ObjectNode) future.get("payload")).put("notBefore", 2_000_000L);
+        ObjectNode monitor = event("input.accepted", "monitor-turn", "monitor");
+        appendBatch(future, monitor);
+        jdbc.update("UPDATE ma_session_head SET is_wake_pending = TRUE");
+        var reads = new CountingJdbcTemplate(jdbc.getDataSource());
+        store = new JdbcWakeRecoveryStore(reads);
+        store.setNowMillis(() -> 1_000_000L);
+        var pending = candidate();
+        // The due monitor input makes the proof complete even though a deferred
+        // wakeup sits beside it: recovery attaches now.
+        assertThat(store.hasPendingInput(pending)).contains(true);
+        int readsAfterFirst = reads.revisions.size();
+        // The complete proof is memoized, so the next scan answers true without
+        // re-reading the journal. An early return before the put would skip the
+        // cache and re-prove from revision zero on every scan.
+        assertThat(store.hasPendingInput(pending)).contains(true);
+        assertThat(reads.revisions).hasSize(readsAfterFirst);
+    }
+
     private void append(String kind, String turn, String source) {
         appendBatch(event(kind, turn, source));
     }

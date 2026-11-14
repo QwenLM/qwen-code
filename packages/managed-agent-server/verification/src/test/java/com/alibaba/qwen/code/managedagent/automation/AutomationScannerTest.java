@@ -17,6 +17,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicAutomationRun;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcAutomationLedgerStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore;
@@ -88,6 +89,9 @@ class AutomationScannerTest {
 
     @Autowired
     private JdbcAutomationLedgerStore ledger;
+
+    @Autowired
+    private JdbcManagedSessionStore sessionStore;
 
     @Autowired
     private ManagedAgentStore agentStore;
@@ -224,6 +228,51 @@ class AutomationScannerTest {
     }
 
     @Test
+    void listSessionPagesWithACursorUnderTheLiveStateFilter() {
+        // A limit below the live capacity forces hasMore and a nextCursor, so
+        // the cursor arm of the query (which carries the live-state bind in a
+        // different positional order than the first-page arm) is exercised.
+        // One definition is retired first: pages order by gmt_create DESC, so
+        // the retired row sorts after the cursor and the cursor arm must
+        // exclude it — dropping the filter from that arm leaks the retired
+        // row into the second page and reddens the page-size assertion. A
+        // shifted bind order surfaces as a type-conversion error; the bound
+        // vs literal form of the filter is behaviour-neutral and not pinned.
+        String retired = service.create(tenant, ACTOR,
+                "iso-page-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true))
+                .body().id();
+        service.retireSession(tenant, sessionId, ACTOR, retired,
+                "iso-page-retire-" + UUID.randomUUID());
+        // gmt_create reads the controlled clock: advance it so the live
+        // definitions are strictly newer and the retired row cannot tie-break
+        // ahead of the cursor on the random schedule id.
+        clock.addAndGet(2);
+        List<String> created = new java.util.ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+            created.add(service.create(tenant, ACTOR,
+                    "iso-page-" + UUID.randomUUID(),
+                    new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
+                            "UTC", "Run it.", null, "skip", "none", null, true))
+                    .body().id());
+        }
+        PublicList<PublicAutomation> first = service.listSession(tenant,
+                sessionId, null, 2);
+        assertThat(first.data()).hasSize(2);
+        assertThat(first.hasMore()).isTrue();
+        assertThat(first.nextCursor()).isNotNull();
+        PublicList<PublicAutomation> second = service.listSession(tenant,
+                sessionId, first.nextCursor(), 2);
+        assertThat(second.data()).hasSize(1);
+        assertThat(second.hasMore()).isFalse();
+        List<String> paged = new java.util.ArrayList<>();
+        first.data().forEach(a -> paged.add(a.id()));
+        second.data().forEach(a -> paged.add(a.id()));
+        assertThat(paged).containsExactlyInAnyOrderElementsOf(created);
+    }
+
+    @Test
     void retireSessionRefusesAForeignDefinitionAndLeavesItLive() {
         PublicAutomation mine = service.create(tenant, ACTOR,
                 "iso-retire-" + UUID.randomUUID(),
@@ -279,6 +328,34 @@ class AutomationScannerTest {
         assertThat(created.sessionId()).isEqualTo(sessionId);
         assertThat(ledger.findSchedule(tenant, created.id()).orElseThrow()
                 .sessionId()).isEqualTo(sessionId);
+    }
+
+    @Test
+    void creatorActorReadsTheSessionRowFromTheSchema() {
+        // The internal routes' creator derivation against the real schema: the
+        // actor id is decoded from ma_session.creator_actor_key, and a missing
+        // Session yields empty rather than throwing. A wrong column or decoder
+        // would silently 403 every create/retire, so pin the read itself.
+        assertThat(sessionStore.creatorActor(tenant, sessionId)).isEqualTo(ACTOR);
+        assertThat(sessionStore.creatorActor(tenant, "missing-session")).isEmpty();
+    }
+
+    @Test
+    void anEmptyCreatorActorRefusesTheInternalMutation() {
+        ManagedSessionStore emptyCreatorStore = mock(ManagedSessionStore.class);
+        when(emptyCreatorStore.creatorActor(tenant, sessionId)).thenReturn("");
+        ManagedAutomationSessionService sessionService =
+                new ManagedAutomationSessionService(emptyCreatorStore, service);
+        AutomationSessionModels.Create request = new AutomationSessionModels.Create(
+                WORKSPACE, "writer", 1,
+                new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true));
+        assertThatThrownBy(() -> sessionService.create(tenant, sessionId,
+                "writer-token", "iso-empty-creator-" + UUID.randomUUID(), request))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(403);
+                    assertThat(error.getCode()).isEqualTo("session_operation_forbidden");
+                });
     }
 
     private PublicAutomation defineGated(String gate) {
