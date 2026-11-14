@@ -4,9 +4,13 @@ mod desktop_state;
 mod runtime;
 
 use command_group::GroupChild;
-use desktop_state::{default_window_size, restore_window, zoom_after, SettingsStore, DEFAULT_ZOOM};
-use runtime::{resolve_workspace, stop_runtime_handle, DesktopRuntime};
+use desktop_state::{
+    default_window_size, is_shell_state_key_allowed, restore_window, zoom_after, SettingsStore,
+    DEFAULT_ZOOM,
+};
+use runtime::{fanout_origin, resolve_workspace, stop_runtime_handle, DesktopRuntime};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -154,6 +158,10 @@ struct ApplicationState {
     settings: SettingsStore,
     log_path: PathBuf,
     origin: Arc<Mutex<Option<Url>>>,
+    /// This launch's value from the boot fragment. `webview.url()` is the
+    /// top-level document, so a cross-origin frame inside the Web Shell passes
+    /// `require_runtime_origin`; the nonce is what it cannot obtain.
+    shell_nonce: Arc<Mutex<Option<String>>>,
     last_error: Mutex<Option<String>>,
     last_workspace: Mutex<Option<(PathBuf, bool)>>,
     window_dirty: AtomicBool,
@@ -175,6 +183,8 @@ fn main() {
             choose_workspace,
             open_logs,
             restart_runtime,
+            shell_state_read,
+            shell_state_write,
             install_update,
         ])
         .setup(setup_app);
@@ -267,6 +277,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     }
     let _ = fs::write(&log_path, b"");
     let origin = Arc::new(Mutex::new(None));
+    let shell_nonce = Arc::new(Mutex::new(None));
     let navigation_origin = Arc::clone(&origin);
     let runtime_exit_handle = handle.clone();
     handle.listen("runtime-process-stopped", move |event| {
@@ -346,6 +357,7 @@ fn setup_app(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         settings,
         log_path,
         origin,
+        shell_nonce,
         last_error: Mutex::new(None),
         last_workspace: Mutex::new(None),
         window_dirty: AtomicBool::new(false),
@@ -424,6 +436,40 @@ fn change_zoom(
     state.settings.stage_zoom(zoom);
     state.window_dirty.store(true, Ordering::Relaxed);
     Ok(())
+}
+
+// Reachable from the daemon-served Web Shell, which owns the saved-connection
+// and workspace-host catalogs. That page's origin changes every launch because
+// the runtime binds an ephemeral loopback port, so browser storage cannot carry
+// the catalogs across restarts. The capability already restricts this command
+// to `http://127.0.0.1:*`; `require_runtime_origin` then pins it to the origin
+// this launch actually recorded.
+#[tauri::command]
+fn shell_state_read(
+    webview: WebviewWindow,
+    state: State<'_, ApplicationState>,
+    key: String,
+    nonce: String,
+) -> Result<Option<String>, String> {
+    require_runtime_origin(&webview, state.inner())?;
+    require_shell_nonce(state.inner(), &nonce)?;
+    if !is_shell_state_key_allowed(&key) {
+        return Err(format!("Unsupported desktop shell state key: {key}"));
+    }
+    Ok(state.settings.shell_state(&key))
+}
+
+#[tauri::command]
+fn shell_state_write(
+    webview: WebviewWindow,
+    state: State<'_, ApplicationState>,
+    key: String,
+    value: String,
+    nonce: String,
+) -> Result<(), String> {
+    require_runtime_origin(&webview, state.inner())?;
+    require_shell_nonce(state.inner(), &nonce)?;
+    state.settings.set_shell_state(&key, &value)
 }
 
 #[tauri::command]
@@ -519,6 +565,70 @@ async fn install_update(webview: WebviewWindow, app: AppHandle) -> Result<(), St
     Ok(())
 }
 
+// The two catalogs whose entries name remote origins. Both must stay in
+// `SHELL_STATE_KEYS` (desktop_state.rs); `fanout_keys_stay_allowlisted` pins it.
+const REMOTE_CONNECTIONS_KEY: &str = "qwen-remote-connections";
+const WORKSPACE_HOSTS_KEY: &str = "qwen-workspace-hosts";
+
+// The daemon answers 431 once the request line passes Node's ~16 KiB header
+// limit, and the shell then cannot load at all — nothing in the app can reset
+// that, only hand-editing the settings file. Thirty-two origins keep the boot URL
+// near a kilobyte; hosts past the cap stay in the catalog and are reachable the
+// way they always were, after a reload.
+const MAX_LAUNCH_FANOUT_ORIGINS: usize = 32;
+
+/// Origins the very first document of a launch must be served with. The daemon
+/// derives `connect-src` from the request URL alone, while the catalogs reach
+/// the client only through hydration, so without this a saved host is blocked
+/// until the user reloads or clicks through to it.
+fn launch_fanout_origins(settings: &SettingsStore, page_origin: &str) -> Vec<String> {
+    let mut origins = fanout_origins_from_catalogs(
+        settings.shell_state(REMOTE_CONNECTIONS_KEY).as_deref(),
+        settings.shell_state(WORKSPACE_HOSTS_KEY).as_deref(),
+        page_origin,
+    );
+    origins.truncate(MAX_LAUNCH_FANOUT_ORIGINS);
+    origins
+}
+
+fn fanout_origins_from_catalogs(
+    connections: Option<&str>,
+    hosts: Option<&str>,
+    page_origin: &str,
+) -> Vec<String> {
+    let mut origins = Vec::new();
+    if let Some(entries) = parse_catalog(connections) {
+        origins.extend(
+            entries
+                .iter()
+                .filter_map(|entry| entry.as_str())
+                .filter_map(fanout_origin),
+        );
+    }
+    if let Some(entries) = parse_catalog(hosts) {
+        origins.extend(
+            entries
+                .iter()
+                .filter_map(|entry| entry.get("origin")?.as_str())
+                .filter_map(fanout_origin),
+        );
+    }
+    // The call site passes `origin_of(runtime.base_url())`, whose path is "/", so
+    // the page origin arrives with a trailing slash while `fanout_origin` strips
+    // it — normalise through the same function or the skip below never matches.
+    let page_origin = fanout_origin(page_origin).unwrap_or_else(|| page_origin.to_string());
+    let mut seen = HashSet::new();
+    origins.retain(|origin| origin != &page_origin && seen.insert(origin.clone()));
+    origins
+}
+
+fn parse_catalog(raw: Option<&str>) -> Option<Vec<serde_json::Value>> {
+    match serde_json::from_str::<serde_json::Value>(raw?) {
+        Ok(serde_json::Value::Array(entries)) => Some(entries),
+        _ => None,
+    }
+}
+
 fn start_runtime_async(app: AppHandle, workspace: PathBuf, create_if_missing: bool) {
     stop_runtime(&app);
     let generation = {
@@ -583,7 +693,10 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf, create_if_missing: bo
                         return;
                     }
                 };
+                let fanout = launch_fanout_origins(&state.settings, origin.as_str());
+                let shell_nonce = runtime.shell_nonce().to_string();
                 *lock(&state.origin) = Some(origin);
+                *lock(&state.shell_nonce) = Some(shell_nonce);
                 let Some(window) = app.get_webview_window("main") else {
                     runtime.stop();
                     clear_pending_runtime(&state, generation);
@@ -594,7 +707,9 @@ fn start_runtime_async(app: AppHandle, workspace: PathBuf, create_if_missing: bo
                     );
                     return;
                 };
-                if let Err(error) = window.navigate(runtime.authenticated_web_url()) {
+                if let Err(error) =
+                    window.navigate(runtime.authenticated_web_url_with_fanout(&fanout))
+                {
                     runtime.stop();
                     clear_pending_runtime(&state, generation);
                     emit_runtime_failure(
@@ -797,6 +912,40 @@ fn require_bootstrap_origin(webview: &WebviewWindow) -> Result<(), String> {
     }
 }
 
+fn require_runtime_origin(webview: &WebviewWindow, state: &ApplicationState) -> Result<(), String> {
+    let url = webview
+        .url()
+        .map_err(|error| format!("Failed to read calling webview URL: {error}"))?;
+    let runtime_origin = lock(&state.origin).clone();
+    if is_runtime_origin(&url, runtime_origin.as_ref()) {
+        Ok(())
+    } else {
+        Err("This command is only available from the Qwen Code Web Shell.".to_string())
+    }
+}
+
+fn is_runtime_origin(url: &Url, runtime_origin: Option<&Url>) -> bool {
+    runtime_origin.is_some_and(|origin| is_same_origin(url, origin))
+}
+
+/// `require_runtime_origin` reads `webview.url()`, which is the top-level
+/// document, so a cross-origin frame inside the Web Shell satisfies it too.
+/// Tauri reports no frame origin, so the check that separates them is this
+/// launch's nonce: it rides in the boot fragment, and a cross-origin frame
+/// cannot read the top document's fragment.
+fn require_shell_nonce(state: &ApplicationState, nonce: &str) -> Result<(), String> {
+    let expected = lock(&state.shell_nonce).clone();
+    if is_shell_nonce(expected.as_deref(), nonce) {
+        Ok(())
+    } else {
+        Err("This command is only available from the Qwen Code Web Shell.".to_string())
+    }
+}
+
+fn is_shell_nonce(expected: Option<&str>, provided: &str) -> bool {
+    expected.is_some_and(|expected| !expected.is_empty() && expected == provided)
+}
+
 fn is_allowed_navigation(url: &Url, origin: &Mutex<Option<Url>>) -> bool {
     is_bootstrap_url(url)
         // Untrusted srcdoc previews in packages/web-shell rely on CSP and
@@ -924,8 +1073,12 @@ mod tests {
     };
     use super::{
         bootstrap_workspace, default_workspace_override_dir, default_workspace_path,
-        ensure_workspace_dir, is_allowed_navigation, is_bootstrap_url, is_safe_external_url,
-        is_same_origin, origin_of, updates_disabled_value, BOOTSTRAP_URL,
+        ensure_workspace_dir, fanout_origins_from_catalogs, is_allowed_navigation,
+        is_bootstrap_url, is_runtime_origin, is_safe_external_url, is_same_origin,
+        is_shell_nonce, is_shell_state_key_allowed, launch_fanout_origins, origin_of,
+        updates_disabled_value,
+        BOOTSTRAP_URL, MAX_LAUNCH_FANOUT_ORIGINS, REMOTE_CONNECTIONS_KEY, SettingsStore,
+        WORKSPACE_HOSTS_KEY,
     };
     use std::ffi::{OsStr, OsString};
     use std::fs;
@@ -1007,6 +1160,129 @@ mod tests {
             &Url::parse("https://example.com/").expect("external"),
             &origin,
         ));
+    }
+
+    #[test]
+    fn fanout_origins_cover_saved_hosts_and_skip_the_page_origin() {
+        let connections = Some(
+            r#"["https://remote.example","https://other.example","http://127.0.0.1:49152/","https://remote.example/ws","not a url"]"#,
+        );
+        let hosts = Some(
+            r#"[{"origin":"https://remote.example","workspaces":[]},{"origin":"http://10.0.0.2:4170","workspaces":[]}]"#,
+        );
+        // The page origin as `start_runtime` passes it, with a trailing slash.
+        // `https://remote.example` sits in both catalogs with a different origin
+        // between its two entries, so after the page origin is skipped its
+        // duplicates are still not adjacent — the shape a `Vec::dedup` misses.
+        // One fixture, both properties.
+        assert_eq!(
+            fanout_origins_from_catalogs(connections, hosts, "http://127.0.0.1:49152/"),
+            [
+                "https://remote.example",
+                "https://other.example",
+                "http://10.0.0.2:4170",
+            ]
+        );
+    }
+
+    /// A store backed by a real settings file — the same file the IPC writes.
+    fn settings_with_shell_state(shell_state: serde_json::Value) -> (PathBuf, SettingsStore) {
+        // Callers run in parallel and the Windows clock ticks coarsely, so a
+        // timestamp alone let two of them share one directory — each then read
+        // the other's catalog.
+        static NEXT_DIR: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let root = std::env::temp_dir().join(format!(
+            "qwen-desktop-launch-fanout-{}-{}",
+            std::process::id(),
+            NEXT_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&root).expect("temp dir");
+        let path = root.join("desktop-state.json");
+        let contents = serde_json::json!({ "shellState": shell_state });
+        std::fs::write(&path, contents.to_string()).expect("settings");
+        let store = SettingsStore::load_from_path(path).expect("store");
+        (root, store)
+    }
+
+    #[test]
+    fn launch_fanout_origins_reads_the_persisted_catalogs() {
+        let shell_state = serde_json::json!({
+            "qwen-remote-connections": serde_json::Value::Array(vec![
+                "https://only-in-connections.example/".into(),
+                "http://127.0.0.1:49152".into(),
+            ])
+            .to_string(),
+            "qwen-workspace-hosts": serde_json::Value::Array(vec![
+                serde_json::json!({ "origin": "https://remote.example" }),
+                serde_json::json!({ "origin": "http://10.0.0.2:4170" }),
+            ])
+            .to_string(),
+        });
+        let (root, store) = settings_with_shell_state(shell_state);
+        assert_eq!(
+            launch_fanout_origins(&store, "http://127.0.0.1:49152/"),
+            [
+                "https://only-in-connections.example",
+                "https://remote.example",
+                "http://10.0.0.2:4170",
+            ]
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn launch_fanout_origins_caps_the_boot_url() {
+        let shell_state = serde_json::json!({
+            "qwen-remote-connections": serde_json::Value::Array(
+                (0..MAX_LAUNCH_FANOUT_ORIGINS + 8)
+                    .map(|index| format!("http://10.0.0.{}:4170", index + 1).into())
+                    .collect(),
+            )
+            .to_string(),
+        });
+        let (root, store) = settings_with_shell_state(shell_state);
+        let origins = launch_fanout_origins(&store, "http://127.0.0.1:49152/");
+        assert_eq!(origins.len(), MAX_LAUNCH_FANOUT_ORIGINS);
+        assert_eq!(origins.first().map(String::as_str), Some("http://10.0.0.1:4170"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn fanout_keys_stay_allowlisted() {
+        for key in [REMOTE_CONNECTIONS_KEY, WORKSPACE_HOSTS_KEY] {
+            assert!(is_shell_state_key_allowed(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn shell_state_commands_accept_only_the_runtime_origin() {
+        let origin = Url::parse("http://127.0.0.1:49152/").expect("origin");
+        assert!(is_runtime_origin(
+            &Url::parse("http://127.0.0.1:49152/session/123").expect("same origin"),
+            Some(&origin),
+        ));
+        assert!(!is_runtime_origin(
+            &Url::parse("http://127.0.0.1:49153/").expect("different port"),
+            Some(&origin),
+        ));
+        assert!(!is_runtime_origin(
+            &Url::parse(BOOTSTRAP_URL).expect("bootstrap"),
+            Some(&origin),
+        ));
+        assert!(!is_runtime_origin(
+            &Url::parse("http://127.0.0.1:49152/").expect("runtime"),
+            None,
+        ));
+    }
+
+    #[test]
+    fn shell_state_commands_require_the_launch_nonce() {
+        assert!(is_shell_nonce(Some("launch-nonce"), "launch-nonce"));
+        assert!(!is_shell_nonce(Some("launch-nonce"), "other-nonce"));
+        assert!(!is_shell_nonce(Some("launch-nonce"), ""));
+        assert!(!is_shell_nonce(None, "launch-nonce"));
+        // A launch that never recorded one must not authorise anyone.
+        assert!(!is_shell_nonce(Some(""), ""));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   forgetRemoteConnection,
   formatOriginHost,
@@ -41,6 +41,54 @@ describe('remote connections', () => {
     );
 
     expect(readRemoteConnections()).toEqual(['https://remote.example']);
+  });
+
+  it('keeps a saved origin the view hides as this launch', () => {
+    window.localStorage.setItem(
+      'qwen-remote-connections',
+      JSON.stringify([window.location.origin, 'https://two.example']),
+    );
+
+    expect(readRemoteConnections()).toEqual(['https://two.example']);
+
+    // The dialog renders this return value, so it must stay the filtered view:
+    // the stored entry above is a saved connection, not a host to act on.
+    expect(forgetRemoteConnection('https://two.example')).toEqual([]);
+
+    // The page origin is hidden from the list this launch shows, but it is a
+    // saved connection: persisting the hidden view would delete it for good,
+    // and the read path would then have no row left to re-add it from.
+    expect(window.localStorage.getItem('qwen-remote-connections')).toBe(
+      JSON.stringify([window.location.origin]),
+    );
+
+    rememberRemoteConnection('https://three.example');
+
+    expect(
+      JSON.parse(
+        window.localStorage.getItem('qwen-remote-connections') ?? '[]',
+      ),
+    ).toEqual([window.location.origin, 'https://three.example']);
+  });
+
+  it('persists a saved connection through the desktop store without the page origin', () => {
+    const invoke = vi.fn(async (): Promise<unknown> => undefined);
+    (window as { __TAURI__?: unknown }).__TAURI__ = { core: { invoke } };
+    try {
+      rememberRemoteConnection(window.location.origin);
+      expect(invoke).not.toHaveBeenCalled();
+
+      rememberRemoteConnection('https://remote.example');
+
+      expect(readRemoteConnections()).toEqual(['https://remote.example']);
+      expect(invoke).toHaveBeenCalledWith('shell_state_write', {
+        key: 'qwen-remote-connections',
+        value: JSON.stringify(['https://remote.example']),
+        nonce: expect.any(String),
+      });
+    } finally {
+      delete (window as { __TAURI__?: unknown }).__TAURI__;
+    }
   });
 
   it('keeps an invalid display origin from breaking render paths', () => {
