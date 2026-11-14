@@ -71,9 +71,13 @@ const removeTempTree = (dir: string) =>
 // really run — the spy only makes its per-sweep cost observable.
 const aoneMocks = vi.hoisted(() => ({
   resolveAoneWorkspaceRepo: vi.fn(),
+  realResolveAoneWorkspaceRepo: undefined as
+    | undefined
+    | typeof import('./aone-mrs.js').resolveAoneWorkspaceRepo,
 }));
 vi.mock('./aone-mrs.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./aone-mrs.js')>();
+  aoneMocks.realResolveAoneWorkspaceRepo = actual.resolveAoneWorkspaceRepo;
   aoneMocks.resolveAoneWorkspaceRepo.mockImplementation(
     actual.resolveAoneWorkspaceRepo,
   );
@@ -322,6 +326,24 @@ describe('refreshWorkspaceSessionPrStates', () => {
       execSync(
         'git remote add origin git@gitlab.alibaba-inc.com:jspt/agentic_coding.git',
         { cwd: workspaceCwd, stdio: 'pipe' },
+      );
+      // The origin probe spawns real git under a 5s budget; on a contended
+      // macOS host that spawn can time out and resolution degrades to
+      // undefined even though the repo was just seeded. Retry the REAL
+      // resolution once inside the single spy call (the per-sweep
+      // call-count pins stay 1) so these cases test the refresh, not the
+      // host's git latency — the same retry-under-load shape removeTempTree
+      // uses for teardown.
+      const real = aoneMocks.realResolveAoneWorkspaceRepo!;
+      aoneMocks.resolveAoneWorkspaceRepo.mockImplementation(
+        async (...args: Parameters<typeof real>) =>
+          (await real(...args)) ?? real(...args),
+      );
+    });
+
+    afterEach(() => {
+      aoneMocks.resolveAoneWorkspaceRepo.mockImplementation(
+        aoneMocks.realResolveAoneWorkspaceRepo!,
       );
     });
 
@@ -3769,9 +3791,15 @@ describe('startSessionPrRefreshTimer', () => {
     try {
       // Tick 1: rotation 0 → untrusted primary first, views PR 42.
       await vi.advanceTimersByTimeAsync(60_000);
-      await vi.waitFor(() => {
-        expect(view).toHaveBeenCalledTimes(1);
-      });
+      // The explicit timeout replaces waitFor's 1s default, which expires
+      // under load on the contended macOS nightly hosts (same shape as the
+      // sibling observation-order case above).
+      await vi.waitFor(
+        () => {
+          expect(view).toHaveBeenCalledTimes(1);
+        },
+        { timeout: 10_000 },
+      );
       // Tick 1's refresh tail runs after the view and awaits real fs; the
       // re-entrancy guard silently skips the next interval while it is still
       // in flight (the race `sweepDone` documents). This tick commits no
@@ -3784,10 +3812,22 @@ describe('startSessionPrRefreshTimer', () => {
       );
       await vi.advanceTimersByTimeAsync(0);
       // Tick 2: rotation 1 → trusted non-primary first, views PR 43.
-      await vi.advanceTimersByTimeAsync(60_000);
-      await vi.waitFor(() => {
-        expect(view).toHaveBeenCalledTimes(2);
-      });
+      // The re-entrancy guard skips an interval whose predecessor's refresh
+      // tail is still in flight (real fs under load), and a skipped tick
+      // does not advance the rotation counter — so keep advancing intervals
+      // until the second view lands instead of assuming the very next one
+      // runs; the executed tick's rotation is 1 either way, and the order
+      // stays [42, 43]. waitFor's fake-time budget cannot reach the next
+      // 60s interval on its own, hence the explicit advances.
+      for (let i = 0; i < 5 && view.mock.calls.length < 2; i++) {
+        await vi.advanceTimersByTimeAsync(60_000);
+      }
+      await vi.waitFor(
+        () => {
+          expect(view).toHaveBeenCalledTimes(2);
+        },
+        { timeout: 10_000 },
+      );
       expect(view.mock.calls.map((call) => call[0])).toEqual([
         'https://github.com/o/r/pull/42',
         'https://github.com/o/r/pull/43',
