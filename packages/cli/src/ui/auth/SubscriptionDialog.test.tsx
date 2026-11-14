@@ -11,12 +11,14 @@ import { SubscriptionDialog } from './SubscriptionDialog.js';
 
 // The macOS nightly legs run on contended 3-core hosts where the ink
 // keypress-to-render chain can exceed vi.waitFor's 1s default budget (the
-// canCheckAgain=true keyboard case failed three of four nights). Match
-// AuthDialog.test.tsx's WAIT_FOR_TIMEOUT so the waits survive load.
-const WAIT_FOR_TIMEOUT = 5000;
+// canCheckAgain=true keyboard case failed three of four nights). 5s still
+// timed out under the extreme contention of dispatch 43574338804 (cli 2/3,
+// 734s of test time across workers), so use the repo's 15s contended-host
+// budget. The case ceiling below keeps the chained waits under it.
+const WAIT_FOR_TIMEOUT = 15_000;
 // Keep the chained per-wait budgets under the case ceiling: the off-ECS
-// lane default is 15s and the purchase-polling case chains three 5s waits,
-// so vitest would otherwise decide the outcome before the last wait's own
+// lane default is 15s and the purchase-polling case chains three waits, so
+// vitest would otherwise decide the outcome before the last wait's own
 // timer (same rule as packages/core/src/test-utils/latency-budget.ts).
 vi.setConfig({ testTimeout: 60_000 });
 

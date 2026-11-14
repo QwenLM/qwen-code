@@ -46,6 +46,12 @@ describe('FileChangedWatcher with real files', { timeout: 90_000 }, () => {
     const notify = vi.fn().mockResolvedValue(undefined);
     watcher = new FileChangedWatcher(notify);
     await watcher.setPaths([root]);
+    // Let the native watch finish attaching before mutating the tree: on a
+    // contended macOS host chokidar's 'ready' can fire before FSEvents is
+    // watching deeply, and a mkdir in that window loses the add permanently
+    // (0 notifications, not a slow one). Settle so the future-nested add is
+    // observed deterministically.
+    await delay(500);
 
     const nested = path.join(root, 'future', 'nested');
     const file = path.join(nested, 'topic.md');
@@ -127,6 +133,9 @@ describe('FileChangedWatcher with real files', { timeout: 90_000 }, () => {
     const notify = vi.fn().mockResolvedValue(undefined);
     watcher = new FileChangedWatcher(notify);
     await watcher.setPaths([root]);
+    // FSEvents-attachment settle (see the future-nested case): the nested
+    // mkdir below must not land in the readdir-then-watch window.
+    await delay(500);
     for (const file of excluded) await fs.writeFile(file, 'updated');
     const nested = path.join(root, 'memory', 'deep', 'topic.md');
     await fs.mkdir(path.dirname(nested), { recursive: true });
@@ -224,6 +233,8 @@ describe('FileChangedWatcher with real files', { timeout: 90_000 }, () => {
     const notify = vi.fn().mockResolvedValue(undefined);
     watcher = new FileChangedWatcher(notify);
     await watcher.setPaths([...files, dynamic], files);
+    // FSEvents-attachment settle before the mkdirs below (readdir-then-watch).
+    await delay(500);
     await fs.writeFile(files[1], 'rc');
     await fs.writeFile(files[0], 'env');
     await fs.mkdir(path.join(parent, 'unrelated'));
@@ -276,6 +287,8 @@ describe('FileChangedWatcher with real files', { timeout: 90_000 }, () => {
     const notify = vi.fn().mockResolvedValue(undefined);
     watcher = new FileChangedWatcher(notify);
     await watcher.setPaths([...files, directory]);
+    // FSEvents-attachment settle before the mkdirs below (readdir-then-watch).
+    await delay(500);
     await fs.writeFile(files[1], 'rc');
     await fs.writeFile(files[0], 'env');
     await fs.mkdir(path.join(directory, 'nested'), { recursive: true });
@@ -304,6 +317,10 @@ describe('FileChangedWatcher with real files', { timeout: 90_000 }, () => {
     const notify = vi.fn().mockResolvedValue(undefined);
     watcher = new FileChangedWatcher(notify);
     await watcher.setPaths([directory]);
+    // Same FSEvents-attachment settle as the future-nested case: the discovery
+    // observer must be live before the missing ancestors are created, or the
+    // add is lost in the readdir-then-watch window on a contended macOS host.
+    await delay(500);
     await fs.mkdir(directory, { recursive: true });
     const file = path.join(directory, 'topic.md');
     await fs.writeFile(file, 'new memory');
@@ -328,6 +345,8 @@ describe('FileChangedWatcher with real files', { timeout: 90_000 }, () => {
     await fs.unlink(parent);
     await fs.mkdir(directory, { recursive: true });
     await watcher.setPaths([directory]);
+    // FSEvents-attachment settle before the write that must be observed.
+    await delay(500);
     const file = path.join(directory, 'topic.md');
     await fs.writeFile(file, 'retry');
     await vi.waitFor(
@@ -449,6 +468,8 @@ describe('FileChangedWatcher with real files', { timeout: 90_000 }, () => {
     const notify = vi.fn().mockResolvedValue(undefined);
     watcher = new FileChangedWatcher(notify);
     await watcher.setPaths([alias, target]);
+    // FSEvents-attachment settle before the mkdirs below (readdir-then-watch).
+    await delay(500);
 
     for (const relative of [
       '.git/config',
