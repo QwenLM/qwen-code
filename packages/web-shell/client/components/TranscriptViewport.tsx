@@ -75,10 +75,14 @@ export function followRangeFromRows(
   return { start, end, current: current ?? firstVisible! };
 }
 
+export interface TranscriptViewportProps extends MessageListProps {
+  approvalOverlayActive?: boolean;
+}
+
 export const TranscriptViewport = forwardRef<
   MessageListHandle,
-  MessageListProps
->(function TranscriptViewport(props, ref) {
+  TranscriptViewportProps
+>(function TranscriptViewport({ approvalOverlayActive, ...props }, ref) {
   const { onCanScrollToBottomChange } = props;
   const { t } = useI18n();
   const viewport = useTranscriptViewport(props.messages, t);
@@ -457,10 +461,11 @@ export const TranscriptViewport = forwardRef<
       load(edge);
   };
 
+  // Approval centers global navigation against the outer chat wrap instead.
   return (
     <div
       ref={root}
-      className={`${styles.root} relative flex min-h-0 flex-1`}
+      className={`${styles.root} ${globalNavigation && (approvalOverlayActive ?? props.pendingApproval) ? 'static' : 'relative'} flex min-h-0 flex-1`}
       data-history-viewport={historical ? 'historical' : 'live'}
     >
       {!props.hideSessionTimeline &&
@@ -575,6 +580,7 @@ export const TranscriptViewport = forwardRef<
                     onEditUserMessage: undefined,
                     onSubmitUserMessageEdit: undefined,
                     onShowContextDetail: undefined,
+                    onOpenMemoryFile: undefined,
                     onBranchSession: undefined,
                     onRetryClick: undefined,
                     onRetryFailedPrompt: undefined,

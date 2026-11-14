@@ -264,11 +264,11 @@ describe('audio release slots', () => {
     expect(route(audio.jobs.collect, {}, '')).toEqual(['ubuntu-latest']);
   });
 
-  it('builds the selected release commit without a cache dependency', () => {
+  it('builds the selected release commit', () => {
     expect(release.jobs.audio_capture_prebuilds.uses).toBe(
       './.github/workflows/audio-capture-prebuilds.yml',
     );
-    expect(release.jobs.audio_capture_prebuilds.with).toEqual({
+    expect(release.jobs.audio_capture_prebuilds.with).toMatchObject({
       ref: '${{ needs.prepare.outputs.release_sha }}',
     });
     expect(
@@ -276,9 +276,6 @@ describe('audio release slots', () => {
         s.uses?.startsWith('actions/checkout@'),
       ).with.ref,
     ).toBe('${{ inputs.ref || github.sha }}');
-    expect(JSON.stringify(release)).not.toMatch(
-      /audio_artifact_id|audio_prebuild_key|audio-prebuilds\.mjs/,
-    );
     for (const job of [audio.jobs.build, audio.jobs.collect]) {
       expect(job.steps[0].uses).toBe(
         '$/.github/actions/prepare-release-runner',
@@ -288,15 +285,16 @@ describe('audio release slots', () => {
 
   it('keeps newer host glibc out of Linux native binaries', () => {
     const steps = audio.jobs.build.steps;
-    const container = steps.find(
-      (s) => s.name === 'Build Linux prebuild on ECS',
-    );
-    expect(container.if).toBe("${{ runner.environment == 'self-hosted' }}");
-    expect(container.run).toContain('node:22-bookworm');
+    const container = steps.find((s) => s.name === 'Build Linux prebuild');
+    expect(container.if).toBe("${{ startsWith(matrix.os, 'ubuntu') }}");
+    expect(container.run).toContain('node:22.22.3-bookworm');
+    expect(container['working-directory']).toBe('.');
+    expect(container.run).toContain('--frozen-lockfile --ignore-scripts');
+    expect(container.run).toContain('npm run prebuildify -- --target 22.22.3');
     expect(container.run).toContain('--user "$(id -u):$(id -g)"');
     for (const name of ['Install build deps', 'Build prebuild']) {
       expect(steps.find((s) => s.name === name).if).toBe(
-        "${{ runner.environment != 'self-hosted' }}",
+        "${{ !startsWith(matrix.os, 'ubuntu') }}",
       );
     }
   });

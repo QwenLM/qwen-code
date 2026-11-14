@@ -8,6 +8,7 @@ import { proposeMemoryImport } from '@qwen-code/qwen-code-core/memory/import-mod
 import { validateAuthMethod } from '../config/auth.js';
 import { loadCliConfig, type CliArgs } from '../config/config.js';
 import { loadSettings } from '../config/settings.js';
+import { getSeparatedHookSettings } from '../config/hook-approvals.js';
 import { getAuthTypeFromEnv } from '../utils/modelConfigUtils.js';
 import { MemoryImportService } from './service.js';
 
@@ -24,6 +25,14 @@ export async function createLocalMemoryImportService(): Promise<MemoryImportServ
       interactive: false,
     } as unknown as CliArgs,
     process.cwd(),
+    undefined,
+    getSeparatedHookSettings(settings),
+    undefined,
+    undefined,
+    undefined,
+    false,
+    // This Config exists for one memory-import run and never uses LSP.
+    { lspDisabled: true },
   );
   if (!config.isTrustedFolder() || !config.isManagedMemoryAvailable())
     throw new Error(

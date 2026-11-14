@@ -11,6 +11,8 @@
  * unchanged across locales.
  */
 export const MUST_TRANSLATE_KEYS = [
+  'Instruction files',
+  'Auto memory',
   'View or change the language setting',
   'List background tasks (text dump — interactive dialog opens via the footer pill)',
   'Delete a previous session',
@@ -49,6 +51,7 @@ export const MUST_TRANSLATE_KEYS = [
   'Consulting advisor...',
   'Advisor review failed: {{error}}',
   'No conversation context available for /advisor',
+  'No conversation context available for /btw',
   'Focus too long (max {{max}} chars)',
   'Another operation is in progress, wait for it to complete before running /advisor',
   'No response received.',
@@ -134,4 +137,16 @@ export const MUST_TRANSLATE_KEYS = [
   'Unset',
   'Update requires sudo. Please run:',
   'Standalone install detected. Please rerun the standalone installer to update:',
+  'Bind a GitHub pull request to this session',
+  'Usage: /pr <number | url>',
+  'No PRs bound to this session.',
+  'Bound PRs: {{list}}',
+  'Invalid PR reference. Usage: /pr <number | url>',
+  'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.',
+  'Bound PR #{{number}} to this session: {{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}',
+  'Failed to bind PR #{{number}}.',
+  'Failed to bind PR #{{number}}: {{message}}',
+  'Could not read the PR bindings for this session.',
+  'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.',
 ] as const;

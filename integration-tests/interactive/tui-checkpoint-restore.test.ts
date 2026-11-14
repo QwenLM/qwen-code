@@ -21,6 +21,7 @@ import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { E2E_MEMORY_SETTINGS_DEFAULTS } from '../e2e-memory-defaults.js';
 import { startFakeOpenAIServer, fakeToolCall } from '../fake-openai-server.js';
 import { pickE2eRenderer, resolveE2eCliCommand } from '../renderer-matrix.js';
+import { createUntil } from './wait.js';
 import {
   InteractiveSession,
   sendAboutUntilRendered,
@@ -31,13 +32,7 @@ const renderer = pickE2eRenderer();
 const runtime = resolveE2eCliCommand(renderer);
 const json = (file: string, value: unknown) =>
   writeFileSync(file, JSON.stringify(value, null, 2) + '\n');
-async function until(check: () => boolean, reason: string) {
-  const deadline = Date.now() + 15000;
-  while (!check()) {
-    if (Date.now() >= deadline) throw new Error(reason);
-    await new Promise((done) => setTimeout(done, 100));
-  }
-}
+const until = createUntil(15_000);
 
 it(`H11a real model edit creates, hot-restores and cold-resumes its product checkpoint without resurrecting discarded context (${runtime}+${renderer})`, async () => {
   const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'qwen-h11a-')));

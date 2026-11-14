@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest';
 import {
   CHANNEL_PROMPT_META_KEY,
   CHANNEL_OUTPUT_MODE_META_KEY,
+  CHANNEL_WORKFLOW_ORIGIN_META_KEY,
 } from '@qwen-code/channel-base';
 import {
   CHANNEL_PROMPT_META_KEY as BRIDGE_CHANNEL_PROMPT_META_KEY,
   CHANNEL_OUTPUT_MODE_META_KEY as BRIDGE_CHANNEL_OUTPUT_MODE_META_KEY,
+  CHANNEL_WORKFLOW_ORIGIN_META_KEY as BRIDGE_CHANNEL_WORKFLOW_ORIGIN_META_KEY,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 
 // The channel bridges write the channel-turn classification under the
@@ -17,6 +19,11 @@ describe('channel prompt classification wire key', () => {
     expect(CHANNEL_PROMPT_META_KEY).toBe(BRIDGE_CHANNEL_PROMPT_META_KEY);
     expect(CHANNEL_OUTPUT_MODE_META_KEY).toBe(
       BRIDGE_CHANNEL_OUTPUT_MODE_META_KEY,
+    );
+    // The launch origin of a channel turn rides the same strip/re-inject
+    // path; a mismatch would drop detached workflow approvals and output.
+    expect(CHANNEL_WORKFLOW_ORIGIN_META_KEY).toBe(
+      BRIDGE_CHANNEL_WORKFLOW_ORIGIN_META_KEY,
     );
   });
 });

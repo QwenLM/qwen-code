@@ -19,6 +19,7 @@ import {
 } from './capability-parity.js';
 import { SERVE_CAPABILITY_REGISTRY } from './capabilities.js';
 import {
+  HOSTED_CRON_CREATE_TOOL,
   HOSTED_MEMBER_BOARD_TOOLS,
   HOSTED_MEMBER_COMMAND_TOOL_NAMES,
   HOSTED_WORKFLOW_TOOL,
@@ -34,7 +35,7 @@ import {
 const REPO = resolve(import.meta.dirname, '../../../..');
 const MANAGED_SURFACE_FILE = resolve(
   REPO,
-  'packages/managed-agent-server/src/test/resources/capability-parity/managed-surface.txt',
+  'packages/managed-agent-server/verification/src/test/resources/capability-parity/managed-surface.txt',
 );
 const ROUTE_METHODS: ReadonlySet<string> = new Set([
   'GET',
@@ -64,6 +65,7 @@ const HOSTED_TOOLS = new Set([
   ...toolNames(HOSTED_TEAM_TOOLS),
   HOSTED_TEAM_PLAN_TOOL.name,
   HOSTED_WORKFLOW_TOOL.name,
+  HOSTED_CRON_CREATE_TOOL.name,
 ]);
 
 /** The twin `label method template surface`, read without a Java build. */

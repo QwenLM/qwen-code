@@ -613,7 +613,7 @@ export class AcpConnection {
   }
 
   async listSessions(options?: {
-    cursor?: number;
+    cursor?: number | string;
     size?: number;
   }): Promise<ListSessionsResponse> {
     const conn = this.ensureConnection();

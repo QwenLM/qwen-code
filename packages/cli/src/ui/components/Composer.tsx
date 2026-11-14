@@ -18,6 +18,7 @@ import { useConfig } from '../contexts/ConfigContext.js';
 import { theme } from '../semantic-colors.js';
 import { StreamingState } from '../types.js';
 import { FeedbackDialog } from '../FeedbackDialog.js';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
 import { useModBand } from '../hooks/use-mod-band.js';
 import { ModBand } from './ModBand.js';
 import { modBandMaxRows } from '../utils/mod-band-tree.js';
@@ -31,6 +32,8 @@ export const Composer = ({ footerRef }: ComposerProps) => {
   const config = useConfig();
   const isScreenReaderEnabled = useIsScreenReaderEnabled();
   const uiState = useUIState();
+  const subscriptionActive =
+    config.getAuthType() === AuthType.QWEN_SUBSCRIPTION;
   const uiActions = useUIActions();
   const { vimEnabled } = useVimModeState();
   const modBand = useModBand(config);
@@ -93,6 +96,7 @@ export const Composer = ({ footerRef }: ComposerProps) => {
               : uiState.currentLoadingPhrase
           }
           elapsedTime={uiState.elapsedTime}
+          showCancelHint={!uiState.commandCancellationBlocked}
           candidatesTokens={responseCandidateTokens}
           taskStartTokens={taskStartTokens}
           taskStartStreamingChars={taskStartStreamingChars}
@@ -109,11 +113,13 @@ export const Composer = ({ footerRef }: ComposerProps) => {
        * affordance during long-running calls. The full timer/spinner/phrase
        * UI is still suppressed to avoid layout breakage.
        */}
-      {!uiState.embeddedShellFocused && suppressBottomLoadingIndicator && (
-        <Box paddingLeft={2}>
-          <Text color={theme.text.secondary}>({t('Esc to cancel')})</Text>
-        </Box>
-      )}
+      {!uiState.embeddedShellFocused &&
+        suppressBottomLoadingIndicator &&
+        !uiState.commandCancellationBlocked && (
+          <Box paddingLeft={2}>
+            <Text color={theme.text.secondary}>({t('Esc to cancel')})</Text>
+          </Box>
+        )}
 
       <QueuedMessageDisplay messageQueue={uiState.messageQueue} />
 
@@ -154,7 +160,12 @@ export const Composer = ({ footerRef }: ComposerProps) => {
           placeholder={
             vimEnabled
               ? '  ' + t("Press 'i' for INSERT mode and 'Esc' for NORMAL mode.")
-              : '  ' + t('Type your message or @path/to/file')
+              : '  ' +
+                t(
+                  subscriptionActive
+                    ? 'Type your request, or /usage'
+                    : 'Type your message or @path/to/file',
+                )
           }
           promptSuggestion={uiState.promptSuggestion}
           onPromptSuggestionDismiss={uiState.abortPromptSuggestion}

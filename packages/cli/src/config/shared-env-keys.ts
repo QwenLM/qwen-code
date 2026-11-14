@@ -34,9 +34,12 @@ export const ENV_ACP_REPEATED_TOOL_FAILURE_GUARD =
 export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'QWEN_HOME',
   'QWEN_RUNTIME_DIR',
+  // The shared Conversations root is selected by the operator at daemon boot.
+  'QWEN_CONVERSATIONS_DIR',
   // Project reloads must not replace or relabel an operator container requirement.
   'QWEN_AGENT_EXECUTION_BACKEND',
   'QWEN_CODE_MCP_APPROVALS_PATH',
+  'QWEN_CODE_HOOK_APPROVALS_PATH',
   'QWEN_CODE_TRUSTED_FOLDERS_PATH',
   // These two select which file becomes the System / SystemDefaults settings
   // layer. A project `.env` must never redirect them: the System layer
@@ -84,6 +87,17 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // it or override a user opt-in through settings.env or a project .env.
   'QWEN_CODE_ENABLE_WORKFLOWS',
   'QWEN_CODE_DISABLE_WORKFLOWS',
+  // LSP is the same class of opt-in with a larger blast radius: it spawns
+  // language servers that run with the user's permissions. A cloned repository
+  // must not be able to turn them on, nor to unset an operator's kill switch.
+  'QWEN_CODE_ENABLE_LSP',
+  'QWEN_CODE_DISABLE_LSP',
+  // The agent-loop rollout switches are the same class of opt-in experiment:
+  // a project `.env` must not force the shared loop or the event-bus kernel on
+  // (or off) ahead of the operator's explicit setting. The operator's launch
+  // environment and the parity suites' spawned child env are unaffected.
+  'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
+  'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP',
   // The name-only lock is a deployment policy. A project that wants it sets
   // tools.workflowNameOnly, which a workspace may only turn on; a project
   // .env must not be able to unset the operator's exported value.
@@ -376,9 +390,16 @@ export function isPrivateProvenanceEnvKey(key: string): boolean {
 export const HOME_ENV_BOOTSTRAP_KEYS = [
   'QWEN_HOME',
   'QWEN_RUNTIME_DIR',
+  'QWEN_CONVERSATIONS_DIR',
   'QWEN_CODE_MCP_APPROVALS_PATH',
   'QWEN_CODE_TRUSTED_FOLDERS_PATH',
 ] as const;
+
+// An empty Conversations root is an explicit invalid selection. Preserve it
+// through environment loading so serve rejects it instead of using a fallback.
+export function keepsEmptyHomeEnvValue(key: string): boolean {
+  return key.toUpperCase() === 'QWEN_CONVERSATIONS_DIR';
+}
 
 // Loader-affecting variables inherited from the launching shell. A daemon or
 // ACP child needs them only for its own boot (e.g. the dev harness tsx
@@ -409,10 +430,12 @@ export const HOME_ENV_BOOTSTRAP_KEYS = [
 // ACP child boot).
 //
 // Known adjacent surface: LSP `.lsp.json` env overrides carry their own
-// narrower denylist (`SECURITY_SENSITIVE_ENV_KEYS` in
-// core/lsp/LspServerManager.ts — missing BASH_ENV/ENV/npm_config_node_options).
-// Unifying the two lists is deferred: the LSP surface is experimental
-// (behind --experimental-lsp) and its keys were chosen independently.
+// denylist (`SECURITY_SENSITIVE_ENV_KEYS` in core/lsp/lsp-server-manager.ts).
+// Both lists now block the shell-startup (`BASH_ENV`, `ENV`) and npm
+// node-options (`NPM_CONFIG_NODE_OPTIONS`) vectors; the loader list keeps its
+// broader, non-LSP entries. Unifying them wholesale is still deferred because
+// legitimate language servers rely on ordinary `env` overrides passing
+// through.
 export const INHERITED_LOADER_ENV_KEYS = [
   'NODE_OPTIONS',
   'BUN_OPTIONS',

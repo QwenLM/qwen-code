@@ -99,6 +99,7 @@ function makeBridge(): AcpSessionBridge {
         maxSessions: 20,
         maxPendingPromptsPerSession: 5,
         eventRingSize: 8000,
+        eventRingMaxBytes: 8 * 1024 * 1024,
         compactedReplayMaxBytes: 4 * 1024 * 1024,
         maxJournalEvents: 10_000,
         maxJournalBytes: 8 * 1024 * 1024,
@@ -637,7 +638,6 @@ describe('workspace-qualified core REST', () => {
         'providers',
         'env',
         'preflight',
-        'hooks',
         'tools',
         'settings',
         'permissions',
@@ -653,6 +653,38 @@ describe('workspace-qualified core REST', () => {
         expect(res.body).not.toHaveProperty('workspaceCwd');
         expect(res.body).not.toHaveProperty('workspaceId');
       }
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('serves the hooks trust decision on an untrusted workspace (#16387)', async () => {
+    const h = await makeHarness({ secondaryTrusted: false });
+    const pendingApprovalHash = 'a'.repeat(64);
+    vi.mocked(
+      h.secondaryWorkspaceService.getWorkspaceHooksStatus,
+    ).mockResolvedValueOnce({
+      v: 1,
+      workspaceCwd: h.secondaryCwd,
+      initialized: true,
+      disabled: false,
+      hooks: [],
+      events: {},
+      pendingApproval: true,
+      pendingApprovalHooks: ['SessionStart: echo untrusted'],
+      pendingApprovalHash,
+    });
+    try {
+      const res = await request(h.app)
+        .get(`/workspaces/${encodeURIComponent(h.secondaryId)}/hooks`)
+        .set('Host', host());
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        workspaceCwd: h.secondaryCwd,
+        pendingApproval: true,
+        pendingApprovalHooks: ['SessionStart: echo untrusted'],
+        pendingApprovalHash,
+      });
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
@@ -2349,6 +2381,9 @@ describe('workspace-qualified core REST', () => {
         h.secondaryBridge.runWorkspaceMemoryRemember,
       ).toHaveBeenCalledTimes(2);
 
+      vi.mocked(
+        h.secondaryBridge.isWorkspaceMemoryRememberAvailable,
+      ).mockResolvedValue(false);
       const forget = await request(h.app)
         .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/memory/forget`)
         .set('Authorization', 'Bearer secret')
@@ -2373,6 +2408,9 @@ describe('workspace-qualified core REST', () => {
         1,
       );
 
+      vi.mocked(
+        h.secondaryBridge.isWorkspaceMemoryRememberAvailable,
+      ).mockResolvedValue(true);
       const dream = await request(h.app)
         .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/memory/dream`)
         .set('Authorization', 'Bearer secret')
