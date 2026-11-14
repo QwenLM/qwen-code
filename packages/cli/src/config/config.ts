@@ -2917,8 +2917,8 @@ export async function loadCliConfig(
     lsToolEnabled: settings.tools?.listDirectory?.enabled === true,
     todoWriteEnabled: settings.tools?.todoWrite?.enabled === true,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
-    unifiedAgentLoopEnabled: settings.experimental?.unifiedAgentLoop ?? false,
-    eventBusAgentLoopEnabled: settings.experimental?.eventBusAgentLoop ?? false,
+    unifiedAgentLoopEnabled: settings.experimental?.unifiedAgentLoop,
+    eventBusAgentLoopEnabled: settings.experimental?.eventBusAgentLoop,
     agentCollaborationEnabled:
       settings.experimental?.agentCollaboration ?? false,
     artifactEnabled: settings.experimental?.artifact ?? true,

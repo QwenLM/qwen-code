@@ -12,13 +12,14 @@
  */
 
 import { spawn } from 'node:child_process';
-import { cpSync, existsSync, readdirSync, readFileSync, rmSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { cpSync, readdirSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   CONTAINER_SANDBOX_NO_PROXY,
   fakeServerHostOptions,
   IS_CONTAINER_SANDBOX,
+  readDebugLogs,
   TestRig,
 } from '../test-helper.js';
 import {
@@ -144,15 +145,7 @@ const runSubagent = (id: string) =>
   );
 
 function debugLog(runtimeDir: string): string {
-  const debugDir = join(runtimeDir, 'debug');
-  if (!existsSync(debugDir)) return '';
-  return (
-    readdirSync(debugDir, { recursive: true, withFileTypes: true })
-      // `latest` points at the session's own log.
-      .filter((entry) => entry.isFile() && basename(entry.name) !== 'latest')
-      .map((entry) => readFileSync(join(entry.parentPath, entry.name), 'utf8'))
-      .join('')
-  );
+  return readDebugLogs(runtimeDir);
 }
 
 const toolResults = (messages: JsonObject[]) =>

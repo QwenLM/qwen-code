@@ -3304,7 +3304,7 @@ describe('loadCliConfig', () => {
     );
   });
 
-  it('keeps the event-bus agent loop disabled by default', async () => {
+  it('leaves the event-bus agent loop setting unset by default', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
 
@@ -3312,7 +3312,7 @@ describe('loadCliConfig', () => {
 
     expect(mockConfigConstructorParams).toHaveBeenCalledWith(
       expect.objectContaining({
-        eventBusAgentLoopEnabled: false,
+        eventBusAgentLoopEnabled: undefined,
       }),
     );
   });
@@ -3326,6 +3326,51 @@ describe('loadCliConfig', () => {
     expect(mockConfigConstructorParams).toHaveBeenCalledWith(
       expect.objectContaining({
         eventBusAgentLoopEnabled: true,
+      }),
+    );
+  });
+
+  it('propagates an explicit event-bus agent loop opt-out', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({ experimental: { eventBusAgentLoop: false } }, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        eventBusAgentLoopEnabled: false,
+      }),
+    );
+  });
+
+  it('leaves the unified agent loop setting unset by default', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        unifiedAgentLoopEnabled: undefined,
+      }),
+    );
+  });
+
+  it('propagates the unified agent loop opt-in and opt-out', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({ experimental: { unifiedAgentLoop: true } }, argv);
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        unifiedAgentLoopEnabled: true,
+      }),
+    );
+
+    await loadCliConfig({ experimental: { unifiedAgentLoop: false } }, argv);
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        unifiedAgentLoopEnabled: false,
       }),
     );
   });
