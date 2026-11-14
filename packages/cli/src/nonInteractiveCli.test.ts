@@ -59,6 +59,8 @@ import {
   LlmClient,
 } from '@qwen-code/qwen-code-core';
 import { getAutoMemorySnapshot } from '@qwen-code/qwen-code-core/memory/request-context.js';
+import { buildLegacyRelevantAutoMemoryPrompt } from '@qwen-code/qwen-code-core/memory/recall.js';
+import type { ScannedAutoMemoryDocument } from '@qwen-code/qwen-code-core/memory/structured-scan.js';
 import type { Content, Part } from '@google/genai';
 import { LlmChat } from '@qwen-code/qwen-code-core/core/llm-chat.js';
 import { LoopEventBus } from '@qwen-code/qwen-code-core/event-bus/bus.js';
@@ -3274,9 +3276,15 @@ describe('runNonInteractive', () => {
         withSnapshot: true,
         withReminder: true,
       },
+      {
+        name: 'recalled memory only',
+        withSnapshot: false,
+        withReminder: false,
+        withMemory: true,
+      },
     ])(
       'adds or deduplicates plan reminders on interrupted replay: $name',
-      async ({ withSnapshot, withReminder }) => {
+      async ({ withSnapshot, withReminder, withMemory }) => {
         setupMetricsMock();
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
         mockLlmClient.stripOrphanedUserEntriesFromHistory = vi.fn();
@@ -3292,6 +3300,20 @@ describe('runNonInteractive', () => {
         if (withReminder) {
           parts.unshift({
             text: '<system-reminder>Existing plan reminder</system-reminder>',
+          });
+        }
+        if (withMemory) {
+          parts.push({
+            text: buildLegacyRelevantAutoMemoryPrompt([
+              {
+                filePath: '/memory/notes.md',
+                relativePath: 'notes.md',
+                title: 'Notes',
+                description: 'Saved notes',
+                body: 'Prefer pnpm.',
+                mtimeMs: Date.now(),
+              } as ScannedAutoMemoryDocument,
+            ]),
           });
         }
         mockLlmClient.getChat = vi.fn(() => ({

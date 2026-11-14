@@ -891,6 +891,34 @@ export function isWrappedSystemReminderPart(part: Part): boolean {
   );
 }
 
+export const RELEVANT_MEMORY_HEADING = '## Relevant memory';
+
+/**
+ * True for the wrapped legacy recalled-memory part built by
+ * `buildLegacyRelevantAutoMemoryPrompt`. It is wrapped like a reminder, but
+ * it is not one of the per-turn mode reminders, so continuation guards that
+ * ask "were the reminders already delivered?" must not count it.
+ */
+export function isRecalledMemoryReminderPart(part: Part): boolean {
+  return (
+    isWrappedSystemReminderPart(part) &&
+    part.text!.startsWith(
+      `${SYSTEM_REMINDER_OPEN}\n${RELEVANT_MEMORY_HEADING}\n`,
+    )
+  );
+}
+
+/**
+ * True for a wrapped per-turn reminder that a replayed continuation may
+ * already carry. Recalled memory is excluded: it shares the envelope but says
+ * nothing about plan mode or the other turn reminders.
+ */
+export function isReplayedTurnReminderPart(part: Part): boolean {
+  return (
+    isWrappedSystemReminderPart(part) && !isRecalledMemoryReminderPart(part)
+  );
+}
+
 /**
  * True when `content` is a structural system-reminder entry: it has parts and
  * EVERY part is wrapped reminder text or a marked memory catalog snapshot.
