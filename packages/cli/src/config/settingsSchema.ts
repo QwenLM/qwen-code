@@ -4633,9 +4633,9 @@ const SETTINGS_SCHEMA = {
         label: 'Unified Agent Loop',
         category: 'Experimental',
         requiresRestart: true,
-        default: false,
+        default: undefined as boolean | undefined,
         description:
-          'Run headless sessions (`-p` and stream-json) and ACP sessions (Zed, VS Code, Web Shell, channels) on the shared agent loop (experimental). The Ink TUI and OpenTUI run their turns on it, and subagents send their model requests and run their tool calls through it. The QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP environment variable overrides this setting per surface: `1` enables every surface, `0` disables every surface, and a comma-separated list such as `headless,acp=0` forces individual surfaces (headless, acp, ink, opentui, agent-core, speculation). A bare `1`/`0` is only recognized as the whole value, not inside a list; surfaces the list does not name fall back to this setting. A project `.env` or `settings.env` cannot set it.',
+          'Run sessions on the shared agent loop. When unset, each surface uses its own default: headless sessions (`-p` and stream-json) run on the shared loop, while ACP sessions (Zed, VS Code, Web Shell, channels), the Ink TUI, OpenTUI and subagents keep their own loop (experimental there). `true` runs all of them on the shared loop, and `false` keeps all of them, headless included, on their own loop. The QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP environment variable overrides this setting per surface: `1` enables every surface, `0` disables every surface, and a comma-separated list such as `headless,acp=0` forces individual surfaces (headless, acp, ink, opentui, agent-core, speculation). A bare `1`/`0` is only recognized as the whole value, not inside a list; surfaces the list does not name fall back to this setting. A project `.env` or `settings.env` cannot set it.',
         showInDialog: true,
       },
       eventBusAgentLoop: {

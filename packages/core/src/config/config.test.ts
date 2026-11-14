@@ -7438,10 +7438,27 @@ describe('Server Config (config.ts)', () => {
       });
       afterEach(() => vi.unstubAllEnvs());
 
-      it('defaults to off for every surface', () => {
+      it('defaults to on for headless and off for every other surface', () => {
         for (const surface of AGENT_LOOP_SURFACES) {
-          expect(makeConfig().isUnifiedAgentLoopEnabled(surface)).toBe(false);
+          expect(makeConfig().isUnifiedAgentLoopEnabled(surface)).toBe(
+            surface === 'headless',
+          );
         }
+      });
+
+      it('keeps headless on its own loop when the setting is false', () => {
+        expect(
+          makeConfig({
+            unifiedAgentLoopEnabled: false,
+          }).isUnifiedAgentLoopEnabled('headless'),
+        ).toBe(false);
+      });
+
+      it('keeps headless on its own loop when the environment turns it off', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'headless=0');
+        expect(makeConfig().isUnifiedAgentLoopEnabled('headless')).toBe(false);
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', '0');
+        expect(makeConfig().isUnifiedAgentLoopEnabled('headless')).toBe(false);
       });
 
       it('honors the constructor parameter', () => {
@@ -7480,7 +7497,8 @@ describe('Server Config (config.ts)', () => {
         const config = makeConfig();
         expect(config.isUnifiedAgentLoopEnabled('acp')).toBe(true);
         expect(config.isUnifiedAgentLoopEnabled('ink')).toBe(false);
-        expect(config.isUnifiedAgentLoopEnabled('headless')).toBe(false);
+        // An unnamed surface falls back to its default, on for headless.
+        expect(config.isUnifiedAgentLoopEnabled('headless')).toBe(true);
       });
 
       it('resolves each surface independently', () => {
