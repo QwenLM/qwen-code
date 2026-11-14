@@ -79,7 +79,7 @@ channel 停摆一段时间（重启、发布或持续 API 故障）后，停机�
 ## 验证计划
 
 - 单元测试（collocated，`GithubAdapter.test.ts`，`comment digest (startup backlog)` 套件）：缺口摘要 vs 无缺口逐条、遗留游标、间隔缩放、缺口下限（6 分钟否 / 11 分钟是）、时钟偏移、首次观测静默、作者自有丢弃、互相署名、已渲染片段 + follower 排除、被拒 dispatch、中止 pass、zh lead、畸形 `lastPollAt`、25 成员省略、行内位置、摘录截断、gate 宽限、满员正文预算、省略尾部以更多摘要补投、内容哈希 id + 重列去重、部分/空快照装载保留、逐 PR 拉取错误、进程内故障恢复、预算耗尽、群组发送者白名单、retired 判定（解除门后第二轮）、不可读投递环、修复后的环使接受的摘要三轮只投一次、大小臂（中性 lead + 省略尾部装载 + 后续中性 lead）、缺口把大小臂排空重置为离线 lead、禁用监视不装载、禁用重启在重新启用前清除持久装载、后续 pass 中止时已排空 PR 不被重新装载、停留摘要对环淘汰的已渲染成员去重、legacy Gone 回退排除全上下文作者、超预算回退、降级首轮重启、持续拉取失败。
-- E2E（封闭 mock GitHub + 隔离 daemon + PR sidecar）：缺口 → 一条摘要且记录已渲染成员键；无缺口 → 逐条；满员积压 → 最新成员在正文预算内幸存；缺口下首次观测 → 静默。
+- E2E（封闭 mock GitHub + 隔离 daemon + PR sidecar），可从仓库经 `scripts/run-github-bound-backlog-e2e.mjs` 复现（先构建 bundle，再 `node scripts/run-github-bound-backlog-e2e.mjs --group g1 --cli "node dist/cli.js" --expect digest`，其余臂用 g2/g4/g5）：缺口 → 一条摘要且记录已渲染成员键；无缺口 → 逐条；满员积压 → 最新成员在正文预算内幸存；缺口下首次观测 → 静默。
 - `npm run build && npm run typecheck`，改动文件的聚焦 vitest。
 
 ## 验收标准

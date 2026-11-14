@@ -257,9 +257,13 @@ backlog)` suite): gap digest vs per-comment no-gap, legacy cursor, interval
   rendered members the ring evicts, the legacy Gone fallback excluding the
   full-context author, over-budget fall-through, degraded-first-poll restart,
   persistent fetch failure.
-- E2E (hermetic mock GitHub + isolated daemon + PR sidecar): gap → one digest
-  with rendered member keys recorded; no-gap → per-comment; full-size backlog →
-  newest members survive the body budget; first-observation-under-gap → silent.
+- E2E (hermetic mock GitHub + isolated daemon + PR sidecar), reproducible from
+  the tree via `scripts/run-github-bound-backlog-e2e.mjs` (build the bundle
+  first, then `node scripts/run-github-bound-backlog-e2e.mjs --group g1 --cli
+"node dist/cli.js" --expect digest`, and g2/g4/g5 for the other arms): gap →
+  one digest with rendered member keys recorded; no-gap → per-comment;
+  full-size backlog → newest members survive the body budget;
+  first-observation-under-gap → silent.
 - `npm run build && npm run typecheck`, focused vitest on the changed files.
 
 ## Acceptance criteria
