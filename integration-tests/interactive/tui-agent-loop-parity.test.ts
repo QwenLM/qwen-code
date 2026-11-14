@@ -461,7 +461,7 @@ describe('normalize', () => {
     // queued-input scenario's sizes move with the pid's width in the same
     // way. These texts cross a multiple of four, which steps both ceilings.
     const shellText = (pid: number) =>
-      'Command: echo queue-now && node queue-gate.cjs\n' +
+      'Command: echo queue-now && node -e "setTimeout(() => {}, 5000)"\n' +
       'Directory: (root)\n' +
       'Output: queue-now\n' +
       'Error: (none)\n' +
@@ -504,15 +504,15 @@ describe('normalize', () => {
     };
     const normalizedShell = (pid: number, volatile?: Volatile) =>
       normalize(shellRecord(pid), '/workspace', '/scratch', volatile);
-    expect(shellText(999).length % 4).toBe(0);
+    expect(shellText(99).length % 4).toBe(0);
     // Without the scenario's keys the counts follow the pid's width; with
     // them the records compare, while the PGID text is scrubbed either way.
-    expect(normalizedShell(999)).not.toEqual(normalizedShell(1_000));
-    expect(JSON.stringify(normalizedShell(999))).toContain(
+    expect(normalizedShell(99)).not.toEqual(normalizedShell(100));
+    expect(JSON.stringify(normalizedShell(99))).toContain(
       'Process Group PGID: <PGID>',
     );
-    expect(normalizedShell(999, FOREGROUND_SHELL_VOLATILE)).toEqual(
-      normalizedShell(1_000, FOREGROUND_SHELL_VOLATILE),
+    expect(normalizedShell(99, FOREGROUND_SHELL_VOLATILE)).toEqual(
+      normalizedShell(100, FOREGROUND_SHELL_VOLATILE),
     );
   });
 });
