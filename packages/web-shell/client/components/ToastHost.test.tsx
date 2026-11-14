@@ -4,7 +4,13 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../i18n';
 import { WebShellPortalRootContext } from '../portalRoot';
-import { ToastHost, type WebShellToast } from './ToastHost';
+import {
+  ToastHost,
+  WindowToastHost,
+  requestToast,
+  MAX_TOASTS,
+  type WebShellToast,
+} from './ToastHost';
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -148,5 +154,116 @@ describe('ToastHost elevation', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('WindowToastHost', () => {
+  function renderWindowHost(): HTMLElement {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, containers: [container] });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <WindowToastHost />
+        </I18nProvider>,
+      );
+    });
+    return container;
+  }
+
+  function toasts(container: HTMLElement): HTMLElement[] {
+    return Array.from(container.querySelectorAll('[data-web-shell-toast]'));
+  }
+
+  it('renders a requested toast with its tone and message', () => {
+    const container = renderWindowHost();
+    expect(toasts(container)).toHaveLength(0);
+    act(() => {
+      requestToast('error', 'Could not change the directory.');
+    });
+    const list = toasts(container);
+    expect(list).toHaveLength(1);
+    expect(list[0]!.textContent).toContain('Could not change the directory.');
+    expect(list[0]!.getAttribute('data-tone')).toBe('error');
+  });
+
+  it('deduplicates by tone+message and ignores empty messages', () => {
+    const container = renderWindowHost();
+    act(() => {
+      requestToast('error', 'same');
+      requestToast('error', 'same');
+      requestToast('warning', 'same');
+      requestToast('error', '');
+    });
+    const list = toasts(container);
+    expect(list).toHaveLength(2);
+    expect(
+      list.filter((n) => n.getAttribute('data-tone') === 'error'),
+    ).toHaveLength(1);
+  });
+
+  it('caps the stack at MAX_TOASTS, keeping the newest', () => {
+    const container = renderWindowHost();
+    act(() => {
+      for (let i = 0; i < MAX_TOASTS + 2; i++) {
+        requestToast('info', `message-${i}`);
+      }
+    });
+    const list = toasts(container);
+    expect(list).toHaveLength(MAX_TOASTS);
+    expect(list[list.length - 1]!.textContent).toContain(
+      `message-${MAX_TOASTS + 1}`,
+    );
+  });
+
+  it('auto-dismisses after the shared deadline (R4-4)', () => {
+    vi.useFakeTimers();
+    try {
+      const container = renderWindowHost();
+      act(() => {
+        requestToast('info', 'transient');
+      });
+      expect(toasts(container)).toHaveLength(1);
+      act(() => {
+        vi.advanceTimersByTime(5000);
+      });
+      // A mutated dismissAt far in the future would keep the toast here.
+      expect(toasts(container)).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('scopes notices to the acting shell when co-mounted (R4-6)', () => {
+    function mountShell(): { shell: HTMLElement; host: HTMLElement } {
+      const shell = document.createElement('div');
+      shell.setAttribute('data-web-shell-root', '');
+      const button = document.createElement('button');
+      shell.appendChild(button);
+      const host = document.createElement('div');
+      shell.appendChild(host);
+      document.body.appendChild(shell);
+      const root = createRoot(host);
+      mounted.push({ root, containers: [shell] });
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <WindowToastHost scope={shell} />
+          </I18nProvider>,
+        );
+      });
+      return { shell, host };
+    }
+    const a = mountShell();
+    const b = mountShell();
+    // The acting control lives in shell A; its notice must not reach B.
+    (a.shell.querySelector('button') as HTMLButtonElement).focus();
+    act(() => {
+      requestToast('error', 'shell-a notice');
+    });
+    expect(toasts(a.host)).toHaveLength(1);
+    expect(toasts(b.host)).toHaveLength(0);
   });
 });

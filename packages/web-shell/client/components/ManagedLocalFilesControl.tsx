@@ -4,23 +4,27 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import { FolderOpenIcon } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { useManagedLocalFilesBridge } from '../local-files/useManagedLocalFilesBridge';
-import type { LocalFilesPhase } from '../local-files/useLocalFilesBridge';
 import type { ManagedFetch } from '../local-files/managed-client-files-bridge';
 import type { ManagedAgentProvider } from './managed/managed-agent-provider';
-import { LocalFilesPanel } from './LocalFilesControl';
+import {
+  LocalFilesPanel,
+  getLocalFilesDotClass,
+  getLocalFilesTooltip,
+} from './LocalFilesControl';
+import { requestToast } from './ToastHost';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { cn } from '@/lib/utils';
-
-const BUSY: readonly LocalFilesPhase[] = ['connecting'];
 
 export interface ManagedLocalFilesControlProps {
   provider: ManagedAgentProvider;
   sessionId: string | undefined;
   triggerClassName: string;
+  /** Bound session title, shown while connected when known. */
+  sessionName?: string;
 }
 
 /**
@@ -33,9 +37,11 @@ export function ManagedLocalFilesControl({
   provider,
   sessionId,
   triggerClassName,
+  sessionName,
 }: ManagedLocalFilesControlProps) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
+  const stateDescriptionId = useId();
 
   const transport = provider.clientFiles?.transport();
   const unavailableFetch = (async () =>
@@ -48,8 +54,8 @@ export function ManagedLocalFilesControl({
 
   if (!transport) return null;
 
-  const active = status.phase === 'connected';
-  const busy = BUSY.includes(status.phase);
+  const dotClass = getLocalFilesDotClass(status);
+  const stateDescription = getLocalFilesTooltip(status, t);
 
   const control = (
     <Popover open={open} onOpenChange={setOpen}>
@@ -58,15 +64,19 @@ export function ManagedLocalFilesControl({
           type="button"
           className={cn('relative', triggerClassName)}
           aria-label={t('localFiles.trigger')}
-          title={t('localFiles.trigger')}
+          aria-describedby={stateDescriptionId}
+          title={stateDescription}
         >
           <FolderOpenIcon size={16} strokeWidth={1.2} aria-hidden="true" />
-          {active || busy ? (
+          <span id={stateDescriptionId} className="sr-only">
+            {stateDescription}
+          </span>
+          {dotClass ? (
             <span
               aria-hidden="true"
               className={cn(
                 'absolute right-1 bottom-1 h-1.5 w-1.5 rounded-full',
-                active ? 'bg-primary' : 'bg-muted-foreground',
+                dotClass,
               )}
             />
           ) : null}
@@ -84,6 +94,16 @@ export function ManagedLocalFilesControl({
           onOpenInNewTab={() => {
             window.open(window.location.href, '_blank', 'noopener');
           }}
+          onChangeDirectory={() => {
+            void connect({ forcePicker: true }).then((result) => {
+              // A failed re-pick keeps the running bridge connected, but the
+              // click must not be silent (R1-5).
+              if (result?.kind === 'repick-failed') {
+                requestToast('error', t('localFiles.changeDirectoryFailed'));
+              }
+            });
+          }}
+          sessionName={sessionName}
         />
       </PopoverContent>
     </Popover>

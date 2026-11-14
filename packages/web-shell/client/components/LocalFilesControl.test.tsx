@@ -16,10 +16,15 @@ import type {
   DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 import { DaemonHttpError } from '@qwen-code/sdk/daemon';
+import type { LocalFilesStatus } from '../local-files/useLocalFilesBridge';
 import {
   LocalFilesControl,
   createLocalFilesRewarm,
   resolveLocalFilesWorkspaceRoute,
+  getLocalFilesDotClass,
+  getLocalFilesTooltip,
+  deriveLocalFilesTunnelCommand,
+  deriveLocalFilesTunnelLocalPort,
 } from './LocalFilesControl';
 
 const bridgeLifecycle = vi.hoisted(() => ({
@@ -44,9 +49,25 @@ const capsOverride = vi.hoisted(() => ({
 const DEFAULT_CAPS = vi.hoisted(() => ({ sentinel: 'default-caps' }));
 const connectionOverride = vi.hoisted(() => ({
   current: undefined as
-    | { sessionId?: string; workspaceCwd?: string }
+    | { sessionId?: string; workspaceCwd?: string; displayName?: string }
     | undefined,
 }));
+
+// Per-case bridge status / connect spy for the wiring tests appended below.
+const bridgeStatusOverride = vi.hoisted(() => ({
+  current: undefined as unknown,
+}));
+// The real hook's connect() always returns a promise; the control chains
+// .then() on it for the repick-failed toast.
+const bridgeConnectSpy = vi.hoisted(() =>
+  vi.fn(
+    async (): Promise<
+      { kind: 'repick-failed' } | { kind: 'change-deferred' } | undefined
+    > => undefined,
+  ),
+);
+const toastSpy = vi.hoisted(() => vi.fn());
+const newSessionSpy = vi.hoisted(() => vi.fn(async () => {}));
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => {
   const fallback = {
@@ -80,6 +101,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => {
       client: {},
     }),
     useWorkspaceActions: () => ({ preheatAcp: vi.fn() }),
+    useActions: () => ({ newSession: newSessionSpy }),
   };
 });
 
@@ -91,11 +113,15 @@ vi.mock('../local-files/useLocalFilesBridge', () => ({
     }, []);
     capturedHookOptions.current = options;
     return {
-      status: { phase: 'idle', blocker: null },
-      connect: vi.fn(),
+      status: bridgeStatusOverride.current ?? { phase: 'idle', blocker: null },
+      connect: bridgeConnectSpy,
       disconnect: vi.fn(),
     };
   },
+}));
+
+vi.mock('./ToastHost', () => ({
+  requestToast: toastSpy,
 }));
 
 const primary = {
@@ -509,4 +535,525 @@ it('keeps the local-files bridge mounted while the More slot opens and closes', 
     slot.remove();
   }
   expect(bridgeLifecycle.cleanup).toHaveBeenCalledTimes(1);
+});
+
+describe('getLocalFilesDotClass', () => {
+  it.each<[LocalFilesStatus['phase'], string | null]>([
+    ['connected', 'bg-primary'],
+    ['held-elsewhere', 'bg-muted-foreground'],
+    ['connecting', 'bg-muted-foreground'],
+    ['registering', 'bg-muted-foreground'],
+    ['reconnecting', 'bg-[var(--warning-color)]'],
+    ['needs-gesture', 'bg-[var(--warning-color)]'],
+    ['failed', 'bg-destructive'],
+    ['idle', null],
+    ['needs-session', null],
+    ['unavailable', null],
+  ])('maps %s to %s', (phase, expected) => {
+    expect(getLocalFilesDotClass({ phase, blocker: null })).toBe(expected);
+  });
+
+  it('uses the theme-aware warning token for the warning states (R2-1)', () => {
+    // A fixed palette color (bg-amber-500) is low-contrast in the light theme;
+    // the warning states must resolve to the theme-aware token. Reverting to a
+    // raw palette color makes this go red.
+    for (const phase of ['reconnecting', 'needs-gesture'] as const) {
+      expect(getLocalFilesDotClass({ phase, blocker: null })).toBe(
+        'bg-[var(--warning-color)]',
+      );
+    }
+  });
+
+  it('keeps held-elsewhere visually distinct from a bridge this tab owns', () => {
+    // A bridge held by another tab is live but not usable here; the trigger
+    // must not show the same "connected" dot as one this tab owns.
+    expect(
+      getLocalFilesDotClass({ phase: 'held-elsewhere', blocker: null }),
+    ).not.toBe(getLocalFilesDotClass({ phase: 'connected', blocker: null }));
+  });
+});
+
+describe('getLocalFilesTooltip', () => {
+  const t = (key: string) => key;
+  it('names the state and the directory', () => {
+    expect(
+      getLocalFilesTooltip(
+        { phase: 'connected', blocker: null, rootName: 'proj' },
+        t,
+      ),
+    ).toBe('localFiles.trigger — localFiles.status.connected (proj)');
+  });
+  it('omits the directory when none is named', () => {
+    expect(getLocalFilesTooltip({ phase: 'failed', blocker: null }, t)).toBe(
+      'localFiles.trigger — localFiles.status.failed',
+    );
+  });
+  it('uses the resolving label during a transient resolving blip (R1-7)', () => {
+    expect(
+      getLocalFilesTooltip(
+        { phase: 'unavailable', blocker: 'workspace-resolving' },
+        t,
+      ),
+    ).toBe('localFiles.trigger — localFiles.status.resolving');
+  });
+  it('keeps the permanent label for hard blockers (R4-4)', () => {
+    // Broadening the predicate to `blocker !== null` would mislabel every
+    // hard verdict as still resolving.
+    expect(
+      getLocalFilesTooltip(
+        { phase: 'unavailable', blocker: 'workspace-ineligible' },
+        t,
+      ),
+    ).toBe('localFiles.trigger — localFiles.status.unavailable');
+  });
+});
+
+describe('deriveLocalFilesTunnelCommand (R1-3)', () => {
+  it('clamps a privileged remote port to an unprivileged local bind', () => {
+    // http://daemon.example/ has no explicit port → remote 80, which a non-root
+    // user cannot bind locally. Without the clamp this copies -L 80:…:80.
+    expect(deriveLocalFilesTunnelCommand('http://daemon.example/')).toBe(
+      'ssh -L 8080:localhost:80 daemon.example',
+    );
+    expect(deriveLocalFilesTunnelCommand('https://daemon.example/')).toBe(
+      'ssh -L 8443:localhost:443 daemon.example',
+    );
+  });
+  it('keeps an unprivileged port unchanged', () => {
+    expect(deriveLocalFilesTunnelCommand('http://host:4170/')).toBe(
+      'ssh -L 4170:localhost:4170 host',
+    );
+  });
+  it('strips IPv6 brackets so ssh gets a bare host', () => {
+    expect(deriveLocalFilesTunnelCommand('http://[2001:db8::1]:4170/')).toBe(
+      'ssh -L 4170:localhost:4170 2001:db8::1',
+    );
+  });
+  it('returns undefined for a relative or base-less URL', () => {
+    expect(
+      deriveLocalFilesTunnelCommand('/api/agent/web-shell/v1'),
+    ).toBeUndefined();
+    expect(deriveLocalFilesTunnelCommand('')).toBeUndefined();
+  });
+  it('refuses hosts carrying shell metacharacters or a leading dash (R3-15)', () => {
+    // The WHATWG parser preserves these in the hostname; the command is
+    // pasted into a shell, and a leading '-' would reach ssh's option parser.
+    for (const host of [
+      'http://`id`/',
+      'http://a;b/',
+      'http://$(id)/',
+      'http://-oProxyCommand=x/',
+      'http://a|b/',
+      'http://a&b/',
+      // Every character is allowlisted; only the leading-dash check rejects
+      // this one, so dropping that check keeps the suite green without it.
+      'http://-host/',
+    ]) {
+      expect(deriveLocalFilesTunnelCommand(host)).toBeUndefined();
+      expect(deriveLocalFilesTunnelLocalPort(host)).toBeUndefined();
+    }
+  });
+});
+
+describe('deriveLocalFilesTunnelLocalPort (R3-15)', () => {
+  it('names the local bind the copied tunnel actually opens', () => {
+    // The blocker copy tells the user which address to open; with the
+    // privileged-port clamp that is the LOCAL port, not the remote one.
+    expect(deriveLocalFilesTunnelLocalPort('http://daemon.example/')).toBe(
+      8080,
+    );
+    expect(deriveLocalFilesTunnelLocalPort('https://daemon.example/')).toBe(
+      8443,
+    );
+    expect(deriveLocalFilesTunnelLocalPort('http://host:4170/')).toBe(4170);
+    expect(
+      deriveLocalFilesTunnelLocalPort('/api/agent/web-shell/v1'),
+    ).toBeUndefined();
+  });
+});
+
+describe('LocalFilesControl trigger and notices', () => {
+  let cleanup: (() => void) | undefined;
+
+  afterEach(() => {
+    cleanup?.();
+    cleanup = undefined;
+    bridgeStatusOverride.current = undefined;
+    bridgeConnectSpy.mockClear();
+    toastSpy.mockClear();
+    newSessionSpy.mockClear();
+    capsOverride.current = undefined;
+    connectionOverride.current = undefined;
+    Object.defineProperty(navigator, 'clipboard', {
+      value: undefined,
+      configurable: true,
+    });
+  });
+
+  async function renderControl() {
+    const { createRoot } = await import('react-dom/client');
+    Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const renderTree = () => (
+      <I18nProvider language="en">
+        <LocalFilesControl triggerClassName="t" />
+      </I18nProvider>
+    );
+    act(() => {
+      root.render(renderTree());
+    });
+    cleanup = () => {
+      act(() => root.unmount());
+      container.remove();
+    };
+    return {
+      container,
+      rerender: () =>
+        act(() => {
+          root.render(renderTree());
+        }),
+    };
+  }
+
+  function triggerOf(container: HTMLElement): HTMLElement {
+    const trigger = container.querySelector<HTMLElement>(
+      'button[aria-label="Local files"]',
+    );
+    if (!trigger) throw new Error('trigger never rendered');
+    return trigger;
+  }
+
+  it('renders a red dot and a state tooltip for a failed bridge', async () => {
+    bridgeStatusOverride.current = {
+      phase: 'failed',
+      blocker: null,
+      rootName: 'proj',
+      message: 'x',
+    };
+    const { container } = await renderControl();
+    const trigger = triggerOf(container);
+    expect(trigger.getAttribute('title')).toBe('Local files — Failed (proj)');
+    expect(trigger.querySelector('.bg-destructive')).not.toBeNull();
+  });
+
+  it('renders a warning-token dot for a grant that needs a gesture', async () => {
+    bridgeStatusOverride.current = {
+      phase: 'needs-gesture',
+      blocker: null,
+      rootName: 'proj',
+    };
+    const { container } = await renderControl();
+    const dot = triggerOf(container).querySelector('span[aria-hidden="true"]');
+    expect(dot?.className).toContain('var(--warning-color)');
+  });
+
+  it('exposes the state as an accessible description, name unchanged (R1-8)', async () => {
+    bridgeStatusOverride.current = {
+      phase: 'failed',
+      blocker: null,
+      rootName: 'proj',
+      message: 'x',
+    };
+    const { container } = await renderControl();
+    const trigger = triggerOf(container);
+    // The accessible name stays the stable trigger label…
+    expect(trigger.getAttribute('aria-label')).toBe('Local files');
+    // …while the state is reachable as a description for assistive tech.
+    const describedBy = trigger.getAttribute('aria-describedby');
+    expect(describedBy).toBeTruthy();
+    const description = document.getElementById(describedBy!);
+    expect(description?.textContent).toBe('Local files — Failed (proj)');
+  });
+
+  it('tooltip says Resolving during a transient resolving blip (R1-7)', async () => {
+    bridgeStatusOverride.current = {
+      phase: 'unavailable',
+      blocker: 'workspace-resolving',
+    };
+    const { container } = await renderControl();
+    expect(triggerOf(container).getAttribute('title')).toBe(
+      'Local files — Resolving…',
+    );
+  });
+
+  it('warns once when a grant needs a gesture, and not on re-render', async () => {
+    bridgeStatusOverride.current = {
+      phase: 'needs-gesture',
+      blocker: null,
+      rootName: 'proj',
+    };
+    const { rerender } = await renderControl();
+    expect(toastSpy).toHaveBeenCalledTimes(1);
+    expect(toastSpy).toHaveBeenCalledWith(
+      'warning',
+      expect.stringContaining('proj'),
+    );
+    // Force the effect to re-run with the same phase (rootName is a dep):
+    // the dedupe ref must suppress a second toast.
+    bridgeStatusOverride.current = {
+      phase: 'needs-gesture',
+      blocker: null,
+      rootName: 'other',
+    };
+    rerender();
+    expect(toastSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('warns again when a later reload re-enters needs-gesture (R1-15)', async () => {
+    bridgeStatusOverride.current = {
+      phase: 'needs-gesture',
+      blocker: null,
+      rootName: 'proj',
+    };
+    const { rerender } = await renderControl();
+    expect(toastSpy).toHaveBeenCalledTimes(1);
+    // The user reconnects and works for a while…
+    bridgeStatusOverride.current = {
+      phase: 'connected',
+      blocker: null,
+      rootName: 'proj',
+      toolCount: 4,
+    };
+    rerender();
+    // …then a later reload falls back to needing re-authorization again. A
+    // fire-once-per-mount latch (prev === undefined) would stay silent here.
+    bridgeStatusOverride.current = {
+      phase: 'needs-gesture',
+      blocker: null,
+      rootName: 'proj',
+    };
+    rerender();
+    expect(toastSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not warn for a connected bridge', async () => {
+    bridgeStatusOverride.current = {
+      phase: 'connected',
+      blocker: null,
+      rootName: 'proj',
+      toolCount: 4,
+    };
+    await renderControl();
+    expect(toastSpy).not.toHaveBeenCalled();
+  });
+
+  it('change directory calls connect with forcePicker', async () => {
+    bridgeStatusOverride.current = {
+      phase: 'connected',
+      blocker: null,
+      rootName: 'proj',
+      toolCount: 4,
+    };
+    const { container } = await renderControl();
+    const trigger = triggerOf(container);
+    act(() => {
+      trigger.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const change = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === 'Change directory…',
+    );
+    if (!change) throw new Error('popover never opened');
+    act(() => {
+      change.click();
+    });
+    expect(bridgeConnectSpy).toHaveBeenCalledWith({ forcePicker: true });
+  });
+
+  it('toasts when a forced re-pick fails, and stays silent otherwise', async () => {
+    bridgeStatusOverride.current = {
+      phase: 'connected',
+      blocker: null,
+      rootName: 'proj',
+      toolCount: 4,
+    };
+    const { container } = await renderControl();
+    openPopover(container);
+    bridgeConnectSpy.mockResolvedValueOnce({ kind: 'repick-failed' });
+    await act(async () => {
+      panelButton('Change directory…').click();
+    });
+    expect(toastSpy).toHaveBeenCalledWith(
+      'error',
+      'Could not change the directory. The current directory is still connected.',
+    );
+    toastSpy.mockClear();
+    await act(async () => {
+      panelButton('Change directory…').click();
+    });
+    expect(toastSpy).not.toHaveBeenCalled();
+  });
+
+  it('toasts a pending notice when the change is deferred by a resolving blip', async () => {
+    bridgeStatusOverride.current = {
+      phase: 'connected',
+      blocker: null,
+      rootName: 'proj',
+      toolCount: 4,
+    };
+    const { container } = await renderControl();
+    openPopover(container);
+    bridgeConnectSpy.mockResolvedValueOnce({ kind: 'change-deferred' });
+    await act(async () => {
+      panelButton('Change directory…').click();
+    });
+    // The live bridge still serves the old directory until the verdict
+    // settles; a silent success would misreport the change as effective.
+    expect(toastSpy).toHaveBeenCalledWith(
+      'info',
+      'Directory change saved. It takes effect once the workspace finishes resolving; until then the current directory stays connected.',
+    );
+  });
+
+  function openPopover(container: HTMLElement): void {
+    act(() => {
+      triggerOf(container).dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+    });
+  }
+
+  function panelButton(label: string): HTMLButtonElement {
+    const button = Array.from(document.querySelectorAll('button')).find(
+      (candidate) => candidate.textContent?.trim() === label,
+    );
+    if (!button) throw new Error(`popover button never rendered: ${label}`);
+    return button;
+  }
+
+  function stubClipboard() {
+    const writeText = vi.fn(async () => {});
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+    return writeText;
+  }
+
+  it('copies the daemon startup command and reports success', async () => {
+    const writeText = stubClipboard();
+    bridgeStatusOverride.current = {
+      phase: 'unavailable',
+      blocker: 'unsupported-daemon',
+    };
+    const { container } = await renderControl();
+    openPopover(container);
+    await act(async () => {
+      panelButton('Copy startup command').click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    // Pin the literal, not the constant-to-constant tautology (R1-12): a
+    // command that does not enable the reverse channel must go red.
+    expect(writeText).toHaveBeenCalledWith(
+      'QWEN_SERVE_CLIENT_MCP_OVER_WS=1 qwen serve',
+    );
+    expect(toastSpy).toHaveBeenCalledWith('success', 'Command copied');
+  });
+
+  it('reports a clipboard rejection instead of claiming success (R1-13)', async () => {
+    const writeText = vi.fn(async () => {
+      throw new Error('denied');
+    });
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+    bridgeStatusOverride.current = {
+      phase: 'unavailable',
+      blocker: 'unsupported-daemon',
+    };
+    const { container } = await renderControl();
+    openPopover(container);
+    await act(async () => {
+      panelButton('Copy startup command').click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(toastSpy).toHaveBeenCalledWith(
+      'error',
+      'Could not copy the command',
+    );
+    expect(toastSpy).not.toHaveBeenCalledWith('success', 'Command copied');
+  });
+
+  it('derives and copies the SSH tunnel command for an insecure origin', async () => {
+    const writeText = stubClipboard();
+    bridgeStatusOverride.current = {
+      phase: 'unavailable',
+      blocker: 'insecure-context',
+    };
+    const { container } = await renderControl();
+    openPopover(container);
+    await act(async () => {
+      panelButton('Copy SSH tunnel command').click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    // Default mock baseUrl is https://daemon.example/ → remote 443, and a
+    // non-root user cannot bind 443 locally, so the local port is clamped high.
+    expect(writeText).toHaveBeenCalledWith(
+      'ssh -L 8443:localhost:443 daemon.example',
+    );
+    // The instruction must name the LOCAL bind the tunnel opens — the only
+    // 'localhost' token in the command is the remote side (R3-15).
+    expect(document.body.textContent).toContain('http://localhost:8443');
+  });
+
+  it('offers new session in needs-session and calls the session action', async () => {
+    bridgeStatusOverride.current = { phase: 'needs-session', blocker: null };
+    const { container } = await renderControl();
+    openPopover(container);
+    act(() => {
+      panelButton('New session').click();
+    });
+    expect(newSessionSpy).toHaveBeenCalledOnce();
+  });
+
+  it('handles a rejected newSession without an unhandled rejection (R4-4)', async () => {
+    bridgeStatusOverride.current = { phase: 'needs-session', blocker: null };
+    const { container } = await renderControl();
+    openPopover(container);
+    // A thenable that records whether the caller attached a rejection
+    // handler: dropping the control's .catch leaves the rejection unhandled.
+    let handlerAttached = false;
+    const rejected = Promise.reject(new Error('creation refused'));
+    rejected.catch(() => {});
+    const thenable = {
+      then(onFulfilled?: unknown, onRejected?: unknown) {
+        if (onRejected) handlerAttached = true;
+        return rejected.then(
+          onFulfilled as (() => unknown) | undefined,
+          onRejected as (() => unknown) | undefined,
+        );
+      },
+      catch(onRejected?: unknown) {
+        handlerAttached = true;
+        return rejected.catch(onRejected as (() => unknown) | undefined);
+      },
+    };
+    newSessionSpy.mockImplementationOnce(
+      () => thenable as unknown as Promise<void>,
+    );
+    await act(async () => {
+      panelButton('New session').click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(newSessionSpy).toHaveBeenCalledOnce();
+    // newSession reports through the notice system; the control must not
+    // add a toast of its own, and must handle the rejection itself.
+    expect(toastSpy).not.toHaveBeenCalled();
+    expect(handlerAttached).toBe(true);
+  });
+
+  it('shows the bound session name from the connection', async () => {
+    connectionOverride.current = { displayName: 'My task' };
+    bridgeStatusOverride.current = {
+      phase: 'connected',
+      blocker: null,
+      rootName: 'proj',
+      toolCount: 4,
+    };
+    const { container } = await renderControl();
+    openPopover(container);
+    expect(document.body.textContent).toContain('My task');
+  });
 });

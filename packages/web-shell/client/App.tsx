@@ -237,6 +237,8 @@ import { readWaitingGamesEnabled } from './utils/waitingGamesConfig';
 import {
   ToastHost,
   TOAST_REQUEST_EVENT,
+  MAX_TOASTS,
+  TOAST_AUTO_DISMISS_MS,
   type ToastRequestDetail,
   type ToastTone,
   type WebShellToast,
@@ -649,8 +651,6 @@ import { WebShellPortalRootContext } from './portalRoot';
 import { CompactModeContext, TodoContextsProvider } from './WebShellContexts';
 import styles from './App.module.css';
 
-const MAX_TOASTS = 4;
-const TOAST_AUTO_DISMISS_MS = 5000;
 const DEFAULT_REVIEW_PANEL_WIDTH = 500;
 const MIN_ARTIFACT_PANEL_WIDTH = 320;
 const MIN_CHAT_PANE_WIDTH_WITH_ARTIFACT_PANEL = 500;

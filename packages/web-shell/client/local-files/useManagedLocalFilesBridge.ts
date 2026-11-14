@@ -68,7 +68,9 @@ export function useManagedLocalFilesBridge(
   options: UseManagedLocalFilesBridgeOptions,
 ): {
   status: LocalFilesStatus;
-  connect: () => Promise<void>;
+  connect: (options?: {
+    forcePicker?: boolean;
+  }) => Promise<{ kind: 'repick-failed' } | undefined>;
   disconnect: () => Promise<void>;
 } {
   const { sessionId, baseUrl, fetch } = options;
@@ -200,91 +202,141 @@ export function useManagedLocalFilesBridge(
     return () => win.removeEventListener('pagehide', onPageHide);
   }, [win]);
 
-  const connect = useCallback(async () => {
-    if (!win || blocker !== null || !sessionId) return;
-    if (connectingRef.current) return;
-    connectingRef.current = true;
-    try {
-      const generation = generationRef.current;
-      const stale = () => generationRef.current !== generation;
-      let handle = handleRef.current;
-      if (handle) {
-        // Reuse preconditions, mirroring the daemon hook: the store must still
-        // hold the grant (a peer tab may have disconnected it) and the browser
-        // permission must still be granted (it can be revoked while the tab
-        // stays open). Trusting handleRef outright would register a directory
-        // the user just disconnected or no longer allows.
-        const stored = await storeRef.current?.load();
-        if (stale()) return;
-        if (!stored) {
-          handleRef.current = undefined;
-          handle = undefined;
-        } else {
-          const permission = await ensureReadwritePermission(handle);
+  const connect = useCallback(
+    async (options?: { forcePicker?: boolean }) => {
+      if (!win || blocker !== null || !sessionId) return;
+      if (connectingRef.current) return;
+      connectingRef.current = true;
+      try {
+        const forcePicker = options?.forcePicker === true;
+        const generation = generationRef.current;
+        const stale = () => generationRef.current !== generation;
+        // forcePicker (Change directory) skips grant reuse so the picker opens
+        // even though a grant exists; the fresh pick is saved over the record.
+        let handle = forcePicker ? undefined : handleRef.current;
+        if (handle) {
+          // Reuse preconditions, mirroring the daemon hook: the store must still
+          // hold the grant (a peer tab may have disconnected it) and the browser
+          // permission must still be granted (it can be revoked while the tab
+          // stays open). Trusting handleRef outright would register a directory
+          // the user just disconnected or no longer allows.
+          const stored = await storeRef.current?.load();
           if (stale()) return;
-          if (permission.state !== 'granted') {
-            // Do not register on a handle the browser no longer allows. Drop the
-            // retained handle and fall through to the picker in this same
-            // gesture, so the Connect click is not a silent no-op that only
-            // reaches the picker on a second click.
+          if (!stored) {
             handleRef.current = undefined;
             handle = undefined;
+          } else {
+            const permission = await ensureReadwritePermission(handle);
+            if (stale()) return;
+            if (permission.state !== 'granted') {
+              // Do not register on a handle the browser no longer allows. Drop the
+              // retained handle and fall through to the picker in this same
+              // gesture, so the Connect click is not a silent no-op that only
+              // reaches the picker on a second click.
+              handleRef.current = undefined;
+              handle = undefined;
+            }
           }
         }
-      }
-      if (!handle) {
-        const picked = await pickDirectoryHandle(win);
-        if (stale()) return;
-        if (picked.kind === 'cancelled') return;
-        if (picked.kind === 'unavailable') {
-          setStatus({ phase: 'unavailable', blocker: picked.blocker });
-          return;
+        if (!handle) {
+          const picked = await pickDirectoryHandle(win);
+          if (stale()) return;
+          if (picked.kind === 'cancelled') return;
+          // A failed re-pick must not misreport the still-running bridge; leave
+          // the connected status and the old grant untouched. Report the outcome
+          // so the Change-directory handler can surface it (R1-5).
+          if (
+            forcePicker &&
+            (picked.kind === 'unavailable' || picked.kind === 'failed')
+          ) {
+            return { kind: 'repick-failed' } as const;
+          }
+          if (picked.kind === 'unavailable') {
+            setStatus({ phase: 'unavailable', blocker: picked.blocker });
+            return;
+          }
+          if (picked.kind === 'failed') {
+            setStatus({
+              phase: 'failed',
+              blocker: null,
+              message: picked.message,
+            });
+            return;
+          }
+          const previousHandle = handleRef.current;
+          handle = picked.handle;
+          handleRef.current = handle;
+          // Save before the same-entry short-circuit, in the daemon hook's
+          // order: re-confirming the bound folder must re-persist a grant the
+          // record has lost (a peer tab's Disconnect clears the origin-scoped
+          // slot), not discard the freshly granted handle.
+          const saved = (await storeRef.current?.save(handle)) ?? false;
+          if (stale()) return;
+          // A change that failed to persist must not leave the old directory
+          // as the stored grant while the panel serves the new one: reject the
+          // re-pick wholesale and keep the live bridge, exactly as the daemon
+          // hook does. The record still holds the directory the bridge serves,
+          // so a reload stays consistent and the handler's toast fires.
+          if (forcePicker && !saved) {
+            handleRef.current = previousHandle;
+            return { kind: 'repick-failed' } as const;
+          }
+          // Re-confirming the already-bound entry is not a change: the picker
+          // reopens the last choice (fixed PICKER_ID), so pressing Select
+          // without navigating must not tear down and re-register the live
+          // bridge. Identity, not basename — a same-named folder elsewhere is
+          // a real change; a throwing isSameEntry fails closed (not same).
+          if (forcePicker && previousHandle) {
+            let same = false;
+            try {
+              same = await previousHandle.isSameEntry(handle);
+            } catch {
+              same = false;
+            }
+            if (stale()) return;
+            if (same) return;
+          }
         }
-        if (picked.kind === 'failed') {
-          setStatus({
-            phase: 'failed',
-            blocker: null,
-            message: picked.message,
-          });
-          return;
-        }
-        handle = picked.handle;
-        handleRef.current = handle;
-        await storeRef.current?.save(handle);
         if (stale()) return;
-      }
-      if (stale()) return;
-      const server = new LocalFilesMcpServer(new LocalDirectory(handle));
-      const bridge = new ManagedClientFilesBridge({
-        baseUrl,
-        sessionId,
-        server,
-        fetch,
-      });
-      // Detach the previous bridge's listener before tearing it down: its
-      // disconnect() awaits the unregister POST and only then emits `stopped`,
-      // which would otherwise land after the new bridge's `connecting`/`connected`
-      // and overwrite the live panel status with a stale idle.
-      unsubscribeRef.current?.();
-      unsubscribeRef.current = undefined;
-      bridgeRef.current?.disconnect();
-      bridgeRef.current = bridge;
-      unsubscribeRef.current = bridge.onState((state) => {
-        setStatus({
-          phase: phaseOf(state, true),
-          blocker: null,
-          rootName: handle.name,
-          ...(state.phase === 'connected'
-            ? { toolCount: state.toolCount }
-            : {}),
-          ...(state.phase === 'failed' ? { message: state.message } : {}),
+        const server = new LocalFilesMcpServer(new LocalDirectory(handle));
+        const bridge = new ManagedClientFilesBridge({
+          baseUrl,
+          sessionId,
+          server,
+          fetch,
         });
-      });
-      await bridge.connect();
-    } finally {
-      connectingRef.current = false;
-    }
-  }, [win, blocker, sessionId, baseUrl, fetch]);
+        // Detach the previous bridge's listener before tearing it down: its
+        // disconnect() awaits the unregister POST and only then emits `stopped`,
+        // which would otherwise land after the new bridge's `connecting`/`connected`
+        // and overwrite the live panel status with a stale idle.
+        unsubscribeRef.current?.();
+        unsubscribeRef.current = undefined;
+        bridgeRef.current?.disconnect();
+        bridgeRef.current = bridge;
+        unsubscribeRef.current = bridge.onState((state) => {
+          setStatus({
+            phase: phaseOf(state, true),
+            blocker: null,
+            rootName: handle.name,
+            ...(state.phase === 'connected'
+              ? { toolCount: state.toolCount }
+              : {}),
+            ...(state.phase === 'failed' ? { message: state.message } : {}),
+          });
+        });
+        // Do not await the drain loop: it stays pending for the bridge's whole
+        // connected lifetime, and awaiting it would hold the re-entrancy guard
+        // for that entire span, making a later "Change directory" click return
+        // at the guard before the picker opens. The guard only needs to cover
+        // grant acquisition; connect() publishes its outcome (including
+        // failure) through onState, so nothing is lost by not awaiting it.
+        void bridge.connect();
+      } finally {
+        connectingRef.current = false;
+      }
+    },
+    [win, blocker, sessionId, baseUrl, fetch],
+  );
 
   if (blocker !== null && status.phase !== 'unavailable') {
     return {

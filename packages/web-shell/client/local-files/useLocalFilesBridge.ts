@@ -266,6 +266,15 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
    */
   const connectWroteStatusRef = useRef(false);
   /**
+   * A forced rebuild parked by a Change-directory pick that landed during a
+   * transient resolving blip: the live bridge must survive the blip, but the
+   * rebind that follows the verdict must rebuild with force — its basename
+   * exemption cannot tell the new same-named directory from the old one.
+   */
+  const pendingForceRebuildRef = useRef<FileSystemDirectoryHandle | undefined>(
+    undefined,
+  );
+  /**
    * A revoke — or just its panel reconcile — handed to a connect's finally
    * because that connect may still write.
    */
@@ -712,6 +721,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       // blocker clears, or the panel renders no Connect affordance for the
       // life of the mount. needs-gesture must survive (its handle is not in
       // handleRef either, but its phase is not unavailable).
+      pendingForceRebuildRef.current = undefined;
       setStatus((prev) => (prev.phase === 'unavailable' ? IDLE : prev));
       return;
     }
@@ -740,6 +750,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         if (staleRebind()) return;
         if (!persisted) {
           handleRef.current = undefined;
+          pendingForceRebuildRef.current = undefined;
           stopBridge();
           setStatus(IDLE);
           return;
@@ -766,6 +777,7 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
       if (permission.state !== 'granted') {
         // Stop the previous session's bridge first: stop() emits 'stopped'
         // (mapped to idle), so the needs-gesture status must come after it.
+        pendingForceRebuildRef.current = undefined;
         stopBridge();
         setStatus({
           phase: 'needs-gesture',
@@ -774,7 +786,12 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         });
         return;
       }
-      startBridge(handle);
+      // A Change-directory pick parked during a resolving blip owes a forced
+      // rebuild: startBridge's keep-bridge exemption compares basenames and
+      // cannot tell the new same-named directory from the old one.
+      const forceRebuild = pendingForceRebuildRef.current !== undefined;
+      pendingForceRebuildRef.current = undefined;
+      startBridge(handle, forceRebuild ? { force: true } : undefined);
       // A rebind keeps serving the in-memory grant, so this effect owns the
       // latch over it: set when the record is a peer's entry, cleared when
       // the record is provably this mount's own again (the exemption exit
@@ -806,88 +823,164 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
   );
 
   /** Must be called from a real click handler (it may open a native picker). */
-  const connect = useCallback(async () => {
-    if (capability.blocker !== null) {
-      // Preserve a name restore() supplied: the revoke path must stay
-      // reachable over a stored grant even while the entry is withheld.
-      setStatus((prev) => {
-        const rootName = recordRootName(prev.rootName);
-        return {
-          phase: 'unavailable',
-          blocker: capability.blocker,
-          ...(rootName === undefined ? {} : { rootName }),
-        };
-      });
-      return;
-    }
-    // One picker at a time: a double click would otherwise open two native
-    // dialogs and race two bridges for the same grant.
-    if (connectInFlightRef.current) return;
-    connectInFlightRef.current = true;
-    const generation = generationRef.current;
-    connectGenerationRef.current = generation;
-    connectSavedRef.current = false;
-    connectBoundHandleRef.current = undefined;
-    connectWroteStatusRef.current = false;
-    const stale = () => generationRef.current !== generation;
-    try {
-      // A peer tab's disconnect clears the store without signaling this tab:
-      // an in-memory handle the store no longer holds must not reconnect.
-      if (store && handleRef.current) {
-        const persisted = await store.load();
-        if (stale()) return;
-        if (!persisted) handleRef.current = undefined;
-      }
-      // A stored handle only needs its permission back, not a new picker run.
-      const stored = handleRef.current ?? (await store?.load());
-      if (stale()) return;
-      if (stored) {
-        const permission = await ensureReadwritePermission(stored, {
-          allowRequest: true,
-        });
-        if (stale()) return;
-        if (permission.state === 'granted') {
-          connectBoundHandleRef.current = stored;
-          connectSavedRef.current = (await store?.save(stored)) ?? true;
-          saveEpochRef.current += 1;
-          // Both latches clear only on the exits that bind a grant: a stale
-          // or otherwise non-binding connect (dismissed picker, failed pick,
-          // re-armed gesture) must not disarm either guard.
-          if (stale()) return;
-          const sameEntry = await sameBoundEntry(stored);
-          // A disconnect that landed inside the identity await must win over
-          // the binding side effects below.
-          if (stale()) return;
-          // Already bound to this very entry: nothing to rebuild. A committed
-          // re-save just wrote this mount's handle over the record, so the
-          // record is its grant again even though nothing rebuilds; a soft-
-          // failed save wrote nothing and the peer's record stays guarded.
-          if (sameEntry) {
-            if (connectSavedRef.current) foreignRecordRef.current = false;
-            handleRef.current = stored;
-            return;
-          }
-          detachedRef.current = false;
-          releasedRecordRef.current = false;
-          connectWroteStatusRef.current = true;
-          startBridge(stored, { force: true });
+  const connect = useCallback(
+    async (options?: { forcePicker?: boolean }) => {
+      if (capability.blocker !== null) {
+        // A transient resolving blip must not withhold a live, correctly-routed
+        // bridge (mirrors the rebind effect's exemption): the panel stays
+        // connected and a Change-directory click still reaches the picker
+        // instead of overwriting the live status with `unavailable`. Hard
+        // verdicts — ineligible, unsupported — still withhold.
+        const transientLiveBridge =
+          capability.blocker === 'workspace-resolving' &&
+          bridgeRef.current !== undefined &&
+          bridgeSessionRef.current === sessionId;
+        if (!transientLiveBridge) {
+          // Preserve a name restore() supplied: the revoke path must stay
+          // reachable over a stored grant even while the entry is withheld.
+          setStatus((prev) => {
+            const rootName = recordRootName(prev.rootName);
+            return {
+              phase: 'unavailable',
+              blocker: capability.blocker,
+              ...(rootName === undefined ? {} : { rootName }),
+            };
+          });
           return;
         }
-        // A request that ran consumed the click's transient activation, so a
-        // picker opened now would reject SecurityError gesture-less: ask for
-        // one more click instead of falling through. Deliberately does NOT
-        // touch handleRef: the rebind effect starts a bridge from whatever it
-        // holds, and an ungranted handle would register tools whose every
-        // call the browser rejects.
-        if (permission.requested) {
+      }
+      // One picker at a time: a double click would otherwise open two native
+      // dialogs and race two bridges for the same grant.
+      if (connectInFlightRef.current) return;
+      connectInFlightRef.current = true;
+      const forcePicker = options?.forcePicker === true;
+      const generation = generationRef.current;
+      connectGenerationRef.current = generation;
+      connectSavedRef.current = false;
+      connectBoundHandleRef.current = undefined;
+      connectWroteStatusRef.current = false;
+      const stale = () => generationRef.current !== generation;
+      try {
+        // A peer tab's disconnect clears the store without signaling this tab:
+        // an in-memory handle the store no longer holds must not reconnect.
+        if (store && handleRef.current) {
+          const persisted = await store.load();
+          if (stale()) return;
+          if (!persisted) handleRef.current = undefined;
+        }
+        // A stored handle only needs its permission back, not a new picker run.
+        // forcePicker (Change directory) skips reuse so the picker opens even
+        // though a grant exists; the fresh pick is saved over the old record.
+        const stored = forcePicker
+          ? undefined
+          : (handleRef.current ?? (await store?.load()));
+        if (stale()) return;
+        if (stored) {
+          const permission = await ensureReadwritePermission(stored, {
+            allowRequest: true,
+          });
+          if (stale()) return;
+          if (permission.state === 'granted') {
+            connectBoundHandleRef.current = stored;
+            connectSavedRef.current = (await store?.save(stored)) ?? true;
+            saveEpochRef.current += 1;
+            // Both latches clear only on the exits that bind a grant: a stale
+            // or otherwise non-binding connect (dismissed picker, failed pick,
+            // re-armed gesture) must not disarm either guard.
+            if (stale()) return;
+            const sameEntry = await sameBoundEntry(stored);
+            // A disconnect that landed inside the identity await must win over
+            // the binding side effects below.
+            if (stale()) return;
+            // Already bound to this very entry: nothing to rebuild. A committed
+            // re-save just wrote this mount's handle over the record, so the
+            // record is its grant again even though nothing rebuilds; a soft-
+            // failed save wrote nothing and the peer's record stays guarded.
+            if (sameEntry) {
+              if (connectSavedRef.current) foreignRecordRef.current = false;
+              handleRef.current = stored;
+              return;
+            }
+            detachedRef.current = false;
+            releasedRecordRef.current = false;
+            connectWroteStatusRef.current = true;
+            startBridge(stored, { force: true });
+            return;
+          }
+          // A request that ran consumed the click's transient activation, so a
+          // picker opened now would reject SecurityError gesture-less: ask for
+          // one more click instead of falling through. Deliberately does NOT
+          // touch handleRef: the rebind effect starts a bridge from whatever it
+          // holds, and an ungranted handle would register tools whose every
+          // call the browser rejects.
+          if (permission.requested) {
+            connectWroteStatusRef.current = true;
+            // The live blocker read matches the sibling writers: a withhold
+            // that landed while the native prompt was open owns the phase, or
+            // the panel renders the withheld affordance without its
+            // explanation and offers a click the deployment forbade.
+            const blocker = capabilityRef.current.blocker;
+            const rootName = recordRootName(stored.name);
+            if (rootName !== undefined) namedRecordRef.current = stored;
+            setStatus(
+              blocker !== null
+                ? {
+                    phase: 'unavailable',
+                    blocker,
+                    ...(rootName === undefined ? {} : { rootName }),
+                  }
+                : {
+                    phase: 'needs-gesture',
+                    blocker: null,
+                    ...(rootName === undefined ? {} : { rootName }),
+                  },
+            );
+            return;
+          }
+          // The query answered denied without any request: activation survived,
+          // so a fresh pick is still possible within this click.
+        }
+        const result = await pickDirectoryHandle(win);
+        if (stale()) return;
+        if (result.kind === 'cancelled') return;
+        // A re-pick that fails must not misreport the still-running bridge as
+        // failed, nor strand a later retry on the same-entry short-circuit:
+        // leave the connected status (and the old grant) untouched. Report the
+        // outcome so the Change-directory handler can surface it (R1-5).
+        if (
+          forcePicker &&
+          (result.kind === 'unavailable' || result.kind === 'failed')
+        ) {
+          return { kind: 'repick-failed' } as const;
+        }
+        if (result.kind === 'unavailable') {
+          // Name the record-backed grant: the failure write must not hide the
+          // panel's Disconnect, the only revoke path, over a persisted handle.
+          const record = await store?.load();
+          const rootName = recordRootName(record?.name);
+          if (stale()) return;
+          if (record !== undefined && rootName !== undefined) {
+            namedRecordRef.current = record;
+          }
           connectWroteStatusRef.current = true;
-          // The live blocker read matches the sibling writers: a withhold
-          // that landed while the native prompt was open owns the phase, or
-          // the panel renders the withheld affordance without its
-          // explanation and offers a click the deployment forbade.
+          setStatus({
+            phase: 'unavailable',
+            blocker: result.blocker,
+            ...(rootName === undefined ? {} : { rootName }),
+          });
+          return;
+        }
+        if (result.kind === 'failed') {
+          const record = await store?.load();
+          const rootName = recordRootName(record?.name);
+          if (stale()) return;
+          if (record !== undefined && rootName !== undefined) {
+            namedRecordRef.current = record;
+          }
+          connectWroteStatusRef.current = true;
+          // A withhold that landed while the picker was open owns the phase:
+          // the picker error must not replace the deployment's explanation.
           const blocker = capabilityRef.current.blocker;
-          const rootName = recordRootName(stored.name);
-          if (rootName !== undefined) namedRecordRef.current = stored;
           setStatus(
             blocker !== null
               ? {
@@ -896,90 +989,85 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
                   ...(rootName === undefined ? {} : { rootName }),
                 }
               : {
-                  phase: 'needs-gesture',
+                  phase: 'failed',
                   blocker: null,
+                  message: result.message,
                   ...(rootName === undefined ? {} : { rootName }),
                 },
           );
           return;
         }
-        // The query answered denied without any request: activation survived,
-        // so a fresh pick is still possible within this click.
-      }
-      const result = await pickDirectoryHandle(win);
-      if (stale()) return;
-      if (result.kind === 'cancelled') return;
-      if (result.kind === 'unavailable') {
-        // Name the record-backed grant: the failure write must not hide the
-        // panel's Disconnect, the only revoke path, over a persisted handle.
-        const record = await store?.load();
-        const rootName = recordRootName(record?.name);
+        connectBoundHandleRef.current = result.handle;
+        connectSavedRef.current = (await store?.save(result.handle)) ?? true;
+        saveEpochRef.current += 1;
+        if (connectSavedRef.current) foreignRecordRef.current = false;
         if (stale()) return;
-        if (record !== undefined && rootName !== undefined) {
-          namedRecordRef.current = record;
+        // A change that failed to persist must not leave the old directory as
+        // the stored grant while the panel serves the new one: reject the
+        // re-pick wholesale, keep the live bridge, and report the failure so
+        // the handler can surface it. connectSavedRef stays false so a parked
+        // pendingRevoke still runs in finally; the bind stamp is withdrawn
+        // because this connect bound nothing.
+        if (forcePicker && !connectSavedRef.current) {
+          connectBoundHandleRef.current = undefined;
+          return { kind: 'repick-failed' } as const;
         }
+        detachedRef.current = false;
+        releasedRecordRef.current = false;
         connectWroteStatusRef.current = true;
-        setStatus({
-          phase: 'unavailable',
-          blocker: result.blocker,
-          ...(rootName === undefined ? {} : { rootName }),
-        });
-        return;
-      }
-      if (result.kind === 'failed') {
-        const record = await store?.load();
-        const rootName = recordRootName(record?.name);
-        if (stale()) return;
-        if (record !== undefined && rootName !== undefined) {
-          namedRecordRef.current = record;
+        // Re-picking the already-bound entry must not tear down the live bridge:
+        // the picker reopens the last choice, so confirming without navigating
+        // lands here. Identity, not basename — a same-named folder elsewhere is
+        // a different directory and still rebuilds.
+        if (forcePicker && (await sameBoundEntry(result.handle))) {
+          if (stale()) return;
+          handleRef.current = result.handle;
+          pendingForceRebuildRef.current = undefined;
+          return;
         }
-        connectWroteStatusRef.current = true;
-        // A withhold that landed while the picker was open owns the phase:
-        // the picker error must not replace the deployment's explanation.
-        const blocker = capabilityRef.current.blocker;
-        setStatus(
-          blocker !== null
-            ? {
-                phase: 'unavailable',
-                blocker,
-                ...(rootName === undefined ? {} : { rootName }),
-              }
-            : {
-                phase: 'failed',
-                blocker: null,
-                message: result.message,
-                ...(rootName === undefined ? {} : { rootName }),
-              },
-        );
-        return;
+        // During a transient resolving blip, do not tear down the live,
+        // correctly-routed bridge for the forced rebuild; keep the fresh grant
+        // and park a forced-rebuild obligation the rebind effect consumes once
+        // the verdict settles. Without the obligation the rebind's basename
+        // exemption would keep serving the OLD same-named directory. The
+        // outcome is reported as deferred — the blip can outlive the click by
+        // a long time, and the live bridge still serves the old directory, so
+        // a silent success would misreport the change as effective. Hard
+        // verdicts still withhold through startBridge below.
+        if (
+          forcePicker &&
+          capabilityRef.current.blocker === 'workspace-resolving' &&
+          bridgeRef.current !== undefined &&
+          bridgeSessionRef.current === sessionId
+        ) {
+          handleRef.current = result.handle;
+          handleEpochRef.current += 1;
+          pendingForceRebuildRef.current = result.handle;
+          return { kind: 'change-deferred' } as const;
+        }
+        pendingForceRebuildRef.current = undefined;
+        startBridge(result.handle, { force: true });
+      } finally {
+        connectInFlightRef.current = false;
+        // A revoke deferred by a disconnect waits for this connect's verdict:
+        // it saved, so the record is its own grant and the revoke is dropped;
+        // it left without saving, so the revoke proceeds here instead of being
+        // swallowed by a veto whose connect never wrote anything.
+        const pending = pendingRevokeRef.current;
+        pendingRevokeRef.current = undefined;
+        if (pending !== undefined && !connectSavedRef.current) await pending();
       }
-      connectBoundHandleRef.current = result.handle;
-      connectSavedRef.current = (await store?.save(result.handle)) ?? true;
-      saveEpochRef.current += 1;
-      if (connectSavedRef.current) foreignRecordRef.current = false;
-      if (stale()) return;
-      detachedRef.current = false;
-      releasedRecordRef.current = false;
-      connectWroteStatusRef.current = true;
-      startBridge(result.handle, { force: true });
-    } finally {
-      connectInFlightRef.current = false;
-      // A revoke deferred by a disconnect waits for this connect's verdict:
-      // it saved, so the record is its own grant and the revoke is dropped;
-      // it left without saving, so the revoke proceeds here instead of being
-      // swallowed by a veto whose connect never wrote anything.
-      const pending = pendingRevokeRef.current;
-      pendingRevokeRef.current = undefined;
-      if (pending !== undefined && !connectSavedRef.current) await pending();
-    }
-  }, [
-    capability.blocker,
-    recordRootName,
-    sameBoundEntry,
-    startBridge,
-    store,
-    win,
-  ]);
+    },
+    [
+      capability.blocker,
+      recordRootName,
+      sameBoundEntry,
+      sessionId,
+      startBridge,
+      store,
+      win,
+    ],
+  );
 
   const disconnect = useCallback(async () => {
     // Invalidates any connect() still waiting on the picker, so a grant made
