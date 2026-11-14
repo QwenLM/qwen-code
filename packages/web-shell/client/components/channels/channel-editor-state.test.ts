@@ -1249,10 +1249,10 @@ describe('GitHub watch events require bound delivery', () => {
     return draft;
   }
 
-  it('refuses a watch selection while bound delivery is off', () => {
+  it('accepts the deprecated watch selection while bound delivery is off', () => {
     expect(
       validateChannelEditorDraft(BOUND, draftWithEvents('ci_failure'), []),
-    ).toEqual({ prWatchEvents: 'requiresBoundDelivery' });
+    ).toEqual({});
   });
 
   it('allows the selection once bound delivery is on', () => {
@@ -1267,10 +1267,12 @@ describe('GitHub watch events require bound delivery', () => {
     );
   });
 
-  it('reports invalidOption before the delivery dependency', () => {
+  it('accepts an unknown deprecated watch value', () => {
+    // The daemon accepts the deprecated key and warns at connect; blocking the
+    // save here would leave the editor stricter than the authority it mirrors.
     expect(
       validateChannelEditorDraft(BOUND, draftWithEvents('typo_event'), []),
-    ).toEqual({ prWatchEvents: 'invalidOption' });
+    ).toEqual({});
   });
 });
 

@@ -145,8 +145,6 @@ const FIELD_LABEL_KEYS: Record<string, Record<string, string>> = {
     requireBoundWatch: 'channels.editor.field.github.requireBoundWatch',
     prCommentWatch: 'channels.editor.field.github.prCommentWatch',
     prWatchEvents: 'channels.editor.field.github.prWatchEvents',
-    prWatchLimit: 'channels.editor.field.github.prWatchLimit',
-    prWatchBudgetReserve: 'channels.editor.field.github.prWatchBudgetReserve',
     boundSessionActions: 'channels.editor.field.github.boundSessionActions',
   },
   gitlab: {
@@ -201,8 +199,6 @@ const BOUND_SESSION_FIELD_KEYS = new Set([
   'requireBoundWatch',
   'prCommentWatch',
   'prWatchEvents',
-  'prWatchLimit',
-  'prWatchBudgetReserve',
   'boundSessionActions',
 ]);
 
@@ -587,8 +583,6 @@ export function ChannelEditorDialog({
       );
     if (code === 'invalidOption')
       return t('channels.editor.validation.invalidOption');
-    if (code === 'requiresBoundDelivery')
-      return t('channels.editor.validation.requiresBoundDelivery');
     if (code === 'requiresBoundDeliveryForWatchGate')
       return t('channels.editor.validation.requiresBoundDeliveryForWatchGate');
     if (code === 'number') return t('channels.editor.validation.number');

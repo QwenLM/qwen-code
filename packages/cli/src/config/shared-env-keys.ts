@@ -310,6 +310,17 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // location is an operator decision (documented as a per-daemon opt-in), so
   // only the daemon's launch environment or a home `.env` may set it.
   'QWEN_SERVE_SESSION_ATTACHMENTS_ROOT',
+  // The two PR-watch overrides are the environment form of
+  // serve.sessionPrWatch, which WORKSPACE_RESTRICTED_SETTINGS strips from
+  // workspace settings: the watch spends the daemon's own gh budget and
+  // injects prompts into sessions across every workspace it serves. A
+  // project `.env` setting either key would hand a repository that
+  // daemon-wide switch — and, because a non-blank event list counts as the
+  // operator's explicit choice, silently suppress the trust-gated per-host
+  // channel alias. The operator channels (home-scoped `.env` and the launch
+  // environment) still apply.
+  'QWEN_SESSION_PR_WATCH_EVENTS',
+  'QWEN_SESSION_PR_WATCH_WAKE_DORMANT',
   // DEV gates the daemon's inherited-loader-env scrub (run-qwen-serve.ts);
   // only the dev harness (scripts/dev.js) stamps it into the launch env. A
   // project file setting it would silently keep loader vars in the base env
