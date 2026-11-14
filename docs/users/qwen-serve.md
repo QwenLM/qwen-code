@@ -625,8 +625,10 @@ Qwen Live runs through the Web Shell on every platform: the browser tab is the m
 >   points consistent, export `QWEN_CODE_MEMORY_PROJECT_SCOPE` in the shell or
 >   service environment that launches them.
 > - **Directory-name collisions.** The storage key is derived by
->   `sanitizeCwd`, which replaces every non-alphanumeric character with
->   `-`. Sibling directories that differ only in punctuation (e.g.
+>   `boundProjectIdentifier`: `sanitizeCwd` replaces every non-alphanumeric
+>   character with `-`, and a key longer than 255 bytes is shortened to a
+>   238-byte readable prefix plus `-` and 16 hex characters of the project
+>   hash. Sibling directories that differ only in punctuation (e.g.
 >   `feature_1` and `feature-1`) map to the same memory directory even
 >   under `workspace` scope. Avoid such naming when relying on workspace
 >   isolation.

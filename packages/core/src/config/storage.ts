@@ -8,7 +8,11 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import * as fs from 'node:fs';
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { getProjectHash, QWEN_DIR, sanitizeCwd } from '../utils/paths.js';
+import {
+  boundProjectIdentifier,
+  getProjectHash,
+  QWEN_DIR,
+} from '../utils/paths.js';
 import { FatalConfigError } from '../utils/errors.js';
 
 export { QWEN_DIR } from '../utils/paths.js';
@@ -18,6 +22,7 @@ export const SKILL_PROVIDER_CONFIG_DIRS = ['.qwen', '.agents'];
 const TMP_DIR_NAME = 'tmp';
 const BIN_DIR_NAME = 'bin';
 const PROJECT_DIR_NAME = 'projects';
+export { PROJECT_DIR_NAME_MAX } from '../utils/paths.js';
 const IDE_DIR_NAME = 'ide';
 const PLANS_DIR_NAME = 'plans';
 const DEBUG_DIR_NAME = 'debug';
@@ -617,7 +622,7 @@ export class Storage {
   }
 
   getProjectDir(): string {
-    const projectId = sanitizeCwd(this.getProjectRoot());
+    const projectId = boundProjectIdentifier(this.getProjectRoot());
     const projectsDir = path.join(this.runtimeBaseDir, PROJECT_DIR_NAME);
     return path.join(projectsDir, projectId);
   }

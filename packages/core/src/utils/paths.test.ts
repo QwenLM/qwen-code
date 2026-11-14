@@ -28,6 +28,9 @@ import {
   tildeifyPath,
   expandHomeDir,
   getProjectHash,
+  boundProjectIdentifier,
+  PROJECT_DIR_NAME_MAX,
+  sanitizeCwd,
   realpathNearestExisting,
   realpathNearestExistingAsync,
   _resetValidatePathCacheForTest,
@@ -972,4 +975,51 @@ describe('expandHomeDir', () => {
       ['relative/path', path.normalize('relative/path')],
     ],
   ]);
+});
+
+describe('boundProjectIdentifier', () => {
+  it('renames an identifier the filesystem would refuse', () => {
+    const longRoot = path.join(
+      path.resolve('workspace'),
+      ...'abcde'.split('').map((letter) => letter.repeat(50)),
+    );
+    expect(Buffer.byteLength(sanitizeCwd(longRoot), 'utf8')).toBeGreaterThan(
+      PROJECT_DIR_NAME_MAX,
+    );
+
+    const bounded = boundProjectIdentifier(longRoot);
+    // Exact length: the 17-byte `-<hash>` suffix leaves a 238-byte readable
+    // budget, and a lower budget would still satisfy a `<=` ceiling.
+    expect(Buffer.byteLength(bounded, 'utf8')).toBe(PROJECT_DIR_NAME_MAX);
+    expect(bounded).toContain(getProjectHash(longRoot).slice(0, 16));
+    expect(bounded.startsWith(sanitizeCwd(longRoot).slice(0, 64))).toBe(true);
+  });
+
+  it('keeps an identifier the filesystem already accepts', () => {
+    // Only an identifier mkdir would reject is renamed; renaming a 239-255
+    // byte one would orphan the sessions already filed under its old name.
+    const base = path.resolve('w');
+    const prefix = sanitizeCwd(base).length + 1;
+    for (const bytes of [239, 254, 255]) {
+      const root = path.join(base, 'a'.repeat(bytes - prefix));
+      expect(boundProjectIdentifier(root)).toBe(sanitizeCwd(root));
+    }
+  });
+
+  it('gives distinct long project paths distinct identifiers', () => {
+    const base = path.resolve('workspace');
+    const first = path.join(base, 'a'.repeat(300), 'one');
+    const second = path.join(base, 'a'.repeat(300), 'two');
+    // Both roots must exceed the limit, or the difference between them comes
+    // from their tails and deleting the hash suffix would still pass. Compare
+    // the whole path: sanitizeCwd truncates at the limit by construction, so
+    // it can only reach it, never exceed it.
+    for (const root of [first, second])
+      expect(Buffer.byteLength(root, 'utf8')).toBeGreaterThan(
+        PROJECT_DIR_NAME_MAX + 64,
+      );
+    expect(boundProjectIdentifier(first)).not.toBe(
+      boundProjectIdentifier(second),
+    );
+  });
 });

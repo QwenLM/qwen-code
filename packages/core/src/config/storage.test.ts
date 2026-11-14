@@ -8,8 +8,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { spawnSync } from 'node:child_process';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { Storage } from './storage.js';
+import { Storage, PROJECT_DIR_NAME_MAX } from './storage.js';
 import { FatalConfigError } from '../utils/errors.js';
+import { getProjectHash, sanitizeCwd } from '../utils/paths.js';
 
 const mockRealpathSync = vi.hoisted(() => vi.fn());
 const mockReaddirSync = vi.hoisted(() => vi.fn());
@@ -391,6 +392,92 @@ describe('Storage – runtime path methods use getRuntimeBaseDir', () => {
   it('getProjectDir uses custom runtime base dir', () => {
     const storage = new Storage('/tmp/project');
     expect(storage.getProjectDir()).toContain(path.join(customDir, 'projects'));
+  });
+
+  it('getProjectDir keeps the readable identifier for a short project path', () => {
+    const projectRoot = path.resolve('workspace', 'short-project');
+    const storage = new Storage(projectRoot);
+    expect(path.basename(storage.getProjectDir())).toBe(
+      sanitizeCwd(projectRoot),
+    );
+  });
+
+  it('getProjectDir bounds a project identifier to one filesystem component', () => {
+    const longRoot = path.join(
+      path.resolve('workspace'),
+      ...'abcde'.split('').map((letter) => letter.repeat(50)),
+    );
+    // The bug this pins: the flattened identifier exceeded NAME_MAX, so every
+    // mkdir/scandir under it failed with ENAMETOOLONG.
+    expect(sanitizeCwd(longRoot).length).toBeGreaterThan(PROJECT_DIR_NAME_MAX);
+
+    const storage = new Storage(longRoot);
+    const projectId = path.basename(storage.getProjectDir());
+    // Pinned to the limit exactly: a lowered readable budget still fits under
+    // NAME_MAX, so only an exact length asserts the budget itself.
+    expect(Buffer.byteLength(projectId, 'utf8')).toBe(PROJECT_DIR_NAME_MAX);
+    expect(projectId).toContain(getProjectHash(longRoot).slice(0, 16));
+    expect(projectId.startsWith(sanitizeCwd(longRoot).slice(0, 64))).toBe(true);
+  });
+
+  it('getProjectDir keeps an identifier the filesystem already accepts', () => {
+    // Regression: the rename threshold was PROJECT_DIR_NAME_MAX minus the hash
+    // suffix (238), so a 239-255 byte identifier that mkdir had always accepted
+    // was rewritten to a new name, orphaning the sessions already filed there.
+    // Measure from a fixed base so the identifier itself is the only variable.
+    const base = path.resolve('w');
+    const prefix = sanitizeCwd(base).length + 1;
+    for (const bytes of [239, 254, 255]) {
+      const root = path.join(base, 'a'.repeat(bytes - prefix));
+      const projectId = path.basename(new Storage(root).getProjectDir());
+      expect({ bytes, projectId }).toEqual({
+        bytes,
+        projectId: sanitizeCwd(root),
+      });
+    }
+  });
+
+  it('getProjectDir renames an identifier at exactly one byte over the limit', () => {
+    // The keep side above stops at 255. This is the other fence post: 256 is
+    // the shortest identifier that must be renamed, and the long-path fixtures
+    // sit far past it, so a guard drifting to `> PROJECT_DIR_NAME_MAX + 1`
+    // would leave this file green while 256-byte roots kept a name mkdir
+    // refuses.
+    const base = path.resolve('w');
+    const prefix = sanitizeCwd(base).length + 1;
+    const overLimit = PROJECT_DIR_NAME_MAX + 1;
+    const root = path.join(base, 'a'.repeat(overLimit - prefix));
+    expect(Buffer.byteLength(sanitizeCwd(root), 'utf8')).toBe(overLimit);
+
+    const projectId = path.basename(new Storage(root).getProjectDir());
+    expect(projectId).not.toBe(sanitizeCwd(root));
+    expect(Buffer.byteLength(projectId, 'utf8')).toBeLessThanOrEqual(
+      PROJECT_DIR_NAME_MAX,
+    );
+  });
+
+  it('getProjectDir gives distinct long project paths distinct directories', () => {
+    const base = path.resolve('workspace');
+    const firstRoot = path.join(base, 'a'.repeat(300), 'one');
+    const secondRoot = path.join(base, 'a'.repeat(300), 'two');
+    // Both roots must exceed the limit, or the difference between them comes
+    // from their tails and deleting the hash suffix would still pass. Compare
+    // the whole path: sanitizeCwd truncates at the limit by construction, so
+    // it can only reach it, never exceed it.
+    for (const root of [firstRoot, secondRoot])
+      expect(Buffer.byteLength(root, 'utf8')).toBeGreaterThan(
+        PROJECT_DIR_NAME_MAX + 64,
+      );
+    expect(new Storage(firstRoot).getProjectDir()).not.toBe(
+      new Storage(secondRoot).getProjectDir(),
+    );
+  });
+
+  it('getProjectDir is stable for the same long project path', () => {
+    const longRoot = path.join(path.resolve('workspace'), 'x'.repeat(300));
+    expect(new Storage(longRoot).getProjectDir()).toBe(
+      new Storage(longRoot).getProjectDir(),
+    );
   });
 
   it('getGeneratedWorkflowsDir sits under the project workflow runs dir', () => {
