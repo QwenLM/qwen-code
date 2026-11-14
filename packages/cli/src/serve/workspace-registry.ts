@@ -9,6 +9,7 @@ import {
   type AcpSessionBridge,
 } from './acp-session-bridge.js';
 import type { ClientMcpSenderRegistry } from './acp-http/client-mcp-sender-registry.js';
+import type { SubSessionLauncher } from './create-sub-session.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import type { WorkspaceRuntimeProvenance } from './managed-scratch-workspace.js';
 import type { DaemonWorkspaceService } from './workspace-service/types.js';
@@ -45,6 +46,12 @@ export interface WorkspaceRuntime {
   registrationIds?: string[];
   readonly env: WorkspaceRuntimeEnvMetadata;
   readonly bridge: AcpSessionBridge;
+  /** This runtime's own sub-session launcher — the same one wired into its
+   *  bridge as `onCreateSubSession`. Daemon-side automations that spawn a
+   *  session (the clean-review verification handoff) go through it so the
+   *  per-caller and workspace concurrency caps and the depth-1 gate apply.
+   *  Absent on a runtime built without one. */
+  readonly subSessionLauncher?: SubSessionLauncher;
   readonly workspaceService: DaemonWorkspaceService;
   readonly routeFileSystemFactory: WorkspaceFileSystemFactory;
   readonly clientMcpSenderRegistry: ClientMcpSenderRegistry;

@@ -46,7 +46,11 @@ import {
   escapeXml,
   escapeXmlWithinBudget,
 } from '@qwen-code/qwen-code-core/utils/xml.js';
-import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
+import {
+  SessionLimitExceededError,
+  SessionNotFoundError,
+  TotalSessionLimitExceededError,
+} from '@qwen-code/acp-bridge/bridgeErrors';
 import { ACTIVE_WORK_CLOSE_TIMEOUT_MS } from '@qwen-code/acp-bridge/bridgeTypes';
 import type {
   AcpSessionBridge,
@@ -64,6 +68,7 @@ import {
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import type { StandaloneSessionService } from './conversations/standalone-session-service.js';
 import { createSessionOrganizationService } from './session-organization-helpers.js';
+import { markPreSpawnRefusal, preSpawnRefusal } from './sub-session-refusal.js';
 
 type StandaloneSubSessionService = Pick<
   StandaloneSessionService,
@@ -779,14 +784,18 @@ export function createSubSessionLauncher(
   const launch = async (
     info: CreateSubSessionInfo,
   ): Promise<CreateSubSessionResult> => {
+    // Every refusal below this point and before `inflight.set` is a pre-spawn
+    // refusal: no session exists and no prompt was dispatched. They carry the
+    // marker so a caller that recorded an intent ahead of the launch can undo
+    // it and retry, instead of treating a transient cap as a finished round.
     if (stopAc.signal.aborted) {
-      throw new Error(
+      throw preSpawnRefusal(
         'The daemon is shutting down; cannot create a sub-session.',
       );
     }
     const bridge = getBridge();
     if (!bridge) {
-      throw new Error('Session bridge is not available.');
+      throw preSpawnRefusal('Session bridge is not available.');
     }
 
     // Depth-1 gate. Every daemon session wires a spawner, sub-sessions included,
@@ -799,19 +808,26 @@ export function createSubSessionLauncher(
     // persisted parent lineage catches the same child after a daemon restart,
     // when the launcher set is empty but the restored bridge entry has been
     // re-seeded from its transcript metadata.
-    const caller = bridge.getSessionSummary(info.callerSessionId);
+    let caller: ReturnType<AcpSessionBridge['getSessionSummary']>;
+    try {
+      caller = bridge.getSessionSummary(info.callerSessionId);
+    } catch (error) {
+      // Marked, not replaced: callers that match on SessionNotFoundError keep
+      // working, and a caller waiting on this launch learns nothing was spawned.
+      throw markPreSpawnRefusal(error);
+    }
     const standalone = isReservedStandaloneSessionSourceType(caller.sourceType);
     const standaloneService = standalone
       ? getStandaloneSessionService?.()
       : undefined;
     if (standalone && !standaloneService) {
-      throw new Error('Standalone session service is unavailable.');
+      throw preSpawnRefusal('Standalone session service is unavailable.');
     }
     if (
       spawnedSessionIds.has(info.callerSessionId) ||
       caller.parentSessionId !== undefined
     ) {
-      throw new Error(
+      throw preSpawnRefusal(
         'A sub-session cannot create further sub-sessions (nesting is capped ' +
           'at one level).',
       );
@@ -823,7 +839,7 @@ export function createSubSessionLauncher(
     const key = info.callerSessionId;
     const current = inflight.get(key) ?? 0;
     if (current >= maxConcurrentPerCaller) {
-      throw new Error(
+      throw preSpawnRefusal(
         `Too many concurrent sub-sessions for this session ` +
           `(cap ${maxConcurrentPerCaller}); wait for one to finish.`,
       );
@@ -831,7 +847,7 @@ export function createSubSessionLauncher(
     // Forge-proof backstop: the per-caller cap above trusts `callerSessionId`,
     // this one does not. See MAX_CONCURRENT_SUB_SESSIONS_TOTAL.
     if (inflightTotal >= maxConcurrentTotal) {
-      throw new Error(
+      throw preSpawnRefusal(
         `Too many concurrent sub-sessions in this workspace ` +
           `(cap ${maxConcurrentTotal}); wait for one to finish.`,
       );
@@ -877,16 +893,31 @@ export function createSubSessionLauncher(
         lastEventId = created.initialPrompt.lastEventId;
         turn = created.initialPrompt.turn;
       } else {
-        sub = await bridge.spawnOrAttach({
-          workspaceCwd: boundWorkspace,
-          sessionScope: 'thread', // force a fresh top-level session, never attach
-          // Record the caller as the sub-session's parent so the UI can link it
-          // back. Persisted into the sub-session's transcript at spawn time.
-          parentSessionId: info.callerSessionId,
-          ...(info.sourceType ? { sourceType: info.sourceType } : {}),
-          ...(info.sourceId ? { sourceId: info.sourceId } : {}),
-          ...(info.model ? { modelServiceId: info.model } : {}),
-        });
+        try {
+          sub = await bridge.spawnOrAttach({
+            workspaceCwd: boundWorkspace,
+            sessionScope: 'thread', // force a fresh top-level session, never attach
+            // Record the caller as the sub-session's parent so the UI can link
+            // it back. Persisted into the sub-session's transcript at spawn.
+            parentSessionId: info.callerSessionId,
+            ...(info.sourceType ? { sourceType: info.sourceType } : {}),
+            ...(info.sourceId ? { sourceId: info.sourceId } : {}),
+            ...(info.model ? { modelServiceId: info.model } : {}),
+          });
+        } catch (error) {
+          // The bridge's ADMISSION refusals are raised before any session
+          // exists, so they belong to the same class as the gates above. Only
+          // these two are marked: any other failure from this call may have
+          // created a session and dispatched a prompt, and must stay
+          // unclassified so a write-ahead caller does not retry it.
+          if (
+            error instanceof SessionLimitExceededError ||
+            error instanceof TotalSessionLimitExceededError
+          ) {
+            throw markPreSpawnRefusal(error);
+          }
+          throw error;
+        }
       }
       spawnedSession = sub;
       const sessionId = sub.sessionId;

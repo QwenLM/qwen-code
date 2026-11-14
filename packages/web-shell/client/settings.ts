@@ -16,6 +16,7 @@ const SETTING_KEYS = {
   'setting:review-sandbox': 'review.sandbox',
   'setting:review-effort': 'review.effort',
   'setting:review-comment': 'review.comment',
+  'setting:review-auto-verify': 'review.autoVerify',
   'setting:review-severity-floor': 'review.severityFloor',
   'setting:review-reverse-audit-rounds': 'review.reverseAuditRounds',
   'setting:review-approach-rounds': 'review.approachRounds',

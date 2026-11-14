@@ -57,11 +57,12 @@ describe('operatorReviewSettings', () => {
     });
   });
 
-  it('defaults to attribution on, comment off, and no effort when no review section exists', () => {
+  it('defaults to attribution on, comment off, auto-verify on, and no effort when no review section exists', () => {
     setReview(undefined);
     expect(operatorReviewSettings()).toEqual({
       attribution: true,
       comment: false,
+      autoVerify: true,
       effort: undefined,
     });
   });
@@ -73,6 +74,7 @@ describe('operatorReviewSettings', () => {
     expect(operatorReviewSettings()).toEqual({
       attribution: true,
       comment: false,
+      autoVerify: true,
       effort: undefined,
     });
   });
@@ -81,15 +83,29 @@ describe('operatorReviewSettings', () => {
     setReview({
       attribution: false,
       comment: true,
+      autoVerify: false,
       effort: 'low',
       severityFloor: 'critical',
     });
     expect(operatorReviewSettings()).toEqual({
       attribution: false,
       comment: true,
+      autoVerify: false,
       effort: 'low',
       severityFloor: 'critical',
     });
+  });
+
+  it('a hand-edited non-boolean autoVerify keeps the schema default (on)', () => {
+    // Same class as attribution: only a real boolean decides. Unlike the
+    // unreadable-settings degrade below, a readable file with a garbled value
+    // has not lost the operator's policy — it never expressed one.
+    for (const autoVerify of ['false', 'true', 0, 1, null]) {
+      setReview({ autoVerify });
+      expect(operatorReviewSettings().autoVerify).toBe(true);
+    }
+    setReview({ autoVerify: false });
+    expect(operatorReviewSettings().autoVerify).toBe(false);
   });
 
   it('effort passes through raw — callers resolve auto and case variants', () => {
@@ -138,6 +154,7 @@ describe('operatorReviewSettings', () => {
     expect(operatorReviewSettings()).toEqual({
       attribution: true,
       comment: false,
+      autoVerify: false,
       effort: undefined,
       reverseAuditRounds: undefined,
       approachRounds: undefined,
@@ -166,10 +183,30 @@ describe('operatorReviewSettings', () => {
     expect(operatorReviewSettings()).toEqual({
       attribution: true,
       comment: false,
+      autoVerify: false,
       effort: undefined,
       reverseAuditRounds: undefined,
       approachRounds: undefined,
     });
+  });
+
+  it('hands the degrade to a caller-supplied discloser instead of writing stderr', () => {
+    // The daemon's handoff automation reads this on every pass that has work.
+    // Left to the default writer, an unreadable settings file would print the
+    // same NOTE once a minute for the life of the process; a repeated reader
+    // takes the message and discloses it once in its own voice.
+    loadSettingsMock.mockImplementation(() => {
+      throw new Error('Error in /home/u/.qwen/settings.json: Unexpected token');
+    });
+    stderr.mockClear();
+    stderrSafe.mockClear();
+    const seen: string[] = [];
+    const settings = operatorReviewSettings((message) => seen.push(message));
+    expect(settings.autoVerify).toBe(false);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toContain('review settings could not be loaded');
+    expect(stderr).not.toHaveBeenCalled();
+    expect(stderrSafe).not.toHaveBeenCalled();
   });
 
   // Same re-validation as the ceiling above: a settings file is hand-edited,
@@ -237,5 +274,6 @@ describe('review settings in the /settings dialog', () => {
     expect(dialogKeys).toContain('review.severityFloor');
     expect(dialogKeys).toContain('review.reverseAuditRounds');
     expect(dialogKeys).toContain('review.approachRounds');
+    expect(dialogKeys).toContain('review.autoVerify');
   });
 });
