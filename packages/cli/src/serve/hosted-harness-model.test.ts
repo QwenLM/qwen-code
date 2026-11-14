@@ -15,6 +15,7 @@ import {
   type LlmPreparedRequest,
   type LlmPreparedRequestCallback,
 } from '@qwen-code/qwen-code-core/core/llm-chat.js';
+import * as agentLoop from '@qwen-code/qwen-code-core/core/agent-loop.js';
 import { createHash } from 'node:crypto';
 import * as classifier from '@qwen-code/qwen-code-core/permissions/classifier.js';
 import { getRuntimeContentGenerator } from '@qwen-code/qwen-code-core/agents/runtime/agent-context.js';
@@ -137,6 +138,7 @@ function config(
     }),
     getModel: () => 'test-model',
     getMaxSessionTurns: () => -1,
+    isUnifiedAgentLoopEnabled: () => false,
     getContentGeneratorConfig: () => undefined,
     getEffectiveInputModalities: () => ({ image: false }),
     setUserMemory,
@@ -3072,6 +3074,7 @@ describe('Hosted Harness resume and retraction', () => {
       }),
       getModel: () => 'test-model',
       getMaxSessionTurns: () => -1,
+      isUnifiedAgentLoopEnabled: () => false,
       getContentGeneratorConfig: () => undefined,
       setUserMemory: vi.fn(),
       setPromptToolSnapshot: vi.fn(),
@@ -3682,5 +3685,68 @@ describe('createHostedLoopFireClassifier', () => {
     const verdict = await classifyFire(fireInput);
     expect(verdict.allowed).toBe(false);
     expect(verdict.unavailable).toBe(true);
+  });
+});
+
+describe('Hosted model-round-only migration parity (#17248)', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('runs the shared round with the setting on and matches the legacy text round', async () => {
+    const events = [
+      { type: LlmEventType.Content, value: 'hello ' },
+      { type: LlmEventType.Content, value: 'world' },
+      { type: LlmEventType.Finished },
+    ];
+    const off = config(events);
+    const offSpy = vi.spyOn(agentLoop, 'runModelRound');
+    const offResult = await runHostedHarnessTextTurn(input);
+    expect(offSpy).not.toHaveBeenCalled();
+    offSpy.mockRestore();
+
+    const on = config(events);
+    state.config['isUnifiedAgentLoopEnabled'] = () => true;
+    const onSpy = vi.spyOn(agentLoop, 'runModelRound');
+    const onResult = await runHostedHarnessTextTurn(input);
+    expect(onSpy).toHaveBeenCalledTimes(1);
+    onSpy.mockRestore();
+
+    expect(offResult.text).toBe('hello world');
+    expect(onResult.text).toBe(offResult.text);
+    expect(on.requests).toEqual(off.requests);
+    expect(on.sendOptions).toEqual(off.sendOptions);
+  });
+
+  it('retracts the abandoned prefix on a non-continuation retry, as the legacy path', async () => {
+    const events = [
+      { type: LlmEventType.Content, value: 'orphan' },
+      { type: LlmEventType.Retry },
+      { type: LlmEventType.Content, value: 'final' },
+      { type: LlmEventType.Finished },
+    ];
+    const off = config(events);
+    const offResult = await runHostedHarnessTextTurn(input);
+    const on = config(events);
+    state.config['isUnifiedAgentLoopEnabled'] = () => true;
+    const onResult = await runHostedHarnessTextTurn(input);
+    expect(offResult.text).toBe('final');
+    expect(onResult.text).toBe(offResult.text);
+    expect(on.requests).toEqual(off.requests);
+  });
+
+  it('keeps the published prefix on a continuation retry, as the legacy path', async () => {
+    const events = [
+      { type: LlmEventType.Content, value: 'keep' },
+      { type: LlmEventType.Retry, isContinuation: true },
+      { type: LlmEventType.Content, value: ' more' },
+      { type: LlmEventType.Finished },
+    ];
+    const off = config(events);
+    const offResult = await runHostedHarnessTextTurn(input);
+    const on = config(events);
+    state.config['isUnifiedAgentLoopEnabled'] = () => true;
+    const onResult = await runHostedHarnessTextTurn(input);
+    expect(offResult.text).toBe('keep more');
+    expect(onResult.text).toBe(offResult.text);
+    expect(on.requests).toEqual(off.requests);
   });
 });
