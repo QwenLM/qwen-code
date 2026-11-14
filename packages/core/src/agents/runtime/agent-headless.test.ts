@@ -3658,7 +3658,7 @@ describe('subagent.ts', () => {
             );
             vi.stubEnv(
               'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP',
-              kernel ? '1' : undefined,
+              kernel ? '1' : '0',
             );
             mockSendMessageStream.mockReset();
             const run = new AbortController();
