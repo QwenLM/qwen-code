@@ -22,10 +22,20 @@ public final class ManagedHistoryMaintenanceRecords {
     private ManagedHistoryMaintenanceRecords() {}
 
     public static void requireRecord(JsonNode body) {
-        closed(body, Set.of("schemaVersion", "kind", "operationId", "expectedCompactionRevision",
+        Set<String> fields = new java.util.HashSet<>(Set.of("schemaVersion", "kind", "operationId", "expectedCompactionRevision",
                 "historyCutSequence", "requestRef", "phase", "attempt", "candidateRef", "outcome",
-                "failureCode", "compactionRevision", "run"), "historyMaintenance");
-        count(body.get("schemaVersion"), 1, 1, "schemaVersion");
+                "failureCode", "compactionRevision", "run"));
+        long version = count(body == null ? null : body.get("schemaVersion"), 1, 2, "schemaVersion");
+        if (version == 2) {
+            fields.add("modelStatsRef");
+        }
+        closed(body, fields, "historyMaintenance");
+        if (version == 2 && !body.get("modelStatsRef").isNull()) {
+            JsonNode ref = body.get("modelStatsRef");
+            durableRef(ref, "modelStatsRef");
+            require(ManagedModelDiagnostics.STATS_KIND.equals(ref.path("kind").asText())
+                    && ref.path("schemaVersion").asInt() == 1, "Invalid maintenance model statistics reference.");
+        }
         oneOf(body.get("kind"), List.of("context_compression"), "kind");
         id(body.get("operationId"), "operationId");
         count(body.get("expectedCompactionRevision"), 0, MAX_SAFE, "expectedCompactionRevision");
@@ -55,6 +65,8 @@ public final class ManagedHistoryMaintenanceRecords {
         boolean candidate = !body.get("candidateRef").isNull();
         require(!"admitted".equals(phase) || attempt == 0 && !candidate && "admitted".equals(state),
                 "History maintenance admission must have no attempt or candidate.");
+        require(version != 2 || !"admitted".equals(phase) || body.get("modelStatsRef").isNull(),
+                "History maintenance admission has no model statistics.");
         require(!List.of("generating", "candidate").contains(phase)
                 || attempt >= 1 && List.of("running", "recovery_blocked").contains(state),
                 "An active phase needs a running or blocked attempt.");

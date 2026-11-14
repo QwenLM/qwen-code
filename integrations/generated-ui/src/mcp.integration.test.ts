@@ -177,7 +177,10 @@ describe('built generated UI MCP artifact', () => {
     );
     expect(notices).toContain('@modelcontextprotocol/sdk@');
     expect(notices).toContain('quickjs-emscripten-core@');
-    expect(notices).toContain('dompurify@');
+    expect(notices).toContain('dompurify@3.4.17');
+    expect(await readFile(join(output, 'app.html'), 'utf8')).toContain(
+      'DOMPurify 3.4.17',
+    );
     expect(await readdir(output)).not.toContain('node_modules');
   });
 

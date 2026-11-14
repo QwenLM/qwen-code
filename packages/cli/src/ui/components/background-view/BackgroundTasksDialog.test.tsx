@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { useState } from 'react';
 import { act } from '@testing-library/react';
-import { render } from 'ink-testing-library';
+import { cleanup, render } from 'ink-testing-library';
 import type {
   Config,
   WorkflowApproval,
@@ -129,10 +129,17 @@ interface Harness {
   probe: { current: ProbeHandle | null };
 }
 
+// Ink renders stay mounted unless explicitly unmounted. An old tree's 1s
+// activity interval then re-renders it into the next test's mocked keypress
+// handlers, letting a stale dialog steal the key before the current one sees
+// it (#16432 auto-open tests flaked exactly this way).
+const mountedRenders: Array<() => void> = [];
+
 function setup(
   initial: readonly DialogEntry[],
   availableTerminalHeight = 30,
 ): Harness {
+  for (const unmount of mountedRenders.splice(0)) unmount();
   const handlers: Array<(key: { name?: string; sequence?: string }) => void> =
     [];
   mockedUseKeypress.mockImplementation((cb, opts) => {
@@ -228,13 +235,14 @@ function setup(
     return null;
   }
 
-  const { lastFrame } = render(
+  const { lastFrame, unmount } = render(
     <SettingsContext.Provider
       value={{ merged: { general: {} } } as LoadedSettings}
     >
       <Harness />
     </SettingsContext.Provider>,
   );
+  mountedRenders.push(unmount);
 
   return {
     cancel,
@@ -285,6 +293,13 @@ describe('BackgroundTasksDialog', () => {
   });
 
   afterEach(() => {
+    // ink-testing-library does not auto-register cleanup, so every setup()
+    // leaks a render root. A leaked root that re-renders during a later test
+    // calls that test's useKeypress mock and pushes its own closure onto its
+    // handlers, so pressKey drives a foreign provider and the state under
+    // assertion never settles at any budget (#16609). Unmount before the
+    // mocks are restored, while the root can still render safely.
+    cleanup();
     vi.restoreAllMocks();
   });
 

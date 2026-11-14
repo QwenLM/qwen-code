@@ -5,7 +5,39 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { matchesToolPattern } from './rule-parser.js';
+import {
+  matchesToolPattern,
+  splitCompoundCommandSegments,
+} from './rule-parser.js';
+import type { CompoundCommandSegment } from './rule-parser.js';
+
+// A lone CR right after a clobber operator is the whole redirect target: bash
+// writes a file named `\r`, so the CR stays in the segment instead of being
+// dropped as a line ending. `1>|` and `2>|` name it exactly as `>|` does.
+describe('splitCompoundCommandSegments', () => {
+  it.each<[title: string, command: string, expected: CompoundCommandSegment[]]>(
+    [
+      [
+        '1>|',
+        'cat 1>|\r\necho hi',
+        [
+          { command: 'cat 1>|\r', terminator: '\n' },
+          { command: 'echo hi', terminator: '' },
+        ],
+      ],
+      [
+        '2>|',
+        'cat 2>|\r\necho hi',
+        [
+          { command: 'cat 2>|\r', terminator: '\n' },
+          { command: 'echo hi', terminator: '' },
+        ],
+      ],
+    ],
+  )('keeps the CR target behind %s', (_title, command, expected) => {
+    expect(splitCompoundCommandSegments(command)).toEqual(expected);
+  });
+});
 
 // The predicate a subagent's declaration filter applies to each deny entry,
 // and that callers predicting the filter share.

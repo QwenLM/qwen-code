@@ -26,6 +26,7 @@ const {
 } = vi.hoisted(() => ({
   previewTest: { enabled: false },
   previewCapabilities: {
+    features: [] as string[],
     workspaceCwd: '/work/project',
     workspaces: [
       { id: 'primary', cwd: '/work/project', trusted: true, primary: true },
@@ -33,6 +34,7 @@ const {
   },
   animationFrameBlocks: [{ id: 'frame-block' }],
   connection: {
+    status: 'connected',
     sessionId: 'subagent-session',
     workspaceCwd: '/work/project',
     loadingTranscript: false,
@@ -44,6 +46,8 @@ const {
     stat: vi.fn().mockResolvedValue({ type: 'file' }),
   },
   workspaceClient: {
+    sessionStatus: vi.fn().mockResolvedValue({}),
+    workspaceByCwd: vi.fn(),
     resolveSubagentSession: vi.fn(),
     cancelSubagentSession: vi.fn(),
   },
@@ -160,11 +164,88 @@ afterEach(() => {
   latestOpenSubagent.current = undefined;
   messagesFromBlocks.mockClear();
   previewTest.enabled = false;
+  connection.status = 'connected';
   connection.sessionId = 'subagent-session';
   workspaceActions.stat.mockReset().mockResolvedValue({ type: 'file' });
   workspaceClient.resolveSubagentSession.mockReset();
+  workspaceClient.sessionStatus.mockReset().mockResolvedValue({});
+  workspaceClient.workspaceByCwd.mockReset();
+  previewCapabilities.features = [];
+  messages.splice(1);
   vi.useRealTimers();
 });
+
+it.each([false, true])(
+  'uses a virtual subagent real parent to classify worktree edits (recovery=%s)',
+  async (recover) => {
+    const virtual = `subagent.${btoa('parent-session').replace(/=+$/, '')}.YWdlbnQ`;
+    connection.sessionId = virtual;
+    const cwd = '/work/project/.qwen/worktrees/one';
+    previewCapabilities.features = ['workspace_git_check_ignore'];
+    workspaceClient.sessionStatus.mockImplementation(async (id: string) => {
+      if (id !== 'parent-session')
+        throw new Error('virtual session has no status');
+      return { worktree: { path: cwd } };
+    });
+    if (recover)
+      workspaceClient.sessionStatus.mockRejectedValueOnce(new Error('offline'));
+    const ignored = vi.fn().mockResolvedValue({ v: 1, ignoredPaths: [] });
+    workspaceClient.workspaceByCwd.mockReturnValue({
+      workspaceGitIgnoredPaths: ignored,
+    });
+    workspaceClient.resolveSubagentSession.mockResolvedValue({
+      sessionId: virtual,
+      status: 'completed',
+    });
+    messages.push(
+      { id: 'turn', role: 'user', content: 'edit' },
+      {
+        id: 'write',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'write-file',
+            toolName: 'write_file',
+            status: 'completed',
+            args: { file_path: `${cwd}/src/app.ts`, content: 'source' },
+          },
+        ],
+      },
+    );
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const renderDetail = () =>
+      root!.render(
+        <I18nProvider language="en">
+          <SubagentDetail
+            sessionId="parent-session"
+            rootToolCallId="agent-1"
+            initialRootTool={
+              (messages[0] as Extract<Message, { role: 'tool_group' }>).tools[0]
+            }
+            workspaceCwd="/work/project"
+          />
+        </I18nProvider>,
+      );
+    await act(async () => renderDetail());
+    if (recover) {
+      expect(ignored).not.toHaveBeenCalled();
+      connection.status = 'disconnected';
+      await act(async () => renderDetail());
+      connection.status = 'connected';
+      await act(async () => renderDetail());
+    }
+    expect(workspaceClient.sessionStatus).toHaveBeenCalledWith(
+      'parent-session',
+    );
+    expect(ignored).toHaveBeenCalledWith(['src/app.ts'], cwd, 'parent-session');
+    const changes = latestMessageListProps.current?.[
+      'turnFileChanges'
+    ] as ReadonlyMap<string, readonly { path: string }[]>;
+    expect(changes.get('turn')?.[0].path).toBe(`${cwd}/src/app.ts`);
+  },
+);
 
 async function mountRecoveringDetail(
   availability: DaemonAvailability,
@@ -349,6 +430,7 @@ it('opens subagent and fork transcript outputs in source-scoped panel tabs', asy
     title: 'Review',
     turnId: 'turn-1',
     changes: [],
+    unfilteredChanges: [],
     sourceSessionId: 'subagent-session',
     workspaceCwd: '/work/project',
     workspaceId: 'project-id',

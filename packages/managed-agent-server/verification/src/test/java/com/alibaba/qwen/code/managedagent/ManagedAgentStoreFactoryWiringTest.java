@@ -6,14 +6,14 @@ import com.alibaba.qwen.code.managedagent.contracts.event.JournalEventTransport;
 import com.alibaba.qwen.code.managedagent.contracts.extensions.ExtensionPackages;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorktreeFiles;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedSessionSkills;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedTaskEventStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcSessionWorktreeStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceLifecycleStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedExtensionRecordStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionSkills;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedTaskEventStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
-import com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceProfileLifecycleVerifier;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -62,14 +62,14 @@ class ManagedAgentStoreFactoryWiringTest {
                 .withBean("managedAgentClock", Clock.class, Clock::systemUTC)
                 .withBean(ManagedAgentSettings.class, ManagedAgentProperties::new)
                 .withBean(CommittedEventPublisher.class, () -> events -> {})
-                .withBean(ManagedWorkspaceRegistry.class, () -> mock(ManagedWorkspaceRegistry.class))
+                .withBean(JdbcManagedWorkspaceRegistry.class, () -> mock(JdbcManagedWorkspaceRegistry.class))
                 .withBean(WorktreeFiles.class, () -> mock(WorktreeFiles.class))
-                .withBean(ManagedSessionSkills.class, () -> mock(ManagedSessionSkills.class))
+                .withBean(JdbcManagedSessionSkills.class, () -> mock(JdbcManagedSessionSkills.class))
                 .withBean(ExtensionPackages.class, () -> mock(ExtensionPackages.class))
-                .withBean(WorkspaceLifecycleStore.class, () -> mock(WorkspaceLifecycleStore.class))
+                .withBean(JdbcWorkspaceLifecycleStore.class, () -> mock(JdbcWorkspaceLifecycleStore.class))
                 .withBean(WorkspaceProfileLifecycleVerifier.class, () -> mock(WorkspaceProfileLifecycleVerifier.class))
-                .withBean(ManagedAgentDefinitionStore.class, () -> mock(ManagedAgentDefinitionStore.class))
-                .withBean(SessionWorktreeStore.class, () -> mock(SessionWorktreeStore.class))
+                .withBean(JdbcManagedAgentDefinitionStore.class, () -> mock(JdbcManagedAgentDefinitionStore.class))
+                .withBean(JdbcSessionWorktreeStore.class, () -> mock(JdbcSessionWorktreeStore.class))
                 .withBean(JournalEventTransport.class, () -> mock(JournalEventTransport.class))
                 .run(context -> {
                     assertThat(context).hasNotFailed();
@@ -77,11 +77,11 @@ class ManagedAgentStoreFactoryWiringTest {
                     assertThat(AopUtils.isAopProxy(store)).isTrue();
                     Object target = AopTestUtils.getUltimateTargetObject(store);
                     Map.of("worktreeFiles", WorktreeFiles.class,
-                            "creationSkills", ManagedSessionSkills.class,
+                            "creationSkills", JdbcManagedSessionSkills.class,
                             "extensionPackages", ExtensionPackages.class,
-                            "lifecycle", WorkspaceLifecycleStore.class,
-                            "definitions", ManagedAgentDefinitionStore.class,
-                            "sessionWorktrees", SessionWorktreeStore.class,
+                            "lifecycle", JdbcWorkspaceLifecycleStore.class,
+                            "definitions", JdbcManagedAgentDefinitionStore.class,
+                            "sessionWorktrees", JdbcSessionWorktreeStore.class,
                             "journalEventTransport", JournalEventTransport.class)
                             .forEach((field, type) -> assertThat(com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, field))
                                     .as(field).isSameAs(context.getBean(type)));
@@ -89,7 +89,7 @@ class ManagedAgentStoreFactoryWiringTest {
                     assertThat(records).isNotNull();
                     assertThat(context.getBeanFactory().containsSingleton("factoryRecordStore")).isFalse();
                     Object resolved = records.getTargetSource().getTarget();
-                    assertThat(resolved).isSameAs(context.getBean(ManagedExtensionRecordStore.class));
+                    assertThat(resolved).isSameAs(context.getBean(JdbcManagedExtensionRecordStore.class));
                     assertThat(ReflectionTestUtils.getField(resolved, "sessions")).isSameAs(store);
                 });
     }
@@ -104,8 +104,8 @@ class ManagedAgentStoreFactoryWiringTest {
 
         @Bean
         @Lazy
-        ManagedExtensionRecordStore factoryRecordStore(JdbcTemplate jdbc, AgentStateStore sessions) {
-            return new ManagedExtensionRecordStore(jdbc, sessions, new ManagedTaskEventStore(jdbc));
+        JdbcManagedExtensionRecordStore factoryRecordStore(JdbcTemplate jdbc, AgentStateStore sessions) {
+            return new JdbcManagedExtensionRecordStore(jdbc, sessions, new JdbcManagedTaskEventStore(jdbc));
         }
     }
 }

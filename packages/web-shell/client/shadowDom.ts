@@ -175,7 +175,10 @@ export function installWebShellShadowStyles(
     shadowRoot.appendChild(style);
     return style;
   });
+  let released = false;
   return () => {
+    if (released) return;
+    released = true;
     for (const style of elements) style.remove();
   };
 }

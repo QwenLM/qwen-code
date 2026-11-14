@@ -23,6 +23,8 @@ import {
 } from '@qwen-code/qwen-code-core/services/chatCompressionService.js';
 import { loadCliConfig } from '../config/config.js';
 import { HostedContextCompression } from './hosted-context-compression.js';
+import { enableManagedSessionDiagnostics } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-diagnostics.js';
+import { startModelInvocationObservation } from '@qwen-code/qwen-code-core/telemetry/model-observation.js';
 
 vi.mock('../config/settings.js', () => ({
   loadSettings: () => ({
@@ -59,6 +61,7 @@ let session: ManagedSession;
 let compression: HostedContextCompression;
 let busy = false;
 let pendingHooks = false;
+let onCompactionCommitted: ReturnType<typeof vi.fn>;
 
 const candidate: ChatCompressionCandidate = {
   newHistory: [
@@ -78,6 +81,7 @@ beforeEach(async () => {
   vi.clearAllMocks();
   busy = false;
   pendingHooks = false;
+  onCompactionCommitted = vi.fn();
   vi.mocked(loadCliConfig).mockResolvedValue(config as never);
   root = await mkdtemp(path.join(os.tmpdir(), 'qwen-hosted-compression-'));
   const sessionKey = {
@@ -139,6 +143,7 @@ beforeEach(async () => {
     instructions: async () => 'instructions',
     busy: () => busy,
     hasPendingHooks: () => pendingHooks,
+    onCompactionCommitted,
   });
 });
 
@@ -184,10 +189,91 @@ async function reopen() {
     instructions: async () => 'instructions',
     busy: () => busy,
     hasPendingHooks: () => pendingHooks,
+    onCompactionCommitted,
   });
 }
 
 describe('Hosted context compression', () => {
+  it.each(['noop', 'compressed', 'business-failed'] as const)(
+    'commits bounded model statistics for manual %s without a user turn',
+    async (mode) => {
+      await enableManagedSessionDiagnostics(session);
+      vi.spyOn(ChatCompressionService.prototype, 'compress').mockImplementation(
+        async (_chat, options) => {
+          if (mode === 'noop')
+            return {
+              newHistory: null,
+              info: {
+                originalTokenCount: 0,
+                newTokenCount: 0,
+                compressionStatus: CompressionStatus.NOOP,
+              },
+            };
+          const observation = startModelInvocationObservation({
+            sessionId: session.authority.sessionHeader.sessionKey.sessionId,
+            executionId: randomUUID(),
+            model: 'summary',
+            startedAt: Date.now(),
+            retryAttempt: 1,
+          });
+          observation!.update({
+            promptTokenCount: 30,
+            candidatesTokenCount: 10,
+            totalTokenCount: 40,
+            cachedContentTokenCount: 0,
+            thoughtsTokenCount: 0,
+          });
+          observation!.finish('success');
+          if (mode === 'business-failed') throw new Error('Invalid summary');
+          await options.onPreparedCompaction?.(structuredClone(candidate));
+          return { newHistory: candidate.newHistory, info: candidate.info };
+        },
+      );
+      const request = intent();
+      const before = session.authority.committedSequence;
+      await compression.admit(request);
+      await compression.wait();
+      const maintenance = session.authority.extensionRecord(
+        'history_maintenance',
+        request.operationId,
+      )!.record as {
+        schemaVersion: number;
+        modelStatsRef: import('@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js').ManagedSessionDurableRef;
+      };
+      expect(maintenance.schemaVersion).toBe(2);
+      expect(maintenance.modelStatsRef.kind).toBe(
+        'managed-session-model-stats',
+      );
+      const saved = JSON.parse(
+        (await session.resources.read(maintenance.modelStatsRef)).toString(),
+      );
+      expect(saved.statistics.sources.compression.requests.success).toBe(
+        mode === 'noop' ? 0 : 1,
+      );
+      expect(saved.statistics.totals.requests.total).toBe(
+        mode === 'noop' ? 0 : 1,
+      );
+      expect(saved.statistics.sources.main.requests.total).toBe(0);
+      expect(saved.context).toBeNull();
+      expect(
+        session.authority
+          .eventsInSequenceRange(
+            before + 1,
+            session.authority.committedSequence,
+          )
+          .some(
+            (event) =>
+              event.kind === 'model.attempt' || event.kind === 'turn.settled',
+          ),
+      ).toBe(false);
+      expect(compression.status(request.operationId)).toMatchObject(
+        mode === 'business-failed'
+          ? { status: 'failed', failureCode: 'context_compression_failed' }
+          : { status: 'completed', outcome: mode },
+      );
+    },
+  );
+
   it('compresses with the Session connection without a host model registration', async () => {
     const modelConfiguration = {
       authType: AuthType.USE_OPENAI,
@@ -230,6 +316,9 @@ describe('Hosted context compression', () => {
       sessionIdGenerated: true,
       chatRecording: false,
     });
+    expect(vi.mocked(loadCliConfig).mock.calls[0]?.[9]).toMatchObject({
+      lspDisabled: true,
+    });
     const result = compression.status(request.operationId)!;
     expect(result).toMatchObject({
       status: 'completed',
@@ -262,6 +351,21 @@ describe('Hosted context compression', () => {
     expect(await compression.admit(request)).toEqual(result);
     await compression.wait();
     expect(summarize).toHaveBeenCalledOnce();
+  });
+
+  it('notifies the loop resolver seam when a route-driven compaction commits', async () => {
+    engine();
+    const request = intent();
+    expect(onCompactionCommitted).not.toHaveBeenCalled();
+    await compression.admit(request);
+    await compression.wait();
+    expect(compression.status(request.operationId)).toMatchObject({
+      status: 'completed',
+      outcome: 'compressed',
+    });
+    // A committed compaction is fresh context: the loop resolver must reset
+    // so the next fire re-delivers the full guidance, not a dangling reminder.
+    expect(onCompactionCommitted).toHaveBeenCalledOnce();
   });
 
   it('refuses busy and stale requests before invoking the model', async () => {

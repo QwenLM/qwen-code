@@ -1,14 +1,16 @@
 package com.alibaba.qwen.code.runtimebroker;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.persistence.FaultGateRig;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.provisioning.external.ExternalHttpRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.provisioning.external.ExternalRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -22,6 +24,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutionException;
@@ -47,9 +50,13 @@ class ExternalRuntimeWorkerFaultGateTest {
         Path workspace = Files.createDirectory(directory.resolve("workspace")).toRealPath();
         var scope = new RuntimeScope("tenant", "workspace", "1", workspace.toString(),
                 "sha256:" + "a".repeat(64), "session");
-        var bindings = new InMemoryRuntimeBindingRepository();
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository();
+        var source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:external-worker-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
         var transport = new HttpRuntimeTransport();
         try (var operator = new Operator(cli, workspace)) {
             var first = operator.provisioner();
@@ -147,8 +154,8 @@ class ExternalRuntimeWorkerFaultGateTest {
     }
 
     private static RuntimeBrokerService broker(ExternalRuntimeProvisioner provisioner, RuntimeScope scope,
-            HttpRuntimeTransport transport, InMemoryRuntimeBindingRepository bindings,
-            InMemoryRuntimeSessionRepository sessions, InMemoryToolExecutionRepository executions, String owner) {
+            HttpRuntimeTransport transport, RuntimeBindingRepository bindings,
+            RuntimeSessionRepository sessions, ToolExecutionRepository executions, String owner) {
         return new RuntimeBrokerService(ignored -> CompletableFuture.completedFuture(scope), provisioner, transport,
                 bindings, sessions, executions, owner, Duration.ofSeconds(30), Duration.ofSeconds(30));
     }

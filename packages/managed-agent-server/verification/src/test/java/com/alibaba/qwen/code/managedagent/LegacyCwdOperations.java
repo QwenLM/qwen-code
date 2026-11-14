@@ -2,6 +2,8 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
@@ -17,7 +19,7 @@ public final class LegacyCwdOperations {
             String tenant, String session, String actor, String actorDigest,
             String key, String digest, String target, long revision) {
         String id = "op_" + UUID.randomUUID().toString().replace("-", "");
-        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session);
+        String scope = ManagedSessionStore.sessionScopeKey(tenant, session);
         String targetKey = ManagedSchemaKeys.key(session);
         long now = System.currentTimeMillis();
         String request = JsonNodeFactory.instance.objectNode().put("schemaVersion", 1)
@@ -33,7 +35,7 @@ public final class LegacyCwdOperations {
                 ManagedSchemaKeys.operationKey(ManagedSchemaContract.OperationKind.CWD_CHANGE,
                         scope, targetKey, id), scope, scope, targetKey, session, request, ManagedSchemaKeys.key(key),
                 tenant, session, id, actorDigest, key, digest, target, revision,
-                com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(tenant, actor), now, now, now);
+                ManagedWorkspaceRegistry.actorKey(tenant, actor), now, now, now);
         return new OperationAdmission(store.findOperation(tenant, session, id).orElseThrow(), false);
     }
 }

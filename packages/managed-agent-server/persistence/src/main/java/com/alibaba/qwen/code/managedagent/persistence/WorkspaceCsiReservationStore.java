@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiApplicationProgress;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcCsiFilesRetirementGuard;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
@@ -78,8 +79,8 @@ public final class WorkspaceCsiReservationStore implements com.alibaba.qwen.code
                     + " registration_json = COALESCE(registration_json, VALUES(registration_json)),"
                     + " storage_kind = CASE WHEN registration_state = 'FENCE_ONLY' THEN 'CSI' ELSE storage_kind END,"
                     + " registration_state = CASE WHEN registration_state = 'FENCE_ONLY' THEN 'REGISTERED' ELSE registration_state END",
-                    registration.aliasKey(), JdbcRuntimeBindingRepository.storageFenceKey(registration.tenantId()),
-                    JdbcRuntimeBindingRepository.storageFenceKey(registration.storageId()), registration.tenantId(), registration.storageId(),
+                    registration.aliasKey(), RuntimeAdmissionFences.storageFenceKey(registration.tenantId()),
+                    RuntimeAdmissionFences.storageFenceKey(registration.storageId()), registration.tenantId(), registration.storageId(),
                     registration.physicalKey(), registration.revision(), encoded);
             verifyRegistration(registration);
             jdbc.update("INSERT INTO ma_storage_owner (storage_key, storage_kind)"
@@ -433,7 +434,7 @@ public final class WorkspaceCsiReservationStore implements com.alibaba.qwen.code
                     || data.path("runtime_generation").longValue() != owner.runtimeGeneration()
                     || !value.physicalKey().equals(data.path("physical_key").textValue())
                     || !data.path("storage_id").isTextual()
-                    || !JdbcRuntimeBindingRepository.storageAliasKey(tenant, data.path("storage_id").textValue()).equals(owner.registrationKey())) {
+                    || !RuntimeAdmissionFences.storageAliasKey(tenant, data.path("storage_id").textValue()).equals(owner.registrationKey())) {
                 throw unavailable();
             }
             return value;

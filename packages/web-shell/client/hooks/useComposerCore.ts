@@ -82,7 +82,7 @@ import {
   inputHighlight,
   inputHighlightTheme,
 } from '../extensions/inputHighlight';
-import { isEditableTarget } from '../utils/dom';
+import { getShadowAwareActiveElement, isEditableTarget } from '../utils/dom';
 import { cssUrlValue } from '../utils/cssUrlVar';
 import {
   createInputAnnotationsFromComposerTags,
@@ -1191,6 +1191,8 @@ export interface UseComposerCoreOptions {
   cycleModeOnTab?: boolean;
   onToggleShortcuts?: () => void;
   disabled?: boolean;
+  /** Keep the editor editable while rejecting every submit path. */
+  submitDisabled?: boolean;
   /**
    * Whether the composer may react to FILE drags at all (drag highlight and
    * drop ingestion on the inline image/text lane). `false` leaves paste
@@ -1621,6 +1623,7 @@ export function useComposerCore(
     cycleModeOnTab = false,
     onToggleShortcuts,
     disabled = false,
+    submitDisabled = false,
     fileDragEnabled = true,
     placeholderText = 'Type a message...',
     commands,
@@ -1772,6 +1775,8 @@ export function useComposerCore(
   onToggleShortcutsRef.current = onToggleShortcuts;
   const disabledRef = useRef(disabled);
   disabledRef.current = disabled;
+  const submitDisabledRef = useRef(submitDisabled);
+  submitDisabledRef.current = submitDisabled;
   const fileDragEnabledRef = useRef(fileDragEnabled);
   fileDragEnabledRef.current = fileDragEnabled;
   const attachmentsEnabledRef = useRef(attachmentsEnabled);
@@ -3267,6 +3272,7 @@ export function useComposerCore(
   ) => {
     if (
       disabledRef.current ||
+      submitDisabledRef.current ||
       activeDraftAttachmentRestoreRef.current !== null ||
       (sharedDraftRef.current?.session.pendingBatches ??
         imageIngestionLaneRef.current.pendingBatches) > 0 ||
@@ -4593,10 +4599,24 @@ export function useComposerCore(
       if (disabledRef.current || searchMode || dialogOpen) return;
       if (event.defaultPrevented) return;
       // Only capture keystrokes if the target is within the web-shell container
-      // or if no specific element has focus (document.body is active)
+      // or if no specific element has focus (document.body is active). A
+      // marked focus region (the managed page's non-interactive tabindex=-1
+      // wrapper) parks focus without intent to interact, so it counts as
+      // body focus too — otherwise clicking the pane silences "type anywhere".
       const target = event.target as Node;
       const isWithinContainer = containerRef.current?.contains(target);
-      const isBodyFocused = document.activeElement === document.body;
+      // The focused element must be read from the container's own root: in a
+      // shadow-root mount `document.activeElement` and `event.target` both
+      // retarget to the host, which would make a parked focus region look
+      // unfocused and silence "type anywhere". The region must also wrap this
+      // composer: two managed shells can share one shadow root, and their
+      // parked wrappers are then siblings, so the attribute alone would let
+      // one shell capture the keystrokes aimed at the other.
+      const activeRegion = getShadowAwareActiveElement(containerRef.current);
+      const isBodyFocused =
+        document.activeElement === document.body ||
+        (activeRegion?.hasAttribute('data-web-shell-focus-region') === true &&
+          activeRegion.contains(containerRef.current));
       if (!isWithinContainer && !isBodyFocused) return;
       const view = viewRef.current;
       const followup = followupStateRef.current;
@@ -5076,6 +5096,7 @@ export function useComposerCore(
   const retryLast = useCallback(() => {
     if (
       disabledRef.current ||
+      submitDisabledRef.current ||
       activeDraftAttachmentRestoreRef.current !== null ||
       (sharedDraftRef.current?.session.pendingBatches ??
         imageIngestionLaneRef.current.pendingBatches) > 0 ||
@@ -5281,6 +5302,7 @@ export function useComposerCore(
     (match: string) => {
       if (
         disabledRef.current ||
+        submitDisabledRef.current ||
         activeDraftAttachmentRestoreRef.current !== null ||
         (sharedDraftRef.current?.session.pendingBatches ??
           imageIngestionLaneRef.current.pendingBatches) > 0 ||
@@ -5438,6 +5460,7 @@ export function useComposerCore(
 
   const canSubmit =
     !disabled &&
+    !submitDisabled &&
     !draftAttachmentsRestoring &&
     pendingImageBatchCount === 0 &&
     !workspaceUploadBusy &&

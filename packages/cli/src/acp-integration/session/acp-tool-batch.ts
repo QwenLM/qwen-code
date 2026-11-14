@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type {
   AgentEventEmitter,
   ToolCallConfirmationDetails,
@@ -12,11 +13,13 @@ import type {
   ToolResultDisplay,
 } from '@qwen-code/qwen-code-core';
 import { ApprovalMode } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import { goalToolResultProvenance } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import { createToolLifecycle } from '@qwen-code/qwen-code-core/telemetry/tool-lifecycle.js';
 import {
   canonicalToolName,
   ToolNames,
 } from '@qwen-code/qwen-code-core/tools/tool-names.js';
+import { enforceFunctionResponseBudget } from '@qwen-code/qwen-code-core/tools/tool-response-finalizer.js';
 import {
   isShellProgressData,
   ToolConfirmationOutcome,
@@ -25,7 +28,6 @@ import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.j
 import { USER_CANCEL_ABORT_REASON } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
   createSchedulerExecutor,
-  runToolBatch,
   type AgentLoopDuplicateState,
   type AgentLoopStopReason,
   type AgentLoopToolResult,
@@ -42,6 +44,7 @@ import type {
   SessionUpdate,
 } from '@agentclientprotocol/sdk';
 import type { Part } from '@google/genai';
+import type { SharedLoopRound } from '../../ui/hooks/shared-loop-round.js';
 import type { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import type { MessageEmitter } from './emitters/MessageEmitter.js';
 import {
@@ -55,6 +58,7 @@ import { SubAgentTracker } from './SubAgentTracker.js';
 import type { SessionContext } from './types.js';
 
 const debugLogger = createDebugLogger('ACP_TOOL_BATCH');
+export const deferredToolUpdateContext = new AsyncLocalStorage<true>();
 
 /** A Session Workflow plan an `exit_plan_mode` approval carries. */
 export interface TodoPlanApproval {
@@ -122,7 +126,8 @@ interface CallState {
 }
 
 /**
- * Runs one tool batch of an ACP prompt turn on the shared loop's batch: one
+ * Runs one tool batch of an ACP prompt turn on the shared loop's batch, in
+ * the `runAgentLoop` call of the round that requested it: one
  * `CoreToolScheduler` for the whole batch, whose state changes become ACP
  * `tool_call` updates and whose approvals become `session/request_permission`
  * requests.
@@ -131,6 +136,8 @@ export async function runAcpToolBatch(
   host: AcpToolBatchHost,
   options: {
     requests: ToolCallRequestInfo[];
+    /** The loop call of the round that requested `requests`. */
+    loop: Pick<SharedLoopRound, 'runBatch'>;
     signal: AbortSignal;
     duplicates: AgentLoopDuplicateState;
     onFullTurnModel?: (model: string) => boolean;
@@ -146,17 +153,25 @@ export async function runAcpToolBatch(
   else signal.addEventListener('abort', abortTools, { once: true });
 
   let stopAfterPermissionCancel = false;
+  let closed = false;
+  let drainCompletedUpdates = false;
   const stopBatch = () => {
+    if (closed) return;
     stopAfterPermissionCancel = true;
     tools.abort(USER_CANCEL_ABORT_REASON);
   };
 
-  // Updates go out in the order the scheduler reports them.
+  // A completed card can drain after cancellation without delaying the turn.
   let emissions = Promise.resolve();
-  const emit = (task: () => Promise<unknown> | unknown, what: string) => {
+  const emit = (
+    task: () => Promise<unknown> | unknown,
+    what: string,
+    deliverAfterClose = false,
+  ) => {
     emissions = emissions.then(async () => {
+      if (closed && !(drainCompletedUpdates && deliverAfterClose)) return;
       try {
-        await task();
+        await (closed ? deferredToolUpdateContext.run(true, task) : task());
       } catch (error) {
         debugLogger.debug(`Failed to emit ${what}`, error);
       }
@@ -327,6 +342,7 @@ export async function runAcpToolBatch(
       outcome = ToolConfirmationOutcome.ProceedOnce;
       config.setApprovalMode(ApprovalMode.DEFAULT);
       await host.sendModeUpdate();
+      if (tools.signal.aborted) return;
     }
     state.modeUpdateBeforeStart =
       details.type === 'edit' &&
@@ -371,7 +387,9 @@ export async function runAcpToolBatch(
     const status = call.status as 'success' | 'error' | 'cancelled';
     state.settleRelatedAgent?.(status === 'success');
     state.cleanupTracker?.();
-    if (canonicalToolName(request.name) === ToolNames.TODO_WRITE) {
+    const isTodoWrite =
+      canonicalToolName(request.name) === ToolNames.TODO_WRITE;
+    if (isTodoWrite) {
       host.onTodoWriteSettled(status, response.resultDisplay);
     }
     const planModeChanged =
@@ -381,12 +399,10 @@ export async function runAcpToolBatch(
       state.approvalModeAtStart !== undefined &&
       config.getApprovalMode() !== state.approvalModeAtStart;
     if (planModeChanged) {
-      emit(async () => {
-        await host.sendModeUpdate();
-        if (config.getApprovalMode() === ApprovalMode.PLAN) {
-          host.onPlanModeEntered();
-        }
-      }, 'mode update');
+      if (config.getApprovalMode() === ApprovalMode.PLAN) {
+        host.onPlanModeEntered();
+      }
+      emit(() => host.sendModeUpdate(), 'mode update');
     }
     if (response.visionBridgeNotice) {
       const notice = response.visionBridgeNotice;
@@ -401,10 +417,14 @@ export async function runAcpToolBatch(
       state.execution?.durationMs,
     );
     if (lifecycle) {
-      emit(() => host.toolCallEmitter.emitLifecycle(lifecycle), 'lifecycle');
+      emit(
+        () => host.toolCallEmitter.emitLifecycle(lifecycle),
+        'lifecycle',
+        true,
+      );
     }
     const executed = response.executionStatus !== 'not_started';
-    if (!executed && canonicalToolName(request.name) !== ToolNames.TODO_WRITE) {
+    if (!executed && !isTodoWrite) {
       emit(
         () =>
           host.toolCallEmitter.emitError(
@@ -417,21 +437,20 @@ export async function runAcpToolBatch(
               ),
           ),
         'tool error update',
+        true,
       );
       return;
     }
+    const durationMs =
+      call.startTime === undefined ? undefined : Date.now() - call.startTime;
     emit(
       () =>
         host.toolCallEmitter.emitResult({
           callId: request.callId,
           toolName: request.name,
           args: request.args,
-          ...(call.startTime !== undefined
-            ? {
-                startedAt: call.startTime,
-                durationMs: Date.now() - call.startTime,
-              }
-            : {}),
+          startedAt: call.startTime,
+          durationMs,
           message: response.responseParts,
           resultDisplay: response.resultDisplay,
           error: response.error,
@@ -440,6 +459,8 @@ export async function runAcpToolBatch(
           persistedOutputFiles: response.persistedOutputFiles,
         }),
       'tool result update',
+      // A todo result can publish a new plan revision, so it stays turn-scoped.
+      !isTodoWrite,
     );
   };
 
@@ -516,15 +537,11 @@ export async function runAcpToolBatch(
       );
   };
 
-  const results: AgentLoopToolResult[] = [];
+  const results = new Map<ToolCallRequestInfo, AgentLoopToolResult>();
   try {
-    const batch = await runToolBatch(options.requests, {
-      config,
-      client: config.getLlmClient(),
-      signal,
+    const batch = await options.loop.runBatch({
+      ...options.duplicates,
       toolSignal: tools.signal,
-      duplicates: options.duplicates,
-      keepCancelledResults: true,
       executor: createSchedulerExecutor(config, {
         onToolCallsUpdate,
         outputUpdateHandler,
@@ -535,39 +552,121 @@ export async function runAcpToolBatch(
         },
         onToolResultFullTurnModel: options.onFullTurnModel,
         refuseToolCall: (request) => host.refuseToolCall(request),
-        onPermissionPromptTerminalSequence: (sequence) =>
-          host.sendTerminalSequence(sequence),
+        onPermissionPromptTerminalSequence: (sequence) => {
+          if (!closed) host.sendTerminalSequence(sequence);
+        },
       }),
-      host: {
-        beforeToolLaunch: (request) => {
-          const approval = states.get(request.callId)?.todoPlanApproval;
-          if (approval && host.isTodoPlanApprovalStale(approval)) {
-            stopBatch();
-            return false;
-          }
-          return true;
-        },
-        onToolResult: (result) => {
-          results.push(result);
-          if (result.origin === 'replayed' || result.origin === 'duplicate') {
-            emitDuplicate(host, result, emit);
-          }
-        },
+      beforeToolLaunch: (request) => {
+        const approval = states.get(request.callId)?.todoPlanApproval;
+        if (approval && host.isTodoPlanApprovalStale(approval)) {
+          stopBatch();
+          return false;
+        }
+        return true;
+      },
+      onToolResult: (result) => {
+        results.set(result.request, result);
+        if (result.origin === 'replayed' || result.origin === 'duplicate') {
+          emitDuplicate(host, result, (task, what) => emit(task, what, true));
+        }
       },
     });
-    await Promise.all(approvals);
+    // A batch that settles after an abort still returns its recorded
+    // responses. At the deadline the kernel returns without them, and an
+    // approval promise may still be running the tool.
+    if (batch.stop === 'cancelled' && batch.responses === undefined) {
+      // Keep the per-call responses already available at the deadline.
+      // The scheduler's final batch hooks and budget can still be pending.
+      const seen = new Set<string>();
+      const completed: AgentLoopToolResult[] = [];
+      for (const request of options.requests) {
+        let result = results.get(request);
+        if (!result && !seen.has(request.callId)) {
+          const call = latest.get(request.callId);
+          if (
+            call?.status === 'success' ||
+            call?.status === 'error' ||
+            call?.status === 'cancelled'
+          ) {
+            result = {
+              request,
+              executionRequest: call.request,
+              response: call.response,
+              status: call.status,
+              origin: 'executed',
+            };
+            if (call.response.executionStatus !== 'not_started') {
+              config
+                .getLlmClient()
+                .recordCompletedToolCall(call.request.name, call.request.args);
+            }
+          }
+        }
+        seen.add(request.callId);
+        if (result) completed.push(result);
+      }
+      // Budget the saved results without waiting for output persistence.
+      const budgeted = enforceFunctionResponseBudget(
+        completed.map(({ request, response, executionRequest }) => ({
+          callId: request.callId,
+          toolName: executionRequest.name,
+          responseParts: response.responseParts,
+          persistedOutputFiles: response.persistedOutputFiles,
+          artifacts: response.artifacts,
+        })),
+        config.getToolOutputBatchBudget(),
+        false,
+        false,
+      );
+      const kept = completed.map((result, index) => {
+        const { response, status, executionRequest } = result;
+        const { responseParts } = budgeted[index];
+        config.getChatRecordingService()?.recordToolResult(
+          responseParts,
+          {
+            callId: result.request.callId,
+            status,
+            resultDisplay: response.resultDisplay,
+            persistedOutputFiles: response.persistedOutputFiles,
+            artifacts: response.artifacts,
+            error: response.error,
+            errorType: response.errorType,
+            executionStatus: response.executionStatus,
+          },
+          goalToolResultProvenance(executionRequest, responseParts),
+        );
+        return { ...result, response: { ...response, responseParts } };
+      });
+      drainCompletedUpdates = true;
+      return {
+        parts: budgeted.flatMap(({ responseParts }) => responseParts),
+        stop: batch.stop,
+        stopAfterPermissionCancel,
+        results: kept,
+      };
+    }
+    if (
+      !signal.aborted ||
+      config.isEventBusAgentLoopEnabled?.('acp') !== true
+    ) {
+      await Promise.all(approvals);
+    }
     await emissions;
     return {
       parts: batch.parts,
       stop: batch.stop,
       stopAfterPermissionCancel,
       results: options.requests.flatMap(
-        (request) => results.find((result) => result.request === request) ?? [],
+        (request) => results.get(request) ?? [],
       ),
     };
   } finally {
+    closed = true;
     signal.removeEventListener('abort', abortTools);
-    for (const state of states.values()) state.cleanupTracker?.();
+    for (const state of states.values()) {
+      if (!state.settled) state.settleRelatedAgent?.(false);
+      state.cleanupTracker?.();
+    }
   }
 }
 

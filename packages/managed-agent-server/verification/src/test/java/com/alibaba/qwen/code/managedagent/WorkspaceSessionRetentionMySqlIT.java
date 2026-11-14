@@ -9,10 +9,10 @@ import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedToolResultStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedToolResultStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationRetentionStore;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
@@ -208,7 +208,7 @@ class WorkspaceSessionRetentionMySqlIT {
         String tenant = "config-removed";
         String session = closed(original, tenant, false);
         var disabled = com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                new JdbcManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         assertThat(disabled.workspaceFilesEnabled()).isFalse();
         transaction(() -> disabled.beginWorkspaceLifecycle(tenant, session, OperationKind.ARCHIVE,
                 OWNER, ACTOR_DIGEST, "archive", "archive-digest", false));
@@ -234,11 +234,11 @@ class WorkspaceSessionRetentionMySqlIT {
                 projectionScope, digest, "result-1");
         jdbc.update("INSERT INTO ma_operation (operation_key, scope_key, session_scope_key, target_kind, target_key, operation_kind, operation_id, tenant_id, workspace_id, session_id, execution_key, request_json, request_digest, state, phase, claim_generation, claim_until, gmt_create, gmt_modified) VALUES (?, ?, ?, 'TOOL_EXECUTION', ?, 'TOOL_RESULT_PROJECTION', 'result-1', ?, 'workspace', ?, ?, '{}', ?, 'LEASED', 'PROJECTING', 1, (" + ManagedSchemaTime.SQL_NOW + " + 60000), 0, 0)", projectionKey, projectionScope, projectionScope,
                 digest, tenant, session, digest, digest);
-        var projection = new ManagedToolResultStore(jdbc, new DataSourceTransactionManager(source), store);
-        var claim = new ManagedToolResultStore.Claim(new ManagedToolResultStore.Source("result-1", tenant,
+        var projection = new JdbcManagedToolResultStore(jdbc, new DataSourceTransactionManager(source), store);
+        var claim = new JdbcManagedToolResultStore.Claim(new JdbcManagedToolResultStore.Source("result-1", tenant,
                 "workspace", session, "execution", 1, 1, mapper.createObjectNode(), mapper.createObjectNode(),
                 mapper.createArrayNode(), digest), 1);
-        var result = new ManagedToolResultStore.Projection(mapper.createObjectNode(), "pub-1", mapper.createObjectNode(),
+        var result = new JdbcManagedToolResultStore.Projection(mapper.createObjectNode(), "pub-1", mapper.createObjectNode(),
                 mapper.createObjectNode(), List.of(), "policy");
         var publicLocked = new CountDownLatch(1);
         var completingPublicLock = new CountDownLatch(1);
@@ -472,7 +472,7 @@ class WorkspaceSessionRetentionMySqlIT {
             }
         };
         return com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(observedJdbc, mapper, Clock.systemUTC(), ignored -> {},
-                new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+                new JdbcManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
     }
 
     private ManagedAgentStore faultStore(String sqlPrefix) {
@@ -488,7 +488,7 @@ class WorkspaceSessionRetentionMySqlIT {
         };
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
-        return com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(fault, mapper, Clock.systemUTC(), ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        return com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(fault, mapper, Clock.systemUTC(), ignored -> {}, new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
     }
 
     private void publication(String tenant, String session) {
@@ -514,7 +514,7 @@ class WorkspaceSessionRetentionMySqlIT {
         ManagedSchema.initialize(source);
         var properties = new ManagedAgentProperties();
         properties.getHarness().setWorkspaceFilesEnabled(true);
-        return com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, clock, ignored -> {}, new ManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        return com.alibaba.qwen.code.managedagent.VerificationFixtures.managedAgentStore(jdbc, mapper, clock, ignored -> {}, new JdbcManagedWorkspaceRegistry(jdbc), properties, new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
     }
 
     private String create(ManagedAgentStore store, String tenant) {

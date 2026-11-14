@@ -1,7 +1,8 @@
 package com.alibaba.qwen.code.managedagent.workspace.runtime;
 
 import com.alibaba.qwen.code.managedagent.VerificationFixtures;
-import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
+import com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -27,26 +28,78 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.time.Instant;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 class WorkspaceRuntimeTransportTest {
     @Test
+    void ordinaryExecutionKeepsItsRecordedSessionAcrossMeasurementFlagChangesButRejectsChangedScope() throws Exception {
+        for (String recordedProfile : List.of(WorkspaceExecutionProfile.CAPABILITY_DIGEST,
+                WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST)) {
+            var fixture = sshAcquisitionFixture(recordedProfile);
+            var original = fixture.session().getScope();
+            var binding = fixture.resolver().savedBinding(fixture.session().getHarnessSessionId());
+            String desiredProfile = WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(recordedProfile)
+                    ? WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST : WorkspaceExecutionProfile.CAPABILITY_DIGEST;
+            var desired = new RuntimeScope(original.getTenantId(), original.getWorkspaceId(), original.getWorkspaceGeneration(),
+                    original.getCanonicalCwd(), desiredProfile, original.getIsolationClass());
+            when(fixture.resolver().resolve(fixture.session().getHarnessSessionId(), null))
+                    .thenReturn(new WorkspaceRuntimeResolver.Resolved(binding, desired));
+            Map<String, Object> reference = Map.of("callId", "original-file-call", "toolName", "read_file",
+                    "input", Map.of("file_path", "fixture.txt"));
+            Map<String, Object> result = Map.of("executionStatus", "success", "responseParts", List.of());
+            when(fixture.http().execute(fixture.lease(), fixture.session(), reference))
+                    .thenReturn(CompletableFuture.completedFuture(result));
+
+            assertThat(fixture.transport().execute(fixture.lease(), fixture.session(), reference)
+                    .toCompletableFuture().join()).isEqualTo(result);
+            assertThat(fixture.session().getScope()).isSameAs(original);
+            assertThat(fixture.session().getScope().getCapabilityDigest()).isEqualTo(recordedProfile);
+            verify(fixture.http()).execute(same(fixture.lease()), same(fixture.session()), same(reference));
+            verify(fixture.sessions()).findById(original, fixture.session().getRuntimeSessionId());
+            verify(fixture.ownership()).assertHeld(binding, fixture.record());
+
+            for (var changed : List.of(
+                    new RuntimeScope("other-tenant", original.getWorkspaceId(), original.getWorkspaceGeneration(),
+                            original.getCanonicalCwd(), desiredProfile, original.getIsolationClass()),
+                    new RuntimeScope(original.getTenantId(), "other-workspace", original.getWorkspaceGeneration(),
+                            original.getCanonicalCwd(), desiredProfile, original.getIsolationClass()),
+                    new RuntimeScope(original.getTenantId(), original.getWorkspaceId(), "other-generation",
+                            original.getCanonicalCwd(), desiredProfile, original.getIsolationClass()),
+                    new RuntimeScope(original.getTenantId(), original.getWorkspaceId(), original.getWorkspaceGeneration(),
+                            original.getCanonicalCwd() + "/other", desiredProfile, original.getIsolationClass()),
+                    new RuntimeScope(original.getTenantId(), original.getWorkspaceId(), original.getWorkspaceGeneration(),
+                            original.getCanonicalCwd(), desiredProfile, "workspace"))) {
+                when(fixture.resolver().resolve(fixture.session().getHarnessSessionId(), null))
+                        .thenReturn(new WorkspaceRuntimeResolver.Resolved(binding, changed));
+                assertThat(fixture.transport().execute(fixture.lease(), fixture.session(), reference)
+                        .toCompletableFuture().join()).containsEntry("executionStatus", "not_started")
+                        .containsEntry("error", Map.of("type", "workspace_unavailable",
+                                "message", "Workspace execution was refused before dispatch."));
+            }
+            verifyNoMoreInteractions(fixture.http());
+        }
+    }
+
+    @Test
     void invalidRemoteCwdIsRejectedBeforeClaimingStorageOrInstallingContext() throws Exception {
         var fixture = sshAcquisitionFixture();
         var binding = fixture.resolver().savedBinding(fixture.session().getHarnessSessionId());
-        doThrow(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable()).when(fixture.resolver())
+        doThrow(WorkspaceExecutionStore.unavailable()).when(fixture.resolver())
                 .verifyInstallable(binding, binding.getCwdRelative());
         unavailable(() -> fixture.transport().acquire(fixture.lease(), fixture.session()));
         verifyNoInteractions(fixture.ownership(), fixture.http());
@@ -133,7 +186,7 @@ class WorkspaceRuntimeTransportTest {
     @Test
     void dedicatedWorkspaceExemptionDoesNotOpenTheExistingGenericRoutes() throws Exception {
         var fixture = fixture();
-        when(fixture.resolver().resolve(any(), any())).thenThrow(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable());
+        when(fixture.resolver().resolve(any(), any())).thenThrow(WorkspaceExecutionStore.unavailable());
         Map<String, Object> reference = Map.of("runtimeProtocol", 3, "callId", "original");
         unavailable(() -> fixture.transport().statusV3(fixture.lease(), fixture.session(), reference, 0));
         unavailable(() -> fixture.transport().cancelV3(fixture.lease(), fixture.session(), reference));
@@ -194,7 +247,7 @@ class WorkspaceRuntimeTransportTest {
         when(bindings.findById("binding-a")).thenReturn(runtime);
         var sessions = mock(RuntimeSessionRepository.class);
         var http = mock(HttpRuntimeTransport.class);
-        var transport = new WorkspaceRuntimeTransport(http, mock(WorkspaceExecutionStore.class), bindings, sessions,
+        var transport = new WorkspaceRuntimeTransport(http, mock(JdbcWorkspaceExecutionStore.class), bindings, sessions,
                 harness -> new ContextBinding("tenant", "workspace", 7, "storage", ".", "config", 1));
         for (String harness : new String[] {"harness-a", "harness-b"}) {
             var session = new RuntimeSession(harness, harness + "-turn", "continuation", scope);
@@ -319,18 +372,22 @@ class WorkspaceRuntimeTransportTest {
         when(bindings.findById("binding-a")).thenReturn(runtime);
         var sessions = mock(RuntimeSessionRepository.class);
         when(sessions.findById(scope, session.getRuntimeSessionId())).thenReturn(record);
-        var ownership = mock(WorkspaceExecutionStore.class);
+        var ownership = mock(JdbcWorkspaceExecutionStore.class);
         var http = mock(HttpRuntimeTransport.class);
         return new Fixture(new WorkspaceRuntimeTransport(http, resolver, ownership, bindings, sessions), http, resolver,
                 ownership, bindings, sessions, runtime, record, lease, session, boot, map(fixture.get("expectedPod")), request, capture);
     }
 
     private static Fixture sshAcquisitionFixture() throws Exception {
+        return sshAcquisitionFixture(WorkspaceExecutionProfile.CAPABILITY_DIGEST);
+    }
+
+    private static Fixture sshAcquisitionFixture(String capabilityDigest) throws Exception {
         var fixture = fixture();
         var original = fixture.runtime();
         var oldScope = fixture.session().getScope();
         var scope = new RuntimeScope(oldScope.getTenantId(), oldScope.getWorkspaceId(), oldScope.getWorkspaceGeneration(),
-                oldScope.getCanonicalCwd(), oldScope.getCapabilityDigest(), "session");
+                oldScope.getCanonicalCwd(), capabilityDigest, "session");
         var session = new RuntimeSession(fixture.session().getHarnessSessionId(), fixture.session().getRuntimeSessionId(),
                 fixture.session().getTurnKind(), scope);
         var request = new RuntimeProvisionRequest(scope, session.getHarnessSessionId(), "ssh-process", original.getRequest().getStorageId());
@@ -350,7 +407,7 @@ class WorkspaceRuntimeTransportTest {
     }
 
     private record Fixture(WorkspaceRuntimeTransport transport, HttpRuntimeTransport http, WorkspaceRuntimeResolver resolver,
-            WorkspaceExecutionStore ownership, RuntimeBindingRepository bindings, RuntimeSessionRepository sessions,
+            JdbcWorkspaceExecutionStore ownership, RuntimeBindingRepository bindings, RuntimeSessionRepository sessions,
             RuntimeBindingRecord runtime, RuntimeSessionRecord record, RuntimeLease lease, RuntimeSession session,
             Map<String, Object> boot, Map<String, Object> pod, Map<String, Object> request, Map<String, Object> capture) {
     }

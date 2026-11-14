@@ -12,6 +12,7 @@ import type { ManagedSessionKey } from '@qwen-code/qwen-code-core/managed-runtim
 import type { HostedWorkspaceBrokerOptions } from './hosted-workspace-broker.js';
 import { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url.js';
 import { readCsiNativeRequest } from './managed-csi-native-readback.js';
+import { readHostedCsiFileProfile } from './managed-csi-file-profile.js';
 import {
   MANAGED_CSI_FILE_PROTOCOL,
   parseManagedCsiFileJson,
@@ -177,7 +178,7 @@ export async function commitHostedCsiHistory(
   const original = readCsiFileHistoryObservation(observation, owner);
   const content = {
     schemaVersion: 2,
-    profile: 'csi-files-retirement/1',
+    profile: await readHostedCsiFileProfile(session),
     runtimeSessionId: owner,
     ...original,
     preparation,

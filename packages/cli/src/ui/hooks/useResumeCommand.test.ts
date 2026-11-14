@@ -623,6 +623,7 @@ describe('useResumeCommand', () => {
     expect(overrideLoadHistory).toHaveBeenCalledTimes(1);
     expect(overrideLoadHistory).toHaveBeenCalledWith(
       expect.arrayContaining([expect.anything()]),
+      'session-2',
     );
     expect(historyManager.loadHistory).not.toHaveBeenCalled();
     expect(historyManager.clearItems).toHaveBeenCalledTimes(1);
@@ -719,6 +720,7 @@ describe('useResumeCommand', () => {
           text: expect.stringContaining('stopped during tool execution'),
         }),
       ]),
+      'session-2',
     );
   });
 

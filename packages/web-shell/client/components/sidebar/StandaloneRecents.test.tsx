@@ -127,6 +127,7 @@ describe('StandaloneRecents', () => {
       currentSessionReady?: boolean;
       refreshKey?: number;
       searchQuery?: string;
+      sortBy?: 'updatedAt' | 'lastUserPromptAt';
       onError?: (error: unknown, message: string) => void;
       onRenameSession?: (sessionId: string, displayName: string) => void;
       onLoadSession?: (sessionId: string) => Promise<void> | void;
@@ -171,6 +172,7 @@ describe('StandaloneRecents', () => {
           currentSessionReady={options.currentSessionReady}
           refreshKey={options.refreshKey}
           searchQuery={options.searchQuery}
+          sortBy={options.sortBy}
           onNewSession={options.onNewSession}
           renderSession={renderSession}
           onLoadSession={options.onLoadSession ?? vi.fn()}
@@ -236,6 +238,55 @@ describe('StandaloneRecents', () => {
       archiveState: 'active',
       pageSize: 50,
     });
+  });
+
+  it('never pages with a cursor minted under the previous sort', async () => {
+    let release: (() => void) | undefined;
+    let cursor = 'cursor-from-updated-at';
+    list.mockImplementation(
+      async (options: { sortBy?: string; cursor?: string }) => {
+        if (options.sortBy !== 'lastUserPromptAt')
+          return {
+            sessions: [summary('active', 'Active chat')],
+            nextCursor: cursor,
+          };
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return {
+          sessions: [summary('question', 'Question chat')],
+          nextCursor: cursor,
+        };
+      },
+    );
+    const showMore = () =>
+      Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'sidebar.showAllSessions',
+      );
+    const stalePageCalls = () =>
+      list.mock.calls.filter(
+        ([options]) =>
+          options.cursor !== undefined && options.sortBy === 'lastUserPromptAt',
+      );
+
+    await render();
+    expect(showMore()).toBeDefined();
+
+    await render({ sortBy: 'lastUserPromptAt' });
+    expect(showMore()).toBeUndefined();
+    await act(async () => showMore()?.click());
+    expect(stalePageCalls()).toHaveLength(0);
+    await act(async () => release?.());
+
+    // A refresh keeps the loaded pages, so the cursor survives the round trip
+    // and only the in-flight guard can hold the button.
+    cursor = 'cursor-from-last-user-prompt-at';
+    await render({ sortBy: 'lastUserPromptAt', refreshKey: 1 });
+    expect(showMore()?.disabled).toBe(true);
+    const beforeClick = list.mock.calls.length;
+    await act(async () => showMore()?.click());
+    expect(list.mock.calls).toHaveLength(beforeClick);
+    await act(async () => release?.());
   });
 
   it.each(['active', 'archived'] as const)(
@@ -488,14 +539,196 @@ describe('StandaloneRecents', () => {
 
     expect(container.textContent).toContain('Chat 5');
     expect(container.textContent).not.toContain('Chat 6');
-    const showAll = Array.from(container.querySelectorAll('button')).find(
-      (button) => button.textContent === 'sidebar.showAllSessions',
+    const showMore = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'sidebar.showMoreSessions',
     );
+    expect(t).toHaveBeenCalledWith('sidebar.showMoreSessions', { count: 1 });
 
-    await act(async () => showAll?.click());
+    await act(async () => showMore?.click());
 
     expect(container.textContent).toContain('Chat 6');
-    expect(showAll?.isConnected).toBe(false);
+    expect(showMore?.isConnected).toBe(false);
+  });
+
+  it('expands the preview ten sessions at a time', async () => {
+    list.mockResolvedValue({
+      sessions: Array.from({ length: 16 }, (_, index) =>
+        summary(`session-${index + 1}`, `Chat ${index + 1}`),
+      ),
+    });
+    await render();
+    const showMore = () =>
+      Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'sidebar.showMoreSessions',
+      );
+
+    expect(container.textContent).toContain('Chat 5');
+    expect(container.textContent).not.toContain('Chat 6');
+    expect(t).toHaveBeenCalledWith('sidebar.showMoreSessions', { count: 10 });
+    await act(async () => showMore()?.click());
+    expect(container.textContent).toContain('Chat 15');
+    expect(container.textContent).not.toContain('Chat 16');
+    expect(t).toHaveBeenCalledWith('sidebar.showMoreSessions', { count: 1 });
+    await act(async () => showMore()?.click());
+    expect(container.textContent).toContain('Chat 16');
+    expect(showMore()).toBeUndefined();
+  });
+
+  it('renders a fetched page without re-arming the preview gate', async () => {
+    list
+      .mockResolvedValueOnce({
+        sessions: Array.from({ length: 50 }, (_, index) =>
+          summary(`p1-${index}`, `Page1 chat ${index}`),
+        ),
+        nextCursor: 'next',
+      })
+      .mockResolvedValueOnce({
+        sessions: Array.from({ length: 50 }, (_, index) =>
+          summary(`p2-${index}`, `Page2 chat ${index}`),
+        ),
+      });
+    await render();
+    // The local preview is still limited to five rows...
+    expect(container.textContent).toContain('Page1 chat 0');
+    expect(container.textContent).not.toContain('Page1 chat 5');
+    // ...but the server pagination control is available immediately.
+    const loadMore = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'sidebar.showAllSessions',
+    );
+    expect(loadMore).toBeDefined();
+    await act(async () => loadMore!.click());
+    // The whole fetched page renders even though the preview was never
+    // exhausted — not just its first rows inside a trailing count window.
+    expect(container.textContent).toContain('Page2 chat 0');
+    expect(container.textContent).toContain('Page2 chat 49');
+  });
+
+  it('keeps a fetched page fully visible once the preview is exhausted', async () => {
+    list
+      .mockResolvedValueOnce({
+        sessions: Array.from({ length: 50 }, (_, index) =>
+          summary(`p1-${index}`, `Page1 chat ${index}`),
+        ),
+        nextCursor: 'next',
+      })
+      .mockResolvedValueOnce({
+        sessions: Array.from({ length: 50 }, (_, index) =>
+          summary(`p2-${index}`, `Page2 chat ${index}`),
+        ),
+      });
+    await render();
+    const showMore = () =>
+      Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'sidebar.showMoreSessions',
+      );
+    for (let click = 0; click < 5; click++) {
+      await act(async () => showMore()?.click());
+    }
+    expect(container.textContent).toContain('Page1 chat 49');
+    expect(showMore()).toBeUndefined();
+    const loadMore = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'sidebar.showAllSessions',
+    );
+    expect(loadMore).toBeDefined();
+    await act(async () => loadMore!.click());
+    expect(container.textContent).toContain('Page2 chat 49');
+  });
+
+  it('resets the expansion when the sort changes', async () => {
+    list.mockResolvedValue({
+      sessions: Array.from({ length: 16 }, (_, index) =>
+        summary(`session-${index + 1}`, `Chat ${index + 1}`),
+      ),
+    });
+    await render();
+    const showMore = () =>
+      Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'sidebar.showMoreSessions',
+      );
+    await act(async () => showMore()?.click());
+    expect(container.textContent).toContain('Chat 15');
+    expect(container.textContent).not.toContain('Chat 16');
+    await render({ sortBy: 'lastUserPromptAt' });
+    expect(container.textContent).toContain('Chat 5');
+    expect(container.textContent).not.toContain('Chat 6');
+    expect(showMore()).toBeDefined();
+  });
+
+  it('resets the expansion when the group collapses', async () => {
+    list.mockResolvedValue({
+      sessions: Array.from({ length: 16 }, (_, index) =>
+        summary(`session-${index + 1}`, `Chat ${index + 1}`),
+      ),
+    });
+    await render();
+    const showMore = () =>
+      Array.from(container.querySelectorAll('button')).find(
+        (button) => button.textContent === 'sidebar.showMoreSessions',
+      );
+    await act(async () => showMore()?.click());
+    expect(container.textContent).toContain('Chat 15');
+    const toggle = () =>
+      container.querySelector<HTMLButtonElement>(
+        '[data-testid="standalone-active-group"] > div > button',
+      )!;
+    await act(async () => toggle().click());
+    expect(container.textContent).not.toContain('Chat 1');
+    await act(async () => toggle().click());
+    expect(container.textContent).toContain('Chat 5');
+    expect(container.textContent).not.toContain('Chat 6');
+    expect(showMore()).toBeDefined();
+  });
+
+  it('keeps the preview when a server page resolves after collapse', async () => {
+    let resolvePage!: (value: {
+      sessions: DaemonStandaloneSessionSummary[];
+    }) => void;
+    list
+      .mockResolvedValueOnce({
+        sessions: Array.from({ length: 50 }, (_, index) =>
+          summary(`p1-${index}`, `Page1 chat ${index}`),
+        ),
+        nextCursor: 'next',
+      })
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolvePage = resolve;
+          }),
+      );
+    await render();
+    const loadMore = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'sidebar.showAllSessions',
+    );
+    expect(loadMore).toBeDefined();
+    // Start the page fetch, then collapse before it resolves.
+    await act(async () => {
+      loadMore!.click();
+      await Promise.resolve();
+    });
+    const toggle = () =>
+      container.querySelector<HTMLButtonElement>(
+        '[data-testid="standalone-active-group"] > div > button',
+      )!;
+    await act(async () => toggle().click());
+    await act(async () => {
+      resolvePage({
+        sessions: Array.from({ length: 50 }, (_, index) =>
+          summary(`p2-${index}`, `Page2 chat ${index}`),
+        ) as DaemonStandaloneSessionSummary[],
+      });
+      await Promise.resolve();
+    });
+    // Re-expand: the collapse reset must still hold five rows, not the whole
+    // catalog the late page would have revealed.
+    await act(async () => toggle().click());
+    expect(container.textContent).toContain('Page1 chat 0');
+    expect(container.textContent).not.toContain('Page1 chat 5');
+    expect(container.textContent).not.toContain('Page2 chat 49');
+    const showMore = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'sidebar.showMoreSessions',
+    );
+    expect(showMore).toBeDefined();
   });
 
   it('unlocks pagination when a refresh replaces an in-flight page', async () => {

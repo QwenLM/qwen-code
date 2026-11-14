@@ -64,6 +64,7 @@ const mockHandleListExtensions = vi.hoisted(() => vi.fn());
 const mockStartEarlyStartupPrefetches = vi.hoisted(() => vi.fn());
 const mockStartPostRenderPrefetches = vi.hoisted(() => vi.fn());
 const mockRunAcpAgent = vi.hoisted(() => vi.fn());
+const mockConstructExtensionFileWatcher = vi.hoisted(() => vi.fn());
 const mockStartNonInteractiveOpenAILogHousekeeping = vi.hoisted(() => vi.fn());
 const mockStopNonInteractiveOpenAILogHousekeeping = vi.hoisted(() =>
   vi.fn(async () => {}),
@@ -335,6 +336,9 @@ vi.mock('./config/lsp-config-watcher.js', () => ({
 
 vi.mock('./config/extension-file-watcher.js', () => ({
   ExtensionFileWatcher: class {
+    constructor() {
+      mockConstructExtensionFileWatcher();
+    }
     startWatching() {}
     restartWatching() {}
     stopWatching() {}
@@ -512,6 +516,15 @@ describe('llm.tsx main function', () => {
         const provider =
           vi.mocked(loadCliConfig).mock.calls[0]?.[9]
             ?.workflowAncestorTrustProvider;
+        if (sandbox) {
+          // The pre-sandbox partialConfig validates auth for a configuration
+          // that never uses LSP, so it must refuse the service outright: the
+          // setting alone would otherwise start host-side language servers
+          // outside the container.
+          expect(vi.mocked(loadCliConfig).mock.calls[0]?.[9]?.lspDisabled).toBe(
+            true,
+          );
+        }
         if (capability === undefined) {
           expect(provider).toBeTypeOf('function');
           await expect(
@@ -2231,7 +2244,11 @@ describe('llm.tsx main function', () => {
     expect(initializerModule.initializeApp).toHaveBeenCalledWith(
       configStub,
       expect.any(Object),
-      { deferIdeConnection: false },
+      {
+        deferIdeConnection: false,
+        allowSubscriptionStartupFallback: true,
+        allowUnlistedSubscriptionModel: false,
+      },
     );
     expect(mockStartNonInteractiveOpenAILogHousekeeping).toHaveBeenCalledWith(
       configStub,
@@ -3009,7 +3026,11 @@ describe('llm.tsx main function', () => {
     expect(initializerModule.initializeApp).toHaveBeenCalledWith(
       configStub,
       expect.any(Object),
-      { deferIdeConnection: false },
+      {
+        deferIdeConnection: false,
+        allowSubscriptionStartupFallback: true,
+        allowUnlistedSubscriptionModel: false,
+      },
     );
     expect(mockStartNonInteractiveOpenAILogHousekeeping).toHaveBeenCalledWith(
       validatedConfig,
@@ -3067,6 +3088,7 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
   let initialSigtermListeners: NodeJS.SignalsListener[];
 
   beforeEach(() => {
+    mockConstructExtensionFileWatcher.mockClear();
     originalEnvNoRelaunch = process.env['QWEN_CODE_NO_RELAUNCH'];
     process.env['QWEN_CODE_NO_RELAUNCH'] = 'true';
     initialSigintListeners = process.listeners(
@@ -3118,7 +3140,10 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
 
   // Drives main() to the renderer dispatch: interactive config, no
   // relaunch, TTY stdin — the same harness the kitty-protocol tests use.
-  const interactiveMainSetup = async (screenReader = false) => {
+  const interactiveMainSetup = async (
+    screenReader = false,
+    acpFlag?: 'acp' | 'experimentalAcp',
+  ) => {
     const { loadCliConfig, parseArguments } = await import(
       './config/config.js'
     );
@@ -3145,7 +3170,7 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
       initialize: vi.fn(),
       waitForMcpReady: vi.fn().mockResolvedValue(undefined),
       getIdeMode: () => false,
-      getExperimentalZedIntegration: () => false,
+      getExperimentalZedIntegration: () => acpFlag !== undefined,
       getScreenReader: () => screenReader,
       getMemoryFileCount: () => 0,
       getWarnings: () => [],
@@ -3193,8 +3218,8 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
       disableMcpServer: undefined,
       mcpConfig: undefined,
       allowedTools: undefined,
-      acp: undefined,
-      experimentalAcp: undefined,
+      acp: acpFlag === 'acp' || undefined,
+      experimentalAcp: acpFlag === 'experimentalAcp' || undefined,
       extensions: undefined,
       listExtensions: undefined,
       openaiLogging: undefined,
@@ -3235,6 +3260,23 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
     });
   };
 
+  it.each(['acp', 'experimentalAcp'] as const)(
+    'does not construct the interactive extension watcher in %s mode',
+    async (acpFlag) => {
+      await interactiveMainSetup(false, acpFlag);
+      mockRunAcpAgent.mockClear();
+      mockRunAcpAgent.mockResolvedValue(undefined);
+      vi.spyOn(process, 'exit').mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+
+      await expect(main()).rejects.toBeInstanceOf(MockProcessExitError);
+
+      expect(mockRunAcpAgent).toHaveBeenCalledOnce();
+      expect(mockConstructExtensionFileWatcher).not.toHaveBeenCalled();
+    },
+  );
+
   it('strict mode fails loudly when the OpenTUI entry declines to start', async () => {
     await interactiveMainSetup();
     selectOpentui(true);
@@ -3243,6 +3285,7 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
     await expect(main()).rejects.toThrow(
       /QWEN_TUI_RENDERER_STRICT forbids the ink fallback/,
     );
+    expect(mockConstructExtensionFileWatcher).toHaveBeenCalledOnce();
     // The dispatch rejected before the ink UI could mount.
     expect(mockStartPostRenderPrefetches).not.toHaveBeenCalled();
   });
@@ -3516,6 +3559,8 @@ describe('llm.tsx main function kitty protocol', () => {
       expect.any(Object),
       {
         deferIdeConnection: true,
+        allowSubscriptionStartupFallback: true,
+        allowUnlistedSubscriptionModel: true,
       },
     );
     expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
@@ -3645,6 +3690,8 @@ describe('llm.tsx main function kitty protocol', () => {
       expect.any(Object),
       {
         deferIdeConnection: false,
+        allowSubscriptionStartupFallback: true,
+        allowUnlistedSubscriptionModel: false,
       },
     );
     expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
@@ -3775,6 +3822,8 @@ describe('llm.tsx main function kitty protocol', () => {
       expect.any(Object),
       {
         deferIdeConnection: false,
+        allowSubscriptionStartupFallback: true,
+        allowUnlistedSubscriptionModel: false,
       },
     );
     expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
@@ -3913,6 +3962,8 @@ describe('llm.tsx main function kitty protocol', () => {
       expect.any(Object),
       {
         deferIdeConnection: false,
+        allowSubscriptionStartupFallback: false,
+        allowUnlistedSubscriptionModel: false,
       },
     );
     expect(mockRunAcpAgent).toHaveBeenCalledWith(

@@ -10,7 +10,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageR
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration.StorageAlias;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -147,9 +147,9 @@ public class ExternalStorageRegistrationTest {
     @Test
     public void externalRegistrationCannotEnterLocalExecutionAndCannotAdoptLegacyAliases() {
         for (String kind : List.of("LOCAL", "UNREGISTERED")) {
-            String alias = JdbcRuntimeBindingRepository.storageAliasKey("tenant", kind);
+            String alias = RuntimeAdmissionFences.storageAliasKey("tenant", kind);
             jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, storage_kind) VALUES (?, ?, ?, ?, ?, ?)",
-                    alias, JdbcRuntimeBindingRepository.storageFenceKey("tenant"), JdbcRuntimeBindingRepository.storageFenceKey(kind), "tenant", kind, kind);
+                    alias, RuntimeAdmissionFences.storageFenceKey("tenant"), RuntimeAdmissionFences.storageFenceKey(kind), "tenant", kind, kind);
             assertThat(LocalStorageOwners.alias(jdbc, "tenant", kind, false).get("storage_kind")).isEqualTo(kind);
             WorkspaceStorageKindGuard.requireLocalAlias(jdbc, "tenant", kind);
             WorkspaceStorageKindGuard.requireExecutionAlias(jdbc, "tenant", kind);

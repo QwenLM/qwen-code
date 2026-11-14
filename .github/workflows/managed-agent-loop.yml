@@ -1,0 +1,104 @@
+name: 'Managed Agent loop verification'
+
+on:
+  pull_request:
+    branches: ['main']
+    paths:
+      - 'packages/core/**'
+      - 'packages/cli/**'
+      - 'packages/acp-bridge/**'
+      - 'packages/sdk-typescript/**'
+      - 'integration-tests/managed-loop/**'
+      - 'integration-tests/helpers/hosted-*'
+      - 'integration-tests/helpers/daemon-process.ts'
+      - 'integration-tests/cli/_daemon-harness.ts'
+      - 'integration-tests/fake-openai-server.ts'
+      - 'integration-tests/vitest.managed-loop.config.ts'
+      - 'integration-tests/vitest.config.ts'
+      - 'scripts/tests/managed-agent-loop-workflow.test.js'
+      - '.github/workflows/managed-agent-loop.yml'
+      - '.github/actions/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+  push:
+    branches: ['main']
+  schedule:
+    - cron: '35 19 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: 'read'
+
+concurrency:
+  group: '${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}'
+  cancel-in-progress: "${{ github.event_name == 'pull_request' }}"
+
+defaults:
+  run:
+    shell: 'bash'
+
+jobs:
+  managed-loop:
+    name: 'Managed loop (${{ matrix.loop }})'
+    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
+    runs-on: '${{ (github.event_name == ''pull_request'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "ecs-qwen-ephemeral"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        loop: ['shared', 'kernel']
+    env:
+      MANAGED_LOOP_MODE: '${{ matrix.loop }}'
+      MANAGED_LOOP_REPORT_DIR: '${{ github.workspace }}/test-results/managed-loop'
+      QWEN_SANDBOX: 'false'
+    steps:
+      - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        if: "${{ runner.environment == 'github-hosted' }}"
+        with:
+          node-version: '22.x'
+          package-manager-cache: false
+      - name: 'Use pre-installed Node.js'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        uses: './.github/actions/self-hosted-node'
+      - name: 'Cache pnpm store'
+        if: "${{ runner.environment == 'github-hosted' }}"
+        uses: './.github/actions/pnpm-store-cache'
+      - name: 'Install dependencies'
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: 'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only'
+      - name: 'Build the CLI and workspace packages'
+        run: 'npm run build && npm run bundle'
+      - name: 'Run both Managed paths without retries'
+        run: |-
+          mkdir -p "$MANAGED_LOOP_REPORT_DIR/$MANAGED_LOOP_MODE"
+          node node_modules/vitest/vitest.mjs run --root integration-tests --config vitest.managed-loop.config.ts --reporter=default --reporter=json --outputFile="$MANAGED_LOOP_REPORT_DIR/$MANAGED_LOOP_MODE/tests.json"
+      - name: 'Require both paths to have passed'
+        run: |-
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { readFileSync } from 'node:fs';
+          const root = `${process.env.MANAGED_LOOP_REPORT_DIR}/${process.env.MANAGED_LOOP_MODE}`;
+          const report = JSON.parse(readFileSync(`${root}/tests.json`, 'utf8'));
+          assert.equal(report.numTotalTests, 2);
+          assert.equal(report.numPassedTests, 2);
+          assert.equal(report.numPendingTests, 0);
+          assert.equal(report.success, true);
+          for (const surface of ['hosted-agent-core', 'daemon-acp']) {
+            const evidence = JSON.parse(readFileSync(`${root}/${surface}.json`, 'utf8'));
+            assert.equal(evidence.mode, process.env.MANAGED_LOOP_MODE);
+            assert.equal(evidence.surface, surface);
+            assert.equal(evidence.evidence.status, 'pass');
+          }
+          NODE
+      - name: 'Upload protocol and executed-loop evidence'
+        if: '${{ always() }}'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v4
+        with:
+          name: 'managed-loop-${{ matrix.loop }}-${{ github.run_attempt }}'
+          path: 'test-results/managed-loop/'
+          if-no-files-found: 'warn'
+          retention-days: 7
