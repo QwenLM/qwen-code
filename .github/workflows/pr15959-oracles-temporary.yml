@@ -1,0 +1,154 @@
+name: 'PR 15959 snapshot and record oracles'
+on:
+  push:
+    branches: ['codex/verify-pr-15959-oracles-20261115']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  typecheck:
+    runs-on: [self-hosted, linux, x64, ecs-qwen]
+    container: node:22-bookworm
+    timeout-minutes: 45
+    env:
+      NODE_OPTIONS: '--max-old-space-size=6144'
+      QWEN_SKIP_PREPARE: '1'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: '0ba1d481cd98f8ea78698ef282767babc555c954'
+          persist-credentials: false
+      - name: Attest source and resource limits
+        run: |
+          mkdir -p .verify-evidence
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          test "$(git rev-parse HEAD)" = '0ba1d481cd98f8ea78698ef282767babc555c954'
+          git rev-parse HEAD | tee .verify-evidence/source-sha.txt
+          node -e 'console.log(JSON.stringify({node:process.version,heapBytes:require("node:v8").getHeapStatistics().heap_size_limit}))' | tee .verify-evidence/runtime.json
+          cat /sys/fs/cgroup/memory.max 2>/dev/null || true
+          free -m
+      - name: Install locked dependencies without rebuilding
+        timeout-minutes: 20
+        run: corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
+      - name: Reuse normal build from this exact head
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: unit-test-tree
+          repository: QwenLM/qwen-code
+          run-id: '43606770112'
+          github-token: ${{ github.token }}
+          path: '.verify-input'
+      - name: Restore built prerequisites
+        run: |
+          tar -xzf .verify-input/unit-test-tree.tgz
+          node scripts/ci-build-cache.mjs host-assets
+          git diff --exit-code
+      - name: Run snapshot and record mutation oracles
+        timeout-minutes: 12
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import subprocess
+          from pathlib import Path
+          
+          root = Path.cwd()
+          out = root / '.verify-evidence/r5'
+          out.mkdir(parents=True, exist_ok=True)
+          test = root / 'packages/cli/src/serve/hosted-harness-session.test.ts'
+          prod = root / 'packages/cli/src/serve/hosted-turn-history.ts'
+          test_original = test.read_bytes()
+          prod_original = prod.read_bytes()
+          for path, data in ((test, test_original), (prod, prod_original)):
+              expected = subprocess.check_output(['git', '-C', str(root), 'show', 'HEAD:' + str(path.relative_to(root))])
+              assert data == expected, 'Refuse to overwrite pre-existing source changes'
+          
+          test_text = test_original.decode()
+          fixture_call = '    await writeCancelledGroupWithLegacySnapshot(managed);'
+          assert test_text.count(fixture_call) == 2
+          instrumented = test_text.replace(fixture_call, '    const snapshotId = await writeCancelledGroupWithLegacySnapshot(managed);')
+          
+          def probe(input_name, indent):
+              lines = [
+                  f"expect({input_name}.excludedPromptIds?.has('prior-cancel')).toBe(true);",
+                  f"expect({input_name}.history?.filter((entry) => entry.daemonPromptId === 'prior-cancel')).toHaveLength(0);",
+                  f"const snapshots = {input_name}.history?.filter((entry) => entry.type === 'system' && entry.subtype === 'chat_compression' && entry.uuid === snapshotId) ?? [];",
+                  "expect(snapshots, 'R5-1 snapshot must reach model seam').toHaveLength(1);",
+                  "const compressed = JSON.stringify((snapshots[0]!.systemPayload as { compressedHistory: unknown }).compressedHistory);",
+                  "expect(compressed).toContain('prior-cancel:background-agent');",
+                  "expect(compressed).toContain('prior-complete:background-agent');",
+              ]
+              return ''.join(indent + line + '\n' for line in lines)
+          
+          for marker, input_name, indent in (
+              ('    const api = JSON.stringify(runnerApiHistory(input));', 'input', '    '),
+              ('      const api = JSON.stringify(runnerApiHistory(resumedInput!));', 'resumedInput!', '      '),
+          ):
+              assert instrumented.count(marker) == 1
+              instrumented = instrumented.replace(marker, probe(input_name, indent) + marker)
+          
+          prod_text = prod_original.decode()
+          start = prod_text.index('  const restoreRaw =\n')
+          end = prod_text.index('  return records.flatMap', start)
+          mutant = prod_text[:start] + '  const restoreRaw = true;\n' + prod_text[end:]
+          (out / 'test-original.ts').write_bytes(test_original)
+          (out / 'test-witness.ts').write_text(instrumented)
+          (out / 'production-original.ts').write_bytes(prod_original)
+          (out / 'production-mutant.ts').write_text(mutant)
+          m2_start = prod_text.index('export function isExcludedHostedRecord(')
+          m2_end = prod_text.index('\n/**', m2_start)
+          m2_block = prod_text[m2_start:m2_end]
+          assert m2_block.count('    record.daemonPromptId !== undefined &&') == 1
+          m2_block = m2_block.replace('    record.daemonPromptId !== undefined &&', "    record.type === 'user' &&\n    record.daemonPromptId !== undefined &&")
+          m2 = prod_text[:m2_start] + m2_block + prod_text[m2_end:]
+          (out / 'production-m2.ts').write_text(m2)
+          results = []
+          try:
+              for label, production, test_source in (
+                  ('mutant-original-tests', mutant, test_text),
+                  ('mutant-witness-tests', mutant, instrumented),
+                  ('intact-witness-tests', prod_text, instrumented),
+                  ('m2-original-route-tests', m2, test_text),
+              ):
+                  prod.write_text(production)
+                  test.write_text(test_source)
+                  diff = subprocess.check_output(['git', '-C', str(root), 'diff', '--', str(prod.relative_to(root)), str(test.relative_to(root))])
+                  (out / (label + '.patch')).write_bytes(diff)
+                  container_out = str(out.resolve() / label)
+                  selector = 'keeps settled tool history whole after|excludes a naked interrupted instruction' if label.startswith('m2-') else 'PR #15959 R3-3'
+                  command = (
+                      'set +e; NODE_OPTIONS=--max-old-space-size=6144 timeout 150 '
+                      'npx --no-install vitest run src/serve/hosted-harness-session.test.ts '
+                      "-t '" + selector + "' --reporter=json --outputFile=" + container_out + '.json '
+                      '> ' + container_out + '.log 2>&1; result=$?; '
+                      "printf '%s\\n' \"$result\" > " + container_out + '.rc; exit "$result"'
+                  )
+                  run = subprocess.run(['bash', '-c', command], cwd=root / 'packages/cli', capture_output=True, text=True, timeout=180)
+                  report = json.loads((out / (label + '.json')).read_text())
+                  cases = [a for suite in report['testResults'] for a in suite['assertionResults'] if a['status'] in ('passed', 'failed')]
+                  result = {'cell': label, 'exit': run.returncode, 'testSha256': hashlib.sha256(test_source.encode()).hexdigest(), 'productionSha256': hashlib.sha256(production.encode()).hexdigest(), 'executed': len(cases), 'passed': sum(a['status'] == 'passed' for a in cases), 'failed': sum(a['status'] == 'failed' for a in cases), 'cases': [{'name': a['fullName'], 'status': a['status'], 'failureMessages': a.get('failureMessages', [])} for a in cases]}
+                  results.append(result)
+                  (out / 'results.json').write_text(json.dumps(results, indent=2) + '\n')
+                  print(json.dumps({k: v for k, v in result.items() if k != 'cases'}), flush=True)
+                  assert len(cases) == (5 if label.startswith('m2-') else 2), 'Unexpected selection; do not credit'
+          finally:
+              prod.write_bytes(prod_original)
+              test.write_bytes(test_original)
+              assert prod.read_bytes() == prod_original and test.read_bytes() == test_original
+              print('Scratch production and test sources restored byte-for-byte', flush=True)
+          
+          assert [(r['exit'], r['passed'], r['failed']) for r in results] == [(0, 2, 0), (1, 0, 2), (0, 2, 0), (1, 2, 3)], 'Mutation matrix differs from the declared hypothesis'
+          assert all('R5-1 snapshot must reach model seam' in '\n'.join(c['failureMessages']) for c in results[1]['cases'])
+          assert all('to deeply equal' in '\n'.join(c['failureMessages']) for c in results[3]['cases'] if c['status'] == 'failed')
+          print('R5 old tests survive; snapshot witnesses kill only the restore mutant; intact witnesses pass; route seam kills M2', flush=True)
+          PY
+      - name: Preserve evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pr15959-snapshot-record-oracles
+          path: .verify-evidence/
+          include-hidden-files: true
