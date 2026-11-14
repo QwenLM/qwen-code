@@ -67,6 +67,8 @@ export interface ItemProjectionContext {
 }
 
 function fmtTokensShort(n: number): string {
+  // 999,950 rounds to 1000.0k, so it belongs in the next unit.
+  if (n >= 999_950) return `${(n / 1_000_000).toFixed(1)}m`;
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
 }
 
@@ -118,7 +120,9 @@ export function projectAbout(systemInfo: Record<string, unknown>): string {
   let authLabel = '';
   if (selectedAuthType) {
     const matched = findProviderByCredentials(baseUrl, apiKeyEnvKey);
-    if (matched && resolveMetadataKey(matched) && matched.label) {
+    if (selectedAuthType === 'qwen-subscription') {
+      authLabel = 'Qwen Subscription';
+    } else if (matched && resolveMetadataKey(matched) && matched.label) {
       authLabel = matched.label;
     } else if (
       selectedAuthType.startsWith('oauth') ||
@@ -486,7 +490,17 @@ export function projectContextUsage(item: Record<string, unknown>): string {
     ['System prompt', 'systemPrompt'],
     ['Built-in tools', 'builtinTools'],
     ['MCP tools', 'mcpTools'],
-    ['Memory files', 'memoryFiles'],
+    ...(breakdown['instructionFiles'] === undefined
+      ? []
+      : ([['Instruction files', 'instructionFiles']] as Array<
+          [string, string]
+        >)),
+    [
+      breakdown['instructionFiles'] === undefined
+        ? 'Memory files'
+        : 'Auto memory',
+      'memoryFiles',
+    ],
     ['Skills', 'skills'],
     ['Startup context', 'startupContext'],
   ];
@@ -504,12 +518,6 @@ export function projectContextUsage(item: Record<string, unknown>): string {
     lines.push(
       `█ Messages ${fmtTokensShort(messages)} tokens (${pct(messages, windowSize)}%)`,
     );
-    const unattributed = Number(breakdown['unattributed'] ?? 0);
-    if (unattributed > 0) {
-      lines.push(
-        `█ Unattributed ${fmtTokensShort(unattributed)} tokens (${pct(unattributed, windowSize)}%)`,
-      );
-    }
   }
   // Three-tier compaction ladder — ink renders it whenever thresholds +
   // currentTier are present (even while usage is still estimated).
@@ -569,7 +577,20 @@ export function projectContextUsage(item: Record<string, unknown>): string {
       ].sort(byTokens),
     );
     detail(
-      'Memory files',
+      'Instruction files',
+      (
+        (item['instructionFiles'] ?? []) as Array<{
+          path: string;
+          tokens: number;
+        }>
+      )
+        .map((file) => ({ name: file.path, tokens: file.tokens }))
+        .sort(byTokens),
+    );
+    detail(
+      breakdown['instructionFiles'] === undefined
+        ? 'Memory files'
+        : 'Auto memory',
       // The producer emits ContextMemoryDetail ({ path, tokens }); map to
       // the name field detail() renders.
       [
@@ -1025,11 +1046,11 @@ export function projectSpecialItemText(
       );
     case 'tools_list':
       return projectToolsList(
-        ((record['tools'] ?? []) as Array<{
+        (record['tools'] ?? []) as Array<{
           name: string;
           displayName?: string;
           description?: string;
-        }>) ?? [],
+        }>,
         Boolean(record['showDescriptions']),
       );
     case 'model_stats': {
@@ -1156,8 +1177,23 @@ export function projectItemToStreamEvent(
         sentToModel: item.sentToModel ?? false,
         ...(item.promptId ? { promptId: item.promptId } : {}),
       };
-    case 'info':
-      return viaSpecialText();
+    case 'info': {
+      const text = projectSpecialItemText(item, ctx);
+      return text === null
+        ? null
+        : {
+            type: 'info',
+            text,
+            ...(isSyntheticHistoryItem(item)
+              ? {}
+              : { historyIsSynthetic: false }),
+            ...(item.presentation ? { presentation: item.presentation } : {}),
+          };
+    }
+    // ink draws a notice (a Mod's own prompt, a background agent that
+    // finished, a cron that fired) as an info row.
+    case 'notification':
+      return { type: 'info', text: item.text };
     case 'warning':
       return { type: 'warning', text: item.text };
     // No success row in the live model yet; ink's green SuccessMessage
@@ -1238,7 +1274,7 @@ export function projectItemToStreamEvent(
     //  - the rest: ink renders these through dedicated components and no
     //    OpenTUI writer produces them (tool_use_summary is written by ink's
     //    use-llm-stream only; diff_stats comes from the file-history rewind
-    //    flow, which has no OpenTUI seam; notification has no writer yet).
+    //    flow, which has no OpenTUI seam).
     case 'tool_group':
     case 'retry_countdown':
     case 'vision_notice':
@@ -1247,7 +1283,6 @@ export function projectItemToStreamEvent(
     case 'gemini_thought':
     case 'gemini_thought_content':
     case 'help':
-    case 'notification':
     case 'tool_use_summary':
     case 'diff_stats':
       return null;

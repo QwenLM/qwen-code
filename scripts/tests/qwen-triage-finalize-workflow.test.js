@@ -5,6 +5,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import { readdirSync } from 'node:fs';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -28,11 +29,24 @@ describe('qwen-triage-finalize workflow', () => {
       'Qwen Code CI',
       'Qwen Autofix',
       'Managed Agent gate',
+      'Managed Agent loop verification',
       'SDK Python',
       'Serve A/B',
       'Web-shell Visuals',
     ]);
     expect(workflow.on.workflow_run.workflows).not.toContain('E2E Tests');
+    // Literal against literal above, so tie each name to a `name:` some
+    // workflow really carries: `workflow_run.workflows` matches on that name,
+    // so a typo keeps this suite green while the finalizer never fires.
+    const names = readdirSync('.github/workflows')
+      .filter((f) => f.endsWith('.yml'))
+      .map(
+        (f) => parse(readFileSync(join('.github/workflows', f), 'utf8')).name,
+      );
+    expect(
+      workflow.on.workflow_run.workflows.filter((n) => !names.includes(n)),
+      'names in workflow_run.workflows that no workflow carries:',
+    ).toEqual([]);
     expect(workflow.on.workflow_run.types).toEqual(['completed']);
     expect(workflow.jobs.finalize.if).toContain(
       "github.event.workflow_run.event == 'pull_request'",
@@ -51,11 +65,15 @@ describe('qwen-triage-finalize workflow', () => {
     expect(workflow.jobs.finalize.steps).toHaveLength(1);
   });
 
-  it('serializes concurrent finalize runs per head SHA without cancelling', () => {
-    // Two listed workflows can complete near-simultaneously; a cancelled run
-    // would drop its read-modify-write, so queue instead of cancel.
-    expect(workflowText).toContain(
-      "group: 'qwen-triage-finalize-${{ github.event.workflow_run.head_sha }}'",
+  it('serializes PR finalize runs per head SHA without cancelling', () => {
+    // Two listed workflows can complete near-simultaneously; a cancelled PR
+    // run would drop its read-modify-write, so queue instead of cancel.
+    // Non-PR firings get a unique group so they never occupy a PR's group
+    // before the job-level event gate skips them.
+    // Keep the expression on one line: a more-indented continuation would
+    // survive folding as a literal newline inside the group.
+    expect(workflow.concurrency.group).toBe(
+      "qwen-triage-finalize-${{ github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.head_sha || github.run_id }}",
     );
     expect(workflowText).toContain('cancel-in-progress: false');
   });
