@@ -1840,6 +1840,11 @@ export interface DaemonSessionToolCalls {
   events: DaemonEvent[];
 }
 
+export type DaemonSessionTurnHooksPage =
+  import('./ui/hook-lifecycle.js').HookTurnPage;
+export type DaemonSessionTurnHooksPageOptions =
+  DaemonSessionTurnIndexPageOptions;
+
 export interface DaemonSessionTurnIndexPageOptions {
   snapshot?: string;
   start?: number;
@@ -1852,6 +1857,8 @@ export interface DaemonSessionTurnIndexEntry {
   turnId: string;
   kind: 'prompt' | 'realtime' | 'scheduled';
   promptId?: string;
+  /** Canonical persisted identity for per-turn history queries. */
+  historyPromptId?: string;
   timestamp?: string;
   label: string;
   detail?: string;
@@ -2914,6 +2921,107 @@ export interface DaemonWorkspaceMemoryDreamTask {
 
 export interface DaemonWorkspaceMemoryDreamOptions {
   clientId?: string;
+}
+
+export type DaemonMemoryImportScope = 'project' | 'user';
+
+export interface DaemonMemoryImportSourceFile {
+  path: string;
+  content: string;
+}
+
+export interface DaemonMemoryImportSource {
+  version: 1;
+  source: 'codex';
+  files: DaemonMemoryImportSourceFile[];
+}
+
+export interface DaemonMemoryImportSection {
+  id: string;
+  groupId: string;
+  title: string;
+  path: string;
+  line: number;
+  content: string;
+  references: string[];
+  suggestedScope: DaemonMemoryImportScope | 'unassigned';
+  sourceProject?: string;
+  reason: string;
+  selectable: boolean;
+}
+
+export interface DaemonMemoryImportEstimate {
+  basis: 'source-only-with-context-reserve';
+  modelCalls: number;
+  sourceTokens: number;
+  maxOutputTokens: number;
+  reservedTokens: number;
+  exceedsBudget: boolean;
+  limits: {
+    maxCalls: number;
+    maxReservedTokens: number;
+    batchSections: number;
+    sourceBytes: number;
+    contextBytes: number;
+    outputTokens: number;
+    promptBytes: number;
+  };
+}
+
+export interface DaemonMemoryImportPreview {
+  version: 1;
+  kind: 'preview';
+  digest: string;
+  groups: Array<{
+    id: string;
+    scope: DaemonMemoryImportSection['suggestedScope'];
+    sourceProject?: string;
+    sectionIds: string[];
+    estimate: DaemonMemoryImportEstimate;
+  }>;
+  sections: DaemonMemoryImportSection[];
+  warnings: string[];
+  estimate: DaemonMemoryImportEstimate;
+}
+
+export interface DaemonMemoryImportSelection {
+  id: string;
+  scope: DaemonMemoryImportScope;
+}
+
+export interface DaemonMemoryImportRequest {
+  source: DaemonMemoryImportSource;
+  selection: DaemonMemoryImportSelection[];
+  idempotencyKey: string;
+}
+
+export interface DaemonMemoryImportItemResult {
+  id: string;
+  scope: DaemonMemoryImportScope;
+  status: 'pending' | 'added' | 'duplicate' | 'conflict' | 'skipped' | 'failed';
+  reason?: string;
+  refs?: string[];
+}
+
+export interface DaemonMemoryImportResult {
+  sourceSections: number;
+  newDocuments: number;
+  duplicateSections: number;
+  conflictSections: number;
+  failedSections: number;
+}
+
+export interface DaemonMemoryImportTask {
+  version: 1;
+  kind: 'task';
+  id: string;
+  status: 'queued' | 'running' | 'completed' | 'partial' | 'cancelled';
+  createdAt: string;
+  updatedAt: string;
+  items: DaemonMemoryImportItemResult[];
+  usage: { modelCalls: number; reservedTokens: number };
+  budget: { maxCalls: number; maxReservedTokens: number };
+  result?: DaemonMemoryImportResult;
 }
 
 export type DaemonContentHash = `sha256:${string}`;
@@ -5078,7 +5186,15 @@ export interface DaemonChannelConfigNumberFieldDescriptor
   required?: boolean;
   envResolvable?: never;
   multiline?: never;
+  /** Exclusive lower bound: the value must be strictly greater than this. */
   exclusiveMinimum?: number;
+  /**
+   * Inclusive lower bound: the value may equal this. Needed because a field
+   * whose real floor is 0 cannot express it with `exclusiveMinimum` — writing
+   * -1 to admit 0 also admits (-1, 0), which the editor then accepts and the
+   * adapter rejects at save. When both are declared the stricter one wins.
+   */
+  minimum?: number;
   /** Inclusive upper bound. A poll interval above Node's 32-bit timer range is
    * clamped to 1ms, so an unbounded interval field can persist a hot loop. */
   maximum?: number;
@@ -5130,10 +5246,51 @@ export interface DaemonChannelTypeDescriptor {
   type: string;
   displayName: string;
   manageable: boolean;
+  /**
+   * Whether the adapter offers browser-rendered QR login. Absent on daemons
+   * that predate the capability.
+   */
+  supportsQrLogin?: boolean;
   fields: readonly DaemonChannelConfigFieldDescriptor[];
+  /** True for sending-only integrations; absent on older daemons. */
+  outboundOnly?: boolean;
+  /** Adapter-owned logical destination, without endpoint credentials. */
+  defaultDeliveryTarget?: {
+    type: 'user' | 'chat';
+    id: string;
+    label?: string;
+  };
 }
 
 export type DaemonChannelTypeCatalog = DaemonChannelTypeDescriptor[];
+
+export type DaemonChannelQrLoginStatus =
+  | 'pending'
+  | 'succeeded'
+  | 'failed'
+  | 'expired'
+  | 'cancelled';
+
+/**
+ * A browser-rendered QR login session. Carries no credential values: the daemon
+ * persists them itself and the client only learns that binding succeeded.
+ */
+export interface DaemonChannelQrLoginView {
+  loginId: string;
+  channelType: string;
+  channelName: string;
+  status: DaemonChannelQrLoginStatus;
+  expiresAt: number;
+  /** Rendered QR image; only the initiating client receives it. */
+  qrCodeDataUrl?: string;
+  error?: string;
+}
+
+export interface DaemonChannelQrLoginStartResult
+  extends DaemonChannelQrLoginView {
+  /** True when an existing pending login for the same channel was reattached. */
+  attached: boolean;
+}
 
 export interface DaemonChannelRuntimeState {
   state: 'stopped' | 'starting' | 'connected' | 'partial' | 'error';
@@ -6236,4 +6393,35 @@ export interface DaemonSubscriptionActivation {
   authType: 'qwen-subscription';
   modelId: string;
   runtimeSync: DaemonModelProviderRuntimeSyncResult;
+}
+
+/**
+ * WeChat login state. The credential is process-global (one account.json in
+ * the daemon's home), so these views are served outside any workspace scope.
+ * Neither carries the bot token: it is consumed by the daemon when it saves
+ * the account and is never returned to a client.
+ */
+export interface DaemonWeixinAccountStatus {
+  /** False once the daemon has disposed these routes; login is unavailable. */
+  enabled: boolean;
+  configured: boolean;
+  userId?: string;
+  savedAt?: string;
+}
+
+export interface DaemonWeixinLoginFlow {
+  id: string;
+  /** Not monotonic: `scanned` can return to `waiting` with a replacement QR. */
+  status: 'waiting' | 'scanned' | 'ready' | 'expired' | 'error';
+  /** Block-glyph QR rendering, absent when the encoder could not render it. */
+  qrText?: string;
+  /**
+   * The URL the operator scans. A live status does not guarantee one: while
+   * the daemon mints a replacement after an expiry the view has neither this
+   * nor qrText, and terminal views have neither. Derive the scan prompt from
+   * these two fields, never from `status`.
+   */
+  qrcodeUrl?: string;
+  /** Set on the failure terminals only; `ready` carries none. */
+  errorCode?: string;
 }

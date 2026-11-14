@@ -56,6 +56,22 @@ public interface HarnessConnector extends AutoCloseable {
 
     public default boolean supportsContextCompression() { return false; }
 
+    public default boolean supportsSideQueries() { return false; }
+
+    /** Selects an instance without acquiring or changing Session placement. */
+    public default SideQueryTarget prepareSideQuery() {
+        throw new UnsupportedOperationException("Side queries are unavailable");
+    }
+
+    public interface SideQueryTarget extends AutoCloseable {
+        public String instanceId();
+        public String bootId();
+        public Map<String, Object> submit(Map<String, Object> body);
+        public Map<String, Object> status(String queryId, Map<String, Object> claim);
+        public void cancel(String queryId, Map<String, Object> claim);
+        @Override public void close();
+    }
+
     @FunctionalInterface
     public interface ContextCompressionSubmission {
         public Map<String, Object> submit();
@@ -94,6 +110,23 @@ public interface HarnessConnector extends AutoCloseable {
 
     public default Map<String, Object> mcpManagementOperation(String tenantId, String sessionId, String operationId) {
         throw new UnsupportedOperationException("MCP management is unavailable");
+    }
+
+    public default boolean supportsClientFiles() { return false; }
+
+    /**
+     * Session-aware client-files admission: must answer the same question the
+     * register route answers, so the capability is never advertised for a
+     * Session whose registration the Harness would refuse (foregroundOnly or
+     * no tool profile). Defaults to the parameterless capability.
+     */
+    public default boolean supportsClientFiles(StoreModels.SessionRecord session) {
+        return supportsClientFiles();
+    }
+
+    /** Registers or unregisters the Session's client filesystem relay. */
+    public default Map<String, Object> clientFilesOperation(String tenantId, String sessionId, Map<String, Object> body) {
+        throw new UnsupportedOperationException("Client files registration is unavailable");
     }
 
     public default boolean supportsSessionExtensions() { return false; }
