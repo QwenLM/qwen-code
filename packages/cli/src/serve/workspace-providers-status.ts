@@ -302,7 +302,6 @@ function resolveApprovalMode(settings: Settings): ApprovalMode {
   return ApprovalMode.AUTO;
 }
 
-const URL_LIKE_PATTERN = /\b[A-Za-z][A-Za-z\d+.-]*:\/\/[^\s'"`<>]+/g;
 const URL_START_PATTERN = /\b[A-Za-z][A-Za-z\d+.-]*:\/\//g;
 
 function sanitizeProviderWarning(warning: string): string {
@@ -314,8 +313,7 @@ function sanitizeProviderWarning(warning: string): string {
     result += warning.slice(index, next.index);
 
     const segmentEnd = findUrlSegmentEnd(warning, next.index, next.marker);
-    const segment = warning.slice(next.index, segmentEnd);
-    result += sanitizeProviderWarningSegment(segment, next.marker.length);
+    result += sanitizeProviderBaseUrl(warning.slice(next.index, segmentEnd));
 
     index = segmentEnd;
     next = findNextUrlStart(warning, index);
@@ -347,37 +345,12 @@ function findUrlSegmentEnd(
 
   const nextUrl = findNextUrlStart(value, afterMarker);
 
+  // The segment may run past the URL into the sentence around it: the
+  // authority-bounded sanitizer reads the URL part and leaves the prose alone,
+  // because the authority ends at the first whitespace (or, when the space sits
+  // inside the userinfo, at the first whitespace after that userinfo's `@`).
+  // Cutting at the first space instead would deny the space-in-password shape.
   return Math.min(lineEnd, nextUrl?.index ?? value.length);
-}
-
-function sanitizeProviderWarningSegment(
-  segment: string,
-  markerLength: number,
-): string {
-  const at = segment.indexOf('@', markerLength);
-  if (
-    at !== -1 &&
-    hasCredentialPrefix(segment, markerLength, at) &&
-    segment[at + 1] !== undefined &&
-    /[A-Za-z0-9.[\]-]/.test(segment[at + 1])
-  ) {
-    return `${segment.slice(0, markerLength)}${segment.slice(at + 1)}`;
-  }
-
-  return segment.replace(URL_LIKE_PATTERN, (url) =>
-    sanitizeProviderBaseUrl(url),
-  );
-}
-
-function hasCredentialPrefix(
-  segment: string,
-  markerLength: number,
-  at: number,
-): boolean {
-  const colon = segment.indexOf(':', markerLength);
-  if (colon === -1 || colon > at) return false;
-  const username = segment.slice(markerLength, colon);
-  return !/[/?#\s'"`<>]/.test(username);
 }
 
 function buildCurrent(
