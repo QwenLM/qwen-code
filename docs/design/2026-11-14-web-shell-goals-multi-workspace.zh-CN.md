@@ -109,7 +109,7 @@ ordinaryWorkspaces`，以及 `lockedWorkspaceCapability`）。
 - 重载：锁定 → 单次限定（或 primary）请求，打上锁定 workspace 的 cwd；
   多 workspace → 对 `operableWorkspaces` 用 `Promise.all` fan-out，给每条
   Goal 打 workspace 标签，`droppedCount` 求和；部分失败时留住其他
-  workspace 的 Goal，第一个错误带上失败 workspace 的显示名；全部失败
+  workspace 的 Goal，加载错误点名每一个失败的 workspace；全部失败
   （每个列举都 reject）时保留上一份列表而不清空页面，与单/锁定视图既有
   的保留行为一致。单 workspace → 今天的无后缀请求，daemon 恰好广告一个
   workspace 时打上该 primary 的 cwd（不广告 workspace 列表的 daemon 保持
@@ -119,9 +119,10 @@ ordinaryWorkspaces`，以及 `lockedWorkspaceCapability`）。
 - 卡片：多 workspace 视图下，卡片 footer 起始处加共享 `WorkspacePill`
   徽章（Scheduled Tasks 页同用）。卡片键仍是 `sessionId`（会话 id 是
   daemon 全局的，不同于 scheduled-task id）。
-- 未受信 secondary 被排除在 fan-out 之外，聚合视图显示计数提示
-  （`goals.untrustedSkipped`），而不是对从未读取的 workspace 显示干巴巴
-  的「没有目标」空态。
+- 未受信 secondary 与 SSH workspace 被排除在 fan-out 之外（SSH 边界以 501
+  拒绝限定 goals 路由，其列举永远无法加载）；聚合视图显示计数提示
+  （`goals.workspacesSkipped`，「未受信或远程」），而不是对从未读取的
+  workspace 显示干巴巴的「没有目标」空态。
 - 创建表单：多 workspace 视图下提供 workspace 选择器，默认当前选中的
   workspace（若可操作），否则 primary。App 通过 `defaultWorkspaceCwd`
   prop 提供该默认值。选择器与徽章标签经 `disambiguateWorkspaceLabels`
@@ -136,8 +137,10 @@ ordinaryWorkspaces`，以及 `lockedWorkspaceCapability`）。
 
 - 向 `GoalsDialog` 传 `workspaces` / `lockedWorkspace` /
   `defaultWorkspaceCwd`（与 scheduled-tasks 页相同的 workspace 数组）。
-- `onCreateGoal(condition, workspaceCwd?)`：选择器提供了 cwd 时在该
-  workspace 创建会话；否则保持 `resolveWorkspaceMaintenanceTargetCwd()`。
+- `onCreateGoal(condition, workspaceCwd?)`：选择器提供了 cwd 时，先按当前
+  受信 workspace 列表重新校验，再进 `createNewSession`（后者会先清掉当前
+  会话、之后分配才拒绝未受信目标）；目标不可用时报已翻译的错误并返回
+  false，不触碰会话。否则保持 `resolveWorkspaceMaintenanceTargetCwd()`。
   搁浅会话恢复仅在选择器仍指向其所属 workspace 时复用搁浅会话；重试时若
   选择器改指其他 workspace，则在那里新分配会话，而不是静默把 Goal 建在
   上一个 workspace。owner 守卫与跳转聊天流程不变。
@@ -147,11 +150,12 @@ ordinaryWorkspaces`，以及 `lockedWorkspaceCapability`）。
 
 ### i18n
 
-en、zh、ru 三个语言包各新增 `goals.workspace`（选择器标签）与
-`goals.untrustedSkipped`（被跳过 workspace 提示）——ru 语言包翻译了整个
-Goals 对话框，因此补全这两个键，而不是在整片俄文里留一个英文回退。
-workspace 显示名来自现有 `workspaceLabel` / `disambiguateWorkspaceLabels`
-工具；徽章提示是原始 cwd。
+en、zh、ru 三个语言包各新增 `goals.workspace`（选择器标签）、
+`goals.workspacesSkipped`（被跳过 workspace 提示，「未受信或远程」）与
+`goals.error.workspaceUnavailable`——ru 语言包翻译了整个 Goals 对话框，
+因此补全这三个键，而不是在整片俄文里留一个英文回退；ru 提示的名词经
+`ruPlural` 变格。workspace 显示名来自现有 `workspaceLabel` /
+`disambiguateWorkspaceLabels` 工具；徽章提示是原始 cwd。
 
 ## 设计决策
 

@@ -66,7 +66,7 @@ const multiWorkspaceOverrides: ScenarioOverrides = {
   },
 };
 
-test('aggregates goals from every workspace and badges each card', async ({
+test('aggregates goals from every workspace and badges each card @smoke', async ({
   page,
   baseURL,
 }) => {
@@ -187,8 +187,11 @@ test('an untrusted secondary is neither listed nor requested', async ({
   expect(
     daemon.requests.filter((r) => r.path.includes('/workspaces/ws-secondary')),
   ).toHaveLength(0);
-  // The page never asks, but the route itself must still reject a direct
-  // read of an untrusted workspace even when the fixture gave it goals.
+  // The skipped workspace is accounted for in the UI, not silently absent.
+  await expect(page.getByTestId('goals-skipped')).toBeVisible();
+  // The page never asks; the mock mirrors the route's trust gate. The
+  // route-level rejection itself is pinned in routes/goals.test.ts and
+  // workspace-qualified-rest.test.ts — this fetch only exercises the double.
   const status = await page.evaluate(() =>
     fetch('/workspaces/ws-secondary/goals').then((r) => r.status),
   );
@@ -232,5 +235,135 @@ test('a single workspace keeps the plain primary-only view', async ({
     daemon.requests.filter(
       (r) => r.path.startsWith('/workspaces/') && r.path.endsWith('/goals'),
     ),
+  ).toHaveLength(0);
+});
+
+test('both surfaces agree on the primary goal even if the map carries a primary key', async ({
+  page,
+  baseURL,
+}) => {
+  // The mock must keep ONE primary snapshot: a goalsByWorkspace entry keyed
+  // by the primary id is ignored, so the two listings can never disagree.
+  await openGoals(page, baseURL!, {
+    ...multiWorkspaceOverrides,
+    goalsByWorkspace: {
+      ...multiWorkspaceOverrides.goalsByWorkspace,
+      'ws-primary': {
+        sessionId: 'sess-primary-divergent',
+        displayName: 'divergent copy',
+        snapshot: goalSnapshot('divergent primary copy', 9_000),
+      },
+    },
+  });
+
+  await expect(page.getByText('primary goal')).toBeVisible();
+  await expect(page.getByText('divergent primary copy')).toHaveCount(0);
+  const qualified = await page.evaluate(() =>
+    fetch('/workspaces/ws-primary/goals').then((r) => r.json()),
+  );
+  expect(
+    qualified.goals.map((g: { condition: string }) => g.condition),
+  ).toEqual(['primary goal']);
+
+  // Pausing from the primary card flips the card the user is looking at.
+  const primaryCard = page
+    .locator('[role="listitem"]')
+    .filter({ hasText: 'primary goal' });
+  await primaryCard.getByRole('button', { name: 'Pause goal' }).click();
+  await expect(primaryCard.getByText('Paused', { exact: true })).toBeVisible();
+});
+
+test('a retry after a failed creation targets the newly picked workspace', async ({
+  page,
+  baseURL,
+}) => {
+  // Fail the goal-control POST once so the first attempt strands a session
+  // in the secondary workspace; switching the picker must allocate a fresh
+  // session in the primary, not reuse the stranded one.
+  const daemon = await installMockDaemon(
+    page,
+    createWebShellDaemonScenario(multiWorkspaceOverrides),
+    { baseURL: baseURL! },
+  );
+  await page.route('**/session/*/goal', async (route) => {
+    if (route.request().method() === 'POST') {
+      await route.fulfill({
+        status: 500,
+        json: { error: 'injected goal failure' },
+      });
+    } else {
+      await route.continue();
+    }
+  });
+  await page.goto('/?language=en-US&instanceId=host&instanceType=dsw');
+  await page.getByRole('button', { name: 'Goals', exact: true }).click();
+  await expect(page.getByTestId('goals-page')).toBeVisible();
+
+  await page.getByRole('button', { name: 'New goal' }).click();
+  await page.locator('select').selectOption('/e2e/secondary');
+  await page.locator('textarea').fill('stranded retry goal');
+  await page.getByRole('button', { name: 'Set goal' }).click();
+  await expect(page.getByText('injected goal failure')).toBeVisible();
+  // The stranding must be real: the session allocation succeeded before the
+  // goal control failed, so a retry has a stranded session to (not) reuse.
+  expect(
+    daemon.requests.some(
+      (r) =>
+        r.method === 'POST' &&
+        r.path === '/session' &&
+        (r.body as { cwd?: string } | null)?.cwd === '/e2e/secondary',
+    ),
+  ).toBe(true);
+
+  await page.unroute('**/session/*/goal');
+  await page.locator('select').selectOption('/e2e/primary');
+  const requestsBeforeRetry = daemon.requests.length;
+  await page.getByRole('button', { name: 'Set goal' }).click();
+
+  // Scope to post-retry requests: an earlier page-load allocation must not
+  // be able to satisfy this assertion.
+  await expect
+    .poll(() =>
+      daemon.requests
+        .slice(requestsBeforeRetry)
+        .some(
+          (r) =>
+            r.method === 'POST' &&
+            r.path === '/session' &&
+            (r.body as { cwd?: string } | null)?.cwd === '/e2e/primary',
+        ),
+    )
+    .toBe(true);
+});
+
+test('an unavailable picker target is refused without touching the session', async ({
+  page,
+  baseURL,
+}) => {
+  // Simulate a stale selection: the form keeps a cwd that the current
+  // capability list no longer advertises as trusted. The App guard must
+  // refuse BEFORE createNewSession, which would clear the current session.
+  const daemon = await openGoals(page, baseURL!, multiWorkspaceOverrides);
+
+  await page.getByRole('button', { name: 'New goal' }).click();
+  await page.evaluate(() => {
+    const select = document.querySelector('select')!;
+    const option = document.createElement('option');
+    option.value = '/e2e/gone';
+    option.textContent = 'gone';
+    select.appendChild(option);
+  });
+  await page.locator('select').selectOption('/e2e/gone');
+  await page.locator('textarea').fill('goal into the void');
+  const requestsBeforeSubmit = daemon.requests.length;
+  await page.getByRole('button', { name: 'Set goal' }).click();
+
+  await expect(
+    page.getByText('The selected workspace is unavailable or untrusted.'),
+  ).toBeVisible();
+  expect(
+    daemon.requests
+      .slice(requestsBeforeSubmit)
+      .filter((r) => r.method === 'POST' && r.path === '/session'),
   ).toHaveLength(0);
 });

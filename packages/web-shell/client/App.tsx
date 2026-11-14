@@ -25130,9 +25130,31 @@ export function App({
                             workspaceCwd ===
                               connectionRef.current.workspaceCwd);
                         if (!canReuseStranded) {
+                          // The picker can outlive a trust change or workspace
+                          // removal: re-validate its cwd before createNewSession,
+                          // which clears the current session before allocation
+                          // would refuse an untrusted target.
+                          const pickedCwd =
+                            workspaceCwd === undefined
+                              ? undefined
+                              : ordinaryWorkspaces.find(
+                                  (entry) =>
+                                    entry.cwd === workspaceCwd &&
+                                    entry.trusted !== false,
+                                )?.cwd;
+                          if (workspaceCwd !== undefined && !pickedCwd) {
+                            reportError(
+                              new Error(t('goals.error.workspaceUnavailable')),
+                              'Failed to create the goal',
+                            );
+                            return false;
+                          }
+                          // Only forget the stranded session once the retry
+                          // actually proceeds; a refused target must leave the
+                          // recovery handle intact for a later retry.
                           strandedGoalSessionRef.current = undefined;
                           const targetCwd =
-                            workspaceCwd ??
+                            pickedCwd ??
                             resolveWorkspaceMaintenanceTargetCwd();
                           if (!targetCwd) return false;
                           const created = await createNewSession(

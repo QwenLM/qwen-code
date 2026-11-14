@@ -163,10 +163,32 @@ describe('web-shell i18n catalog', () => {
     expect(en).toBe('Workspace');
     expect(getTranslator('zh-CN')('goals.workspace')).not.toBe(en);
     expect(getTranslator('ru')('goals.workspace')).not.toBe(en);
-    for (const language of ['en', 'zh-CN', 'ru'] as const) {
+    // Compare against the EN string, not the raw key: the translator falls
+    // back to EN for a missing entry, so a raw-key comparison would pass
+    // even if the zh/ru entry were deleted.
+    const enSkipped = getTranslator('en')('goals.workspacesSkipped', {
+      count: 2,
+    });
+    for (const language of ['zh-CN', 'ru'] as const) {
       expect(
-        getTranslator(language)('goals.untrustedSkipped', { count: 2 }),
-      ).not.toBe('goals.untrustedSkipped');
+        getTranslator(language)('goals.workspacesSkipped', { count: 2 }),
+      ).not.toBe(enSkipped);
+    }
+    // The ru noun must agree with the count (1 → singular), not hard-code
+    // the genitive plural for every count.
+    expect(
+      getTranslator('ru')('goals.workspacesSkipped', { count: 1 }),
+    ).toContain('рабочая область');
+    expect(
+      getTranslator('ru')('goals.workspacesSkipped', { count: 5 }),
+    ).toContain('рабочих областей');
+    const enUnavailable = getTranslator('en')(
+      'goals.error.workspaceUnavailable',
+    );
+    for (const language of ['zh-CN', 'ru'] as const) {
+      expect(
+        getTranslator(language)('goals.error.workspaceUnavailable'),
+      ).not.toBe(enUnavailable);
     }
   });
 

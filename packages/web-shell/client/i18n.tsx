@@ -3551,14 +3551,16 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'goals.idle': 'Waiting',
   'goals.dropped': (v) =>
     `${v?.count ?? 0} session${Number(v?.count) === 1 ? '' : 's'} could not be reached — any goals they are running are missing from this list.`,
-  'goals.untrustedSkipped': (v) =>
-    `${v?.count ?? 0} workspace${Number(v?.count) === 1 ? '' : 's'} not shown (untrusted).`,
+  'goals.workspacesSkipped': (v) =>
+    `${v?.count ?? 0} workspace${Number(v?.count) === 1 ? '' : 's'} not shown (untrusted or remote).`,
   'goals.notYetEvaluated': 'not yet evaluated',
   'goals.openSessionHint': "Open this goal's session",
   'goals.error.emptyCondition': 'Enter a condition for the goal.',
   'goals.error.clearKeyword': (v) =>
     `"${v?.word ?? ''}" clears a goal rather than setting one. Describe the condition to work toward.`,
   'goals.error.createFailed': 'Failed to start the goal',
+  'goals.error.workspaceUnavailable':
+    'The selected workspace is unavailable or untrusted.',
   'goals.error.saveFailed': 'Failed to save the goal',
   'goals.error.goalUnavailable': 'The goal is no longer available.',
   'goals.error.requiresObjective': (v) =>
@@ -8592,14 +8594,15 @@ const ZH: Messages = {
   'goals.idle': '等待中',
   'goals.dropped': (v) =>
     `有 ${v?.count ?? 0} 个会话无法访问——它们正在运行的目标未显示在此列表中。`,
-  'goals.untrustedSkipped': (v) =>
-    `有 ${v?.count ?? 0} 个工作区未显示（未受信）。`,
+  'goals.workspacesSkipped': (v) =>
+    `有 ${v?.count ?? 0} 个工作区未显示（未受信或远程）。`,
   'goals.notYetEvaluated': '尚未判定',
   'goals.openSessionHint': '打开该目标所在的会话',
   'goals.error.emptyCondition': '请输入目标条件。',
   'goals.error.clearKeyword': (v) =>
     `“${v?.word ?? ''}”是清除目标的指令，不是一个条件。请描述要达成的条件。`,
   'goals.error.createFailed': '启动目标失败',
+  'goals.error.workspaceUnavailable': '所选工作区不可用或未受信。',
   'goals.error.saveFailed': '保存目标失败',
   'goals.error.goalUnavailable': '该目标已不可用。',
   'goals.error.requiresObjective': (v) =>
@@ -10290,14 +10293,16 @@ const RU: Messages = {
   'goals.idle': 'Ожидание',
   'goals.dropped': (v) =>
     `не удалось связаться с ${v?.count ?? 0} ${ruPlural(v?.count, 'сессией', 'сессиями', 'сессиями')} — цели, которые они выполняли, отсутствуют в этом списке.`,
-  'goals.untrustedSkipped': (v) =>
-    `Пропущено рабочих областей (нет доверия): ${v?.count ?? 0}.`,
+  'goals.workspacesSkipped': (v) =>
+    `${v?.count ?? 0} ${ruPlural(v?.count, 'рабочая область', 'рабочие области', 'рабочих областей')} не показано (нет доверия или удалённый доступ).`,
   'goals.notYetEvaluated': 'ещё не оценено',
   'goals.openSessionHint': 'Открыть сессию этой цели',
   'goals.error.emptyCondition': 'Введите условие для цели.',
   'goals.error.clearKeyword': (v) =>
     `"${v?.word ?? ''}" снимает цель, а не задаёт её. Опишите условие, к которому нужно работать.`,
   'goals.error.createFailed': 'Не удалось запустить цель',
+  'goals.error.workspaceUnavailable':
+    'Выбранная рабочая область недоступна или не пользуется доверием.',
   'goals.error.saveFailed': 'Не удалось сохранить цель',
   'goals.error.goalUnavailable': 'Цель больше недоступна.',
   'goals.error.requiresObjective': (v) =>

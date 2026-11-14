@@ -114,6 +114,7 @@ async function mount(
       primary: boolean;
       trusted: boolean;
       displayName?: string;
+      ssh?: { host: string; port?: number; directory: string };
     }>;
     lockedWorkspace?: {
       id: string;
@@ -1221,6 +1222,64 @@ describe('GoalsDialog multi-workspace', () => {
     expect(skipped).not.toBeNull();
     expect(skipped!.textContent).toContain('1');
     expect(document.body.textContent).not.toContain('No active goals');
+  });
+
+  it('keeps the empty state in a locked view even when the list carries untrusted secondaries', async () => {
+    // The notice only renders in the aggregated view; the empty-state
+    // suppression must use the same predicate, or a locked deployment with
+    // an untrusted secondary in its capability list renders neither.
+    await mount([], {
+      workspaces: [primaryWs, untrustedWs],
+      lockedWorkspace: primaryWs,
+      listGoalsByWorkspace: { '': { goals: [], droppedCount: 0 } },
+    });
+
+    expect(document.querySelector('[data-testid="goals-skipped"]')).toBeNull();
+    expect(document.body.textContent).toContain('No active goals');
+  });
+
+  it('excludes SSH workspaces from the fan-out and the picker, with a notice', async () => {
+    // The SSH boundary rejects the qualified goals route with 501, so an SSH
+    // workspace can never load; it must be skipped, not polled into a
+    // permanent load error.
+    const sshWs = {
+      id: 'ws-ssh',
+      cwd: '/remote/checkout',
+      primary: false,
+      trusted: true,
+      ssh: { host: 'remote.example', directory: '/remote/checkout' },
+    };
+    await mount([], {
+      workspaces: [primaryWs, sshWs],
+      listGoalsByWorkspace: { '': { goals: [], droppedCount: 0 } },
+    });
+
+    expect(actions.listGoals).toHaveBeenCalledWith(undefined);
+    expect(actions.listGoals).not.toHaveBeenCalledWith('ws-ssh');
+    const skipped = document.querySelector('[data-testid="goals-skipped"]');
+    expect(skipped).not.toBeNull();
+    expect(skipped!.textContent).toContain('1');
+
+    click(findButton('New goal'));
+    const options = Array.from(document.querySelector('select')!.options).map(
+      (o) => o.value,
+    );
+    expect(options).toEqual(['/w-primary']);
+  });
+
+  it('names every failing workspace in the load error', async () => {
+    await mount([], {
+      workspaces: [primaryWs, secondaryWs],
+      listGoalsImpl: async (workspaceId?: string) => {
+        if (workspaceId === undefined) throw new Error('primary down');
+        throw new Error('secondary down');
+      },
+    });
+
+    const alert = document.querySelector('[role="alert"]');
+    expect(alert).not.toBeNull();
+    expect(alert!.textContent).toContain('primary down');
+    expect(alert!.textContent).toContain('secondary down');
   });
 
   it('disambiguates picker labels when two workspaces share a basename', async () => {

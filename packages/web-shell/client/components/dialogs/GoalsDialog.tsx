@@ -81,18 +81,18 @@ export function GoalsDialog({
   // fresh array each render would re-fire its mount effect in a loop.
   const workspaceList = useMemo(() => workspaces ?? [], [workspaces]);
   const isMultiWorkspace = !lockedWorkspace && workspaceList.length > 1;
-  // The workspaces the page can actually read: every trusted one, PLUS the
-  // primary even when untrusted — both primary read surfaces are trust-gated,
+  // The workspaces the page can actually read: every trusted local one, PLUS
+  // the primary even when untrusted — both primary read surfaces are trust-gated,
   // so an untrusted primary surfaces as a partial-load error rather than
-  // silently disappearing. Secondaries stay gated on trust; their qualified
-  // route rejects an untrusted read, and the page says so instead of showing
-  // a bare "no goals" for a workspace it never read.
+  // silently disappearing. SSH workspaces are excluded: the SSH boundary
+  // rejects the qualified goals route with 501, so their listing can never
+  // load; they fall into skippedWorkspaces so the notice accounts for them.
   const operableWorkspaces = useMemo(
-    () => workspaceList.filter((ws) => ws.primary || ws.trusted),
+    () => workspaceList.filter((ws) => ws.primary || (ws.trusted && !ws.ssh)),
     [workspaceList],
   );
   const skippedWorkspaces = useMemo(
-    () => workspaceList.filter((ws) => !ws.primary && !ws.trusted),
+    () => workspaceList.filter((ws) => !ws.primary && (!ws.trusted || ws.ssh)),
     [workspaceList],
   );
   // The notice only renders in the aggregated view; the empty-state
@@ -177,7 +177,7 @@ export function GoalsDialog({
     try {
       let list: DaemonGoal[];
       let dropped = 0;
-      let firstError: string | null = null;
+      const failures: string[] = [];
       if (lockedWorkspace) {
         const result = await actions.listGoals(lockedWorkspaceId);
         // Tag even without a badge so opening a goal's session restores it
@@ -190,9 +190,8 @@ export function GoalsDialog({
       } else if (isMultiWorkspace) {
         // Fan out over every operable workspace and tag each goal with its
         // workspace so cards can badge it. One workspace failing must not
-        // blank the whole list — keep the others and surface the first error,
-        // named so the user knows which project is missing.
-        let failures = 0;
+        // blank the whole list — keep the others and name every failing
+        // workspace so no project drops out silently.
         const results = await Promise.all(
           operableWorkspaces.map(async (ws) => {
             const actionId = workspaceActionId(ws);
@@ -206,22 +205,18 @@ export function GoalsDialog({
                 droppedCount: result.droppedCount,
               };
             } catch (err) {
-              failures += 1;
-              if (!firstError) {
-                const message =
-                  err instanceof Error ? err.message : String(err);
-                firstError = `${workspaceDisplayLabel(ws.cwd)}: ${message}`;
-              }
+              const message = err instanceof Error ? err.message : String(err);
+              failures.push(`${workspaceDisplayLabel(ws.cwd)}: ${message}`);
               return { goals: [] as DaemonGoal[], droppedCount: 0 };
             }
           }),
         );
-        if (failures === operableWorkspaces.length) {
+        if (failures.length === operableWorkspaces.length) {
           // A total outage (daemon restart, wedged bridges) must not erase the
           // page for multi-workspace users only — keep the previous list, the
           // same retention the single/locked views get from the outer catch.
           if (!mountedRef.current || seq !== reloadSeqRef.current) return;
-          setLoadError(firstError);
+          setLoadError(failures.join('; '));
           setGoals((prev) => prev ?? []);
           setDroppedCount(0);
           return;
@@ -246,7 +241,7 @@ export function GoalsDialog({
       list.sort((a, b) => b.setAt - a.setAt);
       setGoals(list);
       setDroppedCount(dropped);
-      setLoadError(firstError);
+      setLoadError(failures.length > 0 ? failures.join('; ') : null);
     } catch (err) {
       if (!mountedRef.current || seq !== reloadSeqRef.current) return;
       setLoadError(err instanceof Error ? err.message : String(err));
@@ -552,7 +547,7 @@ export function GoalsDialog({
 
       {showSkippedNotice && (
         <div className={styles.degraded} data-testid="goals-skipped">
-          {t('goals.untrustedSkipped', { count: skippedWorkspaces.length })}
+          {t('goals.workspacesSkipped', { count: skippedWorkspaces.length })}
         </div>
       )}
 

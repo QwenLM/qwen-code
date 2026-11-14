@@ -163,8 +163,11 @@ export interface WebShellDaemonScenario {
   /**
    * Per-workspace goal listings for `GET /workspaces/:id/goals`, keyed by
    * workspace id. Each entry projects exactly like the primary `/goals`
-   * branch. An id absent from the map answers 400 `workspace_mismatch`,
-   * like the real daemon's qualified route.
+   * branch. The route gates on `capabilities.workspaces` registration (400
+   * `workspace_mismatch`) and trust (403 `untrusted_workspace`), not on map
+   * membership: an advertised workspace absent from the map lists empty.
+   * An entry keyed by the PRIMARY workspace id is ignored — the primary
+   * always derives from `goalSnapshot` on both surfaces.
    */
   goalsByWorkspace?: Record<
     string,
@@ -510,7 +513,9 @@ export function createWebShellDaemonScenario(
       goal: null,
       activity: 'idle',
     },
-    goalsByWorkspace: overrides.goalsByWorkspace,
+    goalsByWorkspace: overrides.goalsByWorkspace
+      ? structuredClone(overrides.goalsByWorkspace)
+      : undefined,
     midTurnMessages: overrides.midTurnMessages ?? [],
     branch: overrides.branch,
   };
@@ -2417,21 +2422,29 @@ async function handleDaemonRoute(
       );
       return;
     }
-    const entry = scenario.goalsByWorkspace?.[ws.id];
-    const goal = entry?.snapshot.goal;
+    // The primary workspace derives from scenario.goalSnapshot on BOTH
+    // surfaces (the real daemon reads one runtime); a map entry keyed by the
+    // primary id is ignored so the two listings can never disagree.
+    const entry = ws.primary ? undefined : scenario.goalsByWorkspace?.[ws.id];
+    const snapshot = ws.primary ? scenario.goalSnapshot : entry?.snapshot;
+    const sessionId = ws.primary ? scenario.sessionId : entry?.sessionId;
+    const displayName = ws.primary
+      ? scenario.displayName
+      : (entry?.displayName ?? null);
+    const goal = snapshot?.goal;
     await json(route, {
       v: 1,
       goals:
-        entry && goal && goal.status !== 'complete'
+        snapshot && goal && goal.status !== 'complete'
           ? [
               {
-                sessionId: entry.sessionId,
-                displayName: entry.displayName ?? null,
+                sessionId,
+                displayName,
                 condition: goal.objective,
                 iterations: goal.turnCount,
                 setAt: goal.createdAt,
-                hasActivePrompt: entry.snapshot.activity !== 'idle',
-                snapshot: entry.snapshot,
+                hasActivePrompt: snapshot.activity !== 'idle',
+                snapshot,
               },
             ]
           : [],
@@ -2466,11 +2479,15 @@ async function handleDaemonRoute(
   if (goalMatch) {
     // Resolve the target snapshot by session id so controlling a secondary
     // goal does not mutate the primary's card (the real routes address the
-    // owning runtime).
+    // owning runtime). The primary session always derives from
+    // scenario.goalSnapshot — the map must not hold a second primary copy.
     const sessionId = decodeURIComponent(goalMatch[1]!);
-    const wsEntry = Object.values(scenario.goalsByWorkspace ?? {}).find(
-      (entry) => entry.sessionId === sessionId,
-    );
+    const wsEntry =
+      sessionId === scenario.sessionId
+        ? undefined
+        : Object.values(scenario.goalsByWorkspace ?? {}).find(
+            (entry) => entry.sessionId === sessionId,
+          );
     if (method === 'GET') {
       await json(route, {
         snapshot: wsEntry ? wsEntry.snapshot : scenario.goalSnapshot,

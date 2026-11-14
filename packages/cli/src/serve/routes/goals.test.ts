@@ -513,12 +513,13 @@ describe('GET /workspaces/:workspace/goals', () => {
   });
 
   it('keeps the primary surface scoped to the primary workspace', async () => {
+    const primary = primaryBridge();
     const app = makeQualifiedApp([
       {
         workspaceId: 'id-primary',
         workspaceCwd: WORKSPACE,
         trusted: true,
-        bridge: primaryBridge(),
+        bridge: primary,
       },
       {
         workspaceId: 'id-secondary',
@@ -533,6 +534,9 @@ describe('GET /workspaces/:workspace/goals', () => {
     expect(res.status).toBe(200);
     expect(res.body.goals).toHaveLength(1);
     expect(res.body.goals[0].condition).toBe('primary goal');
+    // Pin the scoping decision itself: the primary route must enumerate the
+    // primary cwd, not the secondary's (the real bridge returns [] otherwise).
+    expect(primary.listWorkspaceSessions).toHaveBeenCalledWith(WORKSPACE);
   });
 
   it('resolves the primary workspace by id too', async () => {
@@ -783,5 +787,32 @@ describe('GET /workspaces/:workspace/goals', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.goals[0].condition).toBe('conversation goal');
+  });
+
+  it('answers 503 conversation_runtime_unavailable when the Conversations runtime is not active', async () => {
+    const app = makeQualifiedApp([
+      {
+        workspaceId: 'id-primary',
+        workspaceCwd: WORKSPACE,
+        trusted: true,
+        bridge: primaryBridge(),
+      },
+      {
+        workspaceId: 'id-conversations',
+        workspaceCwd: '/w-conversations',
+        trusted: true,
+        provenance: 'live-conversation',
+        state: 'draining',
+        bridge: {
+          listWorkspaceSessions: () => [],
+          getSessionGoal: async () => noGoal,
+        },
+      },
+    ]);
+
+    const res = await request(app).get(qualified('id-conversations'));
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('conversation_runtime_unavailable');
   });
 });

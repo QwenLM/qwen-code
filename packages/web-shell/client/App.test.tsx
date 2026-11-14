@@ -1143,8 +1143,11 @@ const {
         onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
       } | null,
       latestGoalsProps: null as {
-        onCreateGoal?: (condition: string) => Promise<void>;
-        onOpenSession?: (sessionId: string) => void;
+        onCreateGoal?: (
+          condition: string,
+          workspaceCwd?: string,
+        ) => boolean | void | Promise<boolean | void>;
+        onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
       } | null,
       latestWorkflowRunsProps: null as {
         onCreateViaChat?: () => void;
@@ -2883,8 +2886,11 @@ vi.doMock('./components/dialogs/GoalsDialog', async () => {
   const React = await import('react');
   return {
     GoalsDialog: (props: {
-      onCreateGoal?: (condition: string) => Promise<void>;
-      onOpenSession?: (sessionId: string) => void;
+      onCreateGoal?: (
+        condition: string,
+        workspaceCwd?: string,
+      ) => boolean | void | Promise<boolean | void>;
+      onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
     }) => {
       testState.latestGoalsProps = props;
       return React.createElement('div');

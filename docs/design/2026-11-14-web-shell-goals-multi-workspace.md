@@ -129,16 +129,18 @@ ordinaryWorkspaces`, and `lockedWorkspaceCapability`).
   keep the untagged legacy shape). Tagging in all three branches mirrors
   `ScheduledTasksDialog` so opening a goal's session carries its workspace
   context even without a badge. A partial failure keeps the other
-  workspaces' goals and surfaces the first error prefixed with the failing
-  workspace's display label; a total failure (every listing rejects)
-  retains the previous list instead of blanking the page, matching the
-  retention the single/locked views already had. The existing monotonic
-  reload sequence and self-chaining 10 s poll stay unchanged.
+  workspaces' goals and names every failing workspace in the load error; a
+  total failure (every listing rejects) retains the previous list instead
+  of blanking the page, matching the retention the single/locked views
+  already had. The existing monotonic reload sequence and self-chaining
+  10 s poll stay unchanged.
 - Cards: in multi-workspace view, a shared `WorkspacePill` badge (also used
   by the Scheduled Tasks page) leads the card footer. Card keys stay
   `sessionId` (session ids are daemon-global, unlike scheduled-task ids).
-- Untrusted secondaries are excluded from the fan-out, and the aggregated
-  view shows a count notice (`goals.untrustedSkipped`) instead of a bare
+- Untrusted secondaries and SSH workspaces are excluded from the fan-out
+  (the SSH boundary rejects the qualified goals route with 501, so their
+  listing can never load); the aggregated view shows a count notice
+  (`goals.workspacesSkipped`, "untrusted or remote") instead of a bare
   "no goals" empty state for workspaces it never read.
 - Create form: in multi-workspace view, a workspace picker defaulting to
   the currently selected workspace when it is operable, else the primary.
@@ -158,24 +160,29 @@ ordinaryWorkspaces`, and `lockedWorkspaceCapability`).
 - Pass `workspaces` / `lockedWorkspace` / `defaultWorkspaceCwd` to
   `GoalsDialog` (the same workspace arrays the scheduled-tasks page gets).
 - `onCreateGoal(condition, workspaceCwd?)`: when the picker supplied a cwd,
-  create the session in that workspace; otherwise keep
-  `resolveWorkspaceMaintenanceTargetCwd()`. The stranded-session recovery
-  reuses the stranded session only while the picker still targets its
-  workspace; a retry that switches the picker to a different workspace
-  allocates a fresh session there instead of silently creating the goal in
-  the previous one. The owner-guard and show-chat flow stay unchanged.
+  re-validate it against the current trusted workspace list before
+  `createNewSession` (which clears the current session before allocation
+  would refuse an untrusted target); an unavailable target reports a
+  translated error and returns false without touching the session.
+  Otherwise keep `resolveWorkspaceMaintenanceTargetCwd()`. The
+  stranded-session recovery reuses the stranded session only while the
+  picker still targets its workspace; a retry that switches the picker to a
+  different workspace allocates a fresh session there instead of silently
+  creating the goal in the previous one. The owner-guard and show-chat flow
+  stay unchanged.
 - `onOpenSession` passes the goal's tagged `workspaceCwd` so
   `loadSidebarSession` switches to the goal's workspace context, mirroring
   the scheduled-tasks wiring.
 
 ### i18n
 
-Add `goals.workspace` (picker label) and `goals.untrustedSkipped` (skipped
-workspace notice) to the en, zh, and ru catalogs — the ru catalog translates
-the whole Goals dialog, so it gets both keys rather than an English
-fallback mid-surface. Workspace display names come from the existing
-`workspaceLabel` / `disambiguateWorkspaceLabels` utils; the badge tooltip is
-the raw cwd.
+Add `goals.workspace` (picker label), `goals.workspacesSkipped` (skipped
+workspace notice, "untrusted or remote"), and `goals.error.workspaceUnavailable`
+to the en, zh, and ru catalogs — the ru catalog translates the whole Goals
+dialog, so it gets all three keys rather than an English fallback
+mid-surface; the ru notice routes its noun through `ruPlural`. Workspace
+display names come from the existing `workspaceLabel` /
+`disambiguateWorkspaceLabels` utils; the badge tooltip is the raw cwd.
 
 ## Design decisions
 
