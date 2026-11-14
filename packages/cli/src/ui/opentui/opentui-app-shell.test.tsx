@@ -148,6 +148,7 @@ const mocks = vi.hoisted(() => {
     },
     loadingProps: null as Record<string, unknown> | null,
     keyboardHandlers: [] as Array<(key: unknown) => void>,
+    terminalWidth: 120,
     exitInProgress: false,
     /** Runs while a dispatched command is still awaiting its outcome. */
     onHandle: null as null | ((text: string) => void),
@@ -208,7 +209,10 @@ vi.mock('@opentui/react', () => ({
   useKeyboard: (handler: (key: unknown) => void) => {
     mocks.state.keyboardHandlers.push(handler);
   },
-  useTerminalDimensions: () => ({ width: 120, height: 40 }),
+  useTerminalDimensions: () => ({
+    width: mocks.state.terminalWidth,
+    height: 40,
+  }),
   useRenderer: () => ({
     addInputHandler: () => {},
     removeInputHandler: () => {},
@@ -522,6 +526,7 @@ async function submit(
 
 describe('OpenTuiApp shell wiring', () => {
   beforeEach(() => {
+    mocks.state.terminalWidth = 120;
     isSubscriptionSignedIn.mockReturnValue(false);
     mocks.state.handleResult = { kind: 'handled' };
     mocks.state.handleResults.length = 0;
@@ -2981,6 +2986,61 @@ describe('OpenTuiApp shell wiring', () => {
         cancel: () => void;
       };
     }
+    it.each([
+      ['choice', 80, 72],
+      ['setting', 80, 72],
+      ['choice', 120, 96],
+      ['setting', 120, 96],
+      ['choice', 200, 96],
+      ['setting', 200, 96],
+    ] as const)(
+      'caps direct %s content at %s terminal columns to %s columns',
+      async (kind, width, expectedWidth) => {
+        mocks.state.terminalWidth = width;
+        const o = owner();
+        render(shell(o.config));
+        await settle();
+        let pending!: Promise<string>;
+        await act(async () => {
+          pending =
+            kind === 'choice'
+              ? o.request()(marketplace)
+              : o.setting()({
+                  name: 'Owned width setting',
+                  description: 'Owned',
+                  envVar: 'OWNED_WIDTH_VALUE',
+                });
+        });
+        const result = pending.catch((error: unknown) => error);
+        const props =
+          kind === 'choice'
+            ? mocks.state.extensionChoiceProps
+            : mocks.state.extensionSettingProps;
+        expect(props?.['width']).toBe(expectedWidth);
+        const marker = screen.getByText(
+          kind === 'choice'
+            ? 'extension-choice:Owned marketplace'
+            : 'extension-setting:Owned width setting',
+        );
+        expect(typeof props?.['height']).toBe('number');
+        expect(
+          JSON.parse(marker.parentElement?.getAttribute('data-p') ?? '{}'),
+        ).toMatchObject({
+          flexDirection: 'column',
+          marginLeft: 2,
+          width: expectedWidth + 4,
+          height: props?.['height'],
+        });
+        await act(async () =>
+          (
+            props!['permission'] as { resolve: (value: string) => void }
+          ).resolve(kind === 'choice' ? 'alpha' : 'owned-value'),
+        );
+        await expect(result).resolves.toBe(
+          kind === 'choice' ? 'alpha' : 'owned-value',
+        );
+      },
+    );
     it('resolves the selected plugin and preserves pending choice across rerenders', async () => {
       const o = owner();
       const view = render(shell(o.config));

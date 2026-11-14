@@ -146,7 +146,7 @@ import {
 } from './dialogs-confirm.js';
 import { useMcpApproval } from '../hooks/useMcpApproval.js';
 import { useProjectHooksApproval } from '../hooks/use-project-hooks-approval.js';
-import { dialogAreaWidth } from './dialogs-shared.js';
+import { dialogAreaWidth, dialogContentWidth } from './dialogs-shared.js';
 import { sanitizeTerminalText } from '../utils/textUtils.js';
 import { C } from './theme.js';
 import {
@@ -1870,19 +1870,33 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             </box>
           ) : activeModal ? (
             activeModal.kind === 'choice' ? (
-              <ExtensionPluginChoice
-                key={`choice-${activeModal.id}`}
-                permission={activeModal}
-                width={Math.max(0, terminalWidth - 4)}
+              <box
+                flexDirection="column"
+                marginLeft={2}
+                width={dialogAreaWidth(terminalWidth)}
                 height={dialogRegionHeight}
-              />
+              >
+                <ExtensionPluginChoice
+                  key={`choice-${activeModal.id}`}
+                  permission={activeModal}
+                  width={dialogContentWidth(terminalWidth)}
+                  height={dialogRegionHeight}
+                />
+              </box>
             ) : activeModal.kind === 'setting' ? (
-              <ExtensionSettingInput
-                key={`setting-${activeModal.id}`}
-                permission={activeModal}
-                width={Math.max(0, terminalWidth - 4)}
+              <box
+                flexDirection="column"
+                marginLeft={2}
+                width={dialogAreaWidth(terminalWidth)}
                 height={dialogRegionHeight}
-              />
+              >
+                <ExtensionSettingInput
+                  key={`setting-${activeModal.id}`}
+                  permission={activeModal}
+                  width={dialogContentWidth(terminalWidth)}
+                  height={dialogRegionHeight}
+                />
+              </box>
             ) : activeModal.kind === 'shell' ? (
               <OpenTuiShellConfirmation
                 key={`shell-${activeModal.id}`}
