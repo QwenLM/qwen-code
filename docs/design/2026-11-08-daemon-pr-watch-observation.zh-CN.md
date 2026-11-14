@@ -2,7 +2,7 @@
 
 [English](2026-11-08-daemon-pr-watch-observation.md) | [简体中文](2026-11-08-daemon-pr-watch-observation.zh-CN.md)
 
-状态：已落地（#16611；2026-11-08 提案）。本增量是 [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md)（下称「主设计」）的下一步，仅实现 §1 观测与 §3 转换检测；投递（§4–§5）、配置（§6）与 channel 迁移（§7）不在本增量内。下文按该增量当时的设计描述；PR B（#17214）此后移除了内部开关，启用现在即 deps 存在性。
+状态：已落地（#16611；2026-11-08 提案）。本增量是 [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.zh-CN.md)（下称「主设计」）的下一步，仅实现 §1 观测与 §3 转换检测；投递（§4–§5）、配置（§6）与 channel 迁移（§7）不在本增量内。下文按该增量当时的设计描述；PR B（#17214）此后移除了内部开关，启用现在即 deps 存在性。
 
 ## 问题
 
