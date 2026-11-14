@@ -102,6 +102,7 @@ export default {
   Auth: 'Autenticació',
   Model: 'Model',
   'Fast Model': 'Model ràpid',
+  'Agent Loop': 'Bucle agent',
   Sandbox: 'Entorn aïllat',
   'Session ID': 'ID de sessió',
   'Base URL': 'Base URL',

@@ -371,6 +371,7 @@ export default {
   Auth: 'Auth',
   Model: 'Model',
   'Fast Model': 'Fast Model',
+  'Agent Loop': 'Agent Loop',
   Sandbox: 'Sandbox',
   'Session ID': 'Session ID',
   'Base URL': 'Base URL',

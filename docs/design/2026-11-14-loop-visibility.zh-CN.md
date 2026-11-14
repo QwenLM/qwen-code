@@ -18,7 +18,7 @@
 ### Core：一份路径解析、一个标记
 
 - `Config.getAgentLoopPath(surface): 'legacy' | 'shared' | 'kernel'` 从入口所用的**同一对** getter 推导路径：`!isUnifiedAgentLoopEnabled(surface)` → `legacy`；否则 `isEventBusAgentLoopEnabled(surface)` → `kernel`；否则 `shared`。不复制第二份 env/设置/默认值规则。
-- `logAgentLoopEntry(config, surface)` helper（core，走内核 `[EVENT_BUS]` 同款 `debugLogger` 通道）记一行，写明入口与解析路径，如 `[LOOP] headless legacy`。每个入口在 loop 入口处调用（每轮次一次），含 legacy 路径。
+- `logAgentLoopEntry(config, surface)` helper（core，走内核 `[EVENT_BUS]` 同款 `debugLogger` 通道）记一行，写明入口与解析路径，如 `[LOOP] headless legacy`。每个入口在读取 loop 开关处（其 loop 入口）调用，含 legacy 路径。
 
 ### `/about` 与 `/bug`：一行共享
 
@@ -31,7 +31,7 @@
 | 决策                                          | 理由                                                         |
 | --------------------------------------------- | ------------------------------------------------------------ |
 | 路径由既有 getter 推导，不复制新规则          | 设计要求该行用入口所用的同一解析；第二份副本会漂移。         |
-| 标记在 loop 入口、每轮次一次、含 legacy       | 使每个入口的路径可证明；legacy 目前什么都不记。              |
+| 标记在 loop 决策点、含 legacy                 | 使每个入口的路径可证明；legacy 目前什么都不记。              |
 | 当前入口由执行模式 + 实际渲染器判定           | `/about`/`/bug` 在某模式下运行；交互入口即实际服务的渲染器。 |
 | `executionMode` 在 `SystemInfoContext` 上可选 | 设置对话框只传 config+settings；省略该行而非臆测入口。       |
 
@@ -48,6 +48,6 @@
 - 不加新设置；该行是只读诊断。
 - 标记仅 debug 日志（除该行外无用户可见输出变化）。
 
-## 待解问题
+## 已解问题
 
-- 标记粒度：每轮次一次 vs 每轮一次。计划：loop 入口每轮次一次，避免每轮噪音；需对照对拍套件的标记计数确认。
+- 标记粒度：在各入口读取 loop 开关处记录。真实环境已证 headless 与 agent-core 每轮次一次（debug 日志计数 = 1/轮次）；ink 每模型轮读取开关，故其标记为每轮一次。`[LOOP]` 措辞与对拍套件所计数的标记不同，其计数不受影响（已在 shared 臂 debug 日志核对）。

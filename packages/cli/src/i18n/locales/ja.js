@@ -67,6 +67,7 @@ export default {
   'submit a bug report': 'バグレポートを送信',
   Model: 'モデル',
   'Fast Model': '高速モデル',
+  'Agent Loop': 'エージェントループ',
   Sandbox: 'サンドボックス',
   'Session ID': 'セッションID',
   'Base URL': 'Base URL',

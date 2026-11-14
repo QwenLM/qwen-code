@@ -18,6 +18,7 @@
 import { shellResultText } from '../utils/shell-result.js';
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
+import { logAgentLoopEntry } from '../config/agent-loop-rollout.js';
 import { SendMessageType, type LlmClient } from '../core/client.js';
 import type { ToolArtifact } from '../tools/tools.js';
 import { StreamEventType, type LlmChat } from '../core/llm-chat.js';
@@ -192,6 +193,7 @@ export async function startSpeculation(
   };
 
   // Run the speculative loop in the background
+  logAgentLoopEntry(config, 'speculation');
   runSpeculativeLoop(config, state, cacheSafe, options?.model)
     .then(async (result) => {
       if (abortController.signal.aborted) {

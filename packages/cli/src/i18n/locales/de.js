@@ -83,6 +83,7 @@ export default {
   Auth: 'Authentifizierung',
   Model: 'Modell',
   'Fast Model': 'Schnelles Modell',
+  'Agent Loop': 'Agent-Loop',
   Sandbox: 'Sandbox',
   'Session ID': 'Sitzungs-ID',
   'Base URL': 'Base URL',

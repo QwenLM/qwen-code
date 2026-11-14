@@ -31,8 +31,8 @@ started`, and the **legacy path logs nothing**. The wording differs per
   of the env/setting/default rules.
 - A `logAgentLoopEntry(config, surface)` helper (core, `debugLogger` channel like
   the kernel's `[EVENT_BUS]`) logs one line naming the surface and the resolved
-  path, e.g. `[LOOP] headless legacy`. Each surface calls it at its loop entry
-  (once per turn), including the legacy path.
+  path, e.g. `[LOOP] headless legacy`. Each surface calls it where it reads the
+  loop switch (its loop entry), including the legacy path.
 
 ### `/about` and `/bug`: one shared line
 
@@ -51,7 +51,7 @@ started`, and the **legacy path logs nothing**. The wording differs per
 | Decision                                                    | Rationale                                                                                            |
 | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
 | Path derived from the existing getters, not a new rule copy | The design requires the line to use the same resolution the surface uses; a second copy would drift. |
-| Marker logged at loop entry, once per turn, incl. legacy    | Makes every surface's path provable; legacy currently logs nothing.                                  |
+| Marker logged at the loop decision point, incl. legacy      | Makes every surface's path provable; legacy currently logs nothing.                                  |
 | Current surface from execution mode + renderer of record    | `/about`/`/bug` run in a mode; the interactive surface is the renderer actually serving the session. |
 | `executionMode` optional on `SystemInfoContext`             | The Settings dialog passes only config+settings; it omits the line rather than guessing a surface.   |
 
@@ -70,7 +70,10 @@ started`, and the **legacy path logs nothing**. The wording differs per
 - No new settings; the line is read-only diagnostics.
 - The marker is debug-log only (no user-visible output change beyond the line).
 
-## Open questions
+## Resolved questions
 
-- Marker granularity: once per turn vs per round. Plan: once per turn at the loop
-  entry, to avoid per-round noise; confirm against the parity suites' marker counts.
+- Marker granularity: logged where each surface reads the loop switch. Verified
+  once per turn for headless and agent-core (real-env debug-log count = 1 per
+  turn); ink reads the switch per model round, so its marker is per round. The
+  `[LOOP]` wording is distinct from the parity suites' counted markers, so their
+  counts are unaffected (verified in the shared-arm debug log).
