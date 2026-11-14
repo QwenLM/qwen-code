@@ -27,9 +27,11 @@
   "dependencies": {
     "@qwen-code/channel-base": "0.27.2",
     "dingtalk-stream-sdk-nodejs": "^2.0.4",
+    "proper-lockfile": "^4.1.2",
     "undici": "^7.28.0"
   },
   "devDependencies": {
+    "@types/proper-lockfile": "^4.1.4",
     "typescript": "^5.0.0"
   }
 }

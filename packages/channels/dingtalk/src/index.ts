@@ -2,6 +2,17 @@ export { DingtalkChannel } from './DingtalkAdapter.js';
 export { DingtalkWebhookChannel } from './DingtalkWebhookChannel.js';
 export { webhookPlugin } from './webhook-plugin.js';
 export { downloadMedia } from './media.js';
+export {
+  ManagedDingtalkAdapter,
+  dingtalkSettings,
+} from './managed-dingtalk-adapter.js';
+export type {
+  DingtalkReplyContext,
+  DingtalkSettings,
+  ManagedDingtalkAdapterDeps,
+  ManagedDingtalkAdapterOptions,
+} from './managed-dingtalk-adapter.js';
+export { createManagedDingtalkDeps } from './managed-dingtalk-deps.js';
 
 import { DingtalkChannel } from './DingtalkAdapter.js';
 import type { ChannelPlugin } from '@qwen-code/channel-base';
