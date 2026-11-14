@@ -1952,7 +1952,7 @@ describe('ReadFileTool', () => {
         expect(after.llmContent).not.toMatch(/unchanged since/);
       });
 
-      it('never short-circuits a ranged Read (offset/limit set)', async () => {
+      it('does not short-circuit the first ranged Read after a full Read', async () => {
         const filePath = await put('multi.txt', 'a\nb\nc\nd\ne');
         await read(filePath);
 
@@ -1960,6 +1960,107 @@ describe('ReadFileTool', () => {
         expect(typeof ranged.llmContent).toBe('string');
         expect(ranged.llmContent).not.toMatch(/unchanged since/);
         expect(ranged.llmContent).toContain('b');
+      });
+
+      it('deduplicates repeated identical ranged reads and allows immediate re-fetch on a 3rd call', async () => {
+        const filePath = await put('ranged.txt', 'l1\nl2\nl3\nl4\nl5');
+
+        const first = await read({ file_path: filePath, offset: 1, limit: 2 });
+        expect(first.llmContent).toContain('l2');
+        expect(first.llmContent).toContain('l3');
+        expect(first.llmContent).not.toMatch(/unchanged since/);
+
+        const second = await read({ file_path: filePath, offset: 1, limit: 2 });
+        expect(second.llmContent).toMatch(
+          /\(lines 2-3\) unchanged since last read/,
+        );
+        expect(second.llmContent).not.toContain('l2');
+        expect(second.returnDisplay).toMatch(/Unchanged: .* \(lines 2-3\)/);
+
+        // Consumed as a one-shot escape hatch: 3rd call returns real content again.
+        const third = await read({ file_path: filePath, offset: 1, limit: 2 });
+        expect(third.llmContent).toContain('l2');
+        expect(third.llmContent).toContain('l3');
+        expect(third.llmContent).not.toMatch(/unchanged since/);
+
+        // 3rd call re-armed the range, so 4th identical call deduplicates again.
+        const fourth = await read({ file_path: filePath, offset: 1, limit: 2 });
+        expect(fourth.llmContent).toMatch(
+          /\(lines 2-3\) unchanged since last read/,
+        );
+      });
+
+      it('does not short-circuit distinct ranges of the same file', async () => {
+        const filePath = await put('windows.txt', 'l1\nl2\nl3\nl4\nl5');
+
+        const win1 = await read({ file_path: filePath, offset: 0, limit: 2 });
+        expect(win1.llmContent).toContain('l1');
+
+        const win2 = await read({ file_path: filePath, offset: 2, limit: 2 });
+        expect(win2.llmContent).not.toMatch(/unchanged since/);
+        expect(win2.llmContent).toContain('l3');
+
+        const win1Again = await read({
+          file_path: filePath,
+          offset: 0,
+          limit: 2,
+        });
+        expect(win1Again.llmContent).toMatch(/\(lines 1-2\) unchanged since/);
+      });
+
+      it('invalidates ranged dedup after external edits, recordWrite, or history eviction', async () => {
+        const filePath = await put('inv-range.txt', 'l1\nl2\nl3\nl4\nl5');
+        await read({ file_path: filePath, offset: 1, limit: 2 });
+
+        fileReadCache.markReadEvictedFromHistory(fs.statSync(filePath));
+        const afterEvict = await read({
+          file_path: filePath,
+          offset: 1,
+          limit: 2,
+        });
+        expect(afterEvict.llmContent).not.toMatch(/unchanged since/);
+        expect(afterEvict.llmContent).toContain('l2');
+
+        fileReadCache.recordWrite(filePath, fs.statSync(filePath));
+        const afterWrite = await read({
+          file_path: filePath,
+          offset: 1,
+          limit: 2,
+        });
+        expect(afterWrite.llmContent).not.toMatch(/unchanged since/);
+        expect(afterWrite.llmContent).toContain('l2');
+
+        await put(filePath, 'l1\nchanged\nl3\nl4\nl5');
+        const future = new Date(Date.now() + 60_000);
+        await fsp.utimes(filePath, future, future);
+        const afterExternal = await read({
+          file_path: filePath,
+          offset: 1,
+          limit: 2,
+        });
+        expect(afterExternal.llmContent).not.toMatch(/unchanged since/);
+        expect(afterExternal.llmContent).toContain('changed');
+      });
+
+      it('never short-circuits or arms residentRanges for code_mode ranged reads', async () => {
+        const filePath = await put('cm-range.txt', 'l1\nl2\nl3\nl4\nl5');
+        await read({ file_path: filePath, offset: 1, limit: 2 });
+
+        const cmResult = await runWithToolCallSource(
+          { kind: 'code_mode' },
+          () => read({ file_path: filePath, offset: 1, limit: 2 }),
+        );
+        expect(cmResult.llmContent).toContain('l2');
+        expect(cmResult.llmContent).not.toMatch(/unchanged since/);
+
+        // code_mode read disarms resident ranges since bytes did not enter history.
+        const followUp = await read({
+          file_path: filePath,
+          offset: 1,
+          limit: 2,
+        });
+        expect(followUp.llmContent).toContain('l2');
+        expect(followUp.llmContent).not.toMatch(/unchanged since/);
       });
 
       it('does not arm the placeholder if the first Read was truncated', async () => {

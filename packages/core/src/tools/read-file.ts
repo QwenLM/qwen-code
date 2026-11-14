@@ -57,6 +57,7 @@ import {
   normalizeParts,
   splitImageParts,
 } from '../services/visionBridge/image-part-utils.js';
+import type { FileReadRange } from '../services/fileReadCache.js';
 
 const debugLogger = createDebugLogger('READ_FILE_CACHE');
 
@@ -218,13 +219,18 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     const nestedRead = getCurrentToolCallSource()?.kind === 'code_mode';
     const useFastPath = cacheEnabled && !isAutoMem && !nestedRead;
     const cache = this.config.getFileReadCache();
+    const offset = this.params.offset ?? undefined;
+    const limit = this.params.limit ?? undefined;
+    const pages = this.params.pages ?? undefined;
     // A request-level "full" Read asks for the whole file: no offset,
     // no limit, no PDF page range. The cache entry is only marked as
     // full later if the produced content was not truncated.
     const isFullRead =
-      this.params.offset === undefined &&
-      this.params.limit === undefined &&
-      this.params.pages === undefined;
+      offset === undefined && limit === undefined && pages === undefined;
+    const requestedRange: FileReadRange | undefined =
+      pages === undefined && (offset !== undefined || limit !== undefined)
+        ? { offset, limit }
+        : undefined;
 
     // Descriptor reads reuse admission metadata. Pathname reads stat here
     // for the cache; a failure falls through to the content pipeline.
@@ -243,25 +249,34 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     if (
       useFastPath &&
       stats &&
-      isFullRead &&
+      (isFullRead || requestedRange !== undefined) &&
       cache.getClearGeneration() === cacheGeneration
     ) {
-      const status = cache.check(stats);
-      if (
-        status.state === 'fresh' &&
-        status.entry.lastReadAt !== undefined &&
-        status.entry.lastReadWasFull &&
-        status.entry.lastReadCacheable &&
-        // Only quote-back if that read is still in history (issue
-        // #4239: idle microcompaction flips this off when it blanks it).
-        status.entry.readResidentInHistory &&
-        (status.entry.lastWriteAt === undefined ||
-          status.entry.lastReadAt > status.entry.lastWriteAt)
+      if (isFullRead) {
+        const status = cache.check(stats);
+        if (
+          status.state === 'fresh' &&
+          status.entry.lastReadAt !== undefined &&
+          status.entry.lastReadWasFull &&
+          status.entry.lastReadCacheable &&
+          // Only quote-back if that read is still in history (issue
+          // #4239: idle microcompaction flips this off when it blanks it).
+          status.entry.readResidentInHistory &&
+          (status.entry.lastWriteAt === undefined ||
+            status.entry.lastReadAt > status.entry.lastWriteAt)
+        ) {
+          debugLogger.debug('hit', { path: absPath });
+          return this.unchangedResult(absPath);
+        }
+        debugLogger.debug('miss', { path: absPath, state: status.state });
+      } else if (
+        requestedRange !== undefined &&
+        cache.isRangeResident(stats, requestedRange)
       ) {
-        debugLogger.debug('hit', { path: absPath });
-        return this.unchangedResult(absPath);
+        cache.consumeResidentRange(stats, requestedRange);
+        debugLogger.debug('hit', { path: absPath, range: requestedRange });
+        return this.unchangedResult(absPath, requestedRange);
       }
-      debugLogger.debug('miss', { path: absPath, state: status.state });
     }
 
     const prepareForVisionBridge = shouldRunVisionBridge(this.config);
@@ -349,9 +364,19 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     ) {
       const cacheable = isCacheableReadResult(result);
       const recordStats: Stats = result.stats ?? stats!;
+      const rangeComplete =
+        requestedRange !== undefined &&
+        (!result.linesShown ||
+          (result.originalLineCount !== undefined &&
+            result.originalLineCountExact !== false &&
+            result.linesShown[1] === result.originalLineCount) ||
+          (requestedRange.limit !== undefined &&
+            result.linesShown[1] - result.linesShown[0] + 1 >=
+              requestedRange.limit));
       cache.recordRead(absPath, recordStats, {
         full: isFullRead && !result.isTruncated,
         cacheable,
+        range: !nestedRead && rangeComplete ? requestedRange : undefined,
       });
       this.recordedStats = recordStats;
       // Reading into a program does not prove the full text reached history.
@@ -613,10 +638,28 @@ class ReadFileToolInvocation extends BaseToolInvocation<
    * cache". A dedicated cache-hit metric can be added when telemetry
    * needs visibility into the fast-path's effectiveness.
    */
-  private unchangedResult(absPath: string): ToolResult {
+  private unchangedResult(absPath: string, range?: FileReadRange): ToolResult {
     const relativePath = shortenPath(
       makeRelative(absPath, this.config.getTargetDir()),
     );
+    if (range !== undefined) {
+      const startLine = (range.offset ?? 0) + 1;
+      const rangeLabel =
+        range.limit !== undefined
+          ? `lines ${startLine}-${startLine + range.limit - 1}`
+          : `from line ${startLine}`;
+      const llmContent =
+        `[File ${relativePath} (${rangeLabel}) unchanged since last read ` +
+        `of this exact range in this session — that content was provided ` +
+        `earlier in this conversation. If you cannot retrieve that prior ` +
+        `content (e.g. after context compaction) or you suspect the file ` +
+        `was modified outside the read/edit tools, call ${ToolNames.READ_FILE} ` +
+        `again with the same offset/limit to fetch current content.]`;
+      return {
+        llmContent,
+        returnDisplay: `Unchanged: ${relativePath} (${rangeLabel})`,
+      };
+    }
     const llmContent =
       `[File ${relativePath} unchanged since last read in this session — ` +
       `the full content was provided earlier in this conversation. ` +
