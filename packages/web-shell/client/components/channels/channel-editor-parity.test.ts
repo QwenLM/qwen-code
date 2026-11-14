@@ -73,7 +73,7 @@ const CASES = [
   },
 ] as const;
 
-describe('bound-delivery rule parity (editor mirror vs daemon authority)', () => {
+describe('deprecated prWatchEvents parity (editor mirror vs daemon authority)', () => {
   it.each(CASES)('$name', ({ events, delivery, code, daemon }) => {
     const config = {
       type: 'github',

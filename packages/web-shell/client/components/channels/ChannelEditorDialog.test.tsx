@@ -1220,7 +1220,10 @@ describe('ChannelEditorDialog', () => {
     );
   });
 
-  it('names the delivery dependency when a stored selection lacks it', async () => {
+  it('saves the deprecated watch selection while delivery is off', async () => {
+    // The adapter no longer watches: the daemon reads the key as a per-host
+    // alias only when delivery is on, and it warns rather than rejects, so the
+    // editor must not block a save the authority takes.
     const onSave = vi.fn().mockResolvedValue(undefined);
     const instance: DaemonChannelInstanceSnapshot = {
       name: 'github-bot',
@@ -1238,8 +1241,6 @@ describe('ChannelEditorDialog', () => {
       '[role="group"][aria-label="PR Watch Events"] input[type="checkbox"]',
     );
     expect(box!.checked).toBe(true);
-    // The stored selection stays clearable even while the gate is closed.
-    expect(box!.disabled).toBe(false);
 
     const save = Array.from(document.querySelectorAll('button')).find(
       (button) => button.textContent?.trim() === 'Save',
@@ -1248,21 +1249,12 @@ describe('ChannelEditorDialog', () => {
       save?.click();
     });
 
-    expect(onSave).not.toHaveBeenCalled();
-    expect(document.body.textContent).toContain(
-      'Enable "Deliver To PR-Bound Sessions" to save the selected watch events.',
-    );
-
-    // Following the instruction must retire the instruction: turning the
-    // switch on clears the stale dependency error without another Save.
-    await act(async () => {
-      document
-        .querySelector<HTMLButtonElement>('button[role="switch"]')!
-        .click();
-    });
-    expect(document.body.textContent).not.toContain(
-      'to save the selected watch events.',
-    );
+    expect(onSave).toHaveBeenCalledTimes(1);
+    const request = onSave.mock.calls[0][1] as {
+      config: Record<string, unknown>;
+    };
+    expect(request.config['prWatchEvents']).toEqual(['ci_failure']);
+    expect(request.config['deliverToBoundSessions']).toBe(false);
   });
 
   it('lets a stored selection be cleared while delivery is off', async () => {
@@ -1322,163 +1314,6 @@ describe('ChannelEditorDialog', () => {
     expect(request.config['deliverToBoundSessions']).toBe(false);
   });
 
-  it('keeps the invalid-option message when delivery is switched on', async () => {
-    const instance: DaemonChannelInstanceSnapshot = {
-      name: 'github-bot',
-      config: {
-        type: 'github',
-        prWatchEvents: ['bogus_event'],
-      },
-      secrets: { token: { present: true, source: 'literal' } },
-      startsWithServe: false,
-      runtime: { state: 'stopped' },
-    };
-    await renderDialog({ descriptor: GITHUB_BOUND, instance });
-
-    const save = Array.from(document.querySelectorAll('button')).find(
-      (button) => button.textContent?.trim() === 'Save',
-    );
-    await act(async () => {
-      save?.click();
-    });
-    expect(document.body.textContent).toContain(
-      "Remove values that aren't in the allowed list.",
-    );
-
-    // Switching delivery on remedies the dependency, not the unknown value:
-    // the higher-precedence invalidOption message must survive.
-    await act(async () => {
-      document
-        .querySelector<HTMLButtonElement>('button[role="switch"]')!
-        .click();
-    });
-    expect(document.body.textContent).toContain(
-      "Remove values that aren't in the allowed list.",
-    );
-    expect(document.body.textContent).not.toContain(
-      'to save the selected watch events.',
-    );
-  });
-
-  it('clears the dependency message when the last event is unticked', async () => {
-    const instance: DaemonChannelInstanceSnapshot = {
-      name: 'github-bot',
-      config: {
-        type: 'github',
-        prWatchEvents: ['ci_failure'],
-      },
-      secrets: { token: { present: true, source: 'literal' } },
-      startsWithServe: false,
-      runtime: { state: 'stopped' },
-    };
-    await renderDialog({ descriptor: GITHUB_BOUND, instance });
-
-    const save = Array.from(document.querySelectorAll('button')).find(
-      (button) => button.textContent?.trim() === 'Save',
-    );
-    await act(async () => {
-      save?.click();
-    });
-    expect(document.body.textContent).toContain(
-      'to save the selected watch events.',
-    );
-
-    // Unticking the last event is the other remedy; the alert must retire
-    // without another Save.
-    const box = Array.from(
-      document.querySelectorAll<HTMLInputElement>(
-        '[role="group"][aria-label="PR Watch Events"] input[type="checkbox"]',
-      ),
-    ).find((b) => b.closest('label')?.textContent?.includes('ci_failure'))!;
-    await act(async () => {
-      box.click();
-    });
-    expect(document.body.textContent).not.toContain(
-      'to save the selected watch events.',
-    );
-  });
-
-  it('retires the invalid-option message when the offending value is unticked', async () => {
-    const instance: DaemonChannelInstanceSnapshot = {
-      name: 'github-bot',
-      config: {
-        type: 'github',
-        prWatchEvents: ['bogus_event'],
-      },
-      secrets: { token: { present: true, source: 'literal' } },
-      startsWithServe: false,
-      runtime: { state: 'stopped' },
-    };
-    await renderDialog({ descriptor: GITHUB_BOUND, instance });
-
-    await act(async () => {
-      (
-        Array.from(document.querySelectorAll('button')).find(
-          (button) => button.textContent?.trim() === 'Save',
-        ) as HTMLButtonElement
-      ).click();
-    });
-    expect(document.body.textContent).toContain(
-      "Remove values that aren't in the allowed list.",
-    );
-
-    // Unticking the offending value is the remedy the message asks for; it
-    // must retire the message without a second Save.
-    const bogus = Array.from(
-      document.querySelectorAll<HTMLInputElement>(
-        '[role="group"][aria-label="PR Watch Events"] input[type="checkbox"]',
-      ),
-    ).find((b) => b.closest('label')?.textContent?.includes('bogus_event'))!;
-    await act(async () => {
-      bogus.click();
-    });
-    expect(document.body.textContent).not.toContain(
-      "Remove values that aren't in the allowed list.",
-    );
-  });
-
-  it('replaces the invalid-option message with the dependency one when a valid event remains', async () => {
-    const instance: DaemonChannelInstanceSnapshot = {
-      name: 'github-bot',
-      config: {
-        type: 'github',
-        prWatchEvents: ['ci_failure', 'bogus_event'],
-      },
-      secrets: { token: { present: true, source: 'literal' } },
-      startsWithServe: false,
-      runtime: { state: 'stopped' },
-    };
-    await renderDialog({ descriptor: GITHUB_BOUND, instance });
-
-    await act(async () => {
-      (
-        Array.from(document.querySelectorAll('button')).find(
-          (button) => button.textContent?.trim() === 'Save',
-        ) as HTMLButtonElement
-      ).click();
-    });
-    expect(document.body.textContent).toContain(
-      "Remove values that aren't in the allowed list.",
-    );
-
-    const bogus = Array.from(
-      document.querySelectorAll<HTMLInputElement>(
-        '[role="group"][aria-label="PR Watch Events"] input[type="checkbox"]',
-      ),
-    ).find((b) => b.closest('label')?.textContent?.includes('bogus_event'))!;
-    await act(async () => {
-      bogus.click();
-    });
-    // The remaining value is allowed, so the invalid-option instruction is
-    // gone; the still-unsatisfied dependency takes over the slot.
-    expect(document.body.textContent).not.toContain(
-      "Remove values that aren't in the allowed list.",
-    );
-    expect(document.body.textContent).toContain(
-      'to save the selected watch events.',
-    );
-  });
-
   it('does not surface validation before the first submit', async () => {
     const instance: DaemonChannelInstanceSnapshot = {
       name: 'github-bot',
@@ -1506,52 +1341,6 @@ describe('ChannelEditorDialog', () => {
     expect(document.querySelectorAll('[role="alert"]').length).toBe(0);
   });
 
-  it('keeps a shown invalid-option message when delivery is switched off', async () => {
-    const instance: DaemonChannelInstanceSnapshot = {
-      name: 'github-bot',
-      config: {
-        type: 'github',
-        deliverToBoundSessions: true,
-        prWatchEvents: ['bogus_event'],
-      },
-      secrets: { token: { present: true, source: 'literal' } },
-      startsWithServe: false,
-      runtime: { state: 'stopped' },
-    };
-    await renderDialog({ descriptor: GITHUB_BOUND, instance });
-    const clickSave = async () => {
-      await act(async () => {
-        (
-          Array.from(document.querySelectorAll('button')).find(
-            (button) => button.textContent?.trim() === 'Save',
-          ) as HTMLButtonElement
-        ).click();
-      });
-    };
-    const clickSwitch = async () => {
-      await act(async () => {
-        document
-          .querySelector<HTMLButtonElement>('button[role="switch"]')!
-          .click();
-      });
-    };
-
-    await clickSave();
-    expect(document.body.textContent).toContain(
-      "Remove values that aren't in the allowed list.",
-    );
-    // The mirror case: a shown instruction survives the switch moving off
-    // (re-derived, not silently dropped), in both directions.
-    await clickSwitch();
-    expect(document.body.textContent).toContain(
-      "Remove values that aren't in the allowed list.",
-    );
-    await clickSwitch();
-    expect(document.body.textContent).toContain(
-      "Remove values that aren't in the allowed list.",
-    );
-  });
-
   it('renders no bound-session panel for channels without the fields', async () => {
     await renderDialog({ descriptor: DINGTALK });
     expect(document.body.textContent).not.toContain('PR-bound sessions');
@@ -1562,12 +1351,12 @@ describe('ChannelEditorDialog', () => {
     expect(document.body.textContent).not.toContain('PR 绑定会话');
   });
 
-  it('scrolls a non-advanced watch-events error into view on save', async () => {
+  it('scrolls a non-advanced watch-gate error into view on save', async () => {
     const instance: DaemonChannelInstanceSnapshot = {
       name: 'github-bot',
       config: {
         type: 'github',
-        prWatchEvents: ['ci_failure'],
+        requireBoundWatch: true,
       },
       secrets: { token: { present: true, source: 'literal' } },
       startsWithServe: false,
@@ -1588,7 +1377,7 @@ describe('ChannelEditorDialog', () => {
       });
       expect(scrollIntoView).toHaveBeenCalledWith({ block: 'center' });
       const target = scrollIntoView.mock.instances[0] as HTMLElement;
-      expect(target.id.endsWith('-prWatchEvents')).toBe(true);
+      expect(target.id.endsWith('-requireBoundWatch')).toBe(true);
     } finally {
       Element.prototype.scrollIntoView = originalScrollIntoView;
     }

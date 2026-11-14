@@ -617,8 +617,8 @@ export function validateChannelEditorDraft(
       draft.values['requireBoundWatch'] === true &&
       draft.values['deliverToBoundSessions'] !== true
     ) {
-      // Its own code: the shared requiresBoundDelivery message names "the
-      // selected watch events", a control this field's operator never touched.
+      // Own code: the copy names the watch gate, not the watch events, so a
+      // shared message would point at a control this operator never touched.
       errors['requireBoundWatch'] = 'requiresBoundDeliveryForWatchGate';
     }
     // Mirror validateRepoFilterConfig: an active mode needs a non-empty list
