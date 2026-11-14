@@ -7,7 +7,10 @@ import type {
   DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
-import { SIDEBAR_SESSION_PREVIEW_LIMIT } from '../../constants/sessions';
+import {
+  SIDEBAR_SESSION_EXPAND_STEP,
+  SIDEBAR_SESSION_PREVIEW_LIMIT,
+} from '../../constants/sessions';
 import {
   readWorkspaceExpanded,
   writeWorkspaceExpanded,
@@ -21,7 +24,10 @@ export interface RecentSessionEntry {
   workspaceCwd?: string;
 }
 
-export function sortRecentSessions(entries: RecentSessionEntry[]) {
+export function sortRecentSessions(
+  entries: RecentSessionEntry[],
+  sortBy?: 'updatedAt' | 'lastUserPromptAt',
+) {
   const unique = new Map<string, RecentSessionEntry>();
   for (const entry of entries) {
     const { session } = entry;
@@ -38,10 +44,14 @@ export function sortRecentSessions(entries: RecentSessionEntry[]) {
     unique.set(JSON.stringify([entry.workspaceCwd, session.sessionId]), entry);
   }
   const activity = (session: DaemonSessionSummary) =>
-    Math.max(
-      Date.parse(session.updatedAt ?? '') || 0,
-      Date.parse(session.createdAt ?? '') || 0,
-    );
+    sortBy === 'lastUserPromptAt'
+      ? Number.isFinite(Date.parse(session.lastUserPromptAt ?? ''))
+        ? Date.parse(session.lastUserPromptAt!)
+        : Number.MIN_SAFE_INTEGER
+      : Math.max(
+          Date.parse(session.updatedAt ?? '') || 0,
+          Date.parse(session.createdAt ?? '') || 0,
+        );
   return [...unique.values()]
     .sort(
       (a, b) =>
@@ -56,6 +66,7 @@ export function sortRecentSessions(entries: RecentSessionEntry[]) {
 async function readRecentPage(
   load: (cursor?: string) => Promise<DaemonSessionListPage>,
   workspaceCwd?: string,
+  sortBy?: 'updatedAt' | 'lastUserPromptAt',
 ): Promise<RecentSessionEntry[]> {
   let cursor: string | undefined;
   const entries: RecentSessionEntry[] = [];
@@ -65,11 +76,12 @@ async function readRecentPage(
       ...page.sessions.map((session) => ({ session, workspaceCwd })),
     );
     cursor = page.nextCursor;
-  } while (cursor && sortRecentSessions(entries).length < LIMIT);
-  return sortRecentSessions(entries);
+  } while (cursor && sortRecentSessions(entries, sortBy).length < LIMIT);
+  return sortRecentSessions(entries, sortBy);
 }
 
 interface RecentSessionsProps {
+  sortBy?: 'updatedAt' | 'lastUserPromptAt';
   client: DaemonClient;
   workspaces: DaemonWorkspaceCapability[];
   includeStandalone: boolean;
@@ -85,6 +97,7 @@ interface RecentSessionsProps {
 }
 
 export function RecentSessions({
+  sortBy,
   client,
   workspaces,
   includeStandalone,
@@ -102,7 +115,9 @@ export function RecentSessions({
   const [expanded, setExpanded] = useState(() =>
     readWorkspaceExpanded('recent-sessions'),
   );
-  const [showAll, setShowAll] = useState(false);
+  const [visibleCount, setVisibleCount] = useState(
+    SIDEBAR_SESSION_PREVIEW_LIMIT,
+  );
   const [entries, setEntries] = useState<RecentSessionEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
@@ -114,13 +129,19 @@ export function RecentSessions({
   useEffect(() => {
     setEntries([]);
     setLoading(true);
+    setVisibleCount(SIDEBAR_SESSION_PREVIEW_LIMIT);
   }, [
     client,
     workspaceKey,
     includeStandalone,
     sourceMetadataEnabled,
     organizationEnabled,
+    sortBy,
   ]);
+
+  useEffect(() => {
+    if (!expanded) setVisibleCount(SIDEBAR_SESSION_PREVIEW_LIMIT);
+  }, [expanded]);
 
   useEffect(() => {
     if (!expanded || refreshPaused) return;
@@ -133,6 +154,7 @@ export function RecentSessions({
           (cursor) =>
             client.listWorkspaceSessionsPage(cwd, {
               archiveState: 'active',
+              ...(sortBy !== undefined ? { sortBy } : {}),
               ...(organizationEnabled
                 ? { view: 'organized' as const, group: 'all' }
                 : {}),
@@ -141,16 +163,21 @@ export function RecentSessions({
               ...(sourceMetadataEnabled ? { sourceType: 'default' } : {}),
             }),
           cwd,
+          sortBy,
         ),
       );
       if (includeStandalone)
         requests.push(
-          readRecentPage((cursor) =>
-            client.listStandaloneSessionsPage({
-              archiveState: 'active',
-              pageSize: 50,
-              cursor,
-            }),
+          readRecentPage(
+            (cursor) =>
+              client.listStandaloneSessionsPage({
+                archiveState: 'active',
+                ...(sortBy !== undefined ? { sortBy } : {}),
+                pageSize: 50,
+                cursor,
+              }),
+            undefined,
+            sortBy,
           ),
         );
       const results = await Promise.allSettled(requests);
@@ -160,6 +187,7 @@ export function RecentSessions({
           results.flatMap((result) =>
             result.status === 'fulfilled' ? result.value : [],
           ),
+          sortBy,
         ),
       );
       setFailed(results.some((result) => result.status === 'rejected'));
@@ -179,6 +207,7 @@ export function RecentSessions({
     includeStandalone,
     sourceMetadataEnabled,
     organizationEnabled,
+    sortBy,
     expanded,
     refreshPaused,
     currentSessionId,
@@ -186,15 +215,18 @@ export function RecentSessions({
     retry,
   ]);
 
-  const rows = expanded
+  // Count renderable rows, not raw entries: renderSession returns null for
+  // entries this list does not draw (e.g. an optimistically pinned session),
+  // and the expand label must promise only rows the click actually reveals.
+  const renderableRows = expanded
     ? entries
-        .slice(0, showAll ? LIMIT : SIDEBAR_SESSION_PREVIEW_LIMIT)
         .map((entry) => ({
           key: JSON.stringify([entry.workspaceCwd, entry.session.sessionId]),
           node: renderSession(entry),
         }))
         .filter((row) => row.node !== null)
     : [];
+  const rows = renderableRows.slice(0, visibleCount);
   const visibleKeys = JSON.stringify(rows.map((row) => row.key));
   useEffect(() => {
     onVisibleRowsChange?.(visibleKeys);
@@ -269,13 +301,20 @@ export function RecentSessions({
           {rows.map((row) => (
             <Fragment key={row.key}>{row.node}</Fragment>
           ))}
-          {!showAll && entries.length > SIDEBAR_SESSION_PREVIEW_LIMIT && (
+          {renderableRows.length > visibleCount && (
             <button
               type="button"
               className={styles.showAllSessions}
-              onClick={() => setShowAll(true)}
+              onClick={() =>
+                setVisibleCount((count) => count + SIDEBAR_SESSION_EXPAND_STEP)
+              }
             >
-              {t('sidebar.showAllSessions')}
+              {t('sidebar.showMoreSessions', {
+                count: Math.min(
+                  SIDEBAR_SESSION_EXPAND_STEP,
+                  renderableRows.length - visibleCount,
+                ),
+              })}
             </button>
           )}
         </div>

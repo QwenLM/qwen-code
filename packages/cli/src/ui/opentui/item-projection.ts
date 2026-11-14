@@ -1190,6 +1190,10 @@ export function projectItemToStreamEvent(
             ...(item.presentation ? { presentation: item.presentation } : {}),
           };
     }
+    // ink draws a notice (a Mod's own prompt, a background agent that
+    // finished, a cron that fired) as an info row.
+    case 'notification':
+      return { type: 'info', text: item.text };
     case 'warning':
       return { type: 'warning', text: item.text };
     // No success row in the live model yet; ink's green SuccessMessage
@@ -1270,7 +1274,7 @@ export function projectItemToStreamEvent(
     //  - the rest: ink renders these through dedicated components and no
     //    OpenTUI writer produces them (tool_use_summary is written by ink's
     //    use-llm-stream only; diff_stats comes from the file-history rewind
-    //    flow, which has no OpenTUI seam; notification has no writer yet).
+    //    flow, which has no OpenTUI seam).
     case 'tool_group':
     case 'retry_countdown':
     case 'vision_notice':
@@ -1279,7 +1283,6 @@ export function projectItemToStreamEvent(
     case 'gemini_thought':
     case 'gemini_thought_content':
     case 'help':
-    case 'notification':
     case 'tool_use_summary':
     case 'diff_stats':
       return null;

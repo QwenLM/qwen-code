@@ -97,7 +97,7 @@ public final class JdbcCsiApplicationProgress {
             throws SQLException {
         String physicalKey;
         long registrationRevision;
-        String alias = JdbcRuntimeBindingRepository.storageAliasKey(original.request().getScope().getTenantId(), original.request().getStorageId());
+        String alias = RuntimeAdmissionFences.storageAliasKey(original.request().getScope().getTenantId(), original.request().getStorageId());
         try (PreparedStatement statement = statement(connection,
                 "SELECT tenant_id, storage_id, physical_key, registration_revision"
                         + " FROM ma_storage WHERE alias_key = ? AND storage_kind = 'CSI' AND registration_state = 'REGISTERED' FOR UPDATE")) {

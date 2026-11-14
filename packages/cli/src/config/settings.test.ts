@@ -343,6 +343,42 @@ describe('Settings Loading and Merging', () => {
         expect(settings.workspaceSettingsActive).toBe(true);
       });
 
+      it('should keep loading when the home directory does not exist', () => {
+        // Regression (#16861): a sandbox container user created without
+        // `useradd -m` has a HOME that does not exist; loading settings must
+        // not crash while resolving it.
+        const missingHome = '/mock/home/missing';
+        vi.mocked(osActual.homedir).mockReturnValue(missingHome);
+        const userSettingsPath = pathActual.join(
+          missingHome,
+          SETTINGS_DIRECTORY_NAME,
+          'settings.json',
+        );
+        (mockFsExistsSync as Mock).mockImplementation(
+          (p: fs.PathLike) => p.toString() === userSettingsPath,
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) =>
+            p.toString() === userSettingsPath
+              ? JSON.stringify({ ui: { theme: 'Default' } })
+              : '{}',
+        );
+        (fs.realpathSync as Mock).mockImplementation((p: fs.PathLike) => {
+          if (p.toString() === missingHome) {
+            throw new Error(
+              `ENOENT: no such file or directory, lstat '${missingHome}'`,
+            );
+          }
+          return p.toString();
+        });
+
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+        expect(settings.workspaceSettingsActive).toBe(true);
+        expect(settings.user.settings.ui).toEqual({ theme: 'Default' });
+        expect(settings.merged.ui?.theme).toBe('Default');
+      });
+
       it('should keep workspace settings empty when reloading the home directory', () => {
         const homeDir = '/mock/home/user';
         vi.mocked(osActual.homedir).mockReturnValue(homeDir);
@@ -4250,6 +4286,28 @@ describe('Settings Loading and Merging', () => {
       expect(
         getSettingsWarnings(settings).some((warning) =>
           warning.includes('tools.workflowsEnabled'),
+        ),
+      ).toBe(true);
+    });
+
+    it('should warn when workspace settings define lspEnabled', () => {
+      // A cloned repo must not enable the subsystem that spawns language
+      // servers with the user's permissions; the value is stripped, not
+      // honored, and the warning is the only signal the user gets.
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({ tools: { lspEnabled: true } });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.tools?.lspEnabled).toBeUndefined();
+      expect(
+        getSettingsWarnings(settings).some((warning) =>
+          warning.includes('tools.lspEnabled'),
         ),
       ).toBe(true);
     });
