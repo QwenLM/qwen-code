@@ -27,7 +27,11 @@ import {
   stripDisplayControlChars,
   truncateNotificationLabel,
 } from '../utils/terminalSafe.js';
-import { escapeXml } from '../utils/xml.js';
+import {
+  escapeXml,
+  TASK_NOTIFICATION_CLOSE,
+  TASK_NOTIFICATION_OPEN,
+} from '../utils/xml.js';
 import type { TaskBase, TaskRegistration } from '../agents/tasks/types.js';
 
 const debugLogger = createDebugLogger('MONITOR_REGISTRY');
@@ -519,7 +523,7 @@ export class MonitorRegistry {
     const displayLine = `Monitor "${desc}" event #${entry.eventCount}: ${safeEventLine}`;
 
     const xmlParts: string[] = [
-      '<task-notification>',
+      TASK_NOTIFICATION_OPEN,
       `<task-id>${escapeXml(entry.monitorId)}</task-id>`,
     ];
     if (entry.toolUseId) {
@@ -531,7 +535,7 @@ export class MonitorRegistry {
       `<event-count>${entry.eventCount}</event-count>`,
       `<summary>Monitor "${escapeXml(desc)}" emitted event #${entry.eventCount}.</summary>`,
       `<result>${escapeXml(safeEventLine)}</result>`,
-      '</task-notification>',
+      TASK_NOTIFICATION_CLOSE,
     );
 
     const meta: MonitorNotificationMeta = {
@@ -567,7 +571,7 @@ export class MonitorRegistry {
     const displayLine = `Monitor "${desc}" ${statusText}. (${entry.eventCount} events${droppedSuffix})`;
 
     const xmlParts: string[] = [
-      '<task-notification>',
+      TASK_NOTIFICATION_OPEN,
       `<task-id>${escapeXml(entry.monitorId)}</task-id>`,
     ];
     if (entry.toolUseId) {
@@ -585,7 +589,7 @@ export class MonitorRegistry {
         `<result>${escapeXml(stripDisplayControlChars(detail))}</result>`,
       );
     }
-    xmlParts.push('</task-notification>');
+    xmlParts.push(TASK_NOTIFICATION_CLOSE);
 
     const meta: MonitorNotificationMeta = {
       monitorId: entry.monitorId,
