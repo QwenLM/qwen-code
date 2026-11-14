@@ -24,6 +24,14 @@ vi.mock('./runtime.js', () => ({
 vi.mock('./managed-channel-client.js', () => ({
   HttpManagedChannelControlPlane: vi.fn(),
 }));
+vi.mock('../../config/settings.js', () => ({
+  loadSettings: vi.fn(() => ({
+    merged: { proxy: 'http://proxy.internal:8080' },
+  })),
+}));
+vi.mock('./proxy.js', () => ({
+  resolveProxyUrl: vi.fn(() => 'http://proxy.internal:8080'),
+}));
 
 const adapterInstances: Array<{ cwd: string }> = [];
 vi.mock('@qwen-code/channel-dingtalk', () => ({
@@ -40,6 +48,9 @@ vi.mock('@qwen-code/channel-dingtalk', () => ({
   createManagedDingtalkDeps: vi.fn(() => ({})),
 }));
 
+import { createManagedDingtalkDeps } from '@qwen-code/channel-dingtalk';
+import { loadSettings } from '../../config/settings.js';
+import { resolveProxyUrl } from './proxy.js';
 import { loadChannelsConfig, parseConfiguredChannels } from './runtime.js';
 import { managedDingtalkCommand } from './managed-dingtalk.js';
 
@@ -86,5 +97,20 @@ describe('managed-dingtalk command workspace resolution', () => {
       /not a DingTalk channel/,
     );
     expect(adapterInstances).toEqual([]);
+  });
+
+  it('resolves the egress proxy and hands it to the deps (R6-1)', async () => {
+    const running = handler(argv('/daemon/workspace'));
+    await new Promise((resolve) => setImmediate(resolve));
+    process.emit('SIGINT');
+    await running;
+    expect(loadSettings).toHaveBeenCalledWith('/daemon/workspace');
+    expect(resolveProxyUrl).toHaveBeenCalledWith(
+      undefined,
+      'http://proxy.internal:8080',
+    );
+    expect(createManagedDingtalkDeps).toHaveBeenCalledWith(
+      'http://proxy.internal:8080',
+    );
   });
 });

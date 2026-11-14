@@ -10,7 +10,9 @@ import {
   createManagedDingtalkDeps,
 } from '@qwen-code/channel-dingtalk';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { loadSettings } from '../../config/settings.js';
 import { HttpManagedChannelControlPlane } from './managed-channel-client.js';
+import { resolveProxyUrl } from './proxy.js';
 import { loadChannelsConfig, parseConfiguredChannels } from './runtime.js';
 
 // H5d of #12827: the DingTalk reference adapter on the managed path. An
@@ -90,6 +92,14 @@ export const managedDingtalkCommand: CommandModule<
         `Channel "${argv.name}" is not a DingTalk channel; the managed path serves DingTalk only.`,
       );
     }
+    // Resolve the egress proxy the same way the Legacy daemon worker does, so
+    // a proxy-only deployment delivers replies instead of silently losing them
+    // while inbound keeps working.
+    const settings = loadSettings(argv.cwd);
+    const proxy = resolveProxyUrl(
+      undefined,
+      settings.merged.proxy as string | undefined,
+    );
     const controlPlane = new HttpManagedChannelControlPlane({
       baseUrl: argv['control-plane'],
       tenantId: argv.tenant,
@@ -103,7 +113,7 @@ export const managedDingtalkCommand: CommandModule<
       cwd: channel.config.cwd,
       config: channel.config,
       controlPlane,
-      deps: createManagedDingtalkDeps(),
+      deps: createManagedDingtalkDeps(proxy),
     });
     await adapter.connect();
     writeStderrLine(

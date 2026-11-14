@@ -138,7 +138,11 @@ function createStreamClient(
   };
 }
 
-async function sendWebhook(webhook: string, text: string): Promise<void> {
+async function sendWebhook(
+  webhook: string,
+  text: string,
+  proxy?: string,
+): Promise<void> {
   // The sessionWebhook is a bearer capability URL taken from the inbound frame;
   // validate it before the first fetch (the same guard the Legacy path applies)
   // so a reply — assistant output and the URL's token included — is never sent
@@ -158,17 +162,30 @@ async function sendWebhook(webhook: string, text: string): Promise<void> {
   }
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), WEBHOOK_TIMEOUT_MS);
+  // In a proxy-only egress the reply must still leave: route this send through
+  // the resolved proxy with a per-send dispatcher (the Legacy sender's shape),
+  // destroyed afterwards so it never leaks. Only the webhook send is proxied —
+  // the internal control-plane traffic is left untouched.
+  let dispatcher: import('undici').Dispatcher | undefined;
   try {
+    if (proxy) {
+      const { EnvHttpProxyAgent } = await import('undici');
+      dispatcher = new EnvHttpProxyAgent({
+        httpProxy: proxy,
+        httpsProxy: proxy,
+      });
+    }
     // DingTalk caps one text message at DINGTALK_MAX_CHUNK_LENGTH units, while
     // a ledger segment can be larger; split and send the chunks in order. One
     // receipt still covers the whole ledger segment. The budget stays armed
     // across every chunk's header AND body read, so a stalled body cannot
     // outlive it.
     for (const chunk of splitChunks(text)) {
-      await postTextChunk(webhook, chunk, abort.signal);
+      await postTextChunk(webhook, chunk, abort.signal, dispatcher);
     }
   } finally {
     clearTimeout(timer);
+    await dispatcher?.destroy().catch(() => undefined);
   }
 }
 
@@ -176,16 +193,19 @@ async function postTextChunk(
   webhook: string,
   content: string,
   signal: AbortSignal,
+  dispatcher?: import('undici').Dispatcher,
 ): Promise<void> {
   let response: Response;
   try {
-    response = await fetch(webhook, {
+    const init: RequestInit & { dispatcher?: import('undici').Dispatcher } = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ msgtype: 'text', text: { content } }),
       signal,
       redirect: 'error',
-    });
+    };
+    if (dispatcher) init.dispatcher = dispatcher;
+    response = await fetch(webhook, init);
   } catch (error) {
     // A timeout or a dropped connection leaves the provider's state unknown.
     throw webhookFailure(
@@ -254,10 +274,12 @@ function webhookFailure(
 }
 
 /** The production dependencies of the managed DingTalk adapter. */
-export function createManagedDingtalkDeps(): ManagedDingtalkAdapterDeps {
+export function createManagedDingtalkDeps(
+  proxy?: string,
+): ManagedDingtalkAdapterDeps {
   return {
     createStreamClient,
-    sendWebhook,
+    sendWebhook: (webhook, text) => sendWebhook(webhook, text, proxy),
     lock: async (directory, onCompromised) => {
       const { default: lockfile } = await import('proper-lockfile');
       const { mkdirSync } = await import('node:fs');

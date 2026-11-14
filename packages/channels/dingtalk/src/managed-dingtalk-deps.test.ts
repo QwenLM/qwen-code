@@ -227,3 +227,43 @@ describe('managed DingTalk webhook URL validation (R4-7)', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('managed DingTalk webhook proxy (R6-1)', () => {
+  it('carries a proxy dispatcher on the request when a proxy is configured', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ errcode: 0 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { sendWebhook } = createManagedDingtalkDeps(
+      'http://proxy.internal:8080',
+    );
+    await sendWebhook(WEBHOOK, 'hello');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const init = fetchMock.mock.calls[0]![1] as { dispatcher?: unknown };
+    expect(init.dispatcher).toBeDefined();
+  });
+
+  it('sends without a dispatcher when no proxy is configured', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ errcode: 0 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { sendWebhook } = createManagedDingtalkDeps();
+    await sendWebhook(WEBHOOK, 'hello');
+    const init = fetchMock.mock.calls[0]![1] as { dispatcher?: unknown };
+    expect(init.dispatcher).toBeUndefined();
+  });
+
+  it('destroys the proxy dispatcher after the send so it never leaks', async () => {
+    const { EnvHttpProxyAgent } = await import('undici');
+    const destroySpy = vi
+      .spyOn(EnvHttpProxyAgent.prototype, 'destroy')
+      .mockResolvedValue(undefined);
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse({ errcode: 0 })),
+    );
+    const { sendWebhook } = createManagedDingtalkDeps(
+      'http://proxy.internal:8080',
+    );
+    await sendWebhook(WEBHOOK, 'hello');
+    expect(destroySpy).toHaveBeenCalledTimes(1);
+    destroySpy.mockRestore();
+  });
+});
