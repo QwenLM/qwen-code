@@ -1,8 +1,8 @@
 package com.alibaba.qwen.code.managedagent.config;
 
 import com.alibaba.druid.pool.DruidDataSource;
-import com.alibaba.qwen.code.managedagent.persistence.HostedCleanupDebtStore;
-import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentDefinitionStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcHostedCleanupDebtStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedAgentDefinitionStore;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -94,10 +94,38 @@ class ManagedAgentEmbeddingTest {
     }
 
     @Test
+    void dedicatedSchedulersAreNotDefaultCandidates() {
+        runner().withPropertyValues("qwen.managed-agent.datasource.url=" + url()).run(context -> {
+            assertThat(context).hasNotFailed();
+            var beanFactory = context.getBeanFactory();
+            var managed = new java.util.ArrayList<String>();
+            for (String name : context.getBeanNamesForType(
+                    org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler.class, false, false)) {
+                // Boot's own taskScheduler (TaskSchedulingAutoConfiguration) is the
+                // legitimate by-type candidate in an embedded host; every managed pool
+                // must back off so it cannot win the host's by-type TaskScheduler injection.
+                if (name.equals("taskScheduler") || !beanFactory.containsBeanDefinition(name)) {
+                    continue;
+                }
+                var definition = (org.springframework.beans.factory.support.AbstractBeanDefinition)
+                        beanFactory.getBeanDefinition(name);
+                assertThat(definition.isDefaultCandidate())
+                        .as("scheduler %s must not be a default candidate in embedded mode", name)
+                        .isFalse();
+                managed.add(name);
+            }
+            // Enumerate the pools the context actually holds rather than a fixed roster,
+            // so dropping defaultCandidate=false from any managed scheduler turns this red.
+            assertThat(managed).contains("managedAgentScheduler", "sessionWorktreeScheduler",
+                    "childRelayScheduler", "messageRelayScheduler", "messageMaterializerScheduler");
+        });
+    }
+
+    @Test
     void cleanupDebtStoreQueriesTheDedicatedDatabaseNotTheHostOne() {
         runner().withPropertyValues("qwen.managed-agent.datasource.url=" + url()).run(context -> {
             assertThat(context).hasNotFailed();
-            var store = context.getBean(HostedCleanupDebtStore.class);
+            var store = context.getBean(JdbcHostedCleanupDebtStore.class);
             // The host business database has no ma_resource_ref. An unqualified
             // JdbcTemplate would bind it and throw "Table not found" here; the
             // dedicated database carries the schema, so the scan returns an
@@ -139,7 +167,7 @@ class ManagedAgentEmbeddingTest {
         runner().withPropertyValues("qwen.managed-agent.datasource.url=" + url()).run(context -> {
             assertThat(context).hasNotFailed();
             var managed = context.getBean("managedJdbcTemplate", JdbcTemplate.class);
-            var repository = context.getBean(ManagedAgentDefinitionStore.class);
+            var repository = context.getBean(JdbcManagedAgentDefinitionStore.class);
             org.assertj.core.api.Assertions.assertThatThrownBy(() -> repository.create(
                     "tenant", "key", "x".repeat(1000), "agent", "digest", "{}", 1))
                     .isInstanceOf(org.springframework.dao.DataAccessException.class);

@@ -5,6 +5,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { MAX_MCP_SELECTION_ENTRIES } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-package.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
 import {
   assertManagedSessionDurableRef,
@@ -101,7 +102,8 @@ export function selectedMcpServers(
   }
   const servers = [...selected.values()];
   if (
-    servers.length > 32 ||
+    servers.length > MAX_MCP_SELECTION_ENTRIES ||
+    servers.filter((pin) => pin.state !== 'removed').length > 32 ||
     servers.filter((pin) => pin.state === 'enabled').length > 16
   )
     throw new HostedMcpConflictError('MCP selection exceeds its capacity.');
@@ -224,7 +226,9 @@ export async function readHostedMcpSettings(
       body['schemaVersion'] !== 1 ||
       body['revision'] !== revision ||
       !Array.isArray(body['servers']) ||
-      body['servers'].length > 32
+      body['servers'].length > MAX_MCP_SELECTION_ENTRIES ||
+      body['servers'].filter((value) => object(value)['state'] !== 'removed')
+        .length > 32
     )
       throw new Error('Invalid MCP settings.');
     const command = parseHostedMcpCommand(body['command']);
