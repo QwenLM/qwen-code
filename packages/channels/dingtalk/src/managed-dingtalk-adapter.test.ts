@@ -1100,11 +1100,43 @@ describe('managed DingTalk adapter review fixes', () => {
       adapter as unknown as { store: { save: (state: unknown) => void } }
     ).store;
     const saveSpy = vi.spyOn(store, 'save');
-    // An acked frame the shutdown drain would otherwise persist.
+    // Park the tick inside submitInbound so its post-answer persist lands after
+    // the compromise — the in-flight tick, not a shutdown drain, is the writer
+    // the ownership guard must silence.
+    let releaseSubmit!: () => void;
+    const submitGate = new Promise<void>((resolve) => {
+      releaseSubmit = resolve;
+    });
+    const originalSubmit = plane.controlPlane.submitInbound.bind(
+      plane.controlPlane,
+    );
+    plane.controlPlane.submitInbound = async (event) => {
+      await submitGate;
+      return originalSubmit(event);
+    };
     fake.push('m1', messageData({ msgId: 'm1' }));
+    const ticking = adapter.tick();
+    await new Promise((resolve) => setImmediate(resolve));
     saveSpy.mockClear();
-    compromise(); // a second owner won the state directory
-    await adapter.disconnect(); // the shutdown drain must not rewrite the file
+    compromise(); // a second owner won the state directory mid-tick
+    releaseSubmit();
+    await ticking;
     expect(saveSpy).not.toHaveBeenCalled();
+  });
+
+  it('persists the frame at acceptance so a hard kill before the next tick does not lose it (R8-1)', async () => {
+    const cwd = tempCwd();
+    const first = await connectedAdapter(cwd);
+    first.fake.push(
+      'm1',
+      messageData({ msgId: 'm1', text: { content: 'hello' } }),
+    );
+    // Hard-kill shape: no tick and no disconnect on the first adapter. A fresh
+    // process reads only the persisted state file; an in-memory inbox frame is
+    // lost because the provider was already told SUCCESS and never redelivers.
+    const second = await connectedAdapter(cwd);
+    await second.adapter.tick();
+    expect(second.plane.submit.map((event) => event.text)).toEqual(['hello']);
+    await second.adapter.disconnect();
   });
 });

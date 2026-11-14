@@ -86,7 +86,6 @@ const INSTANCE_SCOPED_REFUSALS = new Set([
   'workspace_unavailable',
 ]);
 const INSTANCE_REFUSAL_DROP_LIMIT = 1;
-const INBOX_LIMIT = 256;
 const CHANNEL_NOT_FOUND = 'channel_not_found';
 // The wire's text bound (the control plane's Jakarta @Size) and the Harness
 // envelope's byte line, mirrored locally to keep this package free of core
@@ -147,7 +146,6 @@ export class ManagedDingtalkAdapter {
   private abort?: AbortController;
   private registeredGeneration?: number;
   private instanceStalled = false;
-  private readonly inbox: InboxItem[] = [];
 
   constructor(options: ManagedDingtalkAdapterOptions) {
     this.settings = dingtalkSettings(options.config);
@@ -243,10 +241,9 @@ export class ManagedDingtalkAdapter {
       if (this.pollLoop) this.loop = this.runLoop();
     } catch (error) {
       this.stop();
-      // Frames acked between stream.connect() and a failed registration are
-      // already durable on the provider side; persist them as claims so a
-      // restart re-drives them instead of losing them.
-      await this.drainInboxOnShutdown().catch(() => undefined);
+      // Frames acked between stream.connect() and a failed registration were
+      // already persisted as claims by onMessage, so a restart re-drives them;
+      // there is no in-memory inbox to drain.
       await this.release();
       throw error;
     }
@@ -255,85 +252,46 @@ export class ManagedDingtalkAdapter {
   async disconnect(): Promise<void> {
     this.stop();
     await this.loop;
-    try {
-      await this.drainInboxOnShutdown();
-    } finally {
-      await this.controlPlane.disconnect().catch(() => undefined);
-      await this.release();
-    }
+    // Accepted frames are already durable claims (onMessage persists before
+    // acking), so shutdown has no inbox to drain.
+    await this.controlPlane.disconnect().catch(() => undefined);
+    await this.release();
   }
 
-  // The stream acked these messages and will never redeliver them; persist them
-  // as claims before releasing the lock so a graceful restart re-drives them
-  // instead of losing them. They are not submitted here — the next process owns
-  // the admission. Bound the drain by the pending cap so it never evicts an
-  // already-persisted claim (the provider acked that one too and will not
-  // redeliver it).
-  private async drainInboxOnShutdown(): Promise<void> {
-    const state = this.state;
-    if (!state) return;
-    while (
-      this.inbox.length > 0 &&
-      state.pending.length < MANAGED_DINGTALK_PENDING_LIMIT
-    ) {
-      const item = this.inbox[0]!;
-      await this.admit(item, false);
-      this.inbox.shift();
-    }
-    if (this.inbox.length > 0) {
-      this.log(
-        `Managed DingTalk could not persist ${this.inbox.length} acked message(s): the pending claim table is full.`,
-      );
-      this.inbox.length = 0;
-    }
-  }
-
-  /** One admission drain and one outbound pull, for callers that drive it. */
+  /** One admission re-drive and one outbound pull, for callers that drive it. */
   async tick(): Promise<void> {
-    try {
-      await this.ensureRegistered(this.state!);
-    } catch (error) {
-      // Re-registration failed before the drain could run. Persist any
-      // already-acked inbox backlog as durable claims (the generation is 0, so
-      // the drain persists without submitting) — otherwise a frame acked just
-      // before the generation reset would live only in memory for the whole
-      // outage and be lost on a hard restart. The next tick retries registration.
-      await this.drainInbox().catch(() => undefined);
-      throw error;
-    }
+    await this.ensureRegistered(this.state!);
     await this.resubmitPending();
-    await this.drainInbox();
     await this.reportOrphanedOutbound();
     await this.pullOutbox();
   }
 
-  // Returns whether the frame was queued. Acceptance is the commit point: the
-  // caller acks SUCCESS only on true, so an overflow leaves the frame unacked
-  // and the provider's own redelivery is the backstop instead of a silent drop.
-  // Acceptance must mean "a durable claim will be persisted", not merely inbox
-  // room. While the claim table is full there is no slot, so a frame acked here
-  // would live only in memory and be lost on a hard restart. While admission is
-  // stalled or the instance is unregistered, a new frame is left unacked for
-  // provider redelivery rather than parked in memory: a stalled drain persists
-  // the backlog, but a failed re-registration throws before the drain runs. The
-  // already-acked backlog is made durable by drainInbox and by the tick's
-  // registration-failure path. Couple the gate to these conditions.
+  // Returns whether the frame was durably accepted. Acceptance is the commit
+  // point: the caller acks SUCCESS only on true, and true is returned only
+  // after stageInbound has persisted the claim, so a hard kill in the window
+  // before the next tick cannot lose an acked frame — the provider never
+  // redelivers on this ack-once stream. A full claim table, a stall, or an
+  // unregistered instance leaves the frame unacked (LATER) for provider
+  // redelivery; a store.save() failure also returns false rather than letting
+  // the throw escape into the SDK callback.
   private onMessage(messageId: string, data: string): boolean {
-    if (!this.running) return false;
+    if (!this.running || this.ownershipLost) return false;
     if (
       this.instanceStalled ||
       this.registeredGeneration === 0 ||
-      this.inbox.length >= INBOX_LIMIT ||
-      (this.state?.pending.length ?? 0) + this.inbox.length >=
-        MANAGED_DINGTALK_PENDING_LIMIT
+      (this.state?.pending.length ?? 0) >= MANAGED_DINGTALK_PENDING_LIMIT
     ) {
       this.log(
         `Managed DingTalk has no durable claim slot; message ${messageId} is left unacked for redelivery.`,
       );
       return false;
     }
-    this.inbox.push({ messageId, data });
-    return true;
+    try {
+      this.stageInbound({ messageId, data });
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private async runLoop(): Promise<void> {
@@ -354,28 +312,6 @@ export class ManagedDingtalkAdapter {
     }
   }
 
-  private async drainInbox(): Promise<void> {
-    const state = this.state;
-    if (!state) return;
-    while (this.running && this.inbox.length > 0) {
-      if (state.pending.length >= MANAGED_DINGTALK_PENDING_LIMIT) return;
-      // Peek, then shift only after the claim is durable: a failed store.save()
-      // must leave the frame in the inbox for the next tick, not drop it.
-      const item = this.inbox[0]!;
-      // Every acked frame must become a durable claim. Submit only while
-      // admission is live — not stalled and still registered; while stalled or
-      // unregistered the claim is persisted without submitting, so a hard
-      // restart re-drives the backlog instead of losing it. The gate refuses
-      // new frames during the stall, and the stall-lift / re-register re-drives
-      // pending, so the backlog flows once the binding answers again.
-      await this.admit(
-        item,
-        !this.instanceStalled && this.registeredGeneration !== 0,
-      );
-      this.inbox.shift();
-    }
-  }
-
   private senderAllowed(sender: string): boolean {
     switch (this.policy.senderPolicy) {
       case 'disabled':
@@ -387,7 +323,13 @@ export class ManagedDingtalkAdapter {
     }
   }
 
-  private async admit(item: InboxItem, driveSubmit = true): Promise<void> {
+  // Synchronously stage the frame as a durable claim. Acceptance is the commit
+  // point: onMessage calls this before acking SUCCESS, so the claim is on disk
+  // before the provider is told the frame was received and a hard kill in the
+  // window before the next tick cannot lose it. The async submit() is left to
+  // the tick (resubmitPending). A store.save() failure throws and onMessage
+  // returns false (LATER) so the provider redelivers.
+  private stageInbound(item: InboxItem): void {
     const state = this.state!;
     let parsed: Record<string, unknown>;
     try {
@@ -471,7 +413,6 @@ export class ManagedDingtalkAdapter {
       -MANAGED_DINGTALK_PENDING_LIMIT,
     );
     this.persist();
-    if (driveSubmit) await this.submit(eventId, event);
   }
 
   private async submit(
@@ -793,7 +734,7 @@ export class ManagedDingtalkAdapter {
 
   private persist(): void {
     // Once the lock is compromised the state file belongs to another process;
-    // never rewrite it, even from an in-flight tick or the shutdown drain.
+    // never rewrite it, even from an in-flight tick's post-await persist.
     if (this.ownershipLost) return;
     if (this.state) this.store.save(this.state);
   }
