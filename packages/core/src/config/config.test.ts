@@ -96,7 +96,10 @@ import { logGoalState, logRipgrepFallback } from '../telemetry/loggers.js';
 import { RipgrepFallbackEvent } from '../telemetry/types.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
 import { ToolNames } from '../tools/tool-names.js';
-import { applySkillSideEffects } from '../tools/skill-utils.js';
+import {
+  applySkillSideEffects,
+  collectAvailableSkillEntries,
+} from '../tools/skill-utils.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import { AgentType, HookEventName } from '../hooks/types.js';
 import { MessageBus } from '../confirmation-bus/message-bus.js';
@@ -1093,6 +1096,26 @@ describe('Server Config (config.ts)', () => {
     await config.initialize(options);
     return config;
   };
+
+  it('publishes late registered commands without waiting for the skills cache TTL', async () => {
+    const config = await initConfig(
+      {},
+      { ...SKIP_ALL_INIT, skipSkillManager: false },
+    );
+    const manager = config.getSkillManager()!;
+    expect(
+      (await collectAvailableSkillEntries(manager, config)).entries,
+    ).toEqual([]);
+
+    for (const name of ['validation:echo', 'validation:replacement']) {
+      config.setModelInvocableCommandsProvider(() => [
+        { name, description: name },
+      ]);
+      expect(
+        (await collectAvailableSkillEntries(manager, config)).entries,
+      ).toEqual([{ name, description: name }]);
+    }
+  });
   /** A recording Config in an ACP session opted in to the writer lease. */
   const leasedConfig = (overrides: Partial<ConfigParameters> = {}) =>
     makeConfig({

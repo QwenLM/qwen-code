@@ -173,6 +173,7 @@ import { InputFormat, OutputFormat } from '../output/types.js';
 import { PromptRegistry } from '../prompts/prompt-registry.js';
 import { ResourceRegistry } from '../resources/resource-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
+import { clearCollectedSkillEntriesCache } from '../tools/skill-utils.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
 import {
   authoredSkillName,
@@ -13242,6 +13243,9 @@ export class Config {
     provider: () => ReadonlyArray<{ name: string; description: string }>,
   ): void {
     this.modelInvocableCommandsProvider = provider;
+    if (this.skillManager) {
+      clearCollectedSkillEntriesCache(this.skillManager);
+    }
   }
 
   /**
