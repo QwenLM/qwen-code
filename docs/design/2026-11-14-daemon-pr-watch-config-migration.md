@@ -395,7 +395,8 @@ scans are accepted as-is.
    (`GithubAdapter.ts:9178-9189`). This repository cancels superseded runs
    routinely, so core's predicate will fire `ci_failure` on some of them.
    Keeping one definition is what PR A already shipped, and excluding them
-   would require enumerating rollup contexts instead of reading `rollup.state`.
+   would require enumerating rollup contexts and special-casing those conclusions,
+   instead of reading each entry's own state or conclusion.
    The recurring noise is accepted explicitly under **Decisions and open
    questions** below.
 9. **The setting is operator-only.** It spends daemon-wide `gh` budget and

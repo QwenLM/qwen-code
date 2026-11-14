@@ -311,7 +311,8 @@ listing 在同一 tick 稍后才跑）。drain 的扫描继续独立，沿用其
    「a superseded run's cancellation is not a CI failure of this head」
    （`GithubAdapter.ts:9178-9189`）。本仓库经常取消被取代的 run，因此 core 的谓词
    会在其中一些上触发 `ci_failure`。保留单一定义正是 PR A 已发布的形状，而排除它们
-   需要枚举 rollup contexts 而不是读 `rollup.state`。这份反复出现的噪声已在下方
+   需要枚举 rollup contexts 并对这些结论做特判，而不是读取每个条目自己的 state 或
+   conclusion。这份反复出现的噪声已在下方
    **决策与待定问题**里被明确接受。
 9. **该设置是 operator-only。** 它花费 daemon 全局的 `gh` 预算并向跨 workspace 的会话
    注入提示词，因此一个仓库不得为整个 daemon 打开它；受信任门控的别名才是按 workspace
