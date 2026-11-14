@@ -84,6 +84,7 @@ import { base64ToBlob } from '../utils/base64';
 import { isDefinitelyRejectedPromptAdmission } from '../utils/promptAdmission';
 import {
   getActiveTodosForPlanRevision,
+  getFloatingTodos,
   isExitPlanApprovalRequest,
 } from '../utils/todos';
 import { findMonitorTaskForTool } from '../utils/monitorTasks';
@@ -128,10 +129,12 @@ import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
 import { SessionRecoveryBanner } from './SessionRecoveryBanner';
 import { QueuedPromptDisplay } from './QueuedPromptDisplay';
 import { GoalStatusStrip } from './GoalStatusStrip';
+import { TodoPanel } from './panels/TodoPanel';
 import composerStatusStyles from './ComposerStatusStack.module.css';
 import { GoalEditDialog } from './dialogs/GoalEditDialog';
 import { nextApprovalMode, parsePlanCommand } from '../utils/planMode';
 import { useApprovalModes } from '../hooks/useApprovalModes';
+import { useStableArray } from '../hooks/useShallowMemo';
 import { ToolApproval } from './messages/ToolApproval';
 import { AskUserQuestion } from './messages/AskUserQuestion';
 import { createContextUsageMessageData } from './messages/ContextUsageMessage';
@@ -674,6 +677,22 @@ export function ChatPane({
         : [],
     [isExitPlanApproval, messages, pendingToolApproval, sessionWorkflowEnabled],
   );
+  // Per-pane floating todo chip — the pane's own session todos, mirroring the
+  // main view's footer panel. `messages` comes from this pane's transcript (it
+  // sits under its own DaemonSessionProvider), so the chip tracks whichever
+  // session the pane shows. Hidden while the transcript catches up or once
+  // there is nothing left to track.
+  const floatingTodosState = useMemo(
+    () => getFloatingTodos(messages),
+    [messages],
+  );
+  const floatingTodos = useStableArray(floatingTodosState.todos, (todo) =>
+    JSON.stringify([todo.id, todo.status, todo.content, todo.blockedBy ?? []]),
+  );
+  const showFloatingTodos =
+    !connection.catchingUp &&
+    floatingTodos.length > 0 &&
+    !floatingTodosState.allCompleted;
   // Tracked in a ref so an async approval-mode switch (handleSelectMode) reads
   // the approval current when setApprovalMode *resolves*, not a stale one
   // captured at click time — mirrors App's pendingApprovalRef.
@@ -1952,6 +1971,16 @@ export function ChatPane({
       </div>
 
       <div className={styles.footer}>
+        {showFloatingTodos && (
+          <div className={styles.bottomPanels}>
+            <TodoPanel
+              todos={floatingTodos}
+              hasLiveActivity={
+                streamingState !== 'idle' || sessionHasActivePrompt
+              }
+            />
+          </div>
+        )}
         {pendingToolApproval && (
           <div className={styles.approval} data-testid="pane-approval">
             <ToolApproval

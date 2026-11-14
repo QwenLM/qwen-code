@@ -4445,3 +4445,65 @@ describe('pane approval mode allowlist', () => {
     expect(latestChatEditorProps.availableModes).toEqual([]);
   });
 });
+
+describe('pane floating todo panel (#13353)', () => {
+  const todoGroupMessage = (
+    todos: Array<{ id: string; content: string; status: string }>,
+  ) =>
+    [
+      { id: 'm1', role: 'user', content: 'hi' },
+      {
+        id: 'm2',
+        role: 'tool_group',
+        tools: [
+          {
+            id: 'tool-1',
+            toolName: 'todo_write',
+            kind: 'think',
+            status: 'completed',
+            args: { todos },
+          },
+        ],
+      },
+    ] as never[];
+
+  it("shows the pane's own session todos as a floating chip", () => {
+    messagesState = todoGroupMessage([
+      { id: 'a', content: 'First step', status: 'in_progress' },
+      { id: 'b', content: 'Second step', status: 'pending' },
+    ]);
+    render();
+
+    expect(container!.textContent).toContain('Step 1 / 2');
+    // The hover detail carries the full list for the pane's session.
+    expect(container!.textContent).toContain('First step');
+    expect(container!.textContent).toContain('Second step');
+  });
+
+  it('stays hidden while the pane transcript catches up', () => {
+    messagesState = todoGroupMessage([
+      { id: 'a', content: 'First step', status: 'in_progress' },
+      { id: 'b', content: 'Second step', status: 'pending' },
+    ]);
+    connectionState = { ...connectionState, catchingUp: true };
+    render();
+
+    expect(container!.textContent).not.toContain('Step 1 / 2');
+  });
+
+  it('hides once every todo of the pane session is completed', () => {
+    messagesState = todoGroupMessage([
+      { id: 'a', content: 'First step', status: 'completed' },
+      { id: 'b', content: 'Second step', status: 'completed' },
+    ]);
+    render();
+
+    expect(container!.textContent).not.toContain('Step 1 / 2');
+  });
+
+  it('stays hidden when the pane session has no todos', () => {
+    render();
+
+    expect(container!.textContent).not.toContain('Step ');
+  });
+});
