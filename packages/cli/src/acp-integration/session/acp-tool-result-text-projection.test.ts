@@ -5,6 +5,7 @@
  */
 
 import { Buffer } from 'node:buffer';
+import type { ShellResultDisplay } from '@qwen-code/qwen-code-core/utils/shell-result.js';
 import type { SessionUpdate } from '@agentclientprotocol/sdk';
 import { describe, expect, it } from 'vitest';
 import {
@@ -49,6 +50,152 @@ function jsonBytes(value: unknown): number {
 }
 
 describe('ACP tool-result text projection', () => {
+  it.each(['😀', '\n\t"\\\u0000'])(
+    'bounds structured shell results in JSON bytes while preserving metadata: %j',
+    (unit) => {
+      const output = `HEAD-${unit.repeat(50_000)}-TAIL`;
+      const rawOutput: ShellResultDisplay = {
+        type: 'shell_result',
+        version: 1,
+        text: output,
+        output,
+        directory: '/workspace/项目',
+        exitCode: 137,
+        signal: 9,
+        pid: 42,
+        error: `ERROR-${unit.repeat(40_000)}-END`,
+        outcome: 'timed_out',
+        notices: ['Foreground command timed out', output],
+        truncated: false,
+        outputFiles: ['/tmp/shell-output.log'],
+      };
+      const meta = { toolName: 'run_shell_command', custom: 'preserved' };
+      const update = {
+        ...toolUpdate([textBlock(output)], rawOutput, meta),
+        status: 'failed' as const,
+      };
+      const projected = projectAcpToolResultUpdate(update);
+      const result = asRecord(projected)['rawOutput'] as ShellResultDisplay;
+
+      expect(jsonBytes(result)).toBeLessThanOrEqual(
+        ACP_TOOL_RESULT_TEXT_JSON_BYTE_BUDGET,
+      );
+      expect(jsonBytes(asRecord(projected)['content'])).toBeLessThanOrEqual(
+        ACP_TOOL_RESULT_TEXT_JSON_BYTE_BUDGET,
+      );
+      expect(asRecord(projected)['status']).toBe('failed');
+      expect(projected._meta).toEqual(meta);
+      expect(result).toMatchObject({
+        type: 'shell_result',
+        version: 1,
+        directory: rawOutput.directory,
+        exitCode: 137,
+        signal: 9,
+        pid: 42,
+        outcome: 'timed_out',
+        truncated: true,
+        outputFiles: ['/tmp/shell-output.log'],
+      });
+      expect(result.notices).toHaveLength(2);
+      expect(result.notices[0]).toBe(rawOutput.notices[0]);
+      for (const text of [
+        result.output,
+        result.text,
+        result.error!,
+        result.notices[1],
+      ]) {
+        expect(text).toContain(ACP_TOOL_RESULT_TEXT_TRUNCATION_MARKER);
+        expect(text).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])/u);
+        expect(text).not.toMatch(/(?<![\ud800-\udbff])[\udc00-\udfff]/u);
+      }
+      expect(result.output.startsWith('HEAD-')).toBe(true);
+      expect(result.output.endsWith('-TAIL')).toBe(true);
+      expect(rawOutput.output).toBe(output);
+      expect(rawOutput.truncated).toBe(false);
+    },
+  );
+
+  it('preserves a small structured shell result unchanged, including empty output', () => {
+    const result: ShellResultDisplay = {
+      type: 'shell_result',
+      version: 1,
+      text: 'No output',
+      output: '',
+      directory: '(root)',
+      exitCode: 0,
+      signal: null,
+      pid: null,
+      error: null,
+      outcome: 'completed',
+      notices: ['Output saved'],
+      truncated: true,
+      outputFiles: ['/tmp/output.log'],
+    };
+    const update = toolUpdate([textBlock(result.text)], result);
+    expect(projectAcpToolResultUpdate(update)).toBe(update);
+  });
+
+  it('redistributes unused field budgets to long shell output', () => {
+    const result: ShellResultDisplay = {
+      type: 'shell_result',
+      version: 1,
+      text: 'short',
+      output: 'x'.repeat(200_000),
+      directory: '/tmp',
+      exitCode: 0,
+      signal: null,
+      pid: null,
+      error: null,
+      outcome: 'completed',
+      notices: ['notice'],
+      truncated: false,
+      outputFiles: [],
+    };
+    const projected = asRecord(
+      projectAcpToolResultUpdate(toolUpdate([], result)),
+    )['rawOutput'] as ShellResultDisplay;
+    expect(projected.text).toBe('short');
+    expect(projected.notices).toEqual(['notice']);
+    expect(projected.truncated).toBe(true);
+    expect(jsonBytes(projected)).toBeLessThanOrEqual(
+      ACP_TOOL_RESULT_TEXT_JSON_BYTE_BUDGET,
+    );
+    expect(jsonBytes(projected)).toBeGreaterThan(
+      ACP_TOOL_RESULT_TEXT_JSON_BYTE_BUDGET - 8,
+    );
+  });
+
+  it.each([10, 200_000])(
+    'drops unknown structured fields of length %i',
+    (size) => {
+      const result: ShellResultDisplay = {
+        type: 'shell_result',
+        version: 1,
+        text: 'ok',
+        output: 'ok',
+        directory: '/tmp',
+        exitCode: 0,
+        signal: null,
+        pid: null,
+        error: null,
+        outcome: 'completed',
+        notices: [],
+        truncated: false,
+        outputFiles: [],
+      };
+      const projected = projectAcpToolResultUpdate(
+        toolUpdate([], {
+          ...result,
+          internalPayload: 'x'.repeat(size),
+        }),
+      );
+      expect(asRecord(projected)['rawOutput']).toEqual(result);
+      expect(jsonBytes(asRecord(projected)['rawOutput'])).toBeLessThanOrEqual(
+        ACP_TOOL_RESULT_TEXT_JSON_BYTE_BUDGET,
+      );
+    },
+  );
+
   it.each([65_535, 65_536, 65_537])(
     'enforces the rawOutput boundary at %i JSON bytes',
     (targetBytes) => {

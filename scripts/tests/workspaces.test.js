@@ -4,9 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   getTestCiWorkspacePackageJsonPaths,
@@ -29,7 +37,7 @@ describe('workspace helpers', () => {
     for (const packagePath of [
       'packages/cli/package.json',
       'packages/core/package.json',
-      'packages/desktop-shell/package.json',
+      'packages/desktop/package.json',
       'packages/channels/base/package.json',
     ]) {
       writeFile(root, packagePath, '{}\n');
@@ -39,7 +47,7 @@ describe('workspace helpers', () => {
       getWorkspacePackageJsonPaths(root, [
         'packages/*',
         'packages/channels/base',
-        '!packages/desktop-shell',
+        '!packages/desktop',
       ]),
     ).toEqual([
       'packages/channels/base/package.json',
@@ -55,7 +63,7 @@ describe('workspace helpers', () => {
     for (const packagePath of [
       'packages/cli/package.json',
       'packages/core/package.json',
-      'packages/desktop-shell/package.json',
+      'packages/desktop/package.json',
       'packages/channels/base/package.json',
     ]) {
       writeFile(root, packagePath, '{}\n');
@@ -65,7 +73,7 @@ describe('workspace helpers', () => {
       getWorkspacePackageJsonPaths(root, [
         'packages\\*',
         'packages\\channels\\base',
-        '!packages\\desktop-shell',
+        '!packages\\desktop',
       ]),
     ).toEqual([
       'packages/channels/base/package.json',
@@ -116,6 +124,37 @@ describe('workspace helpers', () => {
       'integrations/with-ci/package.json',
       'packages/channels/nested-ci/package.json',
     ]);
+  });
+
+  it('selects the workspaces npm runs test:ci in', () => {
+    // npm resolves the workspaces itself for `npm run test:ci:workspaces`
+    // and for the Linux test job's lane script
+    // (.github/scripts/ci/run-unit-test-lanes.sh), which lists them with
+    // `npm pkg get`. The pins that gate on this selector's set must name the
+    // suites those runs start.
+    const root = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      '../..',
+    );
+    const result = spawnSync(
+      'npm',
+      ['pkg', 'get', 'scripts.test:ci', '--workspaces', '--json'],
+      { cwd: root, encoding: 'utf8', shell: process.platform === 'win32' },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    const npmNames = Object.entries(JSON.parse(result.stdout))
+      .filter(([, script]) => typeof script === 'string')
+      .map(([name]) => name)
+      .sort();
+    const selectorNames = getTestCiWorkspacePackageJsonPaths(root)
+      .map(
+        (packageJsonPath) =>
+          JSON.parse(readFileSync(path.join(root, packageJsonPath), 'utf8'))
+            .name,
+      )
+      .sort();
+    expect(npmNames).toEqual(selectorNames);
+    expect(npmNames).toContain('@qwen-code/web-shell');
   });
 
   function writeFile(root, relativePath, content) {

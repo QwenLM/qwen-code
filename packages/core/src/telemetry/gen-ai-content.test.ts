@@ -24,7 +24,34 @@ function fixture(name: string): object {
   ) as object;
 }
 
+// Output-side GenAI message parts and messages.
+const text = (content: string) => ({ type: 'text', content });
+const reasoning = (content: string) => ({ type: 'reasoning', content });
+/** The `read` tool call `call-1`; `arguments` is present only when given. */
+const readCall = (args?: object) => ({
+  type: 'tool_call',
+  id: 'call-1',
+  name: 'read',
+  ...(args !== undefined && { arguments: args }),
+});
+const readResponse = (response: unknown) => ({
+  type: 'tool_call_response',
+  id: 'call-1',
+  response,
+});
+const assistantOutput = (parts: object[], finish_reason: string) => ({
+  role: 'assistant',
+  parts,
+  finish_reason,
+});
+
 describe('GenAI content conversion', () => {
+  const geminiToolDefinitions = (...functionDeclarations: object[]) =>
+    extractLlmContent({ config: { tools: [{ functionDeclarations }] } })
+      .toolDefinitions;
+  const openAiInput = (messages: unknown[]) =>
+    extractOpenAiContent({ messages }).inputMessages;
+
   it('converts final OpenAI messages and tool definitions', () => {
     const content = extractOpenAiContent({
       messages: [
@@ -67,35 +94,24 @@ describe('GenAI content conversion', () => {
     expect(content.inputMessages).toEqual([
       {
         role: 'system',
-        parts: [{ type: 'text', content: 'be helpful' }],
+        parts: [text('be helpful')],
       },
       {
         role: 'user',
-        parts: [{ type: 'text', content: 'read a' }],
+        parts: [text('read a')],
       },
       {
         role: 'assistant',
         parts: [
-          { type: 'reasoning', content: 'reasoning' },
-          { type: 'text', content: 'calling' },
+          reasoning('reasoning'),
+          text('calling'),
           { type: 'refusal', content: 'refused detail' },
-          {
-            type: 'tool_call',
-            id: 'call-1',
-            name: 'read',
-            arguments: { path: 'a' },
-          },
+          readCall({ path: 'a' }),
         ],
       },
       {
         role: 'tool',
-        parts: [
-          {
-            type: 'tool_call_response',
-            id: 'call-1',
-            response: '{"output":"ok"}',
-          },
-        ],
+        parts: [readResponse('{"output":"ok"}')],
       },
     ]);
     expect(content.systemInstructions).toBeUndefined();
@@ -150,35 +166,19 @@ describe('GenAI content conversion', () => {
       ],
     });
 
-    expect(content.systemInstructions).toEqual([
-      { type: 'text', content: 'be helpful' },
-    ]);
+    expect(content.systemInstructions).toEqual([text('be helpful')]);
     expect(content.inputMessages?.[1]).toEqual({
       role: 'assistant',
-      parts: [
-        { type: 'reasoning', content: 'reason' },
-        {
-          type: 'tool_call',
-          id: 'call-1',
-          name: 'read',
-          arguments: { path: 'a' },
-        },
-      ],
+      parts: [reasoning('reason'), readCall({ path: 'a' })],
     });
     expect(content.inputMessages?.slice(2)).toEqual([
       {
         role: 'tool',
-        parts: [
-          {
-            type: 'tool_call_response',
-            id: 'call-1',
-            response: [{ type: 'text', text: 'ok' }],
-          },
-        ],
+        parts: [readResponse([{ type: 'text', text: 'ok' }])],
       },
       {
         role: 'user',
-        parts: [{ type: 'text', content: 'continue' }],
+        parts: [text('continue')],
       },
     ]);
     expect(content.toolDefinitions).toEqual([
@@ -289,7 +289,7 @@ describe('GenAI content conversion', () => {
       {
         role: 'assistant',
         parts: [
-          { type: 'text', content: 'answer' },
+          text('answer'),
           {
             type: 'blob',
             mime_type: 'image/png',
@@ -299,9 +299,7 @@ describe('GenAI content conversion', () => {
         ],
       },
     ]);
-    expect(content.systemInstructions).toEqual([
-      { type: 'text', content: 'system' },
-    ]);
+    expect(content.systemInstructions).toEqual([text('system')]);
     expect(content.toolDefinitions).toEqual([
       {
         type: 'function',
@@ -317,37 +315,29 @@ describe('GenAI content conversion', () => {
 
   it('omits only invalid optional parameters but rejects missing identity', () => {
     expect(
-      extractLlmContent({
-        config: {
-          tools: [
-            {
-              functionDeclarations: [
-                { name: 'read', parameters: { type: 'NOT_A_SCHEMA_TYPE' } },
-                {
-                  name: 'write',
-                  parametersJsonSchema: {
-                    type: 'object',
-                    required: 'path',
-                  },
-                },
-                {
-                  name: 'list',
-                  parametersJsonSchema: { allOf: [] },
-                },
-                {
-                  name: 'search',
-                  parametersJsonSchema: {
-                    type: 'object',
-                    properties: {
-                      query: { type: 'string', pattern: '[' },
-                    },
-                  },
-                },
-              ],
-            },
-          ],
+      geminiToolDefinitions(
+        { name: 'read', parameters: { type: 'NOT_A_SCHEMA_TYPE' } },
+        {
+          name: 'write',
+          parametersJsonSchema: {
+            type: 'object',
+            required: 'path',
+          },
         },
-      }).toolDefinitions,
+        {
+          name: 'list',
+          parametersJsonSchema: { allOf: [] },
+        },
+        {
+          name: 'search',
+          parametersJsonSchema: {
+            type: 'object',
+            properties: {
+              query: { type: 'string', pattern: '[' },
+            },
+          },
+        },
+      ),
     ).toEqual([
       { type: 'function', name: 'read' },
       { type: 'function', name: 'write' },
@@ -366,18 +356,10 @@ describe('GenAI content conversion', () => {
 
   it('preserves boolean Draft-07 tool parameter schemas', () => {
     expect(
-      extractLlmContent({
-        config: {
-          tools: [
-            {
-              functionDeclarations: [
-                { name: 'allowed', parametersJsonSchema: true },
-                { name: 'impossible', parametersJsonSchema: false },
-              ],
-            },
-          ],
-        },
-      }).toolDefinitions,
+      geminiToolDefinitions(
+        { name: 'allowed', parametersJsonSchema: true },
+        { name: 'impossible', parametersJsonSchema: false },
+      ),
     ).toEqual([
       { type: 'function', name: 'allowed', parameters: true },
       { type: 'function', name: 'impossible', parameters: false },
@@ -386,38 +368,28 @@ describe('GenAI content conversion', () => {
 
   it('rejects incomplete message snapshots and preserves generic parts', () => {
     expect(
-      extractOpenAiContent({
-        messages: [
-          { role: 'user', content: 'ok' },
-          { content: 'missing role' },
-        ],
-      }).inputMessages,
+      openAiInput([
+        { role: 'user', content: 'ok' },
+        { content: 'missing role' },
+      ]),
     ).toBeUndefined();
     expect(
-      extractOpenAiContent({
-        messages: [
-          {
-            role: 'user',
-            content: [{ type: 'provider_extension', value: 1 }],
-          },
-        ],
-      }).inputMessages,
+      openAiInput([
+        {
+          role: 'user',
+          content: [{ type: 'provider_extension', value: 1 }],
+        },
+      ]),
     ).toEqual([
       {
         role: 'user',
         parts: [{ type: 'provider_extension', value: 1 }],
       },
     ]);
-    expect(
-      extractOpenAiContent({
-        messages: [{ role: 'assistant', content: null }],
-      }).inputMessages,
-    ).toEqual([{ role: 'assistant', parts: [] }]);
-    expect(
-      extractOpenAiContent({
-        messages: [{ role: 'user', content: [null] }],
-      }).inputMessages,
-    ).toBeUndefined();
+    expect(openAiInput([{ role: 'assistant', content: null }])).toEqual([
+      { role: 'assistant', parts: [] },
+    ]);
+    expect(openAiInput([{ role: 'user', content: [null] }])).toBeUndefined();
   });
 
   it('preserves redacted Anthropic thinking as a generic part', () => {
@@ -480,8 +452,52 @@ describe('GenAI JSON writer', () => {
 });
 
 describe('GenAI output accumulation', () => {
+  const newOutput = () => new GenAiOutputAccumulator(true, 10_000);
+  const finalMessages = (output: GenAiOutputAccumulator) =>
+    JSON.parse(output.finalize(true)!);
+  /** OpenAI stream chunk with a single choice 0; `finish_reason` only when given. */
+  const openAiDelta = (delta: object, finish_reason?: string) => ({
+    choices: [
+      {
+        index: 0,
+        delta,
+        ...(finish_reason !== undefined && { finish_reason }),
+      },
+    ],
+  });
+  /** Gemini response with a single model candidate 0; `finishReason` only when given. */
+  const llmCandidate = (parts: object[], finishReason?: string) => ({
+    candidates: [
+      {
+        index: 0,
+        content: { role: 'model', parts },
+        ...(finishReason !== undefined && { finishReason }),
+      },
+    ],
+  });
+  const readToolUse = () => ({
+    type: 'tool_use',
+    id: 'call-1',
+    name: 'read',
+    input: {},
+  });
+  const blockStart = (index: number, content_block: object) => ({
+    type: 'content_block_start',
+    index,
+    content_block,
+  });
+  const blockDelta = (index: number, delta: object) => ({
+    type: 'content_block_delta',
+    index,
+    delta,
+  });
+  const stopReason = (stop_reason: string) => ({
+    type: 'message_delta',
+    delta: { stop_reason },
+  });
+
   it('collects all non-streaming OpenAI choices in index order', () => {
-    const output = new GenAiOutputAccumulator(true, 10_000);
+    const output = newOutput();
     output.recordOpenAiResponse({
       choices: [
         {
@@ -497,22 +513,14 @@ describe('GenAI output accumulation', () => {
       ],
     });
 
-    expect(JSON.parse(output.finalize(true)!)).toEqual([
-      {
-        role: 'assistant',
-        parts: [{ type: 'text', content: 'A' }],
-        finish_reason: 'stop',
-      },
-      {
-        role: 'assistant',
-        parts: [{ type: 'text', content: 'B' }],
-        finish_reason: 'length',
-      },
+    expect(finalMessages(output)).toEqual([
+      assistantOutput([text('A')], 'stop'),
+      assistantOutput([text('B')], 'length'),
     ]);
   });
 
   it('collects all OpenAI choices in index order', () => {
-    const output = new GenAiOutputAccumulator(true, 10_000);
+    const output = newOutput();
     output.recordOpenAiChunk({
       choices: [
         { index: 1, delta: { content: 'B' }, finish_reason: null },
@@ -531,64 +539,36 @@ describe('GenAI output accumulation', () => {
     });
 
     expect(output.finishReasons).toEqual(['stop', 'length']);
-    expect(JSON.parse(output.finalize(true)!)).toEqual([
-      {
-        role: 'assistant',
-        parts: [
-          { type: 'reasoning', content: 'R' },
-          { type: 'text', content: 'A' },
-        ],
-        finish_reason: 'stop',
-      },
-      {
-        role: 'assistant',
-        parts: [{ type: 'text', content: 'B' }],
-        finish_reason: 'length',
-      },
+    expect(finalMessages(output)).toEqual([
+      assistantOutput([reasoning('R'), text('A')], 'stop'),
+      assistantOutput([text('B')], 'length'),
     ]);
   });
 
   it('merges fragmented tool-call arguments', () => {
-    const output = new GenAiOutputAccumulator(true, 10_000);
-    output.recordOpenAiChunk({
-      choices: [
-        {
-          index: 0,
-          delta: {
-            tool_calls: [
-              {
-                index: 0,
-                id: 'call-1',
-                function: { name: 'read', arguments: '{"path":' },
-              },
-            ],
+    const output = newOutput();
+    output.recordOpenAiChunk(
+      openAiDelta({
+        tool_calls: [
+          {
+            index: 0,
+            id: 'call-1',
+            function: { name: 'read', arguments: '{"path":' },
           },
-        },
-      ],
-    });
-    output.recordOpenAiChunk({
-      choices: [
-        {
-          index: 0,
-          delta: {
-            tool_calls: [{ index: 0, function: { arguments: '"a"}' } }],
-          },
-          finish_reason: 'tool_calls',
-        },
-      ],
-    });
-    expect(JSON.parse(output.finalize(true)!)[0].parts).toEqual([
-      {
-        type: 'tool_call',
-        id: 'call-1',
-        name: 'read',
-        arguments: { path: 'a' },
-      },
-    ]);
+        ],
+      }),
+    );
+    output.recordOpenAiChunk(
+      openAiDelta(
+        { tool_calls: [{ index: 0, function: { arguments: '"a"}' } }] },
+        'tool_calls',
+      ),
+    );
+    expect(finalMessages(output)[0].parts).toEqual([readCall({ path: 'a' })]);
   });
 
   it('does not invent missing tool-call arguments', () => {
-    const output = new GenAiOutputAccumulator(true, 10_000);
+    const output = newOutput();
     output.recordOpenAiResponse({
       choices: [
         {
@@ -608,144 +588,67 @@ describe('GenAI output accumulation', () => {
       ],
     });
 
-    expect(JSON.parse(output.finalize(true)!)[0].parts).toEqual([
-      {
-        type: 'tool_call',
-        id: 'call-1',
-        name: 'read',
-      },
-    ]);
+    expect(finalMessages(output)[0].parts).toEqual([readCall()]);
   });
 
   it('merges Anthropic content blocks by block index', () => {
-    const output = new GenAiOutputAccumulator(true, 10_000);
-    output.recordAnthropicEvent({
-      type: 'content_block_start',
-      index: 0,
-      content_block: { type: 'thinking', thinking: 'rea' },
-    });
-    output.recordAnthropicEvent({
-      type: 'content_block_delta',
-      index: 0,
-      delta: { type: 'thinking_delta', thinking: 'son' },
-    });
-    output.recordAnthropicEvent({
-      type: 'content_block_start',
-      index: 1,
-      content_block: {
-        type: 'tool_use',
-        id: 'call-1',
-        name: 'read',
-        input: {},
-      },
-    });
-    output.recordAnthropicEvent({
-      type: 'content_block_delta',
-      index: 1,
-      delta: { type: 'input_json_delta', partial_json: '{"path":"a"}' },
-    });
-    output.recordAnthropicEvent({
-      type: 'message_delta',
-      delta: { stop_reason: 'tool_use' },
-    });
+    const output = newOutput();
+    for (const event of [
+      blockStart(0, { type: 'thinking', thinking: 'rea' }),
+      blockDelta(0, { type: 'thinking_delta', thinking: 'son' }),
+      blockStart(1, readToolUse()),
+      blockDelta(1, { type: 'input_json_delta', partial_json: '{"path":"a"}' }),
+      stopReason('tool_use'),
+    ]) {
+      output.recordAnthropicEvent(event);
+    }
 
-    expect(JSON.parse(output.finalize(true)!)).toEqual([
-      {
-        role: 'assistant',
-        parts: [
-          { type: 'reasoning', content: 'reason' },
-          {
-            type: 'tool_call',
-            id: 'call-1',
-            name: 'read',
-            arguments: { path: 'a' },
-          },
-        ],
-        finish_reason: 'tool_use',
-      },
+    expect(finalMessages(output)).toEqual([
+      assistantOutput(
+        [reasoning('reason'), readCall({ path: 'a' })],
+        'tool_use',
+      ),
     ]);
   });
 
   it('preserves an empty Anthropic tool input when no deltas follow', () => {
-    const output = new GenAiOutputAccumulator(true, 10_000);
-    output.recordAnthropicEvent({
-      type: 'content_block_start',
-      index: 0,
-      content_block: {
-        type: 'tool_use',
-        id: 'call-1',
-        name: 'read',
-        input: {},
-      },
-    });
-    output.recordAnthropicEvent({
-      type: 'message_delta',
-      delta: { stop_reason: 'tool_use' },
-    });
+    const output = newOutput();
+    output.recordAnthropicEvent(blockStart(0, readToolUse()));
+    output.recordAnthropicEvent(stopReason('tool_use'));
 
-    expect(JSON.parse(output.finalize(true)!)[0].parts).toEqual([
-      {
-        type: 'tool_call',
-        id: 'call-1',
-        name: 'read',
-        arguments: {},
-      },
-    ]);
+    expect(finalMessages(output)[0].parts).toEqual([readCall({})]);
   });
 
   it('does not invent an output candidate for Anthropic keepalive events', () => {
-    const output = new GenAiOutputAccumulator(true, 10_000);
+    const output = newOutput();
     output.recordAnthropicEvent({ type: 'ping' });
     expect(output.finalize(false)).toBeUndefined();
     expect(output.finishReasons).toBeUndefined();
   });
 
   it('uses error for unfinished candidates only on failure', () => {
-    const failed = new GenAiOutputAccumulator(true, 10_000);
-    failed.recordLlmResponse({
-      candidates: [
-        { index: 0, content: { role: 'model', parts: [{ text: 'a' }] } },
-      ],
-    });
+    const failed = newOutput();
+    failed.recordLlmResponse(llmCandidate([{ text: 'a' }]));
     expect(JSON.parse(failed.finalize(false)!)[0].finish_reason).toBe('error');
     expect(failed.finishReasons).toEqual(['error']);
 
-    const successful = new GenAiOutputAccumulator(true, 10_000);
-    successful.recordLlmResponse({
-      candidates: [
-        { index: 0, content: { role: 'model', parts: [{ text: 'a' }] } },
-      ],
-    });
+    const successful = newOutput();
+    successful.recordLlmResponse(llmCandidate([{ text: 'a' }]));
     expect(successful.finalize(true)).toBeUndefined();
   });
 
   it('tracks non-streaming candidate failures when content capture is off', () => {
-    const responses: Array<
-      [GenAiOutputAccumulator, (accumulator: GenAiOutputAccumulator) => void]
-    > = [
-      [
-        new GenAiOutputAccumulator(false, 10_000),
-        (accumulator) =>
-          accumulator.recordOpenAiResponse({
-            choices: [
-              { index: 0, message: { role: 'assistant', content: '' } },
-            ],
-          }),
-      ],
-      [
-        new GenAiOutputAccumulator(false, 10_000),
-        (accumulator) => accumulator.recordAnthropicResponse({ content: [] }),
-      ],
-      [
-        new GenAiOutputAccumulator(false, 10_000),
-        (accumulator) =>
-          accumulator.recordLlmResponse({
-            candidates: [{ index: 0, content: { role: 'model', parts: [] } }],
-          }),
-      ],
+    const records: Array<(accumulator: GenAiOutputAccumulator) => void> = [
+      (accumulator) =>
+        accumulator.recordOpenAiResponse({
+          choices: [{ index: 0, message: { role: 'assistant', content: '' } }],
+        }),
+      (accumulator) => accumulator.recordAnthropicResponse({ content: [] }),
+      (accumulator) => accumulator.recordLlmResponse(llmCandidate([])),
     ];
 
-    for (const [accumulator, recordResponse] of responses) {
+    for (const recordResponse of records) {
+      const accumulator = new GenAiOutputAccumulator(false, 10_000);
       recordResponse(accumulator);
       expect(accumulator.finalize(false)).toBeUndefined();
       expect(accumulator.finishReasons).toEqual(['error']);
@@ -753,45 +656,13 @@ describe('GenAI output accumulation', () => {
   });
 
   it('accumulates Gemini text chunks without replacing earlier content', () => {
-    const output = new GenAiOutputAccumulator(true, 10_000);
-    output.recordLlmChunk({
-      candidates: [
-        {
-          index: 0,
-          content: {
-            role: 'model',
-            parts: [{ text: 'think', thought: true }],
-          },
-        },
-      ],
-    });
-    output.recordLlmChunk({
-      candidates: [
-        {
-          index: 0,
-          content: { role: 'model', parts: [{ text: 'hel' }] },
-        },
-      ],
-    });
-    output.recordLlmChunk({
-      candidates: [
-        {
-          index: 0,
-          content: { role: 'model', parts: [{ text: 'lo' }] },
-          finishReason: 'STOP',
-        },
-      ],
-    });
+    const output = newOutput();
+    output.recordLlmChunk(llmCandidate([{ text: 'think', thought: true }]));
+    output.recordLlmChunk(llmCandidate([{ text: 'hel' }]));
+    output.recordLlmChunk(llmCandidate([{ text: 'lo' }], 'STOP'));
 
-    expect(JSON.parse(output.finalize(true)!)).toEqual([
-      {
-        role: 'assistant',
-        parts: [
-          { type: 'reasoning', content: 'think' },
-          { type: 'text', content: 'hello' },
-        ],
-        finish_reason: 'STOP',
-      },
+    expect(finalMessages(output)).toEqual([
+      assistantOutput([reasoning('think'), text('hello')], 'STOP'),
     ]);
   });
 
@@ -805,21 +676,15 @@ describe('GenAI output accumulation', () => {
     expect(tooSmallForEmpty.finalize(true)).toBeUndefined();
 
     const overflow = new GenAiOutputAccumulator(true, 20);
-    overflow.recordOpenAiChunk({
-      choices: [
-        {
-          index: 0,
-          delta: { content: 'too much content' },
-          finish_reason: 'stop',
-        },
-      ],
-    });
+    overflow.recordOpenAiChunk(
+      openAiDelta({ content: 'too much content' }, 'stop'),
+    );
     expect(overflow.finishReasons).toEqual(['stop']);
     expect(overflow.finalize(true)).toBeUndefined();
   });
 
   it('omits an incomplete full snapshot instead of dropping invalid choices', () => {
-    const output = new GenAiOutputAccumulator(true, 10_000);
+    const output = newOutput();
     output.recordOpenAiResponse({
       choices: [
         {
@@ -832,33 +697,27 @@ describe('GenAI output accumulation', () => {
     });
     expect(output.finalize(true)).toBeUndefined();
 
-    const missing = new GenAiOutputAccumulator(true, 10_000);
+    const missing = newOutput();
     missing.recordLlmResponse({});
     expect(missing.finalize(false)).toBeUndefined();
   });
 
   it('budgets many small fragments by final content rather than chunk count', () => {
-    const expected = new GenAiOutputAccumulator(true, 10_000);
+    const expected = newOutput();
     for (let index = 0; index < 100; index++) {
-      expected.recordOpenAiChunk({
-        choices: [{ index: 0, delta: { content: 'a' } }],
-      });
+      expected.recordOpenAiChunk(openAiDelta({ content: 'a' }));
     }
-    expected.recordOpenAiChunk({
-      choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
-    });
+    expected.recordOpenAiChunk(openAiDelta({}, 'stop'));
     const serialized = expected.finalize(true)!;
 
     const exact = new GenAiOutputAccumulator(true, serialized.length);
     const oversized = new GenAiOutputAccumulator(true, serialized.length - 1);
     for (let index = 0; index < 100; index++) {
-      const chunk = { choices: [{ index: 0, delta: { content: 'a' } }] };
+      const chunk = openAiDelta({ content: 'a' });
       exact.recordOpenAiChunk(chunk);
       oversized.recordOpenAiChunk(chunk);
     }
-    const finish = {
-      choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
-    };
+    const finish = openAiDelta({}, 'stop');
     exact.recordOpenAiChunk(finish);
     oversized.recordOpenAiChunk(finish);
 
@@ -867,19 +726,11 @@ describe('GenAI output accumulation', () => {
   });
 
   it('does not reject an exact-limit response with many small parts', () => {
-    const chunk = {
-      candidates: [
-        {
-          index: 0,
-          content: {
-            role: 'model',
-            parts: Array.from({ length: 20 }, () => ({ text: '' })),
-          },
-          finishReason: 'STOP',
-        },
-      ],
-    };
-    const expected = new GenAiOutputAccumulator(true, 10_000);
+    const chunk = llmCandidate(
+      Array.from({ length: 20 }, () => ({ text: '' })),
+      'STOP',
+    );
+    const expected = newOutput();
     expected.recordLlmChunk(chunk);
     const serialized = expected.finalize(true)!;
 

@@ -8,121 +8,47 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, type Root } from 'react';
 import { createRoot } from 'react-dom/client';
+import {
+  DAEMON_APPROVAL_MODES,
+  createSidebarMocks,
+  installSidebarDomShims,
+  sidebarSessionPage,
+  staticSidebarSessionCatalogQuery,
+} from '../../test/sidebarHarness';
 
-const { connection, workspace, workspaceActions, active, pinned, archived } =
-  vi.hoisted(() => {
-    const makeSessions = () => {
-      const state = {
-        sessions: [] as never[],
-        loading: false,
-        error: null as Error | null,
-        data: [] as never[] | undefined,
-        reload: vi.fn().mockResolvedValue(undefined),
-        deleteSession: vi.fn().mockResolvedValue(true),
-        archiveSession: vi.fn().mockResolvedValue(true),
-        unarchiveSession: vi.fn().mockResolvedValue(true),
-        exportSession: vi.fn(),
-      };
-      state.data = state.sessions;
-      return state;
-    };
-    return {
-      connection: {
-        status: 'connected',
-        sessionId: null as string | null,
-        workspaceCwd: '/tmp/project',
-        capabilities: { qwenCodeVersion: '1.2.3', features: [] } as
-          | { qwenCodeVersion: string; features: string[] }
-          | undefined,
-      },
-      workspace: {
-        capabilities: undefined,
-        client: {
-          workspaceByCwd: vi.fn(() => ({
-            listWorkspaceSessions: vi.fn().mockResolvedValue([]),
-            listSessionGroups: vi.fn().mockResolvedValue({
-              groups: [],
-              colorOptions: [],
-            }),
-          })),
-        },
-        refreshCapabilities: vi.fn(),
-      },
-      workspaceActions: {
-        addWorkspace: vi.fn(),
-        removeWorkspace: vi.fn(),
-        listSessionGroups: vi.fn().mockResolvedValue({
-          groups: [],
-          colorOptions: [],
-        }),
-        createSessionGroup: vi.fn(),
-        updateSessionGroup: vi.fn(),
-        deleteSessionGroup: vi.fn(),
-        updateSessionOrganization: vi.fn(),
-      },
-      active: makeSessions(),
-      pinned: makeSessions(),
-      archived: makeSessions(),
-    };
-  });
+const mocks = createSidebarMocks({
+  connectionCapabilities: { qwenCodeVersion: '1.2.3', features: [] },
+});
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
-  useConnection: () => connection,
-  useActions: () => ({ renameSession: vi.fn() }),
-  useWorkspace: () => workspace,
-  useWorkspaceActions: () => workspaceActions,
-  useChannels: () => ({ data: undefined, catalog: [], channels: {} }),
-  useSessions: (options?: { archiveState?: string; group?: string }) => {
-    if (options?.archiveState === 'archived') return archived;
-    if (options?.group === 'pinned') return pinned;
-    return active;
-  },
+  DAEMON_APPROVAL_MODES,
+  useConnection: () => mocks.connection,
+  useActions: () => mocks.actions,
+  useWorkspace: () => mocks.workspace,
+  useWorkspaceActions: () => mocks.workspaceActions,
+  useChannels: () => mocks.channels,
+  useSessions: (options?: { archiveState?: string; group?: string }) =>
+    sidebarSessionPage(mocks, options),
 }));
 
 vi.mock('../../session-catalog/session-catalog-hooks', () => ({
-  useWebShellSessions: (options?: {
-    archiveState?: string;
-    group?: string;
-  }) => {
-    if (options?.archiveState === 'archived') return archived;
-    if (options?.group === 'pinned') return pinned;
-    return active;
-  },
+  useWebShellSessions: (options?: { archiveState?: string; group?: string }) =>
+    sidebarSessionPage(mocks, options),
   useSessionCatalogController: () => ({
-    refreshQueries: vi.fn(),
+    refreshQueries: mocks.refreshSessionCatalogQueries,
     invalidateWorkspace: vi.fn(),
     refreshWorkspace: vi.fn(),
     renamed: vi.fn(),
   }),
   useSessionCatalogPolling: () => undefined,
-  useSessionCatalogQuery: () => ({
-    sessions: [],
-    loading: false,
-    error: undefined,
-    reload: vi.fn(),
-  }),
-  useSessionCatalogQueries: vi.fn(() => []),
+  useSessionCatalogQuery: () => staticSidebarSessionCatalogQuery(),
+  useSessionCatalogQueries: mocks.useSessionCatalogQueries,
 }));
 
 const { I18nProvider } = await import('../../i18n');
 const { WebShellSidebar } = await import('./WebShellSidebar');
 
-globalThis.IS_REACT_ACT_ENVIRONMENT = true;
-if (!globalThis.PointerEvent) {
-  globalThis.PointerEvent = MouseEvent as typeof PointerEvent;
-}
-if (!Element.prototype.hasPointerCapture) {
-  Element.prototype.hasPointerCapture = () => false;
-}
-if (!Element.prototype.setPointerCapture) {
-  Element.prototype.setPointerCapture = () => {};
-}
-if (!Element.prototype.releasePointerCapture) {
-  Element.prototype.releasePointerCapture = () => {};
-}
-if (!Element.prototype.scrollIntoView) {
-  Element.prototype.scrollIntoView = () => {};
-}
+installSidebarDomShims();
 
 const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
 const VERSION_BADGE_TITLE = 'Qwen Code v1.2.3';
@@ -189,67 +115,29 @@ afterEach(() => {
   }
 });
 
-describe('WebShellSidebar footer version label degradation', () => {
-  it('drops the version label at the compact breakpoint along with the settings label', () => {
-    // 260px is SIDEBAR_DEFAULT_WIDTH and sits inside the compact footer window
-    // (<344px) where #6522 already hides the settings text label and switches
-    // the footer buttons to fixed 26px icons.
-    const container = mountAtWidth(260);
-    const settings = settingsButton(container);
-
-    expect(settings).not.toBeNull();
-    expect(settings?.querySelector('svg')).not.toBeNull();
-    expect(settings?.textContent).not.toContain(SETTINGS_LABEL);
-
-    // The version label is the only footer child that can neither shrink nor
-    // truncate (`flex: 0 0 auto; white-space: nowrap`), so once the footer is
-    // compact it has to leave the row at the same breakpoint as the settings
-    // label. Otherwise it overflows `.footerPrimary` and paints over the
-    // action icons in `.footerActions` (issue #11453).
-    expect(versionBadge(container)).toBeNull();
-    expect(container.textContent ?? '').not.toContain('v1.2.3');
-
-    // Hiding the label must not take the action icons with it.
-    expect(
-      container.querySelector(`button[aria-label="${DAEMON_STATUS_LABEL}"]`),
-    ).not.toBeNull();
-    expect(
-      container.querySelector(`button[aria-label="${COLLAPSE_LABEL}"]`),
-    ).not.toBeNull();
-  });
-
-  it('keeps the version label hidden across the whole overlap range from #11453', () => {
-    for (const width of [250, 280, 300, 330, 343]) {
+describe('WebShellSidebar footer version row', () => {
+  it.each([220, 250, 260, 280, 300, 330, 343])(
+    'keeps the version separate from compact action buttons at %spx',
+    (width) => {
       const container = mountAtWidth(width);
+      const settings = settingsButton(container);
+      const badge = versionBadge(container);
+      expect(settings?.querySelector('svg')).not.toBeNull();
+      expect(settings?.textContent).not.toContain(SETTINGS_LABEL);
+      expect(badge?.textContent).toBe('v1.2.3');
+      expect(badge?.parentElement).not.toBe(settings?.parentElement);
       expect(
-        versionBadge(container),
-        `version label should be hidden at ${width}px`,
-      ).toBeNull();
-    }
-  });
+        container.querySelector(`button[aria-label="${DAEMON_STATUS_LABEL}"]`),
+      ).not.toBeNull();
+      expect(
+        container.querySelector(`button[aria-label="${COLLAPSE_LABEL}"]`),
+      ).not.toBeNull();
+    },
+  );
 
-  it('shows the settings label and the version label above the compact breakpoint', () => {
+  it('shows the settings label on a wide sidebar', () => {
     const container = mountAtWidth(360);
-    const settings = settingsButton(container);
-    const badge = versionBadge(container);
-
-    expect(settings).not.toBeNull();
-    expect(settings?.textContent).toContain(SETTINGS_LABEL);
-    expect(badge).not.toBeNull();
-    expect(badge?.textContent).toBe('v1.2.3');
-  });
-
-  it('leaves the footer below the former tight breakpoint unchanged', () => {
-    const container = mountAtWidth(220);
-    const settings = settingsButton(container);
-
-    expect(settings).not.toBeNull();
-    expect(settings?.querySelector('svg')).not.toBeNull();
-    expect(settings?.textContent).not.toContain(SETTINGS_LABEL);
-    expect(versionBadge(container)).toBeNull();
-    expect(container.textContent ?? '').not.toContain('v1.2.3');
-    expect(
-      container.querySelector(`button[aria-label="${COLLAPSE_LABEL}"]`),
-    ).not.toBeNull();
+    expect(settingsButton(container)?.textContent).toContain(SETTINGS_LABEL);
+    expect(versionBadge(container)?.textContent).toBe('v1.2.3');
   });
 });

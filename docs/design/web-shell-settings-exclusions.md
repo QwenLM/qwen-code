@@ -16,7 +16,7 @@ Forward options through App and the public provider wrappers. Settings-launched 
 
 ## Files and compatibility
 
-Changes stay in the web-shell package: client/settings.ts, App.tsx, index.tsx, SettingsMessage.tsx, focused tests, and embedding documentation. No daemon protocol changes. Both scopes and all existing visual styling remain unchanged. Setting aliases are manually maintained; new schema settings remain visible until a supported alias is explicitly excluded.
+Changes stay in the web-shell package: client/settings.ts, App.tsx, index.tsx, SettingsMessage.tsx, focused tests, and embedding documentation. No daemon protocol changes. Both scopes and all existing visual styling remain unchanged. Setting aliases are manually maintained; new schema settings remain visible until a supported alias is explicitly excluded. Partially superseded by [web-shell-settings-allowlists.md](web-shell-settings-allowlists.md), which adds `includeItems` and hides unaliased keys whenever an allowlist is configured.
 
 ## Verification
 

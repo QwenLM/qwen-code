@@ -21,7 +21,6 @@ when that is the background-safe route.
 | Windows/Win32 | `64e82449` | Run `29257963004`: 122/122 rows, 99 delivered and 23 exact refusals |
 | macOS/Quartz | `0b9b5d94` and `64e82449` | Logged-in local matrix: 138 deliveries and 6 exact refusals passed; one cursor-interrupted row passed alone on the final head, for effective 145/145 coverage |
 | Linux/X11 | `268a6ab1` | Run `29254936043`: 116/116 rows, 75 delivered and 41 exact refusals |
-| Linux/Sway | `268a6ab1` and `64e82449` | Run `29255208927` passed native and capture 36/36; run `29257961614` passed shared 80/80, for effective 116/116 coverage |
 
 ## Shared web harnesses
 
@@ -36,14 +35,10 @@ Foreground rows listed here are delivered for both AX and PX.
 | macOS | WKWebView | left/right/double click AX/PX, type text AX/PX, press key AX/PX, hotkey AX/PX, scroll AX/PX, child window AX/PX, editor save AX | drag PX: `background_unavailable` |
 | Linux X11 | Electron | Background AX left click and child-window actions deliver with strict focus, z-order, cursor, and input-leak oracles | Background PX left click, AX/PX right and double click, PX child window and drag, AX/PX keyboard and scroll, and AX editor save return exact `background_unavailable` |
 | Linux X11 | Tauri | Background AX/PX left click and child-window actions deliver with strict focus, z-order, cursor, and input-leak oracles | Other background pointer, keyboard, scroll, drag, and editor-save shapes return exact `background_unavailable` |
-| Linux Sway | Electron | The full 40-cell catalog has accepted fixture-owned evidence; safe semantic and compositor routes deliver | Focus-bound and raw background shapes without a target-addressed route return their declared exact refusal |
-| Linux Sway | Tauri | The full 40-cell WebKitGTK catalog has accepted fixture-owned evidence, including live compositor geometry and roleless WebProcess targeting | Focus-bound and raw background shapes without a target-addressed route return their declared exact refusal |
 
 All shared background rows require fixture state, focus, z-order, and
 no-leaked-input evidence. Windows, macOS, and X11 also require cursor
-preservation. Wayland reports the cursor oracle as unsupported until the
-environment can prove it; [issue #2194](https://github.com/trycua/cua/issues/2194)
-tracks possible observer routes.
+preservation.
 Foreground rows require fixture state and retain a video plus before/after turn
 evidence.
 
@@ -69,16 +64,13 @@ integrity-level harness can exercise it.
 
 ## Native Linux
 
-Linux is recorded per display server and compositor because Wayland protocols
-are capabilities, not one uniform API.
+Linux supports X11, including X11 applications under XWayland. Native Wayland
+backends and their validation lanes have been removed. The exact-source runs
+below are historical baselines; acceptance of the upgrade requires new evidence.
 
 | Environment | Proven contracts | Refusals and gaps |
 | --- | --- | --- |
 | X11/Openbox | Exact run `29254936043` passed all 116 declared outcomes: 75 deliveries and 41 exact refusals. GTK3 AT-SPI actions and values, foreground XTest pointer/keyboard routes, capture, desktop scope, and the complete Electron/Tauri catalog all reached fixture-owned oracles. | Xvfb does not prove the real-Xorg MPX/uinput background pointer route. Toolkits that reject XSendEvent retain exact refusals. |
-| Sway/wlroots | Runs `29255208927` and `29257961614` passed the complete 116 outcomes: native and capture 36/36, then shared 80/80. The Electron, Tauri, GTK3, capture, and desktop-scope catalogs use live Sway identity/geometry and external fixture oracles. | Stock Wayland cannot target raw focus-bound input at an occluded surface. Those rows retain exact refusals; another wlroots compositor is not assumed equivalent until a material divergence is reported and tested. Exact cursor preservation remains unproven and is tracked in [issue #2194](https://github.com/trycua/cua/issues/2194). |
-| GNOME/Mutter | A real GNOME 46 Wayland run passed the full GTK3 matrix, 31/31. The WinRects helper supplies stable window ids, frame and buffer geometry, stacking, verified activation, stage capture, and the compositor cursor. AT-SPI handles semantic actions; persistent portal/libei sessions deliver foreground PX click, right/double click, drag, scroll, type, key, and hotkey. Background rows either deliver through AT-SPI with focus and leak guards or return the declared exact refusal. | The helper requires installation plus one Shell-session restart. Without it, target-bound foreground input refuses. Portal video and a shared Electron/Tauri GNOME run remain open. |
-| KDE/KWin | A Plasma 6 session reached GTK AT-SPI discovery, generic toplevel discovery, and portal-interface preflight. Portal input is compiled into release binaries. | No behavioral matrix is accepted. A target-addressable KWin activation adapter is not implemented, so foreground portal/libei input refuses instead of injecting into the wrong focused app. |
-| Nested `cua-compositor` | The optional backend owns its nested session and is covered by typed shared, native, and capture catalogs. Run `29197643541` passed native GTK3 31/31; run `29197887387` passed capture/scope 5/5. Full shared run `29199596935` passed 26/36 Electron rows before the occluded-subtree and wheel-frame repairs. | The lane remains experimental. The accepted full shared run still has 10 failures; focused replacement runs reduce that set but do not promote the environment. Unicode text and a canonical parallel-drag row remain unproven. This private route is not evidence of a stock-Wayland capability. |
 
 PX background left-click rows may resolve the screen point to an actionable
 AT-SPI node. Such a pass proves the public PX-addressed behavior and its desktop

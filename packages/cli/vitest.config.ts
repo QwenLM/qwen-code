@@ -30,6 +30,10 @@ export default defineConfig({
       // the wildcard, or the wildcard will claim it and point at a file
       // that does not exist.
       ...toAliases({
+        '@qwen-code/qwen-code-core/shellResult': path.resolve(
+          __dirname,
+          '../core/src/utils/shell-result.ts',
+        ),
         '@qwen-code/qwen-code-core/omniPolicyCollection': path.resolve(
           __dirname,
           '../core/src/omni/policy/model-call-collection.ts',
@@ -49,6 +53,10 @@ export default defineConfig({
         '@qwen-code/qwen-code-core/transcriptRecords': path.resolve(
           __dirname,
           '../core/src/utils/transcript-records.ts',
+        ),
+        '@qwen-code/qwen-code-core/telemetryConstants': path.resolve(
+          __dirname,
+          '../core/src/telemetry/constants.ts',
         ),
         '@qwen-code/qwen-code-core/userPromptSubmitContext': path.resolve(
           __dirname,
@@ -205,6 +213,10 @@ export default defineConfig({
         '@qwen-code/sdk/daemon/ui/transcript': path.resolve(
           __dirname,
           '../sdk-typescript/src/daemon/ui/transcript.ts',
+        ),
+        '@qwen-code/sdk/daemon/ui': path.resolve(
+          __dirname,
+          '../sdk-typescript/src/daemon/ui/index.ts',
         ),
         '@qwen-code/sdk/daemon/types': path.resolve(
           __dirname,

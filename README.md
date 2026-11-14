@@ -19,7 +19,11 @@
 
 </div>
 
-![Qwen Code in the terminal, desktop app, browser, editor, and chat, with VS Code, Zed, JetBrains, Telegram, DingTalk, WeChat, and Feishu integrations](https://img.alicdn.com/imgextra/i3/O1CN01l5GyhGuOPGC3XHtt_!!6000000005884-2-tps-1742-903.png)
+![Qwen Code in the terminal, desktop app, browser, editor, and chat, with VS Code, Zed, JetBrains, Telegram, DingTalk, WeChat, and Feishu integrations](https://img.alicdn.com/imgextra/i1/O1CN01DXWdF8BDUdD3XPhl_!!6000000001721-2-tps-1743-902.png)
+
+| **Qwen Code 1.0 Preview**                                                                                                                                                                                                                                                                                                                                                              |
+| :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Qwen Code 1.0 Preview brings together the agent harness capabilities of [Qoder](https://qoder.com/) and Qwen Code in an open-source release.<br><br>[Try Qwen Code 1.0 Preview](https://github.com/QwenLM/qwen-code/tree/v1.0.0-preview) · [Documentation](https://qwenlm.github.io/qwen-code-docs/1.x/) · [中文文档](https://qwenlm.github.io/qwen-code-docs/1.x/zh/users/overview/). |
 
 ## Why Qwen Code?
 
@@ -32,6 +36,8 @@
 > Qwen Code is actively iterating on itself — using its own agent and models to file issues, submit PRs, review code, and run tests. Powered by the community, driven by AI.
 
 ## Installation
+
+Looking for **Qwen Code 1.0 Preview**? [Get started here](https://github.com/QwenLM/qwen-code/tree/v1.0.0-preview). The instructions below are for the main version.
 
 **Linux / macOS:**
 
@@ -73,7 +79,7 @@ cd /path/to/your-project
 qwen
 ```
 
-Inside the session, run `/auth` to configure your provider and API key. Then try:
+Inside the session, run `/auth` and choose [**Qwen Account with Subscription**](https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=cli) to sign in with your **Plus or Pro subscription**, or configure a provider with an API key. Then try:
 
 ```text
 Explain this repository and show me where to start.
@@ -105,6 +111,7 @@ For automation and custom integrations:
 - **Headless** — Run `qwen -p "..."` in scripts, CI/CD, or batch jobs.
 - **SDKs** — Build with [TypeScript](./packages/sdk-typescript/README.md), [Python](./packages/sdk-python/README.md), or [Java](./packages/sdk-java/qwencode/README.md).
 - **Daemon** — Run `qwen serve` to connect clients over HTTP + SSE (ACP). _(experimental)_ [Daemon guide](https://qwenlm.github.io/qwen-code-docs/en/users/qwen-serve/).
+- **Computer Use** — Set up [native MCP tools](./packages/cua-driver/README.md#agent-integration) or [Node REPL + SDK](./packages/node-repl/README.md#usage) in Qwen Code, Claude Code, or Codex.
 
 <details>
 <summary>SDK example (Python)</summary>
@@ -134,62 +141,75 @@ asyncio.run(main())
 
 </details>
 
+## Daemon Mode
+
+Run Qwen Code as a long-lived service when you want browser, editor, SDK, and automation clients to share agent sessions without each starting a separate process. The daemon provides the built-in Web Shell and an HTTP + SSE API, supports multiple workspaces, and lets clients reconnect to active sessions.
+
+Start it in the foreground and open the Web Shell:
+
+```bash
+qwen serve --open
+```
+
+The default address is `http://127.0.0.1:4170`. To run and manage it in the background instead:
+
+```bash
+qwen daemon start
+qwen daemon status
+qwen daemon logs -f
+qwen daemon stop
+```
+
+By default, the daemon listens on loopback without bearer authentication; any local process that can reach it can use the full API, including code execution. On shared or untrusted hosts, set `QWEN_SERVER_TOKEN` and use `--require-auth`. See the [Daemon guide](./docs/users/qwen-serve.md) for workspaces, authentication, remote access, and the API.
+
 ## Capabilities
 
-If you know Claude Code, you already know Qwen Code — and then some. We've put significant effort into [bringing Qwen Code to feature parity with Claude Code](https://github.com/wenshao/codeagents/blob/main/docs/comparison/qwen-code-improvement-report.md), improving both breadth and reliability across the board.
+Qwen Code ships with a complete agent harness — multi-agent orchestration, persistent memory, and deep extensibility, all built in.
 
-| Feature                                                            | Qwen Code | Claude Code |
-| ------------------------------------------------------------------ | :-------: | :---------: |
-| SubAgents, Agent Teams, Dynamic Workflows                          |     ✓     |      ✓      |
-| Auto-Memory, Auto-Skills, Hooks                                    |     ✓     |      ✓      |
-| Built-in Skills (/review, /batch, /loop, /bugfix…)                 |     ✓     |      ✓      |
-| MCP, Plan Mode, LSP Integration                                    |     ✓     |      ✓      |
-| Auto Mode, Sandbox, Git Worktrees                                  |     ✓     |      ✓      |
-| Computer Use (desktop automation)                                  |     ✓     |      ✓      |
-| IDE Plugins (VS Code / JetBrains / Zed)                            |     ✓     |      ✓      |
-| SDK                                                                |     ✓     |      ✓      |
-| Headless Mode, Session Management                                  |     ✓     |      ✓      |
-| Open-source — model and framework                                  |     ✓     |      —      |
-| Multi-protocol (OpenAI / Anthropic / Gemini / Qwen + any provider) |     ✓     |      —      |
-| Agent Arena (multi-model head-to-head on same task)                |     ✓     |      —      |
-| Daemon Mode — `qwen serve` (multi-client shared agent)             |     ✓     |      —      |
-| IM Channels (Telegram / DingTalk / WeChat / Feishu)                |     ✓     |      —      |
+### Agentic core
+
+- **[SubAgents](https://qwenlm.github.io/qwen-code-docs/en/users/features/sub-agents/)** — delegate focused subtasks to specialized agents with their own context and toolsets, in the foreground or background.
+- **[Agent Teams](https://qwenlm.github.io/qwen-code-docs/en/users/features/multi-agent-coordination/)** _(experimental)_ — a leader coordinates teammates that share a task list and exchange messages, with read-only investigators and an optional single worktree writer.
+- **[Agent Arena](https://qwenlm.github.io/qwen-code-docs/en/users/features/arena/)** _(experimental)_ — run the same task on multiple models in isolated Git worktrees, compare solutions side by side, and merge the winner.
+- **[Dynamic Workflows](https://qwenlm.github.io/qwen-code-docs/en/users/workflow-mode/)** _(opt-in)_ — the model writes JavaScript workflows that orchestrate agents: parallel fan-out, verification passes, and resumable runs.
+- **[Goals](https://qwenlm.github.io/qwen-code-docs/en/users/features/goals/)** — `/goal` keeps the session working across turns until an independent verifier accepts the outcome, within a token budget.
+- **[Scheduled tasks](https://qwenlm.github.io/qwen-code-docs/en/users/features/scheduled-tasks/)** — `/loop` and cron tools re-run prompts on an interval or at a set time.
+
+### Memory, skills, and sessions
+
+- **[Auto-Memory](https://qwenlm.github.io/qwen-code-docs/en/users/features/memory/)** — the agent writes its own notes and recalls them across sessions; your `QWEN.md` and `AGENTS.md` briefings load automatically.
+- **[Skills & Auto-Skills](https://qwenlm.github.io/qwen-code-docs/en/users/features/skills/)** — built-in skills (`/review`, `/batch`, `/bugfix`…) work out of the box; `/learn` distills docs or code into new skills, the agent can generate skills on its own _(opt-in)_, and `/curator` maintains the library.
+- **[Session management](https://qwenlm.github.io/qwen-code-docs/en/users/features/session-overview/)** — resume past conversations with `/resume`, and browse, rename, or archive sessions.
+
+### Extensibility and control
+
+- **[Hooks](https://qwenlm.github.io/qwen-code-docs/en/users/features/hooks/)** — run your own scripts at lifecycle events: before and after tool calls, session start and end, and more.
+- **[MCP](https://qwenlm.github.io/qwen-code-docs/en/users/features/mcp/)** — connect any Model Context Protocol server to add tools, resources, and prompts.
+- **[LSP integration](https://qwenlm.github.io/qwen-code-docs/en/users/features/lsp/)** _(experimental, opt-in)_ — native language-server support: go-to-definition, references, diagnostics, and code actions.
+- **[Computer Use & Browser Use](https://qwenlm.github.io/qwen-code-docs/en/users/features/computer-use/)** — automate desktop applications and the browser through native MCP tools.
+- **[Plan Mode & approval modes](https://qwenlm.github.io/qwen-code-docs/en/users/features/approval-mode/)** — plan read-only before touching files, then choose per-call confirmation, auto-edit, classifier-driven [Auto Mode](https://qwenlm.github.io/qwen-code-docs/en/users/features/auto-mode/), or YOLO.
+- **[Sandbox](https://qwenlm.github.io/qwen-code-docs/en/users/features/sandbox/) & [Git worktrees](https://qwenlm.github.io/qwen-code-docs/en/users/features/worktree/)** — confine tool execution with built-in sandboxing and isolate wide-ranging edits in a temporary worktree.
+
+### Open and multi-platform
+
+- **Open source, inside and out** — the framework and the Qwen models are open source and evolve together.
+- **[Multi-protocol](https://qwenlm.github.io/qwen-code-docs/en/users/configuration/model-providers/)** — OpenAI, Anthropic, Gemini, and Qwen APIs, plus any third-party provider or local model (Ollama / vLLM). Switch at runtime.
+- **Beyond the terminal** — IDE plugins, desktop app, Web UI, IM channels, headless mode, SDKs, and daemon mode. See [How to Use Qwen Code](#how-to-use-qwen-code).
 
 ## Qwen Code Evaluation
 
-### Evaluation Configuration
+On **SWE-bench Verified**, seven Qwen Code versions scored **76.40%–77.80%** on average using the same Qwen 3.7 Max model (500 tasks, three trials per version).
 
-| Configuration           | Value                                                                                               |
-| ----------------------- | --------------------------------------------------------------------------------------------------- |
-| Dataset                 | `princeton-nlp/SWE-bench_Verified`, 500 cases                                                       |
-| Runs                    | 3 trials per version, 1,500 jobs per version; 7 Qwen Code versions                                  |
-| Model                   | `Qwen 3.7 Max`                                                                                      |
-| Sampling                | `temperature=1`, `top_p=0.95`                                                                       |
-| Thinking / Reasoning    | `interleaved_thinking=true`, `thinking_type=adaptive`, `reasoning_effort=high`                      |
-| Context / Output Limits | `context_1m=true`, `model_context_length=1,000,000`, `max_tokens=64,000`, `model_max_tokens=65,535` |
-| Harness Limits          | `max_iterations=500`, `runtime_timeout_sec=7,200`, `agent_timeout_multiplier=3.0`                   |
+![Average SWE-bench Verified scores by Qwen Code version: 0.0.14, 77.80%; 0.1.0, 76.73%; 0.5.0, 76.60%; 0.10.0, 76.47%; 0.15.0, 77.67%; 0.19.0, 76.40%; 0.22.0, 77.33%.](./.github/assets/qwen-code-avg-score-trend.svg)
 
-### Scores by Qwen Code Version
-
-| Version |  Avg Score | Pass Rate | pass@3 | pass^3 |
-| ------- | ---------: | --------: | -----: | -----: |
-| 0.0.14  | **77.80%** |     84.6% |  84.6% |  69.2% |
-| 0.1.0   | **76.73%** |     84.6% |  84.6% |  68.0% |
-| 0.5.0   | **76.60%** |     83.0% |  83.0% |  68.4% |
-| 0.10.0  | **76.47%** |     84.4% |  84.4% |  67.4% |
-| 0.15.0  | **77.67%** |     84.6% |  84.6% |  68.6% |
-| 0.19.0  | **76.40%** |     85.0% |  85.0% |  65.8% |
-| 0.22.0  | **77.33%** |     84.4% |  84.4% |  68.0% |
-
-### Avg Score Trend
-
-![Qwen Code version Avg Score trend](./.github/assets/qwen-code-avg-score-trend.svg)
+[Full results and evaluation configuration →](./docs/evaluation.md)
 
 ## Ecosystem
 
 - [**Qwen Code Desktop**](https://github.com/QwenLM/qwen-code/releases/tag/desktop-latest) — Official desktop app for macOS, Windows, and Linux
 - [**AionUi**](https://github.com/iOfficeAI/AionUi) — A modern GUI for command-line AI tools including Qwen Code
 - [**Gemini CLI Desktop**](https://github.com/Piebald-AI/gemini-cli-desktop) — A cross-platform desktop/web/mobile UI for Qwen Code
+- [**qwen-audio-agent**](https://github.com/QwenAudio/qwen-audio-agent) — Realtime full-duplex voice frontend for Qwen Code over ACP — talk hands-free with barge-in and a local wake word
 
 - [**🦞 Qwen Code Claw**](https://github.com/openclaw/acpx) — Let other agents (Claude, Codex, etc.) delegate coding tasks to Qwen Code via ACP. Paste this prompt into your agent:
 
@@ -200,6 +220,10 @@ Then follow the instructions inside to install, authenticate, and use Qwen Code 
 ```
 
 - [**Aliyun Model Studio CLI**](https://github.com/modelstudioai/cli) — Official CLI for Aliyun's AI platform (`bailian-cli`). Extends Qwen Code with image/video generation, knowledge retrieval, app orchestration, and model deployment
+
+## Privacy
+
+See the [Terms of Service and Privacy Notice](./docs/users/support/tos-privacy.md), including [Chrome extension and Browser Use data handling](./docs/users/support/tos-privacy.md#chrome-extension-and-browser-use).
 
 ## Contributing
 

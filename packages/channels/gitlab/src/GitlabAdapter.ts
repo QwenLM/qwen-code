@@ -5,7 +5,10 @@ import type {
   ChannelConfig,
   Envelope,
 } from '@qwen-code/channel-base';
-import { PollingChannelBase } from '@qwen-code/channel-base';
+import {
+  lowercaseGroupAllowedUsers,
+  PollingChannelBase,
+} from '@qwen-code/channel-base';
 import { Gitlab, type TodoSchema } from '@gitbeaker/rest';
 import { z } from 'zod';
 import { testBotMention, stripBotMention } from './mention.js';
@@ -63,6 +66,17 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     return result.success ? result.data : null;
   }
 
+  /**
+   * GitLab routing is case-insensitive, but the API reports the canonical
+   * `path_with_namespace` spelling, which preserves case (for example
+   * `CalcProgrammer1/OpenRGB`). Match configured groups case-insensitively so
+   * an allowlist typed in any case still admits the project — and still applies
+   * that project's sender policy — mirroring GitHub.
+   */
+  protected override normalizeGroupId(groupId: string): string {
+    return groupId.toLowerCase();
+  }
+
   async connect(): Promise<void> {
     const cfg = this.config as GitlabConfig;
     this.apiHost = (cfg.baseUrl || 'https://gitlab.com').replace(/\/+$/, '');
@@ -99,6 +113,10 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
     );
     this.config.allowedUsers = allowed;
     this.gate.replaceAllowedUsers(allowed);
+    lowercaseGroupAllowedUsers(this.config.groups);
+    if (this.config.operators) {
+      this.config.operators = this.config.operators.map((u) => u.toLowerCase());
+    }
 
     this.startPollLoop();
   }

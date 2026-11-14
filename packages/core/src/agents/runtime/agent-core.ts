@@ -16,6 +16,17 @@
  * and how to interpret the results.
  */
 
+import {
+  createToolLifecycle,
+  type ToolLifecycleEvent,
+  type ToolExecutionStatus,
+} from '../../telemetry/tool-lifecycle.js';
+import {
+  captureHookExecutionOwner,
+  runWithHookExecutionOwner,
+  type HookExecutionOwner,
+} from '../../hooks/hook-execution-context.js';
+import { runWithAgentChat } from './agent-context.js';
 import { randomUUID } from 'node:crypto';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { reportError } from '../../utils/errorReporting.js';
@@ -29,10 +40,10 @@ import {
   getCurrentAgentDepth,
   getCurrentAgentId,
   getRuntimeContentGenerator,
-  isTopLevelSession,
+  runWithAgentConfiguredToolAllowlist,
   runWithAgentContext,
+  runWithAgentDisallowedTools,
   runWithRuntimeContentGenerator,
-  spawnBlockReason,
   type RuntimeContentGeneratorView,
 } from './agent-context.js';
 import {
@@ -42,7 +53,20 @@ import {
   markDuplicateProviderToolCallResponseSent,
   type ServerLlmStreamEvent,
   type ToolCallRequestInfo,
+  type Turn,
 } from '../../core/turn.js';
+import {
+  runAgentLoop,
+  turnModelRound,
+  type AgentLoopDuplicateState,
+  type AgentLoopHost,
+  type AgentLoopOptions,
+  type AgentLoopResult,
+  type AgentLoopSettledCall,
+  type AgentLoopStopReason,
+  type ModelRoundSource,
+} from '../../core/agent-loop.js';
+import { SendMessageType } from '../../core/client.js';
 import { LoopDetectionService } from '../../services/loopDetectionService.js';
 import type { LoopType } from '../../telemetry/types.js';
 import {
@@ -58,6 +82,7 @@ import type {
   ToolResultDisplay,
 } from '../../tools/tools.js';
 import { isShellProgressData } from '../../tools/tools.js';
+import { buildAdvisorReminder } from '../../core/advisor-policy.js';
 import { getInitialChatHistory } from '../../core/environmentContext.js';
 import {
   finalizeToolResponses,
@@ -78,7 +103,8 @@ import type {
   FunctionDeclaration,
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
-import { LlmChat } from '../../core/llm-chat.js';
+import { LlmChat, type StreamEvent } from '../../core/llm-chat.js';
+import { toolCallArgumentsWereIncomplete } from '../../core/incomplete-tool-call-args.js';
 import { assembleSystemPrompt } from '../../core/prompts.js';
 import {
   dedupeToolCallsById,
@@ -110,27 +136,45 @@ import type {
 } from './agent-events.js';
 import { AgentEventEmitter, AgentEventType } from './agent-events.js';
 import { AgentStatistics, type AgentStatsSummary } from './agent-statistics.js';
-import { matchesToolPattern } from '../../permissions/rule-parser.js';
-import { ToolNames } from '../../tools/tool-names.js';
+import { canonicalToolName, ToolNames } from '../../tools/tool-names.js';
+import type { ToolRegistry } from '../../tools/tool-registry.js';
 import { getToolExposure, ToolMode } from '../../tools/code-mode.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
 import { type ContextState, templateString } from './agent-headless.js';
 import { getResponseText } from '../../utils/partUtils.js';
 import { getThoughtSummary } from '../../utils/thoughtUtils.js';
 import {
-  isTeammate,
+  bindRetryWaitObserver,
+  runWithRetryWaitObserver,
+  type RetryWaitEvent,
+} from '../../utils/retry-wait.js';
+import {
   getTeammateContext,
   runWithTeammateIdentity,
 } from '../team/identity.js';
 import type { TeammateIdentity } from '../team/types.js';
 import {
+  EXCLUDED_TOOLS_FOR_SUBAGENTS,
+  EXCLUDED_TOOLS_FOR_TEAMMATES,
+  getExcludedToolsForCurrentContext,
   getLeaderOnlyToolUnavailableMessage,
   getSubagentPlanToolUnavailableMessage,
   isLeaderOnlyToolUnavailableInSubagent,
-  isPlanRequiredTeammateContext,
   isPlanLifecycleToolUnavailableInSubagent,
-  SUBAGENT_PLAN_LIFECYCLE_TOOLS,
+  isToolExcludedForCurrentContext,
+  matchesAgentToolBlocklist,
+  toolConfigAllowsSkill,
 } from './subagent-plan-tool-policy.js';
+
+// The tool-exclusion sets and the context-aware selector now live in
+// subagent-plan-tool-policy.ts so the tool_call bridge (tools/tool-call.ts)
+// can enforce the same exclusion without a circular import. Re-exported here
+// so existing consumers keep importing them from this module.
+export {
+  EXCLUDED_TOOLS_FOR_SUBAGENTS,
+  EXCLUDED_TOOLS_FOR_TEAMMATES,
+  getExcludedToolsForCurrentContext,
+};
 
 const EXECUTION_ALLOWLIST_ERROR_MAX_ITEMS = 8;
 const EXECUTION_ALLOWLIST_ERROR_MAX_CHARS = 240;
@@ -179,60 +223,6 @@ function summarizeExecutionAllowlist(
  * Result of a single reasoning loop invocation.
  */
 /**
- * Tools that must never be available to non-team subagents (including
- * forked agents spawned via the Agent tool).
- * - AgentTool is depth-gated rather than unconditionally excluded:
- *   `isExcluded()` in `prepareTools()` re-admits it while
- *   `canSpawnNestedAgent()` permits another nesting level, and consults
- *   this set only for every other tool. The entry here remains the
- *   fail-closed floor for consumers of the raw set.
- * - Cron tools are session-scoped and should only run from the main session.
- * - TaskStop and SendMessage are parent-side control-plane tools for managing
- *   background subagents; subagents have no agent IDs to manage natively, so
- *   exposing them only widens the surface for cross-agent interference if an
- *   ID leaks via prompt or transcript.
- * - Team management (team_create/team_delete) and task coordination
- *   (task_create/task_update/task_list) are leader/teammate tools. A
- *   non-team Agent subagent has no teammate identity, so isTeammate()
- *   returns false and these tools would treat it as the leader — letting
- *   it delete or rewrite the active team.
- * - Plan lifecycle tools are owned by the caller/main session. A subagent
- *   should return its plan to the caller instead of entering or exiting mode.
- * - Todo state is also parent-owned because subagents share the session's
- *   persisted Todo sidecar.
- */
-export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
-  ToolNames.AGENT,
-  ToolNames.CRON_CREATE,
-  ToolNames.CRON_LIST,
-  ToolNames.CRON_DELETE,
-  ToolNames.LIST_AGENTS,
-  ToolNames.TASK_STOP,
-  ToolNames.SEND_MESSAGE,
-  ToolNames.TEAM_CREATE,
-  ToolNames.TEAM_DELETE,
-  ToolNames.TEAM_PLAN_APPROVAL,
-  ToolNames.REQUEST_SHUTDOWN,
-  ToolNames.TASK_CREATE,
-  ToolNames.TASK_UPDATE,
-  ToolNames.TASK_LIST,
-  ToolNames.TODO_WRITE,
-  ...SUBAGENT_PLAN_LIFECYCLE_TOOLS,
-  // Worktree management belongs to the parent session — a subagent must
-  // never enter or exit the user's worktree state independently.
-  ToolNames.ENTER_WORKTREE,
-  ToolNames.EXIT_WORKTREE,
-  // V1 session artifacts and sources are owned by the parent daemon session.
-  ToolNames.ARTIFACT,
-  ToolNames.RECORD_ARTIFACT,
-  ToolNames.RECORD_SOURCE,
-  // FIX-8 (SEC-I1): WORKFLOW is excluded to prevent unbounded recursive
-  // fan-out: a subagent spawned by Workflow that calls Workflow would create
-  // O(k^n) subagents.
-  ToolNames.WORKFLOW,
-]);
-
-/**
  * Extract the parent session's advertised tool names from its generation
  * config: flatten every function declaration, drop tools a subagent must
  * never inherit (EXCLUDED_TOOLS_FOR_SUBAGENTS), and deduplicate. Shared by
@@ -264,47 +254,24 @@ export function extractParentToolNames(
 }
 
 /**
- * Tools excluded from teammates. Teammates need send_message and the
- * task_* coordination tools to do their job, but they must not be able
- * to create or destroy the team itself — only the leader can do that.
- * Plan lifecycle tools remain caller-owned for teammates too.
+ * Build the executable fork surface shared by launch and resume. Deferred
+ * tools are absent from the parent's declarations but remain reachable
+ * through tool_search/tool_call, so the live registry is part of this
+ * surface. A configured positive allowlist remains the outer bound.
  */
-const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
-  ToolNames.AGENT,
-  ToolNames.CRON_CREATE,
-  ToolNames.CRON_LIST,
-  ToolNames.CRON_DELETE,
-  ToolNames.LIST_AGENTS,
-  ToolNames.TASK_STOP,
-  ToolNames.TEAM_CREATE,
-  ToolNames.TEAM_DELETE,
-  ToolNames.TEAM_PLAN_APPROVAL,
-  ToolNames.REQUEST_SHUTDOWN,
-  ToolNames.TODO_WRITE,
-  ...SUBAGENT_PLAN_LIFECYCLE_TOOLS,
-  // Worktree management belongs to the parent session.
-  ToolNames.ENTER_WORKTREE,
-  ToolNames.EXIT_WORKTREE,
-  ToolNames.RECORD_SOURCE,
-  // Same recursion guard as EXCLUDED_TOOLS_FOR_SUBAGENTS: the teammate
-  // identity propagates through AsyncLocalStorage into anything it
-  // spawns, so prepareTools() would keep choosing THIS exclusion set
-  // for nested agents — without WORKFLOW here, a teammate-launched
-  // workflow re-arms the O(k^n) fan-out the subagent set prevents.
-  ToolNames.WORKFLOW,
-]);
-
-function getExcludedToolsForCurrentContext(): ReadonlySet<string> {
-  if (!isTeammate()) {
-    return EXCLUDED_TOOLS_FOR_SUBAGENTS;
-  }
-  if (!isPlanRequiredTeammateContext()) {
-    return EXCLUDED_TOOLS_FOR_TEAMMATES;
-  }
-
-  const excluded = new Set(EXCLUDED_TOOLS_FOR_TEAMMATES);
-  excluded.delete(ToolNames.EXIT_PLAN_MODE);
-  return excluded;
+export function buildInheritedForkExecutionToolNames(
+  advertisedToolNames: readonly string[],
+  registeredToolNames: readonly string[],
+  configuredToolAllowlist: readonly string[] | undefined,
+): string[] {
+  return Array.from(
+    new Set([...advertisedToolNames, ...registeredToolNames]),
+  ).filter(
+    (toolName) =>
+      !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(toolName) &&
+      (configuredToolAllowlist === undefined ||
+        configuredToolAllowlist.includes(toolName)),
+  );
 }
 
 /**
@@ -327,6 +294,98 @@ export interface ReasoningLoopResult {
    * otherwise). null otherwise.
    */
   loopType?: LoopType | null;
+}
+
+/** What the agent's tool step leaves for the next round. */
+interface ToolStepResult {
+  messages: Content[];
+  repeatedDuplicateProviderToolCall: boolean;
+  /** Executed calls with their model-visible results, in call order.
+   * Consumed by the loop detector for result-aware stateful-read guards
+   * (issue #9450). */
+  results: Array<{
+    toolName: string;
+    args: Record<string, unknown>;
+    responseParts: Part[];
+  }>;
+}
+
+/** A call of a batch that settled, or that an abort cut off. */
+type SettledToolCall = AgentLoopSettledCall & { durationMs: number };
+
+/** What a round on the shared agent loop leaves for the agent's turn. */
+interface SharedRoundResult {
+  /** The loop's stop; none when the round completed or its batch ran. */
+  stop?: AgentLoopStopReason;
+  /** The time limit passed after the model round. */
+  timedOut: boolean;
+  text: string;
+  /** The batch's results, when it ran. */
+  toolStep?: ToolStepResult;
+}
+
+/** A round's tool batch on the agent's scheduler; see `sharedToolStep`. */
+interface SharedToolStep {
+  /** The request for a call; none for a repeat of a call id. */
+  request(fc: FunctionCall): ToolCallRequestInfo | undefined;
+  /** Drops the requests of an attempt a retry or fallback replaced. */
+  reset(): void;
+  /** Gives the requests the round's final response id and truncation. */
+  settle(round: { responseId?: string; wasOutputTruncated: boolean }): void;
+  requestCount(): number;
+  options: Pick<
+    AgentLoopOptions,
+    | 'duplicates'
+    | 'duplicateStateForCall'
+    | 'keepCancelledResults'
+    | 'deferRecording'
+    | 'executor'
+  >;
+  host: Pick<AgentLoopHost, 'endsOnTerminateTurn' | 'onToolResult'>;
+  finish(batch: AgentLoopResult): ToolStepResult;
+}
+
+/**
+ * A round's stream with the agent's request in place of the `Turn`'s for each
+ * call, one per call id, settled with the round's final state at its end.
+ */
+async function* withAgentRequests(
+  stream: AsyncIterator<ServerLlmStreamEvent, Turn | undefined>,
+  step: SharedToolStep,
+  round: () => { responseId?: string; wasOutputTruncated: boolean },
+): AsyncGenerator<ServerLlmStreamEvent, Turn | undefined> {
+  let done = false;
+  try {
+    for (;;) {
+      const next = await stream.next();
+      if (next.done) {
+        done = true;
+        step.settle(round());
+        return next.value;
+      }
+      const event = next.value;
+      if (
+        event.type === LlmEventType.Retry ||
+        event.type === LlmEventType.ModelFallback
+      ) {
+        step.reset();
+      }
+      if (event.type !== LlmEventType.ToolCallRequest) {
+        yield event;
+        continue;
+      }
+      const request = step.request(
+        event.functionCall ?? {
+          id: event.value.callId,
+          name: event.value.name,
+          args: event.value.args,
+        },
+      );
+      if (request) yield { ...event, value: request };
+    }
+  } finally {
+    if (!done) await stream.return?.(undefined);
+  }
 }
 
 /**
@@ -360,6 +419,25 @@ export interface ReasoningLoopOptions {
    * future external inputs instead of finalizing immediately.
    */
   shouldWaitForExternalMessages?: () => boolean;
+  /**
+   * Enforce `maxTimeMinutes` while the round's request sleeps in a retry
+   * backoff, ending the loop with TIMEOUT instead of waiting out the backoff.
+   * Internal opt-in for workflow dispatches; other agents keep checking the
+   * limit only between rounds.
+   */
+  enforceTimeLimitDuringRetryWait?: boolean;
+}
+
+/** Largest delay `setTimeout` accepts without overflowing to ~immediate. */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+/** Observes the retry waits of one round's request. */
+interface RetryWaitScope {
+  run<T>(fn: () => T): T;
+  bind<T>(iterator: AsyncIterator<T>): AsyncIterableIterator<T>;
+  /** True once the time limit aborted the round during a retry wait. */
+  timedOut(): boolean;
+  close(): void;
 }
 
 /**
@@ -416,12 +494,17 @@ Important Rules:
  - When the task is complete, return the final result as a normal model response (not a tool call) and stop.`;
   }
 
-  // Context files (QWEN.md + output-language.md) keep the subagent aligned
-  // with project conventions; the volatile auto-memory section stays last.
+  // Context files and memory policy keep the subagent aligned. The policy
+  // promises the changing legacy catalog at the request tail: LlmChat appends
+  // it for in-process runs, and peer-process executors (codex/ACP) must
+  // append `getAutoMemoryContext()` themselves.
   return assembleSystemPrompt({
     base: finalPrompt,
     contextFiles: runtimeContext.getUserMemory(),
-    autoMemory: runtimeContext.getAutoMemoryPrompt(),
+    autoMemory:
+      runtimeContext.getMemoryRecallMode() === 'structured'
+        ? ''
+        : runtimeContext.getAutoMemoryPrompt(),
   });
 }
 
@@ -439,8 +522,10 @@ Important Rules:
  * or final result interpretation — those are the caller's responsibility.
  */
 export class AgentCore {
+  private executionChat?: LlmChat;
   private promptOrdinal = 0;
   readonly subagentId: string;
+  private readonly hookExecutionOwner: HookExecutionOwner | undefined;
   readonly name: string;
   /** Business/task name used for local per-invocation usage labels. */
   readonly taskName?: string;
@@ -529,6 +614,11 @@ export class AgentCore {
   ) {
     this.subagentId =
       subagentId ?? `${name}-${randomUUID().replace(/-/g, '').slice(0, 8)}`;
+    // Internal forks without an explicit identity retain the caller's hook scope.
+    this.hookExecutionOwner = captureHookExecutionOwner(
+      runtimeContext,
+      subagentId,
+    );
     this.name = name;
     this.taskName = taskName;
     this.runtimeContext = runtimeContext;
@@ -658,54 +748,45 @@ export class AgentCore {
    * Returns true if this agent's effective tool surface will include the Skill
    * tool. Used before `prepareTools()` to decide whether to inject the
    * `<available_skills>` snapshot.
+   *
+   * Delegates to the predicate `SubagentManager` uses to decide whether this
+   * agent's Config holds a SkillManager, so the listing and a bundled
+   * reference's pointer cannot disagree (#12424). That predicate also honours
+   * `disallowedTools`, which this method used to ignore — a `'*'` agent that
+   * disallowed `skill` was still shown every skill it could not load.
    */
   private willHaveSkillTool(): boolean {
-    if (!this.toolConfig) {
-      return !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL);
-    }
-    const asStrings = this.toolConfig.tools.filter(
-      (t): t is string => typeof t === 'string',
+    return toolConfigAllowsSkill(
+      this.toolConfig,
+      this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly,
     );
-    const hasWildcard = asStrings.includes('*');
-    if (hasWildcard || asStrings.length === 0) {
-      return !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL);
-    }
-    return asStrings.includes(ToolNames.SKILL);
   }
 
   /**
    * Prepares the list of tools available to this agent.
    *
-   * If no explicit toolConfig or it contains "*" or is empty,
-   * inherits all tools (excluding AgentTool to prevent recursion).
+   * With no toolConfig, or one containing "*", inherits all tools
+   * (excluding AgentTool to prevent recursion). An explicit empty tools
+   * array denies all tools.
    */
   async prepareTools(): Promise<FunctionDeclaration[]> {
     const toolRegistry = this.runtimeContext.getToolRegistry();
     await toolRegistry.warmAll();
     const toolsList: FunctionDeclaration[] = [];
 
-    const excludedFromSubagents = getExcludedToolsForCurrentContext();
-
-    // Nested sub-agents: the AgentTool is normally excluded to prevent
-    // recursive spawning, but when maxSubagentDepth permits another level we
-    // let it back in. prepareTools() runs inside this sub-agent's own
-    // AsyncLocalStorage frame (see AgentHeadless.run / AgentInteractive), so
+    // Effective exclusion test — the SHARED predicate
+    // (isToolExcludedForCurrentContext, subagent-plan-tool-policy.ts) also
+    // consumed by the tool_call bridge (resolveDeferredToolCall), so
+    // declaration level and invocation level cannot drift. Nested
+    // sub-agents: AgentTool is depth-gated rather than flatly excluded —
+    // while maxSubagentDepth permits another level it is re-admitted.
+    // prepareTools() runs inside this sub-agent's own AsyncLocalStorage
+    // frame (see AgentHeadless.run / AgentInteractive), so the predicate's
     // spawnBlockReason() reads this agent's own depth and context — the same
-    // shared predicate AgentTool.execute() backstops at runtime.
-    //
-    // !isTopLevelSession() fails closed: prepareTools() only ever serves
-    // agents — never the top-level user session — so a missing agent frame
-    // means the launch path forgot runWithAgentContext. Without this check
-    // such an agent would be depth-gated as the top-level session and receive
-    // the AgentTool even at maxSubagentDepth=1 (codex review: frame-less
+    // shared predicate AgentTool.execute() backstops at runtime. A missing
+    // agent frame fails closed (prepareTools() only ever serves agents,
+    // never the top-level user session; codex review: frame-less
     // AgentInteractive.start(), since fixed to establish its frame).
-    const nestingAllowed =
-      !isTopLevelSession() &&
-      spawnBlockReason(this.runtimeContext.getMaxSubagentDepth()) === null;
-
-    // Effective exclusion test. AgentTool is depth-gated (allowed only when
-    // this sub-agent is shallow enough to spawn another level); every other
-    // control-plane tool follows the static exclusion set unchanged.
     const isExcluded = (name: string | undefined): boolean => {
       if (!name) return false;
       if (
@@ -714,18 +795,15 @@ export class AgentCore {
       ) {
         return false;
       }
-      if (name === ToolNames.AGENT) return !nestingAllowed;
-      return excludedFromSubagents.has(name);
+      return isToolExcludedForCurrentContext(
+        name,
+        this.runtimeContext.getMaxSubagentDepth(),
+      );
     };
     const isHiddenByEagerAllowList = (name: string | undefined): boolean =>
       !!name &&
       toolRegistry.isPermissionDeferred?.(name) === true &&
       toolRegistry.isDeferredAndHidden?.(name) === true;
-
-    const isDisallowed = (name: string): boolean =>
-      this.toolConfig?.disallowedTools?.some((pattern) =>
-        matchesToolPattern(pattern, name),
-      ) === true;
 
     if (this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly) {
       const stringTools =
@@ -736,10 +814,10 @@ export class AgentCore {
         this.toolConfig?.tools.filter(
           (tool): tool is FunctionDeclaration => typeof tool !== 'string',
         ) ?? [];
-      const inheritsRegistry =
-        !this.toolConfig ||
-        stringTools.includes('*') ||
-        (stringTools.length === 0 && inlineTools.length === 0);
+      // An explicit empty tools array denies all tools (the documented
+      // subagent contract); only an absent toolConfig or a wildcard
+      // inherits the registry.
+      const inheritsRegistry = !this.toolConfig || stringTools.includes('*');
       const configuredNames = inheritsRegistry
         ? undefined
         : new Set(stringTools);
@@ -754,10 +832,20 @@ export class AgentCore {
               (inheritsCodeModeBindings &&
                 getToolExposure(name) === 'code-mode-callable')) &&
             !isExcluded(name) &&
-            !isHiddenByEagerAllowList(name) &&
-            !isDisallowed(name) &&
+            !this.isToolDisallowedByAgentConfig(name, toolRegistry) &&
             this.isToolExecutionAllowed(name),
         );
+      if (
+        allowedNames.some(
+          (name) => getToolExposure(name) === 'code-mode-callable',
+        ) &&
+        toolRegistry.getTool(ToolNames.TOOL_SEARCH) &&
+        !allowedNames.includes(ToolNames.TOOL_SEARCH) &&
+        !isExcluded(ToolNames.TOOL_SEARCH) &&
+        this.isToolExecutionAllowed(ToolNames.TOOL_SEARCH)
+      ) {
+        allowedNames.push(ToolNames.TOOL_SEARCH);
+      }
       this.codeModeAllowedToolNames = Object.freeze(
         allowedNames.filter(
           (name) => getToolExposure(name) === 'code-mode-callable',
@@ -770,11 +858,14 @@ export class AgentCore {
           (tool) =>
             !isExcluded(tool.name) &&
             !isHiddenByEagerAllowList(tool.name) &&
-            (!tool.name || !isDisallowed(tool.name)),
+            (!tool.name ||
+              !this.isToolDisallowedByAgentConfig(tool.name, toolRegistry)),
         ),
       );
       return declarations.filter(
-        (declaration) => !declaration.name || !isDisallowed(declaration.name),
+        (declaration) =>
+          !declaration.name ||
+          !this.isToolDisallowedByAgentConfig(declaration.name, toolRegistry),
       );
     }
 
@@ -789,14 +880,16 @@ export class AgentCore {
         (t): t is FunctionDeclaration => typeof t !== 'string',
       );
 
-      if (
-        hasWildcard ||
-        (asStrings.length === 0 && onlyInlineDecls.length === 0)
-      ) {
+      // An explicit empty tools array denies all tools (the documented
+      // subagent contract): it falls through to the explicit-list branch,
+      // which resolves zero names. Only a wildcard or an absent toolConfig
+      // inherits the registry.
+      if (hasWildcard) {
         // Subagents inherit ordinary deferred tools (MCP, low-frequency
         // built-ins). Tools demoted by the `settings.tools.eager` allowlist
-        // remain hidden until ToolSearch reveals them, preserving the
-        // allowlist's schema shrink.
+        // remain hidden and are reached through the stable ToolSearch +
+        // ToolCall bridge, preserving the allowlist's schema shrink without
+        // mutating the declarations.
         toolsList.push(
           ...toolRegistry
             .getFunctionDeclarations({ includeDeferred: true })
@@ -856,13 +949,10 @@ export class AgentCore {
 
     // Apply disallowedTools blocklist (supports MCP server-level patterns).
     if (this.toolConfig?.disallowedTools?.length) {
-      const disallowed = this.toolConfig.disallowedTools;
-      return toolsList.filter((t) => {
-        if (!t.name) return true;
-        return !disallowed.some((pattern) =>
-          matchesToolPattern(pattern, t.name!),
-        );
-      });
+      return toolsList.filter(
+        (t) =>
+          !t.name || !this.isToolDisallowedByAgentConfig(t.name, toolRegistry),
+      );
     }
 
     return toolsList;
@@ -896,6 +986,7 @@ export class AgentCore {
     abortController: AbortController,
     options?: ReasoningLoopOptions,
   ): Promise<ReasoningLoopResult> {
+    this.executionChat = chat;
     const inner = () =>
       this._runReasoningLoopInner(
         chat,
@@ -907,6 +998,10 @@ export class AgentCore {
     return runWithInvocationContext(undefined, () =>
       this.runInAgentFrames(inner),
     );
+  }
+
+  runInHookFrame<T>(fn: () => T): T {
+    return runWithHookExecutionOwner(this.hookExecutionOwner, fn);
   }
 
   /**
@@ -970,7 +1065,24 @@ export class AgentCore {
             ...(this.taskName ? { taskName: this.taskName } : {}),
           },
           () => {
-            const runWithView = () => this.withRuntimeView(fn, inheritedView);
+            const runWithView = () =>
+              runWithAgentChat(this.executionChat, () =>
+                this.withRuntimeView(fn, inheritedView),
+              );
+            // Publish this agent's effective positive allowlist and its
+            // disallowedTools blocklist so a fork it launches cannot widen
+            // either policy. Both helpers always re-set their field, so an
+            // unrestricted nested agent shadows rather than inherits its
+            // parent's policy frame.
+            const runWithToolPolicy = () =>
+              runWithAgentConfiguredToolAllowlist(
+                this.getConfiguredToolExecutionAllowlist(),
+                () =>
+                  runWithAgentDisallowedTools(
+                    this.toolConfig?.disallowedTools,
+                    runWithView,
+                  ),
+              );
             // inheritedAgentDepth restores the agent's original nesting depth.
             // Without it the frame recomputes from the UI's frame-less async
             // chain to depth 0, and an approved `agent` tool call from a
@@ -978,16 +1090,18 @@ export class AgentCore {
             return inheritedAgentId
               ? runWithAgentContext(
                   inheritedAgentId,
-                  runWithView,
+                  runWithToolPolicy,
                   inheritedAgentDepth,
                 )
-              : runWithView();
+              : runWithToolPolicy();
           },
         ),
       );
-    return inheritedTeammateIdentity
-      ? runWithTeammateIdentity(inheritedTeammateIdentity, runInner)
-      : runInner();
+    return this.runInHookFrame(() =>
+      inheritedTeammateIdentity
+        ? runWithTeammateIdentity(inheritedTeammateIdentity, runInner)
+        : runInner(),
+    );
   }
 
   /**
@@ -1025,7 +1139,15 @@ export class AgentCore {
     // Scoped to this reasoning loop. A second duplicate response for the same
     // provider id would keep deterministic providers in a tool-result loop.
     const duplicateProviderToolCallResponseIds = new Set<string>();
+    const refusedDuplicates: AgentLoopDuplicateState = {
+      handled: new Map(),
+      responded: new Set(),
+    };
     let stickyMaxOutputTokens: number | undefined;
+    // Whether THIS round's stream produced a chunk (model acceptance). The
+    // round finally uses it to tell a pre-acceptance failure apart from the
+    // round that just took a reminder for the NEXT round.
+    let roundSawModelChunk = false;
     const loopDetector = new LoopDetectionService(this.runtimeContext);
     loopDetector.reset(
       `${this.runtimeContext.getSessionId()}#${this.subagentId}`,
@@ -1039,6 +1161,11 @@ export class AgentCore {
         loopDetector.addAndCheckHeuristicLoops(event)
       );
     };
+
+    // On the shared agent loop (`experimental.unifiedAgentLoop`), each model
+    // round is the loop's round on a `Turn` over this agent's chat.
+    const onSharedLoop =
+      this.runtimeContext.isUnifiedAgentLoopEnabled?.('agent-core') === true;
 
     while (true) {
       // Check abort before starting a new round — prevents unnecessary API
@@ -1054,7 +1181,7 @@ export class AgentCore {
         break;
       }
 
-      let durationMin = (Date.now() - startTime) / (1000 * 60);
+      const durationMin = (Date.now() - startTime) / (1000 * 60);
       if (options?.maxTimeMinutes && durationMin >= options.maxTimeMinutes) {
         terminateMode = AgentTerminateMode.TIMEOUT;
         break;
@@ -1065,19 +1192,43 @@ export class AgentCore {
       // parent propagation; the try/finally below guarantees reverse-cleanup
       // fires for every exit (success, break, return, throw).
       const roundAbortController = createChildAbortController(abortController);
+      let retryWaitScope: RetryWaitScope | undefined;
 
       try {
         const promptId = `${this.runtimeContext.getSessionId()}#${this.subagentId}#${this.promptOrdinal++}`;
         turnCounter += 1;
+        roundSawModelChunk = false;
+        retryWaitScope = this.createRetryWaitScope(
+          turnCounter,
+          promptId,
+          roundAbortController,
+          startTime,
+          options,
+        );
 
         if (this.runtimeContext.getExecutionEnvironment?.()) {
           toolsList = await this.prepareTools();
         }
+        const advisorReminder =
+          turnCounter === 1 && this.runtimeContext.getAdvisorModel?.()
+            ? buildAdvisorReminder(
+                !!this.runtimeContext
+                  .getToolRegistry()
+                  .getTool(ToolNames.ADVISOR) &&
+                  this.isToolExecutionAllowed(ToolNames.ADVISOR),
+                toolsList.map((tool) => tool.name),
+              )
+            : undefined;
         const messageParams = {
-          message: currentMessages[0]?.parts || [],
+          message: [
+            ...(advisorReminder ? [{ text: advisorReminder }] : []),
+            ...(currentMessages[0]?.parts || []),
+          ],
           config: {
             abortSignal: roundAbortController.signal,
-            tools: [{ functionDeclarations: toolsList }],
+            tools: toolsList.length
+              ? [{ functionDeclarations: toolsList }]
+              : [],
             ...(stickyMaxOutputTokens !== undefined
               ? { maxOutputTokens: stickyMaxOutputTokens }
               : {}),
@@ -1085,19 +1236,87 @@ export class AgentCore {
         };
 
         const roundStreamStart = Date.now();
-        const responseStream = await chat.sendMessageStream(
-          this.modelConfig.model ||
-            this.runtimeContext.getModel() ||
-            DEFAULT_QWEN_MODEL,
-          messageParams,
-          promptId,
-        );
-        this.eventEmitter?.emit(AgentEventType.ROUND_START, {
-          subagentId: this.subagentId,
-          round: turnCounter,
-          promptId,
-          timestamp: Date.now(),
-        } as AgentRoundEvent);
+        // After the round's stream: its text, the round count, the time limit
+        // (true once it has passed) and the token usage, in that order.
+        const finishModelRound = (
+          text: string,
+          thoughtText: string,
+          usage: GenerateContentResponseUsageMetadata | undefined,
+        ): boolean => {
+          if (text || thoughtText || usage) {
+            this.eventEmitter?.emit(AgentEventType.ROUND_TEXT, {
+              subagentId: this.subagentId,
+              runId,
+              round: turnCounter,
+              text,
+              thoughtText,
+              usageMetadata: usage,
+              timestamp: Date.now(),
+            } as AgentRoundTextEvent);
+          }
+          const cumulativeRounds = (options?.roundOffset ?? 0) + turnCounter;
+          this.executionStats.rounds = cumulativeRounds;
+          this.stats.setRounds(cumulativeRounds);
+          const minutes = (Date.now() - startTime) / (1000 * 60);
+          if (options?.maxTimeMinutes && minutes >= options.maxTimeMinutes) {
+            return true;
+          }
+          if (usage) {
+            this.recordTokenUsage(usage, cumulativeRounds, roundStreamStart);
+          }
+          return false;
+        };
+        const sharedRound = onSharedLoop
+          ? await this.runSharedRound({
+              chat,
+              messageParams,
+              promptId,
+              round: turnCounter,
+              runId,
+              retryWaitScope,
+              abortController: roundAbortController,
+              toolsList,
+              duplicates: {
+                handled: handledToolCallFingerprints,
+                responded: duplicateProviderToolCallResponseIds,
+              },
+              refusedDuplicates,
+              checkSubagentLoop,
+              onModelAccepted: () => {
+                roundSawModelChunk = true;
+                loopDetector.commitLoopReminderDelivery();
+              },
+              onMaxOutputTokensEscalated: (limit) => {
+                stickyMaxOutputTokens = limit;
+              },
+              finishModelRound,
+            })
+          : undefined;
+        const sendMessage = () =>
+          chat.sendMessageStream(
+            this.modelConfig.model ||
+              this.runtimeContext.getModel() ||
+              DEFAULT_QWEN_MODEL,
+            messageParams,
+            promptId,
+          );
+        // The request (and any send-time compaction) runs partly before the
+        // stream is returned and partly while it is iterated; both belong to
+        // this round's retry-wait observer.
+        const responseStream:
+          | AsyncIterable<StreamEvent>
+          | Iterable<StreamEvent> = sharedRound
+          ? []
+          : retryWaitScope
+            ? retryWaitScope.bind(await retryWaitScope.run(sendMessage))
+            : await sendMessage();
+        if (!sharedRound)
+          this.eventEmitter?.emit(AgentEventType.ROUND_START, {
+            subagentId: this.subagentId,
+            round: turnCounter,
+            promptId,
+            timestamp: Date.now(),
+          } as AgentRoundEvent);
 
         const functionCalls: FunctionCall[] = [];
         // callIds already streamed to the loop guard this attempt. Mirrors
@@ -1119,7 +1338,9 @@ export class AgentCore {
           if (roundAbortController.signal.aborted) {
             return {
               text: finalText,
-              terminateMode: AgentTerminateMode.CANCELLED,
+              terminateMode: retryWaitScope?.timedOut()
+                ? AgentTerminateMode.TIMEOUT
+                : AgentTerminateMode.CANCELLED,
               turnsUsed: turnCounter,
             };
           }
@@ -1167,6 +1388,13 @@ export class AgentCore {
 
           // Handle chunk events
           if (streamEvent.type === 'chunk') {
+            // First chunk of the round: the model accepted the request. If
+            // it carries a prepared loop-protection reminder, its delivery
+            // accounting settles here — the same model-acceptance boundary
+            // the core client commits at. Later chunks no-op once the
+            // prepared receipt is consumed.
+            roundSawModelChunk = true;
+            loopDetector.commitLoopReminderDelivery();
             const resp = streamEvent.value;
             // Track the response ID for tool call correlation
             if (resp.responseId) {
@@ -1279,49 +1507,57 @@ export class AgentCore {
           }
         }
 
+        if (sharedRound) {
+          // A round cancelled before its batch ends the run at once; a
+          // cancelled batch keeps its results, and the run ends at the next
+          // round's check.
+          if (sharedRound.stop === 'cancelled' && !sharedRound.toolStep) {
+            return {
+              text: finalText,
+              terminateMode: retryWaitScope?.timedOut()
+                ? AgentTerminateMode.TIMEOUT
+                : AgentTerminateMode.CANCELLED,
+              turnsUsed: turnCounter,
+            };
+          }
+          roundText = sharedRound.text;
+          if (sharedRound.stop === 'loop_detected') {
+            terminateMode = AgentTerminateMode.LOOP_DETECTED;
+            loopDetectedInStream = true;
+          } else if (sharedRound.timedOut) {
+            terminateMode = AgentTerminateMode.TIMEOUT;
+            break;
+          }
+        }
+
         if (loopDetectedInStream) {
           break;
         }
 
-        if (roundText || roundThoughtText || lastUsage) {
-          this.eventEmitter?.emit(AgentEventType.ROUND_TEXT, {
-            subagentId: this.subagentId,
-            runId,
-            round: turnCounter,
-            text: roundText,
-            thoughtText: roundThoughtText,
-            usageMetadata: lastUsage,
-            timestamp: Date.now(),
-          } as AgentRoundTextEvent);
-        }
-
-        const cumulativeRounds = (options?.roundOffset ?? 0) + turnCounter;
-        this.executionStats.rounds = cumulativeRounds;
-        this.stats.setRounds(cumulativeRounds);
-
-        durationMin = (Date.now() - startTime) / (1000 * 60);
-        if (options?.maxTimeMinutes && durationMin >= options.maxTimeMinutes) {
+        if (
+          !sharedRound &&
+          finishModelRound(roundText, roundThoughtText, lastUsage)
+        ) {
           terminateMode = AgentTerminateMode.TIMEOUT;
           break;
         }
 
-        // Update token usage if available
-        if (lastUsage) {
-          this.recordTokenUsage(lastUsage, turnCounter, roundStreamStart);
-        }
-
-        if (functionCalls.length > 0) {
-          const toolCallResult = await this.processFunctionCalls(
-            functionCalls,
-            roundAbortController,
-            promptId,
-            turnCounter,
-            toolsList,
-            currentResponseId,
-            wasOutputTruncated,
-            handledToolCallFingerprints,
-            duplicateProviderToolCallResponseIds,
-          );
+        const toolCallResult = sharedRound
+          ? sharedRound.toolStep
+          : functionCalls.length > 0
+            ? await this.processFunctionCalls(
+                functionCalls,
+                roundAbortController,
+                promptId,
+                turnCounter,
+                toolsList,
+                currentResponseId,
+                wasOutputTruncated,
+                handledToolCallFingerprints,
+                duplicateProviderToolCallResponseIds,
+              )
+            : undefined;
+        if (toolCallResult) {
           if (toolCallResult.repeatedDuplicateProviderToolCall) {
             terminateMode = AgentTerminateMode.LOOP_DETECTED;
             break;
@@ -1345,6 +1581,8 @@ export class AgentCore {
             break;
           }
           currentMessages = toolCallResult.messages;
+          const toolPartCount =
+            currentMessages[currentMessages.length - 1]?.parts?.length ?? 0;
 
           const externalInputs = this.drainExternalInputs(options);
           if (externalInputs.length > 0) {
@@ -1364,6 +1602,24 @@ export class AgentCore {
           if ((currentMessages[0]?.parts?.length ?? 0) === 0) {
             terminateMode = AgentTerminateMode.ERROR;
             break;
+          }
+          // Right after the tool results, before any external input, as in
+          // the core client and the daemon.
+          const loopReminder = loopDetector.takeLoopReminder();
+          if (loopReminder) {
+            currentMessages[currentMessages.length - 1].parts!.splice(
+              toolPartCount,
+              0,
+              { text: loopReminder },
+            );
+            // The reminder text rides in currentMessages toward the next
+            // round's model call, but that round can still exit at the
+            // abort/maxTurns/time checks or fail in prepareTools() before
+            // any request is attempted. Like the core client, the delivery
+            // stays prepared here and only settles when that round crosses
+            // the model-acceptance boundary (first chunk above); a round that
+            // exits before its first chunk abandons it in the round finally,
+            // so `reminded` telemetry credits a warning the model actually saw.
           }
         } else {
           const immediateExternalInputs = this.drainExternalInputs(options);
@@ -1448,7 +1704,26 @@ export class AgentCore {
           promptId,
           timestamp: Date.now(),
         } as AgentRoundEvent);
+      } catch (error) {
+        // The time limit aborted a retry wait: the request or its stream
+        // rejects with the abort, which is this agent's TIMEOUT, not an error.
+        if (retryWaitScope?.timedOut()) {
+          terminateMode = AgentTerminateMode.TIMEOUT;
+          break;
+        }
+        throw error;
       } finally {
+        // The round exited without a chunk proving model acceptance
+        // (prepareTools/send rejection, zero-chunk break, abort before the
+        // first chunk): put the prepared reminder delivery back so
+        // `reminded` stays un-credited and the streak's warning stays
+        // eligible for a later round. The round that just TOOK a reminder
+        // for the next one saw its own chunks and skips this; a committed
+        // delivery makes the abandon a no-op.
+        if (!roundSawModelChunk) {
+          loopDetector.abandonLoopReminderDelivery();
+        }
+        retryWaitScope?.close();
         // Reverse-cleanup fires whether the iteration ended normally, broke,
         // returned, or threw — preventing parent-listener accumulation on
         // long-running parents like the per-message roundAbortController in
@@ -1464,6 +1739,557 @@ export class AgentCore {
       ...(terminateMode === AgentTerminateMode.LOOP_DETECTED
         ? { loopType: loopDetector.getLastLoopType() }
         : {}),
+    };
+  }
+
+  /**
+   * Observes the retry waits of one round's request: republishes them as
+   * RETRY_WAIT events and, under `enforceTimeLimitDuringRetryWait`, aborts the
+   * round once the agent's time limit passes while a wait is active. `close()`
+   * ends every wait still registered and ignores later notifications, so a
+   * late callback cannot reach the next round.
+   */
+  private createRetryWaitScope(
+    round: number,
+    promptId: string,
+    roundAbortController: AbortController,
+    startTime: number,
+    options?: ReasoningLoopOptions,
+  ): RetryWaitScope | undefined {
+    const deadline =
+      options?.enforceTimeLimitDuringRetryWait && options.maxTimeMinutes
+        ? startTime + options.maxTimeMinutes * 60 * 1000
+        : undefined;
+    const emitter = this.eventEmitter;
+    if (!emitter && deadline === undefined) return undefined;
+
+    const active = new Set<string>();
+    let closed = false;
+    let timedOut = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const clearTimer = (): void => {
+      if (timer) clearTimeout(timer);
+      timer = undefined;
+    };
+    const armDeadline = (): void => {
+      if (deadline === undefined) return;
+      // Deferred even when already past, so the abort never runs inside the
+      // retry layer's own start notification.
+      timer = setTimeout(
+        () => {
+          timer = undefined;
+          if (closed || active.size === 0) return;
+          if (roundAbortController.signal.aborted) return;
+          if (Date.now() < deadline) {
+            armDeadline();
+            return;
+          }
+          timedOut = true;
+          roundAbortController.abort(
+            new Error('Agent time limit reached during a retry wait.'),
+          );
+        },
+        Math.min(Math.max(0, deadline - Date.now()), MAX_TIMER_DELAY_MS),
+      );
+    };
+    const publish = (event: RetryWaitEvent): void => {
+      emitter?.emit(AgentEventType.RETRY_WAIT, {
+        ...event,
+        subagentId: this.subagentId,
+        round,
+        promptId,
+        timestamp: Date.now(),
+      });
+    };
+    const observer = (event: RetryWaitEvent): void => {
+      if (closed) return;
+      if (event.phase === 'start') {
+        if (active.has(event.waitId)) return;
+        active.add(event.waitId);
+        publish(event);
+        if (active.size === 1) armDeadline();
+        return;
+      }
+      if (!active.delete(event.waitId)) return;
+      publish(event);
+      if (active.size === 0) clearTimer();
+    };
+    return {
+      run: (fn) => runWithRetryWaitObserver(observer, fn),
+      bind: (iterator) => bindRetryWaitObserver(observer, iterator),
+      timedOut: () => timedOut,
+      close: () => {
+        if (closed) return;
+        closed = true;
+        clearTimer();
+        for (const waitId of active) publish({ phase: 'end', waitId });
+        active.clear();
+      },
+    };
+  }
+
+  /**
+   * One round on the shared agent loop (`experimental.unifiedAgentLoop`): the
+   * model round and its tool batch run in one `runAgentLoop` call, on the
+   * event-bus kernel under `experimental.eventBusAgentLoop`. The round is a
+   * `Turn` over this agent's chat, whose events are mapped as the current
+   * round maps its chunks; the batch runs on this agent's scheduler.
+   */
+  private async runSharedRound(params: {
+    chat: LlmChat;
+    messageParams: {
+      message: Part[];
+      config: Pick<GenerateContentConfig, 'tools' | 'maxOutputTokens'>;
+    };
+    promptId: string;
+    round: number;
+    runId: string;
+    retryWaitScope: RetryWaitScope | undefined;
+    abortController: AbortController;
+    toolsList: FunctionDeclaration[];
+    duplicates: AgentLoopDuplicateState;
+    refusedDuplicates: AgentLoopDuplicateState;
+    checkSubagentLoop: (event: ServerLlmStreamEvent) => boolean;
+    onModelAccepted: () => void;
+    onMaxOutputTokensEscalated: (limit: number) => void;
+    /** After the stream; true when the time limit has passed. */
+    finishModelRound: (
+      text: string,
+      thoughtText: string,
+      usage: GenerateContentResponseUsageMetadata | undefined,
+    ) => boolean;
+  }): Promise<SharedRoundResult> {
+    const { promptId, round, runId, retryWaitScope, checkSubagentLoop } =
+      params;
+    const { signal } = params.abortController;
+    const { tools, maxOutputTokens } = params.messageParams.config;
+    const debugLogger = this.runtimeContext.getDebugLogger();
+    if (this.codeModeToolsUnprepared()) await this.prepareTools();
+    const step = this.sharedToolStep(params);
+    const model = {
+      text: '',
+      thoughtText: '',
+      usageMetadata: undefined as
+        | GenerateContentResponseUsageMetadata
+        | undefined,
+      responseId: undefined as string | undefined,
+      wasOutputTruncated: false,
+      stopped: false,
+      timedOut: false,
+    };
+    const emitText = (text: string, thought: boolean) =>
+      this.eventEmitter?.emit(AgentEventType.STREAM_TEXT, {
+        subagentId: this.subagentId,
+        runId,
+        round,
+        text,
+        thought,
+        timestamp: Date.now(),
+      });
+    const turnRound = turnModelRound(
+      params.chat,
+      this.modelConfig.model ||
+        this.runtimeContext.getModel() ||
+        DEFAULT_QWEN_MODEL,
+      {
+        requestConfig: {
+          tools,
+          ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
+        },
+        // A failed request ends the run as it does on the current round.
+        throwErrors: true,
+        onStreamReady: () => {
+          this.eventEmitter?.emit(AgentEventType.ROUND_START, {
+            subagentId: this.subagentId,
+            round,
+            promptId,
+            timestamp: Date.now(),
+          });
+        },
+        onChunk: ({ text, thoughtText, responseId, usageMetadata }) => {
+          params.onModelAccepted();
+          if (responseId) model.responseId = responseId;
+          if (usageMetadata) model.usageMetadata = usageMetadata;
+          // A loop stop on Thought can close the stream before Content.
+          if (thoughtText) {
+            model.thoughtText += thoughtText;
+            emitText(thoughtText, true);
+          }
+          if (text) {
+            model.text += text;
+            emitText(text, false);
+          }
+        },
+      },
+    );
+    // The request and its stream run under this round's retry-wait observer,
+    // and the batch gets this agent's requests for the round's calls.
+    const source: ModelRoundSource = {
+      sendRound: (request, roundSignal) => {
+        const stream = turnRound.sendRound(request, roundSignal);
+        return withAgentRequests(
+          retryWaitScope ? retryWaitScope.bind(stream) : stream,
+          step,
+          () => model,
+        );
+      },
+    };
+    const useEventBus =
+      this.runtimeContext.isEventBusAgentLoopEnabled?.('agent-core') === true;
+    debugLogger.debug(
+      `[AgentCore] subagent ${this.subagentId} round ${round} on the shared agent loop${useEventBus ? ' on the event bus' : ''} (prompt ${promptId})`,
+    );
+
+    const resetAttempt = () => {
+      model.text = '';
+      model.thoughtText = '';
+      model.usageMetadata = undefined;
+      model.responseId = undefined;
+      model.wasOutputTruncated = false;
+    };
+    const stopRound = (): AgentLoopStopReason => {
+      model.stopped = true;
+      return 'loop_detected';
+    };
+    const loop = await runAgentLoop({
+      client: source,
+      config: this.runtimeContext,
+      signal,
+      first: {
+        parts: params.messageParams.message,
+        promptId,
+        options: { type: SendMessageType.UserQuery },
+      },
+      maxRounds: 1,
+      ...step.options,
+      useEventBus,
+      host: {
+        ...step.host,
+        onModelEvent: (event): AgentLoopStopReason | void => {
+          switch (event.type) {
+            case LlmEventType.Retry: {
+              if (
+                checkSubagentLoop({
+                  type: LlmEventType.Retry,
+                  ...(event.isContinuation !== undefined
+                    ? { isContinuation: event.isContinuation }
+                    : {}),
+                })
+              )
+                return stopRound();
+              if (event.maxOutputTokensEscalated !== undefined) {
+                params.onMaxOutputTokensEscalated(
+                  event.maxOutputTokensEscalated,
+                );
+              }
+              resetAttempt();
+              return;
+            }
+            case LlmEventType.ModelFallback:
+              // The calls and output of the model that gave up are dropped.
+              resetAttempt();
+              return;
+            case LlmEventType.UserCancelled:
+              if (signal.aborted) model.stopped = true;
+              return;
+            case LlmEventType.ChatCompressed:
+              debugLogger.debug(
+                `[AGENT-COMPACT] subagent=${this.subagentId} round=${round} ` +
+                  `tokens ${event.value?.originalTokenCount} -> ${event.value?.newTokenCount}`,
+              );
+              return;
+            case LlmEventType.Thought:
+              if (
+                checkSubagentLoop({
+                  type: LlmEventType.Thought,
+                  value: event.value,
+                })
+              )
+                return stopRound();
+              return;
+            case LlmEventType.Content:
+              if (
+                event.value &&
+                checkSubagentLoop({
+                  type: LlmEventType.Content,
+                  value: event.value,
+                })
+              )
+                return stopRound();
+              return;
+            case LlmEventType.ToolCallRequest:
+              // One event per call id: the stream drops a repeated one.
+              if (
+                checkSubagentLoop({
+                  type: LlmEventType.ToolCallRequest,
+                  value: {
+                    ...event.value,
+                    isClientInitiated: false,
+                    response_id: model.responseId,
+                    wasOutputTruncated: model.wasOutputTruncated,
+                  },
+                })
+              )
+                return stopRound();
+              return;
+            case LlmEventType.Finished: {
+              const { reason, usageMetadata } = event.value;
+              if (reason === FinishReason.MAX_TOKENS) {
+                model.wasOutputTruncated = true;
+              }
+              if (
+                checkSubagentLoop({
+                  type: LlmEventType.Finished,
+                  value: { reason, usageMetadata },
+                })
+              )
+                return stopRound();
+              return;
+            }
+            default:
+              return;
+          }
+        },
+        onRoundEnd: (): AgentLoopStopReason | void => {
+          if (model.stopped) return;
+          if (
+            params.finishModelRound(
+              model.text,
+              model.thoughtText,
+              model.usageMetadata,
+            )
+          ) {
+            model.timedOut = true;
+            return 'surface_ended';
+          }
+          const calls = step.requestCount();
+          if (calls > 0) {
+            debugLogger.debug(
+              `[AgentCore] subagent ${this.subagentId} round ${round} tool batch on the shared loop (prompt ${promptId}, ${calls} call(s))`,
+            );
+          }
+        },
+      },
+    });
+    return {
+      ...(loop.reason === 'completed' || loop.reason === 'next_round'
+        ? {}
+        : { stop: loop.reason }),
+      timedOut: model.timedOut,
+      text: model.text,
+      // A batch ran: its results, kept even when it was cancelled.
+      ...(loop.parts ? { toolStep: step.finish(loop) } : {}),
+    };
+  }
+
+  /**
+   * A round's tool batch on this agent's scheduler. The batch answers a
+   * provider replay in place and orders and finalizes the results; the agent
+   * keeps its events, approvals and hooks, and refuses a call it may not run.
+   * The results go to the agent's chat only: the batch neither records them
+   * in the session's transcript nor counts the calls toward the session's
+   * tool calls.
+   */
+  private sharedToolStep(params: {
+    abortController: AbortController;
+    promptId: string;
+    round: number;
+    toolsList: FunctionDeclaration[];
+    duplicates: AgentLoopDuplicateState;
+    refusedDuplicates: AgentLoopDuplicateState;
+  }): SharedToolStep {
+    const { abortController, promptId, round } = params;
+    const debugLogger = this.runtimeContext.getDebugLogger();
+    const declaredToolNames = new Set(params.toolsList.map((t) => t.name));
+    const generatedCallIdBase = randomUUID();
+    const declaredNames = new Map<ToolCallRequestInfo, string | undefined>();
+    const callIds = new Set<string>();
+    const refusals = new Map<ToolCallRequestInfo, string | undefined>();
+    const durations = new Map<string, number>();
+    let replayIndex = 0;
+    return {
+      request: (fc) => {
+        // A provider may stream one call id twice; the agent runs it once
+        // and answers it once.
+        if (fc.id) {
+          if (callIds.has(fc.id)) return undefined;
+          callIds.add(fc.id);
+        }
+        const request = this.buildToolCallRequest(
+          fc,
+          fc.id ??
+            `${fc.name ?? 'tool'}-${generatedCallIdBase}-${declaredNames.size}`,
+          promptId,
+          undefined,
+          false,
+        );
+        declaredNames.set(request, fc.name);
+        return request;
+      },
+      reset: () => {
+        declaredNames.clear();
+        callIds.clear();
+      },
+      settle: ({ responseId, wasOutputTruncated }) => {
+        for (const request of declaredNames.keys()) {
+          request.response_id = responseId;
+          request.wasOutputTruncated = wasOutputTruncated;
+        }
+      },
+      requestCount: () => declaredNames.size,
+      options: {
+        duplicates: params.duplicates,
+        duplicateStateForCall: (request) => {
+          // MCP registrations can change while the model is still streaming.
+          if (!refusals.has(request)) {
+            refusals.set(
+              request,
+              this.toolCallRefusal(
+                declaredNames.get(request),
+                declaredToolNames,
+              ),
+            );
+          }
+          return refusals.get(request)
+            ? params.refusedDuplicates
+            : params.duplicates;
+        },
+        // The results of an aborted batch stay; the run ends at the next
+        // round's abort check, as on the current tool step.
+        keepCancelledResults: true,
+        // Results are left unrecorded: they belong to the agent's chat.
+        deferRecording: true,
+        executor: {
+          run: async (calls, _signal, hooks) => {
+            const settled = new Map<string, AgentLoopSettledCall>();
+            const launched: ToolCallRequestInfo[] = [];
+            for (const request of calls) {
+              const { callId, name, args } = request;
+              const refusal = refusals.get(request);
+              if (!refusal) {
+                if (hooks.beforeLaunch(request, [])) launched.push(request);
+                continue;
+              }
+              const responseParts: Part[] = [
+                {
+                  functionResponse: {
+                    id: callId,
+                    name,
+                    response: { error: refusal },
+                  },
+                },
+              ];
+              this.emitSyntheticToolError({
+                callId,
+                name,
+                args,
+                errorMessage: refusal,
+                responseParts,
+                resultDisplay: refusal,
+                currentRound: round,
+              });
+              settled.set(callId, {
+                status: 'error',
+                request,
+                response: {
+                  callId,
+                  responseParts,
+                  resultDisplay: refusal,
+                  error: new Error(refusal),
+                  errorType: undefined,
+                  executionStatus: 'not_started',
+                },
+              });
+              durations.set(callId, 0);
+            }
+            if (launched.length > 0) {
+              await this.scheduleToolCalls({
+                requests: launched,
+                abortController,
+                currentRound: round,
+                declaredToolNames,
+                isFinished: hooks.isFinished,
+                onSettled: (call) => {
+                  settled.set(call.response.callId, call);
+                  durations.set(call.response.callId, call.durationMs);
+                },
+              });
+            }
+            return calls.flatMap(({ callId }) => settled.get(callId) ?? []);
+          },
+        },
+      },
+      host: {
+        // The agent's run does not end on a tool that ends the turn.
+        endsOnTerminateTurn: () => false,
+        onToolResult: ({ request, response, origin }) => {
+          if (origin !== 'replayed') return;
+          const errorMessage =
+            response.error?.message ??
+            'Duplicate provider tool call was ignored.';
+          debugLogger.debug(
+            `[processFunctionCalls] Suppressing duplicate provider tool-call id: ${request.providerCallId ?? request.callId} (tool: ${request.name}, round: ${round})`,
+          );
+          this.emitSyntheticToolError({
+            callId: `${request.callId}:duplicate:${round}:${replayIndex++}`,
+            name: request.name,
+            args: request.args,
+            errorMessage,
+            responseParts: response.responseParts,
+            resultDisplay: response.resultDisplay,
+            currentRound: round,
+          });
+          durations.set(request.callId, 0);
+        },
+      },
+      finish: (batch) => {
+        if (batch.reason === 'duplicate_provider_call') {
+          debugLogger.debug(
+            `[processFunctionCalls] Dropping batch after a repeated duplicate provider tool-call id (round: ${round})`,
+          );
+          return {
+            messages: [{ role: 'user', parts: [] }],
+            repeatedDuplicateProviderToolCall: true,
+            results: [],
+          };
+        }
+        const responses = batch.responses ?? [];
+        this.eventEmitter?.emit(AgentEventType.TOOL_RESPONSES_FINALIZED, {
+          subagentId: this.subagentId,
+          round,
+          responses: responses.map(({ callId, parts }) => {
+            const durationMs = durations.get(callId);
+            return {
+              callId,
+              responseParts: parts,
+              ...(durationMs !== undefined ? { durationMs } : {}),
+            };
+          }),
+          timestamp: Date.now(),
+        });
+        const requestByCallId = new Map(
+          Array.from(declaredNames.keys(), (request) => [
+            request.callId,
+            request,
+          ]),
+        );
+        return {
+          messages: [{ role: 'user', parts: batch.parts ?? [] }],
+          repeatedDuplicateProviderToolCall: false,
+          results: responses.flatMap(({ callId, parts }) => {
+            const request = requestByCallId.get(callId);
+            return request
+              ? [
+                  {
+                    toolName: request.name,
+                    args: request.args,
+                    responseParts: parts,
+                  },
+                ]
+              : [];
+          }),
+        };
+      },
     };
   }
 
@@ -1639,6 +2465,13 @@ export class AgentCore {
     currentRound: number;
     durationMs?: number;
   }): void {
+    const lifecycle =
+      canonicalToolName(params.name) === ToolNames.TODO_WRITE
+        ? undefined
+        : createToolLifecycle(this.runtimeContext, params.callId, params.name, {
+            subagentId: this.subagentId,
+            persist: false,
+          }).finish('error', 'not_started');
     this.eventEmitter?.emit(AgentEventType.TOOL_CALL, {
       subagentId: this.subagentId,
       round: params.currentRound,
@@ -1657,6 +2490,7 @@ export class AgentCore {
       round: params.currentRound,
       callId: params.callId,
       name: params.name,
+      lifecycle,
       success: false,
       error: params.errorMessage,
       responseParts: params.responseParts,
@@ -1699,12 +2533,100 @@ export class AgentCore {
     );
   }
 
+  /**
+   * The per-agent `toolConfig.disallowedTools` blocklist, mirroring
+   * prepareTools()'s declaration-level filter with the exact same match
+   * semantics. Re-checked at invocation level because the tool_call bridge
+   * makes invocation independent of declaration — a direct call to an
+   * undeclared (blocklisted) tool synthesizes "Tool not found", but a
+   * bridged call resolves around the declaration list, so the blocklist
+   * must be enforced here too, symmetrically to the execution allowlist
+   * re-check (round-6 review, R6-8).
+   */
+  private isToolDisallowedByAgentConfig(
+    toolName: string,
+    toolRegistry?: ToolRegistry,
+  ): boolean {
+    const disallowed = this.toolConfig?.disallowedTools;
+    if (!disallowed?.length) {
+      return false;
+    }
+    const registry = toolRegistry ?? this.runtimeContext.getToolRegistry();
+    return matchesAgentToolBlocklist(
+      disallowed,
+      toolName,
+      registry.getPermissionAliases?.(toolName),
+      registry.getMcpToolIdentity?.(toolName),
+    );
+  }
+
+  /**
+   * The finite positive allowlist configured for this agent. Wildcard/empty
+   * configurations inherit the registry and therefore return `undefined`.
+   * A separate execution allowlist also returns `undefined`: fork agents use
+   * `toolConfig.tools` as a declaration snapshot while deliberately allowing
+   * additional bridged targets through `executionAllowedTools`.
+   */
+  private getConfiguredToolExecutionAllowlist(): readonly string[] | undefined {
+    if (!this.toolConfig || this.executionAllowedTools !== undefined) {
+      return undefined;
+    }
+
+    const stringTools = this.toolConfig.tools.filter(
+      (tool): tool is string => typeof tool === 'string',
+    );
+    const inlineToolNames = this.toolConfig.tools
+      .filter((tool): tool is FunctionDeclaration => typeof tool !== 'string')
+      .map((tool) => tool.name)
+      .filter((name): name is string => typeof name === 'string');
+    if (
+      stringTools.includes('*') ||
+      (stringTools.length === 0 && inlineToolNames.length === 0)
+    ) {
+      return undefined;
+    }
+
+    const allowed = new Set([...stringTools, ...inlineToolNames]);
+    if (
+      this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly &&
+      allowed.has(ToolNames.EXEC)
+    ) {
+      for (const toolName of this.runtimeContext
+        .getToolRegistry()
+        .getAllToolNames()) {
+        if (getToolExposure(toolName) === 'code-mode-callable') {
+          allowed.add(toolName);
+        }
+      }
+    }
+    return [...allowed];
+  }
+
   private isToolExecutionAllowed(toolName: string): boolean {
+    if (this.isToolDisallowedByAgentConfig(toolName)) {
+      return false;
+    }
     if (this.executionAllowedTools === undefined) {
-      return true;
+      // Code mode declares exec unconditionally (getCodeModeFunctionDeclarations
+      // keeps exposure 'exec' regardless of the allowed set), and prepareTools
+      // adds tool_search beside it, so a finite configured list that omits
+      // them must not refuse the tools the model was shown — the same
+      // carve-out the executionAllowedTools branch applies below. Both
+      // gateways apply the agent's scoped nested-tool allowlist themselves.
+      if (
+        (toolName === ToolNames.EXEC || toolName === ToolNames.TOOL_SEARCH) &&
+        this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
+      ) {
+        return true;
+      }
+      const configuredAllowlist = this.getConfiguredToolExecutionAllowlist();
+      return (
+        configuredAllowlist === undefined ||
+        configuredAllowlist.includes(toolName)
+      );
     }
     if (
-      toolName === ToolNames.EXEC &&
+      (toolName === ToolNames.EXEC || toolName === ToolNames.TOOL_SEARCH) &&
       this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
     ) {
       return true;
@@ -1786,24 +2708,8 @@ export class AgentCore {
     wasOutputTruncated = false,
     handledToolCallFingerprints = new Map<string, string>(),
     duplicateProviderToolCallResponseIds = new Set<string>(),
-  ): Promise<{
-    messages: Content[];
-    repeatedDuplicateProviderToolCall: boolean;
-    /** Executed calls with their model-visible results, in call order.
-     * Consumed by the loop detector for result-aware stateful-read guards
-     * (issue #9450). */
-    results: Array<{
-      toolName: string;
-      args: Record<string, unknown>;
-      responseParts: Part[];
-    }>;
-  }> {
-    if (
-      this.codeModeAllowedToolNames === undefined &&
-      this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
-    ) {
-      await this.prepareTools();
-    }
+  ): Promise<ToolStepResult> {
+    if (this.codeModeToolsUnprepared()) await this.prepareTools();
     const responseByCallId = new Map<
       string,
       {
@@ -1869,19 +2775,7 @@ export class AgentCore {
       const toolName = String(fc.name);
       const args = (fc.args ?? {}) as Record<string, unknown>;
 
-      let errorMessage: string | undefined;
-      if (!declaredToolNames.has(fc.name)) {
-        errorMessage = isPlanLifecycleToolUnavailableInSubagent(toolName)
-          ? getSubagentPlanToolUnavailableMessage(toolName)
-          : isLeaderOnlyToolUnavailableInSubagent(toolName)
-            ? getLeaderOnlyToolUnavailableMessage(toolName)
-            : `Tool "${toolName}" not found. Tools must use the exact names provided.`;
-      } else if (!this.isToolExecutionAllowed(toolName)) {
-        errorMessage =
-          this.executionAllowlistErrorSummary !== undefined
-            ? `Tool "${toolName}" is not allowed by this agent's execution allowlist. Allowed entries: ${this.executionAllowlistErrorSummary}.`
-            : `Tool "${toolName}" is not allowed by this agent's execution allowlist. No tools are allowed.`;
-      }
+      const errorMessage = this.toolCallRefusal(fc.name, declaredToolNames);
 
       if (errorMessage) {
         const functionResponsePart = {
@@ -1966,9 +2860,189 @@ export class AgentCore {
       authorizedCalls.push(fc);
     }
 
+    const requests = authorizedCalls.map((fc) =>
+      this.buildToolCallRequest(
+        fc,
+        callIdByFunctionCall.get(fc)!,
+        promptId,
+        responseId,
+        wasOutputTruncated,
+      ),
+    );
+    await this.scheduleToolCalls({
+      requests,
+      abortController,
+      currentRound,
+      declaredToolNames,
+      onSettled: ({ request, response, durationMs }) =>
+        responseByCallId.set(response.callId, {
+          toolName: request.name,
+          responseParts: response.responseParts,
+          persistedOutputFiles: response.persistedOutputFiles,
+          artifacts: response.artifacts,
+          durationMs,
+        }),
+    });
+
+    const orderedResponses: ToolResponseBudgetEntry[] =
+      uniqueFunctionCalls.flatMap((fc) => {
+        const callId = callIdByFunctionCall.get(fc) ?? fc.id ?? '';
+        const response = responseByCallId.get(callId);
+        if (!response) return [];
+        return [
+          {
+            callId,
+            toolName: response.toolName,
+            responseParts: response.responseParts,
+            persistedOutputFiles: response.persistedOutputFiles,
+            artifacts: response.artifacts,
+          },
+        ];
+      });
+    if (functionCalls.length > 0 && orderedResponses.length === 0) {
+      orderedResponses.push({
+        callId: 'tool-call-batch',
+        toolName: 'tool-call-batch',
+        responseParts: [
+          {
+            text: 'All tool calls failed. Please analyze the errors and try an alternative approach.',
+          },
+        ],
+        persistedOutputFiles: [],
+      });
+    }
+    const finalizedResponses = await finalizeToolResponses(
+      this.runtimeContext,
+      orderedResponses,
+      new Map(orderedResponses.map((response) => [response.callId, promptId])),
+    );
+    const toolResponseParts = finalizedResponses.flatMap(
+      (response) => response.responseParts,
+    );
+    this.eventEmitter?.emit(AgentEventType.TOOL_RESPONSES_FINALIZED, {
+      subagentId: this.subagentId,
+      round: currentRound,
+      responses: finalizedResponses.map((response) => {
+        const collected = responseByCallId.get(response.callId);
+        return {
+          callId: response.callId,
+          responseParts: response.responseParts,
+          ...(collected?.durationMs !== undefined
+            ? { durationMs: collected.durationMs }
+            : {}),
+        };
+      }),
+      timestamp: Date.now(),
+    });
+
+    // Pair each executed call with its model-visible (finalized) result so
+    // the reasoning loop can feed the loop detector's result-aware guards.
+    const finalizedByCallId = new Map(
+      finalizedResponses.map((response) => [response.callId, response]),
+    );
+    const results: Array<{
+      toolName: string;
+      args: Record<string, unknown>;
+      responseParts: Part[];
+    }> = [];
+    for (const fc of uniqueFunctionCalls) {
+      const callId = callIdByFunctionCall.get(fc) ?? fc.id ?? '';
+      const finalized = finalizedByCallId.get(callId);
+      if (!finalized) continue;
+      results.push({
+        toolName: String(fc.name ?? ''),
+        args: (fc.args ?? {}) as Record<string, unknown>,
+        responseParts: finalized.responseParts,
+      });
+    }
+
+    return {
+      messages: [{ role: 'user', parts: toolResponseParts }],
+      repeatedDuplicateProviderToolCall: false,
+      results,
+    };
+  }
+
+  /** Code mode needs its allowlist before a call is built. */
+  private codeModeToolsUnprepared(): boolean {
+    return (
+      this.codeModeAllowedToolNames === undefined &&
+      this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
+    );
+  }
+
+  /**
+   * Why the agent cannot run a call it was sent: a tool it did not declare,
+   * or one outside its execution allowlist.
+   */
+  private toolCallRefusal(
+    declaredName: string | undefined,
+    declaredToolNames: ReadonlySet<string | undefined>,
+  ): string | undefined {
+    const toolName = String(declaredName);
+    if (!declaredName || !declaredToolNames.has(declaredName)) {
+      return isPlanLifecycleToolUnavailableInSubagent(toolName)
+        ? getSubagentPlanToolUnavailableMessage(toolName)
+        : isLeaderOnlyToolUnavailableInSubagent(toolName)
+          ? getLeaderOnlyToolUnavailableMessage(toolName)
+          : `Tool "${toolName}" not found. Tools must use the exact names provided.`;
+    }
+    if (!this.isToolExecutionAllowed(toolName)) {
+      return this.executionAllowlistErrorSummary !== undefined
+        ? `Tool "${toolName}" is not allowed by this agent's execution allowlist. Allowed entries: ${this.executionAllowlistErrorSummary}.`
+        : `Tool "${toolName}" is not allowed by this agent's execution allowlist. No tools are allowed.`;
+    }
+    return undefined;
+  }
+
+  /**
+   * Runs one batch of calls on a new scheduler: their events, approvals and
+   * hooks. It returns when every call settled or the round was aborted;
+   * `onSettled` gets each call's result, including the synthetic one of a
+   * call the abort cut off.
+   */
+  private async scheduleToolCalls(params: {
+    requests: ToolCallRequestInfo[];
+    abortController: AbortController;
+    currentRound: number;
+    declaredToolNames: ReadonlySet<string | undefined>;
+    isFinished?: () => boolean;
+    onSettled: (call: SettledToolCall) => void;
+  }): Promise<void> {
+    const {
+      requests,
+      abortController,
+      currentRound,
+      declaredToolNames,
+      isFinished,
+      onSettled,
+    } = params;
     // Build scheduler
     let resolveBatch: (() => void) | null = null;
     const emittedCallIds = new Set<string>();
+    const toolLifecycles = new Map<
+      string,
+      ReturnType<typeof createToolLifecycle>
+    >();
+    const executionResults = new Map<
+      string,
+      { status: ToolExecutionStatus; durationMs: number }
+    >();
+    const startedLifecycles = new Set<string>();
+    const publishLifecycle = (
+      callId: string,
+      lifecycle: ToolLifecycleEvent | undefined,
+    ) => {
+      if (!lifecycle) return;
+      this.eventEmitter?.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
+        subagentId: this.subagentId,
+        round: currentRound,
+        callId,
+        outputChunk: '',
+        lifecycle,
+        timestamp: Date.now(),
+      });
+    };
     // pidMap: callId → PTY PID, populated by onToolCallsUpdate when a shell
     // tool spawns a PTY. Shared with outputUpdateHandler via closure so the
     // PID is included in TOOL_OUTPUT_UPDATE events for interactive shell support.
@@ -1977,6 +3051,11 @@ export class AgentCore {
     // onToolCallsUpdate only fires the transition event once per callId even
     // though the callback runs repeatedly while the tool executes.
     const executionStartedEmitted = new Set<string>();
+    // ToolCall bridge requests are resolved by CoreToolScheduler. Only those
+    // starts are deferred to its first update; ordinary tools keep their
+    // existing pre-schedule event timing.
+    const pendingToolCallStarts = new Set<string>();
+    const executionRequestByCallId = new Map<string, ToolCallRequestInfo>();
     const approvalDeliveryByDetails = new WeakMap<
       ToolCallConfirmationDetails,
       ApprovalDeliveryState
@@ -1988,6 +3067,12 @@ export class AgentCore {
         clearTimeout(state.retryTimer);
         state.retryTimer = undefined;
       }
+      this.eventEmitter.emit(AgentEventType.TOOL_APPROVAL_RESOLVED, {
+        subagentId: this.subagentId,
+        round: currentRound,
+        callId: state.callId,
+        timestamp: Date.now(),
+      });
     };
     const clearApprovalDeliveries = () => {
       for (const state of currentApprovalDeliveries.values()) {
@@ -1995,8 +3080,45 @@ export class AgentCore {
       }
       currentApprovalDeliveries.clear();
     };
+    const emitToolCallStart = (
+      request: ToolCallRequestInfo,
+      invokePreToolUse = true,
+    ) => {
+      const { callId, name: toolName, args } = request;
+      const modelFacingRequest = request as ToolCallRequestInfo & {
+        modelFacingName?: string;
+        modelFacingArgs?: Record<string, unknown>;
+      };
+      this.eventEmitter?.emit(AgentEventType.TOOL_CALL, {
+        subagentId: this.subagentId,
+        round: currentRound,
+        callId,
+        name: toolName,
+        args,
+        ...(modelFacingRequest.modelFacingName
+          ? {
+              modelFacingName: modelFacingRequest.modelFacingName,
+              modelFacingArgs: modelFacingRequest.modelFacingArgs ?? args,
+            }
+          : {}),
+        description: this.getToolDescription(toolName, args),
+        isOutputMarkdown: this.getToolIsOutputMarkdown(toolName),
+        timestamp: Date.now(),
+      } as AgentToolCallEvent);
+
+      if (invokePreToolUse) {
+        void this.hooks?.preToolUse?.({
+          subagentId: this.subagentId,
+          name: this.name,
+          toolName,
+          args,
+          timestamp: Date.now(),
+        });
+      }
+    };
     const deliverApproval = (state: ApprovalDeliveryState) => {
       if (
+        isFinished?.() ||
         !state.active ||
         state.delivered ||
         state.responded ||
@@ -2048,15 +3170,40 @@ export class AgentCore {
     };
     const scheduler = new CoreToolScheduler({
       config: this.runtimeContext,
-      shouldObserveProducer: (callId) => !emittedCallIds.has(callId),
+      isFinished,
+      onToolExecutionStarted: (callId, epoch) => {
+        if (isFinished?.()) return;
+        startedLifecycles.add(callId);
+        publishLifecycle(
+          callId,
+          toolLifecycles
+            .get(callId)
+            ?.start(epoch, executionRequestByCallId.get(callId)?.name),
+        );
+      },
+      onToolExecutionSettled: (callId, status, durationMs) => {
+        executionResults.set(callId, { status, durationMs });
+        if (emittedCallIds.has(callId)) {
+          publishLifecycle(
+            callId,
+            toolLifecycles.get(callId)?.finish('cancelled', status, durationMs),
+          );
+        }
+      },
+      shouldObserveProducer: (callId) =>
+        !isFinished?.() && !emittedCallIds.has(callId),
       // `declaredToolNames` is the batch's own list, computed above from the
       // `toolsList` sent to the model. See `CoreToolSchedulerOptions.hasSkillTool`
       // for why the registry cannot answer this and what the predicate owes.
       hasSkillTool: () => this.canInvokeSkill(declaredToolNames),
+      // The gates above checked the model-emitted name; for tool_call bridge
+      // requests that is the wrapper, so the scheduler re-checks the resolved
+      // target against the same execution allowlist.
+      isToolExecutionAllowed: (name) => this.isToolExecutionAllowed(name),
       outputUpdateHandler: (callId, outputChunk) => {
         // Shell liveness heartbeats have no subagent consumer; broadcasting
         // one would overwrite the live output view kept in liveOutputs.
-        if (isShellProgressData(outputChunk)) {
+        if (isFinished?.() || isShellProgressData(outputChunk)) {
           return;
         }
         this.eventEmitter?.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
@@ -2071,6 +3218,7 @@ export class AgentCore {
       onAllToolCallsComplete: async (completedCalls) => {
         clearApprovalDeliveries();
         for (const call of completedCalls) {
+          if (isFinished?.()) break;
           if (emittedCallIds.has(call.request.callId)) continue;
           emittedCallIds.add(call.request.callId);
 
@@ -2085,12 +3233,28 @@ export class AgentCore {
           // Record stats
           this.recordToolCallStats(toolName, success, duration, errorMessage);
 
+          const execution = executionResults.get(call.request.callId);
+          const lifecycle =
+            startedLifecycles.has(call.request.callId) && !execution
+              ? undefined
+              : toolLifecycles
+                  .get(call.request.callId)
+                  ?.finish(
+                    call.status === 'cancelled'
+                      ? 'cancelled'
+                      : success
+                        ? 'success'
+                        : 'error',
+                    execution?.status ?? 'not_started',
+                    execution?.durationMs,
+                  );
           // Emit tool result event
           this.eventEmitter?.emit(AgentEventType.TOOL_RESULT, {
             subagentId: this.subagentId,
             round: currentRound,
             callId: call.request.callId,
             name: toolName,
+            lifecycle,
             success,
             error: errorMessage,
             responseParts: call.response.responseParts,
@@ -2119,11 +3283,10 @@ export class AgentCore {
             timestamp: Date.now(),
           });
 
-          responseByCallId.set(call.request.callId, {
-            toolName,
-            responseParts: call.response.responseParts,
-            persistedOutputFiles: call.response.persistedOutputFiles,
-            artifacts: call.response.artifacts,
+          onSettled({
+            status: call.status,
+            request: call.request,
+            response: call.response,
             durationMs: duration,
           });
         }
@@ -2131,6 +3294,14 @@ export class AgentCore {
         resolveBatch?.();
       },
       onToolCallsUpdate: (calls: ToolCall[]) => {
+        if (isFinished?.()) return;
+        for (const call of calls) {
+          const { callId } = call.request;
+          if (!pendingToolCallStarts.delete(callId)) continue;
+          executionRequestByCallId.set(callId, call.request);
+          emitToolCallStart(call.request);
+        }
+
         const awaitingByCallId = new Map(
           calls
             .filter(
@@ -2275,53 +3446,25 @@ export class AgentCore {
       onEditorClose: () => {},
     });
 
-    // Prepare requests and emit TOOL_CALL events
-    const requests: ToolCallRequestInfo[] = authorizedCalls.map((fc) => {
-      const toolName = String(fc.name || 'unknown');
-      const callId = callIdByFunctionCall.get(fc)!;
-      const providerCallId = getProviderToolCallId(fc) ?? fc.id;
-      const args = (fc.args ?? {}) as Record<string, unknown>;
-      const request: ToolCallRequestInfo = {
-        callId,
-        ...(providerCallId ? { providerCallId } : {}),
-        name: toolName,
-        args,
-        isClientInitiated: true,
-        prompt_id: promptId,
-        response_id: responseId,
-        wasOutputTruncated,
-        ...(toolName === ToolNames.EXEC &&
-        this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
-          ? {
-              codeModeAllowedToolNames: this.codeModeAllowedToolNames ?? [],
-            }
-          : {}),
-      };
-
-      const description = this.getToolDescription(toolName, args);
-      const isOutputMarkdown = this.getToolIsOutputMarkdown(toolName);
-      this.eventEmitter?.emit(AgentEventType.TOOL_CALL, {
-        subagentId: this.subagentId,
-        round: currentRound,
-        callId,
-        name: toolName,
-        args,
-        description,
-        isOutputMarkdown,
-        timestamp: Date.now(),
-      } as AgentToolCallEvent);
-
-      // pre-tool hook
-      void this.hooks?.preToolUse?.({
-        subagentId: this.subagentId,
-        name: this.name,
-        toolName,
-        args,
-        timestamp: Date.now(),
-      });
-
-      return request;
-    });
+    // Bridge events wait for scheduler resolution; ordinary tool events
+    // retain their existing pre-schedule timing.
+    for (const request of requests) {
+      const { callId, name: toolName } = request;
+      if (canonicalToolName(toolName) !== ToolNames.TODO_WRITE) {
+        toolLifecycles.set(
+          callId,
+          createToolLifecycle(this.runtimeContext, callId, toolName, {
+            subagentId: this.subagentId,
+            persist: false,
+          }),
+        );
+      }
+      if (canonicalToolName(toolName) === ToolNames.TOOL_CALL) {
+        pendingToolCallStarts.add(callId);
+      } else {
+        emitToolCallStart(request);
+      }
+    }
 
     if (requests.length > 0) {
       // Create a per-batch completion promise
@@ -2340,7 +3483,17 @@ export class AgentCore {
         for (const req of requests) {
           if (emittedCallIds.has(req.callId)) continue;
           emittedCallIds.add(req.callId);
+          // A deferred bridge start has not been emitted yet. Pair the
+          // synthetic cancellation with its model-facing wrapper call before
+          // the result, but do not run preToolUse for a call that never ran.
+          // Deleting first also prevents a later scheduler update from
+          // emitting a second, resolved-target start after cancellation.
+          if (pendingToolCallStarts.delete(req.callId)) {
+            emitToolCallStart(req, false);
+          }
 
+          const executionRequest = executionRequestByCallId.get(req.callId);
+          const toolName = executionRequest?.name ?? req.name;
           const errorMessage = 'Tool call cancelled by user abort.';
           const responseParts: Part[] = [
             {
@@ -2351,19 +3504,30 @@ export class AgentCore {
               },
             },
           ];
-          this.recordToolCallStats(req.name, false, 0, errorMessage);
+          this.recordToolCallStats(toolName, false, 0, errorMessage);
 
           this.observeSyntheticToolResultProducer({
             callId: req.callId,
-            name: req.name,
+            name: toolName,
             responseParts,
           });
 
+          const execution = executionResults.get(req.callId);
           this.eventEmitter?.emit(AgentEventType.TOOL_RESULT, {
             subagentId: this.subagentId,
             round: currentRound,
             callId: req.callId,
-            name: req.name,
+            name: toolName,
+            lifecycle:
+              startedLifecycles.has(req.callId) && !execution
+                ? undefined
+                : toolLifecycles
+                    .get(req.callId)
+                    ?.finish(
+                      'cancelled',
+                      execution?.status ?? 'not_started',
+                      execution?.durationMs,
+                    ),
             success: false,
             error: errorMessage,
             responseParts,
@@ -2374,9 +3538,17 @@ export class AgentCore {
             durationMs: 0,
             timestamp: Date.now(),
           } as AgentToolResultEvent);
-          responseByCallId.set(req.callId, {
-            toolName: req.name,
-            responseParts,
+          onSettled({
+            status: 'cancelled',
+            request: executionRequest ?? req,
+            response: {
+              callId: req.callId,
+              responseParts,
+              resultDisplay: errorMessage,
+              error: new Error(errorMessage),
+              errorType: undefined,
+              executionStatus: execution?.status ?? 'not_started',
+            },
             durationMs: 0,
           });
         }
@@ -2400,83 +3572,40 @@ export class AgentCore {
         abortController.signal.removeEventListener('abort', onAbort);
       }
     }
+  }
 
-    const orderedResponses: ToolResponseBudgetEntry[] =
-      uniqueFunctionCalls.flatMap((fc) => {
-        const callId = callIdByFunctionCall.get(fc) ?? fc.id ?? '';
-        const response = responseByCallId.get(callId);
-        if (!response) return [];
-        return [
-          {
-            callId,
-            toolName: response.toolName,
-            responseParts: response.responseParts,
-            persistedOutputFiles: response.persistedOutputFiles,
-            artifacts: response.artifacts,
-          },
-        ];
-      });
-    if (functionCalls.length > 0 && orderedResponses.length === 0) {
-      orderedResponses.push({
-        callId: 'tool-call-batch',
-        toolName: 'tool-call-batch',
-        responseParts: [
-          {
-            text: 'All tool calls failed. Please analyze the errors and try an alternative approach.',
-          },
-        ],
-        persistedOutputFiles: [],
-      });
-    }
-    const finalizedResponses = await finalizeToolResponses(
-      this.runtimeContext,
-      orderedResponses,
-      new Map(orderedResponses.map((response) => [response.callId, promptId])),
-    );
-    const toolResponseParts = finalizedResponses.flatMap(
-      (response) => response.responseParts,
-    );
-    this.eventEmitter?.emit(AgentEventType.TOOL_RESPONSES_FINALIZED, {
-      subagentId: this.subagentId,
-      round: currentRound,
-      responses: finalizedResponses.map((response) => {
-        const collected = responseByCallId.get(response.callId);
-        return {
-          callId: response.callId,
-          responseParts: response.responseParts,
-          ...(collected?.durationMs !== undefined
-            ? { durationMs: collected.durationMs }
-            : {}),
-        };
-      }),
-      timestamp: Date.now(),
-    });
-
-    // Pair each executed call with its model-visible (finalized) result so
-    // the reasoning loop can feed the loop detector's result-aware guards.
-    const finalizedByCallId = new Map(
-      finalizedResponses.map((response) => [response.callId, response]),
-    );
-    const results: Array<{
-      toolName: string;
-      args: Record<string, unknown>;
-      responseParts: Part[];
-    }> = [];
-    for (const fc of uniqueFunctionCalls) {
-      const callId = callIdByFunctionCall.get(fc) ?? fc.id ?? '';
-      const finalized = finalizedByCallId.get(callId);
-      if (!finalized) continue;
-      results.push({
-        toolName: String(fc.name ?? ''),
-        args: (fc.args ?? {}) as Record<string, unknown>,
-        responseParts: finalized.responseParts,
-      });
-    }
-
+  /** The request of a call the model made, as the scheduler runs it. */
+  private buildToolCallRequest(
+    fc: FunctionCall,
+    callId: string,
+    promptId: string,
+    responseId: string | undefined,
+    wasOutputTruncated: boolean,
+  ): ToolCallRequestInfo {
+    const toolName = String(fc.name);
+    const providerCallId = getProviderToolCallId(fc) ?? fc.id;
+    const args = (fc.args ?? {}) as Record<string, unknown>;
     return {
-      messages: [{ role: 'user', parts: toolResponseParts }],
-      repeatedDuplicateProviderToolCall: false,
-      results,
+      callId,
+      ...(providerCallId ? { providerCallId } : {}),
+      name: toolName,
+      args,
+      isClientInitiated: true,
+      prompt_id: promptId,
+      response_id: responseId,
+      wasOutputTruncated,
+      // Mirror `turn.ts`: the data-loss guard keys on the fact that the
+      // arguments arrived unterminated, which is independent of whether the
+      // output token limit was what cut them (QwenLM/qwen-code#12970).
+      ...(toolCallArgumentsWereIncomplete(fc)
+        ? { hadIncompleteArguments: true }
+        : {}),
+      ...((toolName === ToolNames.EXEC || toolName === ToolNames.TOOL_SEARCH) &&
+      this.runtimeContext.getToolMode?.() === ToolMode.CodeModeOnly
+        ? {
+            codeModeAllowedToolNames: this.codeModeAllowedToolNames ?? [],
+          }
+        : {}),
     };
   }
 
@@ -2704,6 +3833,7 @@ export class AgentCore {
     emitter.on(
       AgentEventType.TOOL_OUTPUT_UPDATE,
       (event: AgentToolOutputUpdateEvent) => {
+        if (event.lifecycle) return;
         this.liveOutputs.set(event.callId, event.outputChunk);
         if (event.pid !== undefined) {
           this.shellPids.set(event.callId, event.pid);

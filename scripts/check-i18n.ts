@@ -567,6 +567,12 @@ export async function checkI18n(
   }
 
   const usedKeys = await extractUsedKeys(sourceDir);
+  if (options.sourceDir === undefined) {
+    const sharedKeys = await extractUsedKeys(
+      path.join(__dirname, '../packages/core/src/utils'),
+    );
+    for (const key of sharedKeys) usedKeys.add(key);
+  }
   const unusedKeys = findUnusedKeys(enKeys, usedKeys);
   const unusedKeysOnlyInLocales =
     unusedKeys.length > 0

@@ -19,6 +19,7 @@ import {
   useMessagesFromBlocks,
 } from './useMessages';
 import type { Message } from '../adapters/types';
+import { getTranslator } from '../i18n';
 
 const hookState = vi.hoisted(() => {
   const resolveSubagentSession = vi.fn();
@@ -113,6 +114,75 @@ describe('transcriptBlocksToLocalizedMessages', () => {
       { content: 'localized:error.modelStreamInterrupted' },
       { content: 'localized:error.loopDetected' },
     ]);
+  });
+
+  const loopBlock = (loop?: DaemonStatusTranscriptBlock['loop']) =>
+    baseBlock({
+      id: 'loop',
+      kind: 'error',
+      text: 'internal fallback',
+      errorKind: 'loop_detected',
+      ...(loop ? { loop } : {}),
+    } as Omit<
+      DaemonStatusTranscriptBlock,
+      'clientReceivedAt' | 'createdAt' | 'updatedAt'
+    >);
+  const loopText = (
+    loop: DaemonStatusTranscriptBlock['loop'],
+    language: 'en' | 'zh-CN' = 'en',
+  ) =>
+    transcriptBlocksToLocalizedMessages(
+      [loopBlock(loop)],
+      getTranslator(language),
+    )[0]?.content;
+
+  it('names the cause of a loop stop the daemon reports', () => {
+    expect(
+      loopText({
+        loopType: 'turn_tool_call_cap',
+        loopReason: 'explicit_cap',
+        toolCallCount: 4,
+        toolCallLimit: 3,
+      }),
+    ).toBe(
+      'This turn reached the limit of 3 tool calls set by model.maxToolCallsPerTurn, so it was stopped. Your session is still open—raise the limit in your settings, or send a new instruction to continue.',
+    );
+    expect(
+      loopText(
+        {
+          loopType: 'turn_tool_call_cap',
+          loopReason: 'stuck_repetition',
+          toolCallCount: 101,
+          toolCallLimit: 100,
+        },
+        'zh-CN',
+      ),
+    ).toBe(
+      '工具调用超过 100 次后，模型仍在重复同一个调用，因此系统停止了本轮操作。会话并未结束，你可以换一种方式或给出更明确的指令。',
+    );
+    expect(
+      loopText({
+        loopType: 'global_tool_call_duplicate',
+        loopReason: 'provider_duplicate_id',
+      }),
+    ).toContain('The model service sent a tool call that had already run');
+    expect(loopText({ loopType: 'invalid_tool_params_stagnation' })).toContain(
+      'kept sending invalid arguments to the same tool',
+    );
+  });
+
+  it('keeps the generic loop text when the cause is missing or unknown', () => {
+    const generic = getTranslator('en')('error.loopDetected');
+    expect(loopText(undefined)).toBe(generic);
+    // A cap stop without its limit, a shared type without a reason, and a
+    // detector the daemon does not run all fall back.
+    expect(
+      loopText({ loopType: 'turn_tool_call_cap', loopReason: 'explicit_cap' }),
+    ).toBe(generic);
+    expect(loopText({ loopType: 'global_tool_call_duplicate' })).toBe(generic);
+    expect(loopText({ loopType: 'consecutive_identical_tool_calls' })).toBe(
+      generic,
+    );
   });
 
   it.each(['assistant', 'thought'] as const)(

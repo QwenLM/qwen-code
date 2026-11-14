@@ -62,27 +62,15 @@ export const plugin: ChannelPlugin = {
         ],
       },
       {
-        key: 'dmPolicy',
-        label: 'Direct Message Access',
-        kind: 'enum',
-        required: true,
-        default: 'open',
-        description:
-          'Controls whether direct messages and document notifications can start tasks',
-        options: [
-          { value: 'open', label: 'Open' },
-          { value: 'disabled', label: 'Disabled' },
-        ],
-      },
-      {
-        key: 'senderPolicy',
-        label: 'Sender Policy',
+        key: 'privatePolicy',
+        label: 'Private Policy',
         kind: 'enum',
         required: true,
         default: 'pairing',
         description:
-          'Controls which DingTalk users may start direct-message, document-notification, native-todo, and non-paired group tasks',
+          'Controls which DingTalk users may start direct-message, document-notification, and native-todo tasks',
         options: [
+          { value: 'disabled', label: 'Disabled' },
           { value: 'pairing', label: 'Pairing' },
           { value: 'allowlist', label: 'Allowlist' },
           { value: 'open', label: 'Open' },
@@ -93,6 +81,20 @@ export const plugin: ChannelPlugin = {
         label: 'Allowed Users',
         kind: 'string-list',
         description: 'DingTalk IDs used by Allowlist and Pairing policies',
+      },
+      {
+        key: 'quotePrivateReply',
+        label: 'Quote Private Replies',
+        kind: 'boolean',
+        description:
+          'Quote the originating direct message in the final response. Disabled by default',
+      },
+      {
+        key: 'quoteGroupReply',
+        label: 'Quote Group Replies',
+        kind: 'boolean',
+        description:
+          'Quote the originating group message in the final response. Disabled by default',
       },
       {
         key: 'watchTodos',
@@ -133,11 +135,14 @@ export const plugin: ChannelPlugin = {
       ) {
         return 'DWS channels require approvalMode "default", "plan", or "yolo".';
       }
-      if (
-        config['watchTodos'] !== undefined &&
-        typeof config['watchTodos'] !== 'boolean'
-      ) {
-        return 'DWS watchTodos must be a boolean.';
+      for (const field of [
+        'watchTodos',
+        'quotePrivateReply',
+        'quoteGroupReply',
+      ] as const) {
+        if (config[field] !== undefined && typeof config[field] !== 'boolean') {
+          return `DWS ${field} must be a boolean.`;
+        }
       }
       for (const field of ['startReaction', 'endReaction'] as const) {
         if (config[field] !== undefined && typeof config[field] !== 'string') {

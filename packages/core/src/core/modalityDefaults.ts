@@ -6,6 +6,7 @@
 
 import type { InputModalities } from './contentGenerator.js';
 import { normalize } from './tokenLimits.js';
+import { lookupModelCatalog } from '../models/model-catalog.js';
 import { parseModelReasoningCapabilities } from './reasoning-effort.js';
 
 const FULL_MULTIMODAL: InputModalities = {
@@ -50,15 +51,24 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   [/^qwen3\.5-plus/, { image: true, video: true }],
   [/^qwen3\.6-plus/, { image: true, video: true }],
   [/^qwen3\.7-plus/, { image: true, video: true }],
-  // Qwen 3.8 series: flash/plus support image + video; max supports image only
+  // The stable Qwen 3.8 chat models accept images and video. Max variants
+  // without catalog metadata default to image input.
   [/^qwen3\.8-flash/, { image: true, video: true }],
   [/^qwen3\.8-plus/, { image: true, video: true }],
+  [/^qwen3\.8-max$/, { image: true, video: true }],
   [/^qwen3\.8-max/, { image: true }],
   [/^coder-model$/, { image: true, video: true }],
 
   // Qwen VL (vision-language) models: image + video
   [/^qwen-vl-/, { image: true, video: true }],
-  [/^qwen3-vl-/, { image: true, video: true }],
+  // Ollama names these `qwen3-vl:8b` and `qwen2.5vl:7b`, so the tag strip
+  // leaves a bare `qwen3-vl` or a `qwen2.5vl` with no hyphen.
+  [/^qwen3-?vl(?:-|$)/, { image: true, video: true }],
+  // Open-weight Qwen2-VL / Qwen2.5-VL, including sizes and quantized builds
+  // the bundled catalog has no entry for (32B, 3B, -AWQ, -FP8).
+  [/^qwen2(?:\.5)?-?vl(?:-|$)/, { image: true, video: true }],
+  // QVQ visual reasoning models.
+  [/^qvq-/, { image: true }],
 
   // Qwen coder / text models: text-only
   [/^qwen3-coder-/, {}],
@@ -67,10 +77,13 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   [/^qwen/, {}],
 
   // -------------------
-  // DeepSeek — text-only, except explicit vision variants
+  // DeepSeek — text-only, except explicit vision variants and the official
+  // API's `deepseek-flash` alias (served by multimodal V4.1 Flash). The
+  // DashScope `deepseek-v4.1-flash` ids stay text-only.
   // (QwenLM/qwen-code#10270)
   // -------------------
   [/^deepseek-.*vision/, { image: true }],
+  [/^deepseek-flash$/, { image: true }],
   [/^deepseek/, {}],
 
   // -------------------
@@ -92,7 +105,11 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   // -------------------
   // Moonshot / Kimi
   // -------------------
-  [/^kimi-k3/, { image: true, video: true }],
+  // Kimi Code exposes the K3 generation without the `kimi-` prefix, so the
+  // prefix is optional here too. Its 256K variant accepts images but not
+  // video, so it is named ahead of the video-capable row.
+  [/^(?:kimi-)?k3-256k/, { image: true }],
+  [/^(?:kimi-)?k3/, { image: true, video: true }],
   [/^kimi-k2\./, { image: true, video: true }],
   [/^kimi-/, {}],
 
@@ -107,23 +124,38 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   [/^doubao-seed/, { image: true }],
   [/^doubao-.*(vision|vl)/, { image: true }],
   [/^doubao/, {}],
+
+  // -------------------
+  // Other open-weight vision models, commonly served through Ollama, vLLM and
+  // other OpenAI-compatible servers: Meta's Llama 3.2 Vision and Llama 4,
+  // LLaVA, and Mistral's Pixtral and Small 3.1 / 3.2 all accept images.
+  // -------------------
+  [/^llama-?3\.2-(?:\d+b-)?vision/, { image: true }],
+  [/^llama-?4(?:-|$)/, { image: true }],
+  [/^llava/, { image: true }],
+  [/^pixtral/, { image: true }],
+  [/^mistral-small-?3\.[12](?:-|$)/, { image: true }],
 ];
 
 /**
  * Return the default input modalities for a model based on its name.
  *
- * Uses the same normalize-then-regex pattern as {@link tokenLimit}.
- * Unknown models default to text-only (empty object) to avoid sending
- * unsupported media types that would cause unrecoverable API errors.
+ * Uses the same normalize-then-regex pattern as {@link tokenLimit}, merged
+ * with the models.dev catalog entry. PDF stays explicit because it selects a
+ * different file-reading path; other catalog modalities can extend a known
+ * family. A model neither source knows stays text-only (empty object) to avoid
+ * sending unsupported media types that would cause unrecoverable API errors.
  */
 export function defaultModalities(model: string): InputModalities {
   const norm = normalize(model);
+  const fromCatalog = { ...lookupModelCatalog(norm)?.modalities };
+  delete fromCatalog.pdf;
   for (const [regex, modalities] of MODALITY_PATTERNS) {
     if (regex.test(norm)) {
-      return { ...modalities };
+      return { ...fromCatalog, ...modalities };
     }
   }
-  return {};
+  return fromCatalog;
 }
 
 /**
@@ -141,6 +173,25 @@ export function isQwenFamilyWireModel(model: string | undefined): boolean {
   }
   const normalized = model.toLowerCase();
   return normalized.startsWith('qwen') || normalized === 'coder-model';
+}
+
+/**
+ * Qwen families beyond the legacy qwen3.8-max prefix that speak the same
+ * tiered `reasoning_effort` contract: the invitation-only latest-series
+ * previews and the qwen4 family. Shared by the wire gate and the CLI
+ * controls fallback so the family fact lives in one place. The `qwen4`
+ * prefix is intentionally unanchored (maintainer directive): every current
+ * and future qwen4 variant takes the tiered contract.
+ */
+export function isTieredEffortQwenPrefix(model: string | undefined): boolean {
+  if (!model) {
+    return false;
+  }
+  const normalized = model.toLowerCase();
+  return (
+    normalized.startsWith('qwen-latest-series-invite-') ||
+    normalized.startsWith('qwen4')
+  );
 }
 
 /**
@@ -162,5 +213,8 @@ export function isTieredEffortWireModel(
       reasoning.disableField === 'reasoning_effort'
     );
   }
-  return model.toLowerCase().startsWith('qwen3.8-max');
+  return (
+    model.toLowerCase().startsWith('qwen3.8-max') ||
+    isTieredEffortQwenPrefix(model)
+  );
 }

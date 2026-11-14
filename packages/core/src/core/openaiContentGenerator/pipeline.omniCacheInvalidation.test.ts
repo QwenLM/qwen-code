@@ -15,20 +15,30 @@ import { OpenAIContentConverter } from './converter.js';
 import type { Config } from '../../config/config.js';
 import type { AuthType, ContentGeneratorConfig } from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from './provider/index.js';
+import { drain } from '../../test-utils/model-fixtures.js';
 
 const mockInvalidateByUrl = vi.hoisted(() => vi.fn());
 const mockUploadCacheCtor = vi.hoisted(() => vi.fn());
 const mockObjectStoreCtor = vi.hoisted(() => vi.fn());
 
 vi.mock('openai');
-vi.mock('./converter.js', () => ({
-  OpenAIContentConverter: {
-    convertLlmRequestToOpenAI: vi.fn(),
-    convertOpenAIResponseToGemini: vi.fn(),
-    convertOpenAIChunkToLlm: vi.fn(),
-    convertGeminiToolsToOpenAI: vi.fn(),
-  },
-}));
+vi.mock('./converter.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./converter.js')>();
+  return {
+    // `settleParkedTruncationOverride` calls this directly, so a stub-only
+    // factory turns the first parked-override case added here into a
+    // mock-plumbing failure that reads as a converter bug. Keep it real, as
+    // pipeline.test.ts does.
+    corroborateTruncationFromCompletionTokens:
+      actual.corroborateTruncationFromCompletionTokens,
+    OpenAIContentConverter: {
+      convertLlmRequestToOpenAI: vi.fn(),
+      convertOpenAIResponseToGemini: vi.fn(),
+      convertOpenAIChunkToLlm: vi.fn(),
+      convertGeminiToolsToOpenAI: vi.fn(),
+    },
+  };
+});
 vi.mock('../../telemetry/loggers.js', () => ({
   logProtocolTagSanitized: vi.fn(),
 }));
@@ -106,15 +116,40 @@ describe('ContentGenerationPipeline omni oss cache invalidation', () => {
     },
   ] as unknown as OpenAI.Chat.ChatCompletionMessageParam[];
 
+  const createCliConfig = (omniEnabled: boolean) =>
+    ({
+      isOmniEnabled: () => omniEnabled,
+      storage: { getQwenDir: () => '/tmp/qwen' },
+    }) as unknown as Config;
+
+  /** Converts to `messages`, fails `create` with `error`, and expects `execute` to reject with `message`. */
+  async function expectExecuteRejects(
+    error: Error,
+    message: string,
+    messages = ossMediaMessages,
+  ) {
+    (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(messages);
+    (mockClient.chat.completions.create as Mock).mockRejectedValue(error);
+    await expect(pipeline.execute(request, userPromptId)).rejects.toThrow(
+      message,
+    );
+  }
+
+  /** Converts to oss media messages, serves `stream`, and expects draining it to reject with `message`. */
+  async function expectStreamRejects(stream: object, message: string) {
+    (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
+      ossMediaMessages,
+    );
+    (mockClient.chat.completions.create as Mock).mockResolvedValue(stream);
+    const generator = await pipeline.executeStream(request, userPromptId);
+    await expect(drain(generator)).rejects.toThrow(message);
+  }
+
   beforeEach(() => {
     vi.clearAllMocks();
 
     mockClient = {
-      chat: {
-        completions: {
-          create: vi.fn(),
-        },
-      },
+      chat: { completions: { create: vi.fn() } },
     } as unknown as OpenAI;
 
     mockConverter = OpenAIContentConverter;
@@ -133,10 +168,7 @@ describe('ContentGenerationPipeline omni oss cache invalidation', () => {
       shouldSuppressErrorLogging: vi.fn().mockReturnValue(false),
     } as unknown as ErrorHandler;
 
-    mockCliConfig = {
-      isOmniEnabled: () => true,
-      storage: { getQwenDir: () => '/tmp/qwen' },
-    } as unknown as Config;
+    mockCliConfig = createCliConfig(true);
 
     mockContentGeneratorConfig = {
       model: 'test-model',
@@ -154,14 +186,8 @@ describe('ContentGenerationPipeline omni oss cache invalidation', () => {
   });
 
   it('invalidates each distinct oss:// URL when a non-streaming request fails with a media download error', async () => {
-    (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
-      ossMediaMessages,
-    );
-    (mockClient.chat.completions.create as Mock).mockRejectedValue(
+    await expectExecuteRejects(
       new Error('Download the media resource timed out'),
-    );
-
-    await expect(pipeline.execute(request, userPromptId)).rejects.toThrow(
       'Download the media resource timed out',
     );
 
@@ -175,9 +201,6 @@ describe('ContentGenerationPipeline omni oss cache invalidation', () => {
   });
 
   it('invalidates when the stream fails mid-iteration with an oss-naming error', async () => {
-    (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
-      ossMediaMessages,
-    );
     const emptyResponse = new GenerateContentResponse();
     (mockConverter.convertOpenAIChunkToLlm as Mock).mockReturnValue(
       emptyResponse,
@@ -193,122 +216,73 @@ describe('ContentGenerationPipeline omni oss cache invalidation', () => {
         );
       },
     };
-    (mockClient.chat.completions.create as Mock).mockResolvedValue(stream);
 
-    const generator = await pipeline.executeStream(request, userPromptId);
-    await expect(
-      (async () => {
-        for await (const _ of generator) {
-          // Drain until the mid-stream error surfaces.
-        }
-      })(),
-    ).rejects.toThrow('Failed to resolve oss://bucket/image.png');
-
+    await expectStreamRejects(
+      stream,
+      'Failed to resolve oss://bucket/image.png',
+    );
     expect(mockInvalidateByUrl).toHaveBeenCalledTimes(3);
     expect(mockInvalidateByUrl).toHaveBeenCalledWith('oss://bucket/image.png');
   });
 
   it('invalidates when the stream reports an error_finish chunk naming the oss media', async () => {
-    (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
-      ossMediaMessages,
-    );
     const stream = {
       async *[Symbol.asyncIterator]() {
         yield {
           id: 'chunk-1',
           choices: [
             {
-              delta: {
-                content: 'Download the media resource timed out',
-              },
+              delta: { content: 'Download the media resource timed out' },
               finish_reason: 'error_finish',
             },
           ],
         } as unknown as OpenAI.Chat.ChatCompletionChunk;
       },
     };
-    (mockClient.chat.completions.create as Mock).mockResolvedValue(stream);
 
-    const generator = await pipeline.executeStream(request, userPromptId);
-    await expect(
-      (async () => {
-        for await (const _ of generator) {
-          // Drain until the error_finish chunk surfaces as an error.
-        }
-      })(),
-    ).rejects.toThrow('Download the media resource timed out');
-
+    await expectStreamRejects(stream, 'Download the media resource timed out');
     expect(mockInvalidateByUrl).toHaveBeenCalledTimes(3);
   });
 
   it('does not invalidate on 429/RESOURCE_EXHAUSTED even with oss media present', async () => {
-    (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
-      ossMediaMessages,
-    );
-    (mockClient.chat.completions.create as Mock).mockRejectedValue(
+    await expectExecuteRejects(
       Object.assign(
         new Error('RESOURCE_EXHAUSTED: quota exceeded for oss:// media'),
         { status: 429 },
       ),
-    );
-
-    await expect(pipeline.execute(request, userPromptId)).rejects.toThrow(
       'RESOURCE_EXHAUSTED',
     );
-
     expect(mockInvalidateByUrl).not.toHaveBeenCalled();
   });
 
   it('does not invalidate when the error merely contains the letters "oss" without the scheme', async () => {
-    (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
-      ossMediaMessages,
-    );
-    (mockClient.chat.completions.create as Mock).mockRejectedValue(
+    await expectExecuteRejects(
       new Error('connection loss detected'),
-    );
-
-    await expect(pipeline.execute(request, userPromptId)).rejects.toThrow(
       'connection loss detected',
     );
-
     expect(mockInvalidateByUrl).not.toHaveBeenCalled();
   });
 
   it('does not invalidate when the request carries no oss:// URLs', async () => {
-    (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
+    await expectExecuteRejects(
+      new Error('Failed to resolve oss://bucket/other.png'),
+      'Failed to resolve',
       nonOssMediaMessages,
     );
-    (mockClient.chat.completions.create as Mock).mockRejectedValue(
-      new Error('Failed to resolve oss://bucket/other.png'),
-    );
-
-    await expect(pipeline.execute(request, userPromptId)).rejects.toThrow(
-      'Failed to resolve',
-    );
-
     expect(mockInvalidateByUrl).not.toHaveBeenCalled();
   });
 
   it('does not invalidate when omni is disabled', async () => {
-    mockCliConfig = {
-      isOmniEnabled: () => false,
-      storage: { getQwenDir: () => '/tmp/qwen' },
-    } as unknown as Config;
+    mockCliConfig = createCliConfig(false);
     pipeline = new ContentGenerationPipeline({
       ...mockConfig,
       cliConfig: mockCliConfig,
     });
-    (mockConverter.convertLlmRequestToOpenAI as Mock).mockReturnValue(
-      ossMediaMessages,
-    );
-    (mockClient.chat.completions.create as Mock).mockRejectedValue(
-      new Error('Download the media resource timed out'),
-    );
 
-    await expect(pipeline.execute(request, userPromptId)).rejects.toThrow(
+    await expectExecuteRejects(
+      new Error('Download the media resource timed out'),
       'Download the media resource timed out',
     );
-
     expect(mockInvalidateByUrl).not.toHaveBeenCalled();
   });
 });

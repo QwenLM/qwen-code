@@ -1,3 +1,7 @@
+import {
+  DaemonUnavailableError,
+  isDaemonUnavailableError,
+} from '../daemon/availability.js';
 import type {
   DaemonClient,
   DaemonSessionLiveState,
@@ -112,6 +116,7 @@ export function getSessionCatalogQueryKey(query: SessionCatalogQuery): string {
   return JSON.stringify([
     query.routeKind,
     query.workspaceCwd,
+    options?.sortBy ?? 'updatedAt',
     options?.pageSize ?? null,
     options?.cursor ?? null,
     options?.archiveState ?? null,
@@ -120,6 +125,7 @@ export function getSessionCatalogQueryKey(query: SessionCatalogQuery): string {
     options?.parentSessionId ?? null,
     options?.sourceType ?? null,
     options?.sourceId ?? null,
+    options?.liveOnly ?? null,
   ]);
 }
 
@@ -177,6 +183,7 @@ function liveSessionSnapshotsEqual(
         JSON.stringify(session.backgroundTurn) ||
       prior.isWaitingForPermission !== session.isWaitingForPermission ||
       prior.isWaitingForUserQuestion !== session.isWaitingForUserQuestion ||
+      prior.hasTurnError !== session.hasTurnError ||
       prior.updatedAt !== session.updatedAt
     ) {
       return false;
@@ -198,6 +205,15 @@ function getPollInterval(entry: CatalogEntry): number | undefined {
 
 export class SessionCatalogStore {
   private readonly entries = new Map<string, CatalogEntry>();
+  /**
+   * Prompt-derived titles for sessions whose rename has not landed yet.
+   * Applied to every published page so periodic and in-flight catalog reads
+   * cannot surface the session-id fallback first.
+   */
+  private readonly pendingSessionTitles = new Map<
+    string,
+    Map<string, string>
+  >();
   private readonly queue: QueueJob[] = [];
   private readonly trailingRefreshTimers = new Map<
     string,
@@ -233,11 +249,70 @@ export class SessionCatalogStore {
   private activeBackgroundRequests = 0;
   private queueSequence = 0;
   private visibilityListening = false;
+  private paused = false;
 
   constructor(private readonly client: DaemonClient) {}
 
+  setPaused(paused: boolean): void {
+    if (this.paused === paused) return;
+    this.paused = paused;
+    if (paused) {
+      for (const timer of this.trailingRefreshTimers.values())
+        clearTimeout(timer);
+      this.trailingRefreshTimers.clear();
+    }
+    for (const entry of this.entries.values()) {
+      this.clearPollTimer(entry);
+      if (paused || entry.subscribers.size === 0) continue;
+      entry.retryAt = undefined;
+      if (this.isWorkspaceLiveStateEnabled(entry.query.workspaceCwd)) {
+        this.requestLiveStateRefresh(entry.query.workspaceCwd, 'interactive');
+      } else if (
+        hasAutoLoadSubscriber(entry) ||
+        getPollInterval(entry) !== undefined
+      ) {
+        // Recovery must not reuse a read started before the outage.
+        if (entry.runningRevision !== undefined) entry.desiredRevision += 1;
+        this.requestBackground(entry, 'initial');
+      }
+    }
+    if (!paused) this.drainQueue();
+  }
+
   getSnapshot(query: SessionCatalogQuery): SessionCatalogSnapshot {
     return this.getOrCreateEntry(query).snapshot;
+  }
+
+  /**
+   * Reads a display name the catalog already holds for a session, scheduling
+   * nothing. A history session's name exists only here — neither the load
+   * response nor the metadata events carry it — so the header seeds the title
+   * from this cache instead of waiting for a round-trip.
+   */
+  peekSessionDisplayName(
+    sessionId: string,
+    workspaceCwd: string | undefined,
+  ): string | undefined {
+    if (!workspaceCwd) return undefined;
+    let displayName: string | undefined;
+    let updatedAt = -Infinity;
+    for (const entry of this.entries.values()) {
+      if (entry.query.workspaceCwd !== workspaceCwd) continue;
+      const name = entry.snapshot.page?.sessions.find(
+        // A page can hold sessions from another workspace (the daemon merges
+        // live runtime state), so match the row's workspace too, not just the
+        // entry's.
+        (session) =>
+          session.sessionId === sessionId &&
+          (!session.workspaceCwd || session.workspaceCwd === workspaceCwd),
+      )?.displayName;
+      const candidateUpdatedAt = entry.snapshot.updatedAt ?? 0;
+      if (name?.trim() && candidateUpdatedAt >= updatedAt) {
+        displayName = name;
+        updatedAt = candidateUpdatedAt;
+      }
+    }
+    return displayName;
   }
 
   getEmptySnapshot(): SessionCatalogSnapshot {
@@ -453,6 +528,7 @@ export class SessionCatalogStore {
     ) {
       return entry.snapshot.page;
     }
+    if (this.paused) throw new DaemonUnavailableError();
     let request: Promise<DaemonSessionListPage>;
     const reusableRunningRequest =
       entry.runningRevision !== undefined &&
@@ -552,6 +628,43 @@ export class SessionCatalogStore {
         ...entry.snapshot,
         page: { ...entry.snapshot.page, sessions },
       });
+    }
+  }
+
+  /**
+   * Record a prompt-derived title for a session whose rename is still in
+   * flight. Every subsequent page (poll, in-flight load, live merge) gets the
+   * title until the daemon reports a real custom title, so no read can publish
+   * the session-id fallback first.
+   */
+  setPendingSessionTitle(
+    workspaceCwd: string,
+    sessionId: string,
+    displayName: string,
+  ): void {
+    let pending = this.pendingSessionTitles.get(workspaceCwd);
+    if (!pending) {
+      pending = new Map();
+      this.pendingSessionTitles.set(workspaceCwd, pending);
+    }
+    pending.set(sessionId, displayName);
+    for (const entry of this.entries.values()) {
+      if (entry.query.workspaceCwd !== workspaceCwd) continue;
+      this.setSnapshot(entry, entry.snapshot);
+    }
+  }
+
+  /**
+   * Drop a pending prompt title once a real rename lands (or the session is
+   * closed), so a later catalog page cannot revive the provisional label.
+   */
+  clearPendingSessionTitle(workspaceCwd: string, sessionId: string): void {
+    const pending = this.pendingSessionTitles.get(workspaceCwd);
+    if (!pending?.delete(sessionId)) return;
+    if (pending.size === 0) this.pendingSessionTitles.delete(workspaceCwd);
+    for (const entry of this.entries.values()) {
+      if (entry.query.workspaceCwd !== workspaceCwd) continue;
+      this.setSnapshot(entry, entry.snapshot);
     }
   }
 
@@ -745,6 +858,7 @@ export class SessionCatalogStore {
         const isWaitingForPermission = live?.isWaitingForPermission ?? false;
         const isWaitingForUserQuestion =
           live?.isWaitingForUserQuestion ?? false;
+        const hasTurnError = live?.hasTurnError ?? session.hasTurnError;
         // The daemon watermark only ever advances recency; an equal or older
         // stamp (e.g. a staged page committed fresher data mid-flight) must
         // not regress the row.
@@ -771,6 +885,7 @@ export class SessionCatalogStore {
             JSON.stringify(live?.backgroundTurn) &&
           session.isWaitingForPermission === isWaitingForPermission &&
           session.isWaitingForUserQuestion === isWaitingForUserQuestion &&
+          session.hasTurnError === hasTurnError &&
           session.updatedAt === updatedAt
         ) {
           return session;
@@ -786,11 +901,15 @@ export class SessionCatalogStore {
           hasRunningBackgroundTasks: live?.hasRunningBackgroundTasks,
           isWaitingForPermission,
           isWaitingForUserQuestion,
+          hasTurnError,
           ...(updatedAt !== undefined ? { updatedAt } : {}),
         };
       });
       if (!changed) continue;
-      if (activityAdvanced) {
+      if (
+        activityAdvanced &&
+        entry.query.options.sortBy !== 'lastUserPromptAt'
+      ) {
         sessions.sort((a, b) =>
           compareSessionsByActivity(
             entry.query.options.view === 'organized',
@@ -853,6 +972,7 @@ export class SessionCatalogStore {
   async stageWorkspaceRefresh(
     workspaceCwd: string,
   ): Promise<StagedWorkspaceSessionCatalog> {
+    if (this.paused) throw new DaemonUnavailableError();
     const workspaceEntries = [...this.entries.values()].filter(
       (entry) => entry.query.workspaceCwd === workspaceCwd,
     );
@@ -936,6 +1056,14 @@ export class SessionCatalogStore {
       if ('superseded' in result) continue;
       firstFailure ??= result.error;
       if (result.entry.desiredRevision !== result.revision) continue;
+      if (this.paused || isDaemonUnavailableError(result.error)) {
+        this.setSnapshot(result.entry, {
+          ...result.entry.snapshot,
+          loading: false,
+        });
+        this.rejectWaiters(result.entry, result.revision, result.error);
+        continue;
+      }
       // Scope the failure to the entry whose own fetch rejected; entries
       // that already staged successfully keep their old page and commit on
       // the next reconcile.
@@ -983,7 +1111,10 @@ export class SessionCatalogStore {
       entry.invalidated = false;
       entry.retryAt = undefined;
       entry.snapshot = {
-        page: stagedPage.page,
+        page: this.applyPendingSessionTitlesToPage(
+          staged.workspaceCwd,
+          stagedPage.page,
+        ),
         loading: false,
         stale: false,
         updatedAt: Date.now(),
@@ -991,7 +1122,7 @@ export class SessionCatalogStore {
     }
     for (const { entry, stagedPage } of entries) {
       for (const subscriber of entry.subscribers) subscriber.listener();
-      this.resolveWaiters(entry, stagedPage.page);
+      this.resolveWaiters(entry, entry.snapshot.page ?? stagedPage.page);
     }
     return true;
   }
@@ -1000,6 +1131,7 @@ export class SessionCatalogStore {
     workspaceCwd: string,
     delayMs = SESSION_CATALOG_TRAILING_REFRESH_MS,
   ): void {
+    if (this.paused) return;
     const current = this.trailingRefreshTimers.get(workspaceCwd);
     if (current !== undefined) clearTimeout(current);
     const timer = setTimeout(() => {
@@ -1061,6 +1193,7 @@ export class SessionCatalogStore {
     entry: CatalogEntry,
     bypassRetry = false,
   ): Promise<DaemonSessionListPage> {
+    if (this.paused) return Promise.reject(new DaemonUnavailableError());
     entry.desiredRevision += 1;
     const revision = entry.desiredRevision;
     this.setSnapshot(entry, { ...entry.snapshot, stale: true });
@@ -1102,6 +1235,7 @@ export class SessionCatalogStore {
     entry: CatalogEntry,
     priority: 'initial' | 'poll',
   ): void {
+    if (this.paused) return;
     if (this.isWorkspaceLiveStateEnabled(entry.query.workspaceCwd)) return;
     if (this.isHidden()) {
       entry.nextPollAt = Date.now();
@@ -1189,6 +1323,7 @@ export class SessionCatalogStore {
   }
 
   private drainQueue(): void {
+    if (this.paused) return;
     while (this.activeRequests < 2) {
       const index = this.queue.findIndex(
         (job) => !job.background || this.activeBackgroundRequests < 1,
@@ -1258,6 +1393,11 @@ export class SessionCatalogStore {
             if (entry.desiredRevision !== revision) return;
             if (stagedOwnsRevision()) return;
             const normalized = normalizeError(error);
+            if (this.paused || isDaemonUnavailableError(error)) {
+              this.setSnapshot(entry, { ...entry.snapshot, loading: false });
+              this.rejectWaiters(entry, revision, normalized);
+              return;
+            }
             entry.retryAt = Date.now() + SESSION_CATALOG_ERROR_RETRY_MS;
             this.setSnapshot(entry, {
               ...entry.snapshot,
@@ -1388,9 +1528,50 @@ export class SessionCatalogStore {
     entry: CatalogEntry,
     snapshot: SessionCatalogSnapshot,
   ): void {
-    if (entry.snapshot === snapshot) return;
-    entry.snapshot = snapshot;
+    const next = this.applyPendingSessionTitles(
+      entry.query.workspaceCwd,
+      snapshot,
+    );
+    if (entry.snapshot === next) return;
+    entry.snapshot = next;
     for (const subscriber of entry.subscribers) subscriber.listener();
+  }
+
+  private applyPendingSessionTitles(
+    workspaceCwd: string,
+    snapshot: SessionCatalogSnapshot,
+  ): SessionCatalogSnapshot {
+    const page = snapshot.page;
+    if (!page) return snapshot;
+    const nextPage = this.applyPendingSessionTitlesToPage(workspaceCwd, page);
+    return nextPage === page ? snapshot : { ...snapshot, page: nextPage };
+  }
+
+  private applyPendingSessionTitlesToPage(
+    workspaceCwd: string,
+    page: DaemonSessionListPage,
+  ): DaemonSessionListPage {
+    const pending = this.pendingSessionTitles.get(workspaceCwd);
+    if (!pending || pending.size === 0 || page.sessions.length === 0) {
+      return page;
+    }
+    let changed = false;
+    const sessions = page.sessions.map((session) => {
+      const pendingTitle = pending.get(session.sessionId);
+      if (pendingTitle === undefined) return session;
+      // A real custom title confirms the rename; stop overriding and keep
+      // the daemon's authoritative name.
+      if (session.titleSource !== undefined) {
+        pending.delete(session.sessionId);
+        return session;
+      }
+      // The pending title also beats the daemon's first-prompt label (which
+      // has no titleSource) until the rename lands.
+      if (session.displayName === pendingTitle) return session;
+      changed = true;
+      return { ...session, displayName: pendingTitle };
+    });
+    return changed ? { ...page, sessions } : page;
   }
 
   private resetPollSchedule(entry: CatalogEntry): void {
@@ -1399,6 +1580,7 @@ export class SessionCatalogStore {
 
   private schedulePollFromNow(entry: CatalogEntry): void {
     this.clearPollTimer(entry);
+    if (this.paused) return;
     const now = Date.now();
     if (this.isHidden() && entry.invalidated) {
       entry.nextPollAt = Math.min(entry.nextPollAt ?? now, now);
@@ -1501,6 +1683,7 @@ export class SessionCatalogStore {
   }
 
   private readonly onVisibilityChange = (): void => {
+    if (this.paused) return;
     if (this.isHidden()) {
       for (const entry of this.entries.values()) {
         this.clearPollTimer(entry);
@@ -1567,4 +1750,17 @@ export function loadSessionCatalogOnce(
   options?: { fresh?: boolean },
 ): Promise<DaemonSessionListPage> {
   return getSessionCatalogStore(client).loadOnce(query, options);
+}
+
+/** Sync read of a cached display name; see `SessionCatalogStore.peekSessionDisplayName`. */
+export function peekSessionCatalogDisplayName(
+  client: DaemonClient,
+  sessionId: string | undefined,
+  workspaceCwd: string | undefined,
+): string | undefined {
+  if (!sessionId) return undefined;
+  return getSessionCatalogStore(client).peekSessionDisplayName(
+    sessionId,
+    workspaceCwd,
+  );
 }

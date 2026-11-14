@@ -32,20 +32,29 @@ import type {
   SessionMetrics,
   SkillLevel,
 } from '@qwen-code/qwen-code-core';
-import type { HistoryItemWithoutId } from '../types.js';
+import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
+import { isCollapsibleTool } from '../utils/tool-group-summary.js';
+import { ToolCallStatus } from '../types.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 import {
   formatStopHookLoopText,
   formatUserPromptSubmitBlocked,
+  formatToolArgs,
+  toolResultEvent,
 } from './event-adapter.js';
 import { flattenModelsBySource } from '../utils/modelsBySource.js';
-import { calculateCost } from '../../utils/costCalculator.js';
+import {
+  billableOutputTokens,
+  calculateCost,
+} from '../../utils/costCalculator.js';
 import { computeSessionStats } from '../utils/computeStats.js';
 import { formatDuration } from '../utils/formatters.js';
 import { levelLabel } from '../utils/skill-level-label.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { redactProxy } from '../systemInfoFields.js';
+import { formatInlineImageOverflow } from '../utils/inline-image-parts.js';
+import { isSyntheticHistoryItem } from '../utils/historyUtils.js';
 
 /** Runtime state the host supplies for items that read it in ink. */
 export interface ItemProjectionContext {
@@ -58,6 +67,8 @@ export interface ItemProjectionContext {
 }
 
 function fmtTokensShort(n: number): string {
+  // 999,950 rounds to 1000.0k, so it belongs in the next unit.
+  if (n >= 999_950) return `${(n / 1_000_000).toFixed(1)}m`;
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
 }
 
@@ -109,7 +120,9 @@ export function projectAbout(systemInfo: Record<string, unknown>): string {
   let authLabel = '';
   if (selectedAuthType) {
     const matched = findProviderByCredentials(baseUrl, apiKeyEnvKey);
-    if (matched && resolveMetadataKey(matched) && matched.label) {
+    if (selectedAuthType === 'qwen-subscription') {
+      authLabel = 'Qwen Subscription';
+    } else if (matched && resolveMetadataKey(matched) && matched.label) {
       authLabel = matched.label;
     } else if (
       selectedAuthType.startsWith('oauth') ||
@@ -205,6 +218,7 @@ export function projectSkillsList(
 }
 
 interface FlatModelEntry {
+  billableOutputTokens?: number;
   /** Structured key (raw model name + optional `::source` suffix). */
   key: string;
   label: string;
@@ -222,7 +236,11 @@ interface FlatModelEntry {
 
 /** Active-model rows; `flattenModelsBySource` already labels + filters. */
 function flattenActiveModels(metrics: SessionMetrics): FlatModelEntry[] {
-  return flattenModelsBySource(metrics.models).map((entry) => ({
+  return flattenModelsBySource(
+    metrics.models,
+    metrics.billableOutputTokens,
+  ).map((entry) => ({
+    billableOutputTokens: entry.billableOutputTokens,
     key: entry.key,
     label: entry.label,
     metrics: entry.metrics as FlatModelEntry['metrics'],
@@ -239,7 +257,7 @@ function entryCost(
   return calculateCost({
     inputTokens: entry.metrics.tokens.prompt,
     outputTokens:
-      entry.metrics.tokens.candidates + entry.metrics.tokens.thoughts,
+      entry.billableOutputTokens ?? billableOutputTokens(entry.metrics.tokens),
     pricing: (modelPricing ?? {})[entry.key.split('::')[0]] as Parameters<
       typeof calculateCost
     >[0]['pricing'],
@@ -425,8 +443,16 @@ export function projectContextUsage(item: Record<string, unknown>): string {
   const showDetails = Boolean(item['showDetails']);
   const lines = ['Context Usage', ''];
   if (totalTokens <= 0) {
-    lines.push('No API response yet. Send a message to see actual usage.');
-    lines.push('Estimated pre-conversation overhead');
+    // Parity of views/ContextUsage: an estimated history changes the captions.
+    if (Number(breakdown['messages'] ?? 0) > 0) {
+      lines.push(
+        'No provider usage yet. These are local estimates, including the conversation.',
+      );
+      lines.push('Estimated usage, including the conversation');
+    } else {
+      lines.push('No API response yet. Send a message to see actual usage.');
+      lines.push('Estimated pre-conversation overhead');
+    }
   }
   lines.push(
     `Model: ${modelName} Context window: ${fmtTokensShort(windowSize)} tokens`,
@@ -441,6 +467,12 @@ export function projectContextUsage(item: Record<string, unknown>): string {
     lines.push(
       `█ Used ${fmtTokensShort(totalTokens)} tokens (${pct(totalTokens, windowSize)}%)`,
     );
+    const cached = Number(breakdown['cachedTokens'] ?? 0);
+    if (cached > 0) {
+      lines.push(
+        `█ Cached prefix ${fmtTokensShort(cached)} tokens (${pct(cached, windowSize)}%)`,
+      );
+    }
     lines.push(
       `░ Free ${fmtTokensShort(free)} tokens (${pct(free, windowSize)}%)`,
     );
@@ -449,23 +481,40 @@ export function projectContextUsage(item: Record<string, unknown>): string {
     );
   }
   lines.push('');
-  lines.push('Usage by category');
+  // Parity of views/ContextUsage: without a provider total the estimate
+  // caption above already heads these rows (#12606).
+  if (totalTokens > 0) {
+    lines.push('Usage by category');
+  }
   const categories: Array<[string, string]> = [
     ['System prompt', 'systemPrompt'],
     ['Built-in tools', 'builtinTools'],
     ['MCP tools', 'mcpTools'],
-    ['Memory files', 'memoryFiles'],
+    ...(breakdown['instructionFiles'] === undefined
+      ? []
+      : ([['Instruction files', 'instructionFiles']] as Array<
+          [string, string]
+        >)),
+    [
+      breakdown['instructionFiles'] === undefined
+        ? 'Memory files'
+        : 'Auto memory',
+      'memoryFiles',
+    ],
     ['Skills', 'skills'],
+    ['Startup context', 'startupContext'],
   ];
   for (const [label, key] of categories) {
     const value = Number(breakdown[key] ?? 0);
-    if (key === 'mcpTools' && value <= 0) continue;
+    if ((key === 'mcpTools' || key === 'startupContext') && value <= 0) {
+      continue;
+    }
     lines.push(
       `█ ${label} ${fmtTokensShort(value)} tokens (${pct(value, windowSize)}%)`,
     );
   }
-  if (totalTokens > 0) {
-    const messages = Number(breakdown['messages'] ?? 0);
+  const messages = Number(breakdown['messages'] ?? 0);
+  if (totalTokens > 0 || messages > 0) {
     lines.push(
       `█ Messages ${fmtTokensShort(messages)} tokens (${pct(messages, windowSize)}%)`,
     );
@@ -528,7 +577,20 @@ export function projectContextUsage(item: Record<string, unknown>): string {
       ].sort(byTokens),
     );
     detail(
-      'Memory files',
+      'Instruction files',
+      (
+        (item['instructionFiles'] ?? []) as Array<{
+          path: string;
+          tokens: number;
+        }>
+      )
+        .map((file) => ({ name: file.path, tokens: file.tokens }))
+        .sort(byTokens),
+    );
+    detail(
+      breakdown['instructionFiles'] === undefined
+        ? 'Memory files'
+        : 'Auto memory',
       // The producer emits ContextMemoryDetail ({ path, tokens }); map to
       // the name field detail() renders.
       [
@@ -550,7 +612,7 @@ export function projectContextUsage(item: Record<string, unknown>): string {
     ];
     // Loaded skills first, then by total (listing + body) token cost.
     skills.sort((a, b) => {
-      if (a.loaded !== b.loaded) return a.loaded ? -1 : 1;
+      if (!a.loaded !== !b.loaded) return a.loaded ? -1 : 1;
       const aTotal = a.tokens + (a.bodyTokens ?? 0);
       const bTotal = b.tokens + (b.bodyTokens ?? 0);
       return bTotal - aTotal;
@@ -984,11 +1046,11 @@ export function projectSpecialItemText(
       );
     case 'tools_list':
       return projectToolsList(
-        ((record['tools'] ?? []) as Array<{
+        (record['tools'] ?? []) as Array<{
           name: string;
           displayName?: string;
           description?: string;
-        }>) ?? [],
+        }>,
         Boolean(record['showDescriptions']),
       );
     case 'model_stats': {
@@ -1097,7 +1159,15 @@ export function projectItemToStreamEvent(
 ): OpenTuiStreamEvent | null {
   const viaSpecialText = (): OpenTuiStreamEvent | null => {
     const text = projectSpecialItemText(item, ctx);
-    return text === null ? null : { type: 'info', text };
+    return text === null
+      ? null
+      : {
+          type: 'info',
+          text,
+          ...(isSyntheticHistoryItem(item)
+            ? {}
+            : { historyIsSynthetic: false }),
+        };
   };
   switch (item.type) {
     case 'user':
@@ -1107,8 +1177,23 @@ export function projectItemToStreamEvent(
         sentToModel: item.sentToModel ?? false,
         ...(item.promptId ? { promptId: item.promptId } : {}),
       };
-    case 'info':
-      return viaSpecialText();
+    case 'info': {
+      const text = projectSpecialItemText(item, ctx);
+      return text === null
+        ? null
+        : {
+            type: 'info',
+            text,
+            ...(isSyntheticHistoryItem(item)
+              ? {}
+              : { historyIsSynthetic: false }),
+            ...(item.presentation ? { presentation: item.presentation } : {}),
+          };
+    }
+    // ink draws a notice (a Mod's own prompt, a background agent that
+    // finished, a cron that fired) as an info row.
+    case 'notification':
+      return { type: 'info', text: item.text };
     case 'warning':
       return { type: 'warning', text: item.text };
     // No success row in the live model yet; ink's green SuccessMessage
@@ -1189,7 +1274,7 @@ export function projectItemToStreamEvent(
     //  - the rest: ink renders these through dedicated components and no
     //    OpenTUI writer produces them (tool_use_summary is written by ink's
     //    use-llm-stream only; diff_stats comes from the file-history rewind
-    //    flow, which has no OpenTUI seam; notification has no writer yet).
+    //    flow, which has no OpenTUI seam).
     case 'tool_group':
     case 'retry_countdown':
     case 'vision_notice':
@@ -1198,7 +1283,6 @@ export function projectItemToStreamEvent(
     case 'gemini_thought':
     case 'gemini_thought_content':
     case 'help':
-    case 'notification':
     case 'tool_use_summary':
     case 'diff_stats':
       return null;
@@ -1207,4 +1291,128 @@ export function projectItemToStreamEvent(
       return exhaustive;
     }
   }
+}
+
+/** Replays canonical history; live command projection must not duplicate tools. */
+export function projectHistoryToStreamEvents(
+  history: readonly HistoryItem[],
+  ctx: ItemProjectionContext,
+): OpenTuiStreamEvent[] {
+  const events: OpenTuiStreamEvent[] = [];
+  for (const item of history) {
+    const start = events.length;
+    switch (item.type) {
+      case 'user':
+        events.push({
+          type: 'user',
+          historyId: item.id,
+          text: item.text,
+          promptId: item.promptId,
+          sentToModel: item.sentToModel,
+        });
+        break;
+      case 'compression':
+        events.push({
+          type: 'compaction',
+          compression: item.compression,
+        });
+        break;
+      case 'gemini':
+      case 'gemini_content':
+        if (item.type === 'gemini') events.push({ type: 'done' });
+        if (item.text) {
+          events.push({
+            type: 'text',
+            delta: item.text,
+            ...(item.type === 'gemini' && Number.isFinite(item.timestamp)
+              ? { timestamp: item.timestamp }
+              : {}),
+          });
+        }
+        for (const image of item.images ?? []) {
+          events.push({ type: 'image', ...image });
+        }
+        if (item.omittedImageCount) {
+          events.push({
+            type: 'info',
+            text: formatInlineImageOverflow(item.omittedImageCount),
+          });
+        }
+        break;
+      case 'gemini_thought':
+      case 'gemini_thought_content':
+        events.push({ type: 'thinking', delta: item.text });
+        events.push({ type: 'thinking-end' });
+        break;
+      case 'tool_group':
+        for (const tool of item.tools) {
+          events.push({
+            type: 'tool-start',
+            id: tool.callId,
+            tool: tool.name,
+            title: tool.name,
+          });
+          if (tool.description) {
+            events.push({
+              type: 'tool-description',
+              id: tool.callId,
+              description: tool.description,
+            });
+          }
+          const args = formatToolArgs(tool.args);
+          if (args) events.push({ type: 'tool-args', id: tool.callId, args });
+          const result = toolResultEvent(
+            tool.callId,
+            tool.resultDisplay,
+            tool.visionBridgeNotice,
+          );
+          if (result || tool.detailedDisplay)
+            events.push({
+              ...(result ?? {
+                type: 'tool-result',
+                id: tool.callId,
+                display: '',
+              }),
+              ...(isCollapsibleTool(tool.name) &&
+              typeof tool.detailedDisplay === 'string'
+                ? { detailedDisplay: tool.detailedDisplay }
+                : {}),
+            });
+          for (const image of tool.images ?? [])
+            events.push({ type: 'image', ...image });
+          if (tool.omittedImageCount)
+            events.push({
+              type: 'info',
+              text: formatInlineImageOverflow(tool.omittedImageCount),
+            });
+          events.push({
+            type: 'tool-end',
+            id: tool.callId,
+            success: tool.status === ToolCallStatus.Success,
+            summary:
+              tool.status === ToolCallStatus.Success
+                ? 'ok'
+                : tool.status.toLowerCase(),
+          });
+        }
+        break;
+      default: {
+        const event = projectItemToStreamEvent(item, ctx);
+        if (event) events.push(event);
+      }
+    }
+    if (!events.slice(start).some((event) => event.type !== 'done'))
+      events.push({ type: 'canonical-history' });
+    for (let index = start; index < events.length; index++) {
+      if (events[index].type !== 'done')
+        events[index] = {
+          ...events[index],
+          historyId: item.id,
+          canonicalHistoryItem: item,
+          ...(item.display ? { historyDisplay: item.display } : {}),
+        };
+    }
+  }
+  events.push({ type: 'done' });
+  return events;
 }

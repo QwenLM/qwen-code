@@ -5,12 +5,16 @@ import type {
   SessionScope,
 } from '@qwen-code/channel-base';
 import { CHANNEL_OUTPUT_MODE_FIELD } from '@qwen-code/channel-base';
+import { MAX_CHANNEL_DELIVERY_TARGET_ID_LENGTH } from '@qwen-code/qwen-code-core/services/cronTasksFile.js';
 
 export interface ChannelTypeDescriptor {
   type: string;
   displayName: string;
   manageable: boolean;
+  supportsQrLogin?: boolean;
   fields: readonly ChannelConfigFieldDescriptor[];
+  outboundOnly?: boolean;
+  defaultDeliveryTarget?: ChannelPlugin['defaultDeliveryTarget'];
 }
 
 const registry = new Map<string, ChannelPlugin>();
@@ -34,13 +38,28 @@ const FIELD_KINDS: ReadonlySet<ChannelConfigFieldKind> = new Set([
 
 const SHARED_ACCESS_FIELDS: readonly ChannelConfigFieldDescriptor[] = [
   {
-    key: 'senderPolicy',
-    label: 'Sender Policy',
+    key: 'messageRoutes',
+    label: 'Message Routes',
+    kind: 'record',
+    description:
+      'Map message prefixes to instructions in separate route sessions',
+  },
+  {
+    key: 'defaultMessageRoute',
+    label: 'Default Message Route',
+    kind: 'string',
+    description:
+      'Route unmatched messages through this configured message route',
+  },
+  {
+    key: 'privatePolicy',
+    label: 'Private Policy',
     kind: 'enum',
     required: true,
     default: 'pairing',
     description: 'Controls who can start direct conversations',
     options: [
+      { value: 'disabled', label: 'Disabled' },
       { value: 'pairing', label: 'Pairing' },
       { value: 'allowlist', label: 'Allowlist' },
       { value: 'open', label: 'Open' },
@@ -65,6 +84,13 @@ const SHARED_ACCESS_FIELDS: readonly ChannelConfigFieldDescriptor[] = [
       { value: 'allowlist', label: 'Allowlist' },
       { value: 'open', label: 'Open' },
     ],
+  },
+  {
+    key: 'operators',
+    label: 'Session Operators',
+    kind: 'string-list',
+    description:
+      'User IDs who may approve tool use and run /cancel, /clear or /loop in shared sessions; empty grants no shared-session operator permissions',
   },
 ];
 
@@ -221,6 +247,37 @@ function assertManagementField(
       );
     }
   }
+  const minimum = (field as { minimum?: unknown }).minimum;
+  if (minimum !== undefined) {
+    if (field.kind !== 'number') {
+      throw new Error(
+        `Channel field "${path}" can only declare minimum on number fields.`,
+      );
+    }
+    if (typeof minimum !== 'number' || !Number.isFinite(minimum)) {
+      throw new Error(`Channel field "${path}" must declare a finite minimum.`);
+    }
+  }
+  const maximum = (field as { maximum?: unknown }).maximum;
+  if (maximum !== undefined) {
+    if (field.kind !== 'number') {
+      throw new Error(
+        `Channel field "${path}" can only declare maximum on number fields.`,
+      );
+    }
+    if (typeof maximum !== 'number' || !Number.isFinite(maximum)) {
+      throw new Error(`Channel field "${path}" must declare a finite maximum.`);
+    }
+    if (
+      (field.exclusiveMinimum !== undefined &&
+        maximum <= field.exclusiveMinimum) ||
+      (field.minimum !== undefined && maximum < field.minimum)
+    ) {
+      throw new Error(
+        `Channel field "${path}" declares a maximum that leaves no valid value.`,
+      );
+    }
+  }
   if (field.kind === 'enum') {
     if (!Array.isArray(field.options) || field.options.length === 0) {
       throw new Error(
@@ -270,6 +327,30 @@ function assertManagementField(
 }
 
 function assertManagementDescriptor(plugin: ChannelPlugin): void {
+  if (
+    plugin.outboundOnly !== undefined &&
+    typeof plugin.outboundOnly !== 'boolean'
+  ) {
+    throw new Error('Channel outboundOnly must be a boolean.');
+  }
+  const target = plugin.defaultDeliveryTarget;
+  if (
+    target !== undefined &&
+    (target === null ||
+      typeof target !== 'object' ||
+      Array.isArray(target) ||
+      (target.type !== 'user' && target.type !== 'chat') ||
+      typeof target.id !== 'string' ||
+      target.id.trim().length === 0 ||
+      /^[a-z][a-z0-9+.-]*:\/\//i.test(target.id.trim()) ||
+      target.id.length > MAX_CHANNEL_DELIVERY_TARGET_ID_LENGTH ||
+      (target.label !== undefined && typeof target.label !== 'string') ||
+      Object.keys(target).some(
+        (key) => key !== 'type' && key !== 'id' && key !== 'label',
+      ))
+  ) {
+    throw new Error('Channel defaultDeliveryTarget is invalid.');
+  }
   const management = plugin.management;
   if (management === undefined) return;
   const defaultSessionScope: unknown = plugin.defaultSessionScope ?? 'user';
@@ -287,6 +368,16 @@ function assertManagementDescriptor(plugin: ChannelPlugin): void {
   ) {
     throw new Error(
       'Channel management metadata must declare validateConfig as a synchronous function.',
+    );
+  }
+  if (
+    management.qrLogin !== undefined &&
+    (management.qrLogin === null ||
+      typeof management.qrLogin !== 'object' ||
+      typeof management.qrLogin.start !== 'function')
+  ) {
+    throw new Error(
+      'Channel management metadata must declare qrLogin.start as a function.',
     );
   }
   if (!Array.isArray(management.fields)) {
@@ -319,9 +410,28 @@ function ensureBuiltins(): Promise<void> {
         { name: 'telegram', promise: import('@qwen-code/channel-telegram') },
         { name: 'weixin', promise: import('@qwen-code/channel-weixin') },
         { name: 'dingtalk', promise: import('@qwen-code/channel-dingtalk') },
+        {
+          name: 'dingtalk-webhook',
+          promise: import('@qwen-code/channel-dingtalk').then(
+            ({ webhookPlugin }) => ({ plugin: webhookPlugin }),
+          ),
+        },
         { name: 'dws', promise: import('@qwen-code/channel-dws') },
+        { name: 'email', promise: import('@qwen-code/channel-email') },
         { name: 'wecom', promise: import('@qwen-code/channel-wecom') },
+        {
+          name: 'wecom-callback',
+          promise: import('@qwen-code/channel-wecom').then(
+            ({ callbackPlugin }) => ({ plugin: callbackPlugin }),
+          ),
+        },
         { name: 'feishu', promise: import('@qwen-code/channel-feishu') },
+        {
+          name: 'feishu-webhook',
+          promise: import('@qwen-code/channel-feishu').then(
+            ({ webhookPlugin }) => ({ plugin: webhookPlugin }),
+          ),
+        },
         { name: 'qqbot', promise: import('@qwen-code/channel-qqbot') },
         { name: 'github', promise: import('@qwen-code/channel-github') },
         { name: 'gitlab', promise: import('@qwen-code/channel-gitlab') },
@@ -378,12 +488,14 @@ function registerWithManagementValidation(
       ) as ChannelPlugin,
       plugin,
     );
-    Object.defineProperty(stripped, 'management', {
-      value: undefined,
-      writable: true,
-      enumerable: true,
-      configurable: true,
-    });
+    for (const key of ['management', 'outboundOnly', 'defaultDeliveryTarget']) {
+      Object.defineProperty(stripped, key, {
+        value: undefined,
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
+    }
     registry.set(plugin.channelType, stripped);
     return;
   }
@@ -413,16 +525,33 @@ export async function supportedChannelCatalog(): Promise<
       management,
       defaultSessionScope,
       supportsOutputMode,
+      outboundOnly,
+      defaultDeliveryTarget,
     }) => ({
       type: channelType,
       displayName,
       manageable: management !== undefined,
+      supportsQrLogin: management?.qrLogin !== undefined,
+      ...(outboundOnly !== undefined ? { outboundOnly } : {}),
+      ...(defaultDeliveryTarget !== undefined
+        ? {
+            defaultDeliveryTarget: {
+              type: defaultDeliveryTarget.type,
+              id: defaultDeliveryTarget.id,
+              ...(defaultDeliveryTarget.label !== undefined
+                ? { label: defaultDeliveryTarget.label }
+                : {}),
+            },
+          }
+        : {}),
       fields: management
-        ? managementFieldsWithSharedControls(
-            management.fields,
-            defaultSessionScope ?? 'user',
-            supportsOutputMode === true,
-          )
+        ? outboundOnly === true
+          ? management.fields
+          : managementFieldsWithSharedControls(
+              management.fields,
+              defaultSessionScope ?? 'user',
+              supportsOutputMode === true,
+            )
         : [],
     }),
   );

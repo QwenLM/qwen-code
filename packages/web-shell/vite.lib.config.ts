@@ -1,4 +1,6 @@
-import { defineConfig, type Plugin } from 'vite';
+import { pierreResources } from './pierre-build';
+import { exceljsBrowser } from './exceljs-build';
+import { defineConfig, normalizePath, type Plugin } from 'vite';
 import { resolve } from 'node:path';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
@@ -127,11 +129,13 @@ function injectCssModules(): Plugin {
         // keep `data-qwen-web-shell="component"` so shadow-root style adoption
         // (client/shadowDom.ts) still finds them; that reader concatenates
         // every match rather than taking the first.
-        const entry = item.facadeModuleId?.endsWith('/client/transcript.ts')
-          ? 'transcript'
-          : item.facadeModuleId?.endsWith('/client/index.tsx')
-            ? 'index'
-            : undefined;
+        const entry = item.facadeModuleId?.endsWith('/client/managed-host.tsx')
+          ? 'managed-host'
+          : item.facadeModuleId?.endsWith('/client/transcript.ts')
+            ? 'transcript'
+            : item.facadeModuleId?.endsWith('/client/index.tsx')
+              ? 'index'
+              : undefined;
         if (!entry) {
           continue;
         }
@@ -150,8 +154,125 @@ function injectCssModules(): Plugin {
 // renderer. Built alongside the root entry, it would inherit the full
 // component stylesheet (editor, sidebar, …) that the `/export html`
 // document renderer inlines into every exported file (#11031).
+// The transcript renderer is inlined into every `/export html` document, under
+// a byte budget that web-templates enforces at build time. Strings for
+// surfaces the read-only transcript can never render have no business there:
+// the Live Voice dialog and setup card alone are ~200 entries. The selection
+// menu is also interactive-only; keep its converter out of the entry. Matching on the
+// resolved id (not the specifier) keeps this working however the module is
+// imported. Vite's ids use forward slashes on every platform while
+// `path.resolve` returns backslashes on Windows, so both sides go through
+// `normalizePath`: compared raw, the stub would never apply there and the
+// Windows build would blow the budget this exists to protect.
+const TRANSCRIPT_STUBS = new Map(
+  [
+    [
+      './client/components/message-deletion-messages.ts',
+      './client/components/message-deletion-messages.transcript-stub.ts',
+    ],
+    [
+      './client/trajectory/execution-messages.ts',
+      './client/trajectory/execution-messages.transcript-stub.ts',
+    ],
+    ['./client/live/messages.ts', './client/live/messages.transcript-stub.ts'],
+    [
+      './client/browser-notifications/messages.ts',
+      './client/browser-notifications/messages.transcript-stub.ts',
+    ],
+    [
+      './client/mcp-app/messages.ts',
+      './client/mcp-app/messages.transcript-stub.ts',
+    ],
+    [
+      './client/components/artifacts/files-messages.ts',
+      './client/components/artifacts/files-messages.transcript-stub.ts',
+    ],
+    [
+      './client/components/artifacts/token-usage-messages.ts',
+      './client/components/artifacts/token-usage-messages.transcript-stub.ts',
+    ],
+    [
+      './client/voice/messages.ts',
+      './client/voice/messages.transcript-stub.ts',
+    ],
+    [
+      './client/trajectory/window-messages.ts',
+      './client/trajectory/window-messages.transcript-stub.ts',
+    ],
+    [
+      './client/trajectory/filter-messages.ts',
+      './client/trajectory/filter-messages.transcript-stub.ts',
+    ],
+    [
+      './client/components/workspace-agents/messages.ts',
+      './client/components/workspace-agents/messages.transcript-stub.ts',
+    ],
+    [
+      './client/settings/messages.ts',
+      './client/settings/messages.transcript-stub.ts',
+    ],
+    [
+      './client/components/messages/SelectionCopyMenu.tsx',
+      './client/components/messages/SelectionCopyMenu.transcript-stub.tsx',
+    ],
+    [
+      './client/utils/selectionClipboard.ts',
+      './client/utils/selectionClipboard.transcript-stub.ts',
+    ],
+    [
+      './client/components/messages/workflow-agent-details.ts',
+      './client/components/messages/workflow-agent-details.transcript-stub.ts',
+    ],
+    [
+      './client/components/managed/managed-lifecycle-messages.ts',
+      './client/components/managed/managed-lifecycle-messages.transcript-stub.ts',
+    ],
+    [
+      './client/components/managed/managed-task-messages.ts',
+      './client/components/managed/managed-task-messages.transcript-stub.ts',
+    ],
+    [
+      './client/components/managed/managed-workspace-messages.ts',
+      './client/components/managed/managed-workspace-messages.transcript-stub.ts',
+    ],
+    [
+      './client/components/managed/managed-mcp-messages.ts',
+      './client/components/managed/managed-mcp-messages.transcript-stub.ts',
+    ],
+  ].map(([module, stub]) => [
+    normalizePath(resolve(__dirname, module)),
+    normalizePath(resolve(__dirname, stub)),
+  ]),
+);
+
+function stubTranscriptModules(): Plugin {
+  return {
+    name: 'web-shell-stub-transcript-modules',
+    enforce: 'pre',
+    async resolveId(source, importer, options) {
+      const resolved = await this.resolve(source, importer, {
+        ...options,
+        skipSelf: true,
+      });
+      return resolved
+        ? (TRANSCRIPT_STUBS.get(normalizePath(resolved.id)) ?? null)
+        : null;
+    },
+  };
+}
+
 export default defineConfig(({ mode }) => ({
-  plugins: [react(), tailwindcss(), injectCssModules()],
+  plugins: [
+    pierreResources(),
+    exceljsBrowser(),
+    ...(mode === 'transcript' ? [stubTranscriptModules()] : []),
+    react(),
+    tailwindcss(),
+    injectCssModules(),
+  ],
+  worker: {
+    plugins: () => [exceljsBrowser()],
+  },
   resolve: {
     alias: {
       '@qwen-code/web-shell/daemon-react-sdk': resolve(
@@ -169,7 +290,12 @@ export default defineConfig(({ mode }) => ({
     jsxDev: false,
   },
   build: {
-    emptyOutDir: false,
+    // Only the managed-host pass owns its outDir, so it can safely empty it;
+    // the other passes share `dist/` with the app build.
+    emptyOutDir: mode === 'managed-host',
+    // Outside `dist/`: the app build empties that directory, which would
+    // silently delete a host bundle a maintainer had just produced.
+    outDir: mode === 'managed-host' ? 'dist-managed-host' : 'dist',
     // Same floor as the app build: the lib bundle minifies the same xterm
     // (it is not external), and Vite 5's default target lowers its logical
     // assignments into code that throws on the first mode query. Also covers
@@ -177,51 +303,65 @@ export default defineConfig(({ mode }) => ({
     target: WEB_SHELL_BUILD_TARGET,
     lib: {
       entry:
-        mode === 'transcript'
-          ? { transcript: 'client/transcript.ts' }
-          : {
-              index: 'client/index.tsx',
-              'daemon-react-sdk': 'client/daemon-react-sdk.ts',
-            },
+        mode === 'managed-host'
+          ? { index: 'client/managed-host.tsx' }
+          : mode === 'transcript'
+            ? { transcript: 'client/transcript.ts' }
+            : {
+                index: 'client/index.tsx',
+                'daemon-react-sdk': 'client/daemon-react-sdk.ts',
+                'code-highlighter': 'client/code-highlighter.ts',
+              },
       formats: ['es'],
       fileName: (_format, entryName) => `${entryName}.js`,
     },
     rollupOptions: {
-      external: [
-        'react',
-        'react/jsx-runtime',
-        'react/jsx-dev-runtime',
-        'react-dom',
-        'react-dom/client',
-        'radix-ui',
-        'lucide-react',
-        'class-variance-authority',
-        'clsx',
-        'tailwind-merge',
-        'vaul',
-        '@qwen-code/sdk',
-        /^@qwen-code\/sdk\//,
-        '@datafe-open/markdown-chart',
-        '@datafe-open/markdown-chart-echarts',
-        '@datafe-open/markdown-chart-react',
-        'echarts',
-        /^echarts\//,
-        'react-markdown',
-        'remark-cjk-friendly',
-        /^remark-cjk-friendly\//,
-        'remark-gfm',
-        'remark-math',
-        'rehype-katex',
-        'shiki',
-        'mermaid',
-        'katex',
-        /^katex\/(?!dist\/katex\.min\.css$)/,
-        'codemirror',
-        /^@codemirror\//,
-      ],
+      external: (id, importer) => {
+        if (mode === 'managed-host') return false;
+        // Pierre requires Shiki 3/4; keep its copy inside the lazy preview bundle.
+        if (id === 'shiki') return !importer?.includes('/@pierre/');
+        return [
+          'react',
+          'react/jsx-runtime',
+          'react/jsx-dev-runtime',
+          'react-dom',
+          'react-dom/client',
+          'react-dom/server',
+          'radix-ui',
+          'lucide-react',
+          'class-variance-authority',
+          'clsx',
+          'tailwind-merge',
+          'vaul',
+          'react-resizable-panels',
+          '@qwen-code/sdk',
+          /^@qwen-code\/sdk\//,
+          '@datafe-open/markdown-chart',
+          '@datafe-open/markdown-chart-echarts',
+          '@datafe-open/markdown-chart-react',
+          'echarts',
+          /^echarts\//,
+          'react-markdown',
+          'remark-cjk-friendly',
+          /^remark-cjk-friendly\//,
+          'remark-gfm',
+          'hast-util-from-html-isomorphic',
+          'katex',
+          /^katex\/(?!dist\/katex\.min\.css$)/,
+          'codemirror',
+          /^@codemirror\//,
+        ].some((dependency) =>
+          typeof dependency === 'string'
+            ? dependency === id
+            : dependency.test(id),
+        );
+      },
     },
   },
   define: {
+    ...(mode === 'managed-host'
+      ? { 'process.env.NODE_ENV': JSON.stringify('production') }
+      : {}),
     __WEB_SHELL_VERSION__: JSON.stringify(pkg.version),
   },
 }));

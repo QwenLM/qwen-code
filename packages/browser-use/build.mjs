@@ -4,13 +4,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { chmodSync, rmSync } from 'node:fs';
+import { chmodSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build } from 'esbuild';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const dist = path.join(root, 'dist');
+// The SDK checks that the playwright-core it resolves is the pinned one, so a
+// runtime missing its bundled copy cannot silently load another install.
+const manifest = JSON.parse(
+  readFileSync(path.join(root, 'package.json'), 'utf8'),
+);
+const define = {
+  __QWEN_PLAYWRIGHT_CORE_VERSION__: JSON.stringify(
+    manifest.dependencies['playwright-core'],
+  ),
+};
 const nodeBanner =
   "import { createRequire as __qwenCreateRequire } from 'node:module'; import { fileURLToPath as __qwenFileURLToPath } from 'node:url'; import { dirname as __qwenDirname } from 'node:path'; const require = __qwenCreateRequire(import.meta.url); const __filename = __qwenFileURLToPath(import.meta.url); const __dirname = __qwenDirname(__filename);";
 // The bundled skill imports dist/index.js (staged as runtime/index.js) from
@@ -21,8 +31,8 @@ const nodeBanner =
 // reads process.env/process.platform, so bind `process` through createRequire,
 // the one route the kernel leaves open. The load check at the bottom of this
 // file runs in Node's main realm, where `process` is always a global, so it
-// cannot detect this binding going missing; src/skill-runtime-kernel.test.ts
-// runs the skill's first cell through the real kernel for that.
+// cannot detect this binding going missing; src/runtime-kernel.test.ts
+// imports the SDK through the real kernel for that.
 const kernelBanner =
   "import { createRequire as __qwenCreateRequire } from 'node:module'; const process = __qwenCreateRequire(import.meta.url)('node:process');";
 
@@ -42,6 +52,7 @@ await build({
     js: kernelBanner,
   },
   packages: 'bundle',
+  define,
   external: ['playwright-core', 'playwright-core/*'],
 });
 
@@ -63,6 +74,7 @@ await build({
     js: nodeBanner,
   },
   packages: 'bundle',
+  define,
   external: ['playwright-core', 'playwright-core/*'],
   loader: { '.wasm': 'binary' },
 });

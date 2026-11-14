@@ -150,6 +150,33 @@ describe('findRunningLegacyGoalCard', () => {
     ).toEqual({ condition: 'ship it', iterations: 0 });
   });
 
+  it('skips a card of a kind no replay shows', () => {
+    // The replay drops it, so the card before it is still the newest shown.
+    expect(
+      findRunningLegacyGoalCard([
+        cardRecord('r1', [card('set', 'ship it')]),
+        cardRecord('r2', [card('retired-kind', 'ship it')]),
+      ]),
+    ).toEqual({ condition: 'ship it', iterations: 0 });
+  });
+
+  it('lets a card with an empty condition still end the run before it', () => {
+    expect(
+      findRunningLegacyGoalCard([
+        cardRecord('r1', [card('set', 'goal A')]),
+        cardRecord('r2', [card('cleared', '')]),
+      ]),
+    ).toBeUndefined();
+    // The newest card wins, so goal A must not come back; the empty
+    // condition is reported as it is for the caller to refuse.
+    expect(
+      findRunningLegacyGoalCard([
+        cardRecord('r1', [card('set', 'goal A')]),
+        cardRecord('r2', [card('set', '')]),
+      ])?.condition,
+    ).toBe('');
+  });
+
   it('returns nothing for a transcript with no card', () => {
     expect(findRunningLegacyGoalCard([])).toBeUndefined();
     expect(

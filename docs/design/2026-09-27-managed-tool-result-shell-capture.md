@@ -1,0 +1,39 @@
+# Managed Tool Result Foreground Shell Capture (O1c)
+
+[English](2026-09-27-managed-tool-result-shell-capture.md) | [简体中文](2026-09-27-managed-tool-result-shell-capture.zh-CN.md)
+
+## Status and problem
+
+This design implements the local O1c foundation after the [O1a contract](2026-09-26-managed-tool-result-contract.md) and [O1b local store](2026-09-26-managed-tool-result-local-store.md). Shell currently retains at most 64 MiB of raw output by default. Its final tool text is decoded, formatted, and truncated. Neither that text nor its spill file proves that a 100 MiB process output remains available. The Tool v3 routes, a Session receipt consumer, and a production local Managed Harness tool loop do not yet exist.
+
+## Scope and ownership
+
+The first implementation captures foreground Shell with `process_pipes` and `complete_required`. A local test host injects a Session-owned publisher and a worker handler in the same process; it runs real Shell subprocesses. The existing Session writer lease belongs to the host and is passed to both `openManagedSession` and O1b's writable store. No second lease is acquired. Without the publisher, production workers refuse v3 before any tool side effect. The Java v3 client and TS/Java interop are included; production Broker selection, a separate-process publication channel, and a product Managed tool loop are later work. PTY, background execution, public range/download routes, remote storage, quotas, and automatic GC remain outside O1c.
+
+The O1b Session segment namespace is the sole durable copy of captured bytes. Published segments, pages, and manifests stay for the Session lifetime, including after acknowledgement. Runtime memory may reuse a segment buffer after its publication receipt; a committed acknowledgement permits temporary capture state to be released, never the retained bytes.
+
+## Capture and publication
+
+An invocation-scoped sink receives Buffer chunks from stdout and stderr before decoding, binary detection, rendering, or preview truncation. Only the invocation's primary command receives the sink. V3 foreground Shell explicitly uses pipes. Each stream preserves byte order; the manifest does not claim an order between streams. Ordinary CLI and v2 behavior are unchanged.
+
+The internal defaults are 1 MiB segments, one publication in flight per stream, and 64 KiB of combined raw preview buffering. A pipe pauses synchronously while its chunk enters the bounded sink and resumes after the publication receipt. The producer never queues an unbounded number of O1b writes. The publisher uses receipts to build bounded pages and emits one final manifest at revision 1, checking serialized page and manifest sizes against O1a. It does not poll `prefix()` for each segment. Empty output produces sealed empty stdout and stderr descriptors. A formatted Shell spill file may be reused only as a separately verified result representation, never as proof of raw stdout/stderr completeness.
+
+A stream seals only after EOF and all accepted writes complete. The existing one-second post-exit drain bound applies to time waiting for pipe EOF, excluding time paused for persistence. An inherited open pipe that exceeds the bound produces an incomplete capture. Cancellation targets the process and still drains accepted writes. Storage refusal or I/O failure latches capture failure, stops new segment and page publication, continues bounded pipe draining, and preserves the original process outcome. An unavailable manifest may still record that outcome if Session resources remain writable. A complete capture with a short preview sets `previewTruncated` without changing `captureStatus` or `upstreamTruncated`. A final partial or unavailable result cannot later be upgraded.
+
+## Original receipt and recovery
+
+The host validates foreground admission, Session and Workspace activation, and exact original execution identity. The injected publisher pins its Runtime Session ID separately from the Managed Session ID and rejects another Runtime Session before dispatch. It commits the original intent and `await_runtime` boundary before dispatch. Once segments, seals, pages, and the final manifest are durable, the Session owner verifies the full identity, resource digest, page layout, and complete capture. Identity includes tenant, Managed Session, turn, execution call, model call, the original args digest, binding generation, capture ID, and revision.
+
+A versioned `toolOutcomeRef` records the original physical outcome, final envelope and manifest reference, and a committed or blocked admission decision. The trusted entry appends one idempotent `tool.receipt` for the original execution. Its numeric `historyRevision` is the receipt event's positive Session sequence and remains fixed on replay. A blocked event uses `resultRef: null`; its acknowledgement carries `historyRevision: null`. A committed acknowledgement uses the persisted sequence. Receipt existence alone never permits model continuation: only a validated committed decision can advance `results_ready` and model consumption. A matching committed acknowledgement is required before temporary Runtime capture state may be released. Changed acknowledgements conflict.
+
+A retry first looks up the original committed receipt and returns its exact references and event sequence. A commit followed by a lost response therefore does not republish a new manifest UUID. After receipt commit but before checkpoint, recovery advances from that receipt; after checkpoint but before acknowledgement, it resends the identical acknowledgement. A replacement activation cannot prepare an execution from the old `await_runtime` checkpoint. If the producer stops before EOF, only its verified prefix survives. If a manifest exists without an authoritative receipt mapping, recovery blocks; orphan files are not evidence of acceptance. Execution with an unknown physical result remains in the blocked recovery path and is never converted into a settled success/error or re-executed.
+
+## Protocol and lifecycle
+
+Tool v3 implements the O1a execute, status, cancel, and acknowledge routes with their bearer/lease identity, closed bodies, no-store headers, and body limits. Capture-admitted calls stay on v3; no v2 fallback occurs. V2/v3 share collision protection for an original call. A v3 prepared cancellation that never started has `executionStatus: not_started` and `capture: null`. The Java client exposes explicit v3 operations without changing production Broker's v2 selection.
+
+The local host stops ingress, drains running calls and receipt finalization, closes the segment store, stops Session renewal, releases activation, and seals the existing writer for handoff, in that order. A lost writer cannot continue publishing. Existing local lease recovery may reclaim a dead writer; process death does not certify a Tool result or prove a clean handoff. Replacement may read already committed result bytes from retained storage; incomplete or unreceipted execution stays blocked.
+
+## Validation and acceptance
+
+Use real files and Shell child processes, plus a child-host fixture with an adopted Session lease, genuine authority and Tool v3 handler. Incrementally generate 100 MiB and compare lengths, hashes, and tail ranges after host replacement without constructing a full output Buffer. Use a 1 GiB generation and slow publisher to check bounded in-flight memory. Cover binary/NUL/invalid and split UTF-8, separate pipes, empty output, delayed EOF, inherited pipes, cancellation, and disk failure after a side-effect marker. Exercise receipt/ACK loss windows, mismatched identity and ACK, v2/v3 collision, disabled v3, activation loss, and lease/close ordering. Check Java/TS v3 interop and existing v2/W0c tests. Passing these local tests does not claim a shipped Hosted tool loop or cross-host recovery.

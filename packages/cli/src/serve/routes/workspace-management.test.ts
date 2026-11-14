@@ -19,12 +19,15 @@ import type {
   WorkspaceRuntime,
 } from '../workspace-registry.js';
 import { tmpdir } from 'node:os';
-import { realpathSync } from 'node:fs';
+import { createServer, get as httpGet } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { existsSync, realpathSync } from 'node:fs';
 import {
   mkdir,
   mkdtemp,
   readdir,
   rm,
+  stat,
   symlink,
   writeFile,
 } from 'node:fs/promises';
@@ -38,6 +41,10 @@ import {
 } from '../workspace-registration-store.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { prepareManagedScratchRoot } from '../managed-scratch-workspace.js';
+import {
+  createWorkspaceGitCloner,
+  type GitCloneProcess,
+} from '../workspace-git-clone.js';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: vi.fn(),
@@ -2818,6 +2825,156 @@ describe('DELETE /workspaces/:workspace', () => {
   });
 });
 
+describe('workspace order', () => {
+  function setup(overrides?: Partial<WorkspaceManagementRouteDeps>) {
+    const registry = createMockRegistry([
+      makeRuntime('/work/primary', { primary: true }),
+      makeRuntime('/work/second', { trusted: false }),
+    ]);
+    const store = {
+      read: vi.fn().mockResolvedValue({
+        workspaceOrder: ['/work/second', '/work/primary'],
+      }),
+      setWorkspaceOrder: vi.fn().mockResolvedValue(undefined),
+    };
+    const fixture = createApp({
+      workspaceRegistry: registry,
+      workspaceRegistrationStore:
+        store as unknown as WorkspaceRegistrationStore,
+      ...overrides,
+    });
+    return { ...fixture, registry, store };
+  }
+
+  it('reads and writes process-global presentation order without changing runtimes', async () => {
+    const { app, registry, store } = setup();
+    expect((await request(app).get('/workspace-order')).body).toEqual({
+      cwds: ['/work/second', '/work/primary'],
+    });
+    const response = await request(app)
+      .post('/workspace-order')
+      .send({ cwds: ['/work/primary', '/work/second'] });
+    expect(response.status).toBe(200);
+    expect(response.body.cwds).toEqual(['/work/primary', '/work/second']);
+    expect(store.setWorkspaceOrder).toHaveBeenCalledWith(response.body.cwds);
+    expect(
+      registry.listManaged().map((runtime) => runtime.workspaceCwd),
+    ).toEqual(['/work/primary', '/work/second']);
+    expect(registry.add).not.toHaveBeenCalled();
+  });
+
+  it('rejects invalid and unknown paths without touching persistence', async () => {
+    const { app, store } = setup();
+    for (const [cwds, code] of [
+      [null, 'invalid_workspace_order'],
+      [['relative'], 'invalid_workspace_order'],
+      [['/work/primary', '/work/primary'], 'invalid_workspace_order'],
+      [['/work/unknown'], 'workspace_mismatch'],
+    ] as const) {
+      const response = await request(app)
+        .post('/workspace-order')
+        .send({ cwds });
+      expect(response.status).toBe(400);
+      expect(response.body.code).toBe(code);
+    }
+    expect(store.setWorkspaceOrder).not.toHaveBeenCalled();
+  });
+
+  it('omits stored paths that are no longer registered so a read can be written back', async () => {
+    const { app, store } = setup();
+    store.read.mockResolvedValueOnce({
+      workspaceOrder: ['/work/gone', '/work/primary'],
+    });
+    const read = await request(app).get('/workspace-order');
+    expect(read.body).toEqual({ cwds: ['/work/primary'] });
+    const write = await request(app).post('/workspace-order').send(read.body);
+    expect(write.status).toBe(200);
+    expect(write.body.cwds).toEqual(['/work/primary']);
+    expect(store.setWorkspaceOrder).toHaveBeenCalledWith(['/work/primary']);
+  });
+
+  it('runs the strict mutation gate before touching persistence', async () => {
+    const mutate = vi.fn((options?: { strict?: boolean }) =>
+      options?.strict
+        ? (_req: Request, res: Response, _next: () => void) => {
+            res
+              .status(401)
+              .json({ error: 'Unauthorized', code: 'token_required' });
+          }
+        : (_req: Request, _res: Response, next: () => void) => next(),
+    );
+    const { app, store } = setup({ mutate });
+    const response = await request(app)
+      .post('/workspace-order')
+      .send({ cwds: [] });
+    expect(response.status).toBe(401);
+    expect(mutate).toHaveBeenCalledWith({ strict: true });
+    expect(store.setWorkspaceOrder).not.toHaveBeenCalled();
+  });
+
+  it('reports unavailable persistence and logs storage errors', async () => {
+    const { app: unavailable } = createApp();
+    expect((await request(unavailable).get('/workspace-order')).status).toBe(
+      501,
+    );
+    expect(
+      (await request(unavailable).post('/workspace-order').send({ cwds: [] }))
+        .status,
+    ).toBe(501);
+    vi.mocked(writeStderrLine).mockClear();
+    const { app, store } = setup();
+    store.read.mockRejectedValueOnce(new Error('disk unavailable'));
+    expect((await request(app).get('/workspace-order')).status).toBe(500);
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      'qwen serve: failed to read workspace order: disk unavailable',
+    );
+    store.setWorkspaceOrder.mockRejectedValueOnce(new Error('disk full'));
+    expect(
+      (await request(app).post('/workspace-order').send({ cwds: [] })).status,
+    ).toBe(500);
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      'qwen serve: failed to persist workspace order: disk full',
+    );
+    store.setWorkspaceOrder.mockRejectedValueOnce(
+      new WorkspaceRegistrationStoreCommittedError('lock release failed'),
+    );
+    expect(
+      (await request(app).post('/workspace-order').send({ cwds: [] })).status,
+    ).toBe(200);
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      'qwen serve: lock release failed',
+    );
+  });
+
+  it('waits for pending writes on shutdown and rejects later writes', async () => {
+    const { app, store, handle } = setup();
+    let complete!: () => void;
+    store.setWorkspaceOrder.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          complete = resolve;
+        }),
+    );
+    const pending = request(app)
+      .post('/workspace-order')
+      .send({ cwds: [] })
+      .then((response) => response);
+    await vi.waitFor(() => expect(store.setWorkspaceOrder).toHaveBeenCalled());
+    let sealed = false;
+    const seal = handle.sealAndWait().then(() => {
+      sealed = true;
+    });
+    await Promise.resolve();
+    expect(sealed).toBe(false);
+    expect(
+      (await request(app).post('/workspace-order').send({ cwds: [] })).status,
+    ).toBe(503);
+    complete();
+    expect((await pending).status).toBe(200);
+    await seal;
+  });
+});
+
 describe('persistent workspace registrations', () => {
   it('returns 501 for registration management without a store', async () => {
     const { app } = createApp();
@@ -3469,5 +3626,677 @@ describe('POST /workspace-directory-picker', () => {
     await vi.waitFor(() => {
       expect(observed?.aborted).toBe(true);
     });
+  });
+});
+
+describe('remote daemon proxy routes', () => {
+  const REMOTE = 'http://127.0.0.1:5199';
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function jsonResponse(body: unknown, status = 200): globalThis.Response {
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { 'content-type': 'application/json' },
+    });
+  }
+
+  it('bounds the suggestion proxy and forwards the target credential', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        dir: '/srv',
+        sep: '/',
+        suggestions: [],
+        truncated: false,
+      }),
+    );
+    const { app } = createApp();
+
+    const res = await request(app)
+      .get('/remote-workspace-path-suggestions')
+      .query({ daemon: REMOTE, prefix: '/srv/' })
+      .set('X-Daemon-Token', 'target-secret');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ dir: '/srv', truncated: false });
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(`${REMOTE}/workspace-path-suggestions?prefix=%2Fsrv%2F`);
+    // A 3xx would replay the forwarded bearer on an origin nobody named.
+    expect(init.redirect).toBe('error');
+    // A caller-named origin that accepts and then goes quiet must not pin the
+    // daemon request forever.
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect((init.headers as Record<string, string>)['Authorization']).toBe(
+      'Bearer target-secret',
+    );
+  });
+
+  it('bounds the registration proxy the same way', async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ workspaceId: 'w1' }, 201));
+    const { app } = createApp();
+
+    const res = await request(app)
+      .post('/remote-workspaces')
+      .set('X-Daemon-Token', 'target-secret')
+      .send({ daemon: REMOTE, cwd: '/srv/shared-checkout/', persist: true });
+
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual({ workspaceId: 'w1' });
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(`${REMOTE}/workspaces`);
+    expect(init.method).toBe('POST');
+    expect(init.redirect).toBe('error');
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    expect(JSON.parse(String(init.body))).toEqual({
+      cwd: '/srv/shared-checkout/',
+      persist: true,
+    });
+  });
+
+  it('refuses an upstream body over the byte cap instead of buffering it', async () => {
+    const oversized = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(2 * 1024 * 1024));
+        controller.close();
+      },
+    });
+    fetchMock.mockResolvedValue(new Response(oversized, { status: 200 }));
+    const { app } = createApp();
+
+    const res = await request(app)
+      .get('/remote-workspace-path-suggestions')
+      .query({ daemon: REMOTE, prefix: '/srv/' });
+
+    expect(res.status).toBe(502);
+    expect(res.body.code).toBe('remote_unreachable');
+    expect(res.body.error).toContain('1048576-byte limit');
+  });
+
+  it('refuses an oversized body announced by content-length before reading it', async () => {
+    // A stream body lets the declared length stand on its own, so the
+    // precheck — not the byte counter — is what rejects this one.
+    const small = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"dir":"/srv"}'));
+        controller.close();
+      },
+    });
+    const headers = new Headers({ 'content-type': 'application/json' });
+    headers.set('content-length', String(4 * 1024 * 1024));
+    fetchMock.mockResolvedValue(new Response(small, { status: 200, headers }));
+    const { app } = createApp();
+
+    const res = await request(app)
+      .get('/remote-workspace-path-suggestions')
+      .query({ daemon: REMOTE, prefix: '/srv/' });
+
+    expect(res.status).toBe(502);
+    expect(res.body.error).toContain('1048576-byte limit');
+  });
+
+  it('reports a registration failure the target explained, not remote_unreachable', async () => {
+    // A bodyless 401 from a wrong target token used to reach the caller as
+    // `502 remote_unreachable` whose explanation was a JSON parse error.
+    fetchMock.mockResolvedValue(new Response(null, { status: 401 }));
+    const { app } = createApp();
+
+    const res = await request(app)
+      .post('/remote-workspaces')
+      .send({ daemon: REMOTE, cwd: '/srv/shared-checkout/' });
+
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe('remote_error');
+    expect(res.body.error).toBe('Remote daemon returned 401');
+    expect(res.body.error).not.toContain('JSON');
+  });
+
+  it('reports an HTML gateway failure with the real status', async () => {
+    fetchMock.mockResolvedValue(
+      new Response('<html>502 Bad Gateway</html>', {
+        status: 502,
+        headers: { 'content-type': 'text/html' },
+      }),
+    );
+    const { app } = createApp();
+
+    const res = await request(app)
+      .post('/remote-workspaces')
+      .send({ daemon: REMOTE, cwd: '/srv/shared-checkout/' });
+
+    expect(res.status).toBe(502);
+    expect(res.body.code).toBe('remote_error');
+    expect(res.body.error).not.toContain('<html>');
+  });
+
+  it('forwards the target error detail on the suggestion proxy', async () => {
+    fetchMock.mockResolvedValue(
+      jsonResponse(
+        { error: '`prefix` must be an absolute path', code: 'invalid_prefix' },
+        400,
+      ),
+    );
+    const { app } = createApp();
+
+    const res = await request(app)
+      .get('/remote-workspace-path-suggestions')
+      .query({ daemon: REMOTE, prefix: '/srv/' });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({
+      error: '`prefix` must be an absolute path',
+      code: 'invalid_prefix',
+    });
+  });
+
+  it('aborts the upstream request when the caller hangs up', async () => {
+    let captured: AbortSignal | undefined;
+    fetchMock.mockImplementation(
+      (_url: string, init: RequestInit) =>
+        new Promise<globalThis.Response>((_resolve, reject) => {
+          captured = init.signal as AbortSignal;
+          captured.addEventListener('abort', () =>
+            reject(new Error('aborted')),
+          );
+        }),
+    );
+    const { app } = createApp();
+    const server = createServer(app);
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    try {
+      const { port } = server.address() as AddressInfo;
+      const client = httpGet({
+        host: '127.0.0.1',
+        port,
+        path: `/remote-workspace-path-suggestions?daemon=${encodeURIComponent(
+          REMOTE,
+        )}&prefix=%2Fsrv%2F`,
+      });
+      client.on('error', () => {
+        // The destroyed socket is the point of this test.
+      });
+      await vi.waitFor(() => expect(captured).toBeInstanceOf(AbortSignal));
+      expect(captured?.aborted).toBe(false);
+
+      client.destroy();
+
+      // Browse fires one suggestion request per debounced keystroke; a request
+      // the browser discarded must not keep an outbound socket alive until the
+      // 30s transfer timeout expires.
+      await vi.waitFor(() => expect(captured?.aborted).toBe(true));
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+});
+
+describe('git clone target reservations', () => {
+  const blockingRunner: GitCloneProcess = {
+    run({ signal }) {
+      return new Promise((_resolve, reject) => {
+        signal.addEventListener(
+          'abort',
+          () => {
+            const error = new Error('cancelled');
+            error.name = 'GitCloneCancelledError';
+            reject(error);
+          },
+          { once: true },
+        );
+      });
+    },
+  };
+
+  it('rejects overlapping clones and registrations until the outer job settles', async () => {
+    const root = await mkdtemp(join(REAL_DIR, 'qwen-clone-reserve-'));
+    const cloner = createWorkspaceGitCloner({ runner: blockingRunner });
+    try {
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([
+          makeRuntime('/Users/test', { primary: true }),
+        ]),
+        workspaceGitCloner: cloner,
+      });
+      const outer = join(root, 'outer');
+
+      const started = await request(app).post('/workspaces').send({
+        kind: 'git',
+        url: 'https://example.com/org/repo.git',
+        target: outer,
+      });
+      expect(started.status).toBe(202);
+
+      const nested = await request(app)
+        .post('/workspaces')
+        .send({
+          kind: 'git',
+          url: 'https://example.com/org/repo.git',
+          target: join(outer, 'child'),
+        });
+      expect(nested.status).toBe(409);
+      expect(nested.body.code).toBe('target_nested');
+
+      const child = join(outer, 'child');
+      await mkdir(child);
+      const registration = await request(app).post('/workspaces').send({
+        cwd: child,
+        persist: false,
+      });
+      expect(registration.status).toBe(409);
+      expect(registration.body.code).toBe('workspace_nested');
+
+      const cancelled = await request(app).delete(
+        `/workspace-git-clone-jobs/${started.body.jobId}`,
+      );
+      expect(cancelled.status).toBe(200);
+      expect(cancelled.body.status).toBe('cancelled');
+
+      // The reservation is released with the job.
+      const again = await request(app).post('/workspaces').send({
+        kind: 'git',
+        url: 'https://example.com/org/repo.git',
+        target: outer,
+      });
+      expect(again.status).toBe(202);
+      await cloner.cancel(again.body.jobId);
+    } finally {
+      await cloner.sealAndWait().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('reserves the claim before the target becomes visible to registration', async () => {
+    const root = await mkdtemp(join(REAL_DIR, 'qwen-clone-claim-'));
+    const target = join(root, 'repo');
+    let releaseClaim!: () => void;
+    const claimHeld = new Promise<void>((resolve) => {
+      releaseClaim = resolve;
+    });
+    const cloner = createWorkspaceGitCloner({
+      runner: blockingRunner,
+      resolveClaimedTarget: async (value) => {
+        await claimHeld;
+        return value;
+      },
+    });
+    try {
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([
+          makeRuntime('/Users/test', { primary: true }),
+        ]),
+        workspaceGitCloner: cloner,
+      });
+      const startPromise = request(app)
+        .post('/workspaces')
+        .send({
+          kind: 'git',
+          url: 'https://example.com/org/repo.git',
+          target,
+        })
+        .then((response) => response);
+
+      for (let attempt = 0; attempt < 100 && !existsSync(target); attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(existsSync(target)).toBe(true);
+
+      const registration = await request(app).post('/workspaces').send({
+        cwd: target,
+        persist: false,
+      });
+      expect(registration.status).toBe(409);
+      expect(registration.body.code).toBe('workspace_nested');
+
+      releaseClaim();
+      const started = await startPromise;
+      expect(started.status).toBe(202);
+      await cloner.cancel(started.body.jobId);
+      expect(existsSync(target)).toBe(false);
+    } finally {
+      releaseClaim?.();
+      await cloner.sealAndWait().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a clone target inside a reserved root', async () => {
+    const root = await mkdtemp(join(REAL_DIR, 'qwen-clone-reserved-'));
+    const cloner = createWorkspaceGitCloner({ runner: blockingRunner });
+    try {
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([
+          makeRuntime('/Users/test', { primary: true }),
+        ]),
+        workspaceGitCloner: cloner,
+        reservedWorkspaceRoots: [root],
+      });
+      const res = await request(app)
+        .post('/workspaces')
+        .send({
+          kind: 'git',
+          url: 'https://example.com/org/repo.git',
+          target: join(root, 'repo'),
+        });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('target_reserved');
+      await expect(stat(join(root, 'repo'))).rejects.toBeDefined();
+    } finally {
+      await cloner.sealAndWait().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a clone target that contains a reserved root', async () => {
+    const root = await mkdtemp(join(REAL_DIR, 'qwen-clone-reserved-parent-'));
+    const target = join(root, 'Qwen Code');
+    const conversations = join(target, 'Conversations');
+    const cloner = createWorkspaceGitCloner({ runner: blockingRunner });
+    try {
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([
+          makeRuntime('/Users/test', { primary: true }),
+        ]),
+        workspaceGitCloner: cloner,
+        reservedWorkspaceRoots: [conversations],
+      });
+      const res = await request(app).post('/workspaces').send({
+        kind: 'git',
+        url: 'https://example.com/org/repo.git',
+        target,
+      });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('target_reserved');
+      await expect(stat(conversations)).rejects.toBeDefined();
+    } finally {
+      await cloner.sealAndWait().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a symlinked ancestor of a missing reserved root', async () => {
+    const root = await mkdtemp(join(REAL_DIR, 'qwen-clone-symlink-'));
+    const realDocuments = join(root, 'real-documents');
+    const linkedDocuments = join(root, 'Documents');
+    await mkdir(realDocuments);
+    await symlink(realDocuments, linkedDocuments);
+    const target = join(linkedDocuments, 'Qwen Code');
+    const conversations = join(target, 'Conversations');
+    const cloner = createWorkspaceGitCloner({ runner: blockingRunner });
+    try {
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([
+          makeRuntime('/Users/test', { primary: true }),
+        ]),
+        workspaceGitCloner: cloner,
+        reservedWorkspaceRoots: [conversations],
+      });
+      const res = await request(app).post('/workspaces').send({
+        kind: 'git',
+        url: 'https://example.com/org/repo.git',
+        target,
+      });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('target_reserved');
+      await expect(
+        stat(join(realDocuments, 'Qwen Code')),
+      ).rejects.toBeDefined();
+    } finally {
+      await cloner.sealAndWait().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a case-variant ancestor of a missing reserved root', async () => {
+    const root = await mkdtemp(join(REAL_DIR, 'qwen-clone-case-'));
+    const documents = join(root, 'Documents');
+    await mkdir(documents);
+    const target = join(documents, 'qwen code');
+    const conversations = join(documents, 'Qwen Code', 'Conversations');
+    const cloner = createWorkspaceGitCloner({ runner: blockingRunner });
+    try {
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([
+          makeRuntime('/Users/test', { primary: true }),
+        ]),
+        workspaceGitCloner: cloner,
+        reservedWorkspaceRoots: [conversations],
+      });
+      const res = await request(app).post('/workspaces').send({
+        kind: 'git',
+        url: 'https://example.com/org/repo.git',
+        target,
+      });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('target_reserved');
+      await expect(stat(target)).rejects.toBeDefined();
+    } finally {
+      await cloner.sealAndWait().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a clone target reached through a dangling reserved-root symlink', async () => {
+    const root = await mkdtemp(join(REAL_DIR, 'qwen-clone-dangling-'));
+    const target = join(root, 'missing-documents');
+    const documents = join(root, 'Documents');
+    await symlink(target, documents);
+    const conversations = join(documents, 'Qwen Code', 'Conversations');
+    const cloner = createWorkspaceGitCloner({ runner: blockingRunner });
+    try {
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([
+          makeRuntime('/Users/test', { primary: true }),
+        ]),
+        workspaceGitCloner: cloner,
+        reservedWorkspaceRoots: [conversations],
+      });
+      const res = await request(app).post('/workspaces').send({
+        kind: 'git',
+        url: 'https://example.com/org/repo.git',
+        target,
+      });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('target_reserved');
+      await expect(stat(target)).rejects.toBeDefined();
+    } finally {
+      await cloner.sealAndWait().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves a relative dangling symlink from its physical parent', async () => {
+    const root = await mkdtemp(join(REAL_DIR, 'qwen-clone-relative-link-'));
+    const storage = join(root, 'storage');
+    const userHome = join(storage, 'user');
+    await mkdir(userHome, { recursive: true });
+    const logicalHome = join(root, 'logical-home');
+    await symlink(userHome, logicalHome);
+    await symlink('../documents-storage', join(userHome, 'Documents'));
+    const target = join(storage, 'documents-storage');
+    const conversations = join(
+      logicalHome,
+      'Documents',
+      'Qwen Code',
+      'Conversations',
+    );
+    const cloner = createWorkspaceGitCloner({ runner: blockingRunner });
+    try {
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([
+          makeRuntime('/Users/test', { primary: true }),
+        ]),
+        workspaceGitCloner: cloner,
+        reservedWorkspaceRoots: [conversations],
+      });
+      const res = await request(app).post('/workspaces').send({
+        kind: 'git',
+        url: 'https://example.com/org/repo.git',
+        target,
+      });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('target_reserved');
+      await expect(stat(target)).rejects.toBeDefined();
+    } finally {
+      await cloner.sealAndWait().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the Live runtime outside an active clone target', async () => {
+    const root = await mkdtemp(join(REAL_DIR, 'qwen-live-clone-'));
+    const target = join(root, 'Qwen Code');
+    const conversations = join(target, 'Conversations');
+    const cloner = createWorkspaceGitCloner({ runner: blockingRunner });
+    const registry = createMockRegistry([
+      makeRuntime('/Users/test', { primary: true }),
+    ]);
+    const runtime = makeRuntime(conversations, {
+      provenance: 'live-conversation',
+      removable: false,
+    });
+    const createWorkspaceRuntime = vi.fn().mockResolvedValue(runtime);
+    try {
+      const { app, handle } = createApp({
+        workspaceRegistry: registry,
+        workspaceGitCloner: cloner,
+        createWorkspaceRuntime,
+        runtimeRemoval: createRemovalController(),
+      });
+      const started = await request(app).post('/workspaces').send({
+        kind: 'git',
+        url: 'https://example.com/org/repo.git',
+        target,
+      });
+      expect(started.status).toBe(202);
+
+      await expect(
+        handle.publishOwnedRuntime(
+          conversations,
+          'live-conversation',
+          () => undefined,
+        ),
+      ).rejects.toThrow('nests with an existing workspace');
+      expect(createWorkspaceRuntime).not.toHaveBeenCalled();
+
+      await cloner.cancel(started.body.jobId);
+    } finally {
+      await cloner.sealAndWait().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects extra fields on a git clone request', async () => {
+    const { app } = createApp({
+      workspaceGitCloner: createWorkspaceGitCloner({ runner: blockingRunner }),
+    });
+    const res = await request(app).post('/workspaces').send({
+      kind: 'git',
+      url: 'https://example.com/org/repo.git',
+      target: '/tmp/qwen-extra-key-repo',
+      persist: true,
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_workspace_request');
+  });
+
+  it('rejects a clone target inside the managed scratch root', async () => {
+    const parent = await mkdtemp(join(REAL_DIR, 'qwen-clone-scratch-'));
+    const scratchRoot = prepareManagedScratchRoot(join(parent, 'root'), []);
+    await mkdir(scratchRoot.canonicalRoot, { recursive: true });
+    const target = join(scratchRoot.canonicalRoot, 'scratch-foreign');
+    const cloner = createWorkspaceGitCloner({ runner: blockingRunner });
+    try {
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([
+          makeRuntime('/Users/test', { primary: true }),
+        ]),
+        workspaceGitCloner: cloner,
+        managedScratchRoot: scratchRoot,
+      });
+      const res = await request(app).post('/workspaces').send({
+        kind: 'git',
+        url: 'https://example.com/org/repo.git',
+        target,
+      });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('scratch_root_conflict');
+      await expect(stat(target)).rejects.toBeDefined();
+    } finally {
+      await cloner.sealAndWait().catch(() => undefined);
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a clone target equal to a registered workspace', async () => {
+    const root = await mkdtemp(join(REAL_DIR, 'qwen-clone-equal-'));
+    const target = join(root, 'workspace');
+    await mkdir(target);
+    const cloner = createWorkspaceGitCloner({ runner: blockingRunner });
+    try {
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([
+          makeRuntime('/Users/test', { primary: true }),
+          makeRuntime(target),
+        ]),
+        workspaceGitCloner: cloner,
+      });
+      const res = await request(app).post('/workspaces').send({
+        kind: 'git',
+        url: 'https://example.com/org/repo.git',
+        target,
+      });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('target_nested');
+    } finally {
+      await cloner.sealAndWait().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects persisting an existing workspace under an active clone target', async () => {
+    const root = await mkdtemp(join(REAL_DIR, 'qwen-clone-promotion-'));
+    const outer = join(root, 'outer');
+    const child = join(outer, 'child');
+    const cloner = createWorkspaceGitCloner({ runner: blockingRunner });
+    try {
+      const registry = createMockRegistry([
+        makeRuntime('/Users/test', { primary: true }),
+      ]);
+      const { app } = createApp({
+        workspaceRegistry: registry,
+        workspaceGitCloner: cloner,
+        workspaceRegistrationStore: {} as unknown as WorkspaceRegistrationStore,
+      });
+      const started = await request(app).post('/workspaces').send({
+        kind: 'git',
+        url: 'https://example.com/org/repo.git',
+        target: outer,
+      });
+      expect(started.status).toBe(202);
+
+      await mkdir(child);
+      registry.add(makeRuntime(child));
+
+      const res = await request(app).post('/workspaces').send({
+        cwd: child,
+        persist: true,
+      });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('workspace_nested');
+
+      await cloner.cancel(started.body.jobId);
+    } finally {
+      await cloner.sealAndWait().catch(() => undefined);
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

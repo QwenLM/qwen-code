@@ -16,7 +16,7 @@
 
 ## 文件与兼容性
 
-修改限于 web-shell 包：client/settings.ts、App.tsx、index.tsx、SettingsMessage.tsx、定向测试及嵌入文档。无 daemon 协议变更。两个作用域及既有视觉样式保持不变。设置别名手动维护；新增 schema 设置默认显示，直到其受支持别名被显式排除。
+修改限于 web-shell 包：client/settings.ts、App.tsx、index.tsx、SettingsMessage.tsx、定向测试及嵌入文档。无 daemon 协议变更。两个作用域及既有视觉样式保持不变。设置别名手动维护；新增 schema 设置默认显示，直到其受支持别名被显式排除。本设计的这部分内容已被 [web-shell-settings-allowlists.zh-CN.md](web-shell-settings-allowlists.zh-CN.md) 取代：该设计新增 `includeItems`，配置白名单后尚无公开别名的字段会被隐藏。
 
 ## 验证
 

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isShellResultDisplay, mapShellResultText } from './shell-result.js';
 import type {
   AgentResultDisplay,
   AnsiOutputDisplay,
@@ -124,6 +125,22 @@ export function compactStringForRecording(
   return compactString(value, 'recording', limit);
 }
 
+/**
+ * Field-level compaction for displays reconstructed from transcripts: a
+ * persisted display may omit fields its live producer always sets (a blocked
+ * spawn carries no task prompt, older versions recorded leaner shapes), so
+ * non-string values pass through untouched instead of throwing.
+ */
+function compactMaybeString<T>(
+  value: T,
+  purpose: CompactionPurpose,
+  limit = MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+): T {
+  return (
+    typeof value === 'string' ? compactString(value, purpose, limit) : value
+  ) as T;
+}
+
 function isFileDiffDisplay(resultDisplay: unknown): resultDisplay is FileDiff {
   if (
     typeof resultDisplay !== 'object' ||
@@ -223,10 +240,13 @@ function markerAnsiLine(text: string): AnsiLine {
 }
 
 function compactAnsiLine(line: AnsiLine, purpose: CompactionPurpose): AnsiLine {
+  if (!Array.isArray(line)) return line;
   let changed = false;
   const compactedLine = line.map((token) => {
-    const compactedText = compactString(token.text, purpose);
-    if (compactedText !== token.text) {
+    const tokenText = (token as { text?: unknown } | null | undefined)?.text;
+    if (typeof tokenText !== 'string') return token;
+    const compactedText = compactString(tokenText, purpose);
+    if (compactedText !== tokenText) {
       changed = true;
       return {
         ...token,
@@ -296,32 +316,33 @@ function compactAgentResultDisplay(
 ): AgentResultDisplay {
   return {
     ...display,
-    taskDescription: compactString(
+    taskDescription: compactMaybeString(
       display.taskDescription,
       purpose,
       MAX_RETAINED_AGENT_FIELD_CHARS,
     ),
-    taskPrompt: compactString(
+    taskPrompt: compactMaybeString(
       display.taskPrompt,
       purpose,
       MAX_RETAINED_AGENT_FIELD_CHARS,
     ),
     ...(display.terminateReason !== undefined && {
-      terminateReason: compactString(
+      terminateReason: compactMaybeString(
         display.terminateReason,
         purpose,
         MAX_RETAINED_AGENT_FIELD_CHARS,
       ),
     }),
     ...(display.result !== undefined && {
-      result: compactString(
+      result: compactMaybeString(
         display.result,
         purpose,
         MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
       ),
     }),
-    ...(display.toolCalls !== undefined && {
+    ...(Array.isArray(display.toolCalls) && {
       toolCalls: display.toolCalls.map((toolCall) => {
+        if (toolCall === null || typeof toolCall !== 'object') return toolCall;
         const {
           args: _args,
           responseParts: _responseParts,
@@ -334,21 +355,21 @@ function compactAgentResultDisplay(
         return {
           ...rest,
           ...(description !== undefined && {
-            description: compactString(
+            description: compactMaybeString(
               description,
               purpose,
               MAX_RETAINED_AGENT_FIELD_CHARS,
             ),
           }),
           ...(error !== undefined && {
-            error: compactString(
+            error: compactMaybeString(
               error,
               purpose,
               MAX_RETAINED_AGENT_FIELD_CHARS,
             ),
           }),
           ...(resultDisplay !== undefined && {
-            resultDisplay: compactString(resultDisplay, purpose),
+            resultDisplay: compactMaybeString(resultDisplay, purpose),
           }),
         };
       }),
@@ -371,16 +392,21 @@ function compactTodoResultDisplay(
   display: TodoResultDisplay,
   purpose: CompactionPurpose,
 ): TodoResultDisplay {
+  if (!Array.isArray(display.todos)) return display;
   return {
     ...display,
-    todos: display.todos.map((todo) => ({
-      ...todo,
-      content: compactString(
-        todo.content,
-        purpose,
-        MAX_RETAINED_AGENT_FIELD_CHARS,
-      ),
-    })),
+    todos: display.todos.map((todo) =>
+      todo !== null && typeof todo === 'object'
+        ? {
+            ...todo,
+            content: compactMaybeString(
+              todo.content,
+              purpose,
+              MAX_RETAINED_AGENT_FIELD_CHARS,
+            ),
+          }
+        : todo,
+    ),
   };
 }
 
@@ -401,14 +427,14 @@ function isFindingsResultDisplay(
 function findingRetainedSize(finding: ReportedFinding): number {
   return (
     (finding.id?.length ?? 0) +
-    finding.severity.length +
+    (finding.severity?.length ?? 0) +
     (finding.confidence?.length ?? 0) +
     (finding.source?.length ?? 0) +
-    finding.file.length +
+    (finding.file?.length ?? 0) +
     String(finding.line ?? '').length +
-    finding.summary.length +
-    finding.shortSummary.length +
-    finding.failureScenario.length +
+    (finding.summary?.length ?? 0) +
+    (finding.shortSummary?.length ?? 0) +
+    (finding.failureScenario?.length ?? 0) +
     (finding.category?.length ?? 0) +
     (finding.direction?.length ?? 0) +
     (finding.baseline?.length ?? 0) +
@@ -422,28 +448,33 @@ function compactFindingsResultDisplay(
   display: FindingsResultDisplay,
   purpose: CompactionPurpose,
 ): FindingsResultDisplay {
+  if (!Array.isArray(display.findings)) return display;
   const compacted: FindingsResultDisplay = {
     ...display,
-    findings: display.findings.map((finding) => ({
-      ...finding,
-      summary: compactString(
-        finding.summary,
-        purpose,
-        MAX_RETAINED_AGENT_FIELD_CHARS,
-      ),
-      failureScenario: compactString(
-        finding.failureScenario,
-        purpose,
-        MAX_RETAINED_AGENT_FIELD_CHARS,
-      ),
-      ...(finding.outcomeNote !== undefined && {
-        outcomeNote: compactString(
-          finding.outcomeNote,
-          purpose,
-          MAX_RETAINED_AGENT_FIELD_CHARS,
-        ),
-      }),
-    })),
+    findings: display.findings.map((finding) =>
+      finding !== null && typeof finding === 'object'
+        ? {
+            ...finding,
+            summary: compactMaybeString(
+              finding.summary,
+              purpose,
+              MAX_RETAINED_AGENT_FIELD_CHARS,
+            ),
+            failureScenario: compactMaybeString(
+              finding.failureScenario,
+              purpose,
+              MAX_RETAINED_AGENT_FIELD_CHARS,
+            ),
+            ...(finding.outcomeNote !== undefined && {
+              outcomeNote: compactMaybeString(
+                finding.outcomeNote,
+                purpose,
+                MAX_RETAINED_AGENT_FIELD_CHARS,
+              ),
+            }),
+          }
+        : finding,
+    ),
   };
 
   // Per-field caps alone leave a schema-maximal list (50 findings x the
@@ -456,7 +487,10 @@ function compactFindingsResultDisplay(
   let total = 0;
   let kept = 0;
   for (const finding of compacted.findings) {
-    const size = findingRetainedSize(finding);
+    const size =
+      finding !== null && typeof finding === 'object'
+        ? findingRetainedSize(finding)
+        : 0;
     if (total + size > MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS) {
       break;
     }
@@ -490,12 +524,12 @@ function compactPlanResultDisplay(
 ): PlanResultDisplay {
   return {
     ...display,
-    message: compactString(
+    message: compactMaybeString(
       display.message,
       purpose,
       MAX_RETAINED_AGENT_FIELD_CHARS,
     ),
-    plan: compactString(
+    plan: compactMaybeString(
       display.plan,
       purpose,
       MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
@@ -521,7 +555,7 @@ function compactMcpToolProgressData(
   return {
     ...display,
     ...(display.message !== undefined && {
-      message: compactString(
+      message: compactMaybeString(
         display.message,
         purpose,
         MAX_RETAINED_AGENT_FIELD_CHARS,
@@ -547,7 +581,7 @@ function compactTeamResultDisplay(
 ): TeamResultDisplay {
   return {
     ...display,
-    teamName: compactString(
+    teamName: compactMaybeString(
       display.teamName,
       purpose,
       MAX_RETAINED_AGENT_FIELD_CHARS,
@@ -591,7 +625,7 @@ function compactMcpAppResultDisplay(
   // it to the recorder, so those transcripts still carry blanks.
   //
   // `html` is retained whole: the producer rejects any resource over
-  // MCP_APP_RESOURCE_MAX_BYTES (1 MiB, tools/mcp-tool.ts), and a document
+  // the configured App limit (default 1 MiB, tools/mcp-tool.ts), and a document
   // truncated mid-markup would not render either, so `''` -- which degrades to
   // `fallbackText` -- is the only useful over-budget value.
   //
@@ -612,7 +646,7 @@ function compactMcpAppResultDisplay(
     ...display,
     html: retainAppPayload ? display.html : '',
     toolResult: retainedToolResult,
-    fallbackText: compactString(
+    fallbackText: compactMaybeString(
       display.fallbackText,
       purpose,
       MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
@@ -624,23 +658,28 @@ function compactTaskListResultDisplay(
   display: TaskListResultDisplay,
   purpose: CompactionPurpose,
 ): TaskListResultDisplay {
+  if (!Array.isArray(display.tasks)) return display;
   return {
     ...display,
-    tasks: display.tasks.map((task) => ({
-      ...task,
-      subject: compactString(
-        task.subject,
-        purpose,
-        MAX_RETAINED_AGENT_FIELD_CHARS,
-      ),
-      ...(task.owner !== undefined && {
-        owner: compactString(
-          task.owner,
-          purpose,
-          MAX_RETAINED_AGENT_FIELD_CHARS,
-        ),
-      }),
-    })),
+    tasks: display.tasks.map((task) =>
+      task !== null && typeof task === 'object'
+        ? {
+            ...task,
+            subject: compactMaybeString(
+              task.subject,
+              purpose,
+              MAX_RETAINED_AGENT_FIELD_CHARS,
+            ),
+            ...(task.owner !== undefined && {
+              owner: compactMaybeString(
+                task.owner,
+                purpose,
+                MAX_RETAINED_AGENT_FIELD_CHARS,
+              ),
+            }),
+          }
+        : task,
+    ),
   };
 }
 
@@ -648,6 +687,12 @@ function compactToolResultDisplay<T extends ToolResultDisplay | undefined>(
   resultDisplay: T,
   purpose: CompactionPurpose,
 ): T {
+  if (isShellResultDisplay(resultDisplay)) {
+    return mapShellResultText(resultDisplay, (value) =>
+      compactString(value, purpose),
+    ) as T;
+  }
+
   if (typeof resultDisplay === 'string') {
     return compactString(resultDisplay, purpose) as T;
   }

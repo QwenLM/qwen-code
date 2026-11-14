@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { calculateCost } from './costCalculator.js';
+import { billableOutputTokens, calculateCost } from './costCalculator.js';
 
 describe('calculateCost', () => {
   it('calculates cost correctly with both input and output pricing', () => {
@@ -262,5 +262,103 @@ describe('calculateCost', () => {
     expect(cost).toBeCloseTo(0.9838512, 7);
     // Verify the toFixed(4) formatting that the UI uses
     expect(cost?.toFixed(4)).toBe('0.9839');
+  });
+});
+
+describe('billableOutputTokens', () => {
+  it('derives total - prompt when reasoning sits inside candidates', () => {
+    // OpenAI-style: total already counts the reasoning in `candidates`.
+    expect(
+      billableOutputTokens({
+        prompt: 100_000,
+        candidates: 150_000,
+        thoughts: 120_000,
+        total: 250_000,
+      }),
+    ).toBe(150_000);
+  });
+
+  it('derives total - prompt when thoughts are disjoint from candidates', () => {
+    // Gemini-style: the derivation must equal candidates + thoughts exactly.
+    expect(
+      billableOutputTokens({
+        prompt: 100_000,
+        candidates: 50_000,
+        thoughts: 120_000,
+        total: 270_000,
+      }),
+    ).toBe(170_000);
+  });
+
+  it('refuses a derived figure above the band (operand did not survive)', () => {
+    // A total-only record: prompt never arrived, so the whole total -- mostly
+    // input -- would otherwise be billed at the output rate.
+    expect(
+      billableOutputTokens({
+        prompt: 0,
+        candidates: 0,
+        thoughts: 0,
+        total: 250_000,
+      }),
+    ).toBe(0);
+    // A cached-only prompt coerces prompt to 0 while total keeps the cache:
+    // derived 52_000 against a band of [10_000, 12_000].
+    expect(
+      billableOutputTokens({
+        prompt: 0,
+        candidates: 10_000,
+        thoughts: 2_000,
+        total: 52_000,
+      }),
+    ).toBe(12_000);
+  });
+
+  it('refuses a derived figure below the band (short total)', () => {
+    // One total-less event among complete ones subtracts an unreported prompt
+    // from the other events' output: derived 180_000 < candidates 190_000.
+    expect(
+      billableOutputTokens({
+        prompt: 110_000,
+        candidates: 190_000,
+        thoughts: 0,
+        total: 290_000,
+      }),
+    ).toBe(190_000);
+  });
+
+  it('keeps the band lower bound inclusive', () => {
+    // derived === candidates exactly: the aggregate counts no thoughts beyond
+    // candidates, so it is still trustworthy and must not fall through to the
+    // sum (which would bill 170_000 here). The upper bound needs no such leg:
+    // at derived === candidates + thoughts both paths return the same value.
+    expect(
+      billableOutputTokens({
+        prompt: 100_000,
+        candidates: 50_000,
+        thoughts: 120_000,
+        total: 150_000,
+      }),
+    ).toBe(50_000);
+  });
+
+  it('keeps candidates + thoughts when no usable total is reported', () => {
+    // Summing is the only fallback that keeps a disjoint provider's reasoning
+    // billable, whatever the relative size of the two counts.
+    expect(
+      billableOutputTokens({
+        prompt: 100_000,
+        candidates: 150_000,
+        thoughts: 120_000,
+        total: 0,
+      }),
+    ).toBe(270_000);
+    expect(
+      billableOutputTokens({
+        prompt: 100_000,
+        candidates: 50_000,
+        thoughts: 120_000,
+        total: 0,
+      }),
+    ).toBe(170_000);
   });
 });

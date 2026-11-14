@@ -39,6 +39,7 @@ import {
   type FollowupGenerationParams,
 } from './followup-generation.js';
 import type { WaitingCallInfo } from './live-session.js';
+import * as interactiveMods from '../../services/interactive-mod-session.js';
 
 function buildConfig(overrides: Record<string, unknown> = {}): Config {
   return {
@@ -92,6 +93,96 @@ describe('useFollowupSuggestionGeneration', () => {
     mocks.log.mockReset();
     mocks.getHistoryTail.mockClear();
   });
+
+  it.each(['failed', 'ready', 'aborted'])(
+    'respects Mod startup before generating a follow-up: %s',
+    async (state) => {
+      let resolve!: () => void;
+      let reject!: (error: Error) => void;
+      const ready = new Promise<void>((done, fail) => {
+        resolve = done;
+        reject = fail;
+      });
+      void ready.catch(() => {});
+      const owner = vi
+        .spyOn(interactiveMods, 'getInteractiveModSession')
+        .mockReturnValue({ ready } as interactiveMods.InteractiveModSession);
+      mocks.generate.mockResolvedValue({ suggestion: 'Run the tests' });
+      const config = buildConfig();
+      const { result, rerender, unmount } = renderGeneration(props({ config }));
+      try {
+        await act(async () => {
+          rerender(props({ config, streaming: false }));
+        });
+        expect(mocks.generate).not.toHaveBeenCalled();
+        await act(async () => {
+          if (state === 'aborted') result.current.abortPromptSuggestion();
+          if (state === 'failed') reject(new Error('Mod startup failed'));
+          else resolve();
+        });
+        expect(mocks.generate).toHaveBeenCalledTimes(state === 'ready' ? 1 : 0);
+        expect(result.current.promptSuggestion).toBe(
+          state === 'ready' ? 'Run the tests' : null,
+        );
+      } finally {
+        unmount();
+        resolve();
+        owner.mockRestore();
+      }
+    },
+  );
+
+  it.each(['abort', 'dismiss', 'unmount'])(
+    'cleans up the readiness wait on %s while Mods are still pending',
+    async (action) => {
+      let release!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const owner = vi
+        .spyOn(interactiveMods, 'getInteractiveModSession')
+        .mockReturnValue({ ready } as interactiveMods.InteractiveModSession);
+      const addListener = vi.spyOn(AbortSignal.prototype, 'addEventListener');
+      const removeListener = vi.spyOn(
+        AbortSignal.prototype,
+        'removeEventListener',
+      );
+      const config = buildConfig();
+      const view = renderGeneration(props({ config }));
+      try {
+        await act(async () => {
+          view.rerender(props({ config, streaming: false }));
+        });
+        await act(async () => {
+          if (action === 'abort') view.result.current.abortPromptSuggestion();
+          else if (action === 'dismiss')
+            view.result.current.dismissPromptSuggestion();
+          else view.unmount();
+        });
+
+        expect(removeListener).toHaveBeenCalledWith(
+          'abort',
+          expect.any(Function),
+        );
+        const [event, listener] = removeListener.mock.calls[0];
+        expect(addListener).toHaveBeenCalledWith(event, listener, {
+          once: true,
+        });
+        expect(mocks.generate).not.toHaveBeenCalled();
+        expect(mocks.getHistoryTail).not.toHaveBeenCalled();
+        await act(async () => {
+          release();
+        });
+        expect(mocks.generate).not.toHaveBeenCalled();
+      } finally {
+        view.unmount();
+        release();
+        owner.mockRestore();
+        addListener.mockRestore();
+        removeListener.mockRestore();
+      }
+    },
+  );
 
   it('generates on the streaming→idle edge and publishes the suggestion', async () => {
     mocks.generate.mockResolvedValue({ suggestion: 'Run the tests' });

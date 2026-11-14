@@ -15,7 +15,12 @@ import {
   getPlugin,
   UNSAFE_OBJECT_KEYS,
 } from '../commands/channel/channel-registry.js';
-import { multiSessionCompatibilityError } from '../commands/channel/config-utils.js';
+import {
+  effectiveSessionScope,
+  multiSessionCompatibilityError,
+  parseMessageRoutingConfig,
+  parseSessionRotationConfig,
+} from '../commands/channel/config-utils.js';
 import {
   loadSettings,
   saveSettings,
@@ -133,14 +138,34 @@ function assertSharedField(
   key: string,
   value: unknown,
   previous?: unknown,
+  channelType?: unknown,
 ): boolean {
+  if (key === 'messageRoutes' || key === 'defaultMessageRoute') {
+    return true;
+  }
   if (key === 'multiSession') {
     if (typeof value !== 'boolean') {
       throw invalidConfig(`Channel field "${key}" must be a boolean.`);
     }
     return true;
   }
+  if (key === 'sessionRotation') {
+    try {
+      parseSessionRotationConfig('settings', value);
+    } catch (error) {
+      throw invalidConfig(
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    return true;
+  }
+  if (key === 'groupSenderPolicy' || key === 'allowedGroupUsers') {
+    throw invalidConfig(
+      `Channel field "${key}" moved to groups["*"].${key === 'groupSenderPolicy' ? 'senders' : 'allowedUsers'}.`,
+    );
+  }
   const enumValues: Record<string, ReadonlySet<string>> = {
+    privatePolicy: new Set(['disabled', 'allowlist', 'pairing', 'open']),
     senderPolicy: new Set(['allowlist', 'pairing', 'open']),
     dmPolicy: new Set(['open', 'disabled']),
     groupPolicy: new Set(['disabled', 'allowlist', 'pairing', 'open']),
@@ -159,7 +184,7 @@ function assertSharedField(
     }
     return true;
   }
-  if (key === 'allowedUsers') {
+  if (key === 'allowedUsers' || key === 'operators') {
     if (
       !Array.isArray(value) ||
       value.some((item) => typeof item !== 'string')
@@ -183,14 +208,39 @@ function assertSharedField(
       if (UNSAFE_OBJECT_KEYS.has(groupId) || !isRecord(groupConfig)) {
         throw invalidConfig(`Channel field "${key}.${groupId}" is invalid.`);
       }
-      const previousGroup = isRecord(previousGroups[groupId])
+      let previousGroup = isRecord(previousGroups[groupId])
         ? previousGroups[groupId]
-        : {};
+        : undefined;
+      // Only the GitHub and GitLab adapters fold group-key case
+      // (normalizeGroupId); the other platforms treat case-variant keys as
+      // distinct groups, so the fallback must not borrow tolerance across them.
+      const foldsGroupKeyCase =
+        channelType === 'github' || channelType === 'gitlab';
+      if (previousGroup === undefined && foldsGroupKeyCase) {
+        // A repository-only editor normalizes group-key case on save, so the
+        // entry may arrive under a different spelling than it was stored.
+        // Follow it across the case rewrite so the unchanged-value tolerance
+        // below is not lost, mirroring GroupGate's exact-then-normalized
+        // lookup. The exact spelling above always wins.
+        const normalizedId = groupId.toLowerCase();
+        for (const [storedId, storedConfig] of Object.entries(previousGroups)) {
+          if (
+            storedId.toLowerCase() === normalizedId &&
+            isRecord(storedConfig)
+          ) {
+            previousGroup = storedConfig;
+            break;
+          }
+        }
+      }
+      const previousGroupRecord = previousGroup ?? {};
       for (const [nestedKey, nestedValue] of Object.entries(groupConfig)) {
         const known = [
           'requireMention',
           'dispatchMode',
           'groupHistoryLimit',
+          'senders',
+          'allowedUsers',
         ].includes(nestedKey);
         const valid =
           (nestedKey === 'requireMention' &&
@@ -200,13 +250,20 @@ function assertSharedField(
             ['collect', 'steer', 'followup'].includes(nestedValue)) ||
           (nestedKey === 'groupHistoryLimit' &&
             typeof nestedValue === 'number' &&
-            Number.isFinite(nestedValue));
+            Number.isFinite(nestedValue)) ||
+          (nestedKey === 'senders' &&
+            typeof nestedValue === 'string' &&
+            ['open', 'allowlist'].includes(nestedValue)) ||
+          (nestedKey === 'allowedUsers' &&
+            Array.isArray(nestedValue) &&
+            nestedValue.every((item) => typeof item === 'string'));
         if (
           known &&
           !valid &&
           !(
-            Object.hasOwn(previousGroup, nestedKey) &&
-            isDeepStrictEqual(previousGroup[nestedKey], nestedValue) &&
+            nestedKey !== 'senders' &&
+            Object.hasOwn(previousGroupRecord, nestedKey) &&
+            isDeepStrictEqual(previousGroupRecord[nestedKey], nestedValue) &&
             !containsUnsafeObjectKey(nestedValue)
           )
         ) {
@@ -219,7 +276,7 @@ function assertSharedField(
             `${key}.${groupId}`,
             nestedKey,
             nestedValue,
-            previousGroup,
+            previousGroupRecord,
           );
         }
       }
@@ -321,11 +378,23 @@ function assertDescriptorValue(
     (field.kind === 'number' &&
       typeof value === 'number' &&
       Number.isFinite(value) &&
-      (field.exclusiveMinimum === undefined ||
-        value > field.exclusiveMinimum)) ||
+      (((field.exclusiveMinimum === undefined ||
+        value > field.exclusiveMinimum) &&
+        (field.minimum === undefined || value >= field.minimum) &&
+        (field.maximum === undefined || value <= field.maximum)) ||
+        // A newly declared bound must not strand an unrelated edit: the editor
+        // re-sends the stored number verbatim, and the runtime already tolerates
+        // it (a non-positive poll interval falls back to the default). Only the
+        // range is forgiven — a wrong type is still rejected, unchanged or not.
+        isDeepStrictEqual(previous, value))) ||
     (field.kind === 'enum' &&
       typeof value === 'string' &&
-      field.options?.some((option) => option.value === value) === true) ||
+      (field.options?.some((option) => option.value === value) === true ||
+        // Same forgiveness as the number branch above: a channel that narrows
+        // its own option list must not strand an unrelated edit. The editor
+        // re-sends the stored value verbatim and the runtime already tolerates
+        // it. Only the option set is forgiven — a non-string still fails.
+        isDeepStrictEqual(previous, value))) ||
     (field.kind === 'string-list' &&
       Array.isArray(value) &&
       value.every((item) => typeof item === 'string')) ||
@@ -399,6 +468,7 @@ function assertManagedConfig(
         key,
         value,
         Object.hasOwn(previous, key) ? previous[key] : undefined,
+        config['type'],
       )
     ) {
       continue;
@@ -633,20 +703,34 @@ export class WorkspaceChannelSettingsStore {
     );
     const multiSessionError = multiSessionCompatibilityError(name, {
       multiSession: nextConfig['multiSession'] === true,
-      sessionScope:
-        (nextConfig['sessionScope'] as
-          | 'user'
-          | 'thread'
-          | 'chat_thread'
-          | 'single'
-          | undefined) ??
-        plugin.defaultSessionScope ??
-        'user',
+      sessionRotation: parseSessionRotationConfig(
+        name,
+        nextConfig['sessionRotation'],
+      ),
+      // Same resolution the parser uses, so an existing multiSession channel
+      // with no stored scope is not re-scoped to the plugin default and
+      // rejected on every save.
+      sessionScope: effectiveSessionScope(
+        nextConfig,
+        nextConfig['multiSession'] === true,
+        plugin,
+      ),
       groupHistoryLimit: nextConfig['groupHistoryLimit'],
       groups: isRecord(nextConfig['groups']) ? nextConfig['groups'] : {},
       webhooks: nextConfig['webhooks'],
     });
     if (multiSessionError) throw invalidConfig(multiSessionError);
+    try {
+      const routing = parseMessageRoutingConfig(name, nextConfig);
+      if (routing.messageRoutes !== undefined)
+        nextConfig['messageRoutes'] = routing.messageRoutes;
+      if (routing.defaultMessageRoute !== undefined)
+        nextConfig['defaultMessageRoute'] = routing.defaultMessageRoute;
+    } catch (error) {
+      throw invalidConfig(
+        error instanceof Error ? error.message : String(error),
+      );
+    }
     let crossFieldError: unknown;
     try {
       crossFieldError = plugin.management.validateConfig?.(nextConfig);
@@ -690,6 +774,27 @@ export class WorkspaceChannelSettingsStore {
     const { current, storedChannels } = this.assertRevision(
       options.expectedRevision,
     );
+    const configured = Object.hasOwn(current.channels, name);
+    if (!configured) {
+      if (!current.startupNames.includes(name)) return current;
+      // The config is already gone from this scope; only a stale startup
+      // selection can remain. Write just that selection — replacing the
+      // whole `channels` subtree would erase entries the read view filters
+      // out (and this delete never touched), such as legacy scalar values.
+      saveSettings(
+        channelSettingsScope(this.workspaceCwd),
+        {
+          serve: {
+            channels: current.startupNames.filter(
+              (startupName) => startupName !== name,
+            ),
+          },
+        },
+        ['serve', 'channels'],
+        { throwOnWriteFailure: true },
+      );
+      return this.snapshot();
+    }
     const channels = { ...storedChannels };
     delete channels[name];
     const hasAllSentinel = current.startupNames.some(isAllStartupName);

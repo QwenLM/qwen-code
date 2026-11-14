@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import {
   canOpenWorkspaceArtifact,
+  getArtifactExternalUrl,
   getArtifactPreviewContent,
   getFileChangePreviewContent,
   getWorkspaceArtifactOpenBlockReason,
@@ -72,6 +73,80 @@ describe('TurnOutputs helpers', () => {
     expect(
       getArtifactPreviewContent(artifact, [change], '/workspace/project'),
     ).toBe('# New');
+  });
+
+  it('captures preview content for a parameterised-mime HTML artifact', () => {
+    // normalizeArtifactMimeType maps text/html; charset=utf-8 to text/html; a
+    // raw toLowerCase comparison would silently lose this inline preview.
+    const artifact = {
+      id: 'html-param',
+      kind: 'file',
+      workspacePath: 'out/page-param',
+      mimeType: 'text/html; charset=utf-8',
+    } as DaemonSessionArtifact;
+    const change: TurnOutputFileChange = {
+      path: '/workspace/project/out/page-param',
+      status: 'modified',
+      toolCallId: 'tool-1',
+      isArtifact: true,
+      diffs: [
+        {
+          oldText: '<html>old</html>',
+          newText: '<html>new</html>',
+          fullContent: true,
+        },
+      ],
+    };
+
+    expect(
+      getArtifactPreviewContent(artifact, [change], '/workspace/project'),
+    ).toBe('<html>new</html>');
+  });
+
+  it('captures preview content for an image identified by mime alone', () => {
+    // The image/* mime arm renders an extensionless path; dropping that arm
+    // would silently return undefined for this shape.
+    const artifact = {
+      id: 'image-mime',
+      kind: 'image',
+      workspacePath: 'out/diagram',
+      mimeType: 'image/png',
+    } as DaemonSessionArtifact;
+    const change: TurnOutputFileChange = {
+      path: '/workspace/project/out/diagram',
+      status: 'modified',
+      toolCallId: 'tool-1',
+      isArtifact: true,
+      diffs: [
+        { oldText: '', newText: 'captured-image-content', fullContent: true },
+      ],
+    };
+
+    expect(
+      getArtifactPreviewContent(artifact, [change], '/workspace/project'),
+    ).toBe('captured-image-content');
+  });
+
+  it('stays undefined for an svg mime', () => {
+    // getArtifactImageMimeType deliberately excludes svg, so the preview
+    // content guard must not let it through.
+    const artifact = {
+      id: 'svg-artifact',
+      kind: 'image',
+      workspacePath: 'out/diagram',
+      mimeType: 'image/svg+xml',
+    } as DaemonSessionArtifact;
+    const change: TurnOutputFileChange = {
+      path: '/workspace/project/out/diagram',
+      status: 'modified',
+      toolCallId: 'tool-1',
+      isArtifact: true,
+      diffs: [{ oldText: '', newText: '<svg/>', fullContent: true }],
+    };
+
+    expect(
+      getArtifactPreviewContent(artifact, [change], '/workspace/project'),
+    ).toBeUndefined();
   });
 
   it('uses the latest full file content for review previews', () => {
@@ -186,5 +261,50 @@ describe('TurnOutputs helpers', () => {
     expect(getWorkspaceArtifactOpenBlockReason(missing, t)).toBe(
       'File not found in the workspace',
     );
+  });
+
+  it.each([
+    [
+      'external_url',
+      'https://platform.example.com/detail?id=7',
+      'https://platform.example.com/detail?id=7',
+    ],
+    [
+      'external_url',
+      '  https://example.com/detail  ',
+      'https://example.com/detail',
+    ],
+    ['external_url', 'mailto:owner@example.com', 'mailto:owner@example.com'],
+    ['published', 'https://example.com/detail', undefined],
+    ['external_url', 'javascript:alert(1)', undefined],
+    ['external_url', 'w/agent/report.html', undefined],
+    ['external_url', undefined, undefined],
+  ])(
+    'opens a %s link artifact with %s in a new page',
+    (storage, url, expected) => {
+      expect(
+        getArtifactExternalUrl({
+          id: 'link-1',
+          kind: 'link',
+          storage,
+          status: 'available',
+          title: 'Detail page',
+          ...(url === undefined ? {} : { url }),
+        } as DaemonSessionArtifact),
+      ).toBe(expected);
+    },
+  );
+
+  it('keeps non-link artifacts on the panel path', () => {
+    expect(
+      getArtifactExternalUrl({
+        id: 'page-1',
+        kind: 'html',
+        storage: 'external_url',
+        status: 'available',
+        title: 'Published page',
+        url: 'https://example.com/page',
+      } as DaemonSessionArtifact),
+    ).toBeUndefined();
   });
 });

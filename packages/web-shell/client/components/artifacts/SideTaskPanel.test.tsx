@@ -3,7 +3,7 @@
 import { act, type ComponentProps, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, expect, it, vi } from 'vitest';
-import { I18nProvider } from '../../i18n';
+import { I18nProvider, getTranslator } from '../../i18n';
 
 const {
   connection,
@@ -15,6 +15,7 @@ const {
   catalogController,
 } = vi.hoisted(() => ({
   connection: {
+    commands: undefined as Array<{ name: string; source: string }> | undefined,
     status: 'idle',
     sessionId: undefined as string | undefined,
     workspaceCwd: undefined as string | undefined,
@@ -117,6 +118,8 @@ afterEach(() => {
   container?.remove();
   container = null;
   root = null;
+  connection.commands = undefined;
+  vi.useRealTimers();
   connection.status = 'idle';
   connection.sessionId = undefined;
   connection.workspaceCwd = undefined;
@@ -174,6 +177,31 @@ it('creates a side task and reports the new session id', async () => {
   );
   expect(onCreated).toHaveBeenCalledWith('side-task:draft:1', 'side-session-1');
   expect(onTitleChange).toHaveBeenCalledWith('side-task:draft:1', 'Side task');
+});
+
+it('keeps the derived clientId within the daemon limit for a details tab', async () => {
+  // The daemon rejects client ids over 128 chars (MAX_CLIENT_ID_LENGTH).
+  // A details tab id carries a uuid request id; with a uuid parent session
+  // the derived `side-task:<parent>:<tabId>` must still fit. A longer id
+  // 400s the pane's load and the initial prompt is never sent.
+  const parentId = 'da424824-c6a7-4ce5-a5fd-9b12c9255bef';
+  const requestId = '06a69fb6-7293-4f61-a279-e7b3963b1cd3';
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+
+  await act(async () => {
+    renderSideTask({
+      tabId: `side-task:details:${requestId}`,
+      parentSessionId: parentId,
+      sessionId: 'side-session-1',
+    });
+    await Promise.resolve();
+  });
+
+  const clientId = providerProps.current?.['clientId'];
+  expect(typeof clientId).toBe('string');
+  expect((clientId as string).length).toBeLessThanOrEqual(128);
 });
 
 it('does not report a failed creation after the draft unmounts', async () => {
@@ -323,55 +351,175 @@ it('does not retry creation after a prop change until the user requests it', asy
   expect(onCreated).toHaveBeenCalledWith('side-task:draft:1', 'side-session-1');
 });
 
-it('renders a restored side task as a full chat pane', () => {
+it.each(['/work/project', '/work/secondary'])(
+  'renders a restored side task in its workspace %s',
+  (workspaceCwd) => {
+    connection.sessionId = 'side-session-1';
+    connection.workspaceCwd = workspaceCwd;
+    connection.displayName = 'Investigate flaky tests';
+    connection.status = 'connected';
+    transcript.blocks = [{ kind: 'user' }];
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    const onTitleChange = vi.fn();
+    const onRightPanelOpen = vi.fn();
+    const onArtifactsChange = vi.fn();
+    act(() => {
+      root!.render(
+        <I18nProvider language="en">
+          <SideTaskPanel
+            tabId="side-task:side-session-1"
+            sessionId="side-session-1"
+            parentSessionId="parent-session"
+            workspaceCwd={workspaceCwd}
+            title="Side task"
+            createSession={vi.fn()}
+            onCreated={vi.fn()}
+            onTitleChange={onTitleChange}
+            onRightPanelOpen={onRightPanelOpen}
+            onArtifactsChange={onArtifactsChange}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(
+      container.querySelector('[data-testid="side-task-chat"]'),
+    ).not.toBeNull();
+    expect(latestChatPaneProps.current).toMatchObject({
+      title: 'Investigate flaky tests',
+      workspaceCwd,
+      embedded: true,
+      onRightPanelOpen,
+      onPaneArtifactsChange: onArtifactsChange,
+    });
+    expect(
+      latestChatPaneProps.current?.['onFirstPromptAdmitted'],
+    ).toBeUndefined();
+    expect(providerProps.current).toMatchObject({
+      sessionId: 'side-session-1',
+      workspaceCwd,
+      autoConnect: true,
+    });
+  },
+);
+
+it('threads unavailable models to its chat pane', () => {
   connection.sessionId = 'side-session-1';
-  connection.displayName = 'Investigate flaky tests';
   connection.status = 'connected';
   transcript.blocks = [{ kind: 'user' }];
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
-
-  const onTitleChange = vi.fn();
-  const onRightPanelOpen = vi.fn();
-  const onArtifactsChange = vi.fn();
+  const unavailableModels = [{ id: 'qwen-max', tooltip: 'Need Pro' }];
+  const mountUnavailableModelTooltip = () => undefined;
   act(() => {
-    root!.render(
-      <I18nProvider language="en">
-        <SideTaskPanel
-          tabId="side-task:side-session-1"
-          sessionId="side-session-1"
-          parentSessionId="parent-session"
-          workspaceCwd="/work/project"
-          title="Side task"
-          createSession={vi.fn()}
-          onCreated={vi.fn()}
-          onTitleChange={onTitleChange}
-          onRightPanelOpen={onRightPanelOpen}
-          onArtifactsChange={onArtifactsChange}
-        />
-      </I18nProvider>,
-    );
+    renderSideTask({ unavailableModels, mountUnavailableModelTooltip });
   });
+  expect(latestChatPaneProps.current?.unavailableModels).toEqual(
+    unavailableModels,
+  );
+  expect(latestChatPaneProps.current?.mountUnavailableModelTooltip).toBe(
+    mountUnavailableModelTooltip,
+  );
+});
 
-  expect(
-    container.querySelector('[data-testid="side-task-chat"]'),
-  ).not.toBeNull();
-  expect(latestChatPaneProps.current).toMatchObject({
-    title: 'Investigate flaky tests',
-    workspaceCwd: '/work/project',
-    embedded: true,
-    onRightPanelOpen,
-    onPaneArtifactsChange: onArtifactsChange,
+it('threads model management policy to its chat pane', () => {
+  connection.sessionId = 'side-session-1';
+  connection.status = 'connected';
+  transcript.blocks = [{ kind: 'user' }];
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  const modelManagement = { allowAdd: false, allowDelete: false };
+  act(() => {
+    renderSideTask({ modelManagement });
   });
-  expect(
-    latestChatPaneProps.current?.['onFirstPromptAdmitted'],
-  ).toBeUndefined();
-  expect(providerProps.current).toMatchObject({
-    sessionId: 'side-session-1',
-    workspaceCwd: '/work/project',
-    autoConnect: true,
+  expect(latestChatPaneProps.current?.modelManagement).toEqual(modelManagement);
+});
+
+it('does not send a disabled model setup command as the initial side-task prompt', async () => {
+  connection.commands = [{ name: 'auth', source: 'builtin-command' }];
+  connection.sessionId = 'side-session-1';
+  connection.status = 'connected';
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  const onImageIngestionNotice = vi.fn();
+  const onInitialPromptRefused = vi.fn();
+  await act(async () => {
+    renderSideTask({
+      initialPrompt: '/auth',
+      modelManagement: { allowAdd: false },
+      onImageIngestionNotice,
+      onInitialPromptRefused,
+    });
+    await Promise.resolve();
   });
+  expect(sendPrompt).not.toHaveBeenCalled();
+  expect(onImageIngestionNotice).toHaveBeenCalledTimes(1);
+  expect(onImageIngestionNotice).toHaveBeenCalledWith(
+    'warning',
+    'Adding models is disabled by the host.',
+  );
+  // The refusal must be terminal for the tab: the parent is told to drop the
+  // stored prompt, so a later remount neither re-toasts nor replays it.
+  expect(onInitialPromptRefused).toHaveBeenCalledWith(
+    'side-task:side-session-1',
+  );
+
+  await act(async () => root!.unmount());
+  root = createRoot(container);
+  await act(async () => {
+    renderSideTask({
+      initialPrompt: undefined,
+      modelManagement: { allowAdd: false },
+      onImageIngestionNotice,
+      onInitialPromptRefused,
+    });
+    await Promise.resolve();
+  });
+  expect(onImageIngestionNotice).toHaveBeenCalledTimes(1);
+  expect(sendPrompt).not.toHaveBeenCalled();
+});
+
+it('does not replay a refused initial prompt after the host re-allows adds', async () => {
+  connection.commands = [{ name: 'auth', source: 'builtin-command' }];
+  connection.sessionId = 'side-session-1';
+  connection.status = 'connected';
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  const onImageIngestionNotice = vi.fn();
+  const onInitialPromptRefused = vi.fn();
+  await act(async () => {
+    renderSideTask({
+      initialPrompt: '/auth',
+      modelManagement: { allowAdd: false },
+      onImageIngestionNotice,
+      onInitialPromptRefused,
+    });
+    await Promise.resolve();
+  });
+  expect(onInitialPromptRefused).toHaveBeenCalledWith(
+    'side-task:side-session-1',
+  );
+  expect(sendPrompt).not.toHaveBeenCalled();
+
+  await act(async () => root!.unmount());
+  root = createRoot(container);
+  await act(async () => {
+    renderSideTask({
+      initialPrompt: undefined,
+      modelManagement: { allowAdd: true },
+      onImageIngestionNotice,
+      onInitialPromptRefused,
+    });
+    await Promise.resolve();
+  });
+  expect(sendPrompt).not.toHaveBeenCalled();
 });
 
 it('threads sessionWorkflowEnabled to its chat pane', () => {
@@ -492,6 +640,7 @@ it('sends the /btw question as the first side-task prompt', async () => {
   await act(async () => {
     renderSideTask({
       initialPrompt: 'Explain the current implementation',
+      modelManagement: { allowAdd: false },
       onTitleChange,
     });
     await Promise.resolve();
@@ -512,6 +661,157 @@ it('sends the /btw question as the first side-task prompt', async () => {
     'side-task:side-session-1',
     'Explain the current implementation',
     true,
+  );
+});
+
+it('does not re-send a retained initial prompt to a child that already has a user prompt', async () => {
+  connection.sessionId = 'side-session-1';
+  connection.displayName = 'Side task';
+  connection.status = 'connected';
+  transcript.blocks = [{ kind: 'user', text: 'the explanation already ran' }];
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+
+  await act(async () => {
+    renderSideTask({ initialPrompt: 'Explain the pending question' });
+    await Promise.resolve();
+  });
+
+  expect(sendPrompt).not.toHaveBeenCalled();
+});
+
+it.each([
+  ['image', { images: [{ data: 'AQID', mimeType: 'image/png' }] }],
+  ['file', { files: [{ name: 'notes.txt', mimeType: 'text/plain' }] }],
+  [
+    'resource link',
+    {
+      resourceLinks: [
+        {
+          type: 'resource_link',
+          uri: 'file:///tmp/notes.txt',
+          name: 'notes.txt',
+        },
+      ],
+    },
+  ],
+])(
+  'does not re-send a retained initial prompt to a child whose only user prompt is %s-only',
+  async (_label, media) => {
+    connection.sessionId = 'side-session-1';
+    connection.displayName = 'Side task';
+    connection.status = 'connected';
+    // Media-only prompts submit with empty text; the child is not empty.
+    transcript.blocks = [{ kind: 'user', text: '', ...media }];
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      renderSideTask({ initialPrompt: 'Explain the pending question' });
+      await Promise.resolve();
+    });
+
+    expect(sendPrompt).not.toHaveBeenCalled();
+  },
+);
+
+it.each([
+  ['en', 'The main session is waiting'],
+  ['zh-CN', '主会话正在等我'],
+])(
+  'names a details child from the question, not the instruction boilerplate (%s)',
+  async (language, boilerplatePrefix) => {
+    // R1-1 / R2-4: both the EN and zh-CN details prompts lead with the question
+    // snapshot so the generic first-prompt naming (first 200 code points) yields
+    // a question-derived title rather than the identical instruction prefix.
+    connection.sessionId = 'side-session-1';
+    connection.displayName = 'Side task';
+    connection.status = 'connected';
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    const question = 'Which cache backend should the session use?';
+    const questions = `1. ${question}\n   - SQLite: local file database\n   - Redis: in-memory store`;
+    const detailsPrompt = getTranslator(language as 'en' | 'zh-CN')(
+      'askUser.detailsPrompt',
+      { questions },
+    );
+
+    await act(async () => {
+      renderSideTask({
+        initialPrompt: detailsPrompt,
+        modelManagement: { allowAdd: false },
+      });
+      await Promise.resolve();
+    });
+
+    expect(sendPrompt).toHaveBeenCalledWith(
+      detailsPrompt,
+      expect.objectContaining({ onAdmitted: expect.any(Function) }),
+    );
+    const title = renameSession.mock.calls[0]?.[0] as string;
+    expect(title).toContain(question);
+    expect(title.startsWith(boilerplatePrefix)).toBe(false);
+  },
+);
+
+it.each([
+  [
+    'en',
+    'every heading, body sentence, list item, and label must be in English',
+    'self-contained single-file HTML (inline CSS, no external resources). Language requirement: write the entire page in English',
+  ],
+  [
+    'zh-CN',
+    '整页必须用简体中文写作',
+    '（内联 CSS，不引用外部资源）。语言要求：整页必须用简体中文写作',
+  ],
+])(
+  'details prompt carries a whole-page language requirement (%s)',
+  (language, requirement, placement) => {
+    const prompt = getTranslator(language as 'en' | 'zh-CN')(
+      'askUser.detailsPrompt',
+      { questions: '1. Which cache backend?' },
+    );
+    expect(prompt).toContain(requirement);
+    // Pin placement, not just presence: the language requirement must sit
+    // immediately after the HTML instruction, not buried late in the prompt.
+    expect(prompt).toContain(placement);
+    // The question snapshot still leads (question-derived naming) and the
+    // instruction tokens survive the language strengthening.
+    expect(prompt.startsWith('1. Which cache backend?')).toBe(true);
+    expect(prompt).toContain('ASD-STE100');
+    expect(prompt).toContain('.qwen/tmp/');
+  },
+);
+
+it('sends a retained initial prompt once transcript loading completes', async () => {
+  connection.sessionId = 'side-session-1';
+  connection.displayName = 'Side task';
+  connection.status = 'connected';
+  connection.loadingTranscript = true;
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+
+  await act(async () => {
+    renderSideTask({ initialPrompt: 'Explain the pending question' });
+    await Promise.resolve();
+  });
+  expect(sendPrompt).not.toHaveBeenCalled();
+
+  connection.loadingTranscript = false;
+  await act(async () => {
+    renderSideTask({ initialPrompt: 'Explain the pending question' });
+    await Promise.resolve();
+  });
+  expect(sendPrompt).toHaveBeenCalledTimes(1);
+  expect(sendPrompt).toHaveBeenCalledWith(
+    'Explain the pending question',
+    expect.objectContaining({ onAdmitted: expect.any(Function) }),
   );
 });
 
@@ -721,3 +1021,83 @@ it('bounds first-prompt title retries and reports the final failure', async () =
   );
   expect(onError).toHaveBeenCalledWith(failure, 'Failed to name side task');
 });
+
+it('waits for the command snapshot before classifying an initial project auth command', async () => {
+  connection.sessionId = 'side-session-1';
+  connection.status = 'connected';
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  const props = {
+    initialPrompt: '/auth acme',
+    modelManagement: { allowAdd: false },
+    onInitialPromptRefused: vi.fn(),
+  };
+  await act(async () => {
+    renderSideTask(props);
+  });
+  expect(sendPrompt).not.toHaveBeenCalled();
+  expect(props.onInitialPromptRefused).not.toHaveBeenCalled();
+  connection.commands = [
+    { name: 'clear', source: 'builtin-command' },
+    { name: 'auth', source: 'project' },
+  ];
+  await act(async () => {
+    renderSideTask(props);
+  });
+  expect(sendPrompt).toHaveBeenCalledExactlyOnceWith(
+    '/auth acme',
+    expect.anything(),
+  );
+  expect(props.onInitialPromptRefused).not.toHaveBeenCalled();
+});
+
+it.each([false, true])(
+  'keeps an unresolved initial prompt after the metadata timeout (intervening prompt=%s)',
+  async (interveningPrompt) => {
+    vi.useFakeTimers();
+    connection.sessionId = 'side-session-1';
+    connection.status = 'connected';
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    const props = {
+      initialPrompt: '/auth acme',
+      modelManagement: { allowAdd: false },
+      onInitialPromptRefused: vi.fn(),
+      onImageIngestionNotice: vi.fn(),
+    };
+    await act(async () => {
+      renderSideTask(props);
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(4_999);
+    });
+    expect(props.onImageIngestionNotice).not.toHaveBeenCalled();
+    await act(async () => {
+      renderSideTask({ ...props });
+      vi.advanceTimersByTime(1);
+    });
+    expect(props.onImageIngestionNotice).toHaveBeenCalledExactlyOnceWith(
+      'warning',
+      'Command information is still unavailable. Your side-task prompt has been kept and will be checked when it loads.',
+    );
+    expect(props.onInitialPromptRefused).not.toHaveBeenCalled();
+    expect(sendPrompt).not.toHaveBeenCalled();
+    if (interveningPrompt)
+      transcript.blocks = [{ kind: 'user', text: 'another question' }];
+    connection.commands = [
+      { name: 'clear', source: 'builtin-command' },
+      { name: 'auth', source: 'project' },
+    ];
+    await act(async () => {
+      renderSideTask(props);
+    });
+    expect(sendPrompt).toHaveBeenCalledTimes(interveningPrompt ? 0 : 1);
+    expect(props.onInitialPromptRefused).not.toHaveBeenCalled();
+    await act(async () => {
+      vi.advanceTimersByTime(10_000);
+    });
+    expect(props.onImageIngestionNotice).toHaveBeenCalledTimes(1);
+  },
+);

@@ -3,7 +3,20 @@ export {
   getWorkspaceScopeDirName,
   resolvePath,
 } from './paths.js';
-export { PollingChannelBase } from './PollingChannelBase.js';
+export {
+  appendChannelEvent,
+  channelEventFilePath,
+  channelEventScopeDir,
+  CHANNEL_EVENT_MAX_READ,
+  CHANNEL_EVENT_TYPES,
+  readChannelEvents,
+} from './channel-events.js';
+export type { ChannelEventQuery, ChannelEventType } from './channel-events.js';
+export {
+  PollingChannelBase,
+  MIN_POLL_INTERVAL_MS,
+  MAX_POLL_INTERVAL_MS,
+} from './PollingChannelBase.js';
 export { ACP_EVENT_LOOP_STALL_RESTART_MS, AcpBridge } from './AcpBridge.js';
 export {
   ACP_PRIVATE_PARENT_CAPABILITY_ENV,
@@ -14,6 +27,9 @@ export {
   CHANNEL_TASK_OUTPUT_META_KEY,
   CHANNEL_TASK_RESULT_META_KEY,
   CHANNEL_TASK_RESULT_PARTIAL_META_KEY,
+  CHANNEL_TURN_NOTICE_META_KEY,
+  CHANNEL_WORKFLOW_ORIGIN_META_KEY,
+  parseChannelWorkflowOrigin,
 } from './ChannelAgentBridge.js';
 export type {
   AvailableCommand,
@@ -24,12 +40,18 @@ export type {
   ChannelLoopToolCreateInput,
   ChannelLoopToolHandler,
   ChannelLoopToolResult,
+  ChannelToolContext,
+  ChannelToolDefinition,
+  ChannelWorkflowOrigin,
   PermissionRequestEvent,
   PermissionResolvedEvent,
   SessionDiedEvent,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
-export { CHANNEL_PROMPT_META_KEY } from './ChannelAgentBridge.js';
+export {
+  CHANNEL_PROMPT_AUTHORIZATION_META_KEY,
+  CHANNEL_PROMPT_META_KEY,
+} from './ChannelAgentBridge.js';
 export type { AcpBridgeOptions } from './AcpBridge.js';
 export { DaemonChannelBridge } from './DaemonChannelBridge.js';
 export type {
@@ -50,6 +72,33 @@ export {
   isChannelProactiveDeliveryError,
 } from './ChannelProactiveDeliveryError.js';
 export type { ChannelProactiveDeliveryDisposition } from './ChannelProactiveDeliveryError.js';
+export {
+  BoundSessionGoneError,
+  BoundSessionQueueFullError,
+  BoundSessionUnavailableError,
+} from './bound-session-delivery.js';
+export {
+  BOUND_ACTION_TEMPLATE_MAX_CODE_POINTS,
+  BOUND_ACTION_VARIABLE_MAX_CODE_POINTS,
+  BOUND_EVENT_PLATFORMS,
+  BOUND_PROMPT_BODY_MAX_CODE_POINTS,
+  DEFAULT_BOUND_ROLE_GUIDANCE,
+  DEFAULT_BOUND_ROLE_GUIDANCE_BY_LANGUAGE,
+  boundActionTemplateEntries,
+  buildBoundEventPrompt,
+  isBoundActionKey,
+  renderBoundActionTemplate,
+  resolveBoundActionTemplate,
+  validateBoundActionEntries,
+} from './bound-session-prompt.js';
+export type {
+  BoundActionKeyVocabulary,
+  BoundActionTemplateSource,
+  BoundActionValues,
+  BoundEventPlatform,
+  BoundEventPromptParts,
+  BoundPromptLanguage,
+} from './bound-session-prompt.js';
 export type {
   ChannelBaseOptions,
   ChannelMemoryRecallCacheStatus,
@@ -82,19 +131,25 @@ export type {
   ChannelLoopStatus,
   ChannelLoopStoreOptions,
 } from './ChannelLoopStore.js';
+export { resolvePrivatePolicy } from './private-policy.js';
 export { PairingStore } from './PairingStore.js';
 export type {
   CreatePairingRequestResult,
   PairingRequest,
   PairingSubject,
 } from './PairingStore.js';
-export { GroupGate } from './GroupGate.js';
+export { GroupGate, lowercaseGroupAllowedUsers } from './GroupGate.js';
 export type { GroupCheckResult } from './GroupGate.js';
 export { DmGate } from './DmGate.js';
 export type { DmCheckResult } from './DmGate.js';
 export { SenderGate } from './SenderGate.js';
 export type { SenderCheckResult } from './SenderGate.js';
 export { SessionRouter } from './SessionRouter.js';
+export {
+  singleScopeRoutingKey,
+  unwrapMessageRoutingKey,
+  wrapMessageRoutingKey,
+} from './SessionRouter.js';
 export {
   sanitizeSenderName,
   sanitizePromptText,
@@ -103,7 +158,7 @@ export {
   truncateCodePoints,
   truncateUtf16Units,
 } from './sanitize.js';
-export { isTerminalTaskLifecycleType } from './types.js';
+export { isTerminalTaskLifecycleType, PR_BINDING_ROLES } from './types.js';
 export {
   CHANNEL_OUTPUT_MODE_FIELD,
   DEFAULT_CHANNEL_OUTPUT_MODE,
@@ -120,10 +175,12 @@ export type {
 } from './background-output-coordinator.js';
 export type {
   Attachment,
+  ChannelBoundSessions,
   ChannelConfig,
   ChannelConfigEnumFieldDescriptor,
   ChannelConfigFieldDescriptor,
   ChannelConfigFieldKind,
+  ChannelConfigFieldOption,
   ChannelConfigNestedFieldDescriptor,
   ChannelConfigNumberFieldDescriptor,
   ChannelConfigObjectFieldDescriptor,
@@ -143,6 +200,8 @@ export type {
   ChannelPlugin,
   ChannelPromptOwner,
   ChannelProactiveTarget,
+  ChannelQrLoginDescriptor,
+  ChannelQrLoginHandlers,
   ChannelRuntimeIdentity,
   ChannelRuntimeMemoryScope,
   ChannelTaskCancellationReason,
@@ -157,6 +216,12 @@ export type {
   Envelope,
   GroupConfig,
   GroupPolicy,
+  PrBindingEntry,
+  PrBindingRole,
+  PrBindingsSnapshot,
+  PrBindingSummary,
+  PrivatePolicy,
+  GroupSenderPolicy,
   ObservedChannelIdentity,
   ObservedChannelContactObservation,
   ObservedChannelContact,
@@ -171,3 +236,5 @@ export type {
   UserInputPresentationResult,
   UserInputSettlementReason,
 } from './types.js';
+export { matchMessageRoute } from './message-routes.js';
+export type { MatchedMessageRoute } from './message-routes.js';

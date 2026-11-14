@@ -1456,15 +1456,13 @@ describe('findings (command boundary)', () => {
     writeFileSync(out, JSON.stringify([base])); // a previous run's artifact
     const anchors = join(dir, 'anchors.json');
     linkSync(out, anchors);
-    // On a volume whose ids exceed the safe-integer range (NTFS) this is not a
-    // missing fixture — the guard under test is INERT there. `isSameFile`
-    // stats without `bigint`, so `hasVerifiableInode` is false and the
-    // comparison degrades to `realpathSync.native`, which cannot resolve a
-    // hard link: the alias is admitted and the previous artifact is
-    // overwritten. Skipping hides a real fail-open, so it is tracked rather
-    // than merely noted. See #11848.
+    // The guard needs the volume to expose a file id at all. `isSameFile`
+    // stats with `{ bigint: true }` (the #11848 conversion), so a 64-bit
+    // NTFS id above 2^53 arrives exact and the alias is refused there too;
+    // only an ino-0 volume (FAT/exFAT/SMB) still degrades to canonical
+    // spellings, which cannot see a hard link — that skip is by design.
     const inode = statSync(out).ino;
-    if (!Number.isSafeInteger(inode) || inode <= 0) {
+    if (inode <= 0) {
       ctx.skip();
       return;
     }

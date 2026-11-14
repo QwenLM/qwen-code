@@ -105,8 +105,8 @@ test('loads replayed transcript and connects to fake daemon @smoke', async ({
   // #8214: pin the explicit ::selection rule on message content. This
   // asserts the rule is present and matches every [data-user-selectable]
   // wrapper row (user and assistant alike), not just the first one; it
-  // does not verify the Firefox paint effect itself (this repo's Playwright
-  // projects are chromium-only).
+  // does not verify the Firefox paint effect itself (no Firefox project is
+  // configured).
   const selectionBackgrounds = await page.evaluate(() => {
     // Match the wrapper rows themselves, not their descendants - a single
     // row renders many descendant elements, so counting descendants does
@@ -171,7 +171,7 @@ test('branches from an earlier completed Assistant response and resumes the fork
     .filter({ hasText: 'First completed answer' });
   await firstAnswerRow.hover();
   await firstAnswerRow
-    .getByRole('button', { name: 'Branch', exact: true })
+    .getByRole('button', { name: 'New chat from here', exact: true })
     .click();
 
   await expect.poll(() => daemon.branchRequests().length).toBe(1);
@@ -222,7 +222,10 @@ test('branches from an earlier completed Assistant response and resumes the fork
     .filter({ hasText: 'First completed answer' });
   await restoredFirstAnswer.hover();
   await expect(
-    restoredFirstAnswer.getByRole('button', { name: 'Branch', exact: true }),
+    restoredFirstAnswer.getByRole('button', {
+      name: 'New chat from here',
+      exact: true,
+    }),
   ).toBeVisible();
 });
 
@@ -594,7 +597,7 @@ test('previews qwen3.8-max reasoning before lazy session creation @smoke', async
   const providersBeforeClear = qualifiedProviderRequestCount();
   await page.keyboard.press('Escape');
   await page
-    .getByRole('button', { name: 'New task', exact: true })
+    .getByRole('button', { name: 'New session', exact: true })
     .first()
     .click();
   await expect.poll(() => new URL(page.url()).pathname).toBe('/');
@@ -1081,7 +1084,7 @@ test('uploads an Extension archive from the manager @smoke', async ({
 
   await gotoSession(page, scenario, daemon);
   await submitLocalCommand(page, '/extensions');
-  await page.getByRole('button', { name: 'Add' }).click();
+  await page.getByRole('button', { name: 'Add', exact: true }).click();
   await page.getByRole('tab', { name: 'Archive' }).click();
   const archiveInput = page.getByLabel('Select a .zip or .tar.gz archive.');
   await archiveInput.setInputFiles({
@@ -1090,7 +1093,7 @@ test('uploads an Extension archive from the manager @smoke', async ({
     buffer: Buffer.from('stale-archive'),
   });
   await page.getByRole('button', { name: 'Cancel' }).click();
-  await page.getByRole('button', { name: 'Add' }).click();
+  await page.getByRole('button', { name: 'Add', exact: true }).click();
   await page.getByRole('tab', { name: 'Archive' }).click();
   await expect(page.getByText('Selected archive: stale.zip')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Install' })).toBeDisabled();
@@ -1208,7 +1211,7 @@ test('uploads an Extension archive from the manager @smoke', async ({
     page.getByRole('heading', { name: 'Add Extension' }),
   ).toHaveCount(0);
   await expect(page.getByText('Extension "demo" installed.')).toBeVisible();
-  await page.getByRole('button', { name: 'Add' }).click();
+  await page.getByRole('button', { name: 'Add', exact: true }).click();
   await expect(page.getByRole('tab', { name: 'Source' })).toHaveAttribute(
     'aria-selected',
     'true',
@@ -1323,6 +1326,57 @@ test('submits permission decisions through the fake daemon @smoke', async ({
   expect(requestBodyRecord(permissionRequest)).toEqual({
     outcome: { outcome: 'selected', optionId: 'allow_once' },
   });
+});
+
+test('aligns shell explanation and permission actions @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    events: [
+      permissionRequestEvent('perm-layout', {
+        id: 1,
+        toolCall: {
+          title: 'Shell',
+          kind: 'execute',
+          _meta: { toolName: 'run_shell_command' },
+          rawInput: {
+            command: 'printf web-shell-e2e',
+            description: 'Print a test message',
+          },
+        },
+      }),
+    ],
+  });
+  scenario.capabilities.features.push('session_generation');
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+
+  const panel = page.locator('[data-web-shell-permission-panel]');
+  const explain = panel.getByRole('button', { name: 'Explain', exact: true });
+  const options = panel.getByRole('radiogroup');
+  await expect(explain).toBeVisible();
+  await expect(options).toBeVisible();
+
+  await expect
+    .poll(async () => {
+      const explainBox = (await explain.boundingBox())!;
+      const optionsBox = (await options.boundingBox())!;
+      return Math.abs(
+        explainBox.y +
+          explainBox.height / 2 -
+          (optionsBox.y + optionsBox.height / 2),
+      );
+    })
+    .toBeLessThanOrEqual(2);
+
+  await page.setViewportSize({ width: 600, height: 900 });
+  await expect
+    .poll(async () => {
+      const explainBox = (await explain.boundingBox())!;
+      const optionsBox = (await options.boundingBox())!;
+      return optionsBox.y - (explainBox.y + explainBox.height);
+    })
+    .toBeGreaterThan(0);
 });
 
 test('opens slash menu, resume dialog, model dialog, and theme dialog @smoke', async ({
@@ -1709,6 +1763,104 @@ test('anchors the empty mobile composer with a custom footer but no welcome foot
   expectEmptyMobileComposerAnchored(layout, {
     requireWelcomeFooter: false,
   });
+});
+
+test('keeps desktop history search reachable in a short window @smoke', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 1280, height: 300 });
+  await page.addInitScript(() =>
+    localStorage.setItem(
+      'qwen-web-shell-history',
+      JSON.stringify(
+        Array.from({ length: 8 }, (_, index) => `saved input ${index + 1}`),
+      ),
+    ),
+  );
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+  await replaceComposerText(page, 'working draft');
+  await page.keyboard.press('Control+r');
+  const search = page.locator('[data-web-shell-composer-history-search]');
+  await expect(search).toBeFocused();
+  await expect(
+    page.getByRole('button', { name: /saved input 1/ }),
+  ).toBeVisible();
+  await expect
+    .poll(() =>
+      search.evaluate((element) => {
+        const rect = element.getBoundingClientRect();
+        const x = rect.left + rect.width / 2;
+        return [rect.top + 1, rect.top + rect.height / 2].every((y) =>
+          element.contains(document.elementFromPoint(x, y)),
+        );
+      }),
+    )
+    .toBe(true);
+  const panel = search.locator('..').locator('..');
+  const surface = page.locator('[data-web-shell-composer-surface]');
+  const panelBox = (await panel.boundingBox())!;
+  const surfaceBox = (await surface.boundingBox())!;
+  expect(panelBox.y + panelBox.height).toBeGreaterThan(surfaceBox.y);
+  await page.keyboard.press('Escape');
+  await expect(search).toHaveCount(0);
+  const editor = page.locator('[data-web-shell-composer-editor] .cm-content');
+  await expect(editor).toHaveText('working draft');
+  await expect(editor).toBeFocused();
+  expect(daemon.promptRequests()).toHaveLength(0);
+});
+
+test('keeps the permission picker compact and marks full access as dangerous @smoke', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+
+  await page.locator('[data-web-shell-mode-button]').click();
+  const modeDropdown = page.locator(
+    '[data-web-shell-mode-popover][data-state="open"]',
+  );
+  await expect(modeDropdown).toBeVisible();
+  await expect(modeDropdown).toHaveCSS('width', '400px');
+
+  const labels = modeDropdown.locator('[class*="dropdownItemLabel"]');
+  const descriptions = modeDropdown.locator('[class*="dropdownItemDesc"]');
+  await expect(labels).toHaveCount(4);
+  await expect(descriptions).toHaveCount(4);
+  for (const text of [...(await labels.all()), ...(await descriptions.all())]) {
+    await expect(text).toHaveCSS('font-size', '13px');
+  }
+
+  const fullAccess = modeDropdown.getByRole('button', {
+    name: /Full Access \(yolo\)/,
+  });
+  const dangerColor = await modeDropdown.evaluate((element) => {
+    const probe = document.createElement('span');
+    probe.style.color = 'var(--destructive)';
+    element.append(probe);
+    const color = getComputedStyle(probe).color;
+    probe.remove();
+    return color;
+  });
+  for (const selector of [
+    '[class*="dropdownItemIcon"]',
+    '[class*="dropdownItemLabel"]',
+    '[class*="dropdownItemDesc"]',
+  ]) {
+    await expect(fullAccess.locator(selector)).toHaveCSS('color', dangerColor);
+  }
+
+  await fullAccess.click();
+  await expect(modeDropdown).toHaveCount(0);
+  const modeTrigger = page.locator('[data-web-shell-mode-button]');
+  await expect(modeTrigger).toHaveClass(/modeToolBtnDanger/);
+  await expect(modeTrigger.locator('[class*="toolBtnText"]')).toHaveCSS(
+    'color',
+    dangerColor,
+  );
 });
 
 for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {

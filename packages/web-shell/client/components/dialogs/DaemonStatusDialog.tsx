@@ -1,3 +1,5 @@
+import { createDaemonRestRequest } from '../../daemon/rest-request.js';
+import { useDaemonAvailability } from '../../daemon/availability-context.js';
 import {
   useCallback,
   useContext,
@@ -19,16 +21,27 @@ import {
 import {
   getAllowedDaemonOrigin,
   getDaemonToken,
+  isDaemonMixedContent,
   navigateToDaemon,
 } from '../../config/daemon';
+import {
+  forgetRemoteConnection,
+  formatOriginHost,
+  readRemoteConnections,
+  rememberRemoteConnection,
+  startRemoteConnectionAdd,
+} from '../../config/remote-connections';
 import { useI18n } from '../../i18n';
 import { ErrorBoundary } from '../ErrorBoundary';
+import { DaemonConnectionHelp } from '../DaemonConnectionHelp';
+import { RemoteAccessSettingsCard } from '../RemoteAccessSettingsCard';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { Label } from '../ui/label';
 import { SvgLineChart, type ChartSeries } from './SvgLineChart';
 import { UsageDashboardTab } from './UsageDashboardTab';
 import styles from './DaemonStatusDialog.module.css';
+import { XIcon } from 'lucide-react';
 
 // The cheap in-memory summary is polled continuously; the expensive detail
 // (per-session, workspace diagnostics, auth — the daemon may spawn the ACP
@@ -623,18 +636,27 @@ function MetricsCharts({ series }: { series: DaemonMetricsSeriesBucket[] }) {
 
 function DaemonStatusDialogInner({
   onChangeTarget,
+  onAddConnection = onChangeTarget,
+  connectionsOnly = false,
 }: {
   onChangeTarget: (daemonOrigin: string, token?: string) => boolean | void;
+  onAddConnection?: (daemonOrigin: string, token?: string) => boolean | void;
+  connectionsOnly?: boolean;
 }) {
-  const { t } = useI18n();
+  const { t, language } = useI18n();
   const workspace = useWorkspace();
   // Switching targets navigates the page, which only the standalone shell
   // owns; embedders keep a read-only view of the connection.
   const standalone = useContext(StandaloneContext);
-  const [connectionAddress, setConnectionAddress] = useState(workspace.baseUrl);
+  const [connectionAddress, setConnectionAddress] = useState(
+    connectionsOnly ? '' : workspace.baseUrl,
+  );
   const [connectionToken, setConnectionToken] = useState('');
   const [connectionError, setConnectionError] = useState('');
   const [connectBusy, setConnectBusy] = useState(false);
+  const [savedConnections, setSavedConnections] = useState(
+    readRemoteConnections,
+  );
   // The same-target probe outlives this component unless it is retired: the
   // parent mounts the dialog only while the panel is open, so a response
   // landing after the operator closed it — or after they edited the address —
@@ -686,8 +708,14 @@ function DaemonStatusDialogInner({
   // Two independent fetches: the summary drives the always-live top cards and
   // rides the auto-refresh interval; the full report backs the detail sections
   // and is only pulled on open (autoLoad) and on manual refresh.
-  const summary = useStatusReport({ autoLoad: true, detail: 'summary' });
-  const full = useStatusReport({ autoLoad: true, detail: 'full' });
+  const summary = useStatusReport({
+    autoLoad: !connectionsOnly,
+    detail: 'summary',
+  });
+  const full = useStatusReport({
+    autoLoad: !connectionsOnly,
+    detail: 'full',
+  });
   // `reload` is a stable callback; depend on it (not the hook object, which is
   // a fresh spread each render) so the poll interval is installed once rather
   // than torn down and reinstalled on every data update.
@@ -700,6 +728,7 @@ function DaemonStatusDialogInner({
   // degraded daemon could otherwise accumulate overlapping calls.
   const summaryPollInFlightRef = useRef(false);
   useEffect(() => {
+    if (connectionsOnly) return undefined;
     const timer = window.setInterval(() => {
       if (document.hidden || summaryPollInFlightRef.current) return;
       summaryPollInFlightRef.current = true;
@@ -708,7 +737,7 @@ function DaemonStatusDialogInner({
       });
     }, REFRESH_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [summaryReload]);
+  }, [connectionsOnly, summaryReload]);
 
   const refreshAll = useCallback(() => {
     void summaryReload();
@@ -720,16 +749,65 @@ function DaemonStatusDialogInner({
   const report = summary.report ?? full.report;
   const fullReport = full.report;
   const loading = summary.loading || full.loading;
-  const error = summary.error ?? full.error;
+  const availability = useDaemonAvailability();
+  const unavailable = availability !== 'available';
+  const error = unavailable
+    ? new Error(
+        t(
+          availability === 'auth-required'
+            ? 'daemon.connection.authRequired'
+            : 'daemon.connection.unavailable',
+        ),
+      )
+    : (summary.error ?? full.error);
 
   // Rendered on the dashboard and on the load-failure screen alike: an
   // unreachable daemon, a rejected token or a still-booting runtime is exactly
-  // when the operator needs to re-enter a token or pick another target. With a
-  // report on screen only a failing (now stale) summary marks the link as
-  // errored, matching the toolbar banner; with none, any load error does.
-  const connectionFailed = report
-    ? Boolean(summary.error && summary.report)
-    : Boolean(error);
+  // when the operator needs to re-enter a token or pick another target. While
+  // reachable, only a failing summary with cached data marks the dashboard
+  // link as errored; without a report, any load error does.
+  const connectionFailed =
+    unavailable ||
+    (connectionsOnly
+      ? workspace.status === 'error'
+      : report
+        ? Boolean(summary.error && summary.report)
+        : Boolean(error));
+  const savedConnectionList = savedConnections.length > 0 && (
+    <div
+      role="group"
+      aria-label={t('daemon.connection.saved')}
+      className="mt-3 flex flex-col gap-2"
+    >
+      <Label className="text-[13px] font-normal text-muted-foreground">
+        {t('daemon.connection.saved')}
+      </Label>
+      {savedConnections.map((origin) => (
+        <div key={origin} className="flex min-w-0 gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="min-w-0 flex-1 justify-start truncate"
+            title={origin}
+            onClick={() => onChangeTarget(origin, getDaemonToken(origin))}
+          >
+            {formatOriginHost(origin)}
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            title={t('daemon.connection.forget', { address: origin })}
+            aria-label={t('daemon.connection.forget', { address: origin })}
+            onClick={() => setSavedConnections(forgetRemoteConnection(origin))}
+          >
+            <XIcon aria-hidden="true" />
+          </Button>
+        </div>
+      ))}
+    </div>
+  );
   const connectionCard = (
     <Card title={t('daemon.connection.title')}>
       <Row label={t('daemon.connection.target')} value={workspace.baseUrl} />
@@ -741,6 +819,7 @@ function DaemonStatusDialogInner({
             : t(CONNECTION_STATUS_KEYS[workspace.status])
         }
       />
+      {standalone && savedConnectionList}
       {standalone && (
         <form
           className="mt-3 flex flex-col gap-2"
@@ -754,6 +833,11 @@ function DaemonStatusDialogInner({
               setConnectionError(t('daemon.connection.invalid'));
               return;
             }
+            if (isDaemonMixedContent(daemonOrigin)) {
+              retireConnectionProbe();
+              setConnectionError(t('daemon.connection.mixedContent'));
+              return;
+            }
             const token =
               connectionToken.trim() || getDaemonToken(daemonOrigin);
             // A changed target keeps the write-then-navigate switch
@@ -763,7 +847,7 @@ function DaemonStatusDialogInner({
             // credential before the page reloads, so probe it first —
             // a non-success response must not destroy the working token.
             if (daemonOrigin !== workspace.baseUrl) {
-              const switched = onChangeTarget(daemonOrigin, token);
+              const switched = onAddConnection(daemonOrigin, token);
               // A switch the credential cannot ride along on is refused rather
               // than landing the shell on the new target unauthenticated.
               setConnectionError(
@@ -785,7 +869,12 @@ function DaemonStatusDialogInner({
             // reports "the daemon did not answer".
             const owned = (): boolean =>
               probeControllerRef.current === controller;
-            void fetch(`${daemonOrigin}/capabilities`, {
+            void createDaemonRestRequest(
+              daemonOrigin,
+              token,
+              undefined,
+              true,
+            )('/capabilities', {
               headers: token ? { Authorization: `Bearer ${token}` } : {},
               signal: controller.signal,
             })
@@ -795,8 +884,18 @@ function DaemonStatusDialogInner({
                   setConnectionError(
                     response.status === 401
                       ? t('daemon.connection.authFailed')
-                      : t('daemon.connection.notReady'),
+                      : response.status === 403
+                        ? t('daemon.connection.policyBlocked')
+                        : t('daemon.connection.notReady'),
                   );
+                  return;
+                }
+                rememberRemoteConnection(daemonOrigin);
+                setSavedConnections(readRemoteConnections());
+                if (connectionsOnly) {
+                  setConnectionAddress('');
+                  setConnectionToken('');
+                  setConnectionError('');
                   return;
                 }
                 const changed = onChangeTarget(daemonOrigin, token);
@@ -808,13 +907,9 @@ function DaemonStatusDialogInner({
               })
               .catch(() => {
                 if (!owned()) return;
-                // A rejection means no answer arrived — including this
-                // handler's own 10 s abort, so "the daemon did not
-                // answer" is conclusive rather than inconclusive. Report
-                // it and leave the stored credential alone: navigating
-                // here would overwrite a working token with one nothing
-                // accepted and read as a successful switch.
-                setConnectionError(t('daemon.connection.notReady'));
+                // Fetch hides CORS failures behind the same error as network
+                // failures. Preserve the credential and offer both checks.
+                setConnectionError(t('daemon.connection.unreachable'));
               })
               .finally(() => {
                 window.clearTimeout(timeout);
@@ -852,6 +947,7 @@ function DaemonStatusDialogInner({
               retireConnectionProbe();
               setConnectionAddress(event.target.value);
               setConnectionToken('');
+              setConnectionError('');
             }}
           />
           {connectionError && (
@@ -884,13 +980,34 @@ function DaemonStatusDialogInner({
             disabled={connectBusy}
           >
             {connectBusy
-              ? t('daemon.connection.status.connecting')
-              : t('daemon.connection.connect')}
+              ? t(
+                  connectionsOnly
+                    ? 'daemon.connection.status.adding'
+                    : 'daemon.connection.status.connecting',
+                )
+              : t(
+                  connectionsOnly
+                    ? 'daemon.connection.add'
+                    : 'daemon.connection.connect',
+                )}
           </Button>
+          <DaemonConnectionHelp
+            language={language}
+            expanded={Boolean(connectionError)}
+          />
         </form>
       )}
     </Card>
   );
+
+  if (connectionsOnly) {
+    return (
+      <div className={styles.dialog}>
+        <RemoteAccessSettingsCard />
+        {connectionCard}
+      </div>
+    );
+  }
 
   if (!report) {
     return (
@@ -938,14 +1055,16 @@ function DaemonStatusDialogInner({
             time: new Date(report.generatedAt).toLocaleTimeString(),
           })}
         </span>
-        {/* Flag the toolbar only when the summary that owns the visible
+        {/* While reachable, flag only when the summary owning the visible
             counters/timestamp is the failing, stale source: it errored AND
             still has (now-stale) data on screen. When the summary never loaded
             and the cards are rendering from the full fallback, or when only the
             full fetch failed (surfaced in the diagnostics section), the banner
             would misrepresent an otherwise-usable dashboard. */}
-        {summary.error && summary.report && (
-          <span className={styles.refreshError}>{t('daemon.loadFailed')}</span>
+        {(unavailable || (summary.error && summary.report)) && (
+          <span className={styles.refreshError}>
+            {unavailable ? error?.message : t('daemon.loadFailed')}
+          </span>
         )}
         <div className={styles.toolbarActions}>
           <button
@@ -1350,6 +1469,32 @@ export function DaemonStatusDialog({
       )}
     >
       <DaemonStatusDialogInner onChangeTarget={onChangeTarget} />
+    </ErrorBoundary>
+  );
+}
+
+export function DaemonConnectionsSettings({
+  onChangeTarget = navigateToDaemon,
+  onAddConnection = startRemoteConnectionAdd,
+}: {
+  onChangeTarget?: (daemonOrigin: string, token?: string) => boolean | void;
+  onAddConnection?: (daemonOrigin: string, token?: string) => boolean | void;
+} = {}) {
+  const { t } = useI18n();
+  return (
+    <ErrorBoundary
+      label="daemon-connections"
+      fallback={(error) => (
+        <div className={styles.empty}>
+          {t('daemon.loadFailed')}: {error.message}
+        </div>
+      )}
+    >
+      <DaemonStatusDialogInner
+        connectionsOnly
+        onChangeTarget={onChangeTarget}
+        onAddConnection={onAddConnection}
+      />
     </ErrorBoundary>
   );
 }

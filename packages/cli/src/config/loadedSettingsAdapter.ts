@@ -12,7 +12,7 @@
  */
 
 import * as fs from 'node:fs';
-import { writeWithBackupSync } from '../utils/writeWithBackup.js';
+import { writeWithBackupSync } from '../utils/write-with-backup.js';
 import type {
   ModelProvidersConfig,
   ProviderSettingsAdapter,
@@ -189,7 +189,7 @@ export function createLoadedSettingsAdapter(
     },
 
     backup(): void {
-      // Each settings write consumes .orig; keep the transaction snapshot separate.
+      // Recovery copies are diagnostic; keep the transaction snapshot separate.
       const contents = fs.existsSync(settingsFile.path)
         ? fs.readFileSync(settingsFile.path, 'utf8')
         : null;
