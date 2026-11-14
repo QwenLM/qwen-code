@@ -215,6 +215,18 @@ export interface HttpManagedSessionStores {
   approvalSelection(): Promise<ManagedSessionApprovalSelection | undefined>;
   modelConfig(expectedDigest: string, kind?: 'legacy-close'): Promise<unknown>;
   memory(query: ManagedMemoryQuery): Promise<unknown>;
+  automationsCreate(
+    definition: ManagedAutomationDefinitionInput,
+    idempotencyKey: string,
+  ): Promise<ManagedAutomationResult>;
+  automationsList(
+    cursor?: string,
+    limit?: number,
+  ): Promise<ManagedAutomationPage>;
+  automationsRetire(
+    automationId: string,
+    idempotencyKey: string,
+  ): Promise<ManagedAutomationResult>;
   claimUserMessages(
     promptId: string,
     initialOnly?: boolean,
@@ -259,6 +271,114 @@ export class ManagedSessionStoreHttpError extends ManagedSessionRecordError {
 }
 
 export class ManagedSessionStoreTransportError extends ManagedSessionRecordError {}
+
+/**
+ * The fixed-interval /loop definition the internal `automations:create`
+ * route admits (the H6 snake_case wire shape). The Session id is forced to
+ * the bound Session by the route, so the tool omits it.
+ */
+export interface ManagedAutomationDefinitionInput {
+  readonly cron: string;
+  readonly prompt: string;
+  readonly goal?: string;
+  readonly timezone?: string;
+  readonly session_mode: 'persistent';
+  readonly overlap?: string;
+  readonly catch_up?: string;
+  readonly catch_up_limit?: number;
+  readonly enabled?: boolean;
+  readonly gate?: unknown;
+}
+
+/** One H6 definition as the internal routes answer it (PublicAutomation). */
+export interface ManagedPublicAutomation {
+  readonly id: string;
+  readonly sessionId: string;
+  readonly cron: string;
+  readonly timezone: string;
+  readonly goal: string | null;
+  readonly state: string;
+  readonly enabled: boolean;
+}
+
+/** A create/retire answer: the definition plus the Idempotency-Key replay mark. */
+export interface ManagedAutomationResult {
+  readonly automation: ManagedPublicAutomation;
+  readonly replayed: boolean;
+}
+
+/** One page of the bound Session's definitions (PublicList). */
+export interface ManagedAutomationPage {
+  readonly data: readonly ManagedPublicAutomation[];
+  readonly hasMore: boolean;
+  readonly nextCursor: string | null;
+}
+
+async function readAutomationJson(response: Response): Promise<unknown> {
+  try {
+    return (await response.json()) as unknown;
+  } catch (error) {
+    if (error instanceof TypeError || error instanceof DOMException)
+      throw new ManagedSessionStoreTransportError(
+        'Managed automation response failed.',
+      );
+    if (error instanceof SyntaxError)
+      throw corrupt('Managed automation response is invalid JSON.');
+    throw error;
+  }
+}
+
+function asPublicAutomation(value: unknown): ManagedPublicAutomation {
+  const record = asRecord(value, 'automation definition');
+  if (
+    typeof record['id'] !== 'string' ||
+    typeof record['session_id'] !== 'string' ||
+    typeof record['cron'] !== 'string' ||
+    typeof record['timezone'] !== 'string' ||
+    typeof record['state'] !== 'string' ||
+    typeof record['enabled'] !== 'boolean'
+  )
+    throw corrupt('invalid automation definition.');
+  return {
+    id: record['id'],
+    sessionId: record['session_id'],
+    cron: record['cron'],
+    timezone: record['timezone'],
+    goal: typeof record['goal'] === 'string' ? record['goal'] : null,
+    state: record['state'],
+    enabled: record['enabled'],
+  };
+}
+
+function parseAutomationResult(
+  value: unknown,
+  route: string,
+): ManagedAutomationResult {
+  const record = asRecord(value, `automation result from ${route}`);
+  if (typeof record['replayed'] !== 'boolean')
+    throw corrupt(`invalid automation result from ${route}.`);
+  return {
+    automation: asPublicAutomation(record['body']),
+    replayed: record['replayed'],
+  };
+}
+
+function parseAutomationPage(
+  value: unknown,
+  route: string,
+): ManagedAutomationPage {
+  const record = asRecord(value, `automation list from ${route}`);
+  if (!Array.isArray(record['data']) || typeof record['has_more'] !== 'boolean')
+    throw corrupt(`invalid automation list from ${route}.`);
+  const next = record['next_cursor'];
+  if (next !== null && next !== undefined && typeof next !== 'string')
+    throw corrupt(`invalid automation list cursor from ${route}.`);
+  return {
+    data: record['data'].map((entry) => asPublicAutomation(entry)),
+    hasMore: record['has_more'],
+    nextCursor: typeof next === 'string' ? next : null,
+  };
+}
 
 /**
  * Failures that leave the commit's outcome unknown: the request may have
@@ -336,6 +456,11 @@ export function createHttpManagedSessionStores(
     modelConfig: (expectedDigest, kind) =>
       client.modelConfig(expectedDigest, kind),
     memory: (query) => client.memory(query),
+    automationsCreate: (definition, idempotencyKey) =>
+      client.automationsCreate(definition, idempotencyKey),
+    automationsList: (cursor, limit) => client.automationsList(cursor, limit),
+    automationsRetire: (automationId, idempotencyKey) =>
+      client.automationsRetire(automationId, idempotencyKey),
     claimUserMessages: (promptId, initialOnly) =>
       client.claimUserMessages(promptId, initialOnly),
   };
@@ -1100,6 +1225,107 @@ class ManagedSessionStoreHttpClient {
         reader.releaseLock();
       }
     });
+  }
+
+  /**
+   * Fixed-interval /loop: create an H6 definition bound to this Session.
+   * The Idempotency-Key derives from the tool execution's identity, so a
+   * re-drive meets the claim or the replay rather than minting a second
+   * definition. A transport fault is not retried here — the tool execution
+   * stays pending and its re-drive reuses the key (design decision 9).
+   */
+  async automationsCreate(
+    definition: ManagedAutomationDefinitionInput,
+    idempotencyKey: string,
+  ): Promise<ManagedAutomationResult> {
+    await this.assertWritable();
+    return this.withRetry(
+      false,
+      'POST',
+      '/automations:create',
+      async (timeoutMs) => {
+        const response = await this.request(
+          '/automations:create',
+          'POST',
+          {
+            workspaceId: this.sessionKey.workspaceId,
+            writerId: this.writerId,
+            writerGeneration: this.grant!.writerGeneration,
+            definition,
+          },
+          timeoutMs,
+          'application/json',
+          { 'Idempotency-Key': idempotencyKey },
+        );
+        return parseAutomationResult(
+          await readAutomationJson(response),
+          'POST /automations:create',
+        );
+      },
+    );
+  }
+
+  /** One page of the bound Session's definitions (ungated, Session-scoped). */
+  async automationsList(
+    cursor?: string,
+    limit?: number,
+  ): Promise<ManagedAutomationPage> {
+    await this.assertWritable();
+    return this.withRetry(
+      false,
+      'POST',
+      '/automations:list',
+      async (timeoutMs) => {
+        const response = await this.request(
+          '/automations:list',
+          'POST',
+          {
+            workspaceId: this.sessionKey.workspaceId,
+            writerId: this.writerId,
+            writerGeneration: this.grant!.writerGeneration,
+            ...(cursor === undefined ? {} : { cursor }),
+            ...(limit === undefined ? {} : { limit }),
+          },
+          timeoutMs,
+        );
+        return parseAutomationPage(
+          await readAutomationJson(response),
+          'POST /automations:list',
+        );
+      },
+    );
+  }
+
+  /** Retire a definition of the bound Session; a retired id answers the replay. */
+  async automationsRetire(
+    automationId: string,
+    idempotencyKey: string,
+  ): Promise<ManagedAutomationResult> {
+    await this.assertWritable();
+    return this.withRetry(
+      false,
+      'POST',
+      '/automations:retire',
+      async (timeoutMs) => {
+        const response = await this.request(
+          '/automations:retire',
+          'POST',
+          {
+            workspaceId: this.sessionKey.workspaceId,
+            writerId: this.writerId,
+            writerGeneration: this.grant!.writerGeneration,
+            automationId,
+          },
+          timeoutMs,
+          'application/json',
+          { 'Idempotency-Key': idempotencyKey },
+        );
+        return parseAutomationResult(
+          await readAutomationJson(response),
+          'POST /automations:retire',
+        );
+      },
+    );
   }
 
   async modelConfig(
@@ -3283,6 +3509,7 @@ class ManagedSessionStoreHttpClient {
     body?: Readonly<Record<string, unknown>>,
     timeoutMs = this.requestTimeoutMs,
     accept = 'application/json',
+    extraHeaders?: Readonly<Record<string, string>>,
   ): Promise<Response> {
     if (this.ownershipRelease && path !== '/writers:release-ownership')
       throw corrupt('ownership release has fenced this writer.');
@@ -3313,6 +3540,7 @@ class ManagedSessionStoreHttpClient {
               }
             : {}),
           ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+          ...(extraHeaders ?? {}),
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         signal: AbortSignal.timeout(timeoutMs),

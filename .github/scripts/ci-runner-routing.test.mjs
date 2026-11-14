@@ -2,14 +2,16 @@
 // qwen-autofix.yml scan lane, the trusted-PR lanes of #13245, and the
 // control-plane jobs that run no PR code.
 //
-// classify_pr's own runner is unconditional ECS (kill-switch excepted):
-// the gate executes only trusted base-SHA code with a read-only token, and
-// keeping it on hosted for forks queued the whole fork CI chain behind a
-// scarce pool (2026-10-31 decision, same accepted risk class as lint).
+// classify_pr's own runner is association-gated ECS (kill-switch excepted):
+// a pull_request run executes the PR's own YAML, so the clause is throughput
+// policy, not an enforceable trust boundary. The policy is stated once, in
+// docs/design/2026-10-31-lint-static-ecs-routing.md; this file pins its shape —
+// including the repository-name guard, which keeps a fork named `qwen-code`
+// from being sent to a pool it cannot reach.
 // The association routing for DOWNSTREAM lanes lives in the `pick_runner`
 // shell step, which publishes `ubuntu_runner` (association-gated) and
 // `lint_runner` (untrusted forks use the disposable ARM64 pool). The matrix below
-// pins the gate's unconditional routing AND that ubuntu_runner keeps the
+// pins the gate's association-gated routing AND that ubuntu_runner keeps the
 // association gate for the test/integration lanes.
 //
 // test_windows carries a deliberately different policy. A pull_request run
@@ -61,7 +63,17 @@ const pickRunner = ciDoc.jobs.classify_pr.steps.find(
 // label, unwrapped here to the array it names. Any term the substitutions
 // do not recognise fails loud, so an edited expression is re-read here
 // instead of silently outgrowing the matrix.
-function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
+function evalRunsOn(
+  expression,
+  {
+    ecsDisabled,
+    eventName,
+    sameRepo,
+    assoc,
+    repoName = 'QwenLM/qwen-code',
+    dispatchRunner = 'self-hosted',
+  },
+) {
   const substitutions = [
     [/vars\.MAINTAINER_ECS_RUNNER_DISABLED != 'true'/, String(!ecsDisabled)],
     [
@@ -69,6 +81,10 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
       String(eventName === 'merge_group'),
     ],
     [/github\.event_name == 'push'/, String(eventName === 'push')],
+    [
+      /github\.event_name == 'workflow_dispatch'/,
+      String(eventName === 'workflow_dispatch'),
+    ],
     // Longest term first as a convention; both patterns are quote-anchored
     // (the closing quote is part of each regex), so neither can match
     // inside the other and the substitution order is behaviorally inert.
@@ -88,7 +104,14 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
       /github\.event_name == 'pull_request'/,
       String(eventName === 'pull_request'),
     ],
-    [/github\.repository == 'QwenLM\/qwen-code'/, 'true'],
+    [
+      /github\.repository == 'QwenLM\/qwen-code'/,
+      String(repoName === 'QwenLM/qwen-code'),
+    ],
+    [
+      /github\.event\.inputs\.linux_runner != 'hosted'/,
+      String(dispatchRunner !== 'hosted'),
+    ],
     [
       /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/,
       String(sameRepo),
@@ -101,7 +124,14 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
       /contains\(fromJSON\('\["OWNER","MEMBER","COLLABORATOR"\]'\), github\.event\.pull_request\.author_association\)/,
       String(TRUSTED.includes(assoc)),
     ],
-    [/github\.repository == 'QwenLM\/qwen-code'/, 'true'],
+    [
+      /github\.repository == 'QwenLM\/qwen-code'/,
+      String(repoName === 'QwenLM/qwen-code'),
+    ],
+    [
+      /github\.event\.inputs\.linux_runner != 'hosted'/,
+      String(dispatchRunner !== 'hosted'),
+    ],
   ];
   let expr = expression.replace(/^\$\{\{\s*/, '').replace(/\s*\}\}$/, '');
   for (const [term, value] of substitutions) {
@@ -190,12 +220,13 @@ const ASSOCIATIONS = [
 ];
 
 describe('ci.yml classify_pr runner routing', () => {
-  it('the gate routes every association to ECS; the kill-switch wins', () => {
-    // classify executes trusted base-SHA code only, so its own runner needs
-    // no association gate — a hosted gate queued the entire fork CI chain.
-    // The downstream ubuntu_runner keeps the gate (next test).
+  it('the gate routes trusted authors and same-repo to ECS; untrusted forks stay hosted', () => {
+    // Pins the DEFAULT routing (the header carries the threat model): trusted
+    // associations and same-repo PRs land on ECS, everything else stays hosted
+    // — not a boundary a fork cannot cross. The kill-switch wins for everyone.
     for (const sameRepo of [true, false]) {
       for (const assoc of ASSOCIATIONS) {
+        const isTrusted = sameRepo || TRUSTED.includes(assoc);
         assert.deepEqual(
           evalRunsOn(classifyRunsOn, {
             ecsDisabled: false,
@@ -203,8 +234,8 @@ describe('ci.yml classify_pr runner routing', () => {
             sameRepo,
             assoc,
           }),
-          JSON.parse(ECS),
-          `gate sameRepo=${sameRepo} assoc='${assoc}' must reach ECS`,
+          JSON.parse(isTrusted ? ECS : HOSTED),
+          `gate sameRepo=${sameRepo} assoc='${assoc}' must ${isTrusted ? 'reach ECS' : 'stay hosted'}`,
         );
         assert.deepEqual(
           evalRunsOn(classifyRunsOn, {
@@ -217,6 +248,82 @@ describe('ci.yml classify_pr runner routing', () => {
           `kill-switch must revert the gate (assoc='${assoc}')`,
         );
       }
+    }
+    // dispatch reaches ECS too ("the merge queue, pushes to main, and dispatch"
+    // above). An earlier revision of this PR gated on the PR clauses alone, so
+    // dispatch — whose github.event.pull_request is empty — fell to hosted.
+    // Only users with write access can dispatch, and they already reach ECS via
+    // same-repo PRs and push, so this adds no reachability (unchanged vs base).
+    for (const assoc of ['', 'NONE', 'OWNER']) {
+      assert.deepEqual(
+        evalRunsOn(classifyRunsOn, {
+          ecsDisabled: false,
+          eventName: 'workflow_dispatch',
+          sameRepo: false,
+          assoc,
+        }),
+        JSON.parse(ECS),
+        `dispatch (assoc='${assoc}') must reach ECS`,
+      );
+    }
+    assert.deepEqual(
+      evalRunsOn(classifyRunsOn, {
+        ecsDisabled: true,
+        eventName: 'workflow_dispatch',
+        sameRepo: false,
+        assoc: 'OWNER',
+      }),
+      JSON.parse(HOSTED),
+      'dispatch kill-switch must revert to hosted',
+    );
+    // A maintainer who asks for hosted gets hosted here too: `pick_runner`
+    // treats the `linux_runner` input as authoritative for the downstream
+    // lanes, and a gate that ignored it would sit on the pool the maintainer
+    // just drained. (The arm64 option is a residual with no bound: the gate has
+    // no arm64 labels, so it asks the x64 pool, and `timeout-minutes` cannot
+    // cover the wait because its clock starts only at pickup — with no x64
+    // runner online, `classify_pr` queues unbounded.)
+    assert.deepEqual(
+      evalRunsOn(classifyRunsOn, {
+        ecsDisabled: false,
+        eventName: 'workflow_dispatch',
+        sameRepo: false,
+        assoc: '',
+        dispatchRunner: 'hosted',
+      }),
+      JSON.parse(HOSTED),
+      'dispatch with linux_runner=hosted must stay hosted',
+    );
+    // Only THIS repository. A fork named `qwen-code` satisfies
+    // `head.repo.full_name == github.repository`, and without the name guard it
+    // routes to a pool it cannot reach: classify_pr never finishes, so no lane
+    // gets a verdict at all.
+    assert.deepEqual(
+      evalRunsOn(classifyRunsOn, {
+        ecsDisabled: false,
+        eventName: 'pull_request',
+        sameRepo: true,
+        assoc: 'OWNER',
+        repoName: 'alice/qwen-code',
+      }),
+      JSON.parse(HOSTED),
+      'a fork named qwen-code must not reach the pool',
+    );
+    // merge_group has an empty PR context too. Pin it against the gate's own
+    // runs-on — the pick_runner shell tests below cover the downstream lanes,
+    // not this expression. Without these rows, deleting the merge_group clause
+    // silently demotes the queue to hosted with every test still green.
+    for (const ecsDisabled of [false, true]) {
+      assert.deepEqual(
+        evalRunsOn(classifyRunsOn, {
+          ecsDisabled,
+          eventName: 'merge_group',
+          sameRepo: false,
+          assoc: '',
+        }),
+        JSON.parse(ecsDisabled ? HOSTED : ECS),
+        `merge_group (ecsDisabled=${ecsDisabled})`,
+      );
     }
   });
 
@@ -296,12 +403,13 @@ describe('ci.yml classify_pr runner routing', () => {
     }
   });
 
-  it('the gate expression is unconditional except the kill-switch', () => {
-    // Structural pins: no association/head-repo clause may creep back into
-    // the gate (it would re-queue fork CI on hosted), and the kill-switch
-    // must stay the single escape hatch.
-    assert.doesNotMatch(classifyRunsOn, /author_association/);
-    assert.doesNotMatch(classifyRunsOn, /head\.repo\.full_name/);
+  it('the gate expression requires trusted author or same-repo for self-hosted', () => {
+    // Structural pins for the DEFAULT routing: the gate keeps the association
+    // and head-repo clauses so unreviewed forks stay off the pool by default —
+    // throughput policy, not a fence (a fork can rewrite this whole YAML in the
+    // same diff; see the header). The kill-switch must stay as an escape hatch.
+    assert.match(classifyRunsOn, /author_association/);
+    assert.match(classifyRunsOn, /head\.repo\.full_name/);
     assert.match(
       classifyRunsOn,
       /vars\.MAINTAINER_ECS_RUNNER_DISABLED != 'true'/,
