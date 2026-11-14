@@ -6,6 +6,7 @@ import {
   formatJsonPayload,
   formatToolDisplayName,
   getAgentCurrentToolHint,
+  getExecSource,
   getSubagentDetailsUnavailableReason,
   getToolDescription,
   getToolResultSummary,
@@ -763,4 +764,31 @@ it('reports launch failure before the tool status catches up', () => {
       }),
     ),
   ).toBe('subagent.failed');
+});
+
+it.each([
+  ['exec', { source: 'echo hi' }, 'echo hi'],
+  ['Exec', { source: 'echo hi' }, 'echo hi'],
+  ['EXEC', { source: 'echo hi' }, 'echo hi'],
+  // The guard is `source.trim()`, the value is the untouched string: the
+  // card has to keep the indentation and line structure the model wrote, or
+  // the text a reader copies is no longer the code that ran.
+  ['exec', { source: '\nif (a) {\n  b();\n}\n' }, '\nif (a) {\n  b();\n}\n'],
+] as const)(
+  'shows the JavaScript body of a code-mode %s call',
+  (toolName, args, expected) => {
+    expect(getExecSource(tool({ toolName, args }))).toBe(expected);
+  },
+);
+
+it.each([
+  // Another tool can carry a `source` argument without being code-mode exec.
+  ['read_file', { source: 'echo hi' }],
+  // Whitespace-only is not a program.
+  ['exec', { source: '   \n\t' }],
+  // A non-string source is not a program body.
+  ['exec', { source: { text: 'echo hi' } }],
+  ['exec', {}],
+] as const)('falls back to the JSON card for %s with %j', (toolName, args) => {
+  expect(getExecSource(tool({ toolName, args }))).toBeUndefined();
 });

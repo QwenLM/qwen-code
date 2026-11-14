@@ -75,6 +75,7 @@ import {
   getAdvisorDisplayText,
   getToolSummaryDescription,
   getToolResultSummary,
+  getExecSource,
   isAdvisorToolName,
   isAskUserQuestionToolName,
   isActiveToolStatus,
@@ -369,9 +370,11 @@ function ToolExpandedCard({
 function ToolPayloadBlock({
   payload,
   limit,
+  language,
 }: {
   payload: { text: string; json: boolean };
   limit: number;
+  language?: string;
 }) {
   const { t } = useI18n();
   const renderMode = useTranscriptRenderMode();
@@ -386,13 +389,14 @@ function ToolPayloadBlock({
   // characters yet span many lines once pretty-printed (e.g. a compact array of
   // records). formatJsonPayload already caps the formatted text by render mode,
   // and the read-file line budget lives on to guard ExpandedReadContent below.
+  const fenceLanguage = language ?? (payload.json ? 'json' : undefined);
   const renderAsMarkdown =
-    payload.json && shown.length <= MAX_MARKDOWN_READ_CHARS;
+    fenceLanguage !== undefined && shown.length <= MAX_MARKDOWN_READ_CHARS;
   return (
     <>
       {renderAsMarkdown ? (
         <div className={styles.payloadJson}>
-          <Markdown content={fencedCodeBlock('json', shown)} />
+          <Markdown content={fencedCodeBlock(fenceLanguage, shown)} />
         </div>
       ) : (
         <pre className={styles.payloadText}>
@@ -450,12 +454,17 @@ function GenericToolDetails({
   cancelled: boolean;
 }) {
   const { t } = useI18n();
+  // A code-mode `exec` call is a JavaScript program, not a JSON payload: its
+  // only argument is `source`. Rendering the program itself keeps the indentation
+  // and line structure the model wrote instead of one escaped JSON line.
+  const execSource = useMemo(() => getExecSource(tool), [tool]);
   const argumentsText = useMemo(
     () =>
-      tool.args && Object.keys(tool.args).length > 0
+      execSource ??
+      (tool.args && Object.keys(tool.args).length > 0
         ? stringifyValue(tool.args)
-        : '',
-    [tool],
+        : ''),
+    [tool, execSource],
   );
   const resultText = useMemo(
     () =>
@@ -508,7 +517,11 @@ function GenericToolDetails({
       {argumentsText && (
         <section className={styles.payloadSection}>
           <div className={styles.payloadLabel}>{t('turnCalls.arguments')}</div>
-          <ToolPayloadBlock payload={argumentsPayload} limit={argumentsLimit} />
+          <ToolPayloadBlock
+            payload={argumentsPayload}
+            limit={argumentsLimit}
+            language={execSource ? 'javascript' : undefined}
+          />
         </section>
       )}
       {(resultText || pending || cancelled) && (

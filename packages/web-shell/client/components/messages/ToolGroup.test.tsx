@@ -3501,6 +3501,29 @@ describe('pending edit approval rows', () => {
 });
 
 describe('generic tool card details', () => {
+  it('renders a code-mode exec call as JavaScript instead of JSON', () => {
+    const source = [
+      "const content = 'export const answer = 42;';",
+      "await tools.write_file({ file_path: 'a.js', content });",
+    ].join('\n');
+    const container = renderToolLine(
+      makeTool({ toolName: 'exec', args: { source } }),
+      { forceExpanded: true },
+    );
+
+    const text = container.textContent ?? '';
+    expect(text).toContain('Arguments');
+    // The program keeps its own line structure; the JSON wrapper does not.
+    expect(text).toContain(source);
+    expect(text).not.toContain('"source"');
+    expect(
+      container.querySelector('[data-selection-code-language="javascript"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-selection-code-language="json"]'),
+    ).toBeNull();
+  });
+
   it('pretty-prints arguments and a compact JSON result on expansion', () => {
     const container = renderToolLine(
       makeTool({
