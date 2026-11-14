@@ -229,13 +229,12 @@ async function run(fn: () => Promise<void>): Promise<void> {
             )?.code;
             if (
               error &&
-              (stream !== process.stderr ||
-                (code !== 'EPIPE' &&
-                  code !== 'EBADF' &&
-                  !(
-                    code === 'ERR_STREAM_DESTROYED' &&
-                    (previousCode === 'EPIPE' || previousCode === 'EBADF')
-                  )))
+              code !== 'EPIPE' &&
+              code !== 'EBADF' &&
+              !(
+                code === 'ERR_STREAM_DESTROYED' &&
+                (previousCode === 'EPIPE' || previousCode === 'EBADF')
+              )
             ) {
               reject(error);
             } else {

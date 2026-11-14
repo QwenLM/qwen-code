@@ -270,6 +270,76 @@ describe('local batch commands with real settings loading', () => {
     ).rejects.toThrow('unexpected async stderr error');
   });
 
+  it.each(['list', 'clean'] as const)(
+    '%s survives a real stdout writable that breaks with EPIPE',
+    async (command) => {
+      const { store, task } = createTask(configured, 'configured');
+      const error = Object.assign(new Error('broken stdout pipe'), {
+        code: 'EPIPE',
+      });
+      const broken = new Writable({
+        write(_chunk, _encoding, callback) {
+          queueMicrotask(() => callback(error));
+        },
+      });
+      vi.spyOn(process, 'stdout', 'get').mockReturnValue(
+        broken as typeof process.stdout,
+      );
+
+      await yargs(
+        command === 'list' ? ['batch', 'list'] : ['batch', 'clean', task.id],
+      )
+        .command(batchCommand)
+        .exitProcess(false)
+        .fail(false)
+        .parseAsync();
+
+      expect(broken.errored).toBe(error);
+      expect(process.exitCode).toBeUndefined();
+      expect(fs.existsSync(store.fileOf(task.id))).toBe(command === 'list');
+    },
+  );
+
+  it.each(['EPIPE', 'EBADF'] as const)(
+    'list tolerates asynchronous stdout flush %s',
+    async (code) => {
+      const error = Object.assign(new Error('closed stdout'), { code });
+      vi.mocked(process.stdout.write).mockImplementation(((
+        _chunk: unknown,
+        callback?: (error?: Error | null) => void,
+      ) => {
+        if (typeof callback === 'function') callback(error);
+        return true;
+      }) as typeof process.stdout.write);
+      await yargs(['batch', 'list'])
+        .command(batchCommand)
+        .exitProcess(false)
+        .fail(false)
+        .parseAsync();
+      expect(process.exitCode).toBeUndefined();
+    },
+  );
+
+  it('rejects an unexpected asynchronous stdout flush error', async () => {
+    const error = Object.assign(new Error('unexpected stdout error'), {
+      code: 'EIO',
+    });
+    vi.mocked(process.stdout.write).mockImplementation(((
+      _chunk: unknown,
+      callback?: (error?: Error | null) => void,
+    ) => {
+      if (typeof callback === 'function') callback(error);
+      return true;
+    }) as typeof process.stdout.write);
+    await expect(
+      yargs(['batch', 'list'])
+        .command(batchCommand)
+        .exitProcess(false)
+        .fail(false)
+        .parseAsync(),
+    ).rejects.toThrow('unexpected stdout error');
+  });
+
   it('clean survives a real writable that breaks on its warning', async () => {
     fs.writeFileSync(userSettings, '{ invalid json');
     const { store, task } = createTask(
