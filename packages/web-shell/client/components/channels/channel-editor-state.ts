@@ -65,7 +65,6 @@ export type ChannelEditorValidationCode =
   | 'number'
   | 'outOfRange'
   | 'policy'
-  | 'requiresBoundDelivery'
   | 'requiresBoundDeliveryForWatchGate';
 
 export type ChannelEditorValidationErrors = Record<
@@ -591,7 +590,9 @@ export function validateChannelEditorDraft(
         errors[field.key] = 'outOfRange';
       }
     } else if (field.kind === 'string-list' && field.options) {
-      if (typeof draftValue === 'string') {
+      // prWatchEvents is deprecated: the daemon accepts any value and warns at
+      // connect, so the editor must not block a save the daemon will take.
+      if (field.key !== 'prWatchEvents' && typeof draftValue === 'string') {
         const allowed = new Set(field.options.map((option) => option.value));
         const invalid = draftValue
           .split(',')
@@ -610,16 +611,8 @@ export function validateChannelEditorDraft(
     if (!hasToken && draft.values['useLocalGh'] !== true) {
       errors['token'] = 'credential';
     }
-    // Mirror validateBoundSessionConfig so the dependency is named at the
-    // field instead of surfacing as a raw daemon rejection after submit.
-    // invalidOption wins, the same order the runtime validates in.
-    if (
-      !errors['prWatchEvents'] &&
-      toList(String(draft.values['prWatchEvents'] ?? '')).length > 0 &&
-      draft.values['deliverToBoundSessions'] !== true
-    ) {
-      errors['prWatchEvents'] = 'requiresBoundDelivery';
-    }
+    // Mirror validateBoundSessionConfig's remaining dependency. prWatchEvents
+    // is deprecated and accepted without bound delivery, so it has no check.
     if (
       draft.values['requireBoundWatch'] === true &&
       draft.values['deliverToBoundSessions'] !== true

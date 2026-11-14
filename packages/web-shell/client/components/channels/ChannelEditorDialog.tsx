@@ -584,8 +584,6 @@ export function ChannelEditorDialog({
       );
     if (code === 'invalidOption')
       return t('channels.editor.validation.invalidOption');
-    if (code === 'requiresBoundDelivery')
-      return t('channels.editor.validation.requiresBoundDelivery');
     if (code === 'requiresBoundDeliveryForWatchGate')
       return t('channels.editor.validation.requiresBoundDeliveryForWatchGate');
     if (code === 'number') return t('channels.editor.validation.number');

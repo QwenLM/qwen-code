@@ -47,8 +47,8 @@ const CASES = [
     name: 'delivery off with a selection',
     events: ['ci_failure'],
     delivery: false,
-    code: 'requiresBoundDelivery',
-    daemon: /requires deliverToBoundSessions/,
+    code: undefined,
+    daemon: undefined,
   },
   {
     name: 'delivery on with a selection',
@@ -68,8 +68,8 @@ const CASES = [
     name: 'delivery off with an unknown value',
     events: ['typo_event'],
     delivery: false,
-    code: 'invalidOption',
-    daemon: /Unrecognized prWatchEvents/,
+    code: undefined,
+    daemon: undefined,
   },
 ] as const;
 
