@@ -564,3 +564,116 @@ describe('review regressions', () => {
     expect(composedRanges).toHaveBeenCalledWith({ shadowRoots: [shadow] });
   });
 });
+
+describe('reply selection range at row edges', () => {
+  // A transcript row: the message content body (CSS-module class, as rendered
+  // by AssistantMessage) plus the row chrome (timestamp tip) as a sibling.
+  // A triple-click selects the whole line but parks the outer boundary on
+  // the chrome, outside the body.
+  function rowFixture(chromeAfter: boolean) {
+    const row = document.createElement('div');
+    const body = document.createElement('div');
+    body.className = '_contentBody_9f2ab';
+    const line = document.createElement('p');
+    line.textContent = 'Selected line text';
+    body.append(line);
+    const tip = document.createElement('span');
+    tip.className = 'tip';
+    tip.textContent = '12:34';
+    row.append(chromeAfter ? body : tip);
+    row.append(chromeAfter ? tip : body);
+    document.body.append(row);
+    bodies.push(row);
+    return { row, body, line, tip };
+  }
+  const fullBodyRange = (body: HTMLElement) => {
+    const range = document.createRange();
+    range.selectNodeContents(body);
+    return range;
+  };
+
+  it('clamps a trailing boundary on the row chrome to the body edge', () => {
+    const { body, line, tip } = rowFixture(true);
+    const text = line.firstChild! as Text;
+    const range = document.createRange();
+    range.setStart(text, 0);
+    range.setEnd(tip, 1);
+    window.getSelection()!.addRange(range);
+    const result = getReplySelectionRange(body);
+    expect(result).not.toBeNull();
+    expect(result!.toString()).toBe('Selected line text');
+    expect(
+      result!.compareBoundaryPoints(Range.END_TO_END, fullBodyRange(body)),
+    ).toBe(0);
+    // the live selection keeps its original boundaries
+    expect(window.getSelection()!.getRangeAt(0).endContainer).toBe(tip);
+  });
+
+  it('clamps a leading boundary on the row chrome to the body edge', () => {
+    const { body, line, tip } = rowFixture(false);
+    const text = line.firstChild! as Text;
+    const range = document.createRange();
+    range.setStart(tip, 0);
+    range.setEnd(text, text.data.length);
+    window.getSelection()!.addRange(range);
+    const result = getReplySelectionRange(body);
+    expect(result).not.toBeNull();
+    expect(result!.toString()).toBe('Selected line text');
+    expect(
+      result!.compareBoundaryPoints(Range.START_TO_START, fullBodyRange(body)),
+    ).toBe(0);
+    expect(window.getSelection()!.getRangeAt(0).startContainer).toBe(tip);
+  });
+
+  it('returns the live range unchanged when both boundaries are inside', () => {
+    const { body, line } = rowFixture(true);
+    const text = line.firstChild! as Text;
+    const range = document.createRange();
+    range.setStart(text, 2);
+    range.setEnd(text, 9);
+    window.getSelection()!.addRange(range);
+    expect(getReplySelectionRange(body)).toBe(range);
+  });
+
+  it('rejects a boundary inside another message body', () => {
+    const prev = rowFixture(true);
+    const first = rowFixture(true);
+    const next = rowFixture(true);
+    const prevText = prev.line.firstChild! as Text;
+    const firstText = first.line.firstChild! as Text;
+    const nextText = next.line.firstChild! as Text;
+    const trailing = document.createRange();
+    trailing.setStart(firstText, 0);
+    trailing.setEnd(nextText, 4);
+    window.getSelection()!.addRange(trailing);
+    expect(getReplySelectionRange(first.body)).toBeNull();
+    window.getSelection()!.removeAllRanges();
+    const leading = document.createRange();
+    leading.setStart(prevText, 0);
+    leading.setEnd(firstText, 4);
+    window.getSelection()!.addRange(leading);
+    expect(getReplySelectionRange(first.body)).toBeNull();
+  });
+
+  it('rejects boundaries outside the body on the wrong side or collapsed', () => {
+    const { row, body, line, tip } = rowFixture(false);
+    const text = line.firstChild! as Text;
+    const wrongSide = document.createRange();
+    wrongSide.setStart(text, 0);
+    wrongSide.setEnd(tip, 1);
+    window.getSelection()!.addRange(wrongSide);
+    expect(getReplySelectionRange(body)).toBeNull();
+    window.getSelection()!.removeAllRanges();
+    const ancestor = document.createRange();
+    ancestor.setStart(text, 0);
+    ancestor.setEnd(row, 2);
+    window.getSelection()!.addRange(ancestor);
+    expect(getReplySelectionRange(body)).toBeNull();
+    window.getSelection()!.removeAllRanges();
+    const collapsed = document.createRange();
+    collapsed.selectNodeContents(line);
+    collapsed.collapse(true);
+    window.getSelection()!.addRange(collapsed);
+    expect(getReplySelectionRange(body)).toBeNull();
+  });
+});

@@ -25,11 +25,49 @@ export function getReplySelectionRange(body: HTMLElement): Range | null {
       range.setEnd(composed.endContainer, composed.endOffset);
     }
   }
-  return !range.collapsed &&
-    body.contains(range.startContainer) &&
-    body.contains(range.endContainer)
-    ? range
-    : null;
+  if (range.collapsed) return null;
+  const startInside = body.contains(range.startContainer);
+  const endInside = body.contains(range.endContainer);
+  if (startInside && endInside) return range;
+  // A triple-click (or a drag that reaches the edge of a row) places the
+  // outer boundary on the row chrome — outside the body, so the copy menu
+  // was suppressed even though the selection visibly covers the whole line.
+  // Clamp that boundary to the body edge on a clone; the live selection is
+  // never mutated. Clamping is only safe when the boundary sits on the
+  // correct side of the body and does not belong to another message's body —
+  // cross-message selections stay rejected.
+  if (
+    startInside &&
+    !endInside &&
+    !otherMessageBody(range.endContainer) &&
+    (body.compareDocumentPosition(range.endContainer) &
+      Node.DOCUMENT_POSITION_FOLLOWING) !==
+      0
+  ) {
+    const clamped = body.ownerDocument.createRange();
+    clamped.setStart(range.startContainer, range.startOffset);
+    clamped.setEnd(body, body.childNodes.length);
+    return clamped.collapsed ? null : clamped;
+  }
+  if (
+    !startInside &&
+    endInside &&
+    !otherMessageBody(range.startContainer) &&
+    (body.compareDocumentPosition(range.startContainer) &
+      Node.DOCUMENT_POSITION_PRECEDING) !==
+      0
+  ) {
+    const clamped = body.ownerDocument.createRange();
+    clamped.setStart(body, 0);
+    clamped.setEnd(range.endContainer, range.endOffset);
+    return clamped.collapsed ? null : clamped;
+  }
+  return null;
+}
+
+function otherMessageBody(node: Node): HTMLElement | null {
+  const element = node instanceof Element ? node : node.parentElement;
+  return element?.closest('div[class*=contentBody]') ?? null;
 }
 
 function cloneSelected(node: Node, range: Range): Node | null {
