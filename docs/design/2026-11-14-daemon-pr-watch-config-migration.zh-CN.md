@@ -243,8 +243,9 @@ host 按 watch identity 的口径归并（裸 hostname、不带端口），因�
 
 ### 8. 弃用面
 
-`connect()` 接受 `prWatchEvents` 与 `watch:*` 键，恰好记录一条点名 `sessionPrWatch`
-的告警，且不跑状态检测。今天抛错的校验（`normalizePrWatchEvents`，
+`connect()` 接受 `prWatchEvents`、`watch:*` 键，以及已失效的 `prWatchLimit` /
+`prWatchBudgetReserve`，恰好记录一条点名 `sessionPrWatch` 与这四个键的告警，
+且不跑状态检测。今天抛错的校验（`normalizePrWatchEvents`，
 `GithubAdapter.ts:882-914`，经 `:982-987` 与 `:2093-2096` 抵达）仅对这些键改为告警；
 通知原因键保持现有校验。
 

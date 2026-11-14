@@ -312,8 +312,9 @@ increment promises not to make more expensive.
 
 ### 8. The deprecation surface
 
-`connect()` accepts `prWatchEvents` and the `watch:*` keys, logs exactly one
-warning naming `sessionPrWatch`, and runs no state detection. The validation that
+`connect()` accepts `prWatchEvents`, the `watch:*` keys, and the now-inert
+`prWatchLimit` / `prWatchBudgetReserve`, logs exactly one warning naming
+`sessionPrWatch` and all four keys, and runs no state detection. The validation that
 throws today (`normalizePrWatchEvents`, `GithubAdapter.ts:882-914`, reached
 through `:982-987` and `:2093-2096`) becomes a warning for these keys only; the
 notification-reason keys keep their current validation.
