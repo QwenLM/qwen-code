@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { registerTopLevelCommands } from '../commands/register-top-level-commands.js';
 import { readSshWorkspace } from '../serve/ssh-workspace-store.js';
 import type { ContentGeneratorConfig } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
 import { isInteractiveInvocation } from '../utils/interactive-mode.js';
@@ -69,12 +70,10 @@ import {
   AGENT_HOST_SESSION_SOURCE_TYPE,
   AGENT_SESSION_SOURCE_TYPE,
 } from '../runtime/agent-session-source.js';
-import { extensionsCommand } from '../commands/extensions.js';
 import {
   agentExecutionBackend,
   agentExecutionFactory,
 } from './agent-execution.js';
-import { hooksCommand } from '../commands/hooks.js';
 import { resolveAcpChannelFallback } from './acp-channel-fallback.js';
 import { normalizeDisabledToolList } from './normalizeDisabledTools.js';
 import type { LoadedSettings, Settings } from './settings.js';
@@ -115,19 +114,6 @@ import {
 } from './execution-sandbox-settings.js';
 import { createExecutionSandboxPolicy } from './execution-sandbox-config.js';
 import { appEvents, AppEvent } from '../utils/events.js';
-import { mcpCommand } from '../commands/mcp.js';
-import { memoryCommand } from '../commands/memory.js';
-import { channelCommand } from '../commands/channel.js';
-import { authCommand } from '../commands/auth.js';
-import { serveCommand } from '../commands/serve.js';
-import { daemonCommand } from '../commands/daemon.js';
-import { attachCommand } from '../commands/attach.js';
-import { sessionsCommand } from '../commands/sessions.js';
-import { agentsCommand } from '../commands/agents.js';
-import { batchCommand } from '../commands/batch.js';
-import { boardCommand } from '../commands/board.js';
-import { updateCommand } from '../commands/update.js';
-import { sandboxCommand } from '../commands/sandbox.js';
 import { isValidSessionId, normalizeSessionIdForLookup } from './session-id.js';
 
 export { isValidSessionId } from './session-id.js';
@@ -902,33 +888,9 @@ export async function parseArguments(): Promise<CliArgs> {
           }
           return true;
         }),
-    )
-    // Register MCP subcommands
-    .command(mcpCommand)
-    .command(memoryCommand)
-    // Register Extension subcommands
-    .command(extensionsCommand)
-    .command(authCommand)
-    // Register Hooks subcommands
-    .command(hooksCommand)
-    // Register Channel subcommands
-    .command(channelCommand)
-    .command(boardCommand)
-    // Register `qwen serve` (Stage 1 daemon)
-    .command(serveCommand)
-    // Register `qwen daemon` (local daemon inspection and control)
-    .command(daemonCommand)
-    // Register `qwen attach` (terminal client for a running daemon session)
-    .command(attachCommand)
-    // Register sessions subcommands
-    .command(sessionsCommand)
-    // Register `qwen agents` (join a coordinator; session_send MCP server)
-    .command(agentsCommand)
-    .command(batchCommand)
-    // Register update command
-    .command(updateCommand)
-    // Register `qwen sandbox` (inspect / prove the resolved sandbox backend)
-    .command(sandboxCommand);
+    );
+
+  await registerTopLevelCommands(yargsInstance, rawArgv);
 
   // /review skill helpers (presubmit checks, cleanup). The module pulls in
   // every review subcommand, so it is only loaded when it can match.
@@ -2917,8 +2879,8 @@ export async function loadCliConfig(
     lsToolEnabled: settings.tools?.listDirectory?.enabled === true,
     todoWriteEnabled: settings.tools?.todoWrite?.enabled === true,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
-    unifiedAgentLoopEnabled: settings.experimental?.unifiedAgentLoop ?? false,
-    eventBusAgentLoopEnabled: settings.experimental?.eventBusAgentLoop ?? false,
+    unifiedAgentLoopEnabled: settings.experimental?.unifiedAgentLoop,
+    eventBusAgentLoopEnabled: settings.experimental?.eventBusAgentLoop,
     agentCollaborationEnabled:
       settings.experimental?.agentCollaboration ?? false,
     artifactEnabled: settings.experimental?.artifact ?? true,
