@@ -531,7 +531,7 @@ it('keeps the local-files bridge mounted while the More slot opens and closes', 
 describe('getLocalFilesDotClass', () => {
   it.each<[LocalFilesStatus['phase'], string | null]>([
     ['connected', 'bg-primary'],
-    ['held-elsewhere', 'bg-primary'],
+    ['held-elsewhere', 'bg-muted-foreground'],
     ['connecting', 'bg-muted-foreground'],
     ['registering', 'bg-muted-foreground'],
     ['reconnecting', 'bg-amber-500'],
@@ -542,6 +542,14 @@ describe('getLocalFilesDotClass', () => {
     ['unavailable', null],
   ])('maps %s to %s', (phase, expected) => {
     expect(getLocalFilesDotClass({ phase, blocker: null })).toBe(expected);
+  });
+
+  it('keeps held-elsewhere visually distinct from a bridge this tab owns', () => {
+    // A bridge held by another tab is live but not usable here; the trigger
+    // must not show the same "connected" dot as one this tab owns.
+    expect(
+      getLocalFilesDotClass({ phase: 'held-elsewhere', blocker: null }),
+    ).not.toBe(getLocalFilesDotClass({ phase: 'connected', blocker: null }));
   });
 });
 

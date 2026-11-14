@@ -77,13 +77,21 @@ Non-goals (unchanged from the bridge design):
 
 A shared helper maps `LocalFilesStatus` to a dot color and a tooltip:
 
-| Phase                           | Dot                   |
-| ------------------------------- | --------------------- |
-| `connected`, `held-elsewhere`   | `bg-primary`          |
-| `connecting`, `registering`     | `bg-muted-foreground` |
-| `reconnecting`, `needs-gesture` | `bg-amber-500`        |
-| `failed`                        | `bg-destructive`      |
-| others                          | none                  |
+| Phase                                         | Dot                   |
+| --------------------------------------------- | --------------------- |
+| `connected`                                   | `bg-primary`          |
+| `held-elsewhere`, `connecting`, `registering` | `bg-muted-foreground` |
+| `reconnecting`, `needs-gesture`               | `bg-amber-500`        |
+| `failed`                                      | `bg-destructive`      |
+| others                                        | none                  |
+
+`held-elsewhere` is deliberately muted rather than primary: the bridge is live
+but owned by another tab, so this tab must not read the dot as "I have a
+working bridge here" — this preserves the distinction the pre-change trigger
+made. `bg-amber-500` is a raw palette color because the global theme defines no
+warning token (only `primary`/`muted`/`accent`/`destructive`); it matches the
+existing warning usage in `add-runtime-dialog.tsx`, and introducing a new global
+warning token is out of scope for this change.
 
 The tooltip becomes `Local files — <status>` plus ` (<rootName>)` when a
 directory is named, instead of the static label. The `aria-label` stays the
@@ -185,8 +193,9 @@ base URL is a relative API path).
   pass the session title into the Managed control.
 - `packages/web-shell/client/i18n.tsx` — new EN/ZH keys (both locales).
 - Tests: `LocalFilesPanel.test.tsx`, `LocalFilesControl.test.tsx`,
-  `ManagedLocalFilesControl.test.tsx`, hook tests, and
-  `client/e2e/managed-local-files.spec.ts`.
+  `ManagedLocalFilesControl.test.tsx`, hook tests,
+  `client/e2e/managed-local-files.spec.ts`, and
+  `client/e2e/web-shell.local-files-toast.spec.ts`.
 
 ## 7. Constraints and risks
 
@@ -208,8 +217,13 @@ base URL is a relative API path).
 - `npm run build && npm run typecheck` plus the focused vitest suites from
   `packages/web-shell`.
 - E2E: extend `managed-local-files.spec.ts` to assert the connected-state
-  change-directory affordance and session name in a real browser. The
-  CLI-level dry-run used for command features does not apply to browser-only
+  change-directory affordance and session name in a real browser, and add
+  `web-shell.local-files-toast.spec.ts`, which restores a persisted grant with
+  `prompt` permission (intercepted at IndexedDB) and asserts the one-time
+  warning toast reaches the real toast host without opening the popover. The
+  non-secure-context clipboard fallback is additionally exercised live over a
+  non-loopback origin (`execCommand('copy')` with the derived tunnel command).
+  The CLI-level dry-run used for command features does not apply to browser-only
   UI; the baseline is the existing unit + E2E suites.
 
 ## 9. Acceptance criteria

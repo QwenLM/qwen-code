@@ -70,13 +70,15 @@ export const LOCAL_FILES_DAEMON_COMMAND =
 /**
  * Trigger dot color per phase. `null` means no dot. Failed and needs-gesture
  * get distinct colors so a broken or re-authorization-pending bridge is not
- * invisible the way a plain busy dot made it.
+ * invisible the way a plain busy dot made it. `held-elsewhere` stays muted
+ * (not primary): the bridge is live but owned by another tab, so this tab must
+ * not read the dot as "I have a working bridge here".
  */
 export function getLocalFilesDotClass(status: LocalFilesStatus): string | null {
   switch (status.phase) {
     case 'connected':
-    case 'held-elsewhere':
       return 'bg-primary';
+    case 'held-elsewhere':
     case 'connecting':
     case 'registering':
       return 'bg-muted-foreground';

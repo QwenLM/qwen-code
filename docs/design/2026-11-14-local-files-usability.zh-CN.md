@@ -42,13 +42,15 @@ Web Shell 侧边栏的**本地文件**入口（客户端文件系统桥）功能
 
 一个共享 helper 把 `LocalFilesStatus` 映射为圆点颜色与 tooltip：
 
-| 阶段                            | 圆点                  |
-| ------------------------------- | --------------------- |
-| `connected`、`held-elsewhere`   | `bg-primary`          |
-| `connecting`、`registering`     | `bg-muted-foreground` |
-| `reconnecting`、`needs-gesture` | `bg-amber-500`        |
-| `failed`                        | `bg-destructive`      |
-| 其他                            | 无                    |
+| 阶段                                          | 圆点                  |
+| --------------------------------------------- | --------------------- |
+| `connected`                                   | `bg-primary`          |
+| `held-elsewhere`、`connecting`、`registering` | `bg-muted-foreground` |
+| `reconnecting`、`needs-gesture`               | `bg-amber-500`        |
+| `failed`                                      | `bg-destructive`      |
+| 其他                                          | 无                    |
+
+`held-elsewhere` 刻意用 muted 而非 primary：桥虽在运行但由另一个标签页持有，本标签页不能把圆点读作「我这里有一个可用的桥」——这保留了改动前触发器所做的区分。`bg-amber-500` 是调色板颜色，因为全局主题没有 warning token（只有 `primary`/`muted`/`accent`/`destructive`）；它与 `add-runtime-dialog.tsx` 既有的警告用法一致，而为本改动新增一个全局 warning token 超出范围。
 
 tooltip 变为 `本地文件 — <状态>`，在有目录名时追加 `（<rootName>）`，取代固定标签。`aria-label` 保持基础标签，使既有入口断言与读屏命名稳定。
 
@@ -95,7 +97,7 @@ tooltip 变为 `本地文件 — <状态>`，在有目录名时追加 `（<rootN
 - `packages/web-shell/client/local-files/useManagedLocalFilesBridge.ts` — `connect({ forcePicker })`。
 - `packages/web-shell/client/components/managed/ManagedSessionsPage.tsx` — 向 Managed 控制传入会话标题。
 - `packages/web-shell/client/i18n.tsx` — 新增 EN/ZH 键（两种语言）。
-- 测试：`LocalFilesPanel.test.tsx`、`LocalFilesControl.test.tsx`、`ManagedLocalFilesControl.test.tsx`、hook 测试，以及 `client/e2e/managed-local-files.spec.ts`。
+- 测试：`LocalFilesPanel.test.tsx`、`LocalFilesControl.test.tsx`、`ManagedLocalFilesControl.test.tsx`、hook 测试、`client/e2e/managed-local-files.spec.ts`，以及 `client/e2e/web-shell.local-files-toast.spec.ts`。
 
 ## 7. 约束与风险
 
@@ -107,7 +109,7 @@ tooltip 变为 `本地文件 — <状态>`，在有目录名时追加 `（<rootN
 
 - 单元：扩展 `LocalFilesPanel.test.tsx`（按阶段的新可供性、两种语言）、控制接线测试（toast 去重、复制命令、会话名、更换目录），以及 `forcePicker` 的 hook 测试（重选、取消保留桥、失败保留状态）。
 - `npm run build && npm run typecheck`，外加从 `packages/web-shell` 跑聚焦 vitest 套件。
-- E2E：扩展 `managed-local-files.spec.ts`，在真实浏览器中断言已连接态的更换目录可供性与会话名。命令类功能所用的 CLI 级 dry-run 不适用于纯浏览器 UI；基线是既有单元 + E2E 套件。
+- E2E：扩展 `managed-local-files.spec.ts`，在真实浏览器中断言已连接态的更换目录可供性与会话名；并新增 `web-shell.local-files-toast.spec.ts`，恢复一个权限为 `prompt` 的持久化授权（在 IndexedDB 层拦截），断言一次性警告 toast 在不打开 popover 的情况下到达真实 toast 宿主。非安全上下文的剪贴板回退还在非回环源上实跑（`execCommand('copy')` 携带推导出的隧道命令）。命令类功能所用的 CLI 级 dry-run 不适用于纯浏览器 UI；基线是既有单元 + E2E 套件。
 
 ## 9. 验收标准
 
