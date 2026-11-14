@@ -788,6 +788,14 @@ interface PrWatchEntry {
   commentBaseline?: string;
   commentSince?: string;
   commentLastFetchAt?: number;
+  /**
+   * Per-PR startup digest arm: set on every active entry when a downtime gap
+   * is detected, cleared only when this PR's backlog is actually consumed
+   * (digest settled, no-target retirement, or nothing to deliver). Persisted
+   * so a pass that digested nothing — empty or untrusted binding snapshot,
+   * per-PR fetch error, watch-cap exclusion — does not lose the one-shot.
+   */
+  digestPending?: boolean;
 }
 
 interface PendingWatchEvent {
@@ -856,6 +864,8 @@ function isPrWatchEntryShape(value: unknown): value is PrWatchEntry {
     stringOrUndef(entry.commentBaseline) &&
     stringOrUndef(entry.commentSince) &&
     numberOrUndef(entry.commentLastFetchAt) &&
+    (entry.digestPending === undefined ||
+      typeof entry.digestPending === 'boolean') &&
     (entry.pending === undefined ||
       (Array.isArray(entry.pending) && entry.pending.every(isPending))) &&
     (entry.fired === undefined ||
@@ -1371,6 +1381,7 @@ const BOUND_DELIVERY_COPY: Readonly<
       newCommentLead(author: string): string;
       newInlineReviewCommentLead(author: string): string;
       offlineCommentsLead(count: number): string;
+      offlineOmittedNotice(count: number): string;
       reviewRequestedInstruction: string;
       assignInstruction: string;
       headChange(fromSha: string, toSha: string): string;
@@ -1395,6 +1406,8 @@ const BOUND_DELIVERY_COPY: Readonly<
       `New inline review comment by @${author}:`,
     offlineCommentsLead: (count) =>
       `Offline backlog: ${count} new comment(s) on the PR while this channel was not running:`,
+    offlineOmittedNotice: (count) =>
+      `${count} comment(s) omitted from this digest to fit the prompt budget; they will follow as individual deliveries`,
     reviewRequestedInstruction:
       'Return a formal review summary with verified actionable findings, or a concise no-blocker result.',
     assignInstruction: 'Triage this issue and respond with the next action.',
@@ -1423,6 +1436,8 @@ const BOUND_DELIVERY_COPY: Readonly<
     newInlineReviewCommentLead: (author) => `@${author} 的新行内评审评论：`,
     offlineCommentsLead: (count) =>
       `离线积压：channel 停摆期间 PR 新增 ${count} 条评论：`,
+    offlineOmittedNotice: (count) =>
+      `本摘要因篇幅省略了 ${count} 条评论，将逐条补投`,
     reviewRequestedInstruction:
       '请给出正式的评审总结，包含经核实的可操作发现；若没有阻塞问题，给出简洁的无阻塞结论。',
     assignInstruction: '请分诊该 issue 并给出下一步行动。',
@@ -1929,14 +1944,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private prWatchState: PrWatchStateFile = { version: 1, entries: {} };
   private prWatchStateLoaded = false;
   /**
-   * One-shot startup digest mode: set on the first poll when the persisted
-   * heartbeat shows a downtime gap, consumed by the first COMPLETE watch pass
-   * (an aborted pass keeps it; already-digested PRs have advanced cursors, so
-   * re-entry is a no-op for them). In-memory by design: a restart re-derives
-   * it from the heartbeat.
+   * Startup digest arm: set on any poll whose heartbeat shows a downtime
+   * gap, arms the per-entry digestPending flags on the next watch pass, and
+   * clears once a trusted, non-aborted pass has watched something. The
+   * per-entry flags (persisted) carry the digest for individual PRs across
+   * errors, cap exclusion, and restarts.
    */
   private startupDigestPending = false;
-  private startupGapChecked = false;
   /**
    * Message keys that already have a durable dead-letter record, lazily
    * loaded from the never-rotated dead-letter file on first use and kept
@@ -1947,6 +1961,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * episode, so a record can only match the same transition.
    */
   private deadLetteredKeys: Set<string> | undefined;
+  /** Keys with an event-scoped record (no taskId): retire every task. */
+  private deadLetterEventScoped: Set<string> | undefined;
+  /** Keys with per-task records: retire only the named task ids. */
+  private deadLetterTaskIds: Map<string, Set<string>> | undefined;
   private inboundRecoveryPending = true;
   private recoverableInboundTasks = 0;
   /**
@@ -3013,32 +3031,39 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   protected async pollOnce(): Promise<void> {
+    await this.runPollOnce();
+    // Heartbeat stamped only on a SUCCESSFUL poll (the base class saves the
+    // cursor after this resolves): failed polls leave it stale, so an
+    // in-process outage grows the gap and is detected when polls recover.
+    this.cursor.lastPollAt = new Date().toISOString();
+  }
+
+  private async runPollOnce(): Promise<void> {
     this.inboundPersistenceBlocked = false;
     this.notificationRetryPending = false;
     this.publicationAuditBlocked = false;
     this.publicationAuditKeysCache = undefined;
 
-    // Downtime-gap detection runs once per process, before any early return,
-    // and the heartbeat is stamped every poll so a watch that legitimately
-    // did not run (budget skip, no bindings) cannot fake a gap.
-    if (!this.startupGapChecked) {
-      this.startupGapChecked = true;
-      const lastPollAt = this.cursor.lastPollAt;
-      if (lastPollAt !== undefined) {
-        const gapMs = Date.now() - Date.parse(lastPollAt);
-        const thresholdMs = Math.max(
-          STARTUP_DIGEST_MIN_GAP_MS,
-          5 * this.pollInterval,
+    // Downtime-gap detection on EVERY poll: a pure local comparison against
+    // the last successful heartbeat. A healthy poll re-stamps it, so this
+    // cannot fire in steady state; a restart OR an in-process outage whose
+    // failed polls skipped the cursor save both grow the gap past the
+    // threshold. The threshold scales with the poll interval so a
+    // long-interval channel does not digest every poll.
+    const lastPollAt = this.cursor.lastPollAt;
+    if (lastPollAt !== undefined) {
+      const gapMs = Date.now() - Date.parse(lastPollAt);
+      const thresholdMs = Math.max(
+        STARTUP_DIGEST_MIN_GAP_MS,
+        5 * this.pollInterval,
+      );
+      if (gapMs > thresholdMs && !this.startupDigestPending) {
+        this.startupDigestPending = true;
+        process.stderr.write(
+          `[Channel:${this.name}] downtime gap detected (${Math.round(gapMs / 1000)}s since the last successful poll); each bound PR's comment backlog digests into one prompt\n`,
         );
-        if (gapMs > thresholdMs) {
-          this.startupDigestPending = true;
-          process.stderr.write(
-            `[Channel:${this.name}] downtime gap detected (${Math.round(gapMs / 1000)}s since the last successful poll); the first complete watch pass digests each bound PR's comment backlog into one prompt\n`,
-          );
-        }
       }
     }
-    this.cursor.lastPollAt = new Date().toISOString();
 
     if (this.deliverToBoundSessions) {
       await this.refreshBoundSessions();
@@ -5135,12 +5160,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       if (this.publicTasksInFlight.has(task.id)) continue;
       if (
         task.envelope.messageId?.startsWith('watch:') === true &&
-        this.isDeadLettered(task.envelope.messageId)
+        this.deadLetterCoversTask(task.envelope.messageId, task.id)
       ) {
-        // A durable retire (superseded fold, overflow, or exhaustion) already
-        // consumed this event: complete the retire instead of delivering,
-        // mirroring the drain's dead-lettered pending completion. Covers the
-        // crash window between the dead-letter write and the task removal.
+        // A durable retire (superseded fold, overflow, or this task's own
+        // exhaustion) already consumed it: complete the retire instead of
+        // delivering, mirroring the drain's dead-lettered pending completion.
+        // Covers the crash window between the dead-letter write and the task
+        // removal. A sibling role's per-task record does not cover this task.
         this.removeInboundTask(task.id);
         this.recordChannelEvent({
           type: 'inbound',
@@ -5152,6 +5178,59 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           messageId: task.envelope.messageId,
         });
         continue;
+      }
+      if (
+        task.envelope.messageId?.startsWith('watch:') === true &&
+        task.state === 'failed' &&
+        task.backpressure === true &&
+        task.deliveredAt === undefined
+      ) {
+        // Baseline fold for polls whose watch pass was skipped (budget,
+        // failed binding refresh): the persisted baseline needs no live
+        // observation, so a stale parked task retires here before delivery.
+        let entry: PrWatchEntry | undefined;
+        try {
+          this.loadPrWatchState();
+          entry =
+            this.prWatchState.entries[
+              this.prBindingKey(task.source.chatId, task.issueNumber)
+            ];
+        } catch {
+          // Watch state unreadable: skip the fold (fail-closed).
+        }
+        const reason =
+          entry === undefined
+            ? undefined
+            : this.supersededWatchReason(
+                task.envelope.messageId,
+                task.issueNumber,
+                entry,
+              );
+        if (
+          reason !== undefined &&
+          (this.isDeadLettered(task.envelope.messageId) ||
+            this.appendWatchDeadLetter(
+              task.envelope.messageId,
+              task.issueNumber,
+              task.source.chatId,
+              task.source.threadId ?? `pr:${task.issueNumber}`,
+              task.delivery,
+              task.envelope.text ?? '',
+              reason,
+            ))
+        ) {
+          this.removeInboundTask(task.id);
+          this.recordChannelEvent({
+            type: 'inbound',
+            outcome: 'skipped',
+            reason: 'watch_superseded',
+            repository: task.envelope.chatId,
+            thread: task.envelope.threadId ?? `pr:${task.issueNumber}`,
+            number: task.issueNumber,
+            messageId: task.envelope.messageId,
+          });
+          continue;
+        }
       }
       this.applyTaskDedupe(task.dedupe);
       if (
@@ -5465,6 +5544,18 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       );
       return;
     }
+    // Keep a loaded index current: this record is per-task, so a sibling
+    // role's task of the same event must not read it as its own retire.
+    const retiredKey = task.source.messageId;
+    if (this.deadLetteredKeys !== undefined && retiredKey !== undefined) {
+      this.deadLetteredKeys.add(retiredKey);
+      let ids = this.deadLetterTaskIds!.get(retiredKey);
+      if (!ids) {
+        ids = new Set();
+        this.deadLetterTaskIds!.set(retiredKey, ids);
+      }
+      ids.add(task.id);
+    }
     process.stderr.write(
       `[Channel:${this.name}] bound event retired to dead-letter (${task.source.messageId}): ${reason}\n`,
     );
@@ -5728,30 +5819,66 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
    * benign) rather than silently skipping the exhaustion surface.
    */
   private isDeadLettered(messageKey: string): boolean {
-    if (this.deadLetteredKeys === undefined) {
-      const keys = new Set<string>();
-      try {
-        const raw = readFileSync(
-          this.channelFilePath('github-bound-deadletter.jsonl'),
-          'utf-8',
-        );
-        for (const line of raw.split('\n')) {
-          if (!line) continue;
-          try {
-            const rec = JSON.parse(line) as { source?: { messageId?: string } };
-            if (typeof rec.source?.messageId === 'string') {
-              keys.add(rec.source.messageId);
+    this.loadDeadLetterIndex();
+    return this.deadLetteredKeys!.has(messageKey);
+  }
+
+  /**
+   * Whether a dead-letter record retires THIS task: an event-scoped record
+   * (no taskId — supersession folds, overflow) retires every task of the
+   * event, while a per-task record (retireBoundTask's exhaustion surface)
+   * retires only the task it names. A sibling role's parked task must
+   * survive another role's exhaustion.
+   */
+  private deadLetterCoversTask(messageKey: string, taskId: string): boolean {
+    this.loadDeadLetterIndex();
+    return (
+      this.deadLetterEventScoped!.has(messageKey) ||
+      this.deadLetterTaskIds!.get(messageKey)?.has(taskId) === true
+    );
+  }
+
+  private loadDeadLetterIndex(): void {
+    if (this.deadLetteredKeys !== undefined) return;
+    const keys = new Set<string>();
+    const eventScoped = new Set<string>();
+    const taskIds = new Map<string, Set<string>>();
+    try {
+      const raw = readFileSync(
+        this.channelFilePath('github-bound-deadletter.jsonl'),
+        'utf-8',
+      );
+      for (const line of raw.split('\n')) {
+        if (!line) continue;
+        try {
+          const rec = JSON.parse(line) as {
+            source?: { messageId?: string };
+            taskId?: string;
+          };
+          if (typeof rec.source?.messageId === 'string') {
+            const key = rec.source.messageId;
+            keys.add(key);
+            if (typeof rec.taskId === 'string') {
+              let ids = taskIds.get(key);
+              if (!ids) {
+                ids = new Set();
+                taskIds.set(key, ids);
+              }
+              ids.add(rec.taskId);
+            } else {
+              eventScoped.add(key);
             }
-          } catch {
-            // A malformed line names no key; skip it.
           }
+        } catch {
+          // A malformed line names no key; skip it.
         }
-      } catch {
-        // No file yet, or unreadable: nothing known to be dead-lettered.
       }
-      this.deadLetteredKeys = keys;
+    } catch {
+      // No file yet, or unreadable: nothing known to be dead-lettered.
     }
-    return this.deadLetteredKeys.has(messageKey);
+    this.deadLetteredKeys = keys;
+    this.deadLetterEventScoped = eventScoped;
+    this.deadLetterTaskIds = taskIds;
   }
 
   /**
@@ -5779,6 +5906,52 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       ...(sessionId ? { sessionId } : {}),
       ...(workspaceCwd ? { sessionWorkspaceCwd: workspaceCwd } : {}),
     });
+  }
+
+  /**
+   * Whether a watch event key is superseded by the given facts, and why.
+   * Fact-driven, not transition-driven: a retained event (a failed
+   * dead-letter write) stays foldable on later passes, and a green re-run
+   * folds the red event for the SAME head. Shared by the detection-time fold
+   * (fresh observation facts) and the recovery-time fold (persisted baseline
+   * facts, for polls whose watch pass was skipped). A failed or absent CI
+   * fetch never folds: only a positively observed 'success' does.
+   */
+  private supersededWatchReason(
+    key: string,
+    number: number,
+    facts: {
+      headSha?: string;
+      ci?: CiAggregate;
+      mergeableState?: string;
+      prState?: string;
+    },
+  ): string | undefined {
+    if (key.startsWith(`watch:ci_failure:${number}:`)) {
+      const sha = key.split(':')[3];
+      if (sha !== undefined && sha !== 'unknown') {
+        if (facts.headSha !== undefined && sha !== facts.headSha) {
+          return 'superseded: head advanced';
+        }
+        if (sha === facts.headSha && facts.ci === 'success') {
+          return 'superseded: CI recovered';
+        }
+      }
+    }
+    if (
+      key.startsWith(`watch:merge_conflict:${number}:`) &&
+      facts.mergeableState !== undefined &&
+      facts.mergeableState !== 'dirty'
+    ) {
+      return 'superseded: conflicts resolved';
+    }
+    if (
+      key.startsWith(`watch:state_change:${number}:`) &&
+      facts.prState === 'open'
+    ) {
+      return 'superseded: PR reopened';
+    }
+    return undefined;
   }
 
   /**
@@ -5812,10 +5985,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         encoding: 'utf-8',
         mode: 0o600,
       });
-      // Extend the disk-loaded set, never mint a partial one: a fresh empty
-      // set would hide every earlier dead-letter key from isDeadLettered.
-      this.isDeadLettered(messageKey);
+      // Extend the disk-loaded index, never mint a partial one: a fresh
+      // empty set would hide every earlier dead-letter key. This record is
+      // event-scoped (no taskId): it retires every task of the event.
+      this.loadDeadLetterIndex();
       this.deadLetteredKeys!.add(messageKey);
+      this.deadLetterEventScoped!.add(messageKey);
       return true;
     } catch (err) {
       const payload = JSON.stringify(record);
@@ -8097,7 +8272,26 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // durable tasks in a single poll. PRs that find it spent keep their cursor
     // and resume next pass.
     const commentBudget = { remaining: MAX_WATCH_COMMENTS_PER_PASS };
-    const digestMode = this.startupDigestPending;
+    // Arm the digest on every ACTIVE entry (not just the watched slice), so
+    // a PR excluded by the watch cap keeps its arm until it is watched. The
+    // per-entry flag is persisted and cleared only when that PR's backlog is
+    // actually consumed — a pass that digested nothing must not lose it.
+    if (this.startupDigestPending) {
+      for (const key of active.keys()) {
+        const entry = this.prWatchState.entries[key];
+        if (entry) entry.digestPending = true;
+      }
+    }
+    // The task store is read once per pass, not once per watched PR; an
+    // unreadable store skips the parked-task fold (fail-closed).
+    let tasksSnapshot: InboundTaskRecord[] | undefined;
+    if (watched.length > 0) {
+      try {
+        tasksSnapshot = this.readInboundTasks();
+      } catch {
+        tasksSnapshot = undefined;
+      }
+    }
     let passAborted = false;
     for (const [key, candidate] of watched) {
       // Yield at the spend site, not only at the poll boundary: one pass can
@@ -8115,7 +8309,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         // it when no state event is subscribed so a comment-only channel does
         // not pay for transitions it never emits.
         if (this.prWatchEvents.size > 0) {
-          await this.watchOnePr(key, candidate.chatId, candidate.number);
+          await this.watchOnePr(
+            key,
+            candidate.chatId,
+            candidate.number,
+            tasksSnapshot,
+          );
         }
         // Additive comment watch: isolates its own failures so a comment
         // fetch problem never skips the state transitions above.
@@ -8124,7 +8323,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           candidate.chatId,
           candidate.number,
           commentBudget,
-          digestMode,
+          this.prWatchState.entries[key]?.digestPending === true,
         );
       } catch (err) {
         if (isWatchPassAbortError(err)) {
@@ -8149,10 +8348,18 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       }
     }
     this.savePrWatchState();
-    // An aborted pass keeps digest mode for the next one: PRs it never
-    // reached still hold their backlog. Already-digested PRs have advanced
-    // cursors, so re-entry delivers nothing twice.
-    if (!passAborted) {
+    // The global one-shot only arms entries; it clears once a trusted,
+    // non-aborted pass has actually watched something. An empty watched set
+    // (bindings not yet present) or an untrusted snapshot keeps it armed for
+    // the next pass; per-entry flags carry the digest for individual PRs
+    // across errors, cap exclusion, and restarts.
+    if (
+      !passAborted &&
+      watched.length > 0 &&
+      this.boundSnapshotTrusted &&
+      !this.lastBindingsPartial &&
+      !this.boundRefreshFailed
+    ) {
       this.startupDigestPending = false;
     }
   }
@@ -8161,6 +8368,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     key: string,
     chatId: string,
     number: number,
+    tasksSnapshot: InboundTaskRecord[] | undefined,
   ): Promise<void> {
     const copy = BOUND_DELIVERY_COPY[this.locale];
     const [owner, repo] = chatId.split('/');
@@ -8348,6 +8556,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       ...(entry.commentLastFetchAt !== undefined
         ? { commentLastFetchAt: entry.commentLastFetchAt }
         : {}),
+      ...(entry.digestPending !== undefined
+        ? { digestPending: entry.digestPending }
+        : {}),
     };
 
     // Supersession folding: facts observed this pass retire queued events and
@@ -8356,27 +8567,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // merge_conflict that was resolved. The dead-letter record is the retire's
     // commit point (same surface as the pending overflow); a failed write
     // keeps the event queued / the task parked for the next detection.
-    const conflictsResolved =
-      mergeableState !== undefined && mergeableState !== 'dirty';
-    const supersededReason = (key: string): string | undefined => {
-      if (
-        headChanged &&
-        headSha !== undefined &&
-        key.startsWith(`watch:ci_failure:${number}:`)
-      ) {
-        const sha = key.split(':')[3];
-        if (sha !== undefined && sha !== 'unknown' && sha !== headSha) {
-          return 'superseded: head advanced';
-        }
-      }
-      if (
-        conflictsResolved &&
-        key.startsWith(`watch:merge_conflict:${number}:`)
-      ) {
-        return 'superseded: conflicts resolved';
-      }
-      return undefined;
-    };
+    // Fact-driven, not transition-driven: a retained event (a failed
+    // dead-letter write) stays foldable on later passes, and a green re-run
+    // folds the red event for the same head. `next` is the committed baseline.
+    const supersededReason = (key: string): string | undefined =>
+      this.supersededWatchReason(key, number, next);
     const supersededRetires: Array<{
       key: string;
       issueNumber: number;
@@ -8384,7 +8579,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       threadId: string;
       delivery?: InboundTaskRecord['delivery'];
     }> = [];
-    if (next.pending?.length && (headChanged || conflictsResolved)) {
+    if (next.pending?.length) {
       const keep: PendingWatchEvent[] = [];
       for (const pending of next.pending) {
         const reason = supersededReason(pending.key);
@@ -8414,61 +8609,54 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       }
       next.pending = keep;
     }
-    if (headChanged || conflictsResolved) {
-      // Parked backpressure tasks are the dominant stale path: detection
-      // claims immediately and a full prompt queue parks the task, which then
-      // retries across restarts. Only parked tasks fold — in-flight,
-      // delivered, and non-backpressure tasks settle via recovery.
-      let tasks: InboundTaskRecord[] = [];
-      try {
-        tasks = this.readInboundTasks();
-      } catch {
-        // Store unreadable: skip task folding this pass (fail-closed).
+    // Parked backpressure tasks are the dominant stale path: detection
+    // claims immediately and a full prompt queue parks the task, which then
+    // retries across restarts. Only parked tasks fold — in-flight,
+    // delivered, and non-backpressure tasks settle via recovery. The store
+    // is read once per pass by the caller, not once per PR.
+    for (const task of tasksSnapshot ?? []) {
+      const messageKey = task.source.messageId;
+      if (messageKey === undefined || !messageKey.startsWith('watch:')) {
+        continue;
       }
-      for (const task of tasks) {
-        const messageKey = task.source.messageId;
-        if (messageKey === undefined || !messageKey.startsWith('watch:')) {
-          continue;
+      if (this.prBindingKey(task.source.chatId, task.issueNumber) !== key) {
+        continue;
+      }
+      const reason = supersededReason(messageKey);
+      if (reason === undefined) continue;
+      if (
+        task.state !== 'failed' ||
+        task.backpressure !== true ||
+        task.deliveredAt !== undefined ||
+        this.publicTasksInFlight.has(task.id)
+      ) {
+        continue;
+      }
+      if (
+        this.isDeadLettered(messageKey) ||
+        this.appendWatchDeadLetter(
+          messageKey,
+          task.issueNumber,
+          task.source.chatId,
+          task.source.threadId ?? `pr:${number}`,
+          task.delivery,
+          task.envelope?.text ?? '',
+          reason,
+        )
+      ) {
+        try {
+          this.removeInboundTask(task.id);
+        } catch {
+          // Removal failed after the durable retire: the recovery
+          // dead-letter guard completes it next poll.
         }
-        if (this.prBindingKey(task.source.chatId, task.issueNumber) !== key) {
-          continue;
-        }
-        const reason = supersededReason(messageKey);
-        if (reason === undefined) continue;
-        if (
-          task.state !== 'failed' ||
-          task.backpressure !== true ||
-          task.deliveredAt !== undefined ||
-          this.publicTasksInFlight.has(task.id)
-        ) {
-          continue;
-        }
-        if (
-          this.isDeadLettered(messageKey) ||
-          this.appendWatchDeadLetter(
-            messageKey,
-            task.issueNumber,
-            task.source.chatId,
-            task.source.threadId ?? `pr:${number}`,
-            task.delivery,
-            task.envelope?.text ?? '',
-            reason,
-          )
-        ) {
-          try {
-            this.removeInboundTask(task.id);
-          } catch {
-            // Removal failed after the durable retire: the recovery
-            // dead-letter guard completes it next poll.
-          }
-          supersededRetires.push({
-            key: messageKey,
-            issueNumber: task.issueNumber,
-            chatId: task.source.chatId,
-            threadId: task.source.threadId ?? `pr:${number}`,
-            delivery: task.delivery,
-          });
-        }
+        supersededRetires.push({
+          key: messageKey,
+          issueNumber: task.issueNumber,
+          chatId: task.source.chatId,
+          threadId: task.source.threadId ?? `pr:${number}`,
+          delivery: task.delivery,
+        });
       }
     }
 
@@ -8489,6 +8677,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // Overflow retires sliced during this pass; their skip rows are journalled
     // only after the end-of-pass save commits the baseline and queue together.
     const overflowRetires: PendingWatchEvent[] = [];
+    const coalescedHops: Array<{
+      key: string;
+      issueNumber: number;
+      chatId: string;
+      threadId: string;
+    }> = [];
     for (const event of events) {
       // Coalesce head hops: a pending head_change plus a new one delivers the
       // NET change under the original key, not one prompt per intermediate
@@ -8505,6 +8699,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
               existing.headChangeFrom!,
               headSha,
             );
+            // Coalescing is not a retirement (no dead-letter), but the
+            // absorbed hop must stay visible on the journal surface.
+            coalescedHops.push({
+              key: existing.key,
+              issueNumber: existing.issueNumber,
+              chatId: existing.envelope.chatId,
+              threadId: existing.envelope.threadId ?? `pr:${number}`,
+            });
             continue;
           }
           // Round trip A->B->A: the net change is nothing. Retire the pending
@@ -8665,6 +8867,19 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     for (const retired of overflowRetires) {
       this.recordWatchOverflowSkip(retired);
     }
+    // Coalesced hops are durable only now (the re-rendered pending text is
+    // committed by the same save). Journal after the save, like the retires.
+    for (const hop of coalescedHops) {
+      this.recordChannelEvent({
+        type: 'inbound',
+        outcome: 'skipped',
+        reason: 'watch_coalesced',
+        repository: hop.chatId,
+        thread: hop.threadId,
+        number: hop.issueNumber,
+        messageId: hop.key,
+      });
+    }
     // Superseded retires are durable only now (dead-letter + baseline/queue
     // save, or task removal). Journal after the save, never before: a throwing
     // save leaves the event queued and the fold retries next detection.
@@ -8721,6 +8936,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       !this.prCommentWatchEnabled ||
       !this.boundSessions
     ) {
+      // Comment watching is off: a stale arm must not digest later-enabled
+      // comments that were never gap backlog.
+      if (this.prWatchState.entries[key]?.digestPending === true) {
+        this.prWatchState.entries[key] = {
+          ...this.prWatchState.entries[key],
+          digestPending: false,
+        };
+        this.savePrWatchState();
+      }
       return;
     }
     const entry = this.prWatchState.entries[key] ?? {};
@@ -8734,6 +8958,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         commentBaseline: nowIso,
         commentSince: nowIso,
         commentLastFetchAt: now,
+        digestPending: false,
       };
       this.savePrWatchState();
       return;
@@ -8747,11 +8972,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // The burst budget is shared by every watched PR in this pass. A PR that
     // arrives after it is spent fetches nothing and keeps its cursor untouched,
     // so its tail resumes on the next pass instead of being skipped past.
-    // Digest mode bypasses it: the budget bounds per-COMMENT task fan-out,
-    // while a digest is one task per PR however large its backlog, and the
-    // watch limit already bounds the PR fan-out. Spending it would push the
-    // tail PRs back to per-comment delivery once digest mode clears.
-    if (budget.remaining <= 0 && !digestMode) {
+    // The digest path never decrements it (one task per PR, not per comment),
+    // so a digest pass always finds the budget intact.
+    if (budget.remaining <= 0) {
       return;
     }
     const [owner, repo] = chatId.split('/');
@@ -8978,7 +9201,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     }
     candidates.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 
-    const commitCursor = (newSince: string): void => {
+    const commitCursor = (newSince: string, clearDigest = false): void => {
       // GitHub compares `since` at whole-second granularity while nowIso carries
       // milliseconds: a comment created later in the same second as the fetch
       // snapshot would be excluded from every later fetch. Floor the cursor to
@@ -8991,13 +9214,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         ...(this.prWatchState.entries[key] ?? {}),
         commentSince: floored,
         commentLastFetchAt: now,
+        // The digest arm clears only when this PR's backlog is consumed;
+        // a held cursor (omitted tail, refused dispatch) keeps it armed.
+        ...(clearDigest ? { digestPending: false } : {}),
       };
       this.savePrWatchState();
     };
 
     // No new comments: advance the cursor without any attribution round-trip.
     if (candidates.length === 0) {
-      commitCursor(nowIso);
+      commitCursor(nowIso, true);
       return;
     }
 
@@ -9081,21 +9307,31 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       });
     }
     if (deliverable.length === 0) {
-      commitCursor(gateHoldCursor ?? nowIso);
+      // A gate grace hold keeps the backlog (and the digest arm) for the next
+      // pass; a genuine no-target retirement consumes it with a trace.
+      commitCursor(gateHoldCursor ?? nowIso, gateHoldCursor === undefined);
       return;
     }
 
     if (digestMode) {
       // One private summary for the whole downtime backlog instead of one
-      // prompt per comment. Authorship exclusion is the UNION of per-member
-      // exclusions: a session that posted during the gap was active elsewhere
-      // and already holds the context; the digest targets dormant followers.
+      // prompt per comment. A target is excluded only if it authored EVERY
+      // deliverable member (it already holds the whole context); a partial
+      // author still receives the digest — the mutual-authorship case must
+      // not consume the bundle with zero prompts.
       const exclude = new Set<string>();
-      for (const candidate of deliverable) {
-        for (const sessionId of excludeFor(candidate)) exclude.add(sessionId);
+      for (const target of targets) {
+        if (
+          deliverable.every((candidate) =>
+            excludeFor(candidate).has(target.sessionId),
+          )
+        ) {
+          exclude.add(target.sessionId);
+        }
       }
       if (targets.every((target) => exclude.has(target.sessionId))) {
-        // Consumed with a trace, exactly like the per-comment no-target path.
+        // Every target authored every member: genuinely target-less.
+        // Consumed with a trace, like the per-comment no-target path.
         this.recordChannelEvent({
           type: 'inbound',
           outcome: 'skipped',
@@ -9105,74 +9341,132 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           number,
           messageId: `comment-digest:${number}`,
         });
-        commitCursor(nowIso);
+        commitCursor(nowIso, true);
         return;
       }
-      // A digest is ONE durable task; the body ceiling, not the per-pass
-      // comment cap, bounds its size (see the budget bypass above).
+      // Allocate the shared body ceiling NEWEST-FIRST: the cap keeps the
+      // prefix, so rendering oldest-first would let it eat exactly the
+      // newest, most actionable members. Members that do not fit are named
+      // in the front omission notice, their keys are NOT recorded, and the
+      // cursor holds before the backlog head so they follow as individual
+      // deliveries — nothing is consumed without being delivered.
       const newest = deliverable.slice(-MAX_AGGREGATE_COMMENTS);
-      const omitted = deliverable.length - newest.length;
-      const renderDigest = (language: BoundPromptLanguage): string => {
+      const memberLine = (
+        candidate: (typeof deliverable)[number],
+        language: BoundPromptLanguage,
+      ): string => {
         const digestCopy = BOUND_DELIVERY_COPY[language];
-        const lines = newest.map((candidate) => {
-          const total = Array.from(candidate.body).length;
-          const excerpt =
-            total > MAX_AGGREGATE_COMMENT_CHARS
-              ? `${truncateCodePoints(candidate.body, MAX_AGGREGATE_COMMENT_CHARS)}… [${digestCopy.commentTruncated(total - MAX_AGGREGATE_COMMENT_CHARS)}]`
-              : candidate.body;
-          const lead =
-            candidate.inlineLocation !== undefined
-              ? `${digestCopy.newInlineReviewCommentLead(candidate.author)}\n${candidate.inlineLocation}`
-              : digestCopy.newCommentLead(candidate.author);
-          return `${lead}\n${excerpt}\nComment: ${candidate.url}`;
-        });
-        // The omission notice rides at the FRONT: a tail notice would be the
-        // first thing the bound prompt's code-point cap truncates away.
+        const total = Array.from(candidate.body).length;
+        const excerpt =
+          total > MAX_AGGREGATE_COMMENT_CHARS
+            ? `${truncateCodePoints(candidate.body, MAX_AGGREGATE_COMMENT_CHARS)}… [${digestCopy.commentTruncated(total - MAX_AGGREGATE_COMMENT_CHARS)}]`
+            : candidate.body;
+        const lead =
+          candidate.inlineLocation !== undefined
+            ? `${digestCopy.newInlineReviewCommentLead(candidate.author)}\n${candidate.inlineLocation}`
+            : digestCopy.newCommentLead(candidate.author);
+        return `${lead}\n${excerpt}\nComment: ${candidate.url}`;
+      };
+      const cp = (text: string): number => Array.from(text).length;
+      const renderFor = (
+        language: BoundPromptLanguage,
+        members: ReadonlyArray<(typeof deliverable)[number]>,
+      ): string => {
+        const digestCopy = BOUND_DELIVERY_COPY[language];
+        const omitted = deliverable.length - members.length;
+        // The omission notice rides at the FRONT: a tail notice would be
+        // the first thing the shared body cap truncates away.
         return (
           digestCopy.offlineCommentsLead(deliverable.length) +
-          (omitted > 0 ? `\n[${digestCopy.omittedNotice(omitted)}]` : '') +
-          `\n${lines.join('\n')}`
+          (omitted > 0
+            ? `\n[${digestCopy.offlineOmittedNotice(omitted)}]`
+            : '') +
+          `\n${members.map((candidate) => memberLine(candidate, language)).join('\n')}`
         );
       };
-      // Content-hash identity over ALL members (the aggregate lane's superset
-      // semantics): a crash before the cursor save re-lists the window, the
-      // member dedupe filters consumed comments, and a grown window dispatches
-      // only the new remainder under a fresh hash.
-      const digestId = `comment-digest:${number}:${createHash('sha256')
-        .update(
-          deliverable
-            .map((candidate) => candidate.key)
-            .sort()
-            .join('\n'),
-        )
-        .digest('hex')
-        .slice(0, 40)}`;
-      const envelope: Envelope = {
-        channelName: this.name,
-        senderId: 'github',
-        senderName: 'GitHub',
-        chatId,
-        threadId,
-        messageId: digestId,
-        text: renderDigest('en'),
-        isGroup: true,
-        isMentioned: true,
-        isReplyToBot: false,
-        metadata,
-      };
-      const settled = await this.dispatchEnvelope(
-        envelope,
-        number,
-        { dispatchedComments: deliverable.map((candidate) => candidate.key) },
-        true,
-        exclude,
-        this.locale === 'en' ? undefined : renderDigest(this.locale),
+      const leadCp = cp(
+        BOUND_DELIVERY_COPY[this.locale].offlineCommentsLead(
+          deliverable.length,
+        ),
       );
-      // Settled: the whole backlog is consumed. Not settled (no durable
-      // claim): keep commentSince so the next pass re-fetches and retries;
-      // dispatchedComments dedupes anything already claimed.
-      commitCursor(settled ? nowIso : since);
-      return;
+      const rendered: Array<(typeof deliverable)[number]> = [];
+      let used = leadCp + 1;
+      for (let i = newest.length - 1; i >= 0; i -= 1) {
+        const candidate = newest[i]!;
+        const lineCp = cp(memberLine(candidate, this.locale));
+        // Notice sized for the count IF this member is accepted; the final
+        // notice is no larger, so a fit here stays a fit at the end.
+        const noticeCp =
+          deliverable.length - (rendered.length + 1) > 0
+            ? cp(
+                `\n[${BOUND_DELIVERY_COPY[this.locale].offlineOmittedNotice(deliverable.length - (rendered.length + 1))}]`,
+              )
+            : 0;
+        if (used + lineCp + 1 + noticeCp > BOUND_PROMPT_BODY_MAX_CODE_POINTS) {
+          break;
+        }
+        rendered.unshift(candidate);
+        used += lineCp + 1;
+      }
+      if (rendered.length > 0) {
+        const omitted = deliverable.length - rendered.length;
+        // Content-hash identity over the RENDERED members (the aggregate
+        // lane's superset semantics): a crash before the cursor save
+        // re-lists the window, the member dedupe filters consumed comments,
+        // and a grown window dispatches only the new remainder.
+        const digestId = `comment-digest:${number}:${createHash('sha256')
+          .update(
+            rendered
+              .map((candidate) => candidate.key)
+              .sort()
+              .join('\n'),
+          )
+          .digest('hex')
+          .slice(0, 40)}`;
+        const envelope: Envelope = {
+          channelName: this.name,
+          senderId: 'github',
+          senderName: 'GitHub',
+          chatId,
+          threadId,
+          messageId: digestId,
+          text: renderFor('en', rendered),
+          isGroup: true,
+          isMentioned: true,
+          isReplyToBot: false,
+          metadata,
+        };
+        const settled = await this.dispatchEnvelope(
+          envelope,
+          number,
+          { dispatchedComments: rendered.map((candidate) => candidate.key) },
+          true,
+          exclude,
+          this.locale === 'en' ? undefined : renderFor(this.locale, rendered),
+        );
+        if (!settled) {
+          // No durable claim: keep commentSince and the arm so the next pass
+          // re-fetches and retries; dispatchedComments dedupes any claim.
+          commitCursor(since);
+          return;
+        }
+        if (omitted === 0) {
+          commitCursor(nowIso, true);
+        } else {
+          // Hold before the backlog head: the omitted prefix (and any
+          // budget-dropped members) re-lists next pass and delivers
+          // individually; the rendered suffix is deduped.
+          commitCursor(
+            new Date(
+              Date.parse(deliverable[0]!.createdAt) - 1000,
+            ).toISOString(),
+            true,
+          );
+        }
+        return;
+      }
+      // Not even one member fits (a pathologically long URL): fall through
+      // to the per-comment path rather than consume anything.
     }
 
     // Cap the burst against the pass-wide budget shared by all watched PRs;
@@ -9208,17 +9502,20 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // independent one). Keep commentSince so the next pass re-fetches and
       // retries; dispatchedComments dedupes anything already claimed. Advancing
       // here would skip the comment past with no task and no re-delivery chance.
-      commitCursor(since);
+      commitCursor(since, digestMode);
     } else {
       // Resume just before the last processed comment when capped so the
       // unprocessed tail is re-fetched next pass (a second of overlap is
       // deduped, never lost). A gate-held comment never reaches here: a hold
-      // implies an empty deliverable, which returned above.
+      // implies an empty deliverable, which returned above. A digest that
+      // fell through to this path (no member fit the body budget) consumes
+      // its arm: the backlog delivers individually from here on.
       const last = batch[batch.length - 1]!;
       commitCursor(
         capped
           ? new Date(Date.parse(last.createdAt) - 1000).toISOString()
           : nowIso,
+        digestMode,
       );
     }
   }

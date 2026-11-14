@@ -93,119 +93,152 @@ configured with only member-class templates (e.g. `fix:watch:ci_failure`).
 
 ## Proposed changes
 
-### 1. Supersession folding (always on, detection time)
+### 1. Supersession folding (always on, fact-driven)
 
-In `watchOnePr`, after the new baseline (`next`) is computed and before events
-are appended:
+A shared predicate `supersededWatchReason(key, number, facts)` decides whether
+a watch event is superseded by the given facts. It is **fact-driven, not
+transition-driven**: a retained event (a failed dead-letter write) stays
+foldable on later passes, and a green re-run folds the red event for the SAME
+head. The arms:
 
-- **ci_failure superseded by head advance.** A pending `ci_failure` whose key
-  SHA differs from the currently observed `headSha` is retired. The SHA is read
-  from the stable key format `watch:ci_failure:<n>:<sha>:<detectedAt>`; a key
-  carrying `unknown` is never folded (no proof of supersession).
-- **merge_conflict superseded by resolution.** When `mergeableState` is
-  positively observed as non-`dirty`, pending `merge_conflict` events are
-  retired. A `null`/absent mergeable (GitHub still computing) never folds.
-- **head_change coalescing.** When a new `head_change` is appended while one is
-  already pending, the pending item keeps its key and its text is re-rendered
-  as the net change (original `from` → new `to`). `PendingWatchEvent` gains an
-  optional `headChangeFrom?: string` recorded at detection; a legacy pending
-  item without it is not coalesced (both events deliver — the pre-upgrade
-  behavior). A round trip (the head returns to the pending hop's original
-  `from`) retires the pending hop with reason
-  `superseded: head returned to original` instead of rendering a no-op
-  "A to A" prompt; a failed dead-letter write falls through to append the new
-  hop (two factual prompts, never a lost transition).
+- **ci_failure, head advanced.** The key SHA (parsed from the stable format
+  `watch:ci_failure:<n>:<sha>:<detectedAt>`) differs from `facts.headSha`. A
+  key carrying `unknown` is never folded (no proof of supersession).
+- **ci_failure, CI recovered.** The key SHA equals `facts.headSha` and
+  `facts.ci === 'success'` — a positively observed green re-run. A failed or
+  absent Checks fetch never folds (the baseline preserves the last aggregate).
+- **merge_conflict, resolved.** `facts.mergeableState` is positively observed
+  as non-`dirty`. A `null`/absent mergeable (GitHub still computing) never
+  folds.
+- **state_change, reopened.** `facts.prState === 'open'` retires a parked
+  "PR closed" event; the close-edge-only firing means a reopen produces no
+  corrective event of its own.
 
-The same supersession rules apply to **parked backpressure tasks** — the
-dominant stale path, since detection claims events immediately and a full
-prompt queue parks them. When the new facts supersede, `watchOnePr` also scans
-the inbound task store for this PR's watch tasks and retires every task whose
-`source.messageId` is a superseded `ci_failure` (key SHA ≠ current head) or
-`merge_conflict` (non-dirty positively observed) AND that is parked, not
-in-flight: `state === 'failed'`, `backpressure === true`, `deliveredAt`
-undefined, and not owned by this process (`publicTasksInFlight`). Tasks in any
-other state (accepted/running, delivered, non-backpressure failed) are never
-folded — they settle through the existing recovery contract.
+Two call sites share the predicate:
+
+- **Detection time** (`watchOnePr`): facts are the freshly computed baseline
+  (`next`). Pending events are scanned whenever any are queued; parked
+  backpressure tasks are scanned against a task-store snapshot read ONCE per
+  watch pass by `runPrStateWatch` (not once per PR — the steady-state cost is
+  one read per pass, and an unreadable store skips the fold fail-closed). A
+  task folds only when parked, not in-flight: `state === 'failed'`,
+  `backpressure === true`, `deliveredAt` undefined, not in
+  `publicTasksInFlight`, and scoped to this PR via `prBindingKey`.
+- **Recovery time** (`recoverInboundTasks`): facts are the PERSISTED baseline,
+  so a poll whose watch pass was skipped (REST budget below reserve, failed
+  binding refresh) still retires a stale parked task before delivering it.
+  This fold needs no live observation.
+
+**head_change coalescing** (pending only): when a new `head_change` is appended
+while one is already pending, the pending item keeps its key and its text is
+re-rendered as the net change (original `from` → new `to`); the absorbed hop
+writes a `watch_coalesced` journal row (coalescing is not a retirement, so no
+dead-letter). `PendingWatchEvent` gains an optional `headChangeFrom?: string`
+recorded at detection; a legacy pending item without it is not coalesced (both
+events deliver — the pre-upgrade behavior). A round trip (the head returns to
+the pending hop's original `from`) retires the pending hop with reason
+`superseded: head returned to original` instead of rendering a no-op "A to A"
+prompt; a failed dead-letter write falls through to append the new hop (two
+factual prompts, never a lost transition). A coalesced hop keeps its original
+key and consumes NO new seq number (the branch continues before the increment).
+Parked `head_change` tasks are NOT folded: a hop is a historical fact, not a
+current-state claim, so it delivers as observed; coalescing applies only while
+the hop is pending.
 
 Retirement surface mirrors the existing pending-overflow path: a dead-letter
-record in `github-bound-deadletter.jsonl` with reason
-`superseded: head advanced` / `superseded: conflicts resolved` /
-`superseded: head returned to original` is the commit point; the event then
-leaves `pending` (in the same end-of-pass save that commits the baseline) or
-the task is removed from the store, and a `watch_superseded` journal skip row
-is written after the durable step. A failed
+record in `github-bound-deadletter.jsonl` with reason `superseded: head
+advanced` / `superseded: CI recovered` / `superseded: conflicts resolved` /
+`superseded: PR reopened` / `superseded: head returned to original` is the
+commit point; the event then leaves `pending` (in the same end-of-pass save
+that commits the baseline) or the task is removed from the store, and a
+`watch_superseded` journal skip row is written after the durable step. A failed
 dead-letter write keeps the event queued / the task parked (fail-closed,
-retried on the next detection).
+retried on the next detection or recovery).
 
-Crash window: a recovery pass that finds a recoverable watch task whose key is
-already dead-lettered completes the retirement (removes the task, journals the
-skip) instead of delivering — the same completion logic the drain already
-applies to dead-lettered pending heads. The fired ring, `ciFiredSha` pin, and
-seq counter semantics are unchanged; a coalesced head_change consumes one seq
-number like any detection. Retiring a parked predecessor also unblocks the
-per-PR drain ordering guard, so the surviving net `head_change` delivers
-without waiting for the stale event's horizon.
+**Scoped recovery guard.** Dead-letter records carry two scopes: event-scoped
+records (no `taskId` — supersession folds, overflow) retire every task of the
+event, while per-task records (`retireBoundTask`'s exhaustion surface, which
+writes `taskId`) retire only the task they name. The recovery guard completes
+a retirement only when the record covers THIS task, so one role's exhaustion
+never retires a sibling role's still-parked task of the same event. The
+in-memory index tracks both scopes and stays current on every append.
+
+The fired ring and `ciFiredSha` pin semantics are unchanged. Retiring a parked
+predecessor also unblocks the per-PR drain ordering guard, so the surviving net
+`head_change` delivers without waiting for the stale event's horizon.
 
 Contract amendment: the bound-session-events acceptance "every transition
 instance produces exactly one injected prompt" becomes "every transition
 instance produces exactly one injected prompt **or one visible superseded
-retirement**". Legitimate recurrences (dirty → clean → dirty, SHA revisits,
-close → reopen → close) still fire: folding only consumes instances whose fact
-a later observation has superseded.
+retirement (or, for a pending head hop, one visible coalescing)**". Legitimate
+recurrences (dirty → clean → dirty, SHA revisits, close → reopen → close) still
+fire: folding only consumes instances whose fact a later observation has
+superseded. The 2026-11-02 design pair is amended in the same change.
 
 ### 2. Downtime gap detection
 
-- `GithubCursor` gains `lastPollAt?: string`, stamped at the top of `pollOnce`
-  (before any early return) and persisted by the base class after every
-  successful poll. `validateCursor` accepts a missing value (legacy cursors)
-  and drops a malformed one.
-- On the first `pollOnce` of the process, if a persisted `lastPollAt` exists
-  and `now - lastPollAt > max(10 minutes, 5 × pollInterval)`, the in-memory
-  one-shot flag `startupDigestPending` is set. The threshold scales with the
+- `GithubCursor` gains `lastPollAt?: string`, stamped ONLY after a successful
+  poll (the base class saves the cursor after `pollOnce` resolves).
+  `validateCursor` accepts a missing value (legacy cursors) and drops a
+  malformed one.
+- EVERY poll compares `now - lastPollAt > max(10 minutes, 5 × pollInterval)`;
+  when the gap exceeds the threshold the in-memory flag `startupDigestPending`
+  is set (stderr once per edge). A healthy poll re-stamps the heartbeat, so the
+  comparison cannot fire in steady state. Both a process restart AND an
+  in-process outage count as gaps: failed polls skip the cursor save, so the
+  heartbeat stays stale until polls recover. The threshold scales with the
   configured poll interval so a long-interval channel does not digest every
-  poll; a sustained API outage (failed polls do not save the cursor) counts as
-  a gap, which matches the backlog semantics.
+  poll.
 
-### 3. Comment backlog digest (first complete watch pass after a gap)
+### 3. Comment backlog digest (per-PR, armed by the gap)
 
-`runPrStateWatch` reads the flag into a pass-local digest mode and clears the
-flag only after a pass completes (a rate-limit/credential abort or a failed
-state save keeps it for the next pass; PRs already digested have advanced
-cursors, so re-running digest mode is a no-op for them).
+The global flag ARMS a persisted per-entry `digestPending` flag on every active
+watch entry (including entries outside the watch-cap slice, so a capped PR
+keeps its arm until watched). The global flag clears once a trusted,
+non-aborted pass has watched something; the per-entry flag carries the digest
+for individual PRs across per-PR errors, cap exclusion, untrusted snapshots,
+and restarts. An entry's arm clears only when its backlog is actually consumed
+(digest settled, genuine no-target retirement, or nothing to deliver); a
+silent first observation clears it too. A complete-but-empty binding snapshot
+is authoritative absence: the entry prunes under the existing contract, and a
+binding that appears later is a silent first observation, not a digest.
 
-In `watchPrComments`, digest mode replaces the per-comment dispatch loop:
+In `watchPrComments`, an armed entry replaces the per-comment dispatch loop:
 
-- All deliverable candidates (authorship-excluded and gate-filtered exactly as
-  today) become ONE private-only envelope:
-  - `messageId`: `comment-digest:<n>:<sha256-40 of sorted member keys>`
-    (content-hash identity, mirroring the aggregate lane).
-  - Class: metadata keeps `Trigger: comment.`, so `boundEventClass` resolves
-    `comment` — role routing is byte-identical to individual comment-watch
-    deliveries.
-  - Text: a localized lead with the total count, then the newest
-    `MAX_AGGREGATE_COMMENTS` entries (author lead, body excerpt capped at
-    `MAX_AGGREGATE_COMMENT_CHARS` with the existing truncation notice, comment
-    URL), then the existing `omittedNotice` for the remainder. The shared bound
-    prompt body ceiling still caps the final text visibly.
-  - Dedupe: `dispatchedComments` records EVERY member key, so a re-list after
-    a crash filters consumed members individually; a grown re-fetch window
-    dispatches only the new remainder under a fresh hash (the aggregate lane's
-    superset semantics).
-- Authorship exclusion for the digest is the UNION of per-member exclusions: a
-  session that authored ANY bundled comment is excluded from the digest.
-  Rationale: a session that posted during the gap was active elsewhere and
-  already holds the context; the digest targets the dormant followers. If
-  every target is excluded, the digest retires with the existing
-  `comment_watch_no_target` journal row and the cursor advances (consumed with
-  a trace, exactly like today's no-target path).
-- Digest mode BYPASSES the pass-wide comment burst budget: the budget bounds
-  per-comment task fan-out, while a digest is one task per PR however large
-  its backlog, and the watch limit already bounds the PR fan-out. Spending
-  the budget would push tail PRs (watch limit 30 > budget 20 by default) back
-  to per-comment delivery once digest mode clears. The cursor commits
-  `nowIso` when the dispatch settles, holds `since` when it does not (retry
-  next pass), and the gate-grace hold keeps its existing one-cycle semantics
-  at batch granularity.
+- **Authorship exclusion**: a target is excluded only if it authored EVERY
+  deliverable member (it already holds the whole context). A partial author
+  still receives the digest — the mutual-authorship case (two roles each
+  wrote one member) must not consume the bundle with zero prompts. Only when
+  every target authored every member does the digest retire with the existing
+  `comment_watch_no_target` journal row and the cursor advances.
+- **Body budget, newest-first**: the shared bound-prompt ceiling
+  (`BOUND_PROMPT_BODY_MAX_CODE_POINTS`, 6,000) keeps the PREFIX, so the digest
+  allocates it newest-first: full member lines (author lead, excerpt capped at
+  `MAX_AGGREGATE_COMMENT_CHARS` with the truncation notice, comment URL) are
+  accepted from the newest backwards while they fit under the ceiling minus
+  the lead and the front omission notice. The newest members therefore always
+  survive; the shared cap never truncates the digest tail.
+- **Omission is lossless**: members that do not fit (beyond the newest-20
+  window or dropped by the budget) are counted in a FRONT-placed
+  `offlineOmittedNotice` ("…will follow as individual deliveries"), their
+  dedupe keys are NOT recorded, and the cursor holds before the backlog head
+  so the next pass re-lists them and delivers them individually (the rendered
+  suffix dedupes). Nothing is consumed without being delivered.
+- Envelope: `messageId` is `comment-digest:<n>:<sha256-40 of sorted RENDERED
+member keys>` (content-hash identity over what was actually delivered,
+  mirroring the aggregate lane's superset semantics); metadata keeps
+  `Trigger: comment.`, so `boundEventClass` resolves `comment` and role routing
+  is byte-identical to individual comment-watch deliveries. `dispatchedComments`
+  records exactly the rendered member keys.
+- Cursor: commits `nowIso` when the dispatch settles and nothing was omitted;
+  holds before the backlog head when members were omitted; holds `since` when
+  the dispatch is refused (no durable claim), keeping the arm for retry. The
+  gate-grace hold keeps its existing one-cycle semantics at batch granularity.
+  If not even one member fits (a pathologically long URL), the digest falls
+  through to the per-comment path and consumes its arm.
+- The digest path never decrements the pass-wide comment burst budget (one
+  task per PR, not per comment), so a digest pass always finds the budget
+  intact; the budget continues to bound per-comment fan-out.
 - Cross-instance note: individual comment-watch deliveries dedupe across
   channel instances via stable GitHub ids; a digest's hash identity is
   instance-local (each instance has its own cursor), matching watch-event
@@ -213,34 +246,51 @@ In `watchPrComments`, digest mode replaces the per-comment dispatch loop:
   through the same gap each deliver one digest.
 
 New copy entries in `BOUND_DELIVERY_COPY` (en + zh): an offline-backlog lead
-with the count. Structural markers and platform values follow the existing
-language contract (English byte-identical entries for `en`).
+with the count and an offline omission notice. The omission notice rides at
+the FRONT because the shared body cap truncates the tail. Structural markers
+and platform values follow the existing language contract (English
+byte-identical entries for `en`).
 
 ## Design decisions and rationale
 
-1. **Fold at detection, not drain.** New facts arrive only in `watchOnePr`;
-   folding there covers both drain variants (legacy and role-aware) with one
-   code path and no interaction with the claim/fired crash windows. A
-   drain-time check would add nothing: the head only advances through an
-   observation, which already folds.
-2. **Dead-letter is the fold commit point.** Reusing the overflow retirement
-   surface keeps "surfaced, never silent" and the fail-closed write semantics
-   operators already know; `isDeadLettered` keeps a folded key undeliverable
-   even if a crash interleaves.
+1. **Fold on facts at detection AND recovery.** New facts arrive in
+   `watchOnePr`; folding there covers both drain variants (legacy and
+   role-aware) with one code path. The recovery-time fold against the
+   persisted baseline covers the polls whose watch pass was skipped (budget,
+   failed refresh), where recovery would otherwise deliver the stale parked
+   task before any detection could fold it. The predicate is fact-driven so a
+   retained event (failed dead-letter write) and a green re-run both fold on
+   later passes without a new transition.
+2. **Dead-letter is the fold commit point, scoped per record.** Reusing the
+   overflow retirement surface keeps "surfaced, never silent" and the
+   fail-closed write semantics operators already know. Event-scoped records
+   retire every task of the event; per-task exhaustion records retire only
+   their named task, so a sibling role's parked task survives.
 3. **Digest only the comment lane.** It is the only unbounded backlog source;
    its `comment` class keeps role routing identical without touching the
    published channel-base resolution chain. State events are bounded (≤4 per
    PR per gap) and current after folding.
-4. **Heartbeat in the notification cursor, not the watch state.** The cursor is
-   saved after every successful poll regardless of watch eligibility (budget
-   skips, missing bindings), so the gap signal cannot be faked by a watch that
-   legitimately did not run. The watch state file is only written when the
-   watch pass runs.
-5. **Union authorship exclusion.** Per-member exclusion cannot apply to a
-   bundle; excluding sessions that posted during the gap is the conservative
-   direction (they were active) and preserves the self-trigger loop prevention
-   for dormant sessions.
-6. **No config keys.** The behavior is a strict improvement on the reported
+4. **Heartbeat in the notification cursor, stamped on success only.** The
+   cursor is saved after every successful poll regardless of watch
+   eligibility, so the gap signal cannot be faked by a watch that legitimately
+   did not run; failed polls leave it stale, so an in-process outage is
+   detected when polls recover. The comparison runs every poll (a pure local
+   check), not once per process.
+5. **Exclude only full-context authors.** A target that authored EVERY
+   deliverable member already holds the whole context and is excluded; a
+   partial author still receives the digest. The earlier union rule consumed
+   the mutual-authorship bundle with zero prompts — a regression against the
+   per-comment path, which delivers each session the comments it did not write.
+6. **Per-PR persisted digest arm.** A one-shot global flag cleared by "a pass
+   completed" lost the digest on empty/untrusted snapshots, per-PR errors, and
+   watch-cap exclusion. The persisted per-entry arm clears only when that PR's
+   backlog is consumed, so the feature survives exactly the degraded first
+   polls it exists for.
+7. **Newest-first body budget, lossless omission.** The shared cap keeps the
+   prefix; allocating newest-first guarantees the most actionable members
+   survive, and holding the cursor before the omitted prefix (with their keys
+   unrecorded) makes omission lossless instead of silent consumption.
+8. **No config keys.** The behavior is a strict improvement on the reported
    pain with visible retirements; an operator switch would add surface without
    a requested use case (simplicity first).
 
@@ -248,75 +298,88 @@ language contract (English byte-identical entries for `en`).
 
 - The notification cursor, mark-as-read, publication audit, and public fallback
   contracts are untouched.
-- `PendingWatchEvent.headChangeFrom` is additive; `isPrWatchEntryShape`'s
-  pending validator checks key/issueNumber/envelope/delivery and passes extra
-  fields, so legacy state files load unchanged.
+- `PendingWatchEvent.headChangeFrom` and `PrWatchEntry.digestPending` are
+  additive; `isPrWatchEntryShape` validates them loosely (extra/boolean fields
+  pass), so legacy state files load unchanged.
 - `lastPollAt` is additive to `GithubCursor`; legacy cursors without it skip
-  digest detection on the first upgrade poll (no false digest).
+  digest detection until the first successful poll stamps it (no false digest).
 - channel-base is a published package; this design changes no export of it.
-- The digest body respects `BOUND_PROMPT_BODY_MAX_CODE_POINTS` via the shared
-  envelope cap; excerpts reuse the aggregate lane's constants.
+- The digest bounds itself to `BOUND_PROMPT_BODY_MAX_CODE_POINTS` before the
+  shared envelope cap applies; excerpts reuse the aggregate lane's constants.
 
 ## Risks
 
-- **Information density.** A digest excerpt cap can hide an actionable comment
-  behind `omittedNotice`; the notice names the remedy (list the PR comments)
-  and every member URL pattern remains derivable from the PR. Accepted: the
-  alternative is the prompt flood this design removes.
+- **Information density.** A large backlog omits members from the digest body;
+  the front notice names the count and promises individual follow-up, and the
+  held cursor guarantees that follow-up. Accepted: the alternative is the
+  prompt flood this design removes.
 - **Pre-shutdown stale pending.** Events still in `pending` at shutdown drain
   before the first fold (see scope). Bounded and current-at-detection;
   accepted for v1. Parked backpressure tasks — the dominant stale path — are
-  folded.
-- **Task-store scan cost.** Folding reads the inbound task store once per
-  detecting PR per pass; the store is already read every poll by reconcile and
-  recovery, and the scan only runs when a superseding fact was observed
-  (head change / conflict resolution), not on steady-state polls.
-- **Digest mode re-entry.** A pass aborted mid-way keeps the flag; already
-  digested PRs have advanced cursors and produce no second digest. A PR whose
-  first digest dispatch failed retries from `since` with member dedupe.
+  folded at detection and recovery.
+- **Task-store scan cost.** The store is read once per watch pass (not per PR)
+  and once per recovery pass; both already read it every poll. The fold
+  compares keys against the baseline in memory.
+- **Digest arm re-entry.** An armed entry whose dispatch was refused retries
+  from `since` with member dedupe; an omitted tail delivers individually on
+  the next pass. A complete-but-empty snapshot prunes the entry (authoritative
+  absence), so a later binding is a silent first observation.
 - **Multi-instance duplication** during a shared gap (one digest per instance)
   — consistent with existing watch-event semantics, documented above.
 
 ## Validation plan
 
-- Unit tests (collocated, `GithubAdapter.test.ts`): each folding rule on both
-  pending events and parked backpressure tasks, including the fail-closed
-  dead-letter write, `unknown`-SHA and null-mergeable non-folding, in-flight /
-  delivered / non-backpressure tasks never folded, recovery completing a
-  dead-lettered watch task, legacy pending without `headChangeFrom`; gap
-  threshold scaling and legacy-cursor tolerance; digest bundling, member
-  dedupe on re-list, union authorship exclusion, no-target retirement, burst
-  budget bypass, cursor commit/hold, flag clearing on complete pass and
-  retention on abort, first-observation silence under a gap.
+- Unit tests (collocated, `GithubAdapter.test.ts`, 52 cases in the
+  `startup backlog` suite): each folding arm on pending events and parked
+  tasks (head advanced, CI recovered, conflicts resolved, PR reopened, round
+  trip), fact-driven retry after a failed dead-letter write, recovery-time
+  baseline fold when the watch pass is skipped, scoped per-task vs event-scoped
+  dead-letter records (sibling role survives), fail-closed dead-letter writes,
+  `unknown`-SHA and null-mergeable non-folding, in-flight/delivered tasks never
+  folded, cross-PR task scoping, coalescing with a `watch_coalesced` journal
+  row and end-to-end `headChangeFrom` minting; gap floor (6 min no / 11 min
+  yes), interval scaling, in-process outage recovery, legacy-cursor tolerance,
+  clock skew; digest body budget (newest survives, no tail truncation),
+  lossless omitted tail follow-up, content-hash id shape, re-list dedupe,
+  mutual authorship, no-target retirement, cursor commit/hold, per-PR arm
+  retention across partial/empty snapshots, fetch errors, and budget
+  exhaustion, first-observation silence under a gap.
 - E2E (hermetic mock GitHub + isolated daemon, per the bound-delivery fixture
   pattern; two-stage: boot → bind → silent baseline → stop → rewrite
   `commentSince`/`lastPollAt` to simulate the gap → reboot): assert ONE digest
-  prompt in the bound session transcript with all member dedupe keys recorded;
-  a no-gap control asserts unchanged per-comment delivery; a backpressure arm
-  (full prompt queue, CI red then head advance) asserts the stale `ci_failure`
-  task is retired from `github-inbound-tasks.json` with a superseded
-  dead-letter row; a first-observation-under-gap arm asserts silence.
-  Pre-seeding watch state before the first boot does NOT work: the first
-  complete-but-empty binding snapshot prunes unbound entries.
+  prompt in the bound session transcript with the rendered member dedupe keys
+  recorded; a no-gap control asserts unchanged per-comment delivery; a
+  backpressure arm (full prompt queue, CI red then head advance) asserts the
+  stale `ci_failure` task is retired from `github-inbound-tasks.json` with a
+  superseded dead-letter row; a full-size-backlog arm asserts the newest
+  members survive the body budget; a first-observation-under-gap arm asserts
+  silence. Pre-seeding watch state before the first boot does NOT work: the
+  first complete-but-empty binding snapshot prunes unbound entries.
 - `npm run build && npm run typecheck`, focused vitest for the changed files.
 
 ## Acceptance criteria
 
-1. A `ci_failure` for a non-current head, a `merge_conflict` after a positively
-   observed non-dirty state, and intermediate head hops are retired/coalesced
-   with dead-letter + journal traces — whether the event sits in `pending` or
-   is a parked backpressure task; a recovery pass completes a dead-lettered
-   watch task's retirement instead of delivering it; nothing is silently
-   consumed; a failed dead-letter write keeps the event queued / task parked;
-   in-flight and delivered tasks are never folded.
+1. A `ci_failure` for a non-current head or a positively recovered head, a
+   `merge_conflict` after a positively observed non-dirty state, a
+   `state_change` after a reopen, and intermediate pending head hops are
+   retired/coalesced with dead-letter + journal traces (coalescing: journal
+   only) — whether the event sits in `pending` or is a parked backpressure
+   task, and whether the watch pass ran or was skipped; a recovery pass
+   completes a dead-lettered watch task's retirement only when the record
+   covers that task; nothing is silently consumed; a failed dead-letter write
+   keeps the event queued / task parked; in-flight and delivered tasks are
+   never folded.
 2. After a gap above the threshold, each bound PR's same-account comment
-   backlog arrives as one private digest prompt with class `comment`, all
-   member dedupe keys recorded, authorship union exclusion applied, and the
-   cursor advanced exactly as the per-comment path would.
+   backlog arrives as one private digest prompt with class `comment`, the
+   newest members within the body budget, exactly the rendered member dedupe
+   keys recorded, full-context authors excluded, and any omitted members
+   following as individual deliveries (cursor held, nothing lost).
 3. Without a gap (or on first observation), delivery is byte-identical to
    today: per-comment prompts, silent baselines, no digest.
-4. Role-aware routing, recovery of claimed tasks, the notification lane, and
-   the public publication contract are unchanged.
+4. Role-aware routing, recovery of accepted/running/delivered tasks, the
+   notification lane, and the public publication contract are unchanged;
+   recovery of a dead-lettered parked watch task now completes its retirement
+   (§1) instead of delivering it.
 
 ## Open questions
 
