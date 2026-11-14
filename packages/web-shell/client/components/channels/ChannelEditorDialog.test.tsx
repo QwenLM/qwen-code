@@ -630,6 +630,68 @@ describe('ChannelEditorDialog', () => {
     });
   });
 
+  it.each([
+    {
+      language: 'en' as const,
+      name: 'Instance name',
+      url: 'Webhook URL',
+      save: 'Save',
+      secret: 'Signing secret',
+      hidden: ['Access control', 'Conversation management', 'Pairing'],
+    },
+    {
+      language: 'zh-CN' as const,
+      name: '实例名称',
+      url: 'Webhook 地址',
+      save: '保存',
+      secret: '加签密钥',
+      hidden: ['访问控制', '会话管理', '配对'],
+    },
+  ])('saves a URL-only WeCom webhook editor in $language', async (copy) => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      type: 'wecom-webhook',
+      displayName: 'WeCom Webhook',
+      manageable: true,
+      outboundOnly: true,
+      fields: [
+        {
+          key: 'webhookUrl',
+          label: 'Endpoint (descriptor)',
+          kind: 'secret',
+          required: true,
+          envResolvable: true,
+        },
+      ],
+    };
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor, language: copy.language, onSave });
+    expect(inputByLabel(copy.url)?.type).toBe('password');
+    expect(inputByLabel(copy.secret)).toBeNull();
+    expect(inputByLabel('Bot ID')).toBeNull();
+    expect(inputByLabel('Bot Secret')).toBeNull();
+    expect(document.body.textContent).not.toContain('(descriptor)');
+    for (const hidden of copy.hidden) {
+      expect(
+        document.querySelector('[role="dialog"]')?.textContent,
+      ).not.toContain(hidden);
+    }
+    await act(async () => {
+      setInputValue(inputByLabel(copy.name)!, 'wecom-notices');
+      setInputValue(inputByLabel(copy.url)!, '$WECOM_WEBHOOK_URL');
+    });
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === copy.save,
+    )!;
+    await act(async () => save.click());
+    expect(onSave).toHaveBeenCalledWith('wecom-notices', {
+      expectedRevision: 'revision-1',
+      config: { type: 'wecom-webhook' },
+      secrets: {
+        webhookUrl: { operation: 'replace', value: '$WECOM_WEBHOOK_URL' },
+      },
+    });
+  });
+
   it('shows the default output mode for an existing unconfigured channel and saves a changed mode', async () => {
     const descriptor: DaemonChannelTypeDescriptor = {
       ...DINGTALK,

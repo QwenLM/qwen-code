@@ -1165,7 +1165,7 @@ export class AgentCore {
     // On the shared agent loop (`experimental.unifiedAgentLoop`), each model
     // round is the loop's round on a `Turn` over this agent's chat.
     const onSharedLoop =
-      this.runtimeContext.isUnifiedAgentLoopEnabled?.() === true;
+      this.runtimeContext.isUnifiedAgentLoopEnabled?.('agent-core') === true;
 
     while (true) {
       // Check abort before starting a new round — prevents unnecessary API
@@ -1935,7 +1935,7 @@ export class AgentCore {
       },
     };
     const useEventBus =
-      this.runtimeContext.isEventBusAgentLoopEnabled?.() === true;
+      this.runtimeContext.isEventBusAgentLoopEnabled?.('agent-core') === true;
     debugLogger.debug(
       `[AgentCore] subagent ${this.subagentId} round ${round} on the shared agent loop${useEventBus ? ' on the event bus' : ''} (prompt ${promptId})`,
     );

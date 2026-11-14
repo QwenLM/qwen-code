@@ -332,6 +332,12 @@ describe('runAcpToolBatch', () => {
       );
       expect(events()).toContainEqual(['error', undefined]);
       expect(recordToolResult).toHaveBeenCalledTimes(1);
+      // This cancellation settles with a recorded response, so it takes the
+      // fallback path that reads the kernel switch for the 'acp' surface; a
+      // wrong-but-valid label there must red this, not pass silently.
+      const kernelCalls = isEventBusAgentLoopEnabled.mock.calls;
+      expect(kernelCalls.length).toBeGreaterThan(0);
+      expect(kernelCalls.every(([surface]) => surface === 'acp')).toBe(true);
     } finally {
       confirmation.resolve();
       await running;
