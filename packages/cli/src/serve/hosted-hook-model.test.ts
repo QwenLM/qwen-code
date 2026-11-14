@@ -73,6 +73,7 @@ function fixture() {
   const scope: ManagedHookModelScope = {
     evaluate,
     bindBudget: vi.fn(),
+    diagnosticsEnabled: false,
     beginMainAttempt: vi.fn(),
   };
   return { config, generateContent, evaluate, usage, scope };
@@ -177,6 +178,7 @@ describe('Hosted Hook model boundary', () => {
         .mocked(loadCliConfig)
         .mock.calls[0]?.[9]?.toolInvocationGuard?.({} as never),
     ).toMatchObject({ allowed: false });
+    expect(vi.mocked(loadCliConfig).mock.calls[0]?.[9]?.lspDisabled).toBe(true);
   });
 
   it('cannot call the provider when controller authorization fails', async () => {

@@ -432,6 +432,26 @@ describe('web-shell publish artifact verifier', () => {
     expect(result.stderr).toBe('');
   });
 
+  it.each([
+    ['.', 'index.js'],
+    ['./transcript', 'transcript.js'],
+  ])('refuses a DOM-dependent %s entry', (key, file) => {
+    const result = runVerifier((fixture) => {
+      declarePackage(fixture, {
+        '.': { import: './dist/index.js' },
+        './transcript': { import: './dist/transcript.js' },
+      });
+      write(fixture, 'dist/index.js', 'export default 1;\n');
+      write(fixture, 'dist/transcript.js', 'export default 2;\n');
+      write(fixture, `dist/${file}`, 'new DOMParser();\n');
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      `${key} cannot be imported by Node without DOM globals`,
+    );
+  });
+
   it('keeps npm warnings out of the verifier output', () => {
     const result = runVerifier(
       (fixture) => {

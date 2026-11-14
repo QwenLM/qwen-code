@@ -40,6 +40,104 @@ Hosts with restricted upstream connectivity can set `DEBIAN_MIRROR`,
 `PIP_INDEX_URL` or `RUNNER_RELEASE_URL` at build time. The runner archive is
 still verified against its pinned digest when served from a mirror.
 
+## Browsers in the image
+
+The image bakes Chromium, its system libraries and ffmpeg. The lanes that
+install browsers (`ci.yml`, `e2e.yml`, `web-shell-visuals.yml`) skip their own
+install when `PLAYWRIGHT_BROWSERS_PATH` is set, and only this image sets it for
+them, so a job on it needs no browser egress and no apt round trip for the
+libraries. That holds for Chromium only: the image does not bake WebKit, and the
+lanes that install `chromium webkit` (hosted `ubuntu-latest` and the persistent
+ARM64 machines) still download both. A disposable container has no cache to
+reuse: without this, every visuals job paid a fresh download, and on 2026-11-11
+the upstream CDN served the browser at about 61 KB/s from the hz4/hz5 hosts — a
+110 MB headless shell was still at 70% after six minutes when two jobs were
+cancelled. The same object came from `cdn.npmmirror.com` at 8.9 MB/s on the same
+host, which is why `PLAYWRIGHT_DOWNLOAD_HOST` defaults there. Set it to the
+upstream CDN, or to an internal mirror, on a host that reaches one faster.
+
+The mirror is incomplete: its `builds/cft/` starts at 148.0.7778.96, so it
+carries 1.61.1's and 1.62.1's Chromium but not 1.58.2's 145.0.7632.6 (nor
+1.58.2's non-CFT `builds/chromium/1208/`). The install loop therefore falls back
+per version to Playwright's own CDN list, and logs which version it retried, so
+the default host cannot fail the build on a version it does not mirror.
+
+Size is the price. From the archives' Content-Length, the three versions are
+about 0.92 GB of downloads, roughly 2.0-2.3 GB extracted, plus 2.2-2.5 GB for
+the apt packages (Chromium's system libraries and ffmpeg) — estimates, not a
+measured image delta; weigh them against the host's disk floor.
+
+Every playwright the repository resolves picks its own browser revision, and the
+tree currently carries three: 1.61.1 at the root and in Web Shell, 1.62.1 under
+Browser Use, and 1.58.2 pulled in transitively. All three are baked, because the
+integration lane installs browsers for Browser Use as well and would otherwise
+download at job time. `PLAYWRIGHT_VERSIONS` overrides the list.
+
+The list lives in the Dockerfile because this image's build context is its own
+directory, so the lockfile is not available to it; the revisions are read from
+each version's own `browsers.json` during the build, never written down.
+`scripts/tests/verify-capture.test.js` compares the list against `pnpm-lock.yaml`,
+so a dependency bump fails that test rather than silently leaving a revision to
+be downloaded inside a job. The final layer asserts the font baseline, ffmpeg and
+a launchable Chromium, and fails the build if any of them is missing.
+
+## Interpreter archives in the image
+
+The image also carries the two archives the standalone runtime regression runs
+under: the pinned Node tarball and the pinned Bun tarball. This is the same
+empty-cache problem as the browsers, but its failure mode is worse than a slow
+job.
+
+`Configure persistent standalone runtime cache (self-hosted)` in `ci.yml` points
+`QWEN_STANDALONE_RUNTIME_CACHE` at `${HOME}/.cache/qwen-code/standalone-runtimes`.
+On a persistent runner that is a host-wide directory, so each archive is
+downloaded once per host. Inside a disposable container the same path is in the
+container's own filesystem: on hz4 both archives sit under the runner user's home
+on the host while the container's directory does not exist at all. Nothing is
+ever reused, so every job downloads both.
+
+When that download fails, no test fails. Each archive gets three attempts at
+300 s each and then rethrows, the standalone step exits 1, and that becomes the
+side lane's verdict — after every workspace suite and the whole scripts suite
+have already passed. Job
+[131062149608](https://github.com/QwenLM/qwen-code/actions/runs/43168498988/job/131062149608)
+reads exactly that: both archives were downloaded — `runtime archive cached:` is
+logged after the fetch writes the file back, not on a hit (a hit logs
+`runtime archive reused from cache:`) — and then Bun timed out three times against
+`registry.npmjs.org`, so the lane reported `Side lane exited with 1` under 2786
+passing script tests. That is roughly 110 MB of downloads per job with nothing
+reused. The unit lane's RPC retry cannot help, because the failure is not inside a
+suite.
+
+The archives are verified during the build against the published digests the
+script already checks: Node's `SHASUMS256.txt` entry and Bun's npm
+`dist.integrity`, per architecture. A mirror serving different bytes fails the
+build rather than a job. `NODE_RUNTIME_MIRROR` and `BUN_RUNTIME_MIRROR` override
+the two sources for a host that reaches an internal mirror faster;
+`NODE_RUNTIME_VERSION` and `BUN_RUNTIME_VERSION` must stay equal to the pins in
+`scripts/lib/standalone-runtime-pins.js`, which
+`scripts/tests/runtime-archive-cache.test.js` enforces along with the digests.
+
+The seed is not the cache. `QWEN_CI_BAKED_RUNTIME_CACHE` names a root-owned,
+world-readable directory, while the cache has to be writable: reusing an archive
+refreshes its mtime and a weekly sweep removes what no run has used for a week,
+and both are wrapped in a catch, so pointing the cache at a read-only directory
+would disable them silently. The entrypoint therefore copies the archives into
+the job's own cache directory before the runner starts, skipping any name already
+present. A copy that fails only logs: the fetch falls back to downloading exactly
+as before.
+
+About 110 MB of archives for the two interpreters on one architecture — measured
+from the cached files on hz4 (57 MB Node, 53 MB Bun), against the 2 GB the
+browsers already cost.
+
+The two archives do not share a suffix: Node's is `.tar.gz` and Bun's is `.tgz`.
+Anything that selects them — the build's count, the entrypoint's copy loop — has
+to name both, because `*.tgz` matches only Bun. The suite therefore extracts
+those selectors and runs them against the real filenames instead of asserting
+that a pattern appears in the file: a loop that visits one archive exits 0
+exactly like one that visits two, so reading the text cannot tell them apart.
+
 For a real deployment, publish the image to a registry and configure its
 immutable `repository@sha256:...` digest. A local `sha256:...` image ID may be
 used for a trial. Runner and base versions need routine security updates.
@@ -49,12 +147,15 @@ used for a trial. Runner and base versions need routine security updates.
 Run one manager on each host, managing only that host's Docker socket. Give each
 host a unique `poolId`; matching runner labels let GitHub share work across the
 hosts without a central scheduler. `slots` is a per-host limit, not a fleet total.
-Runner display names use `ecs-qwen-<poolId>-<slot>`, with two-digit slots, for
-example `ecs-qwen-hz4-ephemeral-01`. The name stays the same when a slot is
-replenished; each job still gets a fresh GitHub runner ID, container and internal
-UUID for state and diagnostics. The `ecs-qwen-` prefix preserves existing CI
-worker caps and timeouts. Restart recovery also accepts earlier UUID-based
-runner names, including the old `qwen-` prefix.
+Runner display names use `ecs-qwen-<poolId>-<slot>-<suffix>`, with two-digit
+slots and an eight-hex-character suffix, for example
+`ecs-qwen-hz4-ephemeral-01-1a2b3c4d`. The suffix is fresh for every
+registration, so a leftover registration that still owns an earlier name can
+never reject a replacement with HTTP 422; each job also gets a fresh GitHub
+runner ID, container and internal UUID for state and diagnostics. The
+`ecs-qwen-` prefix preserves existing CI worker caps and timeouts. Restart
+recovery accepts the suffixed form, earlier UUID-based runner names, and the
+old `qwen-` prefix.
 
 Install Docker, Node 22, `gh`, and `flock` on the host. The manager uses a
 dedicated PAT supplied as `GH_TOKEN`. The account must administer the target
@@ -81,20 +182,97 @@ label set matching the actual CI route. The current ARM64 pool registers only
 `self-hosted` and `ecs-qwen-ephemeral`. Omitting generic Linux/ARM64 labels keeps
 unrelated ARM64 jobs out of this pool. Validate the existing
 CI jobs with these formal labels rather than a separate smoke workflow. The
-example runs one slot; hz4 currently maintains ten fixed slots. Keep that
-capacity until real CI execution and resource use are stable. Restrict configuration and
+example runs one slot; hz4 currently maintains thirty fixed slots, and the
+manager accepts up to 64 slots per host. Keep capacity conservative until real CI execution and resource use are stable. Restrict configuration and
 credential directories to the manager account.
 
-The `ttlSeconds` limit starts when the container starts, including idle time.
-A job assigned near the deadline can be interrupted. The manager removes and
-replaces the container; GitHub remains authoritative for job status. The
-manager logs cleanup but does not distinguish expiry from normal completion.
+If the host requires an HTTP proxy for external access (GitHub, npm, etc.),
+optionally add a `proxy` object to the config:
+
+```json
+"proxy": {
+  "http": "http://proxy.example:7890",
+  "https": "http://proxy.example:7890",
+  "noProxy": "localhost,127.0.0.1,100.100.100.200"
+}
+```
+
+Use the host's reachable address (not `127.0.0.1`) so containers can reach it.
+The proxy URLs must not embed credentials (`user:pass@`): the values are
+injected into every runner container, including containers that execute
+untrusted fork PR jobs, so embedded credentials would be exposed. The
+manager rejects such URLs at startup.
+`noProxy` should include the cloud metadata endpoint (`100.100.100.200`)
+to avoid leaking instance credentials through the proxy.
+
+`ttlSeconds` now sets the age at which health checks begin; it is not a hard
+container lifetime. Healthy idle runners stay available, and an assigned job
+can finish even if the container was already near that age. After this age the
+manager checks the recorded GitHub runner ID/name and online status every five
+minutes. An unavailable, offline or mismatched registration logs `WATCHDOG ALERT`
+and keeps the container. Job runtime limits belong to the workflow's
+`timeout-minutes` (currently 45–90 minutes for the routed jobs).
+
+Only a confirmed container exit triggers normal replacement. A failed
+`docker wait` client is checked against Docker state and retried rather than
+being treated as a job exit. The wait client has no age timeout and is cancelled
+when monitoring ends. A stuck runner that cannot honor a GitHub cancellation
+requires operator inspection and targeted recovery; an offline registration is
+not proof that killing its container is safe. This deliberately trades automatic
+age-based reclamation for avoiding interruption of live jobs.
+
 A nonzero or unknown container exit status delays replenishment by 60 seconds;
 a successful short job is replenished immediately. GitHub remains authoritative
 for job success. Diagnostic export is best effort: stderr is not archived, and
 output exceeding the capture limits is discarded.
 `minDiskBytes` applies to the Docker data filesystem. Configure and verify
 disk quotas or a dedicated data volume as appropriate for the host.
+
+Failed cycles retry with jittered exponential backoff: 10 s doubling to a
+60 s cap, or 30 s doubling to a 300 s cap while GitHub answers HTTP 403/429,
+so a rate-limited pool stops sustaining its own rate limit. The backoff
+sleep stays interruptible and a shutdown cuts it short.
+
+`stallAlertSeconds` (default 1800, thirty minutes) sets how long a slot may
+repeat the same failure before the manager logs `STALL ALERT` instead of the
+ordinary retry line. The threshold is wall-clock, so it holds under any retry
+cadence, and the default sits well above the 300 s backoff ceiling on purpose:
+a pool-wide rate-limit storm stalls every slot at once, and a threshold shorter
+than the cadence would put one alert per slot in the journal simultaneously.
+The clock resets whenever a cycle succeeds or the failure changes, and each
+stall episode alerts once. Because the check happens when a failure is
+observed, the alert lands on the first failure at or after the threshold, so
+the reported duration is the threshold rounded up to the current cadence. A
+stall alert means the slot is serving no jobs and needs reconciliation; the
+manager keeps retrying and never exits on its own, so systemd does not restart
+it. Alert on that journal marker rather than on service state.
+
+`drainTimeoutSeconds` (default 0, disabled; the example config sets 1800)
+turns SIGTERM into a drain instead of a fixed grace deadline. Replenishment
+stops immediately, and a slot holding an assigned job keeps serving until that
+job's ephemeral runner exits on its own. A slot whose container shows no
+`Runner.Worker` process for two consecutive five-second polls is retired before
+its container stops: the manager deletes the runner's GitHub registration and
+treats an accepted DELETE as the point at which the runner can no longer be
+assigned work. That gate is what covers the gap between the last idle probe and
+`docker rm -f` — a job assigned there would otherwise be killed by the removal.
+A refused retirement keeps the container draining and restarts the idle window:
+422 (GitHub still reports the runner busy) means a job may have just been
+assigned, 403/429 (rate limiting) is an unknown answer and backs off on the same
+ladder as the rest of the manager, and any other failure fails closed.
+The drain window is added to `shutdownGraceSeconds`, which remains the final
+forced-cleanup bound; keep the sum below the unit's `TimeoutStopSec` (the
+supplied unit allows 55 minutes). A job that outlives the window is stopped and
+the slot logs `drain window elapsed`, so size the window against the longest
+routed job. JIT labels are read-only, so removing the scheduling label is not an
+available drain mechanism: the registration DELETE is the stop signal, and the
+worker poll is what keeps that attempt from firing while a job is running.
+Record the deployed commit and manager checksum together; update them only
+after installing that exact source.
+
+Upgrading: `stallAlertRetries`, the earlier retry-count threshold, is no longer
+read. A config that still carries it has no effect and falls back to the
+1800 s default, so set `stallAlertSeconds` explicitly if you had tuned it.
 
 ## Install and operate
 
@@ -130,6 +308,44 @@ resources first. A cleanup or ambiguous registration error blocks that slot;
 inspect its state and GitHub runner list before manual reconciliation. Never
 remove unrelated runners or run a global Docker prune.
 
+A container or network whose slot state was lost is reconciled from its
+`qwen.instance` label, so an interrupted `docker create` no longer wedges the
+slot permanently. With no slot state, every leftover in the slot's namespace
+is an orphan: when the labels disagree about the identity, the whole pile is
+swept without a GitHub identity and the slot replenishes. Registrations are
+then swept by the slot's naming scheme, but only when every leftover carried
+this slot's identity prefix and GitHub reports the registration offline —
+this relies on each host having a unique `poolId`, so the prefix cannot name
+another host's runners. A foreign or missing identity label still blocks
+registration sweeping for manual reconciliation (the foreign resource itself
+is removed from the slot namespace). The label carries the instance name, not
+the registration's display name, so
+recovery matches registrations under both the bare display name written by
+older versions and the current suffixed one; an ambiguous match still blocks
+the slot rather than deleting anything. A label-recovered match (no recorded
+registration name or id) is only deleted when GitHub explicitly reports it
+offline; an online, status-less or unknown-status match blocks the slot
+instead, because it may belong to a live runner outside this host's view. That
+refusal never keeps the container: a retained container would keep its own
+runner heartbeating, so an online match backed by this slot's leftover runner
+could never reach offline and the refusal would sustain itself. The containers
+are removed and a labelled network is kept (or created first, when the pile
+had none) as the retry anchor — nothing about a label-recovered identity is
+written to a state file, so that network is what brings the slot back into
+cleanup on the next cycle. A permanent identity refusal (an ambiguous or
+mismatched identity) reclaims the containers the same way and keeps reporting
+the same error from the network anchor until a human reconciles; it never
+deletes a registration. Because the containers are gone by the time anyone
+investigates a wedged slot, the diagnostics to inspect are the `.log` and
+`.tar` exports written to the log directory before the refusal, not a live
+container. A runner deletion GitHub rejects (for example while it
+still reports the runner busy) keeps either the slot state or, for a
+label-recovered identity, the network anchor, and is retried, instead of
+dropping the only record that can remove the registration. The identity-less
+sweep deletes registrations before removing the resources for the same
+reason: a rejected deletion is still retried on the next cycle while the pile
+remains.
+
 ```sh
 sudo systemctl stop qwen-ephemeral-runner.service
 ```
@@ -137,9 +353,19 @@ sudo systemctl stop qwen-ephemeral-runner.service
 The existing CI routes untrusted fork PR build, Linux unit tests, lint and no-AK
 integration jobs directly to the formal ARM64 disposable label set. No
 repository-variable switch, configuration relay or manual smoke workflow is
-needed. Trusted and same-repository PRs retain their existing routes. GitHub
-queues excess jobs; the manager replaces completed runners within ten fixed
-slots, without demand-based autoscaling.
+needed. Under that first stage, trusted and same-repository PRs retained their
+existing routes. GitHub queues excess jobs; the manager replaces completed
+runners within ten fixed slots, without demand-based autoscaling.
+
+Update 2026-11-11: two more pool consumers, both credential-free PR jobs that
+run PR code with a read-only token. Web-shell Visuals capture uses this pool for
+every PR, and the Managed Host bundle build uses it on `pull_request` events
+only — its post-merge push and manual runs, and the credential-bearing Visuals
+publisher, stay GitHub-hosted. Size the pool for these lanes as well: they now
+arrive on same-repository PRs, not only untrusted forks. Their rollback lever is
+`MAINTAINER_ECS_RUNNER_DISABLED=true`, which the `ci.yml` `pr_test_runner`
+selector below does not control. Details:
+[disposable container runners design](../../../docs/design/2026-11-07-ephemeral-container-runners.md).
 
 Repository variables are unavailable in fork-triggered CI. Existing global
 overrides still work in contexts where their values are available, but cannot
@@ -150,3 +376,8 @@ already-selected work and trigger fresh CI using the updated workflow; reruns
 of saved older workflows retain their old routing. Jobs do not migrate
 automatically. Dedicated-host/network and runner-access-policy limitations
 remain tracked in #16514.
+
+The same fork limit applies to the two web-shell lanes: a fork run cannot read
+`MAINTAINER_ECS_RUNNER_DISABLED`, so its escape is editing that lane's `runs-on`
+selector on `main` and triggering a fresh event. The switch does reach their
+same-repository runs.
