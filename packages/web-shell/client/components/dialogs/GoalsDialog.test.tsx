@@ -1363,6 +1363,84 @@ describe('GoalsDialog multi-workspace', () => {
     expect(document.querySelector('select')!.value).toBe('/w-primary');
   });
 
+  it('never offers an untrusted primary as a create target', async () => {
+    // The fan-out keeps the untrusted primary so its listing failure stays
+    // loud, but the create path refuses it — the picker must not default to
+    // a target every submit would reject. Removing the creatable filter reds
+    // this case (options and default would include the untrusted primary).
+    const onCreateGoal = vi.fn().mockResolvedValue(undefined);
+    await mount([], {
+      workspaces: [{ ...primaryWs, trusted: false }, secondaryWs],
+      onCreateGoal,
+      listGoalsByWorkspace: {},
+    });
+
+    click(findButton('New goal'));
+    const select = document.querySelector('select');
+    expect(Array.from(select!.options).map((o) => o.value)).toEqual([
+      '/w-secondary',
+    ]);
+    expect(select!.value).toBe('/w-secondary');
+
+    setTextarea('ship it');
+    click(findButton('Set goal'));
+    await flush();
+
+    expect(onCreateGoal).toHaveBeenCalledWith('ship it', '/w-secondary');
+  });
+
+  it('reconciles a vanished selection with the creatable set for control and submit', async () => {
+    // A capabilities refresh can drop the selected workspace while the form
+    // stays open. Both the rendered select and the submitted cwd must fall
+    // back to the default; submitting the vanished cwd reds this case.
+    const thirdWs = {
+      id: 'ws-3',
+      cwd: '/w-third',
+      primary: false,
+      trusted: true,
+    };
+    const onCreateGoal = vi.fn().mockResolvedValue(undefined);
+    await mount([], {
+      workspaces: [primaryWs, secondaryWs, thirdWs],
+      defaultWorkspaceCwd: '/w-secondary',
+      onCreateGoal,
+      listGoalsByWorkspace: {},
+    });
+
+    click(findButton('New goal'));
+    expect(document.querySelector('select')!.value).toBe('/w-secondary');
+
+    // The refresh removes the selected workspace; two remain, so the view
+    // stays multi-workspace and the form keeps its state.
+    await act(async () => {
+      root!.render(
+        <I18nProvider language="en">
+          <GoalsDialog
+            onCreateGoal={onCreateGoal}
+            onOpenSession={vi.fn()}
+            onError={vi.fn()}
+            workspaces={[primaryWs, thirdWs]}
+            defaultWorkspaceCwd="/w-secondary"
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    const select = document.querySelector('select');
+    expect(select!.value).toBe('/w-primary');
+    expect(Array.from(select!.options).map((o) => o.value)).toEqual([
+      '/w-primary',
+      '/w-third',
+    ]);
+
+    setTextarea('ship it');
+    click(findButton('Set goal'));
+    await flush();
+
+    expect(onCreateGoal).toHaveBeenCalledWith('ship it', '/w-primary');
+  });
+
   it('shows no picker or badges for a single workspace', async () => {
     const onOpenSession = vi.fn();
     await mount([baseGoal()], { workspaces: [primaryWs], onOpenSession });

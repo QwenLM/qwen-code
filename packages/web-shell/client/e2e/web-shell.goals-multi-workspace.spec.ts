@@ -109,6 +109,31 @@ test('the create form targets the picked workspace @smoke', async ({
       ),
     )
     .toBe(true);
+
+  // The acceptance criterion is WHERE the goal landed, not just the
+  // allocation body: the page must list it badged secondary, the secondary's
+  // qualified listing must carry it, and the primary's must not.
+  await page.getByRole('button', { name: 'Goals', exact: true }).click();
+  await expect(page.getByTestId('goals-page')).toBeVisible();
+  const createdCard = page
+    .locator('[role="listitem"]')
+    .filter({ hasText: 'ship the secondary goal' });
+  await expect(createdCard).toBeVisible();
+  await expect(createdCard.getByTestId('goal-workspace')).toContainText(
+    'Secondary Project',
+  );
+  const secondaryListing = await page.evaluate(() =>
+    fetch('/workspaces/ws-secondary/goals').then((r) => r.json()),
+  );
+  expect(
+    secondaryListing.goals.map((g: { condition: string }) => g.condition),
+  ).toContain('ship the secondary goal');
+  const primaryListing = await page.evaluate(() =>
+    fetch('/goals').then((r) => r.json()),
+  );
+  expect(
+    primaryListing.goals.map((g: { condition: string }) => g.condition),
+  ).not.toContain('ship the secondary goal');
 });
 
 test('pausing a secondary goal uses its own session route', async ({
@@ -334,15 +359,35 @@ test('a retry after a failed creation targets the newly picked workspace', async
         ),
     )
     .toBe(true);
+
+  // The retried goal must land in the PICKED workspace (primary), and the
+  // stranded secondary session must stay goal-free — reuse would have put
+  // the goal in the secondary instead.
+  await page.getByRole('button', { name: 'Goals', exact: true }).click();
+  await expect(page.getByTestId('goals-page')).toBeVisible();
+  const retriedCard = page
+    .locator('[role="listitem"]')
+    .filter({ hasText: 'stranded retry goal' });
+  await expect(retriedCard).toBeVisible();
+  await expect(retriedCard.getByTestId('goal-workspace')).toContainText(
+    'primary',
+  );
+  const secondaryListing = await page.evaluate(() =>
+    fetch('/workspaces/ws-secondary/goals').then((r) => r.json()),
+  );
+  expect(
+    secondaryListing.goals.map((g: { condition: string }) => g.condition),
+  ).not.toContain('stranded retry goal');
 });
 
-test('an unavailable picker target is refused without touching the session', async ({
+test('a stale picker selection reconciles to the default workspace', async ({
   page,
   baseURL,
 }) => {
-  // Simulate a stale selection: the form keeps a cwd that the current
-  // capability list no longer advertises as trusted. The App guard must
-  // refuse BEFORE createNewSession, which would clear the current session.
+  // Simulate a stale selection: the form keeps a cwd that the capability
+  // list does not carry. The dialog must reconcile BOTH the control and the
+  // submit to the default (primary) instead of sending the vanished cwd to
+  // the App guard — the goal lands in the primary, no refusal toast.
   const daemon = await openGoals(page, baseURL!, multiWorkspaceOverrides);
 
   await page.getByRole('button', { name: 'New goal' }).click();
@@ -355,15 +400,28 @@ test('an unavailable picker target is refused without touching the session', asy
   });
   await page.locator('select').selectOption('/e2e/gone');
   await page.locator('textarea').fill('goal into the void');
-  const requestsBeforeSubmit = daemon.requests.length;
   await page.getByRole('button', { name: 'Set goal' }).click();
 
+  await expect
+    .poll(() =>
+      daemon.requests.some(
+        (r) =>
+          r.method === 'POST' &&
+          r.path === '/session' &&
+          (r.body as { cwd?: string } | null)?.cwd === '/e2e/primary',
+      ),
+    )
+    .toBe(true);
   await expect(
     page.getByText('The selected workspace is unavailable or untrusted.'),
-  ).toBeVisible();
-  expect(
-    daemon.requests
-      .slice(requestsBeforeSubmit)
-      .filter((r) => r.method === 'POST' && r.path === '/session'),
-  ).toHaveLength(0);
+  ).toHaveCount(0);
+  await page.getByRole('button', { name: 'Goals', exact: true }).click();
+  await expect(page.getByTestId('goals-page')).toBeVisible();
+  const reconciledCard = page
+    .locator('[role="listitem"]')
+    .filter({ hasText: 'goal into the void' });
+  await expect(reconciledCard).toBeVisible();
+  await expect(reconciledCard.getByTestId('goal-workspace')).toContainText(
+    'primary',
+  );
 });

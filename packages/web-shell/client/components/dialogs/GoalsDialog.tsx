@@ -95,6 +95,14 @@ export function GoalsDialog({
     () => workspaceList.filter((ws) => !ws.primary && (!ws.trusted || ws.ssh)),
     [workspaceList],
   );
+  // The set the create path actually accepts: the App re-validates the
+  // picker's cwd against trusted workspaces, so an untrusted primary — kept
+  // in operableWorkspaces to make its listing failure loud — must not be a
+  // picker target, or the form opens on a dead default every retry refuses.
+  const creatableWorkspaces = useMemo(
+    () => operableWorkspaces.filter((ws) => ws.trusted !== false),
+    [operableWorkspaces],
+  );
   // The notice only renders in the aggregated view; the empty-state
   // suppression must use the same predicate so a locked view never hides its
   // empty state without showing the notice.
@@ -149,15 +157,24 @@ export function GoalsDialog({
   const defaultCreateWorkspaceCwd = useMemo(() => {
     if (
       defaultWorkspaceCwd &&
-      operableWorkspaces.some((ws) => ws.cwd === defaultWorkspaceCwd)
+      creatableWorkspaces.some((ws) => ws.cwd === defaultWorkspaceCwd)
     ) {
       return defaultWorkspaceCwd;
     }
     return (
-      operableWorkspaces.find((ws) => ws.primary)?.cwd ??
-      operableWorkspaces[0]?.cwd
+      creatableWorkspaces.find((ws) => ws.primary)?.cwd ??
+      creatableWorkspaces[0]?.cwd
     );
-  }, [defaultWorkspaceCwd, operableWorkspaces]);
+  }, [defaultWorkspaceCwd, creatableWorkspaces]);
+  // A capabilities refresh can drop the selected workspace (removal or trust
+  // revocation) while the form stays open. Reconcile the selection with the
+  // creatable set for BOTH the control and the submit, so the select never
+  // renders blank on a cwd the submit would still send.
+  const effectiveFormWorkspaceCwd = creatableWorkspaces.some(
+    (ws) => ws.cwd === formWorkspaceCwd,
+  )
+    ? formWorkspaceCwd
+    : defaultCreateWorkspaceCwd;
 
   const [now, setNow] = useState(() => Date.now());
 
@@ -356,7 +373,7 @@ export function GoalsDialog({
       } else {
         const created = await onCreateGoal(
           trimmed,
-          isMultiWorkspace ? formWorkspaceCwd : undefined,
+          isMultiWorkspace ? effectiveFormWorkspaceCwd : undefined,
         );
         if (!mountedRef.current) return;
         if (created === false) return;
@@ -380,7 +397,7 @@ export function GoalsDialog({
     actions,
     condition,
     editingGoal,
-    formWorkspaceCwd,
+    effectiveFormWorkspaceCwd,
     goals,
     isMultiWorkspace,
     onCreateGoal,
@@ -467,17 +484,19 @@ export function GoalsDialog({
                 </span>
                 <select
                   className={styles.select}
-                  value={formWorkspaceCwd ?? ''}
-                  disabled={submitting || operableWorkspaces.length <= 1}
+                  value={effectiveFormWorkspaceCwd ?? ''}
+                  disabled={submitting || creatableWorkspaces.length <= 1}
                   onChange={(e) =>
                     setFormWorkspaceCwd(e.target.value || undefined)
                   }
                 >
-                  {labeledWorkspaces.map((ws) => (
-                    <option key={ws.id} value={ws.cwd}>
-                      {ws.label}
-                    </option>
-                  ))}
+                  {labeledWorkspaces
+                    .filter((ws) => ws.trusted !== false)
+                    .map((ws) => (
+                      <option key={ws.id} value={ws.cwd}>
+                        {ws.label}
+                      </option>
+                    ))}
                 </select>
               </label>
             )}
