@@ -406,6 +406,29 @@ function isShellAbsolutePath(p: string): boolean {
   return p.startsWith('/') || /^[A-Za-z]:\//.test(p.replace(/\\/g, '/'));
 }
 
+function isUncertainPath(word: string, bare?: string): boolean {
+  return bare?.includes('2') || hasUnpairedSurrogate(word);
+}
+
+function markUncertainArgs(
+  ops: ShellOperation[],
+  args: string[],
+  cwd: string,
+  bares?: string[],
+): ShellOperation[] {
+  const uncertainPaths = new Set(
+    args
+      .filter((word, index) => isUncertainPath(word, bares?.[index]))
+      .map((word) => resolvePath(word, cwd)),
+  );
+  if (uncertainPaths.size === 0) return ops;
+  return ops.map((op) =>
+    op.filePath && uncertainPaths.has(op.filePath)
+      ? { ...op, pathUnknown: true }
+      : op,
+  );
+}
+
 function isEnvAssignmentToken(token: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*=/.test(token);
 }
@@ -533,7 +556,7 @@ function extractRedirects(
       filePath: resolvePath(target, cwd, bare),
     };
     // Keep uncertainty before `..` normalization can remove its source word.
-    if (bare?.includes('2') || hasUnpairedSurrogate(target)) {
+    if (isUncertainPath(target, bare)) {
       operation.pathUnknown = true;
     }
     (virtualTool === 'read_file' ? readFiles : writeFiles).push(operation);
@@ -2400,7 +2423,8 @@ export function extractShellOperations(
     const handler = COMMANDS[cmdName];
     if (handler) {
       const args = tokens.slice(1);
-      ops.push(...handler(args, cwd));
+      const argBares = bares.slice(1);
+      ops.push(...markUncertainArgs(handler(args, cwd), args, cwd, argBares));
     }
     // Unknown commands: return no ops (safe — we don't guess what we don't know)
   }
@@ -2513,7 +2537,10 @@ function resolveCdTargetCwd(
   return {
     kind: 'static',
     cwd: resolvePath(target, cwd, targetBare),
-    cwdUnknown: targetIsDecoded || (cwdUnknown && !isShellAbsolutePath(target)),
+    cwdUnknown:
+      targetIsDecoded ||
+      isUncertainPath(target, targetBare) ||
+      (cwdUnknown && !isShellAbsolutePath(target)),
     redirects,
   };
 }

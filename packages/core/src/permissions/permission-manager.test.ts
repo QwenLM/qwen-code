@@ -3582,8 +3582,25 @@ describe('PermissionManager — compound shell write attribution', () => {
     expect(await pm.evaluate(ctx)).toBe('deny');
   });
 
+  it('does not certify paths after a cd whose uncertainty normalization erased', async () => {
+    const pm = repoPm({
+      permissionsAllow: ['Bash(*)', 'ReadFileTool(*)', 'WriteFileTool(*)'],
+      permissionsDeny: [
+        'ReadFileTool(victim.txt)',
+        'WriteFileTool(.qwen/settings.json)',
+      ],
+    });
+    for (const [command, expected] of [
+      [String.raw`cd $'\xff'/../dir; cat > settings.json`, 'ask'],
+      [String.raw`cd $'\xff'/..; cat victim.txt`, 'deny'],
+    ] as const) {
+      expect(await pm.evaluate(sh(command, '/repo'))).toBe(expected);
+    }
+  });
+
   it.each([
     [String.raw`cat $'\xff'`, 'ask'],
+    [String.raw`cat $'\xff'/../victim.txt`, 'ask'],
     [String.raw`printf x > $'\uD800'`, 'ask'],
     [String.raw`cat $'\U00110000'`, 'ask'],
     ["sh -c 'cat \uD800'" + String.raw`$'\xff'`, 'ask'],

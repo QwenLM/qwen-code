@@ -1136,6 +1136,33 @@ describe('ANSI-C bytes that are not valid UTF-8', () => {
       { ...write('/repo/\udcff'), pathUnknown: true },
     ]);
   });
+
+  it('keeps an undecodable argument unresolved after .. normalization', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        String.raw`cat $'\xff'/../etc/passwd`,
+        '/repo',
+      ),
+    ).toEqual([{ ...read('/repo/etc/passwd'), pathUnknown: true }]);
+  });
+
+  it('keeps later relative writes uncertain after an undecodable cd', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        String.raw`cd $'\xff'/../dir; cat > settings.json`,
+        '/repo',
+      ),
+    ).toEqual([uncertainWrite('/repo/dir/settings.json')]);
+  });
+
+  it('keeps absolute-looking writes uncertain after an undecodable cd', () => {
+    expect(
+      extractShellOperationsAcrossCommand(
+        String.raw`cd $'\xff'/..; cat > /repo/victim.txt`,
+        '/repo',
+      ),
+    ).toEqual([uncertainWrite('/repo/victim.txt', false)]);
+  });
 });
 
 describe('ANSI-C wrapper payloads', () => {
