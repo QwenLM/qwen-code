@@ -47,6 +47,18 @@ public enum SurfaceRegistry {
             Surface.PUBLIC, RuleClass.SIDE_QUERY_ACTOR, EnumSet.of(Capability.SIDE_QUERY_STREAM)),
     WEBSHELL_SIDE_QUERY_STREAM(Method.POST, "/api/agent/web-shell/v1/session-side-queries/stream",
             Surface.WEBSHELL, RuleClass.SIDE_QUERY_ACTOR, EnumSet.of(Capability.SIDE_QUERY_STREAM)),
+    WEBSHELL_CLIENT_FILES_REGISTER(Method.POST, "/api/agent/web-shell/v1/client-files/register",
+            Surface.WEBSHELL, RuleClass.CLIENT_FILES_OPERATOR, EnumSet.of(Capability.CLIENT_FILES_REGISTER)),
+    WEBSHELL_CLIENT_FILES_UNREGISTER(Method.POST, "/api/agent/web-shell/v1/client-files/unregister",
+            Surface.WEBSHELL, RuleClass.CLIENT_FILES_OPERATOR, EnumSet.of(Capability.CLIENT_FILES_UNREGISTER)),
+    WEBSHELL_CLIENT_FILES_STATUS(Method.POST, "/api/agent/web-shell/v1/client-files/status",
+            Surface.WEBSHELL, RuleClass.CLIENT_FILES_ACTOR, EnumSet.of(Capability.CLIENT_FILES_STATUS)),
+    WEBSHELL_CLIENT_FILES_STREAM(Method.POST, "/api/agent/web-shell/v1/client-files/requests/stream",
+            Surface.WEBSHELL, RuleClass.CLIENT_FILES_ACTOR, EnumSet.of(Capability.CLIENT_FILES_STREAM)),
+    WEBSHELL_CLIENT_FILES_RESPOND(Method.POST, "/api/agent/web-shell/v1/client-files/responses",
+            Surface.WEBSHELL, RuleClass.CLIENT_FILES_ACTOR, EnumSet.of(Capability.CLIENT_FILES_RESPOND)),
+    INTERNAL_CLIENT_FILES_MCP(Method.POST, "/internal/managed-client-files/v1/sessions/{sessionId}/mcp",
+            Surface.INTERNAL, RuleClass.INTERNAL_CLIENT_FILES, EnumSet.of(Capability.INTERNAL_CLIENT_FILES_MCP)),
     INTERNAL_SIDE_QUERY_INPUT(Method.POST,
             "/internal/managed-session-store/v1/sessions/{sessionId}/side-queries/{queryId}/input",
             Surface.INTERNAL, RuleClass.INTERNAL_SIDE_QUERY, EnumSet.of(Capability.STORE_SIDE_QUERY)),
@@ -80,6 +92,12 @@ public enum SurfaceRegistry {
             Surface.PUBLIC, RuleClass.PERSONAL_MEMORY, EnumSet.of(Capability.MEMORY_STORE_LIST)),
     INTERNAL_MEMORY_QUERY(Method.POST, "/internal/managed-session-store/v1/sessions/{sessionId}/memory:query",
             Surface.INTERNAL, RuleClass.INTERNAL_WRITER, EnumSet.of(Capability.STORE_MEMORY_QUERY)),
+    INTERNAL_AUTOMATION_CREATE(Method.POST, "/internal/managed-session-store/v1/sessions/{sessionId}/automations:create",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER, EnumSet.of(Capability.STORE_AUTOMATION_CREATE)),
+    INTERNAL_AUTOMATION_LIST(Method.POST, "/internal/managed-session-store/v1/sessions/{sessionId}/automations:list",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER, EnumSet.of(Capability.STORE_AUTOMATION_LIST)),
+    INTERNAL_AUTOMATION_RETIRE(Method.POST, "/internal/managed-session-store/v1/sessions/{sessionId}/automations:retire",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER, EnumSet.of(Capability.STORE_AUTOMATION_RETIRE)),
     PUBLIC_SESSION_ACTIVITY_STATS(Method.GET, "/v1/agents/sessions/{sessionId}/activity-stats",
             Surface.PUBLIC, RuleClass.READER_ACTOR, EnumSet.of(Capability.SESSION_ACTIVITY_STATS)),
     WEBSHELL_SESSION_ACTIVITY_STATS(Method.POST, "/api/agent/web-shell/v1/session-activity-stats/query",
@@ -440,6 +458,10 @@ public enum SurfaceRegistry {
             "/api/agent/web-shell/v1/sessions/create",
             Surface.WEBSHELL, RuleClass.WORKSPACE_CREATE,
             EnumSet.of(Capability.SESSION_CREATE)),
+    WEBSHELL_SESSION_TERMINAL_TICKET(Method.POST,
+            "/api/agent/web-shell/v1/sessions/terminal-ticket",
+            Surface.WEBSHELL, RuleClass.OPERATOR,
+            EnumSet.of(Capability.SESSION_TERMINAL_TICKET)),
     WEBSHELL_TURN_SUBMIT(Method.POST, "/api/agent/web-shell/v1/turns/submit",
             Surface.WEBSHELL, RuleClass.OPERATOR,
             EnumSet.of(Capability.TURN_SUBMIT)),
@@ -838,6 +860,8 @@ public enum SurfaceRegistry {
     public enum Capability {
         SIDE_QUERY_CREATE, SIDE_QUERY_LIST, SIDE_QUERY_CONTEXT, SIDE_QUERY_GET, SIDE_QUERY_CANCEL, SIDE_QUERY_STREAM,
         STORE_SIDE_QUERY,
+        CLIENT_FILES_REGISTER, CLIENT_FILES_UNREGISTER, CLIENT_FILES_STATUS, CLIENT_FILES_STREAM, CLIENT_FILES_RESPOND,
+        INTERNAL_CLIENT_FILES_MCP,
         MEMORY_STORE_CREATE, MEMORY_STORE_LIST, STORE_MEMORY_QUERY,
         SESSION_CONTEXT_USAGE, SESSION_MODEL_STATISTICS, SESSION_RESOURCES, SESSION_AGENT_TRACE,
         SESSION_ACTIVITY_STATS, SESSION_ACTIVITY,
@@ -856,6 +880,7 @@ public enum SurfaceRegistry {
         SESSION_DELETE,
         SESSION_OPERATION_GET,
         SESSION_CONTEXT_COMPRESSION,
+        SESSION_TERMINAL_TICKET,
         TURN_SUBMIT,
         TURN_CANCEL,
         TAIL_EVENTS,
@@ -920,6 +945,9 @@ public enum SurfaceRegistry {
         AUTOMATION_RETIRE,
         AUTOMATION_RUN,
         AUTOMATION_RUN_LIST,
+        STORE_AUTOMATION_CREATE,
+        STORE_AUTOMATION_LIST,
+        STORE_AUTOMATION_RETIRE,
         STORE_APPROVAL_QUERY,
         STORE_MODEL_CONFIG_QUERY,
         STORE_EXECUTION_AUTHORIZE,
@@ -966,6 +994,33 @@ public enum SurfaceRegistry {
         SIDE_QUERY_ACTOR,
         /** Query-scoped claim, boot and generation; never a Session writer grant. */
         INTERNAL_SIDE_QUERY,
+        /**
+         * Client files registration and teardown: the read grant ({@code 404
+         * session_not_found} below it) plus current execution authority on the
+         * bound ACTIVE Workspace ({@code 403 client_files_execution_forbidden}
+         * below it). The {@code 503 client_files_disabled} refusal while the
+         * deployment opt-in is off is a service-layer flag check
+         * ({@code requireEnabled}), not an admission arm of this rule class, so
+         * the anonymous admission probes never reach it.
+         */
+        CLIENT_FILES_OPERATOR,
+        /**
+         * Client files reads and browser uplink: the read grant, then the
+         * registering actor's own active binding ({@code 404
+         * client_files_not_found} for any other actor or a closed binding,
+         * {@code 409 client_files_generation_conflict} for a stale
+         * generation). The status read answers an absent binding with an
+         * empty 200.
+         */
+        CLIENT_FILES_ACTOR,
+        /**
+         * The Runtime-facing MCP leg: no actor; the session relay credential
+         * issued at registration is the only admission ({@code 403
+         * client_files_credential_invalid} without it). On a dedicated
+         * internal listener the routing filter answers a public-connector
+         * caller {@code 404}.
+         */
+        INTERNAL_CLIENT_FILES,
         /** Authenticated tenant actor, restricted to that actor's personal Store. */
         PERSONAL_MEMORY,
         SESSION_WORKTREE,

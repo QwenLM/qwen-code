@@ -30,10 +30,10 @@ class WorkspaceCsiApplicationHistoryTest {
         var manager = mock(PlatformTransactionManager.class);
         var bindings = new JdbcRuntimeBindingRepository(first, new AesGcmSecretProtector("test", new byte[32]));
         assertThatThrownBy(() -> new WorkspaceCsiApplicationHistory(jdbc, manager, bindings,
-                com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(new JdbcTemplate(second)))).isInstanceOf(IllegalArgumentException.class);
+                com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(new JdbcTemplate(second)), null)).isInstanceOf(IllegalArgumentException.class);
         var foreign = new JdbcRuntimeBindingRepository(second, new AesGcmSecretProtector("test", new byte[32]));
         assertThatThrownBy(() -> new WorkspaceCsiApplicationHistory(jdbc, manager, foreign,
-                com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc))).isInstanceOf(IllegalArgumentException.class);
+                com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc), null)).isInstanceOf(IllegalArgumentException.class);
         verifyNoInteractions(manager);
     }
 
@@ -44,7 +44,7 @@ class WorkspaceCsiApplicationHistoryTest {
         var manager = mock(PlatformTransactionManager.class);
         var reader = new WorkspaceCsiApplicationHistory(jdbc, manager,
                 new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32])),
-                com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc));
+                com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc), null);
         boolean previous = TransactionSynchronizationManager.isActualTransactionActive();
         TransactionSynchronizationManager.setActualTransactionActive(true);
         try {
@@ -102,7 +102,7 @@ class WorkspaceCsiApplicationHistoryTest {
         var manager = new DataSourceTransactionManager(source);
         var reader = new WorkspaceCsiApplicationHistory(jdbc, manager,
                 new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32])),
-                com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc));
+                com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(jdbc), null);
         // H2 ignores setReadOnly; the production guard must reject that actual Connection before SQL.
         assertThatThrownBy(() -> read(reader))
                 .isInstanceOf(IllegalArgumentException.class);

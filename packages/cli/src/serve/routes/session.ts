@@ -319,6 +319,17 @@ interface RegisterSessionRoutesDeps {
   workspaceRegistry: WorkspaceRegistry;
   archiveCoordinator: SessionArchiveCoordinator;
   requestedSessionIdAdmission?: RequestedSessionIdAdmission;
+  /**
+   * Fired after a load/resume makes a session live, so the PR watch can deliver
+   * its pending transitions now instead of at the next tick (design §2). Never
+   * awaited: the watch's per-PR lock is not re-entrant, and a restore the drain
+   * itself dispatched must not wait on a drain.
+   */
+  onSessionRestored?: (input: {
+    runtime: WorkspaceRuntime;
+    workspaceCwd: string;
+    sessionId: string;
+  }) => void;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   sendBridgeError: SendBridgeError;
   daemonLog?: DaemonLogger;
@@ -4075,6 +4086,17 @@ export function registerSessionRoutes(
         res
           .status(200)
           .json(redactSdkSurfaceReplay(outcome.session, runtime.trusted));
+        // The core's finally has already released the reservation and the
+        // worktree lock by the time it returns. Never awaited: the watch's
+        // per-PR lock is not re-entrant, and a restore the drain dispatched
+        // must not wait on a drain.
+        try {
+          deps.onSessionRestored?.({ runtime, workspaceCwd, sessionId });
+        } catch (err) {
+          daemonLog?.warn(
+            `session restored hook failed for ${sessionId}: ${String(err)}`,
+          );
+        }
       } catch (err) {
         if (err instanceof RequestedSessionIdAdmissionError) {
           sendRequestedSessionIdAdmissionError(res, err, route);
@@ -6094,6 +6116,140 @@ export function registerSessionRoutes(
       sendBridgeError(res, error, { route, sessionId });
     }
   });
+
+  for (const route of [
+    '/session/:id/turns/:promptId/hooks',
+    '/workspaces/:workspace/session/:id/turns/:promptId/hooks',
+  ]) {
+    app.get(route, async (req, res) => {
+      const routeName = `GET ${route}`;
+      const sessionId = requireSessionId(req, res);
+      if (sessionId === null) return;
+      const promptId = req.params['promptId'];
+      if (typeof promptId !== 'string' || !promptId.trim()) {
+        res.status(400).json({
+          code: 'invalid_prompt_id',
+          error: 'A history prompt ID is required',
+        });
+        return;
+      }
+      const qualified = route.startsWith('/workspaces/');
+      const target = qualified
+        ? resolveQualifiedSessionTarget(req, res, {
+            allowUntrustedSecondary: true,
+          })
+        : undefined;
+      if (qualified && !target) return;
+      const limit = parseTranscriptLimitQuery(req.query['limit'], res);
+      if (limit === null) return;
+      const snapshot = parseTranscriptSnapshotQuery(req.query['snapshot'], res);
+      if (snapshot === null) return;
+      const start = parseTranscriptStartQuery(req.query['start'], res);
+      if (start === null) return;
+      if (
+        (start !== undefined && snapshot === undefined) ||
+        (snapshot !== undefined &&
+          workspaceTranscriptCursorExceedsLimit(snapshot))
+      ) {
+        res.status(400).json({
+          code: 'invalid_transcript_cursor',
+          error: 'Invalid hook page snapshot or start',
+        });
+        return;
+      }
+      try {
+        const result = await runWithoutDebugLogSession(() =>
+          archiveCoordinator.runSharedMany([sessionId], async () => {
+            const runtime = qualified
+              ? target?.kind === 'ordinary'
+                ? target.runtime
+                : await resolveQualifiedSessionRuntime(
+                    req,
+                    res,
+                    routeName,
+                    [sessionId],
+                    'active',
+                  )
+              : await resolveTranscriptSessionRuntime(
+                  res,
+                  routeName,
+                  sessionId,
+                  snapshot !== undefined,
+                );
+            if (!runtime) return undefined;
+            const assertOpen = captureRuntimeGenerationAssertion(runtime);
+            assertOpen?.();
+            return runWithWorkspaceRuntimeStorage(runtime, async () => {
+              if (snapshot === undefined) {
+                await assertSessionLoadable(
+                  runtime.workspaceCwd,
+                  sessionId,
+                  runtime.sessionRuntimeBaseDir,
+                  { allowActiveConflict: true },
+                );
+                try {
+                  runtime.bridge.getSessionSummary(sessionId);
+                  if (runtime.bridge.flushSessionTranscript)
+                    await runtime.bridge.flushSessionTranscript(sessionId);
+                  else
+                    await runtime.bridge.getSessionTranscriptPage({
+                      sessionId,
+                      direction: 'backward',
+                      limit: 1,
+                    });
+                } catch (error) {
+                  if (!(error instanceof SessionNotFoundError)) throw error;
+                }
+                assertOpen?.();
+              }
+              try {
+                const page = await new SessionTranscriptReader(
+                  runtime.workspaceCwd,
+                  getTranscriptCursorCodec(runtime),
+                ).readTurnHooksPage(sessionId, promptId, {
+                  ...(snapshot !== undefined ? { snapshot } : {}),
+                  ...(start !== undefined ? { start } : {}),
+                  ...(limit !== undefined ? { limit } : {}),
+                });
+                assertOpen?.();
+                if (!page)
+                  res.status(404).json({
+                    code: 'turn_not_found',
+                    error: 'History turn not found',
+                    sessionId,
+                  });
+                return page;
+              } catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== 'ENOENT')
+                  throw error;
+                if (snapshot !== undefined)
+                  throw new SessionTranscriptSnapshotUnavailableError(
+                    sessionId,
+                  );
+                const location =
+                  await createWorkspaceRuntimeSessionService(
+                    runtime,
+                  ).getSessionLocation(sessionId);
+                if (location === 'archived')
+                  throw new SessionArchivedError(sessionId);
+                if (location === 'conflict')
+                  throw new SessionConflictError(sessionId);
+                throw new SessionNotFoundError(sessionId);
+              }
+            });
+          }),
+        );
+        if (result === undefined) return;
+        res
+          .status(200)
+          .set('Cache-Control', 'no-store')
+          .type('application/json')
+          .send(serializeWorkspaceTranscriptResponse(result, sessionId));
+      } catch (error) {
+        sendBridgeError(res, error, { route: routeName, sessionId });
+      }
+    });
+  }
 
   app.get('/session/:id/turn-index', async (req, res) => {
     const route = 'GET /session/:id/turn-index';

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act } from 'react';
+import { act, createRef, type RefObject } from 'react';
 import { DialogShell } from '../components/dialogs/DialogShell';
 import { I18nProvider } from '../i18n';
 import { ThemeProvider } from '../themeContext';
@@ -16,6 +16,7 @@ interface HarnessProps {
   onConfirm: (index: number) => void;
   enabled?: boolean;
   onKeyboardMode?: (value: boolean) => void;
+  scope?: RefObject<HTMLElement | null>;
 }
 
 function Harness({ onKeyboardMode, ...props }: HarnessProps) {
@@ -402,5 +403,148 @@ describe('useListboxKeyboard', () => {
     press('ArrowDown');
     expect(onTopMove).toHaveBeenCalledWith(1);
     expect(onBottomMove).not.toHaveBeenCalled();
+  });
+
+  it('ignores list keys while focus is outside an optional scope', () => {
+    const scopeRef = createRef<HTMLDivElement>();
+    const onActiveIndexChange = vi.fn();
+    const onConfirm = vi.fn();
+    function ScopedList() {
+      useListboxKeyboard({
+        itemCount: 3,
+        activeIndex: 0,
+        onActiveIndexChange,
+        onConfirm,
+        scope: scopeRef,
+      });
+      return (
+        <div ref={scopeRef}>
+          <input aria-label="inside scope" />
+        </div>
+      );
+    }
+
+    const outside = document.createElement('input');
+    document.body.appendChild(outside);
+    outside.focus();
+    mountNode(<ScopedList />);
+
+    press('Enter');
+    press('ArrowDown');
+    expect(onConfirm).not.toHaveBeenCalled();
+    expect(onActiveIndexChange).not.toHaveBeenCalled();
+
+    act(() => {
+      scopeRef.current!.querySelector('input')!.focus();
+    });
+    press('Enter');
+    expect(onConfirm).toHaveBeenCalledWith(0);
+    outside.remove();
+  });
+
+  it('resolves the active element through a shadow root for scoped dialogs', () => {
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const shadow = host.attachShadow({ mode: 'open' });
+    const panel = document.createElement('div');
+    const inside = document.createElement('input');
+    panel.appendChild(inside);
+    shadow.appendChild(panel);
+    inside.focus();
+    // `document.activeElement` retargets to the host, not the panel's input.
+    expect(document.activeElement).toBe(host);
+
+    const onActiveIndexChange = vi.fn();
+    const onConfirm = vi.fn();
+    mount({
+      itemCount: 3,
+      activeIndex: 0,
+      onActiveIndexChange,
+      onConfirm,
+      scope: { current: panel },
+    });
+
+    press('ArrowDown');
+    expect(onActiveIndexChange).toHaveBeenLastCalledWith(1);
+
+    // The shadow-root input keeps text-field keys: Home/End move the caret and
+    // Space types a space instead of confirming the row.
+    press('Home');
+    press('End');
+    press(' ');
+    expect(onActiveIndexChange).toHaveBeenCalledTimes(1);
+    expect(onConfirm).not.toHaveBeenCalled();
+
+    // A focused control inside the shadow root keeps its own Enter/Space.
+    const action = document.createElement('button');
+    panel.appendChild(action);
+    action.focus();
+    press('Enter');
+    press(' ');
+    expect(onConfirm).not.toHaveBeenCalled();
+
+    inside.focus();
+    press('Enter');
+    expect(onConfirm).toHaveBeenCalledWith(0);
+    host.remove();
+  });
+
+  it('keeps shadow-root scoped keys active when focus drops to the document body', () => {
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const shadow = host.attachShadow({ mode: 'open' });
+    const panel = document.createElement('div');
+    const inside = document.createElement('input');
+    panel.appendChild(inside);
+    shadow.appendChild(panel);
+    inside.focus();
+    expect(document.activeElement).toBe(host);
+
+    const onActiveIndexChange = vi.fn();
+    mount({
+      itemCount: 3,
+      activeIndex: 0,
+      onActiveIndexChange,
+      onConfirm: vi.fn(),
+      scope: { current: panel },
+    });
+
+    act(() => inside.blur());
+    // The shadow root has no active element while the document reports body.
+    expect(shadow.activeElement).toBeNull();
+    expect(document.activeElement).toBe(document.body);
+
+    press('ArrowDown');
+    expect(onActiveIndexChange).toHaveBeenLastCalledWith(1);
+    host.remove();
+  });
+
+  it('keeps scoped keys active when focus drops to the document body', () => {
+    const scopeRef = createRef<HTMLDivElement>();
+    const onActiveIndexChange = vi.fn();
+    function ScopedList() {
+      useListboxKeyboard({
+        itemCount: 3,
+        activeIndex: 0,
+        onActiveIndexChange,
+        onConfirm: vi.fn(),
+        scope: scopeRef,
+      });
+      return (
+        <div ref={scopeRef}>
+          <input aria-label="inside scope" />
+        </div>
+      );
+    }
+
+    mountNode(<ScopedList />);
+    act(() => {
+      scopeRef.current!.querySelector('input')!.focus();
+      (document.activeElement as HTMLElement).blur();
+    });
+    expect(document.activeElement).toBe(document.body);
+
+    press('ArrowDown');
+    expect(onActiveIndexChange).toHaveBeenLastCalledWith(1);
   });
 });
