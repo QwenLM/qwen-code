@@ -40,16 +40,16 @@ const DEFAULT_MAX_BUFFERED_OUTPUT_BYTES = 64 * 1024 * 1024;
 const MAX_BUFFERED_OUTPUT_BYTES_CEILING = 256 * 1024 * 1024;
 const SIGKILL_TIMEOUT_MS = 200;
 /**
- * streamStdout settle fence: after the child exits, trailing stdio keeps
- * flowing until 'close' — but 'close' also waits on *inherited* fds, so a
- * shell that exits while a grandchild holds the pipe (`sleep 10 &`,
- * `nohup … &`) would defer 'close' indefinitely and wedge the result
- * promise (background shells and the ACP channel both stream this way;
- * PR #12067 review). Settle on 'close' or this bound after exit,
- * whichever comes first. 1s covers trailing writes that land shortly
- * after exit while bounding the grandchild case.
+ * Post-exit settle fence: trailing stdio flows until 'close', but inherited
+ * pipes held by descendants can defer 'close' indefinitely (PR #12067).
+ * Settle on 'close' or the applicable bound after exit, whichever comes first:
+ * POST_EXIT_STREAM_DRAIN_MS gives streamStdout/rawCapture callers 1000ms for
+ * trailing writes; POST_EXIT_BUFFERED_DRAIN_MS limits buffered callers to
+ * 200ms so a foreground `cmd &` does not add a long delay.
  */
 const POST_EXIT_STREAM_DRAIN_MS = 1000;
+// Foreground commands need the same pipe drain without a long delay for `cmd &`.
+const POST_EXIT_BUFFERED_DRAIN_MS = 200;
 // Live PTY rendering only needs a short scrollback for interactive tailing.
 // The full transcript is preserved separately in raw output and final replay.
 const MAX_LIVE_TERMINAL_SCROLLBACK_LINES = 200;
@@ -263,7 +263,7 @@ export interface ShellExecutionResult {
    */
   outputCaptureLimitExceeded?: boolean;
   /**
-   * `streamStdout` only: the process exited, but its stdout was still open
+   * The process exited, but its stdout was still open
    * when the post-exit drain ran out — something it started in the
    * background still holds it, and what that prints is not in the result.
    * A held stderr alone does not set it.
@@ -1041,19 +1041,23 @@ export class ShellExecutionService {
         // left no exit information at all.
         let stdinError: Error | null = null;
         let exited = false;
-        // Single-fire guard for handleExit: with the streamStdout drain
+        // Single-fire guard for handleExit: with the post-exit drain
         // fence, 'exit', 'close', the drain timer and 'error' can all race
         // to settle the same execution.
         let settled = false;
-        // streamStdout drain fence state: the recorded 'exit' info and the
+        // Drain fence state: the recorded 'exit' info and the
         // bound timer. Settlement happens on 'close' or timer expiry,
-        // whichever comes first (see POST_EXIT_STREAM_DRAIN_MS).
+        // whichever comes first: POST_EXIT_STREAM_DRAIN_MS for streamStdout/
+        // rawCapture, POST_EXIT_BUFFERED_DRAIN_MS for buffered callers.
         let recordedExit: {
           code: number | null;
           signal: NodeJS.Signals | null;
         } | null = null;
         let drainTimer: NodeJS.Timeout | null = null;
-        let remainingDrainMs = POST_EXIT_STREAM_DRAIN_MS;
+        let remainingDrainMs =
+          streamStdout || rawCapture
+            ? POST_EXIT_STREAM_DRAIN_MS
+            : POST_EXIT_BUFFERED_DRAIN_MS;
         let drainStartedAt = 0;
         let stdoutHeld = false;
         let pendingCaptureWrites = 0;
@@ -1412,6 +1416,12 @@ export class ShellExecutionService {
         };
         const stdoutHandler = (data: Buffer) => captureData(data, 'stdout');
         const stderrHandler = (data: Buffer) => captureData(data, 'stderr');
+        const stdoutEndHandler = () => {
+          stdoutEnded = true;
+        };
+        const stderrEndHandler = () => {
+          stderrEnded = true;
+        };
         const errorHandler = (err: Error) => {
           error = err;
           void handleExit(1, null);
@@ -1423,16 +1433,8 @@ export class ShellExecutionService {
           if (child.pid) {
             this.activeChildProcesses.delete(child.pid);
           }
-          if (!streamStdout && !rawCapture) {
-            void handleExit(code, signal);
-            return;
-          }
-          // streamStdout: don't settle on 'exit' — trailing stdio written
-          // between 'exit' and 'close' would race the consumer's settle
-          // (a background task's output file closes when the result
-          // resolves). Record the exit info and bound the post-exit drain
-          // so a grandchild inheriting the pipe can defer settlement by at
-          // most POST_EXIT_STREAM_DRAIN_MS instead of indefinitely.
+          // 'exit' can precede the final data events even for buffered output.
+          // Wait for 'close', with a bound for descendants holding the pipes.
           if (recordedExit) return;
           recordedExit = { code, signal };
           exited = true;
@@ -1452,21 +1454,16 @@ export class ShellExecutionService {
 
         child.stdout?.on('data', stdoutHandler);
         child.stderr?.on('data', stderrHandler);
-        if (rawCapture || streamStdout) {
-          // streamStdout reads the stdout end too: the drain reports a
-          // stdout still held, not a held stderr.
-          child.stdout?.on('end', () => {
-            stdoutEnded = true;
-          });
-          child.stderr?.on('end', () => {
-            stderrEnded = true;
-          });
-        }
+        // The drain reports a stdout still held, not a held stderr.
+        child.stdout?.on('end', stdoutEndHandler);
+        child.stderr?.on('end', stderrEndHandler);
         child.on('error', errorHandler);
 
         const detachServiceListeners = () => {
           child.stdout?.off('data', stdoutHandler);
           child.stderr?.off('data', stderrHandler);
+          child.stdout?.off('end', stdoutEndHandler);
+          child.stderr?.off('end', stderrEndHandler);
           child.off('error', errorHandler);
           child.off('exit', exitHandler);
           child.off('close', closeHandler);
@@ -1874,9 +1871,7 @@ export class ShellExecutionService {
         }
 
         child.on('exit', exitHandler);
-        if (streamStdout || rawCapture) {
-          child.once('close', closeHandler);
-        }
+        child.once('close', closeHandler);
         if (launch?.stdin !== undefined && child.stdin) {
           child.stdin.on('error', (err: Error) => {
             stdinError = err;
