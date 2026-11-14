@@ -110,6 +110,23 @@ describe('managed DingTalk webhook chunking', () => {
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
+
+  it('a definitive refusal after a delivered chunk is unknown, not rejected (R10-2)', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ errcode: 0 }))
+      .mockResolvedValueOnce(jsonResponse({ errcode: 310000 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { sendWebhook } = createManagedDingtalkDeps();
+    const text = 'x'.repeat(4_000); // two provider chunks
+    // The first chunk reached the user, so the segment is partially delivered:
+    // it must settle unknown (re-drivable), never rejected (recorded as never
+    // sent, then re-sent in full by the resend path).
+    await expect(sendWebhook(WEBHOOK, text)).rejects.toMatchObject({
+      definitive: false,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('managed DingTalk webhook verdict honesty (R2-2)', () => {

@@ -22,6 +22,11 @@ import { ROBOT_MESSAGE_HOSTS } from './DingtalkAdapter.js';
 
 const WEBHOOK_TIMEOUT_MS = 30_000;
 const RECONNECT_RETRY_MS = 5_000;
+// The SDK's connect() resolves when the WebSocket is *constructed*, not when it
+// opens, and getEndpoint() has no timeout. Bound the whole attempt so a blocked
+// wss: upgrade or a hung endpoint call becomes a rejection, not a deaf start.
+const CONNECT_TIMEOUT_MS = 20_000;
+const SOCKET_OPEN = 1; // ws.WebSocket.OPEN
 // Provider verdicts a retry can heal: system busy (-1), throttled (88), and the
 // send-rate limits (410100 / 130101). Classifying these definitive would settle
 // a rate-limited chunk's whole delivery rejected and never send the rest.
@@ -40,6 +45,11 @@ function createStreamClient(
     debug: boolean;
     onDownStream: (data: unknown) => void;
     connect: () => Promise<void>;
+    socket?: {
+      readyState: number;
+      on: (event: string, cb: (...args: unknown[]) => void) => void;
+      off: (event: string, cb: (...args: unknown[]) => void) => void;
+    };
   };
   internals.debug = false;
   client.registerCallbackListener(TOPIC_ROBOT, (msg: DWClientDownStream) => {
@@ -84,9 +94,58 @@ function createStreamClient(
   let loggedReconnectFailure = false;
   let retry: ReturnType<typeof setTimeout> | undefined;
   const sdkConnect = internals.connect.bind(client);
+  // The SDK resolves connect() once the WebSocket is constructed; only the
+  // 'open' event means the stream can actually receive frames. Wait for it,
+  // rejecting on an error/close before open, so a blocked wss: upgrade cannot
+  // report a healthy start.
+  const waitForSocketOpen = (): Promise<void> => {
+    const socket = internals.socket;
+    if (!socket) {
+      return Promise.reject(new Error('DingTalk stream created no socket.'));
+    }
+    if (socket.readyState === SOCKET_OPEN) return Promise.resolve();
+    return new Promise<void>((resolve, reject) => {
+      const onOpen = () => {
+        cleanup();
+        resolve();
+      };
+      const fail = () => {
+        cleanup();
+        reject(new Error('DingTalk stream failed before the socket opened.'));
+      };
+      const cleanup = () => {
+        socket.off('open', onOpen);
+        socket.off('error', fail);
+        socket.off('close', fail);
+      };
+      socket.on('open', onOpen);
+      socket.on('error', fail);
+      socket.on('close', fail);
+    });
+  };
+  // Bound the whole attempt (getEndpoint has no timeout either) so a hung
+  // endpoint call or handshake becomes a rejection instead of a pending promise.
+  const attempt = (): Promise<void> =>
+    new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error('DingTalk stream connect timed out.'));
+      }, CONNECT_TIMEOUT_MS);
+      withConnectLoggingSuppressed(sdkConnect)
+        .then(() => waitForSocketOpen())
+        .then(
+          () => {
+            clearTimeout(timer);
+            resolve();
+          },
+          (error) => {
+            clearTimeout(timer);
+            reject(error);
+          },
+        );
+    });
   const guardedConnect = (): Promise<void> => {
     if (stopped) return Promise.resolve();
-    return withConnectLoggingSuppressed(sdkConnect).then(
+    return attempt().then(
       (result) => {
         everConnected = true;
         loggedReconnectFailure = false;
@@ -184,8 +243,22 @@ async function sendWebhook(
     // receipt still covers the whole ledger segment. The budget stays armed
     // across every chunk's header AND body read, so a stalled body cannot
     // outlive it.
+    let delivered = 0;
     for (const chunk of splitChunks(text)) {
-      await postTextChunk(webhook, chunk, abort.signal, dispatcher);
+      try {
+        await postTextChunk(webhook, chunk, abort.signal, dispatcher);
+        delivered += 1;
+      } catch (error) {
+        // A definitive refusal after a chunk was already delivered means the
+        // segment is partially delivered, not never sent. Classify it unknown
+        // (re-drivable by receipt replay) rather than rejected, so the ledger
+        // does not record a half-delivered reply as never sent and the resend
+        // path does not re-send the half the user already has.
+        if (delivered > 0 && (error as DingtalkWebhookFailure).definitive) {
+          (error as DingtalkWebhookFailure).definitive = false;
+        }
+        throw error;
+      }
     }
   } finally {
     clearTimeout(timer);

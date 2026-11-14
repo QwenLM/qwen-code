@@ -14,12 +14,22 @@ const mockState = vi.hoisted(() => ({
   instance: null as unknown as { onDownStream: (data: unknown) => void },
   registered: null as null | { topic: unknown; cb: (m: unknown) => void },
   acks: [] as Array<{ id: string; payload: { status: string } }>,
+  // Whether the constructed socket ever emits 'open'. The real SDK resolves
+  // connect() on construction; the deps wrapper must wait for 'open' (R10-1).
+  socketOpen: true,
+  socket: null as null | {
+    readyState: number;
+    on: (e: string, cb: (...a: unknown[]) => void) => void;
+    off: (e: string, cb: (...a: unknown[]) => void) => void;
+    emit: (e: string, ...a: unknown[]) => void;
+  },
 }));
 
 vi.mock('dingtalk-stream-sdk-nodejs', () => {
   class DWClient {
     config = { autoReconnect: true };
     debug = false;
+    socket: unknown = null;
     constructor() {
       mockState.instance = this as unknown as typeof mockState.instance;
     }
@@ -61,6 +71,30 @@ vi.mock('dingtalk-stream-sdk-nodejs', () => {
         error.toJSON = () => ({ message: error.message, config: error.config });
         throw error;
       }
+      // Mirror the SDK: construct the socket and resolve on construction; the
+      // 'open' event (emitted async) is what actually makes the stream live.
+      const listeners = new Map<string, Set<(...a: unknown[]) => void>>();
+      const socket = {
+        readyState: 0,
+        on: (e: string, cb: (...a: unknown[]) => void) => {
+          if (!listeners.has(e)) listeners.set(e, new Set());
+          listeners.get(e)!.add(cb);
+        },
+        off: (e: string, cb: (...a: unknown[]) => void) => {
+          listeners.get(e)?.delete(cb);
+        },
+        emit: (e: string, ...a: unknown[]) => {
+          listeners.get(e)?.forEach((cb) => cb(...a));
+        },
+      };
+      this.socket = socket;
+      mockState.socket = socket;
+      if (mockState.socketOpen) {
+        setImmediate(() => {
+          socket.readyState = 1;
+          socket.emit('open');
+        });
+      }
     }
     disconnect(): void {
       mockState.disconnects += 1;
@@ -96,6 +130,8 @@ beforeEach(() => {
   mockState.connectGate = null;
   mockState.registered = null;
   mockState.acks = [];
+  mockState.socketOpen = true;
+  mockState.socket = null;
 });
 
 afterEach(() => {
@@ -119,6 +155,20 @@ describe('managed DingTalk stream connect (R1-9)', () => {
     expect(JSON.stringify(rejection)).not.toContain('SUPERSECRET');
   });
 
+  it('a socket that never opens rejects the first connect, not a deaf start (R10-1)', async () => {
+    vi.useFakeTimers();
+    // The SDK resolves connect() on construction; a blocked wss: upgrade means
+    // 'open' never fires. The wrapper must reject, not report a healthy start.
+    mockState.socketOpen = false;
+    const { createStreamClient } = createManagedDingtalkDeps();
+    const stream = createStreamClient(SETTINGS, () => true);
+    const connecting = stream.connect();
+    const assertion = expect(connecting).rejects.toThrow('connect failed');
+    await vi.advanceTimersByTimeAsync(21_000);
+    await assertion;
+    stream.disconnect();
+  });
+
   it('a reconnect failure after a successful connect is swallowed', async () => {
     const { createStreamClient } = createManagedDingtalkDeps();
     const stream = createStreamClient(SETTINGS, () => true);
@@ -129,7 +179,11 @@ describe('managed DingTalk stream connect (R1-9)', () => {
   });
 
   it('a failed reconnect re-arms a retry instead of going permanently deaf', async () => {
-    vi.useFakeTimers();
+    // Keep setImmediate real so the mock socket's async 'open' fires; only the
+    // retry timer needs to be fake.
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
+    });
     const { createStreamClient } = createManagedDingtalkDeps();
     const stream = createStreamClient(SETTINGS, () => true);
     await stream.connect(); // call 1 succeeds
@@ -229,7 +283,11 @@ describe('managed DingTalk stream reconnect lifecycle (R4-2 / R4-3)', () => {
   });
 
   it('logs a permanently failing reconnect only on the transition (R4-3)', async () => {
-    vi.useFakeTimers();
+    // Keep setImmediate real so the mock socket's async 'open' fires; only the
+    // retry timer needs to be fake.
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
+    });
     const stderrSpy = vi
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
