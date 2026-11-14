@@ -953,4 +953,88 @@ describe('managed DingTalk adapter review fixes', () => {
     expect(second.plane.submit.map((event) => event.text)).toEqual(['A', 'B']);
     await second.adapter.disconnect();
   });
+
+  it('refuses new frames during a re-registration outage so none is acked-and-lost (R5-1)', async () => {
+    const cwd = tempCwd();
+    const first = await connectedAdapter(cwd);
+    // A channel_not_found admission resets the generation.
+    first.plane.setSubmitErrorFor((id) =>
+      id === 'dingtalk:trigger'
+        ? Object.assign(new Error('not registered'), {
+            status: 404,
+            code: 'channel_not_found',
+          })
+        : undefined,
+    );
+    first.fake.push(
+      'trigger',
+      messageData({ msgId: 'trigger', text: { content: 'trigger' } }),
+    );
+    await first.adapter.tick();
+    // Re-registration now keeps failing (control-plane recovery outage), so
+    // ensureRegistered throws before drainInbox on every following tick.
+    first.plane.controlPlane.register = async () => {
+      throw Object.assign(new Error('HTTP 503'), { status: 503 });
+    };
+    // Frames arriving during the outage must be left unacked for provider
+    // redelivery, not acked into an inbox the drain never reaches.
+    expect(
+      first.fake.push(
+        'n1',
+        messageData({ msgId: 'n1', text: { content: 'n1' } }),
+      ),
+    ).toBe(false);
+    expect(
+      first.fake.push(
+        'n2',
+        messageData({ msgId: 'n2', text: { content: 'n2' } }),
+      ),
+    ).toBe(false);
+    expect(
+      first.fake.push(
+        'n3',
+        messageData({ msgId: 'n3', text: { content: 'n3' } }),
+      ),
+    ).toBe(false);
+    await first.adapter.tick().catch(() => {});
+    await first.adapter.tick().catch(() => {});
+    // Hard restart: the acked trigger survives; the refused frames are the
+    // provider's to redeliver, not lost claims.
+    const second = await connectedAdapter(cwd);
+    await second.adapter.tick();
+    expect(second.plane.submit.map((event) => event.text)).toEqual(['trigger']);
+    await second.adapter.disconnect();
+  });
+
+  it('persists a frame acked just before the generation reset when re-registration then fails (R5-1)', async () => {
+    const cwd = tempCwd();
+    const first = await connectedAdapter(cwd);
+    // The outbox claim reports the channel gone (resetting the generation), but
+    // a frame is acked into the inbox after this tick's drain already ran — the
+    // window between drainInbox and pullOutbox. It is acked while the generation
+    // is still live, so the gate admits it; only the next tick's failed
+    // re-registration can make it durable.
+    first.plane.controlPlane.claimDeliveries = async () => {
+      first.fake.push(
+        'race',
+        messageData({ msgId: 'race', text: { content: 'race' } }),
+      );
+      throw Object.assign(new Error('channel gone'), {
+        status: 404,
+        code: 'channel_not_found',
+      });
+    };
+    await first.adapter.tick();
+    // Re-registration now keeps failing, so ensureRegistered throws before the
+    // drain; the registration-failure path must persist the acked backlog.
+    first.plane.controlPlane.register = async () => {
+      throw Object.assign(new Error('HTTP 503'), { status: 503 });
+    };
+    await first.adapter.tick().catch(() => {});
+    // Hard restart: the acked frame must survive, not be lost to the outage.
+    const second = await connectedAdapter(cwd);
+    await second.adapter.tick();
+    expect(second.plane.submit.map((event) => event.text)).toEqual(['race']);
+    await second.adapter.disconnect();
+  });
 });

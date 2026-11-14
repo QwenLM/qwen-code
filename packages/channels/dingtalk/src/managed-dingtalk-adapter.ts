@@ -285,7 +285,17 @@ export class ManagedDingtalkAdapter {
 
   /** One admission drain and one outbound pull, for callers that drive it. */
   async tick(): Promise<void> {
-    await this.ensureRegistered(this.state!);
+    try {
+      await this.ensureRegistered(this.state!);
+    } catch (error) {
+      // Re-registration failed before the drain could run. Persist any
+      // already-acked inbox backlog as durable claims (the generation is 0, so
+      // the drain persists without submitting) — otherwise a frame acked just
+      // before the generation reset would live only in memory for the whole
+      // outage and be lost on a hard restart. The next tick retries registration.
+      await this.drainInbox().catch(() => undefined);
+      throw error;
+    }
     await this.resubmitPending();
     await this.drainInbox();
     await this.reportOrphanedOutbound();
@@ -298,13 +308,16 @@ export class ManagedDingtalkAdapter {
   // Acceptance must mean "a durable claim will be persisted", not merely inbox
   // room. While the claim table is full there is no slot, so a frame acked here
   // would live only in memory and be lost on a hard restart. While admission is
-  // stalled a new frame is left unacked for provider redelivery rather than
-  // parked as a claim waiting on the operator; drainInbox makes the pre-stall
-  // backlog durable. Couple the gate to both conditions.
+  // stalled or the instance is unregistered, a new frame is left unacked for
+  // provider redelivery rather than parked in memory: a stalled drain persists
+  // the backlog, but a failed re-registration throws before the drain runs. The
+  // already-acked backlog is made durable by drainInbox and by the tick's
+  // registration-failure path. Couple the gate to these conditions.
   private onMessage(messageId: string, data: string): boolean {
     if (!this.running) return false;
     if (
       this.instanceStalled ||
+      this.registeredGeneration === 0 ||
       this.inbox.length >= INBOX_LIMIT ||
       (this.state?.pending.length ?? 0) + this.inbox.length >=
         MANAGED_DINGTALK_PENDING_LIMIT
