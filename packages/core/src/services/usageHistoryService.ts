@@ -14,6 +14,7 @@ import type { SessionMetrics } from '../telemetry/uiTelemetry.js';
 import type { UiEvent } from '../telemetry/uiTelemetry.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { extractJsonStringField } from '../utils/sessionStorageUtils.js';
 
 const debugLogger = createDebugLogger('USAGE_HISTORY');
 
@@ -236,28 +237,32 @@ export function metricsToUsageRecord(
 }
 
 /**
- * Matches a record's top-level `timestamp` value without parsing the line.
- * `timestamp` is an ISO-8601 string (no quotes/backslashes to escape) and is
- * serialized before any large nested payload, so the first match is the
- * record's own timestamp even on multi-megabyte tool-result lines.
+ * Trailing lines up to this many characters are parsed after the loop so a
+ * `}{`-glued final line still recovers its last record's timestamp. Larger
+ * trailing lines (a session that idled right after a big tool call ends on a
+ * multi-megabyte `tool_result`) are NOT parsed — their own timestamp is
+ * already captured by the per-line field extraction below.
  */
-const TIMESTAMP_RE = /"timestamp":"([^"]*)"/;
+const MAX_TRAILING_PARSE_CHARS = 64 * 1024;
 
 /**
  * Replays a session transcript's `ui_telemetry` records into a usage
  * summary. Returns null for an empty transcript; `record` is null when the
  * transcript has no telemetry events (or unparseable timestamps) — the
- * sessionId is still reported so callers can dedupe by session.
+ * sessionId is still reported so callers can dedupe by session. A read error
+ * is rethrown (not collapsed into null) so the caller never memoizes a failed
+ * scan as an authoritative "no usage" result.
  *
  * Single implementation shared by the rebuild migration and the
  * pre-deletion salvage (#7384) so the two can never drift.
  *
- * Streams the file and JSON-parses only the first record and the lines that
- * could carry telemetry (`"ui_telemetry"` is a necessary substring of every
- * such record). The bulk of a transcript is large tool-result payloads that
- * contribute nothing to usage; parsing them dominated the dashboard load
- * (multi-GB histories took ~80s). The end timestamp is read from the last
- * line, with a regex-extracted fallback for a corrupt trailing line.
+ * Streams the file and JSON-parses only the first record, the lines that could
+ * carry telemetry (`"ui_telemetry"` is a necessary substring of every such
+ * record), and a small trailing line. The bulk of a transcript is large
+ * tool-result payloads that contribute nothing to usage; parsing them
+ * dominated the dashboard load (multi-GB histories took ~80s). The end
+ * timestamp comes from the trailing record, or from the per-line extracted
+ * `timestamp` field when the trailing line is large or corrupt.
  */
 async function summarizeTranscriptFile(
   filePath: string,
@@ -277,8 +282,11 @@ async function summarizeTranscriptFile(
     for await (const line of rl) {
       if (line.trim().length === 0) continue;
       lastLine = line;
-      const tsMatch = TIMESTAMP_RE.exec(line);
-      if (tsMatch) lastTsFallback = tsMatch[1];
+      // First-match extraction: a record's own `timestamp` precedes any nested
+      // payload, so this is the record's timestamp even on huge tool-result
+      // lines. Tolerant of non-compact writers (spaces around the colon).
+      const ts = extractJsonStringField(line, 'timestamp');
+      if (ts !== undefined) lastTsFallback = ts;
 
       if (!header) {
         const recs = jsonl.parseLineTolerant<ChatRecord>(line, filePath);
@@ -308,8 +316,12 @@ async function summarizeTranscriptFile(
       }
     }
   } catch (e) {
+    // Rethrow read errors (EMFILE/EACCES/EIO/EBUSY, …) rather than returning
+    // null: a failed scan must not be memoized as an authoritative "no usage"
+    // result, or one transient error hides the session until its file changes.
+    // The rebuild worker's catch skips the cache write, so the next load retries.
     debugLogger.debug(`summarizeTranscriptFile: cannot read ${filePath}: ${e}`);
-    return null;
+    throw e;
   } finally {
     rl.close();
     fileStream.destroy();
@@ -320,11 +332,19 @@ async function summarizeTranscriptFile(
   if (!sessionId) return null;
   if (!hasEvents) return { sessionId, record: null };
 
-  const lastRecs = jsonl.parseLineTolerant<ChatRecord>(lastLine, filePath);
-  const endTs =
-    lastRecs.length > 0
-      ? lastRecs[lastRecs.length - 1]!.timestamp
-      : lastTsFallback;
+  // Only parse a small trailing line (cheap `}{`-glued recovery). A large
+  // trailing line is exactly the payload this scan exists to skip; its own
+  // timestamp was already extracted per-line into lastTsFallback.
+  let endTs: string | undefined;
+  if (lastLine.length <= MAX_TRAILING_PARSE_CHARS) {
+    const lastRecs = jsonl.parseLineTolerant<ChatRecord>(lastLine, filePath);
+    endTs =
+      lastRecs.length > 0
+        ? lastRecs[lastRecs.length - 1]!.timestamp
+        : lastTsFallback;
+  } else {
+    endTs = lastTsFallback;
+  }
   const startTime = new Date(header.timestamp).getTime();
   const endTime = endTs ? new Date(endTs).getTime() : NaN;
   if (isNaN(startTime) || isNaN(endTime)) {
