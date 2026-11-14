@@ -1,0 +1,171 @@
+name: 'PR 15959 current-main merged targeted gates'
+on:
+  push:
+    branches: ['codex/verify-pr-15959-merged-gates-20261115']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  mysql-current-merge:
+    runs-on: [self-hosted, linux, x64, ecs-qwen]
+    container: maven:3.9.11-eclipse-temurin-21
+    timeout-minutes: 55
+    env:
+      NODE_OPTIONS: '--max-old-space-size=6144'
+      MAVEN_OPTS: '-Xmx2048m'
+      MAVEN_ARGS: '-Dmaven.repo.local=/tmp/pr15959-m2'
+    services:
+      mysql:
+        image: mysql:8.4.6
+        env:
+          MYSQL_ROOT_PASSWORD: verify-fixture
+          MYSQL_ROOT_HOST: '%'
+          MYSQL_DATABASE: qwen_verify
+        options: >-
+          --tmpfs /var/lib/mysql
+          --health-cmd="mysqladmin ping --host=127.0.0.1 --user=root --password=verify-fixture --silent"
+          --health-interval=10s --health-timeout=5s --health-retries=12
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 'ea95b22f897d76ae4c1c54f355d65a82a6942af6'
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Prepare and attest isolated tools and database
+        timeout-minutes: 6
+        run: |
+          apt-get update -qq
+          apt-get install -y -qq python3 default-mysql-client
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          mkdir -p .verify-evidence
+          test "$(git rev-parse HEAD)" = 'ea95b22f897d76ae4c1c54f355d65a82a6942af6'
+          git rev-parse HEAD | tee .verify-evidence/source-sha.txt
+          java -version 2>&1 | tee .verify-evidence/java-version.txt
+          mvn -version | tee .verify-evidence/maven-version.txt
+          mysql --host=mysql --user=root --password=verify-fixture -e 'SET GLOBAL max_allowed_packet = 134217728; SELECT VERSION(), @@transaction_isolation, @@innodb_use_native_aio, @@GLOBAL.max_allowed_packet; SHOW GRANTS;' | tee .verify-evidence/mysql-settings.txt
+          printf '%s\n' 'Task service uses image default AIO/binlog; selected cases do not exercise large-object or server-wide deadlock counters. Full CI retains its normal flags.' > .verify-evidence/service-deviation.txt
+      - name: Install sibling SDK from candidate source
+        timeout-minutes: 10
+        run: |
+          set -o pipefail
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install 2>&1 | tee .verify-evidence/sdk-install.log
+      - name: Verify current-main merged action status and consumers
+        timeout-minutes: 22
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, subprocess, xml.etree.ElementTree as ET
+          from pathlib import Path
+          out = Path('.verify-evidence')
+          module = Path('packages/managed-agent-server')
+          command = ['mvn','--batch-mode','--no-transfer-progress','-Pmysql-integration',
+              '-Dtest=ManagedActionStoreTest,ConsolidatedActionStoreTest,ManagedActionsTest',
+              '-Dsurefire.failIfNoSpecifiedTests=false','-Dit.test=WorkspaceSessionCloseMySqlIT',
+              '-Dmysql.url=jdbc:mysql://mysql:3306/qwen_verify?allowPublicKeyRetrieval=true&useSSL=false',
+              '-Dmysql.user=root','-Dmysql.password=verify-fixture','clean','verify','checkstyle:check']
+          (out/'command.json').write_text(json.dumps(command)+'\n')
+          with (out/'maven.log').open('wb') as log:
+              result = subprocess.run(command,cwd=module,stdout=log,stderr=subprocess.STDOUT,timeout=1200)
+          (out/'maven.rc').write_text(str(result.returncode)+'\n')
+          cases=[]
+          for kind in ('surefire-reports','failsafe-reports'):
+              reports=module/'verification/target'/kind
+              if reports.exists():
+                  import shutil
+                  shutil.copytree(reports,out/kind)
+                  for xml in reports.glob('TEST-*.xml'):
+                      for c in ET.parse(xml).getroot().iter('testcase'):
+                          cases.append({'class':c.attrib['classname'],'name':c.attrib['name'],
+                              'failed':c.find('failure') is not None,'error':c.find('error') is not None,
+                              'skipped':c.find('skipped') is not None})
+          (out/'cases.json').write_text(json.dumps(cases,indent=2)+'\n')
+          groups={}
+          for c in cases:groups[c['class'].split('.')[-1]]=groups.get(c['class'].split('.')[-1],0)+1
+          print(json.dumps({'exit':result.returncode,'groups':groups}),flush=True)
+          assert result.returncode==0
+          assert groups=={'ManagedActionsTest':50,'ManagedActionStoreTest':29,'ConsolidatedActionStoreTest':5,'WorkspaceSessionCloseMySqlIT':6}
+          assert not any(c['failed'] or c['error'] or c['skipped'] for c in cases)
+          PY
+      - name: Preserve executed evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pr15959-current-merge-java-focused
+          path: .verify-evidence/
+          include-hidden-files: true
+  node-current-merge:
+    runs-on: [self-hosted, linux, x64, ecs-qwen]
+    container: node:22-bookworm
+    timeout-minutes: 45
+    env:
+      NODE_OPTIONS: '--max-old-space-size=6144'
+      QWEN_SKIP_PREPARE: '1'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 'ea95b22f897d76ae4c1c54f355d65a82a6942af6'
+          persist-credentials: false
+      - name: Attest source and reused build closure
+        run: |
+          mkdir -p .verify-node-evidence
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          test "$(git rev-parse HEAD)" = 'ea95b22f897d76ae4c1c54f355d65a82a6942af6'
+          git rev-parse HEAD | tee .verify-node-evidence/source-sha.txt
+          node -e 'console.log(JSON.stringify({node:process.version,heapBytes:require("node:v8").getHeapStatistics().heap_size_limit}))' | tee .verify-node-evidence/runtime.json
+          cat > .verify-node-evidence/reuse-closure.json <<'JSON'
+          {"prior": "3056beba72fec1646733e3ade9080a35c8bb1e0a", "current": "ea95b22f897d76ae4c1c54f355d65a82a6942af6", "files": ["README.md", "packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/JdbcManagedActionStore.java", "packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/WorkspaceSessionCloseMySqlIT.java", "packages/web-shell/client/components/channels/ChannelEditorDialog.tsx", "packages/web-shell/client/components/channels/ChannelQrLogin.tsx", "packages/web-shell/client/components/channels/qr-login-contract.type-test.ts", "packages/web-shell/client/daemon/workspace/hooks/useDaemonChannels.ts", "packages/web-shell/client/daemon/workspace/types.ts"], "cliUnchanged": true, "coreUnchanged": true, "lockUnchanged": true}
+          JSON
+      - name: Install current locked dependencies without prepare
+        timeout-minutes: 20
+        run: corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
+      - name: Reuse normal prior trial-merge build
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: unit-test-tree
+          repository: QwenLM/qwen-code
+          run-id: '43617647081'
+          github-token: ${{ github.token }}
+          path: '.verify-input'
+      - name: Restore unchanged CLI and Core prerequisites
+        run: |
+          tar -xzf .verify-input/unit-test-tree.tgz
+          node scripts/ci-build-cache.mjs host-assets
+          node scripts/generate-git-commit-info.js
+          git diff --exit-code
+      - name: Rebuild changed Web Shell and check all workspaces
+        timeout-minutes: 18
+        run: |
+          set -o pipefail
+          npm run build --workspace=packages/web-shell 2>&1 | tee .verify-node-evidence/web-shell-build.log
+          npm run typecheck 2>&1 | tee .verify-node-evidence/typecheck.log
+          git diff --exit-code
+      - name: Verify affected CLI suites on current merge
+        timeout-minutes: 10
+        working-directory: packages/cli
+        run: |
+          npx --no-install vitest run src/serve/hosted-turn-history.test.ts src/serve/hosted-context-compression.test.ts src/serve/hosted-harness-model.test.ts src/serve/hosted-harness-session.test.ts src/serve/hosted-csi-text-turn.test.ts src/serve/hosted-csi-tool-turn.test.ts --reporter=json --outputFile=../../.verify-node-evidence/cli.json > ../../.verify-node-evidence/cli.log 2>&1
+      - name: Check executed selection
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          d=json.loads(Path('.verify-node-evidence/cli.json').read_text())
+          suites=d['testResults']
+          counts=[{'name':s['name'],'passed':sum(c['status']=='passed' for c in s['assertionResults']),'failed':sum(c['status']=='failed' for c in s['assertionResults']),'pending':sum(c['status']=='pending' for c in s['assertionResults'])} for s in suites]
+          Path('.verify-node-evidence/cli-counts.json').write_text(json.dumps(counts,indent=2)+'\n')
+          print(json.dumps(counts))
+          assert len(suites)==6 and all(c['passed']>0 and c['failed']==0 for c in counts)
+          assert d['numFailedTests']==0 and d['numFailedTestSuites']==0
+          PY
+      - name: Preserve current-merge Node evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pr15959-current-merge-node-gates
+          path: .verify-node-evidence/
+          include-hidden-files: true
