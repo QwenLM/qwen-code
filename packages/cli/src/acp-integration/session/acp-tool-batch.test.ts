@@ -517,6 +517,57 @@ describe('runAcpToolBatch', () => {
     );
   });
 
+  it('reports the cancellation text for a todo_write cancelled at approval', async () => {
+    const todo: ToolCallRequestInfo = {
+      callId: 'call_todo',
+      name: 'todo_write',
+      args: { todos: [] },
+      isClientInitiated: false,
+      prompt_id: 'prompt',
+    };
+    requestPermission.mockResolvedValue({ outcome: { outcome: 'cancelled' } });
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    batch.run = async () => {
+      batch.options.onToolCallsUpdate([
+        {
+          status: 'awaiting_approval',
+          request: todo,
+          tool: { kind: 'think' },
+          invocation,
+          confirmationDetails: editDetails(onConfirm),
+        },
+      ]);
+      await vi.waitFor(() => expect(onConfirm).toHaveBeenCalled());
+      const cancelled = {
+        request: todo,
+        status: 'cancelled' as const,
+        response: response(todo, {
+          executionStatus: 'not_started',
+          responseParts: [],
+        }),
+      };
+      batch.options.onToolCallsUpdate([cancelled]);
+      return { parts: [] };
+    };
+
+    await runAcpToolBatch(host, {
+      requests: [todo],
+      loop,
+      signal: new AbortController().signal,
+      duplicates: { handled: new Map(), responded: new Set() },
+    });
+
+    expect(log).toContainEqual([
+      'result',
+      expect.objectContaining({
+        callId: 'call_todo',
+        toolName: 'todo_write',
+        success: false,
+        cancelMessage: 'Tool "todo_write" was canceled by the user.',
+      }),
+    ]);
+  });
+
   it('stops the rest of the batch when the user cancels an approval', async () => {
     requestPermission.mockResolvedValue({ outcome: { outcome: 'cancelled' } });
     const onConfirm = vi.fn().mockResolvedValue(undefined);
