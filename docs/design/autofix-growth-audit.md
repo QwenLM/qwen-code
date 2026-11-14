@@ -176,13 +176,14 @@ entrance-by-entrance approach kept growing new entrances each review
 round):
 
 - A push requires `outcome=fixed|noop`, and 'Finalize verification'
-  accepts those two outcomes ONLY from a pass whose step CONCLUSION is
-  success — a gate that reached them exited 0. A gate killed mid-check
-  concludes failure, so a forged `outcome=fixed` + `verified_head`
-  appended to its discovered output file is discarded there (read as a
-  crashed gate, retried) and never reaches the push condition. Every
-  live exit additionally writes its own outcome AFTER the checks, so a
-  mid-check append loses last-write-wins even without a kill.
+  accepts those two outcomes ONLY from a pass whose raw step OUTCOME is
+  success. Both verification steps use `continue-on-error`, which changes
+  a failed step's conclusion to success but leaves its outcome as failure.
+  A forged `outcome=fixed` + `verified_head` appended to a gate killed
+  mid-check is therefore discarded there (read as a crashed gate,
+  retried) and never reaches the push condition. Every live exit
+  additionally writes its own outcome AFTER the checks, so a mid-check
+  append loses last-write-wins even without a kill.
 - The gate launches through the workflow's `env -i` clean-child pattern
   with a step-level `BASH_ENV`/`SHELLOPTS` pin: bash sources a planted
   `BASH_ENV` at process STARTUP, before any body-side unset runs, so
@@ -207,7 +208,7 @@ Known residuals, stated rather than claimed closed: the `$GITHUB_OUTPUT`
 backing file itself stays writable (the gate must write it), so a
 CONCURRENT detached writer spawned by branch code and outliving the gate
 can still race the last append — outcome flips are blocked by the
-conclusion gate above, and a forged trail marker on a FAILED round
+raw step-outcome gate above, and a forged trail marker on a FAILED round
 cannot re-arm (the failure path never re-arms); and steps.prepare's
 `kiss_audit` copy is consumed as the fallback only when no gate
 recorded the bit (a crash path with no push).
