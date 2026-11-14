@@ -213,6 +213,11 @@ host 按 watch identity 的口径归并（裸 hostname、不带端口），因�
 `fired`/`ciFiredSha`/`seq`/`pending` 这些 watch 字段、`watch:` 任务分支、
 `prWatchLimit`、终态切片与 watch 预算保留额。comment watch 继续骑同一轮询。
 
+去掉可配置上限也去掉了 comment watch 原先的 30 个 PR 扇出上限：每个绑定 PR 都会被
+轮询，因此 5,000/小时的 PAT 会比以前更早触及其约 70–75 个绑定 PR 的额度上限。预
+算闸仍会在剩余 200 时让出本轮，所以代价是跳过轮次、评论延迟，而不是请求被拒。这
+与其余旋钮的移除一并接受；绑定很多的运维者可以调低间隔或关闭 comment watch。
+
 `reconcilePendingWatch` 与订阅关闭时的 park 只为 watch pending 存在；它们在一次性
 退休（§7）之后随之去掉。
 

@@ -272,6 +272,14 @@ and delivery: `watchOnePr`'s four detectors, the CI re-check intervals, the
 `prWatchLimit`, the terminal slice and the watch budget reserve. The comment
 watch keeps riding the same poll.
 
+Removing the configurable cap also removes the comment watch's old 30-PR
+fan-out bound: every bound PR is polled, so a 5,000/hour PAT reaches its
+~70–75 bound-PR ceiling sooner than before. The budget gate still yields the
+pass at its 200-request reserve, so the cost is skipped passes and delayed
+comments rather than rejected requests. This is accepted with the rest of the
+knob removal; an operator with many bindings can lower the interval or disable
+the comment watch.
+
 `reconcilePendingWatch` and the subscription-disabled parking exist only for
 watch pending; they go with it, after the one-time retirement (§7).
 
