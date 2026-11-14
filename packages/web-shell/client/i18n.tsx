@@ -1471,6 +1471,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'markdownTable.selection.selected': 'Selected',
   'markdownTable.selection.nonEmpty': 'Non-empty',
   'markdownTable.selection.numeric': 'Numeric',
+  'markdownTable.selection.statistics': 'Numeric selection statistics',
   'markdownTable.selection.sum': 'Sum',
   'markdownTable.selection.average': 'Average',
   'markdownTable.selection.min': 'Min',
@@ -2317,6 +2318,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'terminal.notice.error': (v) => `Error: ${v?.message ?? ''}`,
   'terminal.notice.unknownError': 'Unknown error',
   'terminal.notice.reconnecting': 'Connection lost — reconnecting…',
+  'terminal.notice.lost': 'This terminal is no longer available.',
   'terminal.notice.protocolMismatch':
     'Terminal protocol changed; restart the daemon and reload this page.',
   'localFiles.title': 'Local files',
@@ -2643,6 +2645,15 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sidebar.expandProject': 'Expand workspace',
   'sidebar.search': 'Search sessions',
   'sidebar.searchPlaceholder': 'Search sessions',
+  'sidebar.searchResults': 'Sessions',
+  'sidebar.searchLoading': 'Searching sessions…',
+  'sidebar.searchEmpty': 'No sessions found',
+  'sidebar.searchEmptyHint':
+    'Try a different title or a phrase from a conversation.',
+  'sidebar.searchRecentEmpty': 'Your recent sessions will appear here.',
+  'sidebar.searchPartialFailure': 'Some sessions could not be searched.',
+  'sidebar.searchNavigate': 'Navigate',
+  'sidebar.searchOpen': 'Open',
   'sidebar.rename': 'Rename',
   'sidebar.export': 'Export conversation record',
   'sidebar.exportFailed': 'Failed to export session',
@@ -4674,15 +4685,18 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.platform.available': 'Available',
   'channels.platform.configure': 'Configure',
   'channels.platform.add': 'Add connection',
-  'channels.method.title': 'Choose a DingTalk connection',
-  'channels.method.description':
-    'Choose how this Channel connects to DingTalk.',
+  'channels.platform.name.dingtalk': 'DingTalk',
+  'channels.platform.name.feishu': 'Feishu',
+  'channels.method.title': (v) =>
+    `Choose a ${v?.platform ?? 'Channel'} connection`,
+  'channels.method.description': (v) =>
+    `Choose how this Channel connects to ${v?.platform ?? 'the platform'}.`,
   'channels.method.applicationBot': 'Application bot',
   'channels.method.applicationBot.description':
     'Receive messages and reply using an application bot.',
   'channels.method.webhook': 'Webhook (send only)',
   'channels.method.webhook.description':
-    'Send notifications to the group configured by a custom robot webhook.',
+    'Send notifications to the group configured by a custom bot webhook.',
   'channels.status.readyToSend': 'Ready to send',
   'channels.statusDescription.readyToSend':
     'Ready locally. Remote credentials are checked when sending.',
@@ -4791,12 +4805,12 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'channels.qrLogin.error': 'Could not complete the QR binding.',
   'channels.editor.field.dingtalk.clientId': 'Client ID (AppKey)',
   'channels.editor.field.dingtalk.clientSecret': 'Client Secret (AppSecret)',
-  'channels.editor.field.dingtalkWebhook.webhookUrl': 'Webhook URL',
-  'channels.editor.field.dingtalkWebhook.webhookUrl.description':
-    'The secret webhook address of your DingTalk custom robot.',
-  'channels.editor.field.dingtalkWebhook.signingSecret': 'Signing secret',
-  'channels.editor.field.dingtalkWebhook.signingSecret.description':
-    'Required if signature verification is enabled for the custom robot.',
+  'channels.editor.field.webhook.webhookUrl': 'Webhook URL',
+  'channels.editor.field.webhook.webhookUrl.description':
+    'The secret webhook address of your custom bot.',
+  'channels.editor.field.webhook.signingSecret': 'Signing secret',
+  'channels.editor.field.webhook.signingSecret.description':
+    'Required if signature verification is enabled for the custom bot.',
   'channels.editor.field.weixin.groupPolicy': 'Group policy',
   'channels.editor.field.weixin.groupPolicy.description':
     'WeChat iLink Bot only supports direct messages, so groups stay disabled.',
@@ -6663,6 +6677,7 @@ const ZH: Messages = {
   'markdownTable.selection.selected': '已选',
   'markdownTable.selection.nonEmpty': '非空',
   'markdownTable.selection.numeric': '数值',
+  'markdownTable.selection.statistics': '数值选区统计',
   'markdownTable.selection.sum': '求和',
   'markdownTable.selection.average': '平均',
   'markdownTable.selection.min': '最小',
@@ -7448,6 +7463,7 @@ const ZH: Messages = {
   'terminal.notice.error': (v) => `错误：${v?.message ?? ''}`,
   'terminal.notice.unknownError': '未知错误',
   'terminal.notice.reconnecting': '连接已断开，正在重连…',
+  'terminal.notice.lost': '此终端已不可用。',
   'terminal.notice.protocolMismatch':
     '终端协议已更新，请重启 daemon 并刷新页面。',
   'localFiles.title': '本地文件',
@@ -7743,6 +7759,14 @@ const ZH: Messages = {
   'sidebar.expandProject': '展开工作区',
   'sidebar.search': '搜索会话',
   'sidebar.searchPlaceholder': '搜索会话',
+  'sidebar.searchResults': '会话',
+  'sidebar.searchLoading': '正在搜索会话…',
+  'sidebar.searchEmpty': '未找到相关会话',
+  'sidebar.searchEmptyHint': '试试其他标题或会话中的文字。',
+  'sidebar.searchRecentEmpty': '最近的会话会显示在这里。',
+  'sidebar.searchPartialFailure': '部分会话暂时无法搜索。',
+  'sidebar.searchNavigate': '选择',
+  'sidebar.searchOpen': '打开',
   'sidebar.rename': '重命名',
   'sidebar.export': '导出对话记录',
   'sidebar.exportFailed': '导出会话失败',
@@ -9612,8 +9636,11 @@ const ZH: Messages = {
   'channels.platform.available': '已开放',
   'channels.platform.configure': '配置',
   'channels.platform.add': '添加连接',
-  'channels.method.title': '选择钉钉连接方式',
-  'channels.method.description': '选择此频道连接钉钉的方式。',
+  'channels.platform.name.dingtalk': '钉钉',
+  'channels.platform.name.feishu': '飞书',
+  'channels.method.title': (v) => `选择${v?.platform ?? '此频道'}的连接方式`,
+  'channels.method.description': (v) =>
+    `选择此频道连接${v?.platform ?? '平台'}的方式。`,
   'channels.method.applicationBot': '应用机器人',
   'channels.method.applicationBot.description':
     '通过应用机器人接收消息并回复。',
@@ -9715,11 +9742,11 @@ const ZH: Messages = {
   'channels.qrLogin.cancelled': '已取消绑定。',
   'channels.qrLogin.error': '无法完成扫码绑定。',
   'channels.editor.field.dingtalk.clientId': 'Client ID（原 AppKey）',
-  'channels.editor.field.dingtalkWebhook.webhookUrl': 'Webhook 地址',
-  'channels.editor.field.dingtalkWebhook.webhookUrl.description':
-    '钉钉自定义机器人的私密 Webhook 地址。',
-  'channels.editor.field.dingtalkWebhook.signingSecret': '加签密钥',
-  'channels.editor.field.dingtalkWebhook.signingSecret.description':
+  'channels.editor.field.webhook.webhookUrl': 'Webhook 地址',
+  'channels.editor.field.webhook.webhookUrl.description':
+    '自定义机器人的私密 Webhook 地址。',
+  'channels.editor.field.webhook.signingSecret': '加签密钥',
+  'channels.editor.field.webhook.signingSecret.description':
     '自定义机器人启用加签验证时需填写。',
   'channels.editor.field.dingtalk.clientSecret':
     'Client Secret（原 AppSecret）',
@@ -10275,6 +10302,7 @@ const RU: Messages = {
   'goals.error.clearFailed': 'Не удалось снять цель',
   'goals.error.controlBusy':
     'Другое управление целью ещё выполняется. Повторите, когда оно завершится.',
+  'terminal.notice.lost': 'Этот терминал больше недоступен.',
 };
 
 const MESSAGES: Record<WebShellLanguage, Messages> = {

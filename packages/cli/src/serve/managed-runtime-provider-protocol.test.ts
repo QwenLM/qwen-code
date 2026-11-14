@@ -102,6 +102,27 @@ describe('managed-runtime-provider/1', () => {
     ).toThrow('Managed Tool JSON exceeds size limit.');
   });
 
+  it('admits the terminal turn kind so the Session-close drain can release it', () => {
+    // The web terminal's derived Runtime Session carries turnKind 'terminal'
+    // and holds no provider runtime. The Session-close drain still releases
+    // it through this envelope; rejecting the turn kind here would fail the
+    // release and wedge the Harness Session close permanently (D9-2).
+    const envelope = (turnKind: string) => ({
+      protocolVersion: 1,
+      providerProtocol: MANAGED_RUNTIME_PROVIDER_PROTOCOL,
+      session: { ...session, turnKind },
+      operation: { kind: 'release' },
+    });
+    for (const turnKind of ['bootstrap', 'continuation', 'terminal']) {
+      expect(parseManagedRuntimeProviderRequest(envelope(turnKind))).toEqual(
+        envelope(turnKind),
+      );
+    }
+    expect(() =>
+      parseManagedRuntimeProviderRequest(envelope('other')),
+    ).toThrow();
+  });
+
   it('admits only path-safe ASCII envelope Session ids', () => {
     const request = (patch: Partial<ManagedRuntimeProviderSession>) => ({
       protocolVersion: 1,

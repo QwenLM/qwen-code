@@ -219,7 +219,7 @@ jobs:
           echo "::warning::Upload build artifact failed its first attempt and the retry absorbed it — count this toward the #11364 upload-stall recurrence threshold."
 
   e2e-test-linux:
-    name: "E2E Test (Linux) - ${{ matrix.sandbox }} - shard ${{ matrix.shard }}${{ matrix.agent-loop == 'unified' && ' - unified agent loop' || '' }}"
+    name: "E2E Test (Linux) - ${{ matrix.sandbox }} - shard ${{ matrix.shard }}${{ matrix.agent-loop == 'unified' && ' - unified agent loop' || matrix.agent-loop == 'kernel' && ' - event-bus kernel' || '' }}"
     # Persistent ECS pool with hosted fallback: every trigger here is a
     # trusted context (push to in-repo branches, the nightly schedule, and
     # manual dispatch — no pull_request trigger), and the six-shard matrix
@@ -254,15 +254,18 @@ jobs:
           - '1/1'
         node-version:
           - '22.x'
-        # The nightly and on-demand runs add a sandbox:none leg with
-        # experimental.unifiedAgentLoop on, the scheduled signal each surface
-        # needs before its default changes (#15327). Pushes keep one leg per
+        # The nightly and on-demand runs add sandbox:none legs with the loop
+        # switches on, the scheduled signals each surface needs before its
+        # defaults change: `unified` (experimental.unifiedAgentLoop, #15327)
+        # and `kernel` (both switches, #17045). Pushes keep one leg per
         # sandbox.
         agent-loop: >-
-          ${{ fromJSON(github.event_name == 'push' && '["current"]' || '["current","unified"]') }}
+          ${{ fromJSON(github.event_name == 'push' && '["current"]' || '["current","unified","kernel"]') }}
         exclude:
           - sandbox: 'sandbox:docker'
             agent-loop: 'unified'
+          - sandbox: 'sandbox:docker'
+            agent-loop: 'kernel'
     steps:
       # The sandbox:none retry gate below budgets against the whole 60-minute
       # job, not just the test step — setup spent ~29 of those minutes on two
@@ -459,9 +462,14 @@ jobs:
           # commands below override its one-fork default for this job.
           RUNNER_ENVIRONMENT: '${{ runner.environment }}'
           QWEN_SANDBOX: "${{ matrix.sandbox == 'sandbox:docker' && 'docker' || 'false' }}"
-          # Read by Config.isUnifiedAgentLoopEnabled in every CLI the tests
-          # spawn; the parity suites still set it per run themselves.
-          QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP: "${{ matrix.agent-loop == 'unified' && '1' || '0' }}"
+          # Read by Config.isUnifiedAgentLoopEnabled and
+          # Config.isEventBusAgentLoopEnabled in every CLI the tests spawn;
+          # both override in either direction, so each leg pins its arm with a
+          # concrete value instead of relying on the experimental default.
+          # InteractiveSession forwards these into inheritEnv:false children,
+          # so the parity suites pin both arms explicitly to override them.
+          QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP: "${{ matrix.agent-loop != 'current' && '1' || '0' }}"
+          QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP: "${{ matrix.agent-loop == 'kernel' && '1' || '0' }}"
           BUILD_SANDBOX_FLAGS: '--label org.qwen-code.ci.sandbox=true'
           SANDBOX_FLAGS: '--label org.qwen-code.ci.owner=${E2E_CONTAINER_OWNER}'
         run: |-
@@ -615,7 +623,7 @@ jobs:
         run: 'npx cross-env QWEN_E2E_RENDERER=ink VERBOSE=true KEEP_OUTPUT=true QWEN_SANDBOX=false vitest run --root ./integration-tests --exclude "**/interactive/cron-interactive.test.ts" --exclude "**/channel-plugin.test.ts" --exclude "**/chat-transcript-document.test.ts" --shard="${{ matrix.shard }}"'
 
   e2e-interactive-opentui:
-    name: 'E2E Interactive - OpenTUI renderer (bun)'
+    name: "E2E Interactive - OpenTUI renderer (bun)${{ matrix.agent-loop == 'unified' && ' - unified agent loop' || matrix.agent-loop == 'kernel' && ' - event-bus kernel' || '' }}"
     runs-on: 'ubuntu-latest'
     # Same rationale as e2e-test-linux: a wedged run must free the runner.
     timeout-minutes: 60
@@ -624,6 +632,15 @@ jobs:
       - 'build'
     if: |-
       ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    strategy:
+      # One failing loop arm must not cancel the others (#17045).
+      fail-fast: false
+      matrix:
+        # Same loop arms as e2e-test-linux: pushes keep the current loop
+        # only; nightly and on-demand runs add the shared-loop and kernel
+        # legs. The renderer stays pinned to opentui by the run command.
+        agent-loop: >-
+          ${{ fromJSON(github.event_name == 'push' && '["current"]' || '["current","unified","kernel"]') }}
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -732,6 +749,11 @@ jobs:
           OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
           KEEP_OUTPUT: 'true'
           VERBOSE: 'true'
+          # Same mapping as e2e-test-linux: InteractiveSession forwards these
+          # into inheritEnv:false children, so the parity suites pin both arms
+          # explicitly to override them.
+          QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP: "${{ matrix.agent-loop != 'current' && '1' || '' }}"
+          QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP: "${{ matrix.agent-loop == 'kernel' && '1' || '' }}"
         run: |-
           npx cross-env QWEN_E2E_RENDERER=opentui QWEN_SANDBOX=false vitest run --root ./integration-tests interactive --exclude '**/interactive/cron-interactive.test.ts' --exclude '**/channel-plugin.test.ts'
 

@@ -619,7 +619,9 @@ async function openSessionSearch(): Promise<HTMLInputElement> {
     click(searchButton!);
     await Promise.resolve();
   });
-  const input = container.querySelector<HTMLInputElement>('input');
+  const input = document.querySelector<HTMLInputElement>(
+    '[role="dialog"] input[aria-label="Search sessions"]',
+  );
   expect(input).not.toBeNull();
   return input!;
 }
@@ -1966,7 +1968,11 @@ describe('WebShellSidebar workspace removal', () => {
     renderSidebar({ projectFeaturesEnabled: true });
     await act(async () => Promise.resolve());
 
-    expect(container.querySelector('input')).toBeNull();
+    expect(
+      document.querySelector(
+        '[role="dialog"] input[aria-label="Search sessions"]',
+      ),
+    ).toBeNull();
     expect(container.textContent).toContain('Visible session');
   });
 
@@ -6073,7 +6079,7 @@ describe('WebShellSidebar session source switch', () => {
     ).not.toContain('channel-type:');
   });
 
-  it('does not register the first channel catalog against a search filter', async () => {
+  it('keeps the first channel catalog unfiltered after a dialog search', async () => {
     enableChannelOrganization();
     setChannelCatalog();
     const taskSessions: DaemonSessionSummary[] = [
@@ -6126,14 +6132,18 @@ describe('WebShellSidebar session source switch', () => {
       setInputValue(searchInput, 'ding');
       await Promise.resolve();
     });
-    await switchSessionSource('Channels');
-
-    // Only the DingTalk section matches the search; the first-catalog latch
-    // must wait for an unfiltered settle instead of registering only it.
     await act(async () => {
-      setInputValue(searchInput, '');
+      click(
+        document.querySelector<HTMLButtonElement>(
+          '[role="dialog"] button[aria-label="close"]',
+        )!,
+      );
       await Promise.resolve();
     });
+    await switchSessionSource('Channels');
+
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(container.textContent).toContain('DingTalk');
 
     const feishuGroup = container.querySelector<HTMLElement>(
       'section[aria-label="Feishu"]',
@@ -6630,7 +6640,7 @@ describe('WebShellSidebar session list notices', () => {
     );
   });
 
-  it('keeps a settled filtered-empty view while a refresh is in flight', async () => {
+  it('keeps settled sidebar sessions while searching during a refresh', async () => {
     active.sessions = [
       {
         sessionId: 'task-session',
@@ -6649,11 +6659,12 @@ describe('WebShellSidebar session list notices', () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain('No sessions.');
+    expect(container.textContent).toContain('Task session');
+    expect(searchInput.value).toBe('no-match');
     expect(container.textContent).not.toContain('Loading sessions...');
   });
 
-  it('keeps a settled filtered-empty view when a refresh failed', async () => {
+  it('keeps settled sidebar sessions while searching after a refresh failed', async () => {
     active.sessions = [
       {
         sessionId: 'task-session',
@@ -6672,7 +6683,8 @@ describe('WebShellSidebar session list notices', () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain('No sessions.');
+    expect(container.textContent).toContain('Task session');
+    expect(searchInput.value).toBe('no-match');
     expect(container.textContent).not.toContain('Failed to load sessions');
   });
 
@@ -7999,16 +8011,16 @@ describe('WebShellSidebar standalone grouping', () => {
       isArchived: true,
     } as DaemonSessionSummary);
     renderSidebar();
-    const searchButton = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Search sessions"]',
-    );
-    expect(searchButton).not.toBeNull();
-    act(() => click(searchButton!));
-    const input = container.querySelector<HTMLInputElement>(
-      'input[aria-label="Search sessions"]',
-    );
-    expect(input).not.toBeNull();
-    act(() => setInputValue(input!, 'does not match archive'));
+    const input = await openSessionSearch();
+    act(() => setInputValue(input, 'does not match archive'));
+    await act(async () => {
+      click(
+        document.querySelector<HTMLButtonElement>(
+          '[role="dialog"] button[aria-label="close"]',
+        )!,
+      );
+      await Promise.resolve();
+    });
 
     await openArchiveSettings();
     expect(archivedSessionsTarget.textContent).toContain(

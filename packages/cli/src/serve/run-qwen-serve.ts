@@ -186,6 +186,8 @@ import type {
   WorkspaceRuntime,
 } from './workspace-registry.js';
 import type { SessionArchiveCoordinator } from './server/session-archive.js';
+import type { ConversationRuntimeActivityGate } from './conversations/conversation-runtime-activity.js';
+import type { RequestedSessionIdAdmission } from './session-id-admission.js';
 import type {
   DaemonTrustPolicySnapshot,
   DaemonWorkspaceTrustDecision,
@@ -4912,7 +4914,11 @@ async function runQwenServeImpl(
   // pulls the SessionService chain, which must stay out of the pre-listen
   // static closure; the generation guards dispose-vs-async-start races.
   let sessionPrRefreshTimer:
-    | { dispose(): void; stopWatch(): Promise<void> }
+    | {
+        dispose(): void;
+        stopWatch(): Promise<void>;
+        drainNow(workspaceCwd: string, sessionId?: string): Promise<void>;
+      }
     | undefined;
   let sessionPrRefreshGeneration = 0;
   // Kept separately from the timer handle: the event-loop-monitor cleanup
@@ -7629,8 +7635,189 @@ async function runQwenServeImpl(
     const refreshGeneration = ++sessionPrRefreshGeneration;
     if (opts.profile !== 'hosted-harness') {
       void import('./server/session-pr-refresh.js')
-        .then((mod) => {
+        .then(async (mod) => {
           if (refreshGeneration !== sessionPrRefreshGeneration) return;
+          // The module and the channel-config loader are async and loaded
+          // once; the deps are rebuilt whenever the hosted channels change.
+          // Building them only once would freeze the allowed set before the
+          // channels commit at listen — this load usually wins that race — and
+          // would never pick up a channel added later.
+          let prWatchDeps:
+            | import('./server/pr-watch-deps.js').PrWatchDeps
+            | undefined;
+          let prWatchHostsSignature: string | undefined;
+          let prWatchSources:
+            | Omit<
+                import('./server/pr-watch-deps.js').PrWatchDepsSources,
+                'hostedChannelBaseUrls'
+              >
+            | undefined;
+          let createPrWatchDeps:
+            | typeof import('./server/pr-watch-deps.js').createPrWatchDeps
+            | undefined;
+          let readHostedChannelBaseUrls: (() => readonly unknown[]) | undefined;
+          const resolvePrWatchDeps = () => {
+            if (
+              !createPrWatchDeps ||
+              !prWatchSources ||
+              !readHostedChannelBaseUrls
+            ) {
+              return undefined;
+            }
+            const urls = readHostedChannelBaseUrls();
+            const signature = urls.map((url) => String(url)).join('|');
+            // One build shared by both getters: two builds would hand the
+            // observation and the drain different lock registries.
+            if (prWatchDeps && signature === prWatchHostsSignature) {
+              return prWatchDeps;
+            }
+            prWatchHostsSignature = signature;
+            prWatchDeps = createPrWatchDeps({
+              ...prWatchSources,
+              hostedChannelBaseUrls: () => urls,
+              // Keep the registry across rebuilds: a channel committing
+              // between the observation's and the drain's read must not hand
+              // them different locks for the same files.
+              ...(prWatchDeps ? { locks: prWatchDeps.watch.locks } : {}),
+            });
+            return prWatchDeps;
+          };
+          void (async () => {
+            try {
+              const [depsMod, webhookRuntime, settingsRuntime] =
+                await Promise.all([
+                  import('./server/pr-watch-deps.js'),
+                  loadChannelWebhookConfigRuntime(),
+                  loadSettingsRuntimeModules(),
+                ]);
+              if (refreshGeneration !== sessionPrRefreshGeneration) return;
+              createPrWatchDeps = depsMod.createPrWatchDeps;
+              prWatchSources = {
+                workspaceRegistry,
+                archiveCoordinator: () =>
+                  (
+                    app.locals as {
+                      sessionArchiveCoordinator?: SessionArchiveCoordinator;
+                    }
+                  ).sessionArchiveCoordinator,
+                conversationRuntimeActivity: () =>
+                  (
+                    app.locals as {
+                      conversationRuntimeActivity?: ConversationRuntimeActivityGate;
+                    }
+                  ).conversationRuntimeActivity,
+                restore: async (input) => {
+                  const admission = (
+                    app.locals as {
+                      requestedSessionIdAdmission?: RequestedSessionIdAdmission;
+                    }
+                  ).requestedSessionIdAdmission;
+                  if (!admission) {
+                    throw new Error('PR watch: no session-id admission');
+                  }
+                  const restoreMod = await import(
+                    './server/session-restore.js'
+                  );
+                  return restoreMod.restoreSessionCore({
+                    action: 'resume',
+                    ...input,
+                    requestedSessionIdAdmission: admission,
+                    assertRuntimeGenerationOpen: () =>
+                      input.runtime.generationGuard?.assertOpen(),
+                    daemonLog,
+                    materializeLiveConversationDirectory: (
+                      app.locals as {
+                        materializeLiveConversationDirectory?: (
+                          sessionId: string,
+                        ) => Promise<string>;
+                      }
+                    ).materializeLiveConversationDirectory,
+                    historyPageSize: undefined,
+                    liveReplayMode: undefined,
+                    compactedReplayMode: undefined,
+                    clientId: undefined,
+                    approvalMode: undefined,
+                    restoreSource: {},
+                    isCancelled: () => false,
+                  });
+                },
+                daemonLog,
+                log: (message) => daemonLog.warn(message),
+                // The same operator cap the routes pass to their admissions, so
+                // a relayed prompt cannot outlive a route-admitted one.
+                ...(opts.promptDeadlineMs !== undefined
+                  ? { promptDeadlineMs: opts.promptDeadlineMs }
+                  : {}),
+              };
+              // Only the groups the channel grouping already attributed to a
+              // trusted workspace, so an untrusted workspace's settings never
+              // widen the allowed set.
+              readHostedChannelBaseUrls = () => {
+                const urls: unknown[] = [];
+                const runtimes = workspaceRegistry.listAll();
+                for (const group of channelWorkspaceGroups ?? []) {
+                  const runtime = runtimes.find(
+                    (candidate) =>
+                      candidate.workspaceCwd === group.workspaceCwd,
+                  );
+                  if (!runtime) continue;
+                  let merged: Record<string, unknown>;
+                  try {
+                    // loadChannelsConfig defaults its second argument to
+                    // loadSettings(cwd), which loads that workspace's .env
+                    // into process.env — daemon-wide. A GH_CONFIG_DIR there
+                    // would redirect every gh read this daemon makes and so
+                    // widen the watch's allowed hosts. Load settings the way
+                    // the channel grouping does: no env injection, and no
+                    // workspace settings for an untrusted workspace.
+                    const settings = settingsRuntime.settings.loadSettings(
+                      group.workspaceCwd,
+                      {
+                        skipLoadEnvironment: true,
+                        skipWorkspaceSettings: !runtime.trusted,
+                        workspaceTrusted: runtime.trusted,
+                        // This runs on a background timer, so it must never
+                        // rewrite the user's file: without this an invalid
+                        // settings.json takes the corruption-recovery path and
+                        // is moved aside. Every other read-only load in the
+                        // daemon passes it too.
+                        preserveInvalidWorkspaceSettings: true,
+                      },
+                    );
+                    merged = webhookRuntime.loadChannelsConfig(
+                      group.workspaceCwd,
+                      settings,
+                    );
+                  } catch {
+                    continue;
+                  }
+                  // Only the channels this group actually hosts. The grouping
+                  // keys the merged config by channel name, so the selection
+                  // names are the same keys; without this every github entry
+                  // in the workspace would widen the allowed set, including
+                  // channels this daemon was never asked to host.
+                  const selected =
+                    group.selection.mode === 'all'
+                      ? undefined
+                      : new Set(group.selection.names);
+                  for (const [name, entry] of Object.entries(merged)) {
+                    if (selected && !selected.has(name)) continue;
+                    if (!entry || typeof entry !== 'object') continue;
+                    const config = entry as Record<string, unknown>;
+                    if (config['type'] !== 'github') continue;
+                    urls.push(config['baseUrl']);
+                  }
+                }
+                return urls;
+              };
+            } catch (error) {
+              daemonLog.warn(
+                `PR watch deps unavailable: ${
+                  error instanceof Error ? error.message : String(error)
+                }`,
+              );
+            }
+          })();
           sessionPrRefreshTimer = mod.startSessionPrRefreshTimer({
             workspaceRegistry,
             // The coordinator lives on the serve app (createServeApp below),
@@ -7642,9 +7829,30 @@ async function runQwenServeImpl(
                   sessionArchiveCoordinator?: SessionArchiveCoordinator;
                 }
               ).sessionArchiveCoordinator,
+            getPrWatchDeps: () => resolvePrWatchDeps()?.watch,
+            getPrDrainDeps: () => resolvePrWatchDeps()?.drain,
           });
           const handle = sessionPrRefreshTimer;
           stopPrWatchOnShutdown = handle ? () => handle.stopWatch() : undefined;
+          // Design §2: a user's resume delivers the session's pending
+          // transitions now instead of at the next tick. Read the timer at call
+          // time so a re-entry that replaced it is honoured, and never await —
+          // the watch's per-PR lock is not re-entrant.
+          (
+            app.locals as {
+              prWatchDrainNow?: (cwd: string, sessionId?: string) => void;
+            }
+          ).prWatchDrainNow = (workspaceCwd, sessionId) => {
+            void sessionPrRefreshTimer
+              ?.drainNow(workspaceCwd, sessionId)
+              .catch((error: unknown) => {
+                daemonLog.warn(
+                  `PR watch resume drain failed: ${
+                    error instanceof Error ? error.message : String(error)
+                  }`,
+                );
+              });
+          };
         })
         .catch((error) => {
           // Degrade to "no PR-state sweep" instead of leaking an unhandled

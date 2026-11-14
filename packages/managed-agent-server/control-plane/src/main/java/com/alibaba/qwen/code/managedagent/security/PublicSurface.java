@@ -4,6 +4,8 @@ import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.http.server.PathContainer;
 import org.springframework.web.util.ServletRequestPathUtils;
 
+import java.util.regex.Pattern;
+
 /**
  * The surface predicates shared by the filters and the exception handler.
  * Each decides on the path Spring routes with, so a normalized spelling
@@ -44,5 +46,31 @@ public final class PublicSurface {
                 || path.equals("/v1/agent-channels")
                 || path.startsWith("/v1/agent-channels/")
                 || path.startsWith("/api/agent/web-shell/v1/");
+    }
+
+    // Compiled once: both header filters call this on every request, and
+    // String.matches would recompile the pattern each time.
+    /** The terminal upgrade route template (Ant {@code *} wildcard), shared
+     * by the handler registration, the header-filter exemption regex below,
+     * and the handshake interceptor's capture regex, so the three cannot
+     * drift apart. */
+    public static final String TERMINAL_UPGRADE_PATH =
+            "/api/agent/web-shell/v1/sessions/*/terminal";
+
+    private static final Pattern TERMINAL_UPGRADE =
+            Pattern.compile(TERMINAL_UPGRADE_PATH.replace("*", "[^/]+"));
+
+    /**
+     * The terminal WebSocket upgrade authenticates with the single-use ticket
+     * carried in the bearer subprotocol, not the tenant/signature headers a
+     * browser upgrade cannot set. Only a GET on this exact upgrade path is
+     * exempt from the header filters — an upgrade is always a GET, so any
+     * other method keeps the authenticated surface. The ticket-minting POST
+     * stays on the authenticated surface, and the handshake interceptor still
+     * consumes and validates the ticket before the relay opens the worker.
+     */
+    public static boolean terminalUpgrade(HttpServletRequest request) {
+        return "GET".equals(request.getMethod())
+                && TERMINAL_UPGRADE.matcher(pathWithinApplication(request)).matches();
     }
 }

@@ -104,8 +104,7 @@ preview 按 `queryId` 路由、用 UUID `roundId` 标记轮次。main 的循环�
 | 总线事件         | 载荷（main 类型）                      | 发布者                          |
 | ---------------- | -------------------------------------- | ------------------------------- |
 | `loop.started`   | `{ promptId }`                         | 适配器，状态创建后              |
-| `loop.output`    | `{ event: ServerLlmStreamEvent }`      | 规划中（流式切片）              |
-| `loop.cancelled` | `{ reason }`                           | 规划中（流式切片）              |
+| `loop.cancelled` | `{ reason: 'abort' }`                  | 适配器，signal 中止时           |
 | `loop.finished`  | `{ result: AgentLoopResult }`          | Conversation                    |
 | `llm.request`    | `{ round, send: AgentLoopRound }`      | Conversation                    |
 | `llm.tool_call`  | `{ call: ToolCallRequestInfo }`        | 规划中（流式切片）              |
@@ -115,7 +114,7 @@ preview 按 `queryId` 路由、用 UUID `roundId` 标记轮次。main 的循环�
 | `tool.settled`   | `{ round }`                            | Tool，批结束时                  |
 | `handler.failed` | `{ source, eventType, round?, error }` | 总线，监听器失败时              |
 
-标记*规划中*的事件已在词汇表中，但本切片不发射；它们随流式派发到来。今天的取消经 signal 流入 `runModelRound`/`runToolBatch`，而非总线事件。
+标记*规划中*的事件将在[流式派发的后续实现](2026-11-11-streaming-tool-dispatch.zh-CN.md)中获得发布方。#17045 S 块记录推迟实现的决定。Main 的各入口通过宿主回调接收轮次输出，因此词汇表暂时省略 `loop.output`（对应 Preview 的 `query.output`），等有使用方时再加入。
 
 `llm.settled` 是轮结束信号；终止分类（今天 `runModelRound` 做的 `STOP_EVENTS` 映射）存于 run 状态（`state.model.stop`），Conversation 是把该轮末状态转成循环结果的唯一位置。去重/replay 记账留在 Tool handler，使用现有 `toolCallIdUtils` 助手，位置与今天 `runToolBatch` 完全一致。事件载荷只携带路由与决策数据；完整的模型结果与工具批按所有权存于 run 状态的对应槽位，总线不重复承载它们。
 
@@ -138,7 +137,15 @@ preview 按 `queryId` 路由、用 UUID `roundId` 标记轮次。main 的循环�
 
 ### 取消
 
-handler 按今天的方式读取 run 的 `signal` 与 `toolSignal` 并传给 `runModelRound`/`runToolBatch`；Tool 通过执行器 signal 取消在飞批次，Conversation 在 Llm 与 Tool 安静后收尾一次。run 在 `loop.finished` 到达时结算。发布 `loop.cancelled` 事件与有界收尾上限（preview `QueryListener` 用 10 秒）属于流式切片，而非本切片——见事件表的*规划中*注记。
+handler 按今天的方式读取 run 的 `signal` 与 `toolSignal` 并传给 `runModelRound`/`runToolBatch`；Tool 通过执行器 signal 取消在飞批次，Conversation 在 Llm 与 Tool 安静后收尾一次。run 在 `loop.finished` 到达时结算。
+
+signal 中止时，适配器发布一次 `loop.cancelled`。Conversation 在独立的投递队列中启动 10 秒收尾计时器，因此等待轮次结束回调时也能启动计时。上限内按过程式循环处理取消，入口要求保留被打断批次的结果时仍会保留。到上限仍未结算时以 `cancelled` 结束，不带工具结果。挂起的 handler 恢复时会停止读取模型流、拒绝后续工具启动，并在循环边界丢弃工具进度和结果。已经开始的工具或回调仍可能执行完毕。运行结算后，适配器移除 abort 监听并清除计时器。过程式路径会等待模型轮或工具批结束。
+
+`runAgentLoop` 返回 promise。暴露事件流的入口可以在消费方停止读取时中止对应运行。OpenTUI 为模型流使用本轮的 signal，工具批次继续使用父 turn 的 signal，因此同一个 turn 的多个轮次共享工具资源额度。提供方关闭流时卡住也受上限约束。handler 在上限内结算并失败时，仍以原始错误拒绝。
+
+达到上限后，默认调度器和各入口自己的调度器停止转发工具进度和结果，调度器仍可完成清理。批量结果整理在开始持久化前和每次写入后检查运行状态。
+
+共用的 `LlmChat` 还会在调用方 signal 中止时停止等待 provider 流的创建、读取和关闭，即使 provider 不响应中止。响应处理器先保存已经交付的部分输出并退出，再释放 chat 的发送锁，让下一条提示可以继续使用同一个 chat。迟到的 provider 结果在进入历史或 token 记账之前被丢弃；仍会尝试清理 provider，但不会因此阻塞取消。这个 provider 边界对两条 loop 路径都生效；过程式 loop 对其他卡住的工作仍没有收尾上限。
 
 ### 为什么不复用现有总线
 
@@ -156,7 +163,8 @@ handler 按今天的方式读取 run 的 `signal` 与 `toolSignal` 并传给 `ru
 2. **PR 2 —— opt-in 标志后的 handler。** 把 `runAgentLoop` 内部重新表达为 Conversation/Llm/Tool handler 加 host 适配器，由新增的 `AgentLoopOptions.useEventBus` 标志选择（默认关，因此在统一循环内过程式路径仍是默认，直到 parity 被证明）。`runModelRound`/`runToolBatch` 保留导出与签名（ACP #15509 依赖它们），并被 handler 原样复用。一个等价测试对脚本化场景同时跑两条路径，断言结果与 host 回调顺序完全一致；headless parity 套件与 ACP 轮测试是验收门。
 3. **PR 3 —— 流式派发评估（可选，独立门控）。** preview 在流仍在运行时执行 `tool_use` 块。main 在轮结束后跑批次，且审批按批排序；流式派发改变审批时机与输出交错。此切片先写下 parity 差异并取得明确决定；架构移植本身不依赖它。
 4. **PR 4 —— headless opt-in。** `experimental.eventBusAgentLoop` 设置（环境变量覆盖 `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP`，可双向强制该开关 —— `1` 开、`0` 关 —— 由 `Config.isEventBusAgentLoopEnabled()` 读取）最先让 headless 的共享循环轮次传入 `useEventBus`。AgentCore 和 OpenTUI 在统一循环迁移的后续阶段接入。该设置默认关闭，生效需要同时开启 `experimental.unifiedAgentLoop`。开启 `QWEN_DEBUG_LOG_FILE` 后，适配器记录带 prompt ID 的 `[EVENT_BUS]` 执行标记。
-5. **后续 —— surface 收敛**继续在 unified-agent-loop 计划下进行（TUI、OpenTUI、AgentCore、speculation、Hosted）。总线让循环级挂接（hooks、Mods、保护、录制）成为单点，这正是该计划的既定目标；这里不排任何 surface 工作。
+5. **取消与有界收尾**（#17045 K 块）。`loop.cancelled` 和*取消*一节所述的收尾上限；`loop.output` 从词汇表中删除。
+6. **后续 —— surface 收敛**继续在 unified-agent-loop 计划下进行（TUI、OpenTUI、AgentCore、speculation、Hosted）。总线让循环级挂接（hooks、Mods、保护、录制）成为单点，这正是该计划的既定目标；这里不排任何 surface 工作。
 
 ## 测试
 
@@ -196,7 +204,7 @@ G5 通过隔离的用户设置文件启用两个标志、不用任何环境变�
 - **回调顺序是契约。** surface 依赖 `onModelEvent`/`onToolResult`/输出回调的精确顺序。适配器必须保持；parity 套件是检查，PR 2 另加显式顺序测试。
 - **`runModelRound`/`runToolBatch` 是公共接缝。** ACP 已合入的轮次步（#15509）直接调用它们；PR 2 把它们保留为 handler 的内部实现，而不是删除。
 - **轮次身份。** 数字轮次比 preview 的 UUID 简单且与 main 日志一致；若未来 surface 需要全局唯一轮次 id，事件载荷可同时携带两者而不改路由。
-- **流式派发**仍是未决产品决策（时延收益 vs 审批/顺序语义）；Phase 3 的存在就是把这个决策显式化，而不是夹带进来。
+- **流式派发**已在 Phase 3 评估。[流式派发设计](2026-11-11-streaming-tool-dispatch.zh-CN.md)记录了决定和后续 opt-in 实现的范围。
 - **重复劳动风险。** 1.0 线最终可能整体替换 main；只要 main 的统一循环计划继续，本移植就是正当的。它复用 main 的类型与契约，正是为了让工作不绑定 preview。
 
 ## 受影响文件
