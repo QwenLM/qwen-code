@@ -56,4 +56,14 @@ This workflow handles the process of packaging and publishing new versions of Qw
 - **What you should do**:
   - As a contributor, you don't need to do anything for this process. You can be confident that once your PR is merged into the `main` branch, your changes will be included in the very next nightly release.
 
+### 4. CI failure reports
+
+`.github/workflows/main-ci-failure-issue.yml` watches `E2E Tests`, `Managed Agent gate`, `SDK Java`, `SDK Python`, `Qwen Code CI`, and `Desktop Checks`. It reports failed `push` runs on `main`, scheduled failures on `main` from `Qwen Code CI`, `SDK Java`, and `Desktop Checks`, manually dispatched `SDK Java` failures, and `Managed Agent gate` failures triggered by `pull_request` or `pull_request_review`. Superseded run attempts are skipped.
+
+Main-branch failures and admitted failures from already-merged PRs share a tracking issue per workflow. Open PR failures are reported on the matching PR. On the first attempt, infrastructure-only failures that qualify for a tracking issue are rerun without filing if the rerun can be dispatched; open PR infrastructure failures are reported without rerunning. Later failed attempts and failed rerun dispatches are reported.
+
+Both tracking issues and PR comments use the same failure summary. Its **Job logs analyzed** count compares the supplied log files with jobs whose conclusion is `failure`. A mismatch is marked as incomplete coverage: logs may be missing, or the job list may be incomplete. Equal counts do not establish complete log contents or a complete failing-test list; empty logs still count, and cancelled or timed-out jobs are excluded from the failed-job total. With no failed-job entries, the summary says the list was empty or unavailable. Each occurrence records its own summary.
+
+No identified failure does not mean that tests never ran. A log download may have failed, or the available output may not contain a recognized failure identifier. Use the report's run link, together with its failed-job and step names when those entries are present, to investigate those cases.
+
 We hope this detailed overview is helpful. If you have any questions about our automation or processes, please don't hesitate to ask!
