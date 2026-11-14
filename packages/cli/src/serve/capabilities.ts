@@ -56,6 +56,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // the underlying ACP method from unstable_resumeSession to resumeSession.
   unstable_session_resume: { since: 'v1' },
   session_list: { since: 'v1' },
+  session_last_user_prompt_sort: { since: 'v1' },
   session_catalog_batch: { since: 'v1' },
   // Aggregate persisted session counts via
   // `GET /workspace/:id/session-info` (and the plural

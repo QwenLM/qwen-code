@@ -9,10 +9,15 @@ import { inspect } from 'node:util';
 import { extractErrorCode, extractErrorMessage } from '@qwen-code/acp-bridge';
 import {
   CHANNEL_PROMPT_META_KEY,
+  CHANNEL_WORKFLOW_ORIGIN_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
   DAEMON_SUBMITTED_PROMPT_META_KEY,
   SUBMITTED_PROMPT_META_KEY,
 } from '@qwen-code/acp-bridge/bridgeTypes';
+import {
+  parseChannelWorkflowOrigin,
+  type ChannelWorkflowOrigin,
+} from '@qwen-code/channel-base';
 import type { parseChannelDelivery } from '../../runtime/channel-delivery.js';
 import {
   InvalidClientIdError,
@@ -115,6 +120,7 @@ export interface SessionPromptClassification {
    * The bridge turns it into the session's channel classification.
    */
   channelPrompt: boolean;
+  channelWorkflowOrigin?: ChannelWorkflowOrigin;
   /** The display projection, accepted only from an authorized channel worker. */
   promptDisplayText?: string;
   /** The submitted prompt source, accepted only from a plain client. */
@@ -157,6 +163,7 @@ export function classifyPromptRequest(
   const promptDisplayText =
     forwardedMeta?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
   const channelPrompt = forwardedMeta?.[CHANNEL_PROMPT_META_KEY];
+  const workflowOrigin = forwardedMeta?.[CHANNEL_WORKFLOW_ORIGIN_META_KEY];
   const boundRelay = forwardedMeta?.[CHANNEL_BOUND_RELAY_META_KEY];
   if (forwardedMeta) {
     delete forwardedMeta[CHANNEL_WORKER_PROMPT_AUTHORIZATION_META_KEY];
@@ -164,6 +171,7 @@ export function classifyPromptRequest(
     delete forwardedMeta[SUBMITTED_PROMPT_META_KEY];
     delete forwardedMeta[DAEMON_SUBMITTED_PROMPT_META_KEY];
     delete forwardedMeta[CHANNEL_PROMPT_META_KEY];
+    delete forwardedMeta[CHANNEL_WORKFLOW_ORIGIN_META_KEY];
     delete forwardedMeta[CHANNEL_BOUND_RELAY_META_KEY];
     if (Object.keys(forwardedMeta).length > 0) {
       forwardedBody['_meta'] = forwardedMeta;
@@ -188,6 +196,11 @@ export function classifyPromptRequest(
     (boundRelay === true &&
       isChannelWorkerPromptToken(promptAuthorization) &&
       (runtime.primary || runtime.trusted));
+  const authenticatedChannelPrompt =
+    channelWorkerAuthorized && channelPrompt === true;
+  const channelWorkflowOrigin = authenticatedChannelPrompt
+    ? parseChannelWorkflowOrigin(workflowOrigin)
+    : undefined;
   // Channel classification opts the turn out of loop-detected rejection,
   // so it rides the same worker authorization as the display projection;
   // a forged key from any other caller is dropped here and again at the
@@ -195,7 +208,8 @@ export function classifyPromptRequest(
   return {
     forwardedBody,
     classification: {
-      channelPrompt: channelWorkerAuthorized && channelPrompt === true,
+      channelPrompt: authenticatedChannelPrompt,
+      ...(channelWorkflowOrigin ? { channelWorkflowOrigin } : {}),
       ...(typeof promptDisplayText === 'string' && channelWorkerAuthorized
         ? { promptDisplayText }
         : {}),
@@ -374,6 +388,9 @@ export function admitSessionPrompt(
           ? { submittedPrompt: classification.submittedPrompt }
           : {}),
         ...(classification.channelPrompt ? { channelPrompt: true } : {}),
+        ...(classification.channelWorkflowOrigin
+          ? { channelWorkflowOrigin: classification.channelWorkflowOrigin }
+          : {}),
         ...(delivery !== undefined
           ? {
               channelDelivery: {

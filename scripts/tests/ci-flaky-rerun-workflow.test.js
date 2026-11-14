@@ -1808,28 +1808,66 @@ describe('ci failure patrol workflow', () => {
       join(home, '.gitconfig'),
       `[core]\n\thooksPath = ${hooks}\n[user]\n\tname = t\n\temail = t@e\n`,
     );
+    // The release runner appends GIT_CONFIG_GLOBAL=<empty file> to
+    // $GITHUB_ENV before `npm run test:scripts`, and that outranks
+    // $HOME/.gitconfig. Reproduce the ambient on every lane so the pin below
+    // is load-bearing here too, not only on a release run.
+    const releaseGitConfig = join(root, 'release-gitconfig');
+    writeFileSync(releaseGitConfig, '');
+    const releaseAmbient = {
+      GIT_CONFIG_COUNT: '0',
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_PARAMETERS: '',
+      GIT_CONFIG_GLOBAL: releaseGitConfig,
+    };
+    // The positive control pins the global file back to the planted config,
+    // so it exercises the hooksPath the fixture wrote while the bare base env
+    // stays under the release ambient.
+    const fixtureGitConfig = {
+      GIT_CONFIG_GLOBAL: join(home, '.gitconfig'),
+    };
     const git = (args, env) =>
       execFileSync('git', args, {
         cwd: workspace,
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, HOME: home, ...env },
+        env: {
+          ...process.env,
+          ...releaseAmbient,
+          HOME: home,
+          ...env,
+        },
       });
     const seed = () => {
       git(['init', '-q']);
       writeFileSync(join(workspace, 'driver.mjs'), 'trusted driver\n');
       git(['add', '.']);
-      git(['commit', '-qm', 'seed']);
+      // Identity via -c, not the planted config: removing the pin must fail
+      // the positive control below, not this commit.
+      git([
+        '-c',
+        'user.name=t',
+        '-c',
+        'user.email=t@e',
+        'commit',
+        '-qm',
+        'seed',
+      ]);
     };
     try {
       seed();
       // Positive control: with the planted global config in force, an ordinary
       // force-checkout fires the hook. If this stops firing the fixture is
       // dead and the assertion below would pass vacuously.
-      git(['checkout', '--force', 'HEAD']);
+      git(['checkout', '--force', 'HEAD'], fixtureGitConfig);
       expect(existsSync(sentinel)).toBe(true);
 
       rmSync(sentinel);
+      // The bare base env keeps the ambient in force, so the planted config
+      // is outranked and the hook cannot fire.
+      git(['checkout', '--force', 'HEAD']);
+      expect(existsSync(sentinel)).toBe(false);
+
       const stepEnv = {
         ...process.env,
         HOME: home,
@@ -1859,7 +1897,13 @@ describe('ci failure patrol workflow', () => {
       expect(existsSync(join(workspace, '.git'))).toBe(false);
 
       seed();
-      git(['checkout', '--force', 'HEAD'], exported);
+      // Keep the plant as the fallback: without it the ambient's empty global
+      // file would outrank $HOME/.gitconfig, so a dropped GIT_CONFIG_GLOBAL
+      // export would leave this assertion green.
+      git(['checkout', '--force', 'HEAD'], {
+        ...fixtureGitConfig,
+        ...exported,
+      });
       expect(existsSync(sentinel)).toBe(false);
       expect(readFileSync(join(workspace, 'driver.mjs'), 'utf8')).toBe(
         'trusted driver\n',

@@ -137,7 +137,7 @@ class SharedHarnessOwnershipTest {
         assertClosed(() -> bindings.requireHarnessAdmission(SHARED, SCOPE, "harness-a", authority));
         assertClosed(() -> bindings.requireHookAdmission(SHARED, SCOPE, "harness-a", authority));
         JdbcRepositorySupport.transaction(source, connection -> {
-            JdbcRuntimeBindingRepository.beginHarnessLifecycle(connection, "tenant", "harness-a", "close");
+            RuntimeAdmissionFences.beginHarnessLifecycle(connection, "tenant", "harness-a", "close");
             return null;
         });
         try (var connection = source.getConnection(); var statement = connection.prepareStatement(
@@ -166,7 +166,7 @@ class SharedHarnessOwnershipTest {
         // refuses a bound Workspace scope outright; the Harness claim fences it.
         assertClosed(() -> bindings.requireHarnessAdmission(SCOPE, "harness-a", authority));
         JdbcRepositorySupport.transaction(source, connection -> {
-            JdbcRuntimeBindingRepository.beginHarnessLifecycle(connection, "tenant", "harness-a", "close");
+            RuntimeAdmissionFences.beginHarnessLifecycle(connection, "tenant", "harness-a", "close");
             return null;
         });
         try (var connection = source.getConnection(); var statement = connection.prepareStatement(
@@ -195,17 +195,6 @@ class SharedHarnessOwnershipTest {
         assertClosed(() -> bindings.admitExecution(sessions, executions, execution(binding, a, "call-a")));
         assertEquals(ToolExecutionRecord.State.PREPARED,
                 bindings.admitExecution(sessions, executions, execution(binding, b, "call-b")).getState());
-    }
-
-    @Test
-    void inMemoryRepositoryFencesTheSameHarnessSession() {
-        var registry = new InMemoryRuntimeBindingRepository();
-        var saved = new InMemoryRuntimeSessionRepository();
-        var binding = ready(registry, SHARED);
-        registry.requestHarnessDrain("tenant", "harness-a");
-
-        assertClosed(() -> registry.admitSession(saved, candidate(binding, "harness-a", "a-1")));
-        assertNotNull(registry.admitSession(saved, candidate(binding, "harness-b", "b-1")));
     }
 
     @Test

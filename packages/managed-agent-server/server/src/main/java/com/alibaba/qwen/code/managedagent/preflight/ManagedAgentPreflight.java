@@ -63,6 +63,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AccessDeniedException;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
@@ -202,7 +203,7 @@ public final class ManagedAgentPreflight {
         ConfigurableEnvironment environment = prepared.environment();
         ManagedAgentProperties properties = bind(environment, checks);
         checks.add(javaCheck());
-        String runner = System.getProperty("user.name", "");
+        String runner = runner();
         AccessCheck access = serviceUserCheck(properties.getServiceUser(), runner,
                 ServiceAccount::lookup);
         checks.add(access.check());
@@ -211,7 +212,7 @@ public final class ManagedAgentPreflight {
         checks.add(keyRingCheck(properties));
         checks.add(row("auth", () -> authCheck(environment, properties)));
         checks.add(harnessCheck(properties, distributionQwenCodeVersion()));
-        checks.add(credentialsFileCheck(properties, access.account()));
+        checks.add(credentialsFileCheck(properties, access.account(), runner));
         checks.add(sessionStoreCheck(properties));
         checks.add(toolPathCheck(properties));
         checks.addAll(brokerChecks(properties));
@@ -321,8 +322,8 @@ public final class ManagedAgentPreflight {
         if (prepared.unlisted() != null) {
             List<Check> checks = new ArrayList<>();
             if (!prepared.files().isEmpty()) {
-                checks.addAll(configFileChecks(prepared.files(), account, prepared.values(),
-                        prepared.configurations()));
+                checks.addAll(configFileChecks(prepared.files(), account, runner,
+                        prepared.values(), prepared.configurations()));
             }
             checks.add(new Check("config", Status.WARN,
                     "cannot tell which other files the server reads: " + prepared.unlisted(),
@@ -340,8 +341,8 @@ public final class ManagedAgentPreflight {
         List<Check> checks = new ArrayList<>();
         // A directory it cannot look in is no sign that the server reads no file.
         if (!prepared.files().isEmpty() || hidden.isEmpty()) {
-            checks.addAll(configFileChecks(prepared.files(), account, prepared.values(),
-                    prepared.configurations()));
+            checks.addAll(configFileChecks(prepared.files(), account, runner,
+                    prepared.values(), prepared.configurations()));
         }
         checks.addAll(hidden);
         return checks;
@@ -365,8 +366,12 @@ public final class ManagedAgentPreflight {
                     || hidden.listed() && !account.canRead(directory)) {
                 return null;
             }
-        } catch (IOException | UnsupportedOperationException error) {
+        } catch (AccessDeniedException | UnsupportedOperationException error) {
             // This process cannot look along the path; the account may.
+        } catch (IOException error) {
+            // A loop of symbolic links the kernel refuses the account too, or
+            // gone: Spring reads nothing there.
+            return null;
         }
         return new Check("config", Status.FAIL,
                 directory + " cannot be " + (hidden.listed() ? "listed" : "entered") + " by "
@@ -379,6 +384,20 @@ public final class ManagedAgentPreflight {
     private static String runAs(ServiceAccount account) {
         return "run --check as " + account.name()
                 + (account.superuser() ? "" : " or as root");
+    }
+
+    /** The account this process runs as, which the rows name. */
+    static String runner() {
+        return System.getProperty("user.name", "");
+    }
+
+    // A file the service account may read but this process cannot, which
+    // then cannot check what the server reads.
+    private static Check notReadableByRunner(String row, String path, String runner,
+            ServiceAccount account) {
+        return new Check(row, Status.FAIL,
+                path + " is not readable by " + runner + ", which runs this check",
+                runAs(account));
     }
 
     /**
@@ -397,14 +416,15 @@ public final class ManagedAgentPreflight {
         boolean serverReads;
         try {
             serverReads = account.canRead(file);
-        } catch (IOException | UnsupportedOperationException error) {
+        } catch (AccessDeniedException | UnsupportedOperationException error) {
             // This process cannot look along the path; the account may.
             serverReads = true;
+        } catch (IOException error) {
+            // A loop of symbolic links the kernel refuses the account too.
+            serverReads = false;
         }
         return serverReads
-                ? new Check("config", Status.FAIL,
-                        path + " is not readable by " + runner + ", which runs this check",
-                        runAs(account))
+                ? notReadableByRunner("config", path, runner, account)
                 : new Check("config", Status.FAIL,
                         path + " is not readable by " + account.name(),
                         unreadableFix(account.name(), path));
@@ -507,18 +527,29 @@ public final class ManagedAgentPreflight {
                 null), account.get());
     }
 
+    // Whether the service account can read a file, as far as this process
+    // can tell.
+    private enum Access {
+        READABLE, UNREADABLE,
+        // This process cannot look along the path, so cannot tell.
+        UNKNOWN
+    }
+
     // The server reads these files as its service account, which may not be
     // the account running preflight.
-    private static boolean readable(Path file, ServiceAccount account) {
+    private static Access access(Path file, ServiceAccount account) {
         if (account == null) {
-            return Files.isReadable(file);
+            return Files.isReadable(file) ? Access.READABLE : Access.UNREADABLE;
         }
         try {
-            return account.canRead(file);
+            return account.canRead(file) ? Access.READABLE : Access.UNREADABLE;
         } catch (UnsupportedOperationException error) {
-            return Files.isReadable(file);
+            return Files.isReadable(file) ? Access.READABLE : Access.UNREADABLE;
+        } catch (AccessDeniedException hidden) {
+            return Access.UNKNOWN;
         } catch (IOException error) {
-            return false;
+            // Missing, or a loop of symbolic links the kernel would refuse too.
+            return Access.UNREADABLE;
         }
     }
 
@@ -533,16 +564,17 @@ public final class ManagedAgentPreflight {
         for (Path file : files) {
             configurations.put(file, Format.named(String.valueOf(file.getFileName())));
         }
-        return configFileChecks(files, account, Map.of(), configurations);
+        return configFileChecks(files, account, runner(), Map.of(), configurations);
     }
 
     /**
-     * As above, with the property each config tree value file holds, and the
-     * files Spring reads as configuration files, which a value file may be,
-     * each with the formats Spring reads it in.
+     * As above, with the account this process runs as, the property each
+     * config tree value file holds, and the files Spring reads as
+     * configuration files, which a value file may be, each with the formats
+     * Spring reads it in.
      */
     static List<Check> configFileChecks(List<Path> files, ServiceAccount account,
-            Map<Path, String> values, Map<Path, Set<Format>> configurations) {
+            String runner, Map<Path, String> values, Map<Path, Set<Format>> configurations) {
         if (files.isEmpty()) {
             return List.of(new Check("config", Status.WARN,
                     "no configuration file; packaged defaults and the"
@@ -552,29 +584,34 @@ public final class ManagedAgentPreflight {
         }
         List<Check> checks = new ArrayList<>();
         for (Path file : files) {
-            checks.add(configFileCheck(file, account, values.get(file),
+            checks.add(configFileCheck(file, account, runner, values.get(file),
                     configurations.getOrDefault(file, Set.of())));
         }
         return checks;
     }
 
     static Check configFileCheck(Path file, ServiceAccount account) {
-        return configFileCheck(file, account, null,
+        return configFileCheck(file, account, runner(), null,
                 Format.named(String.valueOf(file.getFileName())));
     }
 
     /**
-     * As above, for a config tree value file that holds this property's
-     * value, or null for none, and the formats Spring reads the file in as a
+     * As above, with the account this process runs as, for a config tree
+     * value file that holds this property's value, or null for none, and the
+     * formats Spring reads the file in as a
      * configuration file, none where it reads it as none. One path can be
      * both, as application.yml is under a config tree imported over config/;
      * and the format is the one a location names, as
      * file:app.yml[.properties] names .properties.
      */
-    static Check configFileCheck(Path file, ServiceAccount account, String property,
-            Set<Format> formats) {
+    static Check configFileCheck(Path file, ServiceAccount account, String runner,
+            String property, Set<Format> formats) {
         String path = file.toString();
-        if (!readable(file, account)) {
+        Access access = access(file, account);
+        if (access == Access.UNKNOWN) {
+            return notReadableByRunner("config", path, runner, account);
+        }
+        if (access == Access.UNREADABLE) {
             return account == null
                     ? new Check("config", Status.FAIL,
                             path + " is not readable", "chmod 600 " + path)
@@ -590,6 +627,13 @@ public final class ManagedAgentPreflight {
             try {
                 secrets = holdsSecret(Files.readAllBytes(file), formats,
                         String.valueOf(file.getFileName()));
+            } catch (AccessDeniedException denied) {
+                // The account can read it, by its modes, but this process
+                // cannot, so it cannot tell what the file holds.
+                return account == null
+                        ? new Check("config", Status.WARN,
+                                path + ": cannot inspect permissions", null)
+                        : notReadableByRunner("config", path, runner, account);
             } catch (IOException error) {
                 return new Check("config", Status.WARN,
                         path + ": cannot inspect permissions", null);
@@ -1127,6 +1171,11 @@ public final class ManagedAgentPreflight {
 
     static Check credentialsFileCheck(ManagedAgentProperties properties,
             ServiceAccount account) {
+        return credentialsFileCheck(properties, account, runner());
+    }
+
+    static Check credentialsFileCheck(ManagedAgentProperties properties,
+            ServiceAccount account, String runner) {
         ManagedAgentProperties.Harness harness = properties.getHarness();
         if (!harness.isEnabled()) {
             return new Check("credentials", Status.SKIP, "disabled", null);
@@ -1147,7 +1196,7 @@ public final class ManagedAgentPreflight {
                     file + ": cannot inspect permissions", null);
         }
         // The server reads the file as its service account at startup.
-        if (!readable(path, account)) {
+        if (access(path, account) == Access.UNREADABLE) {
             return account == null
                     ? new Check("credentials", Status.FAIL,
                             file + " is not readable",
@@ -1156,6 +1205,12 @@ public final class ManagedAgentPreflight {
                     : new Check("credentials", Status.FAIL,
                             file + " is not readable by " + account.name(),
                             unreadableFix(account.name(), file));
+        }
+        // The startup validation reads it as this process, so say why that
+        // fails where the account may read it: this process cannot read it,
+        // or cannot even look along its path to tell.
+        if (account != null && !Files.isReadable(path)) {
+            return notReadableByRunner("credentials", file, runner, account);
         }
         return sharedSecretFileCheck("credentials", path, file);
     }
@@ -2329,13 +2384,6 @@ public final class ManagedAgentPreflight {
                 .filter(check -> check.status() == Status.WARN).count();
         System.out.printf("%d check(s), %d warning(s), %d failure(s)%n",
                 checks.size(), warnings, failures);
-    }
-
-    static boolean isLoopback(String address) {
-        return StringUtils.isBlank(address)
-                || "127.0.0.1".equals(address)
-                || "::1".equals(address)
-                || "localhost".equalsIgnoreCase(address);
     }
 
     static boolean isDigest(String value) {

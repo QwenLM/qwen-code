@@ -185,6 +185,43 @@ it('accepts legacy native owners and the local question provider pin', async () 
   });
 });
 
+it('accepts runtime-free personal memory batches', async () => {
+  const fixture = nativeContinuationFixture([
+    'context_search',
+    'context_remember',
+    'context_get',
+    'context_forget',
+  ]);
+  fixture.plan['runtime'] = null;
+  await expect(fixture.read()).resolves.toMatchObject({
+    plan: { runtime: null },
+  });
+});
+
+it.each([
+  { tools: ['read_file'] },
+  { tools: ['ask_user_question'] },
+  { tools: ['context_remember', 'read_file'] },
+])('rejects a runtime-free $tools batch', async ({ tools }) => {
+  const fixture = nativeContinuationFixture(tools);
+  fixture.plan['runtime'] = null;
+  await expect(fixture.read()).rejects.toThrow(
+    'Hosted approval continuation conflicts with the original Turn.',
+  );
+});
+
+it.each(['commandStep', 'publicChildModel'])(
+  'rejects %s metadata on runtime-free personal memory batches',
+  async (field) => {
+    const fixture = nativeContinuationFixture(['context_remember']);
+    fixture.plan['runtime'] = null;
+    fixture.plan[field] = {};
+    await expect(fixture.read()).rejects.toThrow(
+      'Hosted approval continuation conflicts with the original Turn.',
+    );
+  },
+);
+
 it.each(['ssh-process', 'external-workspace', 'static', '', null, true])(
   'rejects an unsupported question provider pin (%s)',
   async (provider) => {

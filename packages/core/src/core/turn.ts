@@ -11,6 +11,7 @@ import type {
   GenerateContentResponse,
   FunctionCall,
   FunctionDeclaration,
+  GenerateContentConfig,
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { FinishReason } from './genai-compat.js';
@@ -113,6 +114,8 @@ export type ServerLlmRetryEvent = {
   /** When true, the retry is a continuation (recovery) rather than a fresh
    *  restart. The UI should keep accumulated text so the continuation appends. */
   isContinuation?: boolean;
+  /** The output-token limit the retry raised to after a truncated attempt. */
+  maxOutputTokensEscalated?: number;
 };
 
 export type ServerLlmModelFallbackEvent = {
@@ -358,6 +361,10 @@ export function createDuplicateProviderToolCallResponse(
   const message = duplicateProviderToolCallMessage(providerCallId);
   return createNotStartedToolErrorResponse(request, message);
 }
+
+export const TOOL_LOOP_SKIPPED_METADATA = 'toolLoopSkipped';
+export const TOOL_LOOP_SKIPPED_MESSAGE =
+  'Tool skipped because the model repeated a tool-call id.';
 
 export function createNotStartedToolErrorResponse(
   request: ToolCallRequestInfo,
@@ -745,6 +752,27 @@ function getDisplayContentParts(
 }
 
 // A turn manages the agentic loop turn within the server context.
+/** Options for one {@link Turn.run} a surface sends on its own `LlmChat`. */
+export interface TurnRunOptions {
+  /** Request fields the round sends, such as its tools. */
+  requestConfig?: Pick<GenerateContentConfig, 'tools' | 'maxOutputTokens'>;
+  /**
+   * Propagate request and stream errors unchanged, including rejections
+   * caused by cancellation. If a stream event arrives with an aborted signal,
+   * the turn yields `UserCancelled`.
+   */
+  throwErrors?: boolean;
+  /** The stream is ready to iterate after send-time preparation. */
+  onStreamReady?: () => void;
+  /** Each chunk's parsed text and metadata, before yielding its events. */
+  onChunk?: (chunk: {
+    text: string;
+    thoughtText: string;
+    responseId?: string;
+    usageMetadata?: GenerateContentResponseUsageMetadata;
+  }) => void;
+}
+
 export class Turn {
   readonly pendingToolCalls: ToolCallRequestInfo[] = [];
   private pendingCitations = new Set<string>();
@@ -771,6 +799,7 @@ export class Turn {
     req: PartListUnion,
     signal: AbortSignal,
     prepared?: LlmPreparedRequest,
+    runOptions?: TurnRunOptions,
   ): AsyncGenerator<ServerLlmStreamEvent> {
     try {
       // Note: This assumes `sendMessageStream` yields events like
@@ -812,6 +841,7 @@ export class Turn {
               message: req,
               config: {
                 abortSignal: signal,
+                ...runOptions?.requestConfig,
               },
             },
             this.prompt_id,
@@ -819,6 +849,7 @@ export class Turn {
             sendOptions,
           );
 
+      runOptions?.onStreamReady?.();
       for await (const streamEvent of responseStream) {
         if (signal?.aborted) {
           yield { type: LlmEventType.UserCancelled };
@@ -836,6 +867,12 @@ export class Turn {
             retryInfo: streamEvent.retryInfo,
             retryDiagnostics: streamEvent.retryDiagnostics,
             isContinuation: streamEvent.isContinuation,
+            ...(streamEvent.maxOutputTokensEscalated !== undefined
+              ? {
+                  maxOutputTokensEscalated:
+                    streamEvent.maxOutputTokensEscalated,
+                }
+              : {}),
           };
           continue; // Skip to the next event in the stream
         }
@@ -880,9 +917,15 @@ export class Turn {
         if (resp.responseId) {
           this.currentResponseId = resp.responseId;
         }
-
         const thoughtText = getThoughtText(resp);
         const thoughtSummary = getThoughtSummary(resp, thoughtText);
+        const text = getResponseText(resp) ?? '';
+        runOptions?.onChunk?.({
+          text,
+          thoughtText,
+          responseId: resp.responseId,
+          usageMetadata: resp.usageMetadata,
+        });
         if (thoughtSummary) {
           yield {
             type: LlmEventType.Thought,
@@ -891,7 +934,6 @@ export class Turn {
           };
         }
 
-        const text = getResponseText(resp) ?? '';
         const displayParts = getDisplayContentParts(resp);
         const hasImage = displayParts.some((part) => 'inlineData' in part);
         if (text || hasImage) {
@@ -959,6 +1001,7 @@ export class Turn {
       }
     } catch (e) {
       if (e instanceof LlmRequestPreparationError) throw e;
+      if (runOptions?.throwErrors) throw e;
       if (signal.aborted) {
         yield { type: LlmEventType.UserCancelled };
         // Regular cancellation error, fail gracefully.

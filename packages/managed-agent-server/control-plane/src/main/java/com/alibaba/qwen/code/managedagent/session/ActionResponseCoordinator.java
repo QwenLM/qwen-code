@@ -309,12 +309,12 @@ public class ActionResponseCoordinator {
         }
         boolean matched =
                 "decided".equals(action.state())
-                        && com.alibaba.qwen.code.managedagent.repository.ManagedActionStore.decisionDigest(response.body())
+                        && ManagedActionStore.decisionDigest(response.body())
                                 .equals(action.decisionDigest());
         actions.complete(
                 op,
                 owner,
-                matched ? null : com.alibaba.qwen.code.managedagent.repository.ManagedActionStore.endedCode(action.state()),
+                matched ? null : ManagedActionStore.endedCode(action.state()),
                 matched ? action.decisionReceiptId() : null,
                 true,
                 clock.millis());

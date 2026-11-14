@@ -33,6 +33,7 @@ import { ConfigContext } from '../contexts/ConfigContext.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import { switchPrimaryModel } from '../models/primary-model-switch.js';
 import { t } from '../../i18n/index.js';
 import { publicProviderBaseUrl } from '../../utils/acpModelUtils.js';
 import {
@@ -1210,13 +1211,19 @@ export function ModelDialog({
 
         selectionInFlightRef.current = true;
         try {
-          await config.switchModel(selectedAuthType, modelId, {
-            ...(selectedAuthType !== authType &&
-            selectedAuthType === AuthType.QWEN_OAUTH
-              ? { requireCachedCredentials: true }
-              : {}),
-            baseUrl: selectedBaseUrl,
-          });
+          await switchPrimaryModel(
+            config,
+            settings,
+            selectedAuthType,
+            modelId,
+            {
+              ...(selectedAuthType !== authType &&
+              selectedAuthType === AuthType.QWEN_OAUTH
+                ? { requireCachedCredentials: true }
+                : {}),
+              baseUrl: selectedBaseUrl,
+            },
+          );
           selectionCommittedRef.current = true;
         } finally {
           selectionInFlightRef.current = false;

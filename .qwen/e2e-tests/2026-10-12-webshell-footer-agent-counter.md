@@ -1,5 +1,8 @@
 # WebShell footer agent counter (background subagents)
 
+> Superseded by `2026-11-10-webshell-composer-task-chips.md`: the footer
+> task pill was replaced by chips above the composer.
+
 ## Scenario
 
 Open a Web Shell / Qwen Code Desktop session and start a conversation

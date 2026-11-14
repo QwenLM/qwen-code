@@ -102,18 +102,18 @@ Helm stores managed Secret data in its release metadata. To manage credentials
 separately, set `credentials.existingSecret` and omit `model.apiKey`. The Secret
 must already exist in the release namespace and contain all of these keys:
 
-| Key                         | Value                                                                                                                 |
-| --------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `auth-signing-key`          | At least 32 UTF-8 bytes                                                                                               |
-| `session-store-binding-key` | Independent key, at least 32 UTF-8 bytes                                                                              |
-| `harness-token`             | Private bearer token shared by Java and Harness                                                                       |
-| `capability-digest`         | `sha256:` followed by 64 lowercase hexadecimal digits                                                                 |
-| `mysql-password`            | Application database password                                                                                         |
-| `mysql-root-password`       | MySQL initialization root password                                                                                    |
-| `model-api-key`             | Provider API key                                                                                                      |
-| `runtime-broker-token`      | Required with `runtime.enabled`; private Broker bearer token                                                          |
-| `runtime-credential-key`    | Required with `runtime.enabled`; base64 encoding of 32 random bytes                                                   |
-| `web-token`                 | Required with `web.enabled`; independent browser bearer token of at least 32 bytes, different from `auth-signing-key` |
+| Key                         | Value                                                                                                      |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `auth-signing-key`          | At least 32 UTF-8 bytes                                                                                    |
+| `session-store-binding-key` | Independent key, at least 32 UTF-8 bytes                                                                   |
+| `harness-token`             | Private bearer token shared by Java and Harness                                                            |
+| `capability-digest`         | `sha256:` followed by 64 lowercase hexadecimal digits                                                      |
+| `mysql-password`            | Application database password                                                                              |
+| `mysql-root-password`       | MySQL initialization root password                                                                         |
+| `model-api-key`             | Provider API key                                                                                           |
+| `runtime-broker-token`      | Required with `runtime.enabled`; private Broker bearer token                                               |
+| `runtime-credential-key`    | Required with `runtime.enabled`; base64 encoding of 32 random bytes                                        |
+| `web-token`                 | Required with `web.enabled`; non-empty independent browser bearer token, different from `auth-signing-key` |
 
 The Runtime credential key ID is fixed to `kubernetes-v1`; preserve that key for
 every retained binding. When connected to the cluster, Helm validates an existing

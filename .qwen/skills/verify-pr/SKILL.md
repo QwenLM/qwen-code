@@ -45,11 +45,24 @@ consistency rules the publisher enforces in CI.
 
 The workflow (`qwen-triage.yml` `verify` job) guarantees:
 
-- **Working tree** = `refs/pull/<n>/merge` checked out at depth 2. So:
-  `HEAD` is the merge commit, `HEAD^1` is the **base tip**, `HEAD^2` is the
-  **PR head**. Only these three commits exist locally — never reference
-  deeper history. The PR's effective diff is `git diff HEAD^1..HEAD`; the
-  verified head to cite is `git rev-parse HEAD^2`.
+- **Working tree** = `refs/pull/<n>/merge`: `HEAD` is the merge commit,
+  `HEAD^1` is the **base tip**, `HEAD^2` is the **PR head**. The PR's
+  effective diff is `git diff HEAD^1..HEAD`; the verified head to cite is
+  `git rev-parse HEAD^2`. The checkout is shallow. Before PR code runs, the
+  lane deepens both sides back to the oldest date among the PR's commits
+  and their parents, at most 90 days. A merge base older than that stays
+  out: a PR forked earlier keeps one only through a later merge of the
+  base whose parents both fall within those 90 days. The previous report's
+  verified head arrives as a `verify-head` marker in its header; when that
+  commit is still not local, the lane fetches it alone, without its
+  parents, into `refs/verify/previous`. Each fetch is best-effort, so test
+  for what a step needs instead of assuming it:
+  `git merge-base HEAD^1 HEAD^2` for the merge base, and
+  `git log -1 --format=%P <oid>` for a commit's parents, which prints
+  nothing for a commit at the shallow boundary and exits non-zero for one
+  that is not local. `git show` presents a boundary commit as adding the
+  whole tree, and `--no-merges` lists a boundary merge as an ordinary
+  commit.
 - **The `.qwen` tree is base-pinned.** The lane replaces it with
   `git archive "$BASE_OID" -- .qwen` (then root-owned, read-only) before you
   start, while `scripts/tests/**` stays at the PR head — so a `scripts/tests`
@@ -575,9 +588,16 @@ trigger — the claim happened to be right, but only by luck, and a human
 reader caught the gap.
 
 **Classify what changed before scoping a follow-up round.** Let `P` be the
-previous verified head and `H` the new one. The CI checkout does not carry
-`P`; when the hashes the previous report recorded cannot settle the class,
-treat the round as a production change.
+previous verified head and `H` the new one. In CI, `P` is usually local
+through the deepened history. Otherwise it was fetched alone as
+`refs/verify/previous`, without its parents: `git diff P H` still settles a
+test-only tip, but merge bases and ancestry tests do not work, and a failed
+`--is-ancestor` there is not evidence of a force-push. When `P` is missing,
+treat the round as a production change. When `git merge-tree` cannot run
+for want of a merge base (it exits 128 with
+`refusing to merge unrelated histories`), merge only is not established:
+say so in the report, and let `git diff P H` decide between a test-only tip
+and a production change.
 
 - **Merge only.** `git merge-tree --write-tree P <the main tip H merged>`
   computes what a purely mechanical merge would produce. If that tree equals
@@ -1693,12 +1713,15 @@ suite on the merged tree; if `main` has touched any file this PR touches
 since the merge-base, say so and re-measure there.
 
 In local rounds, always add that trial merge as a third arm, however
-fresh the base looks. (The CI checkout already is the merge, but its depth-2
-history cannot list what `main` added.) List what `main` added since the
+fresh the base looks. (The CI checkout already is the merge. When
+`git merge-base HEAD^1 HEAD^2` succeeds, `git log <merge-base>..HEAD^1`
+lists what the base added, but a listed commit whose `%P` is empty is a
+shallow cut and the list stops there.) List what `main` added since the
 merge-base: validation rules on shared paths, new writers or record kinds,
 new readers of a format the PR changes, and schema changes
-(`git diff <merge-base> origin/main -- '*.sql'`). Probe each one on the PR's
-own new paths in the trial-merge tree. Measured example: `main` added
+(`git diff <merge-base> origin/main -- '*.sql'`; in CI, where no
+`origin/main` exists, `HEAD^1` takes its place). Probe each one on the
+PR's own new paths in the trial-merge tree. Measured example: `main` added
 workspace roles and dropped `can_read` / `can_create`; the PR's new SQL
 still named the old columns, so on a real stack built from the merge every
 child creation failed on `bad SQL grammar`. If the PR adds a database
@@ -1787,18 +1810,20 @@ or contract version too.
   the authority said 5, and the next revision was accepted against the
   stale body without any error.
 - **Multi-commit PRs**: verify each commit's claim separately when the
-  commits are reachable. In CI they usually are **not** — the checkout is
-  depth 2, giving only the merge commit, the base tip (`HEAD^1`), and the PR
-  head (`HEAD^2`). A bare `git rev-list --count HEAD^1..HEAD^2` is NOT a
-  sufficient check: at a shallow boundary it returns a plausible small
-  number (often `1`) instead of erroring, so the gap goes unnoticed. Compare
-  the locally reachable commits (`git rev-list HEAD^1..HEAD^2`) against the
-  `commits` array in `$QWEN_VERIFY_CONTEXT`, and treat
-  `git rev-parse --is-shallow-repository` returning true as "assume
-  unreachable unless proven otherwise". If they do not match, verify the
-  aggregate `HEAD^1..HEAD` diff and state in _Not covered_ that per-commit
-  attribution was out of reach. Never
-  present a per-commit table whose rows were not individually exercised.
+  commits are reachable. In CI the lane deepens the checkout so that they
+  usually are, but check rather than assume: a bare
+  `git rev-list --count HEAD^1..HEAD^2` is NOT a sufficient check, because
+  at a shallow boundary it returns a plausible small number (often `1`)
+  instead of erroring. Every `commits[].oid` in `$QWEN_VERIFY_CONTEXT` must
+  be local with its parents: `git log -1 --format=%P <oid>` exits zero and
+  prints at least one parent. In CI,
+  `git rev-list --no-merges HEAD^2 --not HEAD^1` must also list exactly the
+  snapshot's commits whose `%P` shows one parent, and `HEAD^1` is the
+  `<target>` in the mutation matrix's enumeration. If any commit fails
+  either check, claim no per-commit coverage: verify the aggregate
+  `HEAD^1..HEAD` diff and name the unreachable commits in _Not covered_.
+  Never present a per-commit table whose rows were not individually
+  exercised.
 - **Workflow / CI / script PRs**: unit tests are the wrong oracle. Extract
   the embedded bash/jq/python **verbatim** (a YAML parser, not retyping)
   and **execute** it against real data under the step's own shell contract

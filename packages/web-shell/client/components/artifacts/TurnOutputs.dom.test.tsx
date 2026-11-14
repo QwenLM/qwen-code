@@ -1062,6 +1062,179 @@ describe('TurnOutputs artifact downloads', () => {
     act(() => root.unmount());
   });
 
+  it('keeps Open for a managed artifact that only shows metadata', () => {
+    // record_artifact accepts {kind:'image', managedId, mimeType} which lands as
+    // storage:'managed'. The default panel shows only metadata and the managed
+    // ID (no content), so the card must not promise Preview without a host.
+    const onOpenRequest = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <TurnOutputs
+            turnId="turn-managed-image"
+            workspaceCwd="/primary"
+            changes={[]}
+            artifacts={[
+              {
+                id: 'managed-image-artifact',
+                kind: 'image',
+                storage: 'managed',
+                status: 'available',
+                title: 'Diagram',
+                managedId: 'ext-123',
+                mimeType: 'image/png',
+              } as DaemonSessionArtifact,
+            ]}
+            scheduledTasks={[]}
+            onOpenRequest={onOpenRequest}
+            onReviewChanges={() => {}}
+            onOpenArtifact={() => {}}
+            onOpenScheduledTask={() => {}}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const buttons = Array.from(container.querySelectorAll('button'));
+    const open = buttons.find(
+      (button) => button.textContent?.trim() === 'Open',
+    );
+    expect(open).toBeDefined();
+    expect(open?.disabled).toBe(false);
+    expect(open?.querySelector('svg.lucide-eye')).toBeNull();
+    expect(
+      buttons.find((button) => button.textContent?.trim() === 'Preview'),
+    ).toBeUndefined();
+
+    // The open path is unchanged: still a plain artifact panel request.
+    act(() => open?.click());
+    expect(onOpenRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'artifact',
+        artifactId: 'managed-image-artifact',
+        managedId: 'ext-123',
+      }),
+    );
+
+    act(() => root.unmount());
+  });
+
+  it('labels a managed artifact Preview when the host claims the preview', () => {
+    // An embedding host that claims right-panel opens may render the managed
+    // artifact itself, so Preview is truthful in that case.
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <WebShellCustomizationProvider
+          value={{ hostOwnsArtifactPreview: true }}
+        >
+          <I18nProvider language="en">
+            <TurnOutputs
+              turnId="turn-managed-host"
+              workspaceCwd="/primary"
+              changes={[]}
+              artifacts={[
+                {
+                  id: 'managed-image-artifact',
+                  kind: 'image',
+                  storage: 'managed',
+                  status: 'available',
+                  title: 'Diagram',
+                  managedId: 'ext-123',
+                  mimeType: 'image/png',
+                } as DaemonSessionArtifact,
+              ]}
+              scheduledTasks={[]}
+              onReviewChanges={() => {}}
+              onOpenArtifact={() => {}}
+              onOpenScheduledTask={() => {}}
+            />
+          </I18nProvider>
+        </WebShellCustomizationProvider>,
+      );
+    });
+
+    const buttons = Array.from(container.querySelectorAll('button'));
+    const preview = buttons.find(
+      (button) => button.textContent?.trim() === 'Preview',
+    );
+    expect(preview).toBeDefined();
+    expect(preview?.querySelector('svg.lucide-eye')).not.toBeNull();
+    expect(
+      buttons.find((button) => button.textContent?.trim() === 'Open'),
+    ).toBeUndefined();
+
+    act(() => root.unmount());
+  });
+
+  it.each([
+    ['file:///tmp/diagram.html', false, 'Open'],
+    ['file:///tmp/diagram.html', true, 'Preview'],
+    ['https://example.com/diagram.html', false, 'Open'],
+    ['https://example.com/diagram.html', true, 'Preview'],
+  ])(
+    'labels a published artifact (url=%s, snapshot=%s) %s',
+    (url, snapshot, label) => {
+      // Only a saved web-preview snapshot promises Preview; a live preview
+      // tab also needs the webPreview panel and an accepted URL, which the
+      // card cannot verify, so any other publication keeps Open regardless
+      // of its URL scheme.
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <TurnOutputs
+              turnId="turn-published"
+              workspaceCwd="/primary"
+              changes={[]}
+              artifacts={[
+                {
+                  id: 'published-artifact',
+                  kind: 'html',
+                  storage: 'published',
+                  status: 'available',
+                  title: 'diagram.html',
+                  url,
+                  ...(snapshot
+                    ? { metadata: { artifactType: 'web_preview_snapshot' } }
+                    : {}),
+                } as DaemonSessionArtifact,
+              ]}
+              scheduledTasks={[]}
+              onReviewChanges={() => {}}
+              onOpenArtifact={() => {}}
+              onOpenScheduledTask={() => {}}
+            />
+          </I18nProvider>,
+        );
+      });
+
+      const buttons = Array.from(container.querySelectorAll('button'));
+      expect(
+        buttons.find((button) => button.textContent?.trim() === label),
+      ).toBeDefined();
+      expect(
+        buttons.find(
+          (button) =>
+            button.textContent?.trim() ===
+            (label === 'Preview' ? 'Open' : 'Preview'),
+        ),
+      ).toBeUndefined();
+
+      act(() => root.unmount());
+    },
+  );
+
   it('marks only changed workspace artifacts as modified since recorded', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);

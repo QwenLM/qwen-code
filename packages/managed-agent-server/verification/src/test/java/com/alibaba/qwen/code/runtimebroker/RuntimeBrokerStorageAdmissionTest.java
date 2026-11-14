@@ -1,20 +1,27 @@
 package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
+import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
+import javax.sql.DataSource;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneId;
-import java.time.ZoneOffset;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
@@ -27,17 +34,20 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class RuntimeBrokerStorageAdmissionTest {
     private static final RuntimeScope SCOPE = new RuntimeScope("tenant", "workspace", "1", "/workspace",
             WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session");
+    private static final AesGcmSecretProtector PROTECTOR = new AesGcmSecretProtector("test-key", new byte[32]);
 
     @Test
     void preCreateBusyPreservesTheOriginalIdentityAcrossRetriesAndBrokerRestart() {
-        var bindings = new InMemoryRuntimeBindingRepository();
+        DataSource source = database();
+        ManagedSchema.initialize(source);
+        var bindings = new JdbcRuntimeBindingRepository(source, PROTECTOR);
         var provisioner = new AdmissionProvisioner();
         provisioner.admit = binding -> {
             throw busy();
         };
         var original = bindings.findOrCreate(provisioner.createRequest(SCOPE, "harness"));
         for (int round = 0; round < 2; round++) {
-            try (var broker = broker(provisioner, bindings, Clock.systemUTC(), Duration.ofSeconds(30))) {
+            try (var broker = broker(provisioner, bindings, source, Clock.systemUTC(), Duration.ofSeconds(30))) {
                 for (int retry = 0; retry < 2; retry++) {
                     assertEquals("workspace_csi_busy", failure(broker.warm("harness")).getCode());
                     var current = bindings.findById(original.getBindingId());
@@ -51,7 +61,7 @@ class RuntimeBrokerStorageAdmissionTest {
         }
         assertEquals(0, provisioner.ensureCalls);
         provisioner.admit = binding -> { };
-        try (var broker = broker(provisioner, bindings, Clock.systemUTC(), Duration.ofSeconds(30))) {
+        try (var broker = broker(provisioner, bindings, source, Clock.systemUTC(), Duration.ofSeconds(30))) {
             assertEquals("workspace_csi_provenance_unavailable", failure(broker.warm("harness")).getCode());
         }
         assertEquals(1, provisioner.ensureCalls);
@@ -64,7 +74,9 @@ class RuntimeBrokerStorageAdmissionTest {
             "external-scratch, runtime_external_capacity"
     })
     void scratchCapacityPreservesTheOriginalSeedAcrossPreCreateRetries(String kind, String code) {
-        var bindings = new InMemoryRuntimeBindingRepository();
+        DataSource source = database();
+        ManagedSchema.initialize(source);
+        var bindings = new JdbcRuntimeBindingRepository(source, PROTECTOR);
         var provisioner = new AdmissionProvisioner();
         provisioner.provisionerKind = kind;
         provisioner.admit = binding -> {
@@ -72,7 +84,7 @@ class RuntimeBrokerStorageAdmissionTest {
         };
         var original = bindings.findOrCreate(provisioner.createRequest(SCOPE, "harness"));
         for (int round = 0; round < 2; round++) {
-            try (var broker = broker(provisioner, bindings, Clock.systemUTC(), Duration.ofSeconds(30))) {
+            try (var broker = broker(provisioner, bindings, source, Clock.systemUTC(), Duration.ofSeconds(30))) {
                 assertEquals(code, failure(broker.warm("harness")).getCode());
                 var current = bindings.findById(original.getBindingId());
                 assertEquals(RuntimeBindingRecord.State.PROVISIONING, current.getState());
@@ -84,7 +96,7 @@ class RuntimeBrokerStorageAdmissionTest {
         }
         assertEquals(0, provisioner.ensureCalls);
         provisioner.admit = binding -> { };
-        try (var broker = broker(provisioner, bindings, Clock.systemUTC(), Duration.ofSeconds(30))) {
+        try (var broker = broker(provisioner, bindings, source, Clock.systemUTC(), Duration.ofSeconds(30))) {
             assertEquals("workspace_csi_provenance_unavailable", failure(broker.warm("harness")).getCode());
         }
         assertEquals(1, provisioner.ensureCalls);
@@ -93,7 +105,9 @@ class RuntimeBrokerStorageAdmissionTest {
 
     @Test
     void preCreateUnavailablePreservesTheOriginalSeedAcrossRetriesAndBrokerRestart() {
-        var bindings = new InMemoryRuntimeBindingRepository();
+        DataSource source = database();
+        ManagedSchema.initialize(source);
+        var bindings = new JdbcRuntimeBindingRepository(source, PROTECTOR);
         var provisioner = new AdmissionProvisioner();
         provisioner.provisionerKind = "external-scratch";
         provisioner.admit = binding -> {
@@ -102,7 +116,7 @@ class RuntimeBrokerStorageAdmissionTest {
         };
         var original = bindings.findOrCreate(provisioner.createRequest(SCOPE, "harness"));
         for (int round = 0; round < 2; round++) {
-            try (var broker = broker(provisioner, bindings, Clock.systemUTC(), Duration.ofSeconds(30))) {
+            try (var broker = broker(provisioner, bindings, source, Clock.systemUTC(), Duration.ofSeconds(30))) {
                 assertEquals("runtime_external_unavailable", failure(broker.warm("harness")).getCode());
                 var current = bindings.findById(original.getBindingId());
                 assertEquals(RuntimeBindingRecord.State.PROVISIONING, current.getState());
@@ -114,7 +128,7 @@ class RuntimeBrokerStorageAdmissionTest {
         }
         assertEquals(0, provisioner.ensureCalls);
         provisioner.admit = binding -> { };
-        try (var broker = broker(provisioner, bindings, Clock.systemUTC(), Duration.ofSeconds(30))) {
+        try (var broker = broker(provisioner, bindings, source, Clock.systemUTC(), Duration.ofSeconds(30))) {
             assertEquals("workspace_csi_provenance_unavailable", failure(broker.warm("harness")).getCode());
         }
         assertEquals(1, provisioner.ensureCalls);
@@ -123,14 +137,16 @@ class RuntimeBrokerStorageAdmissionTest {
 
     @Test
     void externalUnavailableAfterEnteringEnsurePreservesTheOriginalSeedAcrossBrokerRounds() {
-        var bindings = new InMemoryRuntimeBindingRepository();
+        DataSource source = database();
+        ManagedSchema.initialize(source);
+        var bindings = new JdbcRuntimeBindingRepository(source, PROTECTOR);
         var provisioner = new AdmissionProvisioner();
         provisioner.provisionerKind = "external-scratch";
         provisioner.ensureFailure = new RuntimeBrokerException(503, "runtime_external_unavailable",
                 "External Runtime provider is unavailable.", true);
         var original = bindings.findOrCreate(provisioner.createRequest(SCOPE, "harness"));
         for (int round = 0; round < 2; round++) {
-            try (var broker = broker(provisioner, bindings, Clock.systemUTC(), Duration.ofSeconds(30))) {
+            try (var broker = broker(provisioner, bindings, source, Clock.systemUTC(), Duration.ofSeconds(30))) {
                 assertEquals("runtime_external_unavailable", failure(broker.warm("harness")).getCode());
                 var current = bindings.findById(original.getBindingId());
                 assertEquals(RuntimeBindingRecord.State.PROVISIONING, current.getState());
@@ -143,7 +159,7 @@ class RuntimeBrokerStorageAdmissionTest {
         assertEquals(2, provisioner.ensureCalls);
         provisioner.ensureFailure = new RuntimeBrokerException(409,
                 "workspace_csi_provenance_unavailable", "Provenance unavailable.", false);
-        try (var broker = broker(provisioner, bindings, Clock.systemUTC(), Duration.ofSeconds(30))) {
+        try (var broker = broker(provisioner, bindings, source, Clock.systemUTC(), Duration.ofSeconds(30))) {
             assertEquals("workspace_csi_provenance_unavailable", failure(broker.warm("harness")).getCode());
             assertEquals(RuntimeBindingRecord.State.RECOVERY_BLOCKED,
                     bindings.findById(original.getBindingId()).getState());
@@ -158,7 +174,9 @@ class RuntimeBrokerStorageAdmissionTest {
             "runtime_external_capacity"
     })
     void externalRetryableReserveWithPersistedHandleRemainsAdoptableAcrossBrokerRounds(String code) {
-        var bindings = new InMemoryRuntimeBindingRepository();
+        DataSource source = database();
+        ManagedSchema.initialize(source);
+        var bindings = new JdbcRuntimeBindingRepository(source, PROTECTOR);
         var provisioner = new AdmissionProvisioner();
         provisioner.provisionerKind = "external-scratch";
         var original = bindings.findOrCreate(provisioner.createRequest(SCOPE, "harness"));
@@ -172,7 +190,7 @@ class RuntimeBrokerStorageAdmissionTest {
             throw new RuntimeBrokerException(503, code, "External Runtime provider is unavailable.", true);
         };
         for (int round = 0; round < 2; round++) {
-            try (var broker = broker(provisioner, bindings, Clock.systemUTC(), Duration.ofSeconds(30))) {
+            try (var broker = broker(provisioner, bindings, source, Clock.systemUTC(), Duration.ofSeconds(30))) {
                 assertEquals(code, failure(broker.warm("harness")).getCode());
                 var current = bindings.findById(original.getBindingId());
                 assertEquals(RuntimeBindingRecord.State.PROVISIONING, current.getState());
@@ -184,7 +202,7 @@ class RuntimeBrokerStorageAdmissionTest {
         }
         assertEquals(0, provisioner.ensureCalls);
         provisioner.admit = binding -> { };
-        try (var broker = broker(provisioner, bindings, Clock.systemUTC(), Duration.ofSeconds(30))) {
+        try (var broker = broker(provisioner, bindings, source, Clock.systemUTC(), Duration.ofSeconds(30))) {
             assertEquals("workspace_csi_provenance_unavailable", failure(broker.warm("harness")).getCode());
         }
         assertEquals(1, provisioner.ensureCalls);
@@ -198,12 +216,14 @@ class RuntimeBrokerStorageAdmissionTest {
             "kubernetes-scratch, runtime_kubernetes_capacity"
     })
     void scratchCapacityAfterEnteringEnsureRemainsRecoveryBlocked(String kind, String code) {
-        var bindings = new InMemoryRuntimeBindingRepository();
+        DataSource source = database();
+        ManagedSchema.initialize(source);
+        var bindings = new JdbcRuntimeBindingRepository(source, PROTECTOR);
         var provisioner = new AdmissionProvisioner();
         provisioner.provisionerKind = kind;
         provisioner.ensureFailure = new RuntimeBrokerException(503, code, "Capacity exhausted.", true);
         var original = bindings.findOrCreate(provisioner.createRequest(SCOPE, "harness"));
-        try (var broker = broker(provisioner, bindings, Clock.systemUTC(), Duration.ofSeconds(30))) {
+        try (var broker = broker(provisioner, bindings, source, Clock.systemUTC(), Duration.ofSeconds(30))) {
             assertEquals(code, failure(broker.warm("harness")).getCode());
             assertEquals(RuntimeBindingRecord.State.RECOVERY_BLOCKED,
                     bindings.findById(original.getBindingId()).getState());
@@ -214,11 +234,13 @@ class RuntimeBrokerStorageAdmissionTest {
 
     @Test
     void busyAfterEnteringEnsureDoesNotReceiveThePreCreateRetryException() {
-        var bindings = new InMemoryRuntimeBindingRepository();
+        DataSource source = database();
+        ManagedSchema.initialize(source);
+        var bindings = new JdbcRuntimeBindingRepository(source, PROTECTOR);
         var provisioner = new AdmissionProvisioner();
         provisioner.ensureFailure = busy();
         var original = bindings.findOrCreate(provisioner.createRequest(SCOPE, "harness"));
-        try (var broker = broker(provisioner, bindings, Clock.systemUTC(), Duration.ofSeconds(30))) {
+        try (var broker = broker(provisioner, bindings, source, Clock.systemUTC(), Duration.ofSeconds(30))) {
             assertEquals("runtime_broker_recovery_blocked", failure(broker.warm("harness")).getCode());
             assertEquals(RuntimeBindingRecord.State.RECOVERY_BLOCKED,
                     bindings.findById(original.getBindingId()).getState());
@@ -229,8 +251,9 @@ class RuntimeBrokerStorageAdmissionTest {
 
     @Test
     void admissionDoesNotCompeteWithRenewalAndExpiredAdmissionCreatesNothing() {
-        var clock = new TestClock();
-        var bindings = new InMemoryRuntimeBindingRepository(clock, () -> "binding");
+        DataSource source = database();
+        ManagedSchema.initialize(source);
+        var bindings = new JdbcRuntimeBindingRepository(source, PROTECTOR, () -> "binding");
         var provisioner = new AdmissionProvisioner();
         provisioner.admit = claimed -> {
             try {
@@ -240,10 +263,10 @@ class RuntimeBrokerStorageAdmissionTest {
                 throw new IllegalStateException(error);
             }
             assertEquals(claimed.getVersion(), bindings.findById(claimed.getBindingId()).getVersion());
-            clock.now = clock.now.plusSeconds(1);
+            expireOperationLease(source, claimed.getBindingId());
         };
         var original = bindings.findOrCreate(provisioner.createRequest(SCOPE, "harness"));
-        try (var broker = broker(provisioner, bindings, clock, Duration.ofMillis(150))) {
+        try (var broker = broker(provisioner, bindings, source, Clock.systemUTC(), Duration.ofMillis(150))) {
             assertEquals("runtime_provision_fenced", failure(broker.warm("harness")).getCode());
         }
         assertEquals(0, provisioner.ensureCalls);
@@ -252,11 +275,30 @@ class RuntimeBrokerStorageAdmissionTest {
     }
 
     private static RuntimeBrokerService broker(RuntimeProvisioner provisioner,
-            InMemoryRuntimeBindingRepository bindings, Clock clock, Duration duration) {
+            RuntimeBindingRepository bindings, DataSource source, Clock clock, Duration duration) {
         return com.alibaba.qwen.code.runtimebroker.service.BrokerServiceTestAccess.create(ignored -> CompletableFuture.completedFuture(SCOPE), provisioner,
-                new HttpRuntimeTransport(), bindings, new InMemoryRuntimeSessionRepository(),
-                new InMemoryToolExecutionRepository(), "coordinator", duration, Duration.ofSeconds(30),
+                new HttpRuntimeTransport(), bindings, new JdbcRuntimeSessionRepository(source),
+                new JdbcToolExecutionRepository(source), "coordinator", duration, Duration.ofSeconds(30),
                 clock, () -> "execution");
+    }
+
+    private static DataSource database() {
+        JdbcDataSource source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:storage-admission-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        return source;
+    }
+
+    private static void expireOperationLease(DataSource source, String bindingId) {
+        try (Connection connection = source.getConnection();
+                PreparedStatement statement = connection.prepareStatement(
+                        "UPDATE ma_runtime_binding SET operation_lease_until = ? WHERE binding_id = ?")) {
+            statement.setLong(1, Instant.parse("2000-01-01T00:00:00Z").toEpochMilli());
+            statement.setString(2, bindingId);
+            statement.executeUpdate();
+        } catch (SQLException error) {
+            throw new IllegalStateException(error);
+        }
     }
 
     private static RuntimeBrokerException failure(CompletionStage<?> stage) {
@@ -303,25 +345,6 @@ class RuntimeBrokerStorageAdmissionTest {
         @Override
         public CompletionStage<RuntimeLease> provision(RuntimeProvisionRequest request) {
             throw new AssertionError("Admission must not start a worker");
-        }
-    }
-
-    private static final class TestClock extends Clock {
-        private Instant now = Instant.parse("2026-10-01T00:00:00Z");
-
-        @Override
-        public ZoneId getZone() {
-            return ZoneOffset.UTC;
-        }
-
-        @Override
-        public Clock withZone(ZoneId zone) {
-            return this;
-        }
-
-        @Override
-        public Instant instant() {
-            return now;
         }
     }
 }

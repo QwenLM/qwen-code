@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
@@ -242,7 +243,7 @@ final class HostedProviderMediaProbe implements AutoCloseable {
         String storageId = "storage-" + sessions.indexOf(session);
         String physical = jdbc.queryForObject("SELECT physical_key FROM ma_storage"
                 + " WHERE alias_key = ? AND tenant_id = ? AND storage_id = ?", String.class,
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storageId),
+                RuntimeAdmissionFences.storageAliasKey(tenant, storageId),
                 tenant, storageId);
         assertThat(physical).isNotBlank();
         var member = jdbc.queryForMap("SELECT binding_id, runtime_generation, session_state,"

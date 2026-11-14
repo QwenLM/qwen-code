@@ -17,6 +17,7 @@ import {
   resolveRequestTimeout,
 } from '../core/openaiContentGenerator/constants.js';
 import { buildSessionAwareFetch } from '../core/outbound-session-id.js';
+import { retryContext } from '../utils/retryContext.js';
 import { buildRuntimeFetchOptions } from '../utils/runtimeFetchOptions.js';
 import {
   QWEN_SUBSCRIPTION_BASE_URL,
@@ -47,6 +48,10 @@ class SubscriptionProvider extends DefaultOpenAICompatibleProvider {
     return new OpenAI({
       apiKey: QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER,
       baseURL: QWEN_SUBSCRIPTION_BASE_URL,
+      ...(this.contentGeneratorConfig.isolatedRoute && {
+        organization: null,
+        project: null,
+      }),
       timeout: resolveRequestTimeout(this.contentGeneratorConfig.timeout),
       maxRetries: this.contentGeneratorConfig.maxRetries ?? DEFAULT_MAX_RETRIES,
       defaultHeaders: this.buildHeaders(),
@@ -85,7 +90,9 @@ class SubscriptionProvider extends DefaultOpenAICompatibleProvider {
           return response;
         };
         const response = await send(token);
-        if (response.status !== 401) return response;
+        if (response.status !== 401 || retryContext.getStore()?.singleAttempt) {
+          return response;
+        }
         await response.body?.cancel();
         const refreshed = await getToken(token);
         return send(refreshed);

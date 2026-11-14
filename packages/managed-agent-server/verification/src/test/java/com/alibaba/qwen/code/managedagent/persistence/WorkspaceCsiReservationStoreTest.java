@@ -219,7 +219,7 @@ class WorkspaceCsiReservationStoreTest {
         var registration = registration("tenant", "storage", "backend", "handle", 1);
         var context = new ContextBinding("tenant", "workspace", 1, "storage", ".",
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
-        var local = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(jdbc, new DataSourceTransactionManager(source)));
+        var local = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(jdbc, new DataSourceTransactionManager(source)));
         var session = localSession(context);
         var original = bindings.findById(session.getBindingId());
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage_owner", Long.class)).isZero();
@@ -268,7 +268,7 @@ class WorkspaceCsiReservationStoreTest {
         var registration = registration("tenant", "storage", "backend", "handle", 1);
         var context = new ContextBinding("tenant", "workspace", 1, "storage", ".",
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
-        var local = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(jdbc, new DataSourceTransactionManager(source)));
+        var local = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(jdbc, new DataSourceTransactionManager(source)));
         WorkspaceTestStorage.register(jdbc, context.getTenantId(), context.getStorageId());
         var session = localSession(context);
         local.claim(context, session);
@@ -333,7 +333,7 @@ class WorkspaceCsiReservationStoreTest {
         var context = new ContextBinding("tenant", "workspace", 1, "storage", ".",
                 WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
         var session = localSession(context);
-        var local = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(jdbc, new DataSourceTransactionManager(source)));
+        var local = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new JdbcWorkspaceExecutionStore(jdbc, new DataSourceTransactionManager(source)));
         var outer = new TransactionTemplate(new DataSourceTransactionManager(source));
         outer.executeWithoutResult(status -> {
             assertUnavailable(() -> store.register(registration));

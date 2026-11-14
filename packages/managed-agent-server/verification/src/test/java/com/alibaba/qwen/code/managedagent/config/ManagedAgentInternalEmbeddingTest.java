@@ -73,6 +73,26 @@ class ManagedAgentInternalEmbeddingTest {
         });
     }
 
+    @Test
+    void mountsTheInternalAutomationRoutesWithBodyValidation() {
+        runner().withPropertyValues("qwen.managed-agent.session-store.binding-key=" + "k".repeat(32)).run(context -> {
+            assertThat(context).hasNotFailed();
+            var mvc = MockMvcBuilders.webAppContextSetup(context)
+                    .addFilters(context.getBean(TenantContextFilter.class)).build();
+            String token = context.getBean(WriterCredentialPolicy.class).issue("tenant", "workspace", "session");
+            String endpoint = "/internal/managed-session-store/v1/sessions/session/automations:list";
+            // A body missing writerId must answer the validation 400, not Spring's
+            // routing 404: the embedded deployment mounts the automation controller
+            // through the explicit @Import (the api package stays out of the scan),
+            // and dropping it from that list kills the fixed-interval /loop routes.
+            String body = "{\"workspaceId\":\"workspace\",\"writerGeneration\":1}";
+            mvc.perform(post(endpoint).header("X-Qwen-Tenant-Id", "tenant")
+                            .header("X-Qwen-Managed-Writer-Token", token).contentType(MediaType.APPLICATION_JSON).content(body))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.error.code").value("invalid_request"));
+        });
+    }
+
     record HostResponse(String hostValue) { }
 
     @Configuration(proxyBeanMethods = false)

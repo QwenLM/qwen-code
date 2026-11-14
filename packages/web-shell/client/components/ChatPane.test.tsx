@@ -168,6 +168,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useOptionalWorkspace: () => undefined,
   useWorkspaceActions: () => subscriptionActions,
   useWorkspace: () => ({
+    baseUrl: 'https://pane.example/daemon/proxy',
     capabilities: connectionState.capabilities,
     client: paneWorkspaceClient,
     status: connectionState.status,
@@ -1890,6 +1891,33 @@ describe('ChatPane', () => {
     expect(latestChatEditorProps.mountUnavailableModelTooltip).toBe(
       mountUnavailableModelTooltip,
     );
+  });
+
+  it('scopes model picker content to its own pane and connected daemon', () => {
+    connectionState.currentModel = 'pane-model';
+    render({ workspaceCwd: '/pane-workspace' });
+    expect(latestChatEditorProps.modelPickerScope).toEqual({
+      sessionId: 'sess-1',
+      workspaceCwd: '/pane-workspace',
+      daemonBaseUrl: 'https://pane.example/daemon/proxy',
+    });
+    expect(latestChatEditorProps.currentModel).toBe('pane-model');
+
+    const initialScope = latestChatEditorProps.modelPickerScope;
+    messagesState = [
+      ...messagesState,
+      { id: 'm2', role: 'assistant', content: 'Streaming delta' },
+    ];
+    rerender({ workspaceCwd: '/pane-workspace' });
+    expect(latestChatEditorProps.modelPickerScope).toBe(initialScope);
+
+    connectionState.sessionId = 'other-pane-session';
+    rerender({ workspaceCwd: '/other-pane-workspace' });
+    expect(latestChatEditorProps.modelPickerScope).toEqual({
+      sessionId: 'other-pane-session',
+      workspaceCwd: '/other-pane-workspace',
+      daemonBaseUrl: 'https://pane.example/daemon/proxy',
+    });
   });
 
   it('shows the Plan entry only when explicitly enabled and hides it on removal', () => {
@@ -4061,6 +4089,7 @@ describe('ChatPane continuation errors', () => {
       // Actual action + actual ChatPane/Banner; only SDK request and hook state
       // delivery are simulated. No SSE frames or provider replay are invented.
       const actions = createDaemonSessionActions({
+        getPromptStatus: () => 'idle',
         store: { getSnapshot: () => ({ activeAssistantBlockId: undefined }) },
         sessionRef,
         activePromptsRef: { current: new Map() },

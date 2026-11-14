@@ -456,6 +456,7 @@ function ArtifactCard({
   onError?: (error: unknown, fallback: string) => void;
 }) {
   const { t } = useI18n();
+  const { hostOwnsArtifactPreview = false } = useWebShellCustomization();
   const openExternalLink = useExternalLinkOpener();
   const [downloading, setDownloading] = useState(false);
   const mountedRef = useRef(true);
@@ -492,9 +493,19 @@ function ArtifactCard({
   // Rendered artifacts (HTML, Markdown, images) open straight into a rendered
   // preview tab, so label the action Preview rather than the generic Open.
   // External-URL artifacts only show metadata and an Open link in the panel,
-  // so they keep Open even when their kind would otherwise render.
+  // so they keep Open even when their kind would otherwise render. Managed
+  // artifacts have no content in the default panel (metadata only), so they
+  // keep Open too unless an embedding host claims the preview. A published
+  // artifact only promises Preview when it is a saved web-preview snapshot;
+  // a live web-preview tab additionally needs the webPreview panel and a URL
+  // parseWebPreviewUrl accepts, which the card cannot verify, so every other
+  // publication keeps Open rather than risk promising a metadata-only view.
   const rendered =
-    isRenderedArtifact(artifact) && artifact.storage !== 'external_url';
+    isRenderedArtifact(artifact) &&
+    artifact.storage !== 'external_url' &&
+    (artifact.storage !== 'managed' || hostOwnsArtifactPreview) &&
+    (artifact.storage !== 'published' ||
+      artifact.metadata?.['artifactType'] === 'web_preview_snapshot');
   return (
     <div className={styles.card}>
       <div className={`${styles.summary} ${styles.artifactSummary}`}>

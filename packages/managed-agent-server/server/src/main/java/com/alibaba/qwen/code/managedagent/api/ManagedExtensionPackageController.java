@@ -50,6 +50,60 @@ public class ManagedExtensionPackageController {
                 key, service.decodeManifest(manifest), request.getInputStream()));
     }
 
+    @PostMapping(value = BASE + "/imports", consumes = MediaType.APPLICATION_OCTET_STREAM_VALUE)
+    public ResponseEntity<ManagedExtensionPackages.Operation> importPackage(TenantContext tenant,
+            @PathVariable String workspaceId, @RequestParam String metadata,
+            @RequestParam(required = false) String extensionId, @RequestHeader("Idempotency-Key") String key,
+            HttpServletRequest request) throws IOException {
+        service.requireExecutionAccess(tenant.tenantId(), tenant.requireActorId(), workspaceId);
+        requireIdentityEncoding(request);
+        return noStore(service.importPackage(tenant.tenantId(), tenant.requireActorId(), workspaceId, extensionId,
+                key, metadata, request.getInputStream(), request.getContentLengthLong()));
+    }
+
+    @PostMapping(BASE + "/source-imports")
+    public ResponseEntity<ManagedExtensionPackages.SourceImportResult> importSource(TenantContext tenant,
+            @PathVariable String workspaceId, @RequestHeader("Idempotency-Key") String key,
+            @RequestBody ManagedExtensionPackages.SourceImport command) throws IOException {
+        return noStore(service.importSource(tenant.tenantId(), tenant.requireActorId(), workspaceId, key, command));
+    }
+
+    @GetMapping(BASE + "/source-imports/{operationId}")
+    public ResponseEntity<ManagedExtensionPackages.SourceImportResult> sourceReceipt(TenantContext tenant,
+            @PathVariable String workspaceId, @PathVariable String operationId) {
+        return noStore(service.sourceReceipt(tenant.tenantId(), tenant.requireActorId(), workspaceId, operationId));
+    }
+
+    @GetMapping(BASE + "/source-imports")
+    public ResponseEntity<ManagedExtensionPackages.SourceImportResult> lookupSourceImport(TenantContext tenant,
+            @PathVariable String workspaceId, @RequestHeader("Idempotency-Key") String key) {
+        return noStore(service.lookupSourceImport(tenant.tenantId(), tenant.requireActorId(), workspaceId, key));
+    }
+
+    @GetMapping(BASE + "/{extensionId}/packages/{packageRevision}/inspection")
+    public ResponseEntity<com.fasterxml.jackson.databind.JsonNode> inspection(TenantContext tenant,
+            @PathVariable String workspaceId, @PathVariable String extensionId, @PathVariable long packageRevision,
+            @RequestParam String packageDigest) throws IOException {
+        return noStore(service.inspection(tenant.tenantId(), tenant.requireActorId(), workspaceId,
+                new ManagedExtensionPackages.Pin(extensionId, packageRevision, packageDigest, null)));
+    }
+
+    @PostMapping(value = BASE + "/imports/preview", consumes = MediaType.APPLICATION_OCTET_STREAM_VALUE)
+    public ResponseEntity<com.fasterxml.jackson.databind.JsonNode> preview(TenantContext tenant,
+            @PathVariable String workspaceId, @RequestParam String metadata, HttpServletRequest request) throws IOException {
+        service.requireExecutionAccess(tenant.tenantId(), tenant.requireActorId(), workspaceId);
+        requireIdentityEncoding(request);
+        return noStore(service.preview(tenant.tenantId(), tenant.requireActorId(), workspaceId, metadata,
+                request.getInputStream(), request.getContentLengthLong()));
+    }
+
+    @PostMapping(BASE + "/operations/lookup")
+    public ResponseEntity<ManagedExtensionPackages.Operation> lookup(TenantContext tenant,
+            @PathVariable String workspaceId, @Valid @RequestBody LookupRequest request) {
+        return noStore(service.lookup(tenant.tenantId(), tenant.requireActorId(), workspaceId,
+                request.kind(), request.idempotencyKey()));
+    }
+
     @PutMapping(value = BASE + "/{extensionId}/packages/{packageDigest}", consumes = MediaType.APPLICATION_OCTET_STREAM_VALUE)
     public ResponseEntity<ManagedExtensionPackages.Operation> publish(TenantContext tenant,
             @PathVariable String workspaceId, @PathVariable String extensionId,
@@ -72,10 +126,9 @@ public class ManagedExtensionPackageController {
             @PathVariable long packageRevision, @RequestParam String packageDigest) throws IOException {
         String actor = tenant.requireActorId();
         var saved = service.get(tenant.tenantId(), actor, workspaceId, extensionId, packageRevision, packageDigest);
-        var archive = service.archive(tenant.tenantId(), actor, workspaceId, extensionId, packageRevision, packageDigest);
         StreamingResponseBody body = output -> {
-            service.get(tenant.tenantId(), actor, workspaceId, extensionId, packageRevision, packageDigest);
-            try (var input = Files.newInputStream(archive, java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
+            try (var archive = service.archive(tenant.tenantId(), actor, workspaceId, extensionId, packageRevision, packageDigest);
+                    var input = Files.newInputStream(archive.path(), java.nio.file.LinkOption.NOFOLLOW_LINKS)) {
                 input.transferTo(output);
             }
         };
@@ -116,6 +169,33 @@ public class ManagedExtensionPackageController {
                 packageDigest, key, service.decodeManifest(manifest), request.getInputStream()));
     }
 
+    @PostMapping(value = WEB + "/imports", consumes = MediaType.APPLICATION_OCTET_STREAM_VALUE)
+    public ResponseEntity<ManagedExtensionPackages.Operation> webImport(TenantContext tenant,
+            @RequestParam String workspaceId, @RequestParam String metadata,
+            @RequestParam(required = false) String extensionId, @RequestHeader("Idempotency-Key") String key,
+            HttpServletRequest request) throws IOException {
+        return importPackage(tenant, workspaceId, metadata, extensionId, key, request);
+    }
+
+    @PostMapping(WEB + "/inspection/query")
+    public ResponseEntity<com.fasterxml.jackson.databind.JsonNode> inspectionQuery(TenantContext tenant,
+            @Valid @RequestBody PackageQuery request) throws IOException {
+        return noStore(service.inspection(tenant.tenantId(), tenant.requireActorId(), request.workspaceId(), request.pin()));
+    }
+
+    @PostMapping(value = WEB + "/imports/preview", consumes = MediaType.APPLICATION_OCTET_STREAM_VALUE)
+    public ResponseEntity<com.fasterxml.jackson.databind.JsonNode> webPreview(TenantContext tenant,
+            @RequestParam String workspaceId, @RequestParam String metadata, HttpServletRequest request) throws IOException {
+        return preview(tenant, workspaceId, metadata, request);
+    }
+
+    @PostMapping(WEB + "/operations/lookup")
+    public ResponseEntity<ManagedExtensionPackages.Operation> lookupQuery(TenantContext tenant,
+            @Valid @RequestBody WebLookupRequest request) {
+        return noStore(service.lookup(tenant.tenantId(), tenant.requireActorId(), request.workspaceId(),
+                request.kind(), request.idempotencyKey()));
+    }
+
     @PostMapping(WEB + "/settings/query")
     public ResponseEntity<ManagedExtensionPackages.Settings> settingsQuery(TenantContext tenant, @Valid @RequestBody ExtensionQuery request) {
         return settings(tenant, request.workspaceId(), request.extensionId());
@@ -143,6 +223,9 @@ public class ManagedExtensionPackageController {
     public record ExtensionQuery(@NotBlank @Size(max = 512) String workspaceId, @NotBlank @Size(max = 128) String extensionId) { }
     public record OperationQuery(@NotBlank @Size(max = 512) String workspaceId, @NotBlank @Size(max = 128) String operationId) { }
     public record PackageQuery(@NotBlank @Size(max = 512) String workspaceId, @NotNull ManagedExtensionPackages.Pin pin) { }
+    public record LookupRequest(@NotBlank @Size(max = 16) String kind, @NotBlank @Size(max = 512) String idempotencyKey) { }
+    public record WebLookupRequest(@NotBlank @Size(max = 512) String workspaceId,
+            @NotBlank @Size(max = 16) String kind, @NotBlank @Size(max = 512) String idempotencyKey) { }
     public record SettingsSubmit(@NotBlank @Size(max = 512) String workspaceId,
             @NotBlank @Size(max = 128) String extensionId, @NotBlank @Size(max = 512) String idempotencyKey,
             long expectedRevision, Map<String, String> values) {
@@ -151,5 +234,13 @@ public class ManagedExtensionPackageController {
 
     private static <T> ResponseEntity<T> noStore(T value) {
         return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(value);
+    }
+
+    private static void requireIdentityEncoding(HttpServletRequest request) {
+        String encoding = request.getHeader("Content-Encoding");
+        if (encoding != null && !"identity".equalsIgnoreCase(encoding)) {
+            throw new com.alibaba.qwen.code.managedagent.exception.ManagedAgentException(415,
+                    "invalid_request", "Encoded package imports are unsupported.");
+        }
     }
 }

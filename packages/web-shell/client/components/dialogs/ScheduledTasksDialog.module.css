@@ -622,7 +622,7 @@
   stroke-width: 1.8;
 }
 
-/* Workspace tag on a card in the aggregated multi-workspace view. Bordered +
+/* Workspace tag on task cards and read-only form fields. Bordered +
  * accent-tinted so it reads as an origin label, distinct from the plain muted
  * schedule pill. Truncates a long workspace name rather than wrapping the row. */
 .workspacePill {
@@ -630,6 +630,7 @@
   align-items: center;
   gap: 5px;
   max-width: 180px;
+  width: fit-content;
   font-size: 11px;
   font-weight: 600;
   color: var(--primary);
@@ -644,7 +645,14 @@
 
 .workspaceIcon {
   display: inline-flex;
+  flex-shrink: 0;
   opacity: 0.85;
+}
+
+.workspaceName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .workspaceIcon svg {

@@ -315,3 +315,124 @@ describe('withChildAgentConsumption', () => {
     expect(agents.markConsumed).not.toHaveBeenCalled();
   });
 });
+
+describe('loop fire-time delivery path', () => {
+  const LOOP_TURN: HostedMonitorWakeTurn = {
+    turnId: 'loop:wakeup-1',
+    text: '<<autonomous-loop-dynamic>>',
+    source: 'loop',
+  };
+
+  function loopHarness(
+    session: ReturnType<typeof world>['session'],
+    opts: {
+      expandLoopFire: (
+        turnId: string,
+        text: string,
+      ) => Promise<{ text: string; expanded: boolean } | null>;
+      markLoopDelivered: () => void;
+      run: () => Promise<unknown>;
+    },
+  ) {
+    return createMonitorWakeRunTurn({
+      session,
+      sessionId: 'session-1',
+      cwd: '/work',
+      executeHostedTurn: (_promptId, text) => {
+        void text;
+        return opts.run();
+      },
+      expandLoopFire: opts.expandLoopFire,
+      markLoopDelivered: opts.markLoopDelivered,
+      busy: () => false,
+      needsRecovery: (cause) =>
+        cause instanceof HostedToolRecoveryRequiredError,
+      writeStderr: () => {},
+    });
+  }
+
+  it('expands a loop sentinel at delivery and commits the cache (M4)', async () => {
+    const { session } = world();
+    const expandLoopFire = vi.fn(async () => ({
+      text: '# Autonomous loop check',
+      expanded: true,
+    }));
+    const markLoopDelivered = vi.fn();
+    const delivered: string[] = [];
+    const runTurn = createMonitorWakeRunTurn({
+      session,
+      sessionId: 'session-1',
+      cwd: '/work',
+      executeHostedTurn: async (_promptId, text) => {
+        delivered.push(text);
+        return { systemPayload: { state: 'completed' } };
+      },
+      expandLoopFire,
+      markLoopDelivered,
+      busy: () => false,
+      needsRecovery: (cause) =>
+        cause instanceof HostedToolRecoveryRequiredError,
+      writeStderr: () => {},
+    });
+    await expect(runTurn(LOOP_TURN)).resolves.toBe('settled');
+    expect(expandLoopFire).toHaveBeenCalledWith(
+      'loop:wakeup-1',
+      '<<autonomous-loop-dynamic>>',
+    );
+    expect(delivered).toEqual(['# Autonomous loop check']);
+    expect(markLoopDelivered).toHaveBeenCalledOnce();
+  });
+
+  it('a denied re-review settles the input without running the turn (M5)', async () => {
+    const { session } = world();
+    const expandLoopFire = vi.fn(async () => null);
+    const markLoopDelivered = vi.fn();
+    const run = vi.fn(async () => ({ systemPayload: { state: 'completed' } }));
+    const turn = loopHarness(session, {
+      expandLoopFire,
+      markLoopDelivered,
+      run,
+    });
+    await expect(turn(LOOP_TURN)).resolves.toBe('settled');
+    expect(run).not.toHaveBeenCalled();
+    expect(markLoopDelivered).not.toHaveBeenCalled();
+  });
+
+  it('a non-sentinel loop turn does not commit the resolver cache (F7)', async () => {
+    const { session } = world();
+    const expandLoopFire = vi.fn(async (_turnId: string, text: string) => ({
+      text,
+      expanded: false,
+    }));
+    const markLoopDelivered = vi.fn();
+    const turn = loopHarness(session, {
+      expandLoopFire,
+      markLoopDelivered,
+      run: async () => ({ systemPayload: { state: 'completed' } }),
+    });
+    await expect(turn({ ...LOOP_TURN, text: '/loop tick' })).resolves.toBe(
+      'settled',
+    );
+    expect(markLoopDelivered).not.toHaveBeenCalled();
+  });
+
+  it.each(['cancelled', 'error'] as const)(
+    'a %s turn does not commit the resolver cache (R8-1)',
+    async (state) => {
+      const { session } = world();
+      const expandLoopFire = vi.fn(async () => ({
+        text: '# Autonomous loop check',
+        expanded: true,
+      }));
+      const markLoopDelivered = vi.fn();
+      const turn = loopHarness(session, {
+        expandLoopFire,
+        markLoopDelivered,
+        run: async () => ({ systemPayload: { state } }),
+      });
+      await expect(turn(LOOP_TURN)).resolves.toBe('settled_incomplete');
+      expect(expandLoopFire).toHaveBeenCalledOnce();
+      expect(markLoopDelivered).not.toHaveBeenCalled();
+    },
+  );
+});
