@@ -338,6 +338,16 @@ class AutomationScannerTest {
         // would silently 403 every create/retire, so pin the read itself.
         assertThat(sessionStore.creatorActor(tenant, sessionId)).isEqualTo(ACTOR);
         assertThat(sessionStore.creatorActor(tenant, "missing-session")).isEmpty();
+        // The column is nullable: a Session row without a creator key decodes
+        // to empty, not to a thrown NullPointerException or a leaked actor.
+        String nullKeySession = activeOtherSession();
+        jdbc.update("UPDATE ma_session SET creator_actor_key = NULL"
+                + " WHERE tenant_id = ? AND session_id = ?", tenant, nullKeySession);
+        assertThat(sessionStore.creatorActor(tenant, nullKeySession)).isEmpty();
+        // The tenant predicate is part of the identity: the same session id
+        // under another tenant must not read this tenant's creator key.
+        String otherTenant = "tenant-automation-" + UUID.randomUUID();
+        assertThat(sessionStore.creatorActor(otherTenant, sessionId)).isEmpty();
     }
 
     @Test
