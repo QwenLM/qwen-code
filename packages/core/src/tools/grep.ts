@@ -29,6 +29,10 @@ import type { FileExclusions } from '../utils/ignorePatterns.js';
 import { ToolErrorType } from './tool-error.js';
 import { isCommandAvailable } from '../utils/shell-utils.js';
 import { recordGrepResultFileReads } from './grepReadTracking.js';
+import {
+  hasPermissionFilteringRules,
+  isPathDeniedByReadRule,
+} from '../core/permission-helpers.js';
 
 const debugLogger = createDebugLogger('GREP');
 
@@ -166,14 +170,57 @@ class GrepToolInvocation extends BaseToolInvocation<
         });
       }
 
+      // A workspace-wide Grep invocation is normally auto-approved, but
+      // path-scoped Read deny rules must still prevent matching file contents
+      // from being returned. Filter complete files before truncation so a
+      // denied file cannot leak through the line or character limits.
+      const permissionManager = this.config.getPermissionManager?.();
+      const permissionFilteringActive = hasPermissionFilteringRules(
+        permissionManager,
+        ToolNames.GREP,
+      );
+      if (permissionManager) {
+        const deniedPaths = new Set<string>();
+        const evaluatedPaths = new Map<string, boolean>();
+        for (const match of rawMatches) {
+          signal.throwIfAborted();
+          let denied = evaluatedPaths.get(match.absoluteFilePath);
+          if (denied === undefined) {
+            denied = await isPathDeniedByReadRule(
+              permissionManager,
+              match.absoluteFilePath,
+              this.config.getTargetDir(),
+              ToolNames.GREP,
+              this.params as unknown as Record<string, unknown>,
+              this.config.getApprovalMode?.() === 'yolo',
+            );
+            evaluatedPaths.set(match.absoluteFilePath, denied);
+          }
+          if (denied) {
+            deniedPaths.add(match.absoluteFilePath);
+          }
+        }
+        if (deniedPaths.size > 0) {
+          rawMatches = rawMatches.filter(
+            (match) => !deniedPaths.has(match.absoluteFilePath),
+          );
+        }
+      }
+
       const filterDescription = this.params.glob
         ? ` (filter: "${this.params.glob}")`
         : '';
 
       // Check if we have any matches
       if (rawMatches.length === 0) {
-        const noMatchMsg = `No matches found for pattern "${this.params.pattern}" ${searchLocationDescription}${filterDescription}.`;
-        return { llmContent: noMatchMsg, returnDisplay: `No matches found` };
+        const permissionNote = permissionFilteringActive
+          ? ` Results may be omitted by permission rules.`
+          : '';
+        const noMatchMsg = `No matches found for pattern "${this.params.pattern}" ${searchLocationDescription}${filterDescription}.${permissionNote}`;
+        return {
+          llmContent: noMatchMsg,
+          returnDisplay: `No matches found${permissionFilteringActive ? ' (permission-filtered)' : ''}`,
+        };
       }
 
       const charLimit = this.config.getTruncateToolOutputThreshold();
@@ -257,6 +304,9 @@ class GrepToolInvocation extends BaseToolInvocation<
 
       // Build result
       let llmContent = header + grepOutput;
+      if (permissionFilteringActive) {
+        llmContent += `\n---\n[Results may be omitted by permission rules.]`;
+      }
 
       // Add truncation notice if needed
       if (truncatedByLineLimit || truncatedByCharLimit) {
@@ -266,6 +316,9 @@ class GrepToolInvocation extends BaseToolInvocation<
 
       // Build display message
       let displayMessage = `Found ${totalMatches} ${matchTerm}`;
+      if (permissionFilteringActive) {
+        displayMessage += ` (permission-filtered)`;
+      }
       if (truncatedByLineLimit || truncatedByCharLimit) {
         displayMessage += ` (truncated)`;
       }

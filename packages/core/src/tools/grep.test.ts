@@ -128,6 +128,7 @@ describe('GrepTool', () => {
       getTruncateToolOutputThreshold: () => 25000,
       getFileReadCache: () => fileReadCache,
       getFileReadCacheDisabled: () => false,
+      getPermissionManager: undefined,
     });
     tempRootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'grep-tool-root-'));
     grepTool = new GrepTool(mockConfig);
@@ -248,6 +249,25 @@ describe('GrepTool', () => {
           expect(read.entry.lastReadCacheable).toBe(true);
         }
       }
+    });
+
+    it('filters matches covered by a path-scoped Read deny rule', async () => {
+      const deniedFile = path.join(tempRootDir, 'fileA.txt');
+      Object.assign(mockConfig, {
+        getPermissionManager: () => ({
+          hasRelevantRules: () => true,
+          evaluate: async (context: { filePath?: string }) =>
+            context.filePath === deniedFile ? 'deny' : 'default',
+        }),
+      });
+
+      const result = await run({ pattern: 'world' });
+
+      expect(result.llmContent).not.toContain('fileA.txt');
+      expect(result.llmContent).toContain(path.join('sub', 'fileC.txt'));
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, 'sub', 'fileC.txt'),
+      ]);
     });
 
     // parseGrepOutput is private. A match is written as its expected

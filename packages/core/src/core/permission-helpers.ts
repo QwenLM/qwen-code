@@ -103,6 +103,87 @@ export function buildPermissionCheckContext(
   };
 }
 
+/**
+ * Whether the manager may hide individual search results for this tool.
+ * Scoped manager shims intentionally expose only the evaluation surface, so
+ * the absence of the optional fast-path method must not disable filtering.
+ */
+export function hasPermissionFilteringRules(
+  pm: PermissionManager | null | undefined,
+  toolName: string,
+): boolean {
+  if (!pm) return false;
+  if (typeof pm.hasDenyOrAskRuleForTool !== 'function') return true;
+  return pm.hasDenyOrAskRuleForTool(toolName);
+}
+
+/**
+ * Check whether a path-bearing search result is blocked by a Read rule.
+ *
+ * Search tools are allowed to scan a workspace by default, but their result
+ * sets must still honour path-scoped `Read(...)`, `Grep(...)`, and `Glob(...)`
+ * rules. The caller's canonical tool name is used so tool-specific rules apply
+ * to individual result paths.
+ */
+export async function isPathDeniedByReadRule(
+  pm: PermissionManager | null | undefined,
+  filePath: string,
+  targetDir: string,
+  toolName = 'read_file',
+  invocationParams?: Record<string, unknown>,
+  askAutoApproved = false,
+): Promise<boolean> {
+  if (!pm) return false;
+
+  if (!hasPermissionFilteringRules(pm, toolName)) {
+    return false;
+  }
+
+  const context = buildPermissionCheckContext(
+    toolName,
+    { file_path: filePath },
+    targetDir,
+  );
+  if (!pm.hasRelevantRules(context)) return false;
+  const decision = await pm.evaluate(context);
+  if (decision === 'deny') return true;
+  if (decision !== 'ask') return false;
+  if (askAutoApproved) return false;
+
+  // A bare tool-level ask rule already gated the search invocation. Only hide
+  // a result for an ask decision that comes from a path-scoped rule. When the
+  // invocation itself carried a matching path, that path was approved at the
+  // scheduler boundary and its results remain visible.
+  const pathScopedAsk =
+    typeof pm.hasPathScopedAskRule === 'function'
+      ? pm.hasPathScopedAskRule(context)
+      : true;
+  if (!pathScopedAsk) return false;
+  if (invocationParams && typeof pm.hasPathScopedAskRule === 'function') {
+    const invocationContext = buildPermissionCheckContext(
+      toolName,
+      invocationParams,
+      targetDir,
+    );
+    if (
+      pm.hasPathScopedAskRule(invocationContext) &&
+      invocationContext.filePath &&
+      isPathWithin(invocationContext.filePath, filePath)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function isPathWithin(root: string, candidate: string): boolean {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return (
+    relative === '' ||
+    (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative))
+  );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // PM evaluation
 // ─────────────────────────────────────────────────────────────────────────────

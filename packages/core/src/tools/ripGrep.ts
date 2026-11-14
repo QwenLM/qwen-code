@@ -30,6 +30,10 @@ import {
 import { recordGrepResultFileReads } from './grepReadTracking.js';
 import { logRipgrepRuntimeRecovery } from '../telemetry/loggers.js';
 import { RipgrepRuntimeRecoveryEvent } from '../telemetry/types.js';
+import {
+  hasPermissionFilteringRules,
+  isPathDeniedByReadRule,
+} from '../core/permission-helpers.js';
 
 const debugLogger = createDebugLogger('RIPGREP');
 const RIPGREP_FIELD_SEPARATOR = '';
@@ -322,8 +326,15 @@ class GrepToolInvocation extends BaseToolInvocation<
         );
       }
 
+      // Ripgrep is workspace-auto-approved, but its result set must still
+      // honour path-scoped Read deny/ask rules before counts and truncation.
+      const permissionManager = this.config.getPermissionManager?.();
+      const permissionFilteringActive = hasPermissionFilteringRules(
+        permissionManager,
+        ToolNames.GREP,
+      );
+
       // Deduplicate lines from potentially overlapping workspace directories.
-      // ripgrep reports the same file twice when given paths like /a and /a/sub.
       if (searchPaths.length > 1) {
         const seen = new Set<string>();
         allLines = allLines.filter((line) => {
@@ -331,6 +342,35 @@ class GrepToolInvocation extends BaseToolInvocation<
           seen.add(line.key);
           return true;
         });
+      }
+
+      if (permissionManager) {
+        const permittedLines: RipgrepMatchLine[] = [];
+        const evaluatedPaths = new Map<string, boolean>();
+        for (const line of allLines) {
+          signal.throwIfAborted();
+          const absolutePath = toAbsoluteResultPath(
+            line.filePath,
+            searchPaths,
+            resolvedPathCache,
+          );
+          let denied = evaluatedPaths.get(absolutePath);
+          if (denied === undefined) {
+            denied = await isPathDeniedByReadRule(
+              permissionManager,
+              absolutePath,
+              this.config.getTargetDir(),
+              ToolNames.GREP,
+              this.params as unknown as Record<string, unknown>,
+              this.config.getApprovalMode?.() === 'yolo',
+            );
+            evaluatedPaths.set(absolutePath, denied);
+          }
+          if (!denied) {
+            permittedLines.push(line);
+          }
+        }
+        allLines = permittedLines;
       }
 
       const totalMatches = allLines.length;
@@ -346,8 +386,14 @@ class GrepToolInvocation extends BaseToolInvocation<
             returnDisplay: 'Error: Search incomplete',
           };
         }
-        const noMatchMsg = `No matches found for pattern "${this.params.pattern}" ${searchLocationDescription}${filterDescription}.`;
-        return { llmContent: noMatchMsg, returnDisplay: `No matches found` };
+        const permissionNote = permissionFilteringActive
+          ? ` Results may be omitted by permission rules.`
+          : '';
+        const noMatchMsg = `No matches found for pattern "${this.params.pattern}" ${searchLocationDescription}${filterDescription}.${permissionNote}`;
+        return {
+          llmContent: noMatchMsg,
+          returnDisplay: `No matches found${permissionFilteringActive ? ' (permission-filtered)' : ''}`,
+        };
       }
       const matchTerm = totalMatches === 1 ? 'match' : 'matches';
 
@@ -404,6 +450,9 @@ class GrepToolInvocation extends BaseToolInvocation<
 
       // Build result
       let llmContent = header + grepOutput;
+      if (permissionFilteringActive) {
+        llmContent += `\n---\n[Results may be omitted by permission rules.]`;
+      }
 
       // Add truncation notice if needed
       if (truncatedByLineLimit || truncatedByCharLimit) {
@@ -418,6 +467,9 @@ class GrepToolInvocation extends BaseToolInvocation<
       // Build display message (show real count, not truncated)
       let displayMessage = `Found ${totalMatches} ${matchTerm}`;
       const displayTags: string[] = [];
+      if (permissionFilteringActive) {
+        displayTags.push('permission-filtered');
+      }
       if (truncatedByLineLimit || truncatedByCharLimit) {
         displayTags.push('truncated');
       }

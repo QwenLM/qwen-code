@@ -6,7 +6,8 @@
 
 import { createInterface } from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
-import { Config } from '../config/config.js';
+import { Config, deriveConfig } from '../config/config.js';
+import { PermissionManager } from '../permissions/permission-manager.js';
 import type {
   ExecutionEnvironment,
   ExecutionWorkerMessage,
@@ -19,10 +20,18 @@ import { LocalExecutionEnvironment } from './local-execution-environment.js';
 export function createExecutionWorkerEnvironment(
   options: ExecutionWorkerOptions,
 ): LocalExecutionEnvironment {
-  const config = new Config({
+  const baseConfig = new Config({
     targetDir: options.workspace,
     cwd: options.workspace,
     sessionId: options.sessionId,
+    approvalMode: options.approvalMode,
+    permissions: options.permissions
+      ? {
+          allow: [...(options.permissions.allow ?? [])],
+          ask: [...(options.permissions.ask ?? [])],
+          deny: [...(options.permissions.deny ?? [])],
+        }
+      : undefined,
     debugMode: false,
     fileReadCacheDisabled: options.fileReadCacheDisabled,
     truncateToolOutputLines: options.truncateToolOutputLines,
@@ -43,6 +52,15 @@ export function createExecutionWorkerEnvironment(
     // The host does not register worker artifacts.
     artifactRecordingSupported: false,
   });
+  // The worker is intentionally constructed without the host's full Config
+  // lifecycle, but its file tools still need the same permission rules when
+  // filtering search results. Initialise a worker-local manager over the
+  // resolved rules and expose it through a narrow Config overlay.
+  const permissionManager = new PermissionManager(baseConfig);
+  permissionManager.initialize();
+  const config = deriveConfig(baseConfig, {
+    getPermissionManager: () => permissionManager,
+  });
   if (options.outputDirectory) {
     config.storage.getProjectTempDir = () => options.outputDirectory!;
     config.storage.getToolResultsDir = () => options.outputDirectory!;
@@ -51,10 +69,17 @@ export function createExecutionWorkerEnvironment(
 }
 
 export async function runExecutionWorker(
-  environment: ExecutionEnvironment,
+  environmentOrFactory:
+    | ExecutionEnvironment
+    | ((options: Pick<ExecutionWorkerOptions, 'permissions' | 'approvalMode'>) =>
+        ExecutionEnvironment),
   input: Readable,
   output: Writable,
 ): Promise<void> {
+  let environment =
+    typeof environmentOrFactory === 'function'
+      ? undefined
+      : environmentOrFactory;
   const requests = new Map<
     string,
     { controller: AbortController; completion: Promise<void> }
@@ -68,36 +93,38 @@ export async function runExecutionWorker(
     request: ExecutionWorkerRequest,
     signal: AbortSignal,
   ): Promise<unknown> => {
+    const activeEnvironment = environment;
+    if (!activeEnvironment) throw new Error('Worker is not initialized.');
     switch (request.method) {
       case 'prepare':
-        return environment.prepare(request.request, signal);
+        return activeEnvironment.prepare(request.request, signal);
       case 'permission':
-        return environment.permission(request.invocationId, signal);
+        return activeEnvironment.permission(request.invocationId, signal);
       case 'confirmation':
-        return environment.confirmation(request.invocationId, signal);
+        return activeEnvironment.confirmation(request.invocationId, signal);
       case 'confirm':
-        return environment.confirm(
+        return activeEnvironment.confirm(
           request.invocationId,
           request.outcome,
           request.payload,
           signal,
         );
       case 'execute':
-        return environment.execute(request.invocationId, signal, (update) =>
+        return activeEnvironment.execute(request.invocationId, signal, (update) =>
           reply({ id, update }),
         );
       case 'modificationContent':
-        return environment.modificationContent(
+        return activeEnvironment.modificationContent(
           request.toolName,
           request.params,
           signal,
         );
       case 'release':
-        return environment.release(request.invocationId, signal);
+        return activeEnvironment.release(request.invocationId, signal);
       case 'invalidateReadCache':
-        return environment.invalidateReadCache(request.paths);
+        return activeEnvironment.invalidateReadCache(request.paths);
       case 'dispose':
-        return environment.dispose();
+        return activeEnvironment.dispose();
       default:
         throw new Error('Unknown execution worker method.');
     }
@@ -109,6 +136,13 @@ export async function runExecutionWorker(
         requests.get(message.cancel)?.controller.abort();
         continue;
       }
+      if ('initialize' in message) {
+        if (environment || typeof environmentOrFactory !== 'function')
+          throw new Error('Worker initialization must be the first message.');
+        environment = environmentOrFactory(message.initialize);
+        continue;
+      }
+      if (!environment) throw new Error('Worker is not initialized.');
       if (!message.id || requests.has(message.id))
         throw new Error('Invalid or duplicate worker request ID.');
       const controller = new AbortController();
@@ -126,11 +160,13 @@ export async function runExecutionWorker(
       requests.set(message.id, { controller, completion });
     }
   } finally {
-    for (const request of requests.values()) request.controller.abort();
-    await environment.dispose();
-    await Promise.allSettled(
-      [...requests.values()].map((request) => request.completion),
-    );
+    if (environment) {
+      for (const request of requests.values()) request.controller.abort();
+      await environment.dispose();
+      await Promise.allSettled(
+        [...requests.values()].map((request) => request.completion),
+      );
+    }
     lines.close();
   }
 }
