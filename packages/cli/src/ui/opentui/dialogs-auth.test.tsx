@@ -1034,18 +1034,10 @@ describe('bracketed-paste into dialog inputs (#57)', () => {
     ).toBeTruthy();
   });
 
-  it('keeps a pasted line break out of the field row', async () => {
+  it('flattens pasted line breaks in the one-line API-key field', async () => {
     await runToApiKeyStep();
-    // Line-ending normalization itself is pinned in line-edit's own tests; this
-    // one covers what the wizard draws: only the line the caret sits on, so the
-    // other line reaches the screen when the caret crosses the break.
     await pasteText('key-1\r\nkey-2');
-    expect(document.body.textContent).toContain('key-2');
-    expect(document.body.textContent).not.toContain('key-1');
-    await press('a', { ctrl: true, sequence: '\x01' });
-    await press('left');
-    expect(document.body.textContent).toContain('key-1');
-    expect(document.body.textContent).not.toContain('key-2');
+    expect(document.body.textContent).toContain('key-1 key-2');
   });
 
   it('appends a paste after typed text in the models custom-ID input', async () => {
@@ -1212,42 +1204,23 @@ describe('caret editing in dialog text fields (#107)', () => {
     expect(screen.getByText(/Step 4\/7 · API Key/)).toBeTruthy();
   });
 
-  it('sends ctrl+E to the end of a pasted value and bare End to its own line', async () => {
+  it('keeps cursor editing on one line after a multiline paste', async () => {
     await runToBaseUrlStep();
     await pasteText('https://one.test\nhttps://two.test');
-    // The paste leaves the caret at the value's end, and ctrl+A is ink's line
-    // home, so the row drawn is the second line and the caret opens it.
+    expect(focusedField()).toEqual({
+      text: 'https://one.test https://two.test ',
+      cell: ' ',
+    });
     await press('a', { ctrl: true, sequence: '\x01' });
-    expect(focusedField()).toEqual({ text: 'https://two.test', cell: 'h' });
-    // Walk back over the break: the offset just past it belongs to the first
-    // line's end, so two lefts park the caret inside that line.
-    await press('left');
-    await press('left');
-    expect(focusedField()).toEqual({ text: 'https://one.test', cell: 't' });
+    expect(focusedField()).toEqual({
+      text: 'https://one.test https://two.test',
+      cell: 'h',
+    });
     await press('e', { ctrl: true, sequence: '\x05' });
     await typeText('s');
-    // ink's ctrl+E binding is the end of the value, not of the caret's line, so
-    // from the first line it crosses the break: the row switches and the
-    // character lands on the second line rather than before the break.
-    expect(focusedField()).toEqual({ text: 'https://two.tests ', cell: ' ' });
-    // The bare key is ink's reducer move, which stops at the line the caret is
-    // on. Park the caret inside the first line — ctrl+A after the ctrl+E jump
-    // lands on the second line's start — and End takes it to that line's end,
-    // so the next character lands before the break rather than at the value's.
-    await press('a', { ctrl: true, sequence: '\x01' });
-    await press('left');
-    await press('left');
-    await press('end');
-    await typeText('X');
-    // The row holds the caret's line and nothing else, so a caret parked on the
-    // break shows a blank cell where ink's own row would.
-    expect(focusedField()).toEqual({ text: 'https://one.testX ', cell: ' ' });
-    // Crossing the break proves the value kept it: the row switches lines, and
-    // the second line was never on screen until the caret reached it.
-    await press('right');
     expect(focusedField()).toEqual({
-      text: 'https://two.tests',
-      cell: 'h',
+      text: 'https://one.test https://two.tests ',
+      cell: ' ',
     });
   });
 

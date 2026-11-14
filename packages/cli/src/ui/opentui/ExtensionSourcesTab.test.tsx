@@ -220,6 +220,14 @@ describe('OpenTuiExtensionSourcesTab', () => {
         await press('return');
         expectSubmitted(f, './unchanged');
       });
+
+      it('flattens a trailing newline so the pasted source remains visible', async () => {
+        const f = await openInput();
+        await paste('./owned-source\n');
+        expect(document.body.textContent).toContain('./owned-source');
+        await press('return');
+        expectSubmitted(f, './owned-source');
+      });
     },
   );
   it('adds with the explicit cwd and keeps Add selected after refresh', async () => {

@@ -81,7 +81,10 @@ import {
 } from '../auth/ProviderSetupSteps.js';
 import { toOriginalKey } from './key-map.js';
 import { isPrintableKeyInput } from './input-prompt-key.js';
-import { normalizePastedText } from './input-prompt-model.js';
+import {
+  normalizeSingleLinePaste,
+  normalizePastedText,
+} from './input-prompt-model.js';
 import {
   clipToWidth,
   sanitizeTerminalText,
@@ -449,7 +452,7 @@ function useLineInputKeys(
   // composer's editor is unfocused while a dialog owns input, so consume the
   // paste here instead of letting it drop.
   usePaste((event: PasteEvent) => {
-    const text = normalizePastedText(decodePasteBytes(event.bytes));
+    const text = normalizeSingleLinePaste(decodePasteBytes(event.bytes));
     if (!text) return;
     event.preventDefault();
     line.insert(text);

@@ -32,7 +32,7 @@ import { isPathWithinRoot } from '@qwen-code/qwen-code-core/utils/workspaceConte
 import { toOriginalKey } from './key-map.js';
 import { useLineEdit, windowLineAtCaret } from './line-edit.js';
 import { isPrintableKeyInput } from './input-prompt-key.js';
-import { normalizePastedText } from './input-prompt-model.js';
+import { normalizeSingleLinePaste } from './input-prompt-model.js';
 import { useBatchSafeCursor, useBatchSafeState } from './batch-cursor.js';
 import {
   matchesSearchQuery,
@@ -767,10 +767,7 @@ export function OpenTuiPermissionsDialog(props: OpenTuiPermissionsDialogProps) {
     // These fields paint one line, so a kept break hides everything the caret
     // left behind while Enter still submits the whole buffer. The shared
     // normalizer must keep breaks for the composer; flatten here only.
-    const text = normalizePastedText(decodePasteBytes(event.bytes)).replace(
-      /[\r\n]+/g,
-      ' ',
-    );
+    const text = normalizeSingleLinePaste(decodePasteBytes(event.bytes));
     if (!text) return;
     event.preventDefault();
     line.insert(text);
