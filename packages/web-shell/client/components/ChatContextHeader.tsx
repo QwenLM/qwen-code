@@ -5,8 +5,10 @@ import {
   LayoutListIcon,
   LayersIcon,
   PanelRightIcon,
+  TimerIcon,
 } from 'lucide-react';
 import { useI18n } from '../i18n';
+import { formatClockTime } from '../utils/formatDateTime';
 import { LocalControlQrButton } from './LocalControlQrButton';
 import styles from './ChatContextHeader.module.css';
 import {
@@ -50,6 +52,12 @@ interface ChatContextHeaderProps {
   onOpenContextUsage?: () => void;
   /** Shows the Local Control QR entry; hidden when omitted. */
   onOpenLocalControlSettings?: () => void;
+  /**
+   * The current session's pending loop wakeup (fire time, epoch ms): a
+   * compact "Loop · next tick HH:MM:SS" chip beside the title. Hidden when
+   * omitted or the tick has already fired (freshness = the 30 s poll).
+   */
+  loopNextTickAt?: number;
 }
 
 export function ChatContextHeader({
@@ -69,8 +77,13 @@ export function ChatContextHeader({
   onOpenTokenUsage,
   onOpenContextUsage,
   onOpenLocalControlSettings,
+  loopNextTickAt,
 }: ChatContextHeaderProps) {
   const { t } = useI18n();
+  const loopLabel =
+    loopNextTickAt !== undefined && loopNextTickAt > Date.now()
+      ? t('chatHeader.loopNextTick', { time: formatClockTime(loopNextTickAt) })
+      : undefined;
   const workspaceLabel = workspaceName ?? t('sidebar.noWorkspace');
   const WorkspaceIcon = onOpenFiles ? 'button' : 'span';
   const workspaceAriaLabel = workspaceName
@@ -114,6 +127,16 @@ export function ChatContextHeader({
         </TooltipProvider>
       )}
       <div className={styles.content}>{content}</div>
+      {loopLabel && (
+        <span
+          className={styles.loopChip}
+          data-testid="chat-header-loop-wakeup"
+          title={loopLabel}
+        >
+          <TimerIcon aria-hidden="true" />
+          {loopLabel}
+        </span>
+      )}
       {location && (
         <div className="mr-2 flex min-w-0 max-w-[40%] shrink items-center">
           {location}

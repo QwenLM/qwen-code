@@ -16,3 +16,13 @@ export function formatDateTime(iso: string, now = Date.now()): string {
     date.getDate(),
   )}`;
 }
+
+/** Local wall-clock `HH:MM:SS` for an epoch-ms timestamp — the loop-wakeup
+ * "next tick" labels (sidebar badge tooltip, header chip, page rows). */
+export function formatClockTime(ms: number): string {
+  const date = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(
+    date.getSeconds(),
+  )}`;
+}
