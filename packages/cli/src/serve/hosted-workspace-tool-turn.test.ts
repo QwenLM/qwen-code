@@ -2863,6 +2863,9 @@ it('the cron union declarations name only the creators the profile declares', as
     expect(del!.description?.includes('cannot be cancelled')).toBe(
       hasLoopWakeup,
     );
+    // The summary describes the wakeup concept and never names the tool
+    // token, on any profile — the id description carries the creator names.
+    expect(del!.description?.includes('loop_wakeup')).toBe(false);
     expect(delId?.includes('loop_wakeup')).toBe(hasLoopWakeup);
     expect(delId?.includes('cron_create')).toBe(hasCronCreate);
     // The handlers are not narrowed by profile: schedules can exist on any
@@ -2889,6 +2892,9 @@ it('the cron description helpers name only the declared creators in every corner
       // The cancellation note names "a wakeup", not "loop wakeup", so it
       // needs its own pin — the concept phrase alone misses a leaked note.
       expect(del.includes('cannot be cancelled')).toBe(hasLoopWakeup);
+      // The summary never names the tool token, even where wakeups exist;
+      // a leak there steers narrow profiles into a refused call.
+      expect(del.includes('loop_wakeup')).toBe(false);
       expect(delId.includes('cron_create')).toBe(hasCronCreate);
       expect(delId.includes('loop_wakeup')).toBe(hasLoopWakeup);
       // Schedules are always listable/retirable regardless of profile.

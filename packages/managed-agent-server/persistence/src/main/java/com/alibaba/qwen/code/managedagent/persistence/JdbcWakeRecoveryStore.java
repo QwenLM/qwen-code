@@ -328,9 +328,11 @@ public class JdbcWakeRecoveryStore
      * A loop wakeup whose fire time is still in the future is deferred, not
      * parked: it must not make wake recovery attach the Harness. A due or
      * immediate loop input (no notBefore, or one already past) still counts.
-     * A deferred proof keeps its progress cached but never answers false; the
-     * cache expires at the earliest deferred fire time so the input is
-     * re-read as due, and a settlement drops it from the deferred latch.
+     * A deferred proof keeps its progress cached but never answers false; a
+     * proof that certifies nothing expires at the earliest deferred fire time
+     * so the input is re-read as due, while one that is also complete answers
+     * true from the complete shortcut and stays memoized until the journal
+     * advances. A settlement drops it from the deferred latch.
      */
     private boolean isDeferredLoopInput(JsonNode event) {
         JsonNode payload = event.path("payload");
