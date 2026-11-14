@@ -378,40 +378,99 @@ describe('MemoryMessage refresh with the resource hook', () => {
     expect(harness.writeMemory).not.toHaveBeenCalled();
   });
 
-  it('keeps a newer failed refresh visible when an earlier content read finishes', async () => {
-    await renderPanel();
-    const read = deferred<DaemonWorkspaceMemoryStatus>();
-    harness.loadMemoryStatus.mockImplementation(
-      (options?: { includeContent?: boolean }) =>
-        options?.includeContent
-          ? read.promise
-          : Promise.resolve(statusWith([workspaceFile])),
-    );
-    await refresh();
-    expect(container.textContent).toContain('Loading memory file');
-
-    harness.availability = 'unavailable';
-    await renderPanel();
-    await refresh();
-    expect(container.textContent).toContain(
-      'Could not refresh memory. Please try again.',
-    );
-
-    await act(async () => {
-      read.resolve(
-        statusWith([
-          { ...workspaceFile, content: 'earlier refresh content\n' },
-        ]),
+  it.each([
+    ['failed', 'complete'],
+    ['failed', 'truncated'],
+    ['failed', 'rejected'],
+    ['superseded', 'complete'],
+    ['superseded', 'truncated'],
+    ['superseded', 'rejected'],
+  ] as const)(
+    'keeps a newer %s refresh visible when an earlier content read is %s',
+    async (outcome, completion) => {
+      await renderPanel();
+      const read = deferred<DaemonWorkspaceMemoryStatus>();
+      harness.loadMemoryStatus.mockImplementation(
+        (options?: { includeContent?: boolean }) =>
+          options?.includeContent
+            ? read.promise
+            : Promise.resolve(statusWith([workspaceFile])),
       );
-    });
-    await flush();
+      await refresh();
+      expect(container.textContent).toContain('Loading memory file');
 
-    expect(container.textContent).not.toContain('Loading memory file');
-    expect(container.textContent).toContain(
-      'Could not refresh memory. Please try again.',
+      if (outcome === 'failed') {
+        harness.loadMemoryStatus.mockRejectedValueOnce(
+          new Error('newer refresh failed'),
+        );
+        await refresh();
+      } else {
+        const newerRefresh = deferred<DaemonWorkspaceMemoryStatus>();
+        const eventRefresh = deferred<DaemonWorkspaceMemoryStatus>();
+        harness.loadMemoryStatus
+          .mockImplementationOnce(() => newerRefresh.promise)
+          .mockImplementationOnce(() => eventRefresh.promise);
+        await refresh();
+        harness.memoryVersion++;
+        await renderPanel();
+        await act(async () => {
+          eventRefresh.resolve(statusWith([workspaceFile]));
+        });
+        await act(async () => {
+          newerRefresh.resolve(statusWith([workspaceFile]));
+        });
+        await flush();
+      }
+      const newestMessage =
+        outcome === 'failed'
+          ? 'newer refresh failed'
+          : 'Memory changed while refreshing. Please try again.';
+      expect(container.textContent).toContain(newestMessage);
+
+      await act(async () => {
+        if (completion === 'rejected') {
+          read.reject(new Error('obsolete content failure'));
+        } else {
+          read.resolve(
+            statusWith([
+              {
+                ...workspaceFile,
+                content: 'earlier refresh content\n',
+                truncated: completion === 'truncated',
+              },
+            ]),
+          );
+        }
+      });
+      await flush();
+
+      expect(container.textContent).not.toContain('Loading memory file');
+      expect(container.textContent).toContain(newestMessage);
+      expect(container.textContent).not.toContain('Memory refreshed.');
+      expect(harness.onMessage).toHaveBeenCalledExactlyOnceWith(
+        newestMessage,
+        outcome === 'failed' ? 'error' : 'status',
+      );
+      const edit = Array.from(container.querySelectorAll('button')).find(
+        (item) => item.textContent === 'Edit',
+      );
+      expect(edit?.disabled).toBe(completion !== 'complete');
+      expect(harness.writeMemory).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps the warning and read-only state for an initially truncated file', async () => {
+    harness.loadMemoryStatus.mockResolvedValue(
+      statusWith([{ ...workspaceFile, content: 'partial', truncated: true }]),
     );
-    expect(container.textContent).not.toContain('Memory refreshed.');
-    expect(harness.onMessage).toHaveBeenCalledTimes(1);
+
+    await renderPanel();
+
+    expect(container.textContent).toContain('truncated');
+    const edit = Array.from(container.querySelectorAll('button')).find(
+      (item) => item.textContent === 'Edit',
+    );
+    expect(edit?.disabled).toBe(true);
     expect(harness.writeMemory).not.toHaveBeenCalled();
   });
 

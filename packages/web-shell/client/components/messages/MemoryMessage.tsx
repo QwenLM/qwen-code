@@ -137,7 +137,12 @@ export function MemoryMessage({
           if (result.truncated) {
             setEditable(false);
             setMode('view');
-            setMessage(t('memory.fileTruncated'));
+            if (
+              refreshSeq === undefined ||
+              refreshSeq === refreshSeqRef.current
+            ) {
+              setMessage(t('memory.fileTruncated'));
+            }
             return;
           }
           setDraft(result.content);
@@ -150,6 +155,8 @@ export function MemoryMessage({
           if (loadSeq !== loadSeqRef.current) return;
           setEditable(false);
           setMode('view');
+          if (refreshSeq !== undefined && refreshSeq !== refreshSeqRef.current)
+            return;
           if (entry.scope === 'global') {
             setMessage(t('memory.globalReadUnsupported'));
             return;
