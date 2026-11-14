@@ -854,6 +854,12 @@ export default {
     'Show tool-specific usage statistics.',
   'Show skill-specific usage statistics.':
     'Show skill-specific usage statistics.',
+  'Show token usage for an inclusive date range.':
+    'Show token usage for an inclusive date range.',
+  'Token usage for {{value}} (inclusive)':
+    'Token usage for {{value}} (inclusive)',
+  'Usage: /stats range <YYYY-MM-DD> <YYYY-MM-DD>':
+    'Usage: /stats range <YYYY-MM-DD> <YYYY-MM-DD>',
   'Show daily token usage statistics.': 'Show daily token usage statistics.',
   'Show monthly token usage statistics.':
     'Show monthly token usage statistics.',

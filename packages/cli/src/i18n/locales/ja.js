@@ -405,6 +405,12 @@ export default {
   Auto: '自動',
   'Show model-specific usage statistics.': 'モデル別の使用統計を表示',
   'Show tool-specific usage statistics.': 'ツール別の使用統計を表示',
+  'Show token usage for an inclusive date range.':
+    '開始日と終了日を含む期間の token 使用量を表示。',
+  'Token usage for {{value}} (inclusive)':
+    '{{value}} の token 使用量（両端の日付を含む）',
+  'Usage: /stats range <YYYY-MM-DD> <YYYY-MM-DD>':
+    '使い方: /stats range <YYYY-MM-DD> <YYYY-MM-DD>',
   'Show daily token usage statistics.': '日次 token 使用統計を表示',
   'Show monthly token usage statistics.': '月次 token 使用統計を表示',
   'Export token usage statistics to CSV or JSON.':
