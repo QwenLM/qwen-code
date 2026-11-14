@@ -83,9 +83,11 @@ Checks a local round against the rules the CI publisher enforces:
     with a non-empty detail, backed by the boundary-gate.json record a passing
     --require-isolation --artifact-dir gate run wrote, or mode waived with the
     approving maintainer (by), a permalink to the approval comment (approval)
-    and the reason; a round without the declaration is refused. The CI publish
-    job's own ci-lane record is honored only under --publish-lane, the flag
-    the publish job alone passes. On the CI entry path ($QWEN_VERIFY_CONTEXT
+    and the reason; a round without the declaration is refused. When the
+    snapshot carries repo and pr, the approval permalink must cite that PR.
+    The CI publish job's own ci-lane record is honored only under
+    --publish-lane, the flag the publish job passes (an argv claim, not an
+    authenticated identity). On the CI entry path ($QWEN_VERIFY_CONTEXT
     set) an absent declaration is only a warning: the publish job writes the
     CI lane's own before trusting the verdict
   - an unreadable artifact (a directory or permission-denied file in its
@@ -96,8 +98,10 @@ head OID, when the verdict line is a heading (GitHub renders the whole
 paragraph as one giant H1), when evidence/ carries no kebab-case PNG capture,
 when a round with failures carries no failures ledger at all, when over
 ${SUITE_SIZED_TOTAL} assertions come with no gate results (an existing test suite
-counted as the round's own), or when comment.md — the exact body a local round
-posts, optional — repeats the heading shape or lacks the attribution footer.
+counted as the round's own), when the Methodology's **Boundary.** disclosure
+is empty, still a template, or contradicts the recorded mode, or when
+comment.md — the exact body a local round posts, optional — repeats the
+heading shape or lacks the attribution footer.
 
 With --context <snapshot>, the head-OID check reads that file instead of the
 round's own context.json. Pass a copy the round never saw: the artifact
@@ -201,12 +205,13 @@ export function checkMutationCoverage(text) {
  * existed only as prose. The declaration is the artifact that makes the
  * exception visible; the checker refuses a round without one.
  */
-// A container declaration must be backed by a gate run, not minted by the
-// round: the record is written by verify-pr-prepare.mjs --require-isolation
-// (gate "require-isolation"). The CI publish job writes its own "ci-lane"
-// record, and that value is honored ONLY under --publish-lane, the flag the
-// publish job alone passes — a local round cannot claim the lane by writing
-// the record itself.
+// A container declaration must be backed by a gate record: the record is
+// written by verify-pr-prepare.mjs --require-isolation (gate
+// "require-isolation"). The CI publish job writes its own "ci-lane"
+// record, and that value is honored ONLY under --publish-lane, the flag
+// the publish job passes. The record lives in the PR-writable artifact
+// tree and the flag is argv, so this corroborates an operator who ran the
+// gate — it is not proof against a round that forges both.
 function gateRecordErrors(gateText, { publishLane = false } = {}) {
   if (gateText === null || gateText === undefined || gateText.trim() === '') {
     return [
@@ -234,14 +239,33 @@ function gateRecordErrors(gateText, { publishLane = false } = {}) {
 }
 
 // A waiver's approval must be a permalink a reader can open, not free text:
-// the maintainer's approval comment on the PR or an issue.
+// the maintainer's approval comment on the PR or an issue. The capture
+// groups let the checker compare the target against the round's own
+// coordinates when they are available.
 const APPROVAL_PERMALINK =
-  /^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/(?:issues|pull)\/\d+#issuecomment-\d+$/;
+  /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/(?:issues|pull)\/(\d+)#issuecomment-\d+$/;
+
+// The skill's template strings are <placeholder> shaped; a declaration
+// that still carries one was copied, not filled in. The tell is the
+// skill's own tokens or a wholly-<…> value — not any angle brackets: a
+// maintainer written as the standard git identity `Name <email>` is a
+// filled-in value, not a placeholder.
+const TEMPLATE_TOKENS = [
+  '<maintainer>',
+  '<why this round may run outside a boundary>',
+  '<image, network policy, credential-free mount>',
+  '<owner>/<repo>',
+  '<round-dir>',
+];
+const placeholder = (value) =>
+  typeof value === 'string' &&
+  (/^<[^>]+>$/.test(value.trim()) ||
+    TEMPLATE_TOKENS.some((token) => value.includes(token)));
 
 export function checkBoundary(
   text,
   gateText = null,
-  { publishLane = false } = {},
+  { publishLane = false, coordinates = null } = {},
 ) {
   if (text === null || text === undefined || text.trim() === '') {
     return {
@@ -267,22 +291,6 @@ export function checkBoundary(
     };
   }
   const nonEmpty = (value) => typeof value === 'string' && value.trim() !== '';
-  // The skill's template strings are <placeholder> shaped; a declaration
-  // that still carries one was copied, not filled in. The tell is the
-  // skill's own tokens or a wholly-<…> value — not any angle brackets: a
-  // maintainer written as the standard git identity `Name <email>` is a
-  // filled-in value, not a placeholder.
-  const TEMPLATE_TOKENS = [
-    '<maintainer>',
-    '<why this round may run outside a boundary>',
-    '<image, network policy, credential-free mount>',
-    '<owner>/<repo>',
-    '<round-dir>',
-  ];
-  const placeholder = (value) =>
-    typeof value === 'string' &&
-    (/^<[^>]+>$/.test(value.trim()) ||
-      TEMPLATE_TOKENS.some((token) => value.includes(token)));
   if (parsed.mode === 'container' && !nonEmpty(parsed.detail)) {
     return {
       errors: [
@@ -321,15 +329,29 @@ export function checkBoundary(
       ],
     };
   }
-  if (
-    parsed.mode === 'waived' &&
-    !APPROVAL_PERMALINK.test(parsed.approval ?? '')
-  ) {
-    return {
-      errors: [
-        "boundary.json mode waived needs approval: a permalink to the maintainer's approval comment (https://github.com/<owner>/<repo>/pull/<n>#issuecomment-<id>) — free-text by is a claim, not a verifiable reference",
-      ],
-    };
+  if (parsed.mode === 'waived') {
+    const match = APPROVAL_PERMALINK.exec(parsed.approval ?? '');
+    if (!match) {
+      return {
+        errors: [
+          `boundary.json mode waived needs approval: a permalink to the maintainer's approval comment (https://github.com/<owner>/<repo>/pull/<n>#issuecomment-<id>) — free-text by is a claim, not a verifiable reference${coordinates ? '' : ' (no round coordinates available, so only the URL shape is checked)'}`,
+        ],
+      };
+    }
+    // The permalink is the waiver's only machine-checkable element: it
+    // must cite this round's PR, not any comment on any repository.
+    if (
+      coordinates &&
+      (match[1].toLowerCase() !== coordinates.owner.toLowerCase() ||
+        match[2].toLowerCase() !== coordinates.repo.toLowerCase() ||
+        match[3] !== String(coordinates.number))
+    ) {
+      return {
+        errors: [
+          `boundary.json approval permalink cites ${match[1]}/${match[2]}#${match[3]}, not this round's ${coordinates.owner}/${coordinates.repo}#${coordinates.number}: the approval must be the maintainer's comment on this PR`,
+        ],
+      };
+    }
   }
   // `by` is a recorded claim, not an identity the checker can verify; the
   // approval permalink and the maintainer's review are the enforcement there.
@@ -364,39 +386,68 @@ function leadShapeWarnings(text, verdict, label) {
  * rule somewhere: a bare token search passes a report that discusses the
  * requirement while reporting nothing about where the PR code actually ran.
  */
-function boundaryLineWarnings(text, label) {
+function boundaryLineWarnings(text, label, boundaryMode = null) {
   const lines = text.split('\n');
-  // The Methodology opens either as an H2 heading or as the report
-  // structure's numbered bold label ("8. **Methodology** — …"); both are
-  // documented shapes, and the Boundary line must follow whichever the
-  // round used.
+  // The Methodology opens as a heading of any level or as the report
+  // structure's numbered label ("8. **Methodology** — …"); the Boundary
+  // line must follow whichever shape the round used.
   const idx = lines.findIndex((line) =>
-    /^(##\s+Methodology\s*$|\d+\.\s+\*\*Methodology\*\*)/.test(line.trim()),
+    /^(?:#{1,6}\s+|\d+\.\s+)\*{0,2}Methodology\b/.test(line.trim()),
   );
   if (idx === -1) {
     return [
-      `${label} has no Methodology section (## Methodology or the numbered **Methodology** label): it opens with a **Boundary.** line naming where the untrusted PR code ran (the image and network policy, or the recorded waiver)`,
+      `${label} has no Methodology section (a Methodology heading or the numbered **Methodology** label): it opens with a **Boundary.** line naming where the untrusted PR code ran (the image and network policy, or the recorded waiver)`,
     ];
   }
-  // The numbered label may carry the Boundary line on the same line
-  // ("8. **Methodology** — **Boundary.** …"); the H2 form opens on the next.
-  // The Boundary token must OPEN the text after the label — a prose mention
-  // ("we discuss the **Boundary.** rule") is not a declaration.
+  // The label line may carry the Boundary line on the same line
+  // ("8. **Methodology** — **Boundary.** …", "## Methodology —
+  // **Boundary.** …"); otherwise the first non-empty line after it must
+  // be the Boundary line. The Boundary token must OPEN the text after the
+  // label — a prose mention ("we discuss the **Boundary.** rule") is not
+  // a declaration.
   const opening = lines[idx].trim();
+  let boundaryLine;
   if (
-    /^\d+\.\s+\*\*Methodology\*\*\s*(?:[—:-]\s*)?\*\*Boundary\.\*\*/.test(
+    /^(?:#{1,6}\s+|\d+\.\s+)\*{0,2}Methodology\b\*{0,2}\s*(?:[—:-]\s*)?\*\*Boundary\.\*\*/.test(
       opening,
     )
   ) {
-    return [];
+    boundaryLine = opening;
+  } else {
+    const first = lines.slice(idx + 1).find((line) => line.trim() !== '');
+    if (!first || !first.trim().startsWith('**Boundary.**')) {
+      return [
+        `${label}: the first line after the Methodology opening must be the **Boundary.** line — a prose mention of the rule elsewhere does not declare where the untrusted PR code ran`,
+      ];
+    }
+    boundaryLine = first.trim();
   }
-  const first = lines.slice(idx + 1).find((line) => line.trim() !== '');
-  if (!first || !first.trim().startsWith('**Boundary.**')) {
-    return [
-      `${label}: the first line after the Methodology opening must be the **Boundary.** line — a prose mention of the rule elsewhere does not declare where the untrusted PR code ran`,
-    ];
+  // The disclosure must say something and must not contradict the
+  // recorded declaration: an empty or template Boundary line ships a
+  // placeholder as the round's boundary statement, and a waived round
+  // must not publish container prose (or the reverse). The content is
+  // what follows the token — on the same-line form the label precedes it.
+  const token = '**Boundary.**';
+  const content = boundaryLine
+    .slice(boundaryLine.indexOf(token) + token.length)
+    .trim();
+  const warnings = [];
+  if (content === '' || placeholder(content)) {
+    warnings.push(
+      `${label}: the **Boundary.** line carries ${content === '' ? 'no disclosure' : 'a <placeholder> disclosure'} — name the image and network policy, or the recorded waiver`,
+    );
   }
-  return [];
+  if (boundaryMode === 'waived' && !/waiv/i.test(content)) {
+    warnings.push(
+      `${label}: boundary.json records a waiver but the **Boundary.** line does not mention it — the prose names a boundary the declaration contradicts`,
+    );
+  }
+  if (boundaryMode === 'container' && /\bwaived\b/i.test(content)) {
+    warnings.push(
+      `${label}: boundary.json records a container but the **Boundary.** line claims a waiver — the prose names a boundary the declaration contradicts`,
+    );
+  }
+  return warnings;
 }
 
 /**
@@ -413,6 +464,8 @@ export function checkArtifacts({
   expectedHead = null,
   publisherOwnsBoundary = false,
   publishLane = false,
+  coordinates = null,
+  evidenceUnreadable = false,
 }) {
   const errors = [];
   const warnings = [];
@@ -589,9 +642,30 @@ export function checkArtifacts({
     );
   } else {
     errors.push(
-      ...checkBoundary(files.boundary, files.boundaryGate, { publishLane })
-        .errors,
+      ...checkBoundary(files.boundary, files.boundaryGate, {
+        publishLane,
+        coordinates,
+      }).errors,
     );
+  }
+
+  // The report's Boundary disclosure is compared against the recorded
+  // mode when a usable declaration exists; on the CI entry path the
+  // publish job writes it later, so there is nothing to compare yet.
+  let boundaryMode = null;
+  if (files.boundary && files.boundary.trim() !== '') {
+    try {
+      const declared = JSON.parse(files.boundary);
+      if (
+        declared &&
+        typeof declared === 'object' &&
+        BOUNDARY_MODES.includes(declared.mode)
+      ) {
+        boundaryMode = declared.mode;
+      }
+    } catch {
+      // checkBoundary already reports the invalid JSON.
+    }
   }
 
   if (files.report && files.report.trim() !== '') {
@@ -618,7 +692,7 @@ export function checkArtifacts({
       );
     }
     warnings.push(...leadShapeWarnings(report, verdict, 'report.md'));
-    warnings.push(...boundaryLineWarnings(report, 'report.md'));
+    warnings.push(...boundaryLineWarnings(report, 'report.md', boundaryMode));
   }
 
   // comment.md is the exact body a local round posts: report content plus
@@ -629,7 +703,7 @@ export function checkArtifacts({
   if (files.comment && files.comment.trim() !== '') {
     const comment = normalizeNewlines(files.comment);
     warnings.push(...leadShapeWarnings(comment, verdict, 'comment.md'));
-    warnings.push(...boundaryLineWarnings(comment, 'comment.md'));
+    warnings.push(...boundaryLineWarnings(comment, 'comment.md', boundaryMode));
     const lines = comment.split('\n').filter((line) => line.trim() !== '');
     if (!FOOTER.test(lines[lines.length - 1] ?? '')) {
       warnings.push(
@@ -638,7 +712,7 @@ export function checkArtifacts({
     }
   }
 
-  if (evidence.length === 0) {
+  if (evidence.length === 0 && !evidenceUnreadable) {
     warnings.push(
       'evidence/ holds no PNG capture: a table is the claim, a capture is the witness',
     );
@@ -673,8 +747,9 @@ function main(argv) {
         return 2;
       }
     } else if (arg === '--publish-lane') {
-      // Passed only by the CI publish job: honors the ci-lane gate record
-      // the job writes itself. A local round cannot claim the lane.
+      // The CI publish job's flag: honors the ci-lane gate record the job
+      // writes itself. An argv claim, not an authenticated identity — a
+      // local shell passing it makes an operator claim, not proof.
       publishLane = true;
     } else if (arg.startsWith('-')) {
       process.stderr.write(`verify-pr check: unknown option ${arg}\n\n${HELP}`);
@@ -725,11 +800,23 @@ function main(argv) {
     }
   }
   const evidenceDir = join(dir, 'evidence');
-  const evidence = existsSync(evidenceDir)
-    ? readdirSync(evidenceDir).filter((name) =>
+  let evidence = [];
+  let evidenceUnreadable = false;
+  if (existsSync(evidenceDir)) {
+    // A PR-writable path named evidence may be a regular file or
+    // unreadable: that is a refusal like the other artifacts, not a
+    // crash out of the CLI.
+    try {
+      evidence = readdirSync(evidenceDir).filter((name) =>
         name.toLowerCase().endsWith('.png'),
-      )
-    : [];
+      );
+    } catch {
+      evidenceUnreadable = true;
+      unreadableErrors.push(
+        'evidence/ is unreadable (a directory or permission-denied file is not an absent artifact)',
+      );
+    }
+  }
 
   // With the round's own snapshot, the report
   // has to cite the head it verified — not merely some 40-hex token, which a
@@ -738,6 +825,21 @@ function main(argv) {
   let expectedHead = null;
   let snapshotWarning = null;
   let snapshotPath = null;
+  // The waiver's approval permalink is checked against the round's own
+  // coordinates when the snapshot carries them; without them only the
+  // URL shape is checkable.
+  const dirPrNumber = /^pr(\d+)-verify-/.exec(basename(resolve(dir)))?.[1];
+  const coordinatesFrom = (snapshot) => {
+    const repoMatch = /^([\w.-]+)\/([\w.-]+)$/.exec(snapshot?.repo ?? '');
+    const number =
+      Number.isInteger(snapshot?.pr) && snapshot.pr > 0
+        ? snapshot.pr
+        : Number(dirPrNumber) || null;
+    return repoMatch && number
+      ? { owner: repoMatch[1], repo: repoMatch[2], number }
+      : null;
+  };
+  let coordinates = null;
   if (contextPath) {
     // A host-held snapshot: the artifact directory is writable by the PR code
     // the round just executed, so its own context.json cannot pin the head
@@ -748,6 +850,7 @@ function main(argv) {
         expectedHead = snapshot.headRefOid;
         snapshotPath = contextPath;
       }
+      coordinates = coordinatesFrom(snapshot);
     } catch {
       // Reported below; never falls back to the writable artifact copy.
     }
@@ -759,12 +862,11 @@ function main(argv) {
     }
   } else {
     snapshotPath = join(dir, 'context.json');
-    const prNumber = /^pr(\d+)-verify-/.exec(basename(resolve(dir)))?.[1];
-    if (!existsSync(snapshotPath) && prNumber) {
+    if (!existsSync(snapshotPath) && dirPrNumber) {
       snapshotPath = join(
         dirname(resolve(dir)),
         'verify-context',
-        `pr${prNumber}.json`,
+        `pr${dirPrNumber}.json`,
       );
     }
     if (existsSync(snapshotPath)) {
@@ -775,6 +877,7 @@ function main(argv) {
         } else {
           snapshotWarning = `snapshot ${snapshotPath} has no valid head OID; the head-OID check fell back to presence-only`;
         }
+        coordinates = coordinatesFrom(snapshot);
       } catch {
         snapshotWarning = `snapshot ${snapshotPath} is unreadable; the head-OID check fell back to presence-only`;
       }
@@ -790,6 +893,8 @@ function main(argv) {
     expectedHead,
     publisherOwnsBoundary: !!process.env.QWEN_VERIFY_CONTEXT,
     publishLane,
+    coordinates,
+    evidenceUnreadable,
   });
   result.errors.unshift(...unreadableErrors);
   if (snapshotWarning) result.warnings.unshift(snapshotWarning);

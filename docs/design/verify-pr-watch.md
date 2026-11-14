@@ -55,24 +55,35 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
   completion write two consecutive rounds on PR #16866 skipped, leaving the
   file two heads stale. The file holds three lists, `verifiedHeads`,
   `inFlightHeads` and `deferredHeads`, each entry carrying its own head,
-  round, artifact directory and timestamp; the top-level
-  `verifiedHead`/`previousHead` fields are a compatibility view over the
-  most recent completions.
+  round, artifact directory and timestamp; deferred entries and in-flight
+  markers also carry a monotonic `seq` and a retry count (below). The
+  top-level `verifiedHead`/`previousHead` fields are a compatibility view
+  over the most recent completions.
   Verified heads dedupe **as a list**: a fire for any sha already verified
-  is ignored without a model turn, not just the most recent one, and the
-  bound-delivery design dedupes redelivered head-change events against it.
+  is refused, not just the most recent one, and the bound-delivery design
+  dedupes redelivered head-change events against it. The dedupe costs the
+  round's model turn — it happens inside `--start`, after the scheduler
+  has already delivered the fire — but the turn does no verification work:
+  the helper refuses the head and the round stops. What the watch saves is
+  the round, not the turn.
   **One round runs per PR at a time**: while any round is in flight, a fire
   for a different head is refused — and **recorded as deferred**, not
   dropped. The probe's cursor advances to the new head in the very call
   that emits the transition, so no second event will arrive; the deferred
   list is that head's only delivery. `--complete` and `--release` print
   the deferred heads, and the watch prompt starts the latest one as the
-  next round; starting a deferred head supersedes every head deferred no
-  later than it (events arrive in push order), and a redelivery updates
-  the entry in place — keeping its original `deferredAt`, so a redelivered
-  older head cannot outrank a newer push — so the tail stays push order,
-  not write order. A redelivery of the in-flight head itself is simply
-  skipped: the running round answers it. The local recipe's clone, base copy, proxy files and
+  next round. Push order is a monotonic `seq`, not the write clock: every
+  start and every first deferral consumes the next sequence number (the
+  high-water mark persists in the state, so a completed round's seq is
+  never reused), the
+  list is kept in `seq` order (the tail is the newest push), and starting
+  a deferred head supersedes every entry with a lower `seq` — events
+  arrive in push order, so an older deferred head would spend a full round
+  on a commit the started one already contains. Legacy entries without a
+  `seq` sort first and are never superseded. A redelivery updates the
+  entry in place, keeping its original `seq`, so a redelivered older head
+  cannot outrank a newer push. A redelivery of the in-flight head itself
+  is simply skipped: the running round answers it. The local recipe's clone, base copy, proxy files and
   container name are per PR, so overlapping rounds would clobber each
   other; the CI lane serialises the same way with its per-PR concurrency
   group. Every read-modify-write holds an exclusive lock file beside the
@@ -84,35 +95,53 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
   by timestamp. The state root resolves from the script's own clone (its
   main worktree), not the caller's cwd, so a round whose session directory
   is its PR clone still writes the trusted clone's state; `--state-root`
-  overrides it and must be an absolute path. A default root that is not a
-  git worktree — the container recipe's `/trusted-scripts` mount resolves
-  it to `/` — is refused (exit 2) rather than writing a shadow state the
-  host never reads; the explicit `--state-root` accepts any directory. A
-  start whose `--repo` differs from the recorded one is refused too: a PR
-  number is only unique within its repository.
+  overrides it and must be an absolute path. A default root that git does
+  not recognise as a repository — validated by `rev-parse --git-dir`, not
+  a `.git` stat, so a bare main worktree is valid and a checkout where git
+  itself fails must not pass; the container recipe's `/trusted-scripts`
+  mount resolves it to `/` — is refused (exit 2) rather than writing a
+  shadow state the host never reads; the explicit `--state-root` accepts
+  any directory. Every verb refuses a
+  `--repo` that differs from the recorded one — a PR number is only unique
+  within its repository — and an omitted `--repo` does not disarm the
+  guard once a repo is recorded; an empty `--repo` is a usage error.
   `--complete` must repeat the `--start` round: it removes only its own
   round's in-flight entry (matched by head **and** round) and upserts its
   verified entry. A completion whose round differs from the in-flight
   marker is refused, and a completion from a round older than the one that
   already answered for the head is refused as stale — neither strands the
-  real marker nor overwrites the newer verdict and comment id.
+  real marker nor overwrites the newer verdict and comment id. A
+  completion for a head that was never started, deferred or answered is
+  refused too: filing it would permanently dedup a commit no round
+  reviewed.
   `inconclusive` releases the marker without filing the head as verified
-  and **re-defers the head**, so the completion output names it again —
-  the start call already consumed its only event. The watch prompt retries
-  it once; a second inconclusive is reported under _Not covered_, not
-  looped. A head that already keeps an earlier verdict is not re-deferred:
-  it keeps that verdict and its dedup. A late completion for a _different_
-  head changes the top-level view but erases no verification. A corrupt state body is refused (exit
-  1), never silently rewritten from empty lists. `--start` writes the sha
+  and **re-defers the head at its original `seq`**, so the completion
+  output names it again — the start call already consumed its only event —
+  without letting the re-deferred head outrank heads pushed after it. The
+  re-defer counts retries: the watch prompt retries once, and a second
+  inconclusive makes the head terminal — the output names it as not
+  covered after repeated inconclusive rounds, not as awaiting a round, and
+  the prompt reports it under _Not covered_ instead of looping. A head
+  that already keeps an earlier verdict is not re-deferred: it keeps that
+  verdict and its dedup. A late completion for a _different_ head changes
+  the top-level view but erases no verification. A corrupt state body is
+  refused (exit 1), never silently rewritten from empty lists; the refusal
+  covers unparseable JSON, a non-object and an array. The lists themselves
+  are validated lazily — each is filtered on read, and an entry without a
+  usable head is dropped — so a malformed list degrades the dedup silently
+  rather than being refused. `--start` writes the sha
   **before** the round begins, so a round that dies still does not replay
   the same head. A round that dies after `--start` is recovered with
   `--release --head <oid>` (the head is mandatory), which removes only the
   named head's in-flight entry without recording a verdict, names any
   deferred heads, and refuses a head with no entry — including when no
   markers exist at all, so a release aimed at the wrong state root cannot
-  read as success. Under one-round-per-PR the blocking marker may belong to
-  a different head than the one being started: recovery releases the head
-  the refusal names. This mirrors the gate's recovery for a dead claim.
+  read as success. A supplied `--round` must match the marker's round: a
+  retried recovery of a dead round must not delete the live marker of a
+  newer round that restarted the same head. Under one-round-per-PR the
+  blocking marker may belong to a different head than the one being
+  started: recovery releases the head the refusal names. This mirrors the
+  gate's recovery for a dead claim.
 
 ## Design decisions
 
@@ -200,7 +229,9 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
 - A head pushed while a round is in flight is refused, recorded as deferred,
   and named by the running round's `--complete` output; starting the latest
   named head verifies it without a manual probe or a second event.
-- An `inconclusive` completion leaves the head startable; a release for a
-  head with no marker is refused, not a silent success.
+- An `inconclusive` completion leaves the head startable at its original
+  push-order position; a second inconclusive makes it terminal, named as
+  not covered rather than awaiting a round. A release for a head with no
+  marker is refused, not a silent success.
 - The task is removed on `merged`/`closed`, or via `cron_delete`.
 - Nothing is scheduled when the probe or `gh` is unavailable.

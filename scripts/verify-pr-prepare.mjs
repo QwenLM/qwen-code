@@ -55,7 +55,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { isEntryPoint } from './lib/entry-point.js';
 
 const OID = /^[0-9a-f]{40}$/;
@@ -98,8 +98,9 @@ and copies model API keys, so the check also requires the credential-free
 attestation and refuses when a known credential signal is visible. The
 built-in macOS sandbox (SANDBOX=sandbox-exec) never counts. With
 --artifact-dir, a pass also writes boundary-gate.json there — the record the
-checker requires alongside a mode:"container" declaration, so the declaration
-cannot be minted without a gate run.
+checker requires alongside a mode:"container" declaration. The artifact tree
+is PR-writable, so the record corroborates an operator who ran the gate; it
+is not proof against a round that forges it.
 `;
 
 /** Returns `{owner, name}` for a GitHub repository slug, or null. */
@@ -728,12 +729,19 @@ function main(argv) {
     '',
     `Next: build the round in ${artifacts}. This preflight ran on the host,`,
     'because resolving the coordinates needs `gh` and `gh` is mutually',
-    'exclusive with the boundary. Before executing PR code, run inside it:',
+    'exclusive with the boundary. Before executing PR code, run inside the',
+    "boundary — the container recipe's spelling (step 5), with the clone",
+    'mounted at /work:',
     '',
-    `  node scripts/verify-pr-prepare.mjs --require-isolation --artifact-dir ${artifacts}`,
+    `  node /trusted-scripts/verify-pr-prepare.mjs --require-isolation --artifact-dir "/work/tmp/${basename(artifacts)}"`,
     '',
-    'The gate writes boundary-gate.json into the artifact directory; the',
-    'checker requires that record alongside the container declaration.',
+    'The path is the in-container one: the gate runs from the read-only',
+    "/trusted-scripts mount, never the PR head's own copy of the script,",
+    'and the record lands in the mounted artifact directory so it survives',
+    'the container. A VM boundary runs the same file from its trusted copy',
+    'with its own artifact path. The gate writes boundary-gate.json into',
+    'the artifact directory; the checker requires that record alongside',
+    'the container declaration.',
   ]);
   return 0;
 }
@@ -783,9 +791,6 @@ function requireBoundary(artifactDir = null) {
     );
     return 4;
   }
-  report([
-    `verify-pr boundary: ${isolation.signals.join(', ')}; credential-free per attestation, no known credential signal`,
-  ]);
   if (artifactDir) {
     const record = {
       gate: 'require-isolation',
@@ -794,12 +799,28 @@ function requireBoundary(artifactDir = null) {
       signals: isolation.signals,
       credentialFree: true,
     };
-    mkdirSync(artifactDir, { recursive: true });
     const path = join(artifactDir, 'boundary-gate.json');
     const tmp = `${path}.${process.pid}.tmp`;
-    writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`);
-    renameSync(tmp, path);
+    // A filesystem failure here is the documented exit-3 path, not an
+    // uncaught throw after the pass line: a driver keyed on exit 4 must
+    // not proceed on a pass the record never landed.
+    try {
+      mkdirSync(artifactDir, { recursive: true });
+      writeFileSync(tmp, `${JSON.stringify(record, null, 2)}\n`);
+      renameSync(tmp, path);
+    } catch (error) {
+      try {
+        rmSync(tmp, { force: true });
+      } catch {
+        // Best-effort: force only covers ENOENT, and a cleanup failure
+        // (ENOTDIR on a non-directory parent) must not mask the original.
+      }
+      return fail(3, `could not write the gate record: ${error.message}`);
+    }
   }
+  report([
+    `verify-pr boundary: ${isolation.signals.join(', ')}; credential-free per attestation, no known credential signal`,
+  ]);
   return 0;
 }
 

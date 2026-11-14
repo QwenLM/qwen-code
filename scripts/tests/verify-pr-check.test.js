@@ -1288,4 +1288,239 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
       }).status,
     ).toBe(2);
   });
+
+  // A PR-writable path named evidence may be a regular file: the read
+  // must degrade to the documented refusal, not crash out of the CLI.
+  it('refuses a regular file in place of evidence/ instead of crashing', () => {
+    const dir = makeArtifactDir(validFiles());
+    writeFileSync(join(dir, 'evidence'), 'not a directory');
+    const result = run(dir);
+    expect(result.status).toBe(1);
+    expect(result.stdout).toMatch(/evidence\/ is unreadable/);
+    expect(result.stderr).not.toMatch(/ENOTDIR/);
+    // The empty-evidence warning must not also fire: the directory is
+    // unreadable, not empty.
+    expect(result.stdout).not.toMatch(/holds no PNG capture/);
+  });
+
+  // The waiver's approval permalink must cite this round's PR when the
+  // snapshot carries the coordinates — any owner/repo/number is not enough.
+  it('checks the approval permalink against the round coordinates', () => {
+    const waiver = (approval) =>
+      validFiles({
+        boundary: JSON.stringify({
+          mode: 'waived',
+          by: 'maintainer',
+          approval,
+          reason: 'Java battery needs the host JDK',
+        }),
+        report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n## Methodology\n\n**Boundary.** host, maintainer-approved waiver for the Java battery.\n`,
+      });
+    const dir = makeArtifactDir(
+      waiver('https://github.com/torvalds/linux/issues/1#issuecomment-1'),
+      ['01-ab-cells.png'],
+    );
+    writeFileSync(
+      join(dir, 'context.json'),
+      JSON.stringify({ repo: 'QwenLM/qwen-code', pr: 17185, headRefOid: HEAD }),
+    );
+    const foreign = run(dir);
+    expect(foreign.status).toBe(1);
+    expect(foreign.stdout).toMatch(
+      /approval permalink cites torvalds\/linux#1, not this round's QwenLM\/qwen-code#17185/,
+    );
+    // The matching permalink passes end to end.
+    writeFileSync(
+      join(dir, 'boundary.json'),
+      JSON.stringify({
+        mode: 'waived',
+        by: 'maintainer',
+        approval: APPROVAL,
+        reason: 'Java battery needs the host JDK',
+      }),
+    );
+    const matching = run(dir);
+    expect(matching.status).toBe(0);
+    expect(matching.stdout).toContain('ok: verdict=merge-ready');
+  });
+});
+
+// The Methodology label is matched by name, not by a hand-listed line
+// shape: any heading level, and the Boundary disclosure on the label line
+// itself, are compliant forms that must not draw a false warning.
+describe('Methodology heading shapes', () => {
+  const lead = `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n`;
+  it('accepts the Boundary line on an H2 label line itself', () => {
+    expect(
+      check({
+        report: `${lead}## Methodology - **Boundary.** node:22-bookworm, no network.\n`,
+      }).warnings,
+    ).toEqual([]);
+  });
+  it('accepts deeper heading levels', () => {
+    for (const heading of ['### Methodology', '# Methodology']) {
+      expect(
+        check({
+          report: `${lead}${heading}\n\n**Boundary.** node:22-bookworm, --network none.\n`,
+        }).warnings,
+      ).toEqual([]);
+    }
+  });
+  it('accepts an unbolded numbered label', () => {
+    expect(
+      check({
+        report: `${lead}8. Methodology — one paragraph.\n\n**Boundary.** node:22-bookworm, --network none.\n`,
+      }).warnings,
+    ).toEqual([]);
+  });
+});
+
+// The disclosure is checked by content, not position alone: an empty or
+// template Boundary line ships a placeholder, and the prose must not name
+// a boundary the recorded declaration contradicts.
+describe('Boundary disclosure content', () => {
+  const lead = `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n`;
+  it('warns when the Boundary line carries no disclosure', () => {
+    expect(
+      check({
+        report: `${lead}## Methodology\n\n**Boundary.**\n`,
+      }).warnings.join('\n'),
+    ).toMatch(/carries no disclosure/);
+  });
+  it('warns when the Boundary line is still a template placeholder', () => {
+    expect(
+      check({
+        report: `${lead}## Methodology\n\n**Boundary.** <where it ran>\n`,
+      }).warnings.join('\n'),
+    ).toMatch(/carries a <placeholder> disclosure/);
+  });
+  // The same-line form carries the label before the token: the content
+  // check must read what follows the token, not the start of the line.
+  it('checks the disclosure on the same-line form too', () => {
+    expect(
+      check({
+        report: `${lead}## Methodology - **Boundary.**\n`,
+      }).warnings.join('\n'),
+    ).toMatch(/carries no disclosure/);
+    expect(
+      check({
+        report: `${lead}8. **Methodology** — **Boundary.** <where it ran>\n`,
+      }).warnings.join('\n'),
+    ).toMatch(/carries a <placeholder> disclosure/);
+  });
+  it('warns when a waived declaration ships container prose', () => {
+    const result = check({
+      boundary: JSON.stringify({
+        mode: 'waived',
+        by: 'maintainer',
+        approval: APPROVAL,
+        reason: 'why',
+      }),
+      report: `${lead}## Methodology\n\n**Boundary.** node:22-bookworm, --network none, credential-free.\n`,
+    });
+    expect(result.errors).toEqual([]);
+    expect(result.warnings.join('\n')).toMatch(
+      /records a waiver but the \*\*Boundary\.\*\* line does not mention it/,
+    );
+  });
+  it('warns when a container declaration ships waiver prose', () => {
+    const result = check({
+      report: `${lead}## Methodology\n\n**Boundary.** host execution, waived by the maintainer.\n`,
+    });
+    expect(result.warnings.join('\n')).toMatch(
+      /records a container but the \*\*Boundary\.\*\* line claims a waiver/,
+    );
+  });
+  it('stays quiet when the waiver prose matches the declaration', () => {
+    const result = check({
+      boundary: JSON.stringify({
+        mode: 'waived',
+        by: 'maintainer',
+        approval: APPROVAL,
+        reason: 'why',
+      }),
+      report: `${lead}## Methodology\n\n**Boundary.** host, maintainer-approved waiver.\n`,
+    });
+    expect(result.warnings).toEqual([]);
+  });
+});
+
+describe('waiver approval coordinates', () => {
+  const COORDS = { owner: 'QwenLM', repo: 'qwen-code', number: 17185 };
+  const waiver = (approval) =>
+    JSON.stringify({
+      mode: 'waived',
+      by: 'maintainer',
+      approval,
+      reason: 'why',
+    });
+  it('accepts a permalink citing the round PR, case-insensitively', () => {
+    for (const approval of [
+      APPROVAL,
+      'https://github.com/qwenlm/qwen-code/pull/17185#issuecomment-1234567890',
+    ]) {
+      expect(
+        checkBoundary(waiver(approval), null, { coordinates: COORDS }).errors,
+      ).toEqual([]);
+    }
+  });
+  it('refuses a permalink citing another repo, owner or number', () => {
+    for (const approval of [
+      'https://github.com/torvalds/linux/issues/1#issuecomment-1',
+      'https://github.com/QwenLM/other-repo/pull/17185#issuecomment-1',
+      'https://github.com/QwenLM/qwen-code/pull/1#issuecomment-1',
+    ]) {
+      expect(
+        checkBoundary(waiver(approval), null, {
+          coordinates: COORDS,
+        }).errors.join('\n'),
+      ).toMatch(
+        /approval permalink cites .* not this round's QwenLM\/qwen-code#17185/,
+      );
+    }
+  });
+  it('keeps the shape check when no coordinates are available, and says so', () => {
+    expect(
+      checkBoundary(
+        waiver('https://github.com/torvalds/linux/issues/1#issuecomment-1'),
+      ).errors,
+    ).toEqual([]);
+    expect(
+      checkBoundary(waiver('approved in words')).errors.join('\n'),
+    ).toMatch(/only the URL shape is checked/);
+  });
+  it('reaches the verdict through checkArtifacts', () => {
+    const result = checkArtifacts({
+      files: validFiles({
+        boundary: waiver(
+          'https://github.com/torvalds/linux/issues/1#issuecomment-1',
+        ),
+      }),
+      evidence: ['01-ab-cells.png'],
+      coordinates: COORDS,
+    });
+    expect(result.errors.join('\n')).toMatch(/approval permalink cites/);
+  });
+});
+
+// The wholly-<…> arm catches any copied template, not only the skill's
+// named tokens.
+describe('generic placeholder arm', () => {
+  it('refuses any wholly-<…> detail or approver', () => {
+    expect(
+      checkBoundary(
+        JSON.stringify({ mode: 'container', detail: '<anything at all>' }),
+      ).errors.join('\n'),
+    ).toMatch(/detail still carries a <placeholder>/);
+    expect(
+      checkBoundary(
+        JSON.stringify({
+          mode: 'waived',
+          by: '<someone>',
+          approval: APPROVAL,
+          reason: 'why',
+        }),
+      ).errors.join('\n'),
+    ).toMatch(/waiver still carries a <placeholder>/);
+  });
 });

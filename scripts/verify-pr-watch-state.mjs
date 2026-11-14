@@ -21,9 +21,13 @@
  *     --artifact-dir <dir> [--repo <owner>/<repo>] [--state-root <dir>]
  *   node verify-pr-watch-state.mjs <pr> --complete --head <oid> --round <n> \
  *     --verdict <word> [--comment-id <id>] [--artifact-dir <dir>] \
- *     [--state-root <dir>]
+ *     [--repo <owner>/<repo>] [--state-root <dir>]
  *   node verify-pr-watch-state.mjs <pr> --release --head <oid> \
- *     [--state-root <dir>]
+ *     [--round <n>] [--repo <owner>/<repo>] [--state-root <dir>]
+ *
+ * Every verb exits 3 when the state belongs to another repository (a PR
+ * number is only unique within its repo); an omitted --repo does not
+ * disarm the guard once a repo is recorded.
  *
  * `--start` exits 3 when the head is already verified, or while any round
  * is in flight for the PR. Verified heads are remembered as a list, so a
@@ -35,17 +39,24 @@
  * per-PR concurrency group. A head refused while another round runs is
  * recorded in `deferredHeads`: the watch gate's cursor already advanced
  * past it, so no second event arrives, and `--complete` names the deferred
- * heads so the caller can start the latest one. `--complete` removes only
- * its own round's in-flight entry (matched by head and round) and upserts
- * its verified entry, except for `inconclusive`, which releases the marker
- * without filing the head as verified and re-defers the head so the next
- * command names it again (a head that already keeps an earlier verdict is
- * not re-deferred). The top-level `verifiedHead`/`previousHead` view
- * reflects the most recent completion. `--release --head <oid>` is the recovery path for
- * a round that died after `--start`: it removes only the named head's
+ * heads so the caller can start the latest one. Each start and first
+ * deferral consumes a monotonic `seq` in push order; the list is kept in
+ * seq order and the supersede filter keys on it, never on the write clock.
+ * `--complete` removes only its own round's in-flight entry (matched by
+ * head and round) and upserts its verified entry, except for
+ * `inconclusive`, which releases the marker without filing the head as
+ * verified and re-defers the head at its original seq so the next command
+ * names it again (a head that already keeps an earlier verdict is not
+ * re-deferred). The re-defer counts retries: a second inconclusive makes
+ * the head terminal, named as not covered rather than awaiting a round.
+ * A completion for a head that was never started, deferred or answered is
+ * refused. The top-level `verifiedHead`/`previousHead` view reflects the
+ * most recent completion. `--release --head <oid>` is the recovery path
+ * for a round that died after `--start`: it removes only the named head's
  * in-flight entry and refuses a head with no entry, including when no
  * markers exist at all — a release aimed at the wrong state root must not
- * read as success.
+ * read as success. A supplied `--round` must match the marker's round, so
+ * a retried recovery cannot delete a newer round's live marker.
  *
  * Every read-modify-write holds an exclusive lock file beside the state
  * file, so two concurrent invocations cannot each build state from the same
@@ -66,9 +77,9 @@
  * flight / foreign marker / lock held.
  */
 
+import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
-  existsSync,
   mkdirSync,
   readFileSync,
   renameSync,
@@ -180,7 +191,10 @@ function verifiedEntries(existing) {
   ) {
     entries.push({
       head: existing.verifiedHead,
-      round: existing.round ?? null,
+      // The pre-list top-level round is ambiguous — it names whichever
+      // operation wrote last — so the migrated entry matches completion
+      // by head alone (round null), like the in-flight migration.
+      round: null,
       verdict: existing.verdict ?? null,
       commentId: existing.commentId ?? null,
       artifactDir: existing.artifactDir ?? null,
@@ -308,6 +322,29 @@ function deferredEntries(existing) {
     : [];
 }
 
+/**
+ * Monotonic event sequence: every start and every first deferral consumes
+ * one, in arrival (push) order. The supersede filter and the "latest one"
+ * naming key on it — never on the write clock, which would let a head
+ * re-deferred by an inconclusive completion outrank heads pushed after it.
+ * The high-water mark persists in the state so a completed round's seq is
+ * never reused. Legacy entries carry no seq; they sort first and are never
+ * superseded.
+ */
+function nextSeq(existing) {
+  const seqs = [
+    existing?.seqCounter ?? 0,
+    ...deferredEntries(existing).map((entry) => entry.seq ?? 0),
+    ...inFlightEntries(existing).map((entry) => entry.seq ?? 0),
+  ];
+  return Math.max(0, ...seqs) + 1;
+}
+
+const bySeq = (a, b) => (a.seq ?? -1) - (b.seq ?? -1);
+
+/** A deferred head is terminal after a second inconclusive completion. */
+const isNotCovered = (entry) => (entry.retries ?? 0) >= 2;
+
 export function startRound(
   stateRoot,
   { pr, head, round, artifactDir, repo },
@@ -316,8 +353,9 @@ export function startRound(
   return withStateLock(stateRoot, pr, () => {
     const existing = readState(stateRoot, pr);
     // The state file is keyed by PR number alone; a same-numbered PR of
-    // another repository must not dedup against this one's answers.
-    if (existing?.repo && repo && existing.repo !== repo) {
+    // another repository must not dedup against this one's answers. An
+    // omitted --repo does not disarm the guard once a repo is recorded.
+    if (existing?.repo && repo !== existing.repo) {
       return {
         repoMismatch: true,
         recorded: existing.repo,
@@ -334,12 +372,10 @@ export function startRound(
       // the running round answers it.
       const blocker = inFlightEntries(existing)[0]?.head ?? null;
       if (duplicate === 'in-flight' && !sameCommit(blocker, head)) {
-        // A redelivery updates the entry in place: re-appending it would
-        // make the tail write order rather than push order, and
-        // "start the latest one" would name a stale head. The original
-        // deferredAt is kept: it records push order, and refreshing it
-        // would let a redelivered older head outrank a newer push in the
-        // supersede filter.
+        // A redelivery updates the entry in place, keeping its original
+        // seq (push order) and retry count; a first deferral consumes the
+        // next seq. The list is kept in seq order so the tail is the
+        // newest push, not the newest write.
         const prior = deferredEntries(existing);
         const at = prior.findIndex((e) => sameCommit(e.head, head));
         const entry = {
@@ -350,11 +386,15 @@ export function startRound(
             at >= 0
               ? (prior[at].deferredAt ?? now.toISOString())
               : now.toISOString(),
+          seq:
+            at >= 0 ? (prior[at].seq ?? nextSeq(existing)) : nextSeq(existing),
+          retries: at >= 0 ? (prior[at].retries ?? 0) : 0,
         };
-        const deferred =
+        const deferred = (
           at >= 0
             ? prior.map((e, i) => (i === at ? entry : e))
-            : [...prior, entry];
+            : [...prior, entry]
+        ).sort(bySeq);
         const state = deriveView({
           ...(existing ?? {}),
           pr,
@@ -362,6 +402,7 @@ export function startRound(
           verifiedHeads: verifiedEntries(existing),
           inFlightHeads: inFlightEntries(existing),
           deferredHeads: deferred,
+          seqCounter: Math.max(existing?.seqCounter ?? 0, entry.seq),
         });
         writeState(stateRoot, pr, state);
       }
@@ -372,28 +413,44 @@ export function startRound(
       };
     }
     const startedAt = now.toISOString();
-    // Starting a deferred head supersedes every head deferred no later
-    // than it: events arrive in push order, so an older deferred head
+    // Starting a deferred head supersedes every head deferred before it
+    // (lower seq): events arrive in push order, so an older deferred head
     // would spend a full round on a commit the started one already
-    // contains. A head that was never deferred keeps the list intact.
+    // contains. Legacy entries without a seq are never superseded. A head
+    // that was never deferred keeps the list intact. The marker carries
+    // the seq and retry count so an inconclusive completion can re-defer
+    // the head at its original push-order position.
     const priorDeferred = deferredEntries(existing);
     const own = priorDeferred.find((entry) => sameCommit(entry.head, head));
-    const deferredHeads = own
-      ? priorDeferred.filter(
-          (entry) =>
-            !sameCommit(entry.head, head) &&
-            (entry.deferredAt ?? '') > (own.deferredAt ?? ''),
-        )
-      : priorDeferred.filter((entry) => !sameCommit(entry.head, head));
+    const seq = own?.seq ?? nextSeq(existing);
+    const deferredHeads = (
+      own && own.seq != null
+        ? priorDeferred.filter(
+            (entry) =>
+              !sameCommit(entry.head, head) &&
+              (entry.seq == null || entry.seq > own.seq),
+          )
+        : priorDeferred.filter((entry) => !sameCommit(entry.head, head))
+    ).sort(bySeq);
     const state = deriveView({
       pr,
       repo: repo ?? existing?.repo ?? null,
       verifiedHeads: verifiedEntries(existing),
-      inFlightHeads: [{ head, round, artifactDir, startedAt }],
+      inFlightHeads: [
+        {
+          head,
+          round,
+          artifactDir,
+          startedAt,
+          seq,
+          retries: own?.retries ?? 0,
+        },
+      ],
       deferredHeads,
       round,
       artifactDir,
       startedAt,
+      seqCounter: Math.max(existing?.seqCounter ?? 0, seq),
     });
     return { path: writeState(stateRoot, pr, state), state };
   });
@@ -401,11 +458,20 @@ export function startRound(
 
 export function completeRound(
   stateRoot,
-  { pr, head, round, verdict, commentId, artifactDir },
+  { pr, head, round, verdict, commentId, artifactDir, repo },
   now = new Date(),
 ) {
   return withStateLock(stateRoot, pr, () => {
     const existing = readState(stateRoot, pr);
+    // Same cross-repository guard as --start: a same-numbered PR of
+    // another repository must not file a verdict into this one's state.
+    if (existing?.repo && repo !== existing.repo) {
+      return {
+        repoMismatch: true,
+        recorded: existing.repo,
+        path: statePath(stateRoot, pr),
+      };
+    }
     const completedAt = now.toISOString();
     // A different round already answered for this head: a stale completion
     // must not replace the newer verdict and commentId with its own.
@@ -442,6 +508,18 @@ export function completeRound(
         };
       }
     }
+    // A verdict needs a registered head: an in-flight marker, an earlier
+    // verdict, or a deferred entry (the fallback that completes a deferred
+    // head without a prior start). A head none of these name was never
+    // started or refused — filing it would permanently dedup a commit no
+    // round reviewed (a stale OID after a force-push, the base sha).
+    if (
+      !ownFlight &&
+      !prior &&
+      !deferredEntries(existing).some((entry) => sameCommit(entry.head, head))
+    ) {
+      return { unregistered: true, path: statePath(stateRoot, pr) };
+    }
     const dir = artifactDir ?? ownFlight?.artifactDir ?? null;
     // An inconclusive round reached no verdict: it releases its marker but
     // is not filed as verified, so the head stays startable.
@@ -468,23 +546,36 @@ export function completeRound(
     // a later command names it again (the probe's cursor already advanced
     // in the start call, so no second event arrives) — unless an earlier
     // round already verified it, in which case the head keeps that verdict
-    // and its dedup, and is not re-deferred.
+    // and its dedup, and is not re-deferred. The re-defer carries the
+    // marker's seq back onto the entry so the head keeps its push-order
+    // position instead of outranking heads pushed after it, and counts the
+    // retry: a second inconclusive makes the head terminal (not covered).
     let deferred;
     let keptVerdict = false;
+    let seqCounter = existing?.seqCounter ?? 0;
     if (verdict === 'inconclusive') {
       if (prior) {
         keptVerdict = true;
         deferred = deferredEntries(existing);
       } else {
-        deferred = deferredEntries(existing).filter(
+        const priorDeferred = deferredEntries(existing);
+        const ownDeferred = priorDeferred.find((entry) =>
+          sameCommit(entry.head, head),
+        );
+        const seq = ownFlight?.seq ?? ownDeferred?.seq ?? nextSeq(existing);
+        deferred = priorDeferred.filter(
           (entry) => !sameCommit(entry.head, head),
         );
         deferred.push({
           head,
           round,
           artifactDir: dir,
-          deferredAt: completedAt,
+          deferredAt: ownDeferred?.deferredAt ?? completedAt,
+          seq,
+          retries: (ownFlight?.retries ?? ownDeferred?.retries ?? 0) + 1,
         });
+        deferred.sort(bySeq);
+        seqCounter = Math.max(existing?.seqCounter ?? 0, seq);
       }
     } else {
       deferred = deferredEntries(existing).filter(
@@ -503,6 +594,7 @@ export function completeRound(
       artifactDir: dir,
       startedAt: existing?.startedAt ?? null,
       completedAt,
+      seqCounter,
     });
     return {
       path: writeState(stateRoot, pr, state),
@@ -519,11 +611,20 @@ export function completeRound(
  * hand-edit that used to be the escape hatch. Mirrors the watch gate's
  * --release for a dead claim. The head is mandatory and must prefix-match
  * an in-flight entry, so one round can never release another's marker —
- * liveness is not something the helper can test.
+ * liveness is not something the helper can test. A supplied --round must
+ * match the marker's round: a retried recovery of a dead round must not
+ * delete the live marker of a newer round that restarted the same head.
  */
-export function releaseRound(stateRoot, { pr, head }) {
+export function releaseRound(stateRoot, { pr, head, round, repo }) {
   return withStateLock(stateRoot, pr, () => {
     const existing = readState(stateRoot, pr);
+    if (existing?.repo && repo !== existing.repo) {
+      return {
+        repoMismatch: true,
+        recorded: existing.repo,
+        path: statePath(stateRoot, pr),
+      };
+    }
     const flights = inFlightEntries(existing);
     const entry = flights.find((candidate) => sameCommit(candidate.head, head));
     if (!entry) {
@@ -533,6 +634,17 @@ export function releaseRound(stateRoot, { pr, head }) {
         ? { mismatch: true, recorded: flights.map((f) => f.head).join(', ') }
         : { released: false, noMarker: true };
     }
+    // Migrated markers carry round null and match by head alone.
+    if (round != null && entry.round != null && entry.round !== round) {
+      return {
+        roundMismatch: true,
+        recordedRound: entry.round,
+        path: statePath(stateRoot, pr),
+      };
+    }
+    const deferred = deferredEntries(existing).filter(
+      (candidate) => !sameCommit(candidate.head, head),
+    );
     const state = deriveView({
       ...(existing ?? {}),
       pr,
@@ -540,7 +652,7 @@ export function releaseRound(stateRoot, { pr, head }) {
       inFlightHeads: flights.filter(
         (candidate) => !sameCommit(candidate.head, head),
       ),
-      deferredHeads: deferredEntries(existing),
+      deferredHeads: deferred,
     });
     writeState(stateRoot, pr, state);
     return {
@@ -549,31 +661,38 @@ export function releaseRound(stateRoot, { pr, head }) {
       startedAt: entry.startedAt,
       // A killed round's deferred heads must not wait for a later round's
       // completion to become visible: the release is their next delivery.
-      deferred: deferredEntries(existing),
+      deferred,
     };
   });
 }
 
 const HELP = `Usage:
   node verify-pr-watch-state.mjs <pr> --start --head <oid> --round <n> --artifact-dir <dir> [--repo <owner>/<repo>] [--state-root <dir>]
-  node verify-pr-watch-state.mjs <pr> --complete --head <oid> --round <n> --verdict <word> [--comment-id <id>] [--artifact-dir <dir>] [--state-root <dir>]
-  node verify-pr-watch-state.mjs <pr> --release --head <oid> [--state-root <dir>]
+  node verify-pr-watch-state.mjs <pr> --complete --head <oid> --round <n> --verdict <word> [--comment-id <id>] [--artifact-dir <dir>] [--repo <owner>/<repo>] [--state-root <dir>]
+  node verify-pr-watch-state.mjs <pr> --release --head <oid> [--round <n>] [--repo <owner>/<repo>] [--state-root <dir>]
 
 Owns .qwen/tmp/verify-pr-watch-<pr>.json so rounds never hand-write it.
 --start exits 3 when the head is already verified or any round is in flight
-for the PR (one round per PR), or when the state belongs to another repo.
+for the PR (one round per PR). Every verb exits 3 when the state belongs to
+another repo (a PR number is only unique within its repository); an omitted
+--repo does not disarm the guard once a repo is recorded.
 A head refused while another round runs is recorded as deferred; --complete
 and --release name the deferred heads so the caller can start the latest
 one. --complete must repeat the --start round: a mismatch, or a completion
 from a round older than the one already answered for the head, is refused
-(exit 3). --verdict inconclusive releases the marker without filing the head
-as verified and re-defers the head for the next round (a head that already
-keeps an earlier verdict is not re-deferred). --release removes only the
-named head's in-flight entry; a head with no entry is refused (exit 3),
-including when no markers exist at all. A corrupt state file is refused (exit 1), never
+(exit 3), as is a head that was never started, deferred or answered.
+--verdict inconclusive releases the marker without filing the head as
+verified and re-defers the head for the next round (a head that already
+keeps an earlier verdict is not re-deferred); a second inconclusive makes
+the head terminal — it is named as not covered, not as awaiting a round.
+--release removes only the named head's in-flight entry; a head with no
+entry is refused (exit 3), including when no markers exist at all, and a
+supplied --round must match the marker's round so a retried recovery cannot
+delete a newer round's live marker. A corrupt state file is refused (exit 1), never
 silently rewritten. --state-root must be an absolute path; the default is
 the main worktree of the clone the script lives in, and a default root that
-is not a git worktree is refused (exit 2) — pass --state-root explicitly.
+git does not recognise as a repository is refused (exit 2) — pass
+--state-root explicitly.
 
 Exit codes: 0 written, 1 I/O error, 2 usage, 3 duplicate / in flight / lock.
 `;
@@ -644,6 +763,14 @@ function parseArgs(argv) {
   if (out.stateRoot !== null && !isAbsolute(out.stateRoot)) {
     throw new Error(`--state-root must be an absolute path\n\n${HELP}`);
   }
+  // An unset REPO shell variable expands to --repo '': persisting the
+  // empty value would disarm the cross-repository guard.
+  if (
+    out.repo !== null &&
+    (typeof out.repo !== 'string' || out.repo.trim() === '')
+  ) {
+    throw new Error(`--repo must not be empty\n\n${HELP}`);
+  }
   return out;
 }
 
@@ -665,9 +792,17 @@ function main(argv) {
       : mainWorktree(SCRIPT_CLONE);
   // mainWorktree falls back to the script's own directory when git fails,
   // so a copy outside any clone (the container's /trusted-scripts mount)
-  // would silently write a shadow state the host never reads. Refuse on
-  // the default branch only: an explicit --state-root may be any directory.
-  if (args.stateRoot === null && !existsSync(join(root, '.git'))) {
+  // would silently write a shadow state the host never reads. Ask git
+  // rather than stat: a bare main worktree has no .git entry but is a
+  // valid root, and a checkout where git itself fails must not pass just
+  // because a .git entry exists. Refuse on the default branch only: an
+  // explicit --state-root may be any directory.
+  if (
+    args.stateRoot === null &&
+    spawnSync('git', ['-C', root, 'rev-parse', '--git-dir'], {
+      encoding: 'utf8',
+    }).status !== 0
+  ) {
     process.stderr.write(
       `verify-pr watch-state: ${root} is not a git worktree, so the default state root resolves to a throwaway location; run the helper from the trusted clone or pass --state-root <trusted main worktree>\n`,
     );
@@ -679,10 +814,23 @@ function main(argv) {
     );
     return 3;
   };
+  const repoMismatch = (pr, result, repo) => {
+    process.stderr.write(
+      `verify-pr watch-state: PR ${pr} state belongs to ${result.recorded}${repo ? `, not ${repo}` : ' (no --repo supplied)'}; a PR number is only unique within its repository\n`,
+    );
+    return 3;
+  };
   const printDeferred = (pr, deferred) => {
-    if (deferred.length > 0) {
+    const awaiting = deferred.filter((entry) => !isNotCovered(entry));
+    const notCovered = deferred.filter(isNotCovered);
+    if (awaiting.length > 0) {
       process.stdout.write(
-        `verify-pr watch-state: PR ${pr} deferred heads awaiting a round: ${deferred.map((entry) => entry.head).join(', ')} — start the latest one\n`,
+        `verify-pr watch-state: PR ${pr} deferred heads awaiting a round: ${awaiting.map((entry) => entry.head).join(', ')} — start the latest one\n`,
+      );
+    }
+    if (notCovered.length > 0) {
+      process.stdout.write(
+        `verify-pr watch-state: PR ${pr} deferred heads not covered after repeated inconclusive rounds: ${notCovered.map((entry) => entry.head).join(', ')} — do not start them again\n`,
       );
     }
   };
@@ -690,12 +838,7 @@ function main(argv) {
     if (args.start) {
       const result = startRound(root, args);
       if (result.locked) return lockHeld(args.pr);
-      if (result.repoMismatch) {
-        process.stderr.write(
-          `verify-pr watch-state: PR ${args.pr} state belongs to ${result.recorded}, not ${args.repo}; a PR number is only unique within its repository\n`,
-        );
-        return 3;
-      }
+      if (result.repoMismatch) return repoMismatch(args.pr, result, args.repo);
       if (result.duplicate) {
         process.stderr.write(
           result.duplicate === 'in-flight' &&
@@ -712,6 +855,7 @@ function main(argv) {
     } else if (args.complete) {
       const result = completeRound(root, args);
       if (result.locked) return lockHeld(args.pr);
+      if (result.repoMismatch) return repoMismatch(args.pr, result, args.repo);
       if (result.staleCompletion) {
         process.stderr.write(
           `verify-pr watch-state: PR ${args.pr} head ${args.head} was already answered by round ${result.recordedRound}; refusing a stale completion from round ${args.round}\n`,
@@ -721,6 +865,12 @@ function main(argv) {
       if (result.roundMismatch) {
         process.stderr.write(
           `verify-pr watch-state: PR ${args.pr} head ${args.head} is in flight as round ${result.recordedRound}, not round ${args.round}; --complete must repeat the --start round\n`,
+        );
+        return 3;
+      }
+      if (result.unregistered) {
+        process.stderr.write(
+          `verify-pr watch-state: PR ${args.pr} head ${args.head} was never started, deferred or answered; refusing to file a verdict for an unregistered head (check --head and --state-root)\n`,
         );
         return 3;
       }
@@ -735,6 +885,7 @@ function main(argv) {
     } else {
       const result = releaseRound(root, args);
       if (result.locked) return lockHeld(args.pr);
+      if (result.repoMismatch) return repoMismatch(args.pr, result, args.repo);
       if (result.mismatch) {
         process.stderr.write(
           `verify-pr watch-state: PR ${args.pr} head ${args.head} has no in-flight marker (recorded: ${result.recorded}); refusing to release another round's marker\n`,
@@ -744,6 +895,12 @@ function main(argv) {
       if (result.noMarker) {
         process.stderr.write(
           `verify-pr watch-state: PR ${args.pr} has no in-flight marker for ${args.head} at ${root}; nothing to release (check --state-root)\n`,
+        );
+        return 3;
+      }
+      if (result.roundMismatch) {
+        process.stderr.write(
+          `verify-pr watch-state: PR ${args.pr} head ${args.head} is in flight as round ${result.recordedRound}, not round ${args.round}; refusing a stale release of a newer round's marker\n`,
         );
         return 3;
       }

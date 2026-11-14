@@ -182,10 +182,15 @@ code runs; otherwise the boundary's operator writes it: the recipe's host
 check step for a container, the CI publish job for the lane, and the VM's
 operator for a VM boundary. A `mode:"container"` declaration must also be
 backed by `boundary-gate.json` — the record a passing
-`--require-isolation --artifact-dir <round-dir>` gate run writes — so the
-declaration cannot be minted without a gate run; the CI publish job writes
-its own `ci-lane` record, which the checker honors only under the publish
-job's `--publish-lane` invocation, never for a local round. The gate
+`--require-isolation --artifact-dir <round-dir>` gate run writes. The
+record lives in the PR-writable artifact tree and `--publish-lane` is an
+argv flag, so neither is proof against a round that forges them: they
+**corroborate an operator** who ran the gate — the PR #16866 shape is a
+round that skipped it — and the checker refuses a container declaration
+with no record. The CI publish job writes its own `ci-lane` record, which
+the checker honors only under `--publish-lane`, the flag the publish job
+passes; a local shell that passes the flag itself is making an operator
+claim, not proving the lane. The gate
 detects container markers only, so a
 VM's operator sets `container=<vm name>` and `QWEN_VERIFY_CREDENTIAL_FREE=1`
 after confirming nothing is mounted, then runs the gate with
@@ -195,7 +200,13 @@ or left exported afterwards: unset both when the round ends. The VM round
 also runs under a **scratch `HOME`** — the credential scan reads `~/.ssh`,
 `~/.config/gh`, `~/.aws` and the rest under the process home, so the
 operator's real home fails `--require-isolation` with exit 4 even on a clean
-VM. The two shapes:
+VM. The scan reads credential **environment signals** too, so in that same
+shell unset `SSH_AUTH_SOCK`, `GH_TOKEN`, `GITHUB_TOKEN`, `KUBECONFIG`,
+`OPENAI_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`,
+`GOOGLE_APPLICATION_CREDENTIALS`, `AZURE_CLIENT_SECRET`, the `AWS_*` keys
+and `SANDBOX_MOUNTS` before running the gate: an agent-forwarded shell
+carries `SSH_AUTH_SOCK` even under a scratch home, and the gate refuses it
+with exit 4. The two shapes:
 
 - Inside a boundary that passed `--require-isolation`:
   `{"mode":"container","detail":"<image, network policy, credential-free mount>"}`
@@ -208,6 +219,9 @@ VM. The two shapes:
   The approval is a permalink a reader can open
   (`https://github.com/<owner>/<repo>/pull/<n>#issuecomment-<id>`), not free
   text — a verbal "yes" in the session is not the record; the comment is.
+  When the round's snapshot carries `repo` and `pr`, the checker also
+  compares the permalink's owner/repo/number against them: the approval
+  must be a comment on this round's PR, not any comment anywhere.
   The invocation itself is not that approval, and a waiver never carries
   over to the next round unasked. If the maintainer declines, use the sandboxed
   lane. Measured case: two local rounds on PR #16866 ran the whole battery on
@@ -481,8 +495,9 @@ authority to certify the round.
 
    `<round-dir>` here is the in-container path (`/work/tmp/pr<n>-verify-<ts>`).
    On a pass the gate writes `boundary-gate.json` there — the record the
-   host checker requires alongside the step-7 declaration, so a container
-   declaration cannot be minted without a gate run.
+   host checker requires alongside the step-7 declaration. The artifact
+   tree is PR-writable, so the record corroborates an operator who ran the
+   gate; it is not proof against a round that forges it.
 
    The scan names credential-shaped ignored files (nested ones included, but
    not public keys; the private-key families cover RSA, Ed25519, ECDSA and
@@ -657,7 +672,9 @@ Exit 3 has several shapes, each with its own reaction:
   file (never the state file) and retry. This applies to `--complete` too —
   a completion lost to contention leaves the round in flight.
 - The state belongs to another repository: a PR number is only unique
-  within its repo; check `--repo` and the state root.
+  within its repo; check `--repo` and the state root. This guard applies to
+  `--complete` and `--release` too, and an omitted `--repo` does not disarm
+  it once the state records a repo.
 
 Record the finished round with the same script's completion form:
 `node <clone>/scripts/verify-pr-watch-state.mjs <n> --complete --head <headSha> --round <r> --verdict <word> [--comment-id <id>]`
@@ -665,21 +682,28 @@ Record the finished round with the same script's completion form:
 verbatim; a completion without it exits 2 and leaves the head in flight
 forever. A completion whose `--round` differs from the in-flight marker, or
 from a round that already answered for the head, is refused (exit 3) rather
-than stranding the marker or overwriting the newer verdict. `inconclusive`
-releases the marker without filing the head as verified and **re-defers the
-head**, so the completion output names it for the next round: retry it once;
-if it completes inconclusive again, report it under _Not covered_ and do not
-start it again without a new head move. A head that already keeps an earlier
-verdict is not re-deferred. When the completion output names **deferred
-heads awaiting a round**, start the latest one as the next round through the
-same `--start` flow — that is the only event those heads will ever get;
-starting it supersedes older deferred heads. If a round dies after
-`--start`, recover its marker with
-`node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha>`
+than stranding the marker or overwriting the newer verdict; so is a
+completion for a head that was never started, deferred or answered — check
+`--head` and `--state-root` rather than filing a verdict for a stranger.
+`inconclusive` releases the marker without filing the head as verified and
+**re-defers the head at its original push-order position**, so the
+completion output names it for the next round: retry it once. A second
+inconclusive makes the head **terminal** — the state counts the retry, and
+the output names it under **deferred heads not covered after repeated
+inconclusive rounds** instead of awaiting a round: report it under _Not
+covered_ and do not start it again without a new head move. A head that
+already keeps an earlier verdict is not re-deferred. When the completion
+output names **deferred heads awaiting a round**, start the latest one as
+the next round through the same `--start` flow — that is the only event
+those heads will ever get; starting it supersedes older deferred heads. If
+a round dies after `--start`, recover its marker with
+`node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <headSha> [--round <r>]`
 before starting the next round for that head — never hand-edit the state
-file. The release also names any deferred heads, so a killed round's
-deferred deliveries are not lost. A release for a head with no in-flight
-marker is refused (exit 3), including when no markers exist at all: check
+file. A supplied `--round` must match the marker's round, so a retried
+recovery cannot delete a newer round's live marker for the same head. The
+release also names any deferred heads, so a killed round's deferred
+deliveries are not lost. A release for a head with no in-flight marker is
+refused (exit 3), including when no markers exist at all: check
 `--state-root` before assuming the marker is gone. A corrupt state file is
 refused (exit 1), never silently rewritten: inspect or remove it before the
 next round.
@@ -844,7 +868,11 @@ ambiguous rather than verify a guessed PR. Then, in order:
    as deferred, and the running round's `--complete` output names it — start
    the latest deferred head it names as the next round. Exit 3 can also mean
    the state lock is held: retry shortly, or remove a killed invocation's
-   `.lock` file (never the state file) and retry. When the in-flight
+   `.lock` file (never the state file) and retry. Exit 3 can also mean the
+   state belongs to another repository — a PR number is only unique within
+   its repo; check `--repo` and the state root. The watch prompt's exit-3
+   enumeration is the full contract, and the repo guard applies to
+   `--complete` and `--release` too. When the in-flight
    round is dead (killed session, OOM, aborted turn), nothing will answer:
    recover the marker with
    `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <blocking head>`

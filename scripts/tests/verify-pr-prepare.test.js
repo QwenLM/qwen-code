@@ -765,9 +765,12 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
       `isolation  ${isolation.signals.join(', ')}`,
     );
     // The printed next-step command must carry the flag the checker's
-    // gate-record requirement now depends on.
-    expect(result.stdout).toContain(
-      'node scripts/verify-pr-prepare.mjs --require-isolation --artifact-dir',
+    // gate-record requirement depends on, in the in-container spelling:
+    // the trusted /trusted-scripts mount (never the PR head's own copy)
+    // and the quoted /work artifact path (a host path would die with the
+    // container or fail mkdir; an unquoted path splits on whitespace).
+    expect(result.stdout).toMatch(
+      /node \/trusted-scripts\/verify-pr-prepare\.mjs --require-isolation --artifact-dir "\/work\/tmp\/pr42-verify-\d{8}-\d{6}"/,
     );
 
     const root = realpathSync(dir);
@@ -1020,6 +1023,28 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     // Without --artifact-dir the gate still passes but writes nothing.
     const noDir = runPrepare(dir, ['--require-isolation'], env);
     expect(noDir.status).toBe(0);
+  });
+
+  // A filesystem failure on the record write is the documented exit-3
+  // path, not an uncaught throw after the pass line: a driver keyed on
+  // exit 4 must not proceed on a pass the record never landed.
+  it('fails with exit 3 when the gate record cannot be written', () => {
+    const { dir } = makeRepo();
+    const env = {
+      PATH: process.env.PATH ?? '',
+      HOME: makeTmpDir(),
+      SANDBOX: 'docker',
+      QWEN_VERIFY_CREDENTIAL_FREE: '1',
+    };
+    const result = runPrepare(
+      dir,
+      ['--require-isolation', '--artifact-dir', '/dev/null/round'],
+      env,
+    );
+    expect(result.status).toBe(3);
+    expect(result.stderr).toContain('could not write the gate record');
+    // The pass line prints only after the record lands.
+    expect(result.stdout).not.toContain('credential-free per attestation');
   });
 
   it('refuses an attested boundary that still shows credentials', () => {

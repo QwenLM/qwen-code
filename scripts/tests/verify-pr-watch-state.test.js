@@ -112,23 +112,42 @@ describe('startRound', () => {
     });
     completeRound(
       root,
-      { pr: 1, head: OLDER, round: 8, verdict: 'findings' },
+      {
+        pr: 1,
+        head: OLDER,
+        round: 8,
+        verdict: 'findings',
+        repo: 'QwenLM/qwen-code',
+      },
       new Date('2026-11-14T01:00:00.000Z'),
     );
-    startRound(root, { pr: 1, head: PREV, round: 9, artifactDir: 'r9' });
+    startRound(root, {
+      pr: 1,
+      head: PREV,
+      round: 9,
+      artifactDir: 'r9',
+      repo: 'QwenLM/qwen-code',
+    });
     completeRound(
       root,
-      { pr: 1, head: PREV, round: 9, verdict: 'findings' },
+      {
+        pr: 1,
+        head: PREV,
+        round: 9,
+        verdict: 'findings',
+        repo: 'QwenLM/qwen-code',
+      },
       new Date('2026-11-14T02:00:00.000Z'),
     );
-    // The third start omits repo: the carry-over branch must keep it, and
-    // both earlier verified heads must survive the start, not just the
-    // latest one.
+    // Every call keeps naming the repo — an omitted --repo is a refusal
+    // once one is recorded — and both earlier verified heads must survive
+    // the start, not just the latest one.
     const result = startRound(root, {
       pr: 1,
       head: HEAD,
       round: 10,
       artifactDir: 'r10',
+      repo: 'QwenLM/qwen-code',
     });
     expect(result.duplicate).toBeUndefined();
     const state = readState(root, 1);
@@ -265,6 +284,9 @@ describe('startRound', () => {
         round: 12,
         artifactDir: 'r12',
         deferredAt: now.toISOString(),
+        // The start consumed seq 1; the first deferral consumes seq 2.
+        seq: 2,
+        retries: 0,
       },
     ]);
   });
@@ -289,6 +311,9 @@ describe('startRound', () => {
         artifactDir: 'r13',
         // The original push-order timestamp is kept, not the redelivery's.
         deferredAt: '2026-11-14T02:30:00.000Z',
+        // The redelivery keeps the original seq and retry count too.
+        seq: 2,
+        retries: 0,
       },
     ]);
   });
@@ -438,7 +463,13 @@ describe('startRound', () => {
     expect(duplicateHead(readState(root, 1), HEAD)).toBe('in-flight');
     expect(duplicateHead(readState(root, 1), PREV)).toBe('verified');
     expect(duplicateHead(readState(root, 1), OLDER)).toBe('verified');
-    completeRound(root, { pr: 1, head: HEAD, round: 10, verdict: 'blocked' });
+    completeRound(root, {
+      pr: 1,
+      head: HEAD,
+      round: 10,
+      verdict: 'blocked',
+      repo: 'QwenLM/qwen-code',
+    });
     const state = readState(root, 1);
     expect(state.verifiedHead).toBe(HEAD);
     expect(state.previousHead).toBe(PREV);
@@ -448,6 +479,12 @@ describe('startRound', () => {
     expect(state.verifiedHeads.map((entry) => entry.head).sort()).toEqual(
       [HEAD, OLDER, PREV].sort(),
     );
+    // The top-level round is ambiguous — it names whichever operation
+    // wrote last — so the migrated verified entry carries round null and
+    // matches completion by head alone, not a fabricated round.
+    expect(
+      state.verifiedHeads.find((entry) => entry.head === PREV).round,
+    ).toBeNull();
   });
 
   it('leaves no temporary file behind', () => {
@@ -524,20 +561,46 @@ describe('completeRound', () => {
     });
   });
 
-  it('works without a prior start (an unregistered round still records)', () => {
+  // A verdict for a head no round registered would permanently dedup a
+  // commit nobody reviewed (a stale OID after a force-push, the base sha):
+  // the no-marker path is only for deferred heads, not for strangers.
+  it('refuses a completion for a head that was never registered', () => {
     const root = makeRoot();
-    completeRound(root, { pr: 1, head: HEAD, round: 1, verdict: 'blocked' });
+    const result = completeRound(root, {
+      pr: 1,
+      head: HEAD,
+      round: 1,
+      verdict: 'blocked',
+    });
+    expect(result.unregistered).toBe(true);
+    expect(readState(root, 1)).toBeNull();
+  });
+
+  it('completes a deferred head without a prior start', () => {
+    const root = makeRoot();
+    startRound(root, { pr: 1, head: PREV, round: 11, artifactDir: 'r11' });
+    startRound(root, { pr: 1, head: HEAD, round: 12, artifactDir: 'r12' });
+    // HEAD was refused and deferred; the fallback completes it without a
+    // marker of its own, and clears its deferred entry.
+    const result = completeRound(root, {
+      pr: 1,
+      head: HEAD,
+      round: 12,
+      verdict: 'findings',
+    });
+    expect(result.unregistered).toBeUndefined();
     expect(readState(root, 1)).toMatchObject({
       verifiedHead: HEAD,
-      previousHead: null,
-      inFlight: false,
+      inFlight: true,
+      inFlightHead: PREV,
+      deferredHeads: [],
     });
   });
 
   // The bound-delivery design dedupes redelivered head-change events against
   // the in-flight marker, so completing one head must not wipe another
   // head's marker (a migrated state can carry one while a completion for a
-  // different head arrives).
+  // different, deferred head arrives).
   it('keeps a foreign in-flight marker when completing another head', () => {
     const root = makeRoot();
     mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
@@ -552,6 +615,18 @@ describe('completeRound', () => {
             round: 11,
             artifactDir: 'r11',
             startedAt: '2026-11-14T02:00:00.000Z',
+            seq: 1,
+            retries: 0,
+          },
+        ],
+        deferredHeads: [
+          {
+            head: HEAD,
+            round: 10,
+            artifactDir: 'r10',
+            deferredAt: '2026-11-14T02:10:00.000Z',
+            seq: 2,
+            retries: 0,
           },
         ],
       }),
@@ -622,6 +697,14 @@ describe('completeRound', () => {
         verifiedHeads: [],
         inFlightHeads: [
           { head: PREV, round: 11, artifactDir: 'dirY', startedAt: null },
+        ],
+        deferredHeads: [
+          {
+            head: HEAD,
+            round: 10,
+            artifactDir: 'dirX',
+            deferredAt: '2026-11-14T02:10:00.000Z',
+          },
         ],
       }),
     );
@@ -913,6 +996,34 @@ describe('releaseRound', () => {
     const result = releaseRound(root, { pr: 1, head: HEAD });
     expect(result.released).toBe(true);
     expect(result.deferred.map((entry) => entry.head)).toEqual([PREV]);
+  });
+
+  // A hand-written or raced state can name the same head in both lists:
+  // the release clears the named head's deferred entry too, so a recovered
+  // head is not also named as awaiting a round.
+  it('clears the named head from the deferred list as well', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({
+        pr: 1,
+        verifiedHeads: [],
+        inFlightHeads: [
+          { head: HEAD, round: 11, artifactDir: 'r11', startedAt: null },
+        ],
+        deferredHeads: [
+          { head: HEAD, round: 11, artifactDir: 'r11', deferredAt: 'x' },
+          { head: PREV, round: 12, artifactDir: 'r12', deferredAt: 'y' },
+        ],
+      }),
+    );
+    const result = releaseRound(root, { pr: 1, head: HEAD });
+    expect(result.released).toBe(true);
+    expect(result.deferred.map((entry) => entry.head)).toEqual([PREV]);
+    expect(readState(root, 1).deferredHeads.map((entry) => entry.head)).toEqual(
+      [PREV],
+    );
   });
 });
 
@@ -1645,5 +1756,499 @@ describe('CLI', () => {
     expect(res.status).toBe(2);
     expect(res.stderr).toMatch(/--state-root must not be empty/);
     expect(existsSync(statePath(root, 16866))).toBe(false);
+  });
+});
+
+// Push order is the monotonic seq, never the write clock: an inconclusive
+// re-defer must not let the re-deferred head outrank heads pushed after it.
+describe('seq push order', () => {
+  const t = (s) => new Date(`2026-11-14T02:0${s}:00.000Z`);
+
+  it('an inconclusive re-defer keeps the original seq, not the write time', () => {
+    const root = makeRoot();
+    // start A, complete A findings, start B, defer C, complete B
+    // inconclusive: B re-defers at its original seq (2), behind C (3).
+    startRound(
+      root,
+      { pr: 1, head: PREV, round: 11, artifactDir: 'r11' },
+      t(0),
+    );
+    completeRound(
+      root,
+      { pr: 1, head: PREV, round: 11, verdict: 'findings' },
+      t(1),
+    );
+    startRound(
+      root,
+      { pr: 1, head: HEAD, round: 12, artifactDir: 'r12' },
+      t(3),
+    );
+    startRound(
+      root,
+      { pr: 1, head: OLDER, round: 13, artifactDir: 'r13' },
+      t(4),
+    );
+    completeRound(
+      root,
+      { pr: 1, head: HEAD, round: 12, verdict: 'inconclusive' },
+      t(5),
+    );
+    const deferred = readState(root, 1).deferredHeads;
+    expect(deferred.map((entry) => entry.head)).toEqual([HEAD, OLDER]);
+    expect(deferred.map((entry) => entry.seq)).toEqual([2, 3]);
+    expect(deferred[0].retries).toBe(1);
+    // Starting the head the message calls "the latest one" (the tail, C)
+    // supersedes B; starting B must NOT delete the genuinely newer C.
+    expect(
+      startRound(
+        root,
+        { pr: 1, head: HEAD, round: 14, artifactDir: 'r14' },
+        t(6),
+      ).duplicate,
+    ).toBeUndefined();
+    expect(readState(root, 1).deferredHeads.map((entry) => entry.head)).toEqual(
+      [OLDER],
+    );
+  });
+
+  it('starting the tail supersedes the re-deferred older head', () => {
+    const root = makeRoot();
+    startRound(
+      root,
+      { pr: 1, head: HEAD, round: 12, artifactDir: 'r12' },
+      t(3),
+    );
+    startRound(
+      root,
+      { pr: 1, head: OLDER, round: 13, artifactDir: 'r13' },
+      t(4),
+    );
+    completeRound(
+      root,
+      { pr: 1, head: HEAD, round: 12, verdict: 'inconclusive' },
+      t(5),
+    );
+    expect(
+      startRound(
+        root,
+        { pr: 1, head: OLDER, round: 15, artifactDir: 'r15' },
+        t(7),
+      ).duplicate,
+    ).toBeUndefined();
+    expect(readState(root, 1).deferredHeads).toEqual([]);
+  });
+
+  it('a second inconclusive makes the head terminal in the state', () => {
+    const root = makeRoot();
+    startRound(root, { pr: 1, head: HEAD, round: 11, artifactDir: 'r11' });
+    completeRound(root, {
+      pr: 1,
+      head: HEAD,
+      round: 11,
+      verdict: 'inconclusive',
+    });
+    expect(readState(root, 1).deferredHeads[0].retries).toBe(1);
+    startRound(root, { pr: 1, head: HEAD, round: 12, artifactDir: 'r12' });
+    completeRound(root, {
+      pr: 1,
+      head: HEAD,
+      round: 12,
+      verdict: 'inconclusive',
+    });
+    const entry = readState(root, 1).deferredHeads[0];
+    expect(entry.retries).toBe(2);
+    // The retry count survives the start that answers the re-deferral.
+    startRound(root, { pr: 1, head: HEAD, round: 13, artifactDir: 'r13' });
+    expect(readState(root, 1).inFlightHeads[0].retries).toBe(2);
+  });
+
+  it('a never-deferred start keeps the deferred list intact', () => {
+    const root = makeRoot();
+    startRound(root, { pr: 1, head: HEAD, round: 11, artifactDir: 'r11' });
+    startRound(root, { pr: 1, head: PREV, round: 12, artifactDir: 'r12' });
+    completeRound(root, { pr: 1, head: HEAD, round: 11, verdict: 'findings' });
+    // OLDER was never deferred: starting it must not wipe PREV's delivery.
+    expect(
+      startRound(root, { pr: 1, head: OLDER, round: 13, artifactDir: 'r13' })
+        .duplicate,
+    ).toBeUndefined();
+    expect(readState(root, 1).deferredHeads.map((entry) => entry.head)).toEqual(
+      [PREV],
+    );
+  });
+
+  it('a keptVerdict completion keeps a pending deferral', () => {
+    const root = makeRoot();
+    startRound(root, { pr: 1, head: HEAD, round: 11, artifactDir: 'r11' });
+    startRound(root, { pr: 1, head: PREV, round: 12, artifactDir: 'r12' });
+    completeRound(root, { pr: 1, head: HEAD, round: 11, verdict: 'findings' });
+    // HEAD already keeps a verdict; a duplicated inconclusive completion
+    // of the same round keeps that verdict AND the unrelated pending
+    // deferral of PREV.
+    const result = completeRound(root, {
+      pr: 1,
+      head: HEAD,
+      round: 11,
+      verdict: 'inconclusive',
+    });
+    expect(result.keptVerdict).toBe(true);
+    expect(result.deferred.map((entry) => entry.head)).toEqual([PREV]);
+    expect(readState(root, 1).deferredHeads.map((entry) => entry.head)).toEqual(
+      [PREV],
+    );
+  });
+
+  it('a legacy deferred entry without a seq is never superseded', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({
+        pr: 1,
+        verifiedHeads: [],
+        inFlightHeads: [
+          { head: HEAD, round: 11, artifactDir: 'r11', startedAt: null },
+        ],
+        deferredHeads: [
+          // Legacy: no seq.
+          { head: PREV, round: 12, artifactDir: 'r12', deferredAt: 'x' },
+          {
+            head: OLDER,
+            round: 13,
+            artifactDir: 'r13',
+            deferredAt: 'y',
+            seq: 5,
+          },
+        ],
+      }),
+    );
+    completeRound(root, { pr: 1, head: HEAD, round: 11, verdict: 'findings' });
+    expect(
+      startRound(root, { pr: 1, head: OLDER, round: 13, artifactDir: 'r13' })
+        .duplicate,
+    ).toBeUndefined();
+    expect(readState(root, 1).deferredHeads.map((entry) => entry.head)).toEqual(
+      [PREV],
+    );
+  });
+});
+
+describe('cross-repo and registration guards', () => {
+  it('complete and release refuse a foreign repo, and an omitted repo too', () => {
+    const root = makeRoot();
+    startRound(root, {
+      pr: 1,
+      head: HEAD,
+      round: 11,
+      artifactDir: 'r11',
+      repo: 'QwenLM/qwen-code',
+    });
+    const foreignComplete = completeRound(root, {
+      pr: 1,
+      head: HEAD,
+      round: 11,
+      verdict: 'merge-ready',
+      repo: 'other/repo',
+    });
+    expect(foreignComplete.repoMismatch).toBe(true);
+    const omittedComplete = completeRound(root, {
+      pr: 1,
+      head: HEAD,
+      round: 11,
+      verdict: 'merge-ready',
+    });
+    expect(omittedComplete.repoMismatch).toBe(true);
+    const foreignRelease = releaseRound(root, {
+      pr: 1,
+      head: HEAD,
+      repo: 'other/repo',
+    });
+    expect(foreignRelease.repoMismatch).toBe(true);
+    const omittedStart = startRound(root, {
+      pr: 1,
+      head: PREV,
+      round: 12,
+      artifactDir: 'r12',
+    });
+    expect(omittedStart.repoMismatch).toBe(true);
+    // Nothing was written by any refusal.
+    expect(readState(root, 1)).toMatchObject({
+      inFlight: true,
+      inFlightHead: HEAD,
+      verifiedHeads: [],
+      repo: 'QwenLM/qwen-code',
+    });
+  });
+
+  it('a release with a mismatched round keeps the newer live marker', () => {
+    const root = makeRoot();
+    startRound(root, { pr: 1, head: HEAD, round: 11, artifactDir: 'r11' });
+    releaseRound(root, { pr: 1, head: HEAD });
+    startRound(root, { pr: 1, head: HEAD, round: 12, artifactDir: 'r12' });
+    // The retried recovery of dead round 11 must not delete round 12's
+    // live marker for the same head.
+    const stale = releaseRound(root, { pr: 1, head: HEAD, round: 11 });
+    expect(stale.roundMismatch).toBe(true);
+    expect(stale.recordedRound).toBe(12);
+    expect(readState(root, 1).inFlight).toBe(true);
+    expect(releaseRound(root, { pr: 1, head: HEAD, round: 12 }).released).toBe(
+      true,
+    );
+    expect(readState(root, 1).inFlight).toBe(false);
+  });
+
+  it('a migrated verified entry matches completion by head alone', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    // Round 9 completed at PREV, then round 10 started for HEAD: the
+    // top-level round names the START, not the verification.
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({
+        pr: 1,
+        verifiedHead: PREV,
+        round: 10,
+        verdict: 'findings',
+        completedAt: '2026-11-14T01:00:00.000Z',
+        inFlight: true,
+        inFlightHead: HEAD,
+        startedAt: '2026-11-14T01:30:00.000Z',
+      }),
+    );
+    // The skill tells a round whose completion lost the lock to retry:
+    // the retry must not be refused as stale by a fabricated round 10.
+    const retry = completeRound(root, {
+      pr: 1,
+      head: PREV,
+      round: 9,
+      verdict: 'findings',
+    });
+    expect(retry.staleCompletion).toBeUndefined();
+    expect(
+      readState(root, 1).verifiedHeads.find((entry) => entry.head === PREV)
+        .round,
+    ).toBe(9);
+  });
+});
+
+describe('withStateLock contention', () => {
+  it('acquires the lock once a contending holder releases mid-retry', async () => {
+    const root = makeRoot();
+    const lock = `${statePath(root, 1)}.lock`;
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(lock, '99999:holder\n');
+    // The holder must be another process: Atomics.wait blocks this event
+    // loop, so an in-process timer could never fire during the retry.
+    // It releases inside the retry budget (~1s): a single-attempt loop
+    // would report the lock held instead of acquiring it.
+    const holder = spawn(process.execPath, [
+      '-e',
+      `setTimeout(() => require('node:fs').unlinkSync(${JSON.stringify(lock)}), 150)`,
+    ]);
+    const exited = new Promise((resolve) => holder.on('exit', resolve));
+    try {
+      expect(withStateLock(root, 1, () => 'ran')).toBe('ran');
+    } finally {
+      await exited;
+    }
+    expect(existsSync(lock)).toBe(false);
+  });
+});
+
+describe('CLI round-8 contracts', () => {
+  it('names a twice-inconclusive head as not covered, not awaiting', () => {
+    const root = makeRoot();
+    expect(run(root, [...START, '--artifact-dir', 'r11']).status).toBe(0);
+    const inconclusive = [
+      '16866',
+      '--complete',
+      '--head',
+      HEAD,
+      '--verdict',
+      'inconclusive',
+    ];
+    expect(run(root, [...inconclusive, '--round', '11']).stdout).toMatch(
+      /deferred heads awaiting a round/,
+    );
+    expect(
+      run(root, [
+        '16866',
+        '--start',
+        '--head',
+        HEAD,
+        '--round',
+        '12',
+        '--artifact-dir',
+        'r12',
+      ]).status,
+    ).toBe(0);
+    const second = run(root, [...inconclusive, '--round', '12']);
+    expect(second.status).toBe(0);
+    expect(second.stdout).toMatch(
+      new RegExp(
+        `deferred heads not covered after repeated inconclusive rounds: ${HEAD} — do not start them again`,
+      ),
+    );
+    expect(second.stdout).not.toMatch(/awaiting a round/);
+    // A later completion still names it as not covered, never as awaiting.
+    expect(
+      run(root, [
+        '16866',
+        '--start',
+        '--head',
+        PREV,
+        '--round',
+        '13',
+        '--artifact-dir',
+        'r13',
+      ]).status,
+    ).toBe(0);
+    const later = run(root, [
+      '16866',
+      '--complete',
+      '--head',
+      PREV,
+      '--round',
+      '13',
+      '--verdict',
+      'findings',
+    ]);
+    expect(later.stdout).toMatch(/not covered after repeated inconclusive/);
+    expect(later.stdout).not.toMatch(/awaiting a round/);
+  });
+
+  it('refuses an unregistered completion with exit 3', () => {
+    const root = makeRoot();
+    const res = run(root, [...COMPLETE]);
+    expect(res.status).toBe(3);
+    expect(res.stderr).toMatch(/never started, deferred or answered/);
+    expect(readState(root, 16866)).toBeNull();
+  });
+
+  it('guards every verb against a foreign or empty repo', () => {
+    const root = makeRoot();
+    expect(
+      run(root, [
+        ...START,
+        '--artifact-dir',
+        'r11',
+        '--repo',
+        'QwenLM/qwen-code',
+      ]).status,
+    ).toBe(0);
+    const foreign = run(root, [...COMPLETE, '--repo', 'other/repo']);
+    expect(foreign.status).toBe(3);
+    expect(foreign.stderr).toMatch(/state belongs to QwenLM\/qwen-code/);
+    const omitted = run(root, [...COMPLETE]);
+    expect(omitted.status).toBe(3);
+    expect(omitted.stderr).toMatch(/no --repo supplied/);
+    const foreignRelease = run(root, [
+      '16866',
+      '--release',
+      '--head',
+      HEAD,
+      '--repo',
+      'other/repo',
+    ]);
+    expect(foreignRelease.status).toBe(3);
+    const empty = run(root, [...COMPLETE, '--repo', '']);
+    expect(empty.status).toBe(2);
+    expect(empty.stderr).toMatch(/--repo must not be empty/);
+    expect(readState(root, 16866).inFlight).toBe(true);
+  });
+
+  it('refuses a stale release through the CLI', () => {
+    const root = makeRoot();
+    expect(run(root, [...START, '--artifact-dir', 'r11']).status).toBe(0);
+    const stale = run(root, [
+      '16866',
+      '--release',
+      '--head',
+      HEAD,
+      '--round',
+      '10',
+    ]);
+    expect(stale.status).toBe(3);
+    expect(stale.stderr).toMatch(/stale release of a newer round's marker/);
+    expect(readState(root, 16866).inFlight).toBe(true);
+    expect(
+      run(root, ['16866', '--release', '--head', HEAD, '--round', '11']).status,
+    ).toBe(0);
+  });
+});
+
+// The default-root guard asks git, not stat: a bare main worktree has no
+// .git entry but is a valid root, and a .git entry whose gitdir link is
+// stale must not pass just because the entry exists.
+describe.skipIf(process.platform === 'win32')('default root git-ness', () => {
+  const gitEnvFor = (home) => ({
+    ...process.env,
+    HOME: home,
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_AUTHOR_NAME: 't',
+    GIT_AUTHOR_EMAIL: 't@t',
+    GIT_COMMITTER_NAME: 't',
+    GIT_COMMITTER_EMAIL: 't@t',
+  });
+  const shipScripts = (dir) => {
+    mkdirSync(join(dir, 'scripts', 'lib'), { recursive: true });
+    for (const f of [
+      'verify-pr-watch-state.mjs',
+      'verify-pr-watch-gate.mjs',
+      'verify-pr-check.mjs',
+    ]) {
+      cpSync(join(dirname(SCRIPT), f), join(dir, 'scripts', f));
+    }
+    cpSync(
+      join(dirname(SCRIPT), 'lib', 'entry-point.js'),
+      join(dir, 'scripts', 'lib', 'entry-point.js'),
+    );
+    return join(dir, 'scripts', 'verify-pr-watch-state.mjs');
+  };
+  const startArgs = (script) => [
+    script,
+    '16866',
+    '--start',
+    '--head',
+    HEAD,
+    '--round',
+    '11',
+    '--artifact-dir',
+    'r11',
+  ];
+
+  it('accepts a bare main worktree as the default root', () => {
+    const bare = makeRoot();
+    const gitEnv = gitEnvFor(bare);
+    execFileSync('git', ['init', '--quiet', '--bare', '.'], {
+      cwd: bare,
+      env: gitEnv,
+      stdio: 'pipe',
+    });
+    const script = shipScripts(bare);
+    const res = spawnSync(process.execPath, startArgs(script), {
+      cwd: bare,
+      env: gitEnv,
+      encoding: 'utf8',
+    });
+    expect(res.status).toBe(0);
+    expect(existsSync(statePath(bare, 16866))).toBe(true);
+  });
+
+  it('refuses a .git entry whose gitdir link is stale', () => {
+    const copy = makeRoot();
+    const script = shipScripts(copy);
+    // git worktree list fails here, so mainWorktree falls back to the
+    // script's own directory — which carries a .git entry. The old stat
+    // guard passed it and wrote a shadow state; git itself must refuse.
+    writeFileSync(join(copy, '.git'), 'gitdir: /nonexistent-gitdir-link\n');
+    const res = spawnSync(process.execPath, startArgs(script), {
+      cwd: copy,
+      env: gitEnvFor(copy),
+      encoding: 'utf8',
+    });
+    expect(res.status).toBe(2);
+    expect(res.stderr).toMatch(/not a git worktree/);
+    expect(existsSync(statePath(copy, 16866))).toBe(false);
   });
 });

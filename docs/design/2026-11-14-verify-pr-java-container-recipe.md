@@ -78,22 +78,28 @@ paths the CI lane's Java gate matches:
    the seed's settings use `<mirrorOf>*</mirrorOf>` (the lane's
    `<mirrorOf>central</mirrorOf>` does not redirect a pom-declared
    `<repositories>` entry), the strip list removes
-   `<repositories>`/`<pluginRepositories>` from every pom, and the container
-   runs with a network-level mirror allowlist — Maven settings cannot bound
-   code executing inside the project lifecycle, so the containment lives at
-   the Docker layer. The seed runs `mvn dependency:go-offline` and installs
-   the one SDK module the lane and the consumer actually use,
+   `<repositories>`/`<pluginRepositories>` from every pom, and the seed
+   container's egress is restricted to the configured mirror by host
+   firewall rules (the iptables `DOCKER-USER` chain) or an allowlisting
+   forward proxy — Docker itself has no egress-allowlist feature, and Maven
+   settings cannot bound code executing inside the project lifecycle, so
+   the containment must name the layer that actually enforces it. The seed
+   FIRST installs the one SDK module the lane and the consumer actually use,
    `packages/sdk-java/qwencode` (`mvn install -DskipTests -Dgpg.skip=true
 -Dmaven.javadoc.skip=true` on that module's pom, as the CI lane does
    inside its own job boundary; `packages/sdk-java` has no root reactor, and
-   the managed-agent build resolves `qwencode-sdk` only): the managed-agent
-   build resolves it from the local repo, so a fresh seed without it cannot
-   resolve, and a reused seed with a stale one compiles against the wrong
-   jar. The reuse key is one rule everywhere in this recipe: **reuse a
+   the managed-agent build resolves `qwencode-sdk` only), THEN runs
+   `mvn dependency:go-offline` against the consumer's poms: the managed-agent
+   build resolves the SDK from the local repo, so a fresh seed without it
+   cannot resolve, go-offline must see the installed jar, and a reused seed
+   with a stale one compiles against the wrong jar. The reuse key is one
+   rule everywhere in this recipe: **reuse a
    seeded repository only when the pom set, the SDK sources and the arm
    (head vs base) are all unchanged**; a change to any re-seeds, under the
    same built-for-this-head reuse rule the skill applies to installs and
-   builds. There are **two** seeded repositories, `m2repo-head` and
+   builds, and a re-seed starts from an EMPTY `m2repo-<arm>` directory —
+   seeding into the old one would leave earlier heads' artifacts
+   resolvable, and an offline battery could pass where a fresh seed fails. There are **two** seeded repositories, `m2repo-head` and
    `m2repo-base`: the head seed installs the head's SDK jar, the base seed
    the base's, each built from that side's sanitized copy — a single shared
    seed would let the trusted base arm resolve the head-built jar and hide
@@ -102,11 +108,18 @@ paths the CI lane's Java gate matches:
    affect the seed; a PR that edits `.mvn/` gets a seed jar built without
    that config, and the round records the deviation instead of re-seeding
    byte-identical output.
-   Seed with `-Dmaven.legacyLocalRepo=true` and KEEP the
-   `_remote.repositories` provenance markers: they record which mirror
-   served each artifact, and the copy-out is restricted to the paths the
-   seed's own `dependency:go-offline` and SDK install wrote (a before/after
-   manifest of the repository tree), verified against the resolved tree.
+   Seed with the lane's Maven 3.9.11 defaults — do NOT pass
+   `-Dmaven.legacyLocalRepo=true`: Maven 3.9 refuses that flag. The seed's
+   `_remote.repositories` provenance markers record which mirror served
+   each artifact; the copy-out is restricted to the paths the seed's own
+   SDK install and `dependency:go-offline` wrote (a before/after manifest
+   of the repository tree), verified against the resolved tree, and the
+   manifest records each artifact's serving mirror so provenance survives
+   the next step: the copy-out STRIPS the `_remote.repositories` markers
+   afterwards. The battery mounts no `settings.xml`, so the seed's mirror
+   id has no counterpart there; leaving the markers in place would make
+   offline resolution reject artifacts whose recorded repository is absent
+   from the battery's configuration.
    Residual risk, stated rather than hidden: a PR build plugin executing
    during the seed can still install a doctored jar at a real dependency's
    coordinates inside the seed container, and the manifest cannot attribute
@@ -227,9 +240,15 @@ paths the CI lane's Java gate matches:
   marker file when loaded, and a second fixture whose `<build><plugins>`
   execution bound to `compile` writes one. The sanitized copy reaches the
   seed container by **copy-in** (`docker cp`), not a bind mount, so an
-  in-boundary write stays inside the container: the control asserts no
-  marker in the host copy, which a bind mount would make indistinguishable
-  from a phantom host execution.
+  in-boundary write stays inside the container. The control runs in two
+  stages, because absence alone is vacuous — copy-in already guarantees no
+  marker in the host copy, and a fixture that never fires would pass too.
+  First run the UNSANITIZED fixture inside the seed container and assert
+  the positive witness: the marker IS present inside the container (the
+  fixture's write path fired) and absent from the host copy (copy-in
+  contained it). Then run the sanitized copy and assert no marker inside
+  the container either — the strip removed the trigger, not the fixture's
+  ability to write.
 
 ## Acceptance criteria
 

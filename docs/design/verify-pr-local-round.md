@@ -114,12 +114,16 @@ silent:
   rounds on PR #16866 ran the whole battery on the host with no gate and no
   waiver. A container declaration must also be backed by `boundary-gate.json`
   — the record a passing `verify-pr-prepare.mjs --require-isolation
-  --artifact-dir <round-dir>` writes — so the declaration cannot be minted
-  without a gate run; the waiver's `approval` must be a GitHub comment
-  permalink a reader can open, not free text. The CI publish job writes the
+  --artifact-dir <round-dir>` writes, corroborating the gate run behind the
+  declaration; the waiver's `approval` must be a GitHub comment
+  permalink a reader can open, not free text, and when the round's
+  coordinates are available the permalink must cite that round's own PR.
+  The CI publish job writes the
   CI lane's own declaration and `ci-lane` gate record before running the
-  checker, so a round cannot forge them and older base-pinned skills still
-  pass. The artifact tree is PR-writable, so the gate record corroborates
+  checker, so the round's own copy does not decide the check and older
+  base-pinned skills still pass. The artifact tree is PR-writable and
+  `--publish-lane` is an argv claim, not an authenticated identity, so the
+  gate record corroborates
   against an operator who skipped the gate (the incident's shape), not
   against PR code that forges it; the publisher-owned CI path is the
   authoritative one.

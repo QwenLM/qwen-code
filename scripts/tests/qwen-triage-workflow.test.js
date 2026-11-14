@@ -6757,6 +6757,51 @@ describe('qwen-triage verify hardening round 2', () => {
     // The release delivers deferred heads too, and corrupt state is refused.
     expect(flat).toContain('The release also names any deferred heads');
     expect(flat).toContain('A corrupt state file is refused (exit 1)');
+    // Section slices, not the whole flattened skill: a sentence that also
+    // exists in the manual section stays green after the watch prompt's
+    // own copy is deleted unless the pin reads the prompt's slice.
+    const promptStart = verifySkill.indexOf('The prompt consumes the gate');
+    const promptEnd = verifySkill.indexOf('On `action: "stop"`');
+    expect(promptStart).toBeGreaterThan(-1);
+    expect(promptEnd).toBeGreaterThan(promptStart);
+    const prompt = verifySkill
+      .slice(promptStart, promptEnd)
+      .replace(/\s+/g, ' ');
+    expect(prompt).toContain('repeat the same value in `--complete`');
+    expect(prompt).toContain('recorded as deferred');
+    expect(prompt).toContain('no second event will arrive');
+    expect(prompt).toContain('deferred heads awaiting a round');
+    expect(prompt).toContain('including when no markers exist at all');
+    // Round-8 contracts live in the prompt's own copy: the push-order
+    // re-defer, the terminal second inconclusive, the unregistered-head
+    // refusal, the release --round match, and the all-verb repo guard.
+    expect(prompt).toContain(
+      're-defers the head at its original push-order position',
+    );
+    expect(prompt).toContain(
+      'deferred heads not covered after repeated inconclusive rounds',
+    );
+    expect(prompt).toContain('never started, deferred or answered');
+    expect(prompt).toContain(
+      "A supplied `--round` must match the marker's round",
+    );
+    expect(prompt).toContain(
+      'an omitted `--repo` does not disarm it once the state records a repo',
+    );
+    // The manual registration step names the repo-mismatch refusal too,
+    // in its own section — not only by reference to the watch prompt.
+    const manualStart = verifySkill.indexOf(
+      'When the maintainer says a previously verified PR has moved',
+    );
+    const manualEnd = verifySkill.indexOf('To make this trigger automatic');
+    expect(manualStart).toBeGreaterThan(-1);
+    expect(manualEnd).toBeGreaterThan(manualStart);
+    const manual = verifySkill
+      .slice(manualStart, manualEnd)
+      .replace(/\s+/g, ' ');
+    expect(manual).toContain(
+      'the state belongs to another repository — a PR number is only unique within its repo',
+    );
   });
 
   // Two local rounds on PR #16866 ran the whole battery on the host with no
@@ -6778,17 +6823,37 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain(
       '{"mode":"container","detail":"<image, network policy, credential-free mount>"}',
     );
-    // A container declaration is backed by a gate record, not minted.
+    // A container declaration is backed by a gate record.
     expect(flat).toContain('backed by `boundary-gate.json`');
+    // The record and the lane flag corroborate an operator; they are not
+    // proof against a round that forges them. The honest wording is the
+    // contract — an overclaim ("cannot be minted", "never for a local
+    // round") must not come back.
+    expect(flat).toContain('neither is proof against a round that forges them');
+    expect(flat).toContain('**corroborate an operator** who ran the gate');
+    expect(flat).not.toContain('cannot be minted without a gate run');
     // Pin the in-container command with its interpreter prefix: the bare
     // flag string also appears in prose, so deleting it from the command
     // alone must red this.
     expect(flat).toContain(
       'node /trusted-scripts/verify-pr-prepare.mjs --require-isolation --artifact-dir <round-dir>',
     );
-    // The ci-lane record is honored only under the publish invocation.
+    // The ci-lane record is honored only under the publish invocation —
+    // an argv claim, not an authenticated identity.
     expect(flat).toContain(
-      "which the checker honors only under the publish job's `--publish-lane` invocation, never for a local round",
+      'which the checker honors only under `--publish-lane`, the flag the publish job passes',
+    );
+    expect(flat).toContain(
+      'a local shell that passes the flag itself is making an operator claim, not proving the lane',
+    );
+    // The VM recipe names the environment half of the credential scan,
+    // not only the scratch home: an agent-forwarded shell carries
+    // SSH_AUTH_SOCK even under a scratch HOME.
+    expect(flat).toContain(
+      'unset `SSH_AUTH_SOCK`, `GH_TOKEN`, `GITHUB_TOKEN`, `KUBECONFIG`, `OPENAI_API_KEY`',
+    );
+    expect(flat).toContain(
+      'an agent-forwarded shell carries `SSH_AUTH_SOCK` even under a scratch home',
     );
     expect(flat).toContain(
       '{"mode":"waived","by":"<maintainer>","approval":"<permalink to the maintainer\'s approval comment>","reason":"<why this round may run outside a boundary>"}',
@@ -6888,6 +6953,8 @@ describe('qwen-triage verify hardening round 2', () => {
       planted = false,
       dockerFails = false,
       readOnlyRound = false,
+      checkerFails = false,
+      killFails = false,
     } = {}) => {
       const root = mkdtempSync(join(tmpdir(), 'verify-step7-'));
       const round = join(root, 'round');
@@ -6909,8 +6976,14 @@ describe('qwen-triage verify hardening round 2', () => {
           'docker',
           `echo "docker $*" >> "${calls}"\n${dockerFails ? 'exit 1\n' : ''}`,
         ],
-        ['kill', `echo "kill $*" >> "${calls}"\n`],
-        ['node', `echo "node $*" >> "${calls}"\nexit 0\n`],
+        [
+          'kill',
+          `echo "kill $*" >> "${calls}"\n${killFails ? 'exit 1\n' : ''}`,
+        ],
+        [
+          'node',
+          `echo "node $*" >> "${calls}"\nexit ${checkerFails ? 1 : 0}\n`,
+        ],
       ]) {
         writeFileSync(join(shim, tool), `#!/usr/bin/env bash\n${body}`, {
           mode: 0o755,
@@ -6998,10 +7071,45 @@ describe('qwen-triage verify hardening round 2', () => {
     );
 
     it('a failing docker stop skips the checker but still tears the proxy down', () => {
-      const { res, log, root, proxyDir } = replay({ dockerFails: true });
+      const { res, log, round, root, proxyDir } = replay({ dockerFails: true });
       try {
         expect(res.status).toBe(1);
         expect(log).not.toMatch(/^node /m);
+        // No declaration was written: the block must not leave a
+        // container-mode boundary.json behind for a later checker run.
+        expect(existsSync(join(round, 'boundary.json'))).toBe(false);
+        expect(log).toMatch(/kill 424242/);
+        for (const f of ['proxy.pid', 'proxy.json', 'proxy.err']) {
+          expect(existsSync(join(proxyDir, f))).toBe(false);
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    // The checker's own exit code is the block's exit code: a shim that
+    // can only succeed leaves the `|| rc=$?` capture unpinned.
+    it('propagates the checker exit code and still tears the proxy down', () => {
+      const { res, log, root, proxyDir } = replay({ checkerFails: true });
+      try {
+        expect(res.status).toBe(1);
+        expect(log).toMatch(/^node /m);
+        expect(log).toMatch(/kill 424242/);
+        for (const f of ['proxy.pid', 'proxy.json', 'proxy.err']) {
+          expect(existsSync(join(proxyDir, f))).toBe(false);
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    // The teardown guards are `|| true`: a kill that fails (the process
+    // already died) must neither fail the block nor skip the removal of
+    // the token-bearing files.
+    it('a failing kill neither fails the block nor skips the file teardown', () => {
+      const { res, log, root, proxyDir } = replay({ killFails: true });
+      try {
+        expect(res.status).toBe(0);
         expect(log).toMatch(/kill 424242/);
         for (const f of ['proxy.pid', 'proxy.json', 'proxy.err']) {
           expect(existsSync(join(proxyDir, f))).toBe(false);
@@ -8604,6 +8712,14 @@ describe('qwen-triage verify publish fidelity', () => {
               mode: 'container',
               detail: 'CI verify lane (credential-free container)',
             }),
+            // Without the gate record every row carries a boundary
+            // refusal the table never observes; an accepted row must be
+            // accepted WHOLE, or a gates regression that errors with a
+            // different message would slip through the gatesError probe.
+            boundaryGate: JSON.stringify({
+              gate: 'require-isolation',
+              passed: true,
+            }),
           },
         });
         const gatesError = result.errors.some((e) =>
@@ -8613,6 +8729,7 @@ describe('qwen-triage verify publish fidelity', () => {
           NAME: `parity-${f.name}`,
           AGENT_VERDICT: 'merge-ready',
         });
+        if (f.accepts) expect(result.errors, f.name).toEqual([]);
         expect(gatesError, f.name).toBe(!f.accepts);
         expect(body.includes('Targeted gates'), f.name).toBe(f.renders);
       }
