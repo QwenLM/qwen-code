@@ -178,7 +178,7 @@ describe('sidebar brand', () => {
   });
 
   it.each([undefined, false] as const)(
-    'groups sorting immediately before multi-select with branding=%s',
+    'places display options in the workspace header with branding=%s',
     async (branding) => {
       mocks.connection.capabilities = {
         qwenCodeVersion: '1.2.3',
@@ -190,25 +190,40 @@ describe('sidebar brand', () => {
         expect(container.textContent).not.toContain('Qwen Code');
       }
       const sort = container.querySelector<HTMLElement>(
-        'button[aria-label="Sort sessions"]',
+        'button[aria-label="Display options"]',
       );
       expect(sort).not.toBeNull();
       const select = container.querySelector<HTMLElement>(
         'button[aria-label="Select sessions"]',
       );
       expect(select).not.toBeNull();
-      expect(sort!.nextElementSibling).toBe(select);
-      expect(sort!.parentElement!.parentElement).toBe(
+      expect(
+        sort!.parentElement!.querySelector(
+          'button[aria-label="Collapse all workspaces"]',
+        ),
+      ).not.toBeNull();
+      expect(sort!.closest('[class*="newTaskNav"]')).toBeNull();
+      expect(select!.parentElement!.parentElement).toBe(
         container.querySelector('button[aria-label="New session"]')!
           .parentElement,
       );
       expect(
-        container.querySelectorAll('button[aria-label="Sort sessions"]'),
+        container.querySelectorAll('button[aria-label="Display options"]'),
       ).toHaveLength(1);
       expect(
         container.querySelector('[data-testid="manage-workspaces"]'),
       ).toBeNull();
       await act(async () => clickSidebarElement(sort!, true));
+      const sortBy = Array.from(
+        document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+      ).find((item) => item.textContent?.startsWith('Sort by'));
+      expect(sortBy).toBeDefined();
+      await act(async () => {
+        sortBy!.focus();
+        sortBy!.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }),
+        );
+      });
       const choice = Array.from(
         document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
       ).find((item) => item.textContent === 'Last question');
@@ -243,7 +258,7 @@ describe('sidebar brand', () => {
         container.querySelector('button[aria-label="Select sessions"]'),
       ).toBeNull();
       const sorts = container.querySelectorAll(
-        'button[aria-label="Sort sessions"]',
+        'button[aria-label="Display options"]',
       );
       expect(sorts).toHaveLength(1);
       expect(
@@ -251,11 +266,19 @@ describe('sidebar brand', () => {
           'button[aria-label="New session"]',
         ),
       ).toBeNull();
-      expect(
-        sorts[0].parentElement!.querySelector(
-          'button[aria-label="Collapse all workspaces"]',
-        ),
-      ).toBeNull();
+      if (hideProjectHeader) {
+        expect(
+          sorts[0].parentElement!.querySelector(
+            'button[aria-label="Collapse all workspaces"]',
+          ),
+        ).toBeNull();
+      } else {
+        expect(
+          sorts[0].parentElement!.querySelector(
+            'button[aria-label="Collapse all workspaces"]',
+          ),
+        ).not.toBeNull();
+      }
     },
   );
 
@@ -271,7 +294,7 @@ describe('sidebar brand', () => {
     });
 
     expect(
-      container.querySelector('button[aria-label="Sort sessions"]'),
+      container.querySelector('button[aria-label="Display options"]'),
     ).toBeNull();
   });
 
@@ -287,7 +310,7 @@ describe('sidebar brand', () => {
     expect(trigger).not.toBeNull();
     await act(async () => clickSidebarElement(trigger!));
     const sorts = document.querySelectorAll<HTMLElement>(
-      'button[aria-label="Sort sessions"]',
+      'button[aria-label="Display options"]',
     );
     expect(sorts).toHaveLength(1);
     expect(
@@ -296,6 +319,16 @@ describe('sidebar brand', () => {
       ),
     ).not.toBeNull();
     await act(async () => clickSidebarElement(sorts[0], true));
+    const sortBy = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent?.startsWith('Sort by'));
+    expect(sortBy).toBeDefined();
+    await act(async () => {
+      sortBy!.focus();
+      sortBy!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }),
+      );
+    });
     expect(document.querySelectorAll('[role="menuitemradio"]')).toHaveLength(2);
     const option = Array.from(
       document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),

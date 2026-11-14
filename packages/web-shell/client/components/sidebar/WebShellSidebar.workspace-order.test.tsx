@@ -13,6 +13,7 @@ import {
   resolveWebShellSessions,
 } from '../../test/sidebarHarness';
 import { readWorkspaceOrder, writeWorkspaceOrder } from './workspaceOrder';
+import { readWorkspaceFilter } from './SessionSortMenu';
 import {
   hasWorkspaceExpansionPreference,
   readWorkspaceExpanded,
@@ -255,6 +256,45 @@ async function selectMenuItem(label: string): Promise<void> {
   await flushSidebar();
 }
 
+async function openDisplayMenu(): Promise<void> {
+  const trigger = container.querySelector<HTMLButtonElement>(
+    'button[aria-label="Display options"]',
+  );
+  expect(trigger).not.toBeNull();
+  await act(async () => {
+    clickSidebarElement(trigger!, true);
+    await Promise.resolve();
+  });
+}
+
+async function openWorkspaceFilter(): Promise<void> {
+  await openDisplayMenu();
+  const trigger = Array.from(
+    document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+  ).find((item) => item.textContent?.startsWith('Workspace'));
+  expect(trigger).toBeDefined();
+  await act(async () => {
+    trigger!.focus();
+    trigger!.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }),
+    );
+    await Promise.resolve();
+  });
+}
+
+async function selectWorkspaceFilter(label: string): Promise<void> {
+  await openWorkspaceFilter();
+  const item = Array.from(
+    document.body.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+  ).find((candidate) => candidate.textContent === label);
+  expect(item).toBeDefined();
+  await act(async () => {
+    clickSidebarElement(item!, true);
+    await Promise.resolve();
+  });
+  await flushSidebar();
+}
+
 beforeEach(() => {
   window.localStorage.clear();
   container = document.createElement('div');
@@ -282,6 +322,32 @@ afterEach(() => {
 });
 
 describe('WebShellSidebar workspace order', () => {
+  it('filters workspace sections and restores the default display options', async () => {
+    renderSidebar();
+    await flushSidebar();
+    expect(workspaceOrderInDom()).toEqual([
+      '/tmp/project',
+      '/tmp/second',
+      '/tmp/third',
+    ]);
+    await selectWorkspaceFilter('second');
+    expect(workspaceOrderInDom()).toEqual(['/tmp/second']);
+    expect(readWorkspaceFilter(window.location.origin)).toBe(
+      'workspace:/tmp/second',
+    );
+    await selectWorkspaceFilter('No workspace');
+    expect(workspaceOrderInDom()).toEqual([]);
+    expect(readWorkspaceFilter(window.location.origin)).toBe('standalone');
+    await openDisplayMenu();
+    await selectMenuItem('Restore defaults');
+    expect(workspaceOrderInDom()).toEqual([
+      '/tmp/project',
+      '/tmp/second',
+      '/tmp/third',
+    ]);
+    expect(readWorkspaceFilter(window.location.origin)).toBe('all');
+  });
+
   it('does not reread saved expansion preferences on unrelated renders', async () => {
     const prefix = 'qwen.web-shell.sidebar.workspace-expanded:';
     for (const entry of capabilities.workspaces) {

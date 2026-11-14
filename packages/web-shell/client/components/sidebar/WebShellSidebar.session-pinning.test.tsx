@@ -176,6 +176,30 @@ function sessionTitleCount(displayName: string): number {
   ).filter((node) => node.textContent === displayName).length;
 }
 
+async function selectWorkspaceFilter(label: string): Promise<void> {
+  const display = container.querySelector<HTMLElement>(
+    'button[aria-label="Display options"]',
+  );
+  expect(display).not.toBeNull();
+  await act(async () => click(display!, true));
+  const workspaceTrigger = Array.from(
+    document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+  ).find((item) => item.textContent?.startsWith('Workspace'));
+  expect(workspaceTrigger).toBeDefined();
+  await act(async () => {
+    workspaceTrigger!.focus();
+    workspaceTrigger!.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }),
+    );
+  });
+  const option = Array.from(
+    document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+  ).find((item) => item.textContent === label);
+  expect(option).toBeDefined();
+  await act(async () => click(option!, true));
+  await flushSidebar();
+}
+
 function findSessionPinButton(displayName: string): HTMLButtonElement {
   const titles = Array.from(
     container.querySelectorAll('[data-web-shell-session-title]'),
@@ -255,11 +279,21 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
     await act(async () =>
       click(
         container.querySelector<HTMLElement>(
-          'button[aria-label="Sort sessions"]',
+          'button[aria-label="Display options"]',
         )!,
         true,
       ),
     );
+    const sortBy = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent?.startsWith('Sort by'));
+    expect(sortBy).toBeDefined();
+    await act(async () => {
+      sortBy!.focus();
+      sortBy!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }),
+      );
+    });
     const choice = Array.from(
       document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
     ).find((item) => item.textContent === 'Last question');
@@ -436,6 +470,40 @@ describe('WebShellSidebar session pinning (issue #9465)', () => {
     // hidden from the unpinned list while the RPC is in flight.
     expect(pinnedListTitles()).toEqual(['Plain session']);
     expect(sessionTitleCount('Plain session')).toBe(1);
+  });
+
+  it('filters an in-flight optimistic pin when the workspace changes', async () => {
+    const workspaceCapabilities = {
+      ...organizationCapabilities,
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/tmp/other',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    connection.capabilities = workspaceCapabilities;
+    workspace.capabilities = workspaceCapabilities;
+    active.sessions = [makeSession('plain', { displayName: 'Plain session' })];
+    active.data = active.sessions;
+    workspaceActions.updateSessionOrganization.mockReturnValue(
+      new Promise(() => {}),
+    );
+    renderSidebar();
+    await flushSidebar();
+    act(() => click(findSessionPinButton('Plain session')));
+    await flushSidebar();
+    expect(pinnedListTitles()).toEqual(['Plain session']);
+    await selectWorkspaceFilter('other');
+    expect(pinnedListTitles()).toEqual([]);
   });
 
   it('appends an optimistic pin below existing pinned sessions', async () => {

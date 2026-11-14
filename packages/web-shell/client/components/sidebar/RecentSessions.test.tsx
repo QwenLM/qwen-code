@@ -2,7 +2,11 @@
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DaemonClient, DaemonSessionSummary } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonClient,
+  DaemonSessionSummary,
+  DaemonWorkspaceCapability,
+} from '@qwen-code/sdk/daemon';
 import {
   RecentSessions,
   sortRecentSessions,
@@ -37,6 +41,10 @@ async function render(
   refreshPaused = false,
   renderSessionOverride?: (entry: RecentSessionEntry) => ReactNode,
   sortBy?: 'updatedAt' | 'lastUserPromptAt',
+  scope?: {
+    workspaces: DaemonWorkspaceCapability[];
+    includeStandalone: boolean;
+  },
 ) {
   const client = (stableClient ??= {
     listWorkspaceSessionsPage,
@@ -48,17 +56,19 @@ async function render(
         client={client}
         onNewSession={() => {}}
         newSessionDisabled={false}
-        workspaces={[
-          { id: 'p', cwd: '/project', primary: true, trusted: true },
-          { id: 'other', cwd: '/other', primary: false, trusted: true },
-          {
-            id: 'untrusted',
-            cwd: '/untrusted',
-            primary: false,
-            trusted: false,
-          },
-        ]}
-        includeStandalone
+        workspaces={
+          scope?.workspaces ?? [
+            { id: 'p', cwd: '/project', primary: true, trusted: true },
+            { id: 'other', cwd: '/other', primary: false, trusted: true },
+            {
+              id: 'untrusted',
+              cwd: '/untrusted',
+              primary: false,
+              trusted: false,
+            },
+          ]
+        }
+        includeStandalone={scope?.includeStandalone ?? true}
         sourceMetadataEnabled
         organizationEnabled
         currentSessionId={currentSessionId}
@@ -180,6 +190,34 @@ describe('recent sessions', () => {
       '/project',
       expect.objectContaining({ cursor: 'next' }),
     );
+  });
+
+  it('does not render stale rows while the workspace scope changes', async () => {
+    listWorkspaceSessionsPage.mockImplementation(async (cwd: string) => ({
+      sessions: [session(`${cwd}-row`, '2026-10-20T12:00:00Z')],
+    }));
+    listStandaloneSessionsPage.mockResolvedValue({
+      sessions: [session('standalone-row', '2026-10-20T11:00:00Z')],
+    });
+    const renderRows = vi.fn((entry: RecentSessionEntry) => (
+      <button title={entry.workspaceCwd ?? 'standalone'}>
+        {entry.session.displayName}
+      </button>
+    ));
+    await render('standalone', false, renderRows);
+    renderRows.mockClear();
+    listWorkspaceSessionsPage.mockReturnValue(new Promise(() => {}));
+    await render('standalone', false, renderRows, undefined, {
+      workspaces: [
+        { id: 'other', cwd: '/other', primary: false, trusted: true },
+      ],
+      includeStandalone: false,
+    });
+    const renderedScopes = renderRows.mock.calls.map(
+      ([entry]) => entry.workspaceCwd,
+    );
+    expect(renderedScopes).not.toContain('/project');
+    expect(renderedScopes).not.toContain(undefined);
   });
 
   it('keeps existing row nodes visible while a session switch refresh is pending', async () => {
