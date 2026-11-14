@@ -84,6 +84,84 @@ const LINE_COMPARISON_PASSES: Array<(value: string) => string> = [
   (value) => value.trimEnd(),
 ];
 
+export interface EditRecoveryCandidate {
+  start: number;
+  end: number;
+  startLine: number;
+  endLine: number;
+  mismatchLine?: number;
+}
+
+/** Suggestions only; callers must never use this locator to authorize a write. */
+export function findEditRecoveryCandidates(
+  content: string,
+  oldString: string,
+): EditRecoveryCandidate[] {
+  if (!oldString) return [];
+  const exact: EditRecoveryCandidate[] = [];
+  let from = 0;
+  while (exact.length < 3) {
+    const start = content.indexOf(oldString, from);
+    if (start < 0) break;
+    const startLine = content.slice(0, start).split('\n').length;
+    exact.push({
+      start,
+      end: start + oldString.length,
+      startLine,
+      endLine: startLine + oldString.replace(/\n$/, '').split('\n').length - 1,
+    });
+    from = start + 1;
+  }
+  if (exact.length) return exact;
+
+  const lines = content.split('\n');
+  const oldLines = oldString.replace(/\n$/, '').split('\n');
+  const anchors = oldLines.flatMap((line, index) =>
+    line.trim().length >= 4 ? [{ line, index }] : [],
+  );
+  if (anchors.length < 2) return [];
+  const first = anchors[0];
+  const last = anchors[anchors.length - 1];
+  if (first.index === last.index) return [];
+  const offsets = [0];
+  for (const line of lines)
+    offsets.push(offsets[offsets.length - 1] + line.length + 1);
+  const candidates: EditRecoveryCandidate[] = [];
+  for (
+    let startLine = 0;
+    startLine + oldLines.length <= lines.length;
+    startLine++
+  ) {
+    if (
+      lines[startLine + first.index] !== first.line ||
+      lines[startLine + last.index] !== last.line
+    )
+      continue;
+    const mismatches = oldLines.flatMap((line, index) =>
+      lines[startLine + index] === line ? [] : [index],
+    );
+    if (
+      !mismatches.length ||
+      mismatches.length > Math.max(1, Math.floor(oldLines.length / 4))
+    )
+      continue;
+    const endLine = startLine + oldLines.length;
+    const end = Math.min(
+      content.length,
+      offsets[endLine] - (oldString.endsWith('\n') ? 0 : 1),
+    );
+    candidates.push({
+      start: offsets[startLine],
+      end,
+      startLine: startLine + 1,
+      endLine,
+      mismatchLine: startLine + mismatches[0] + 1,
+    });
+    if (candidates.length === 3) break;
+  }
+  return candidates;
+}
+
 function normalizeLineForComparison(value: string): string {
   return normalizeBasicCharacters(value).trimEnd();
 }

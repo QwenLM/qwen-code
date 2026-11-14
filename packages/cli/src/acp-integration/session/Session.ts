@@ -358,6 +358,12 @@ import {
   type ChannelWorkflowOrigin,
 } from '@qwen-code/channel-base';
 import { QWEN_CODE_SERVE_ENV } from '../../config/acp-channel-fallback.js';
+import {
+  copyEditReferenceBinding,
+  normalizeEditReference,
+} from '@qwen-code/qwen-code-core/tools/edit-references.js';
+import { StructuredToolError } from '@qwen-code/qwen-code-core/tools/tool-error.js';
+import { attachToolOutputRecovery } from '@qwen-code/qwen-code-core/tools/tool-output-recovery.js';
 import { ENV_ACP_REPEATED_TOOL_FAILURE_GUARD } from '../../config/shared-env-keys.js';
 import { normalizeSessionIdForLookup } from '../../config/session-id.js';
 import {
@@ -17259,11 +17265,14 @@ export class Session implements SessionContext {
       finishToolLifecycle(opts.status);
       spanError = opts.status === 'error' ? error.message : undefined;
       cleanupAgentToolResources();
-      const errorParts = errorResponse(
-        error,
-        toolName,
-        opts.status,
-        opts.errorType,
+      const errorParts = attachToolOutputRecovery(
+        errorResponse(error, toolName, opts.status, opts.errorType),
+        {
+          text:
+            opts.status === 'error' && error instanceof StructuredToolError
+              ? error.recoveryText
+              : undefined,
+        },
       );
       const modelErrorParts = withHookContext(errorParts, opts.status);
       if (toolName !== ToolNames.TODO_WRITE) {
@@ -17657,6 +17666,23 @@ export class Session implements SessionContext {
           return loopDetected ? { ...refusal, loopDetected } : refusal;
         }
 
+        if (canonicalToolName(toolName) === ToolNames.EDIT) {
+          try {
+            args = normalizeEditReference(this.config, args);
+          } catch (error) {
+            return earlyErrorResponse(
+              error instanceof Error ? error : new Error(String(error)),
+              toolName,
+              {
+                status: 'error',
+                errorType: ToolErrorType.INVALID_TOOL_PARAMS,
+                executionStatus: 'not_started',
+                recordInvalidToolParams: true,
+              },
+            );
+          }
+        }
+
         // ---- PreToolUse: once, before every input-dependent check ----
         // A replacement input then goes through the same gates, validation,
         // permission and approval as the model's input; the checks above fix
@@ -17702,7 +17728,14 @@ export class Session implements SessionContext {
               executionStatus: 'not_started',
             });
           }
-          if (preHookResult.updatedInput) args = preHookResult.updatedInput;
+          if (preHookResult.updatedInput) {
+            copyEditReferenceBinding(
+              this.config,
+              args,
+              preHookResult.updatedInput,
+            );
+            args = preHookResult.updatedInput;
+          }
         }
         const originalPolicyRequestArgs =
           policyToolName === ToolNames.SHELL ||
@@ -17794,6 +17827,7 @@ export class Session implements SessionContext {
         let toolBuildSucceeded = false;
         try {
           const buildInvocation = (input: Record<string, unknown>) => {
+            copyEditReferenceBinding(this.config, args, input);
             const built = appExecution
               ? appExecution.tool.buildForApp(
                   input,
@@ -19683,6 +19717,12 @@ export class Session implements SessionContext {
                   toolResult,
                   this.config,
                 );
+
+          if (!aborted && toolResult.recoveryText) {
+            responseParts = attachToolOutputRecovery(responseParts, {
+              text: toolResult.recoveryText,
+            });
+          }
 
           // A tool can fail "softly" by returning toolResult.error without
           // throwing, and can be cancelled mid-flight. Compute the real outcome

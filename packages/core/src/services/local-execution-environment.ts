@@ -8,6 +8,7 @@ import { stat } from 'node:fs/promises';
 import type { Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { EditTool } from '../tools/edit.js';
+import { disableEditReferences } from '../tools/edit-references.js';
 import { GlobTool } from '../tools/glob.js';
 import { GrepTool } from '../tools/grep.js';
 import { LSTool } from '../tools/ls.js';
@@ -95,6 +96,7 @@ export class LocalExecutionEnvironment implements ExecutionEnvironment {
     private readonly config: Config,
     options: LocalExecutionEnvironmentOptions = {},
   ) {
+    disableEditReferences(config);
     this.toolNames = options.toolNames;
     this.run = options.run;
     this.tools = createExecutionTools(config);

@@ -12452,6 +12452,15 @@ export class Config {
     return this.fileSystemService;
   }
 
+  supportsLocalFileReferences(): boolean {
+    // A delegated getter cannot authorize snapshots from the host filesystem.
+    return (
+      this.getFileSystemService === Config.prototype.getFileSystemService &&
+      this.fileSystemService.textFileIo === undefined &&
+      this.fileSystemService.constructor === StandardFileSystemService
+    );
+  }
+
   /**
    * Set a custom FileSystemService
    */

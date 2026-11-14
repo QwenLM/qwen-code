@@ -32,6 +32,7 @@ export class StructuredToolError extends Error {
   constructor(
     message: string,
     readonly errorType: ToolErrorType,
+    readonly recoveryText?: string,
   ) {
     super(message);
   }

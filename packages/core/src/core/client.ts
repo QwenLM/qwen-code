@@ -146,6 +146,10 @@ import {
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
 } from '../tools/tool-call.js';
 import { ToolMode } from '../tools/code-mode.js';
+import {
+  clearEditReferences,
+  invalidateDeliveredEditReferences,
+} from '../tools/edit-references.js';
 
 // Telemetry
 import {
@@ -3037,6 +3041,11 @@ export class LlmClient {
     signal?: AbortSignal,
   ): Promise<LlmChat> {
     signal?.throwIfAborted();
+    if (sessionStartSource === SessionStartSource.Compact) {
+      invalidateDeliveredEditReferences(this.config);
+    } else {
+      clearEditReferences(this.config);
+    }
     this.lastDeliveredMemoryTreeRevision = undefined;
     this.trustedUserAnswers.clear();
     this.forceFullIdeContext = true;
@@ -6795,6 +6804,7 @@ export class LlmClient {
     meta: MicrocompactMeta,
     logTag: string,
   ): Promise<void> {
+    invalidateDeliveredEditReferences(this.config);
     const fileReadCache = this.config.getFileReadCache();
     if (meta.unresolvedEvictedReads > 0) {
       debugLogger.debug(

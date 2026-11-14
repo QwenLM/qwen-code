@@ -13,7 +13,16 @@ const contracts: Record<string, { tool: string; fields: string[] }> = {
   [ToolNames.SHELL]: { tool: 'Bash', fields: ['command'] },
   [ToolNames.EDIT]: {
     tool: 'Edit',
-    fields: ['file_path', 'old_string', 'new_string', 'replace_all'],
+    fields: [
+      'file_path',
+      'old_string',
+      'new_string',
+      'replace_all',
+      'recovery_id',
+      'read_id',
+      'start_line',
+      'end_line',
+    ],
   },
   [ToolNames.WRITE_FILE]: { tool: 'Write', fields: ['file_path', 'content'] },
 };

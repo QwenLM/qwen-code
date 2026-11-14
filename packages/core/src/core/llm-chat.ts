@@ -94,6 +94,10 @@ import {
 } from './tokenLimits.js';
 import { hasCycleInSchema } from '../tools/tools.js';
 import { ToolNames, canonicalToolName } from '../tools/tool-names.js';
+import {
+  invalidateDeliveredEditReferences,
+  syncEditReferenceDelivery,
+} from '../tools/edit-references.js';
 import { clearLoadedSkillTracking } from '../tools/skill-utils.js';
 import * as fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -6217,6 +6221,20 @@ export class LlmChat {
       // successful response may anchor the next send.
       this.toolBudgetUsageAnchor = undefined;
       params.config?.abortSignal?.throwIfAborted();
+      const deliveredToolText: string[] = [];
+      const collectText = (value: unknown): void => {
+        if (typeof value === 'string') deliveredToolText.push(value);
+        else if (Array.isArray(value)) value.forEach(collectText);
+        else if (value && typeof value === 'object')
+          Object.values(value).forEach(collectText);
+      };
+      for (const content of requestContents) {
+        for (const part of content.parts ?? []) {
+          if (part.functionResponse)
+            collectText(part.functionResponse.response);
+        }
+      }
+      syncEditReferenceDelivery(this.config, deliveredToolText);
       const groups = new Map<ToolOutputProvenance, Part[]>();
       for (const content of requestContents)
         for (const part of content.parts ?? []) {
@@ -6967,6 +6985,7 @@ export class LlmChat {
     history: Content[],
     completedToolCallIds?: readonly string[],
   ): void {
+    if (!this.isForkedChat) invalidateDeliveredEditReferences(this.config);
     this.toolBudgetUsageAnchor = undefined;
     this.toolBudgetFixedInputVersion++;
     this.historyReplacementRevision++;
@@ -7009,6 +7028,7 @@ export class LlmChat {
     // sendMessageStream that pushed them has already finished or will
     // start fresh on the next call).
     if (this.history.length < prevLen && !this.isForkedChat) {
+      invalidateDeliveredEditReferences(this.config);
       // Truncation may have dropped a skill body; conservative clear
       // re-arms reload (see setHistory for the trade-off).
       clearLoadedSkillTracking(

@@ -88,7 +88,11 @@ import { ApprovalMode } from '../config/approval-mode.js';
 import { logToolCall } from '../telemetry/loggers.js';
 import { ToolCallEvent } from '../telemetry/types.js';
 import { InputFormat } from '../output/types.js';
-import { ToolErrorType } from '../tools/tool-error.js';
+import { StructuredToolError, ToolErrorType } from '../tools/tool-error.js';
+import {
+  copyEditReferenceBinding,
+  normalizeEditReference,
+} from '../tools/edit-references.js';
 import {
   DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
   DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
@@ -1251,15 +1255,21 @@ const createErrorResponse = (
   return {
     callId: request.callId,
     error,
-    responseParts: [
-      {
-        functionResponse: {
-          id: request.callId,
-          name: getModelFacingToolName(request),
-          response: { error: errorMessage },
+    responseParts: attachToolOutputRecovery(
+      [
+        {
+          functionResponse: {
+            id: request.callId,
+            name: getModelFacingToolName(request),
+            response: { error: errorMessage },
+          },
         },
+      ],
+      {
+        text:
+          error instanceof StructuredToolError ? error.recoveryText : undefined,
       },
-    ],
+    ),
     resultDisplay: resultDisplay ?? error.message,
     errorType,
     executionStatus,
@@ -2451,6 +2461,9 @@ export class CoreToolScheduler {
         return call;
       }
 
+      if (args && typeof args === 'object') {
+        copyEditReferenceBinding(this.config, call.invocation.params, args);
+      }
       const invocationOrError = runInRequestGoalContext(call.request, () =>
         this.buildInvocation(
           call.tool,
@@ -2829,7 +2842,9 @@ export class CoreToolScheduler {
     notifyOnCompletion = false,
   ): AnyToolInvocation | Error {
     try {
-      const invocation = tool.build(structuredClone(args));
+      const clonedArgs = structuredClone(args);
+      copyEditReferenceBinding(this.config, args, clonedArgs);
+      const invocation = tool.build(clonedArgs);
       const notificationAware = invocation as {
         setCompletionNotificationEnabled?: (enabled: boolean) => void;
       };
@@ -3576,6 +3591,26 @@ export class CoreToolScheduler {
               durationMs: 0,
             });
             continue;
+          }
+
+          if (canonicalName === ToolNames.EDIT) {
+            try {
+              reqInfo.args = normalizeEditReference(this.config, reqInfo.args);
+            } catch (error) {
+              newToolCalls.push({
+                status: 'error',
+                request: reqInfo,
+                tool: toolInstance,
+                response: createErrorResponse(
+                  reqInfo,
+                  error instanceof Error ? error : new Error(String(error)),
+                  ToolErrorType.INVALID_TOOL_PARAMS,
+                  'not_started',
+                ),
+                durationMs: 0,
+              });
+              continue;
+            }
           }
 
           // The call's one PreToolUse hook runs before every input-dependent
@@ -5871,6 +5906,7 @@ export class CoreToolScheduler {
       );
     }
     if (result.updatedInput) {
+      copyEditReferenceBinding(this.config, reqInfo.args, result.updatedInput);
       reqInfo.args = result.updatedInput;
       this.hookReplacedInputCallIds.add(callId);
     }

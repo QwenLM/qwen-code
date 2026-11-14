@@ -94,6 +94,26 @@ describe('Claude tool input views through the real Mod worker', () => {
         record_as_artifact: false,
       },
     },
+    {
+      native: 'edit',
+      tool: 'Edit',
+      args: {
+        file_path: '/file',
+        read_id: 'rd_fixture',
+        start_line: 10,
+        end_line: 12,
+        new_string: 'after',
+      },
+      patch: { new_string: 'reviewed' },
+      hidden: { modified_by_user: true },
+    },
+    {
+      native: 'edit',
+      tool: 'Edit',
+      args: { file_path: '/file', recovery_id: 'er_fixture' },
+      patch: { new_string: 'reviewed' },
+      hidden: { modified_by_user: true },
+    },
   ])(
     'projects $tool inputs and keeps hidden native arguments and result references',
     async ({ native, tool, args, patch, hidden }) => {

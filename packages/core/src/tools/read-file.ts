@@ -19,6 +19,11 @@ import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { getCurrentToolCallSource } from '../code-mode/tool-call-runtime.js';
 import type { ReadFileMediaLimits } from '../utils/inline-media.js';
 import { ToolErrorType } from './tool-error.js';
+import {
+  EDIT_REFERENCE_MAX_BYTES,
+  prepareReadReference,
+  supportsEditReferences,
+} from './edit-references.js';
 
 import type { PartListUnion, FunctionDeclaration } from '@google/genai';
 import type { PermissionDecision } from '../permissions/types.js';
@@ -277,6 +282,9 @@ class ReadFileToolInvocation extends BaseToolInvocation<
         signal,
         mediaLimits: this.mediaLimits,
         readSource: source,
+        ...(supportsEditReferences(this.config) && !isAutoMem
+          ? { captureTextSnapshotMaxBytes: EDIT_REFERENCE_MAX_BYTES }
+          : {}),
       },
     );
     signal.throwIfAborted();
@@ -373,6 +381,17 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       llmContent = result.llmContent || '';
     }
 
+    const reference =
+      result.textSnapshot && result.linesShown
+        ? prepareReadReference(this.config, {
+            filePath: absPath,
+            snapshot: result.textSnapshot,
+            startLine: result.linesShown[0],
+            endLine: result.textSnapshot.completeEndLine,
+          })
+        : undefined;
+    if (reference) llmContent = reference.recoveryText;
+
     // For memory files, prepend a per-file staleness caveat so the model knows
     // the content is a point-in-time snapshot and may be stale.
     if (typeof llmContent === 'string' && isAutoMem) {
@@ -412,6 +431,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
 
     const toolResult: ToolResult = {
       llmContent,
+      ...(reference ? { recoveryText: reference.recoveryText } : {}),
       // Self-managed paging may have capped this body under a threshold the
       // scheduler never sees; re-reading just to count the dropped part is
       // the allocation the paging avoids, so declare the raw size unknown

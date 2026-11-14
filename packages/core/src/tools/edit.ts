@@ -68,7 +68,26 @@ import {
   findLineBasedMatchOffsets,
   maybeAugmentOldStringForDeletion,
   normalizeEditStrings,
+  findEditRecoveryCandidates,
 } from '../utils/editHelper.js';
+import {
+  consumeEditReference,
+  copyEditReferenceBinding,
+  EDIT_RECOVERY_MAX_BYTES,
+  EDIT_RECOVERY_MAX_LINES,
+  getEditReferenceBinding,
+  normalizeEditReference,
+  prepareRecoveryReference,
+  prepareReadReference,
+  readEditReferenceSnapshot,
+  supportsEditReferences,
+  validateEditReferenceSnapshot,
+} from './edit-references.js';
+import { getFileReadDefaultPermission } from './file-read-permission.js';
+import {
+  buildPermissionCheckContext,
+  evaluatePermissionRules,
+} from '../core/permission-helpers.js';
 import {
   buildWorkspaceArtifactCandidate,
   formatRecordArtifactReminder,
@@ -158,7 +177,12 @@ interface CalculatedEdit {
   currentContent: string | null;
   newContent: string;
   occurrences: number;
-  error?: { display: string; raw: string; type: ToolErrorType };
+  error?: {
+    display: string;
+    raw: string;
+    type: ToolErrorType;
+    recoveryText?: string;
+  };
   isNewFile: boolean;
   /** Detected encoding of the existing file (e.g. 'utf-8', 'gbk') */
   encoding: string;
@@ -178,6 +202,113 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     return [{ path: this.params.file_path }];
   }
 
+  private async recoveryError(
+    error: NonNullable<CalculatedEdit['error']>,
+    content: string | null,
+    signal?: AbortSignal,
+  ): Promise<NonNullable<CalculatedEdit['error']>> {
+    if (
+      error.type !== ToolErrorType.EDIT_NO_OCCURRENCE_FOUND &&
+      error.type !== ToolErrorType.FILE_CHANGED_SINCE_READ
+    )
+      return error;
+    try {
+      const permissionManager = this.config.getPermissionManager?.();
+      if (
+        (await permissionManager?.getToolRegistrationStatus(
+          ReadFileTool.Name,
+        )) === 'disabled'
+      )
+        return error;
+      const permission = await evaluatePermissionRules(
+        permissionManager,
+        getFileReadDefaultPermission(this.config, this.params.file_path),
+        buildPermissionCheckContext(
+          ReadFileTool.Name,
+          { file_path: this.params.file_path },
+          this.config.getTargetDir(),
+        ),
+      );
+      if (permission.finalPermission !== 'allow') return error;
+      const snapshot = supportsEditReferences(this.config)
+        ? await readEditReferenceSnapshot(this.params.file_path, signal)
+        : undefined;
+      const current = snapshot?.content.replace(/\r\n/g, '\n') ?? content;
+      if (current === null) return error;
+      const candidates = findEditRecoveryCandidates(
+        current,
+        this.params.old_string.replace(/\r\n/g, '\n'),
+      );
+      if (candidates.length !== 1) {
+        const locations = candidates
+          .map((item) => `${item.startLine}-${item.endLine}`)
+          .join(', ');
+        return locations
+          ? {
+              ...error,
+              raw: `${error.raw}\nPossible target line ranges: ${locations}. Read and disambiguate the target; no recovery reference was issued.`,
+            }
+          : error;
+      }
+      const candidate = candidates[0];
+      const text = current.slice(candidate.start, candidate.end);
+      const guidance = `Read the target with read_file({file_path: ${JSON.stringify(this.params.file_path)}, offset: ${candidate.startLine - 1}, limit: ${Math.min(candidate.endLine - candidate.startLine + 1, EDIT_RECOVERY_MAX_LINES)}}).`;
+      const diagnostic =
+        candidate.mismatchLine === undefined
+          ? 'The submitted old text occurs exactly once in the latest snapshot. Review this target before retrying.'
+          : `The submitted old_string differs from this candidate at file line ${candidate.mismatchLine}. This is a suggestion, not an applied match.`;
+      const reference =
+        snapshot && !this.params.replace_all
+          ? prepareRecoveryReference(this.config, {
+              filePath: this.params.file_path,
+              snapshot,
+              ...candidate,
+              newString: this.params.new_string,
+              diagnostic,
+            })
+          : undefined;
+      let block =
+        reference?.recoveryText ??
+        `${diagnostic}\nCurrent candidate, lines ${candidate.startLine}-${candidate.endLine}:\n<current_edit_target>\n${text}\n</current_edit_target>`;
+      if (
+        candidate.endLine - candidate.startLine + 1 > EDIT_RECOVERY_MAX_LINES ||
+        Buffer.byteLength(block) > EDIT_RECOVERY_MAX_BYTES
+      )
+        block = guidance;
+      return {
+        ...error,
+        raw: `${error.raw}\n\n${block}`,
+        ...(reference ? { recoveryText: reference.recoveryText } : {}),
+      };
+    } catch (cause) {
+      if (signal?.aborted) throw cause;
+      return error;
+    }
+  }
+
+  private async referenceFailure(
+    signal?: AbortSignal,
+  ): Promise<CalculatedEdit> {
+    return {
+      currentContent: null,
+      newContent: '',
+      occurrences: 0,
+      error: await this.recoveryError(
+        {
+          display: 'The edit reference is stale or no longer available.',
+          raw: `The edit reference for ${this.params.file_path} is stale or no longer available. No changes were made. Read the current file or review a newly returned recovery target.`,
+          type: ToolErrorType.FILE_CHANGED_SINCE_READ,
+        },
+        null,
+        signal,
+      ),
+      isNewFile: false,
+      encoding: 'utf-8',
+      bom: false,
+      lineEnding: 'lf',
+    };
+  }
+
   /**
    * Calculates the potential outcome of an edit operation.
    * @param params Parameters for the edit operation
@@ -189,11 +320,33 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     original?: TextFileObservation,
     signal?: AbortSignal,
   ): Promise<CalculatedEdit> {
-    const observation =
-      original ??
-      (await this.config
-        .getFileSystemService()
-        .textFileIo?.inspect(params.file_path, signal));
+    const reference = getEditReferenceBinding(this.config, params);
+    const referenceSnapshot = reference
+      ? await readEditReferenceSnapshot(params.file_path, signal).catch(
+          () => undefined,
+        )
+      : undefined;
+    if (
+      reference &&
+      !validateEditReferenceSnapshot(this.config, params, referenceSnapshot)
+    )
+      return this.referenceFailure(signal);
+    const observation = referenceSnapshot
+      ? {
+          kind: 'file' as const,
+          response: {
+            content: referenceSnapshot.content,
+            _meta: {
+              bom: referenceSnapshot.bom,
+              encoding: referenceSnapshot.encoding,
+            },
+          },
+          stats: referenceSnapshot.stats,
+        }
+      : (original ??
+        (await this.config
+          .getFileSystemService()
+          .textFileIo?.inspect(params.file_path, signal)));
     const sandboxFileVersion = captureRuntimeFileVersion(
       this.config,
       params.file_path,
@@ -207,9 +360,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     let finalNewString = params.new_string;
     let finalOldString = params.old_string;
     let occurrences = 0;
-    let error:
-      | { display: string; raw: string; type: ToolErrorType }
-      | undefined = undefined;
+    let error: NonNullable<CalculatedEdit['error']> | undefined = undefined;
     let useBOM = false;
     let detectedEncoding = 'utf-8';
     let detectedLineEnding: LineEnding = 'lf';
@@ -225,7 +376,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     // had — is now caught. ENOENT (genuinely absent) returns ok:true
     // and falls through to the new-file path; an existing file that
     // appeared in the race window is rejected as unread.
-    if (!this.config.getFileReadCacheDisabled()) {
+    if (!reference && !this.config.getFileReadCacheDisabled()) {
       const decision = await checkPriorRead(
         this.config.getFileReadCache(),
         params.file_path,
@@ -236,11 +387,15 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           currentContent: null,
           newContent: '',
           occurrences: 0,
-          error: {
-            display: decision.displayMessage,
-            raw: decision.rawMessage,
-            type: decision.type,
-          },
+          error: await this.recoveryError(
+            {
+              display: decision.displayMessage,
+              raw: decision.rawMessage,
+              type: decision.type,
+            },
+            null,
+            signal,
+          ),
           isNewFile: false,
           encoding: 'utf-8',
           bom: false,
@@ -287,7 +442,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     // window: a stale state now (mtime/size drifted) means we read
     // bytes the cache no longer trusts, and we reject before
     // returning a CalculatedEdit that the call sites would honour.
-    if (fileExists && !this.config.getFileReadCacheDisabled()) {
+    if (fileExists && !reference && !this.config.getFileReadCacheDisabled()) {
       const postDecision = await checkPriorRead(
         this.config.getFileReadCache(),
         params.file_path,
@@ -308,11 +463,15 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           currentContent: null,
           newContent: '',
           occurrences: 0,
-          error: {
-            display: postDecision.displayMessage,
-            raw: postDecision.rawMessage,
-            type: postDecision.type,
-          },
+          error: await this.recoveryError(
+            {
+              display: postDecision.displayMessage,
+              raw: postDecision.rawMessage,
+              type: postDecision.type,
+            },
+            null,
+            signal,
+          ),
           isNewFile: false,
           encoding: 'utf-8',
           bom: false,
@@ -321,11 +480,13 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       }
     }
 
-    const normalizedStrings = normalizeEditStrings(
-      currentContent,
-      finalOldString,
-      finalNewString,
-    );
+    const normalizedStrings = reference
+      ? {
+          oldString: finalOldString,
+          newString: finalNewString.replace(/\r\n/g, '\n'),
+          lineBasedMatch: false,
+        }
+      : normalizeEditStrings(currentContent, finalOldString, finalNewString);
     finalOldString = normalizedStrings.oldString;
     finalNewString = normalizedStrings.newString;
     let matchOffsets: number[] | undefined;
@@ -341,14 +502,17 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         type: ToolErrorType.FILE_NOT_FOUND,
       };
     } else if (currentContent !== null) {
-      finalOldString = maybeAugmentOldStringForDeletion(
-        currentContent,
-        finalOldString,
-        finalNewString,
-        normalizedStrings.lineBasedMatch,
-      );
+      if (!reference)
+        finalOldString = maybeAugmentOldStringForDeletion(
+          currentContent,
+          finalOldString,
+          finalNewString,
+          normalizedStrings.lineBasedMatch,
+        );
 
-      if (normalizedStrings.lineBasedMatch) {
+      if (reference) {
+        matchOffsets = [reference.start];
+      } else if (normalizedStrings.lineBasedMatch) {
         matchOffsets = findLineBasedMatchOffsets(
           currentContent,
           finalOldString,
@@ -447,7 +611,9 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       newContent,
       sandboxFileVersion,
       occurrences,
-      error,
+      error: error
+        ? await this.recoveryError(error, currentContent, signal)
+        : undefined,
       isNewFile,
       bom: useBOM,
       encoding: detectedEncoding,
@@ -516,7 +682,11 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       // detail (file path, stale-vs-unread distinction, "without
       // offset / limit / pages" hint) that `execute()` already
       // surfaces — confirmation-required flows should not lose it.
-      throw new StructuredToolError(editData.error.raw, editData.error.type);
+      throw new StructuredToolError(
+        editData.error.raw,
+        editData.error.type,
+        editData.error.recoveryText,
+      );
     }
 
     const fileName = path.basename(this.params.file_path);
@@ -607,6 +777,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     if (editData.error) {
       return {
         llmContent: editData.error.raw,
+        recoveryText: editData.error.recoveryText,
         returnDisplay: `Error: ${editData.error.display}`,
         error: {
           message: editData.error.raw,
@@ -666,7 +837,23 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       // confirmation-pending Edit would otherwise clobber it
       // without enforcement. ENOENT inside checkPriorRead returns
       // ok:true so genuine new-file creation is unaffected.
-      if (!this.config.getFileReadCacheDisabled()) {
+      if (getEditReferenceBinding(this.config, this.params)) {
+        const snapshot = await readEditReferenceSnapshot(
+          this.params.file_path,
+          signal,
+        ).catch(() => undefined);
+        if (
+          !validateEditReferenceSnapshot(this.config, this.params, snapshot)
+        ) {
+          const failure = await this.referenceFailure(signal);
+          return {
+            llmContent: failure.error!.raw,
+            recoveryText: failure.error!.recoveryText,
+            returnDisplay: failure.error!.display,
+            error: { message: failure.error!.raw, type: failure.error!.type },
+          };
+        }
+      } else if (!this.config.getFileReadCacheDisabled()) {
         const writeDecision = await checkPriorRead(
           this.config.getFileReadCache(),
           this.params.file_path,
@@ -685,12 +872,22 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
             path: this.params.file_path,
             reason: writeDecision.type,
           });
-          return {
-            llmContent: writeDecision.rawMessage,
-            returnDisplay: `Error: ${writeDecision.displayMessage}`,
-            error: {
-              message: writeDecision.rawMessage,
+          const failure = await this.recoveryError(
+            {
+              raw: writeDecision.rawMessage,
+              display: writeDecision.displayMessage,
               type: writeDecision.type,
+            },
+            null,
+            signal,
+          );
+          return {
+            llmContent: failure.raw,
+            recoveryText: failure.recoveryText,
+            returnDisplay: `Error: ${failure.display}`,
+            error: {
+              message: failure.raw,
+              type: failure.type,
             },
           };
         }
@@ -747,6 +944,8 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           },
         });
       }
+
+      consumeEditReference(this.config, this.params);
 
       // Track AI contribution for commit attribution
       if (!mutation && !this.params.modified_by_user) {
@@ -855,13 +1054,37 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         editData.currentContent,
         editData.newContent,
       );
+      let recoveryText: string | undefined;
       if (snippetResult) {
-        const snippetText = `Showing lines ${snippetResult.startLine}-${snippetResult.endLine} of ${snippetResult.totalLines} from the edited file:\n\n---\n\n${snippetResult.content}`;
+        if (supportsEditReferences(this.config)) {
+          const snapshot = await readEditReferenceSnapshot(
+            this.params.file_path,
+            signal,
+          ).catch(() => undefined);
+          if (
+            snapshot &&
+            snapshot.content.replace(/\r\n/g, '\n') === editData.newContent
+          ) {
+            recoveryText = prepareReadReference(this.config, {
+              filePath: this.params.file_path,
+              snapshot,
+              startLine: snippetResult.startLine,
+              endLine: Math.min(
+                snippetResult.endLine,
+                (snapshot.content.match(/[^\n]*\n|[^\n]+$/g) ?? []).length,
+              ),
+            })?.recoveryText;
+          }
+        }
+        const snippetText =
+          recoveryText ??
+          `Showing lines ${snippetResult.startLine}-${snippetResult.endLine} of ${snippetResult.totalLines} from the edited file:\n\n---\n\n${snippetResult.content}`;
         llmSuccessMessageParts.push(snippetText);
       }
 
       return {
         llmContent: llmSuccessMessageParts.join(' '),
+        ...(recoveryText ? { recoveryText } : {}),
         returnDisplay: displayResult,
         ...(artifact ? { artifacts: [artifact] } : {}),
       };
@@ -921,7 +1144,7 @@ Expectation for required parameters:
 2. \`old_string\` MUST be the exact literal text to replace (including all whitespace, indentation, newlines, and surrounding code etc.).
 3. \`new_string\` MUST be the exact literal text to replace \`old_string\` with (also including all whitespace, indentation, newlines, and surrounding code etc.). Ensure the resulting code is correct and idiomatic.
 4. NEVER escape \`old_string\` or \`new_string\`, that would break the exact literal text requirement.
-**Important:** If ANY of the above are not satisfied, the tool will fail. CRITICAL for \`old_string\`: Must uniquely identify the single instance to change. Include at least 3 lines of context BEFORE and AFTER the target text, matching whitespace and indentation precisely. If this string matches multiple locations, or does not match exactly, the tool will fail.`,
+**Important:** If ANY of the above are not satisfied, the tool will fail. CRITICAL for \`old_string\`: Must uniquely identify the single instance to change. Include at least 3 lines of context BEFORE and AFTER the target text, matching whitespace and indentation precisely. If this string matches multiple locations, or does not match exactly, the tool will fail.${supportsEditReferences(config) ? '\n\nAlternatively, use a delivered recovery_id with file_path to retry its exact current target without old_string. Omit new_string to reuse the failed replacement, or provide a correction. A delivered read_id with inclusive start_line/end_line and new_string replaces those complete lines without old_string. A newline-terminated range keeps its ending newline unless deleted. References are session-scoped, expire if the file or retained evidence changes, and cannot be combined with old_string or replace_all.' : ''}`,
       Kind.Edit,
       {
         properties: {
@@ -949,8 +1172,47 @@ Expectation for required parameters:
             type: 'boolean',
             description: 'Refresh existing only.',
           },
+          ...(supportsEditReferences(config)
+            ? {
+                recovery_id: {
+                  type: 'string',
+                  description:
+                    'A recovery_id delivered with the complete current target in an edit failure.',
+                },
+                read_id: {
+                  type: 'string',
+                  description:
+                    'A read_id delivered with complete raw lines by read_file.',
+                },
+                start_line: {
+                  type: 'integer',
+                  minimum: 1,
+                  description:
+                    'Inclusive 1-based first line within the read_id snapshot.',
+                },
+                end_line: {
+                  type: 'integer',
+                  minimum: 1,
+                  description:
+                    'Inclusive 1-based last line within the read_id snapshot.',
+                },
+              }
+            : {}),
         },
-        required: ['file_path', 'old_string', 'new_string'],
+        required: supportsEditReferences(config)
+          ? ['file_path']
+          : ['file_path', 'old_string', 'new_string'],
+        ...(supportsEditReferences(config)
+          ? {
+              anyOf: [
+                { required: ['old_string', 'new_string'] },
+                { required: ['recovery_id'] },
+                {
+                  required: ['read_id', 'start_line', 'end_line', 'new_string'],
+                },
+              ],
+            }
+          : {}),
         type: 'object',
       },
     );
@@ -964,6 +1226,19 @@ Expectation for required parameters:
   protected override validateToolParamValues(
     params: EditToolParams,
   ): string | null {
+    if (
+      typeof params.old_string !== 'string' ||
+      typeof params.new_string !== 'string'
+    )
+      return 'old_string and new_string must be strings, or use a valid delivered edit reference.';
+    const reference = getEditReferenceBinding(this.config, params);
+    if (
+      reference?.reference.kind === 'read' &&
+      params.old_string.endsWith('\n') &&
+      params.new_string &&
+      !params.new_string.endsWith('\n')
+    )
+      return 'A whole-line replacement must retain its final newline, or use an empty new_string to delete the range.';
     // Normalize shell-escaped paths (e.g. "my\ file.txt" → "my file.txt")
     // that may reach the LLM via at-completion or manual typing.
     params.file_path = unescapePath(params.file_path.trim());
@@ -994,6 +1269,18 @@ Expectation for required parameters:
     return new EditToolInvocation(this.config, params);
   }
 
+  override build(
+    params: EditToolParams,
+  ): ToolInvocation<EditToolParams, ToolResult> {
+    const resolved = normalizeEditReference(
+      this.config,
+      params as unknown as Record<string, unknown>,
+    );
+    const invocation = super.build(resolved as unknown as EditToolParams);
+    copyEditReferenceBinding(this.config, resolved, invocation.params);
+    return invocation;
+  }
+
   override toAutoClassifierInput(
     params: EditToolParams,
   ): Record<string, unknown> {
@@ -1018,9 +1305,29 @@ Expectation for required parameters:
   }
 
   getModifyContext(signal: AbortSignal): ModifyContext<EditToolParams> {
+    const readReferenceContent = async (
+      params: EditToolParams,
+    ): Promise<string | undefined> => {
+      if (!getEditReferenceBinding(this.config, params)) return undefined;
+      const snapshot = await readEditReferenceSnapshot(
+        params.file_path,
+        signal,
+      );
+      if (
+        !snapshot ||
+        !validateEditReferenceSnapshot(this.config, params, snapshot)
+      )
+        throw new StructuredToolError(
+          'The edit reference is stale. Read the current file before modifying this proposal.',
+          ToolErrorType.FILE_CHANGED_SINCE_READ,
+        );
+      return snapshot.content;
+    };
     return {
       getFilePath: (params: EditToolParams) => params.file_path,
       getCurrentContent: async (params: EditToolParams): Promise<string> => {
+        const referenceContent = await readReferenceContent(params);
+        if (referenceContent !== undefined) return referenceContent;
         const observation = await this.config
           .getFileSystemService()
           .textFileIo?.inspect(params.file_path, signal);
@@ -1044,6 +1351,20 @@ Expectation for required parameters:
         }
       },
       getProposedContent: async (params: EditToolParams): Promise<string> => {
+        const reference = getEditReferenceBinding(this.config, params);
+        const referenceContent = await readReferenceContent(params);
+        if (reference && referenceContent !== undefined) {
+          const proposed = applyReplacement(
+            referenceContent.replace(/\r\n/g, '\n'),
+            params.old_string,
+            params.new_string.replace(/\r\n/g, '\n'),
+            false,
+            [reference.start],
+          );
+          return detectLineEnding(referenceContent) === 'crlf'
+            ? ensureCrlfLineEndings(proposed)
+            : proposed;
+        }
         const observation = await this.config
           .getFileSystemService()
           .textFileIo?.inspect(params.file_path, signal);

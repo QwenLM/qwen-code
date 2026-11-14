@@ -5,6 +5,7 @@
  */
 
 import fs from 'node:fs';
+import { createHash } from 'node:crypto';
 import fsPromises from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
 import {
@@ -73,6 +74,7 @@ import {
   renderImageBufferOverview,
 } from './image-view.js';
 import { PIPELINE_IMAGE_MIME_TYPES } from './request-tokenizer/supportedImageFormats.js';
+import { hasVerifiableInode } from './file-identity.js';
 
 const debugLogger = createDebugLogger('FILE_UTILS');
 const CANONICAL_IMAGE_MIME_TYPES = new Set([
@@ -1067,6 +1069,14 @@ export interface ProcessedFileReadResult {
    * mutated file rather than the file the read returned.
    */
   stats?: import('node:fs').Stats;
+  textSnapshot?: {
+    content: string;
+    digest: string;
+    stats: import('node:fs').Stats;
+    encoding: string;
+    bom: boolean;
+    completeEndLine: number;
+  };
   /**
    * Structured context for a PDF rendered specifically for a text-only
    * model's vision bridge. Callers must either replace the image parts with a
@@ -1147,6 +1157,7 @@ export interface ProcessSingleFileContentOptions {
   textFileMaxScanBytes?: number;
   /** Reuse a classification already performed by a validated caller. */
   fileType?: FileType;
+  captureTextSnapshotMaxBytes?: number;
 }
 
 /**
@@ -1625,7 +1636,72 @@ export async function processSingleFileContent(
         const maxOutputBytes = getRangeReadByteLimit(config);
         const readTextFileFromHandle = fileSystemService.readTextFileFromHandle;
         let readResult: ReadTextFileResponse;
-        if (descriptor) {
+        let textSnapshot:
+          | Omit<
+              NonNullable<ProcessedFileReadResult['textSnapshot']>,
+              'completeEndLine'
+            >
+          | undefined;
+        if (
+          options.captureTextSnapshotMaxBytes !== undefined &&
+          stats.isFile() &&
+          stats.size > 0 &&
+          hasVerifiableInode(stats.ino) &&
+          stats.size <= options.captureTextSnapshotMaxBytes &&
+          !options.textFileHandle
+        ) {
+          const handle =
+            descriptor?.fileHandle ??
+            (await fsPromises.open(
+              contentPath,
+              fs.constants.O_RDONLY |
+                fs.constants.O_NONBLOCK |
+                fs.constants.O_NOCTTY,
+            ));
+          const sameObservation = (observed: import('node:fs').Stats) =>
+            stats.dev === observed.dev &&
+            stats.ino === observed.ino &&
+            stats.size === observed.size &&
+            stats.mtimeMs === observed.mtimeMs &&
+            stats.ctimeMs === observed.ctimeMs;
+          try {
+            if (sameObservation(await handle.stat())) {
+              const bytes = await readFileHandleBytes(
+                handle,
+                stats.size,
+                signal,
+              );
+              if (
+                bytes.length === stats.size &&
+                sameObservation(await handle.stat())
+              ) {
+                const decoded = await decodeBufferWithEncodingInfoAsync(bytes);
+                textSnapshot = {
+                  ...decoded,
+                  stats,
+                  digest: createHash('sha256').update(bytes).digest('hex'),
+                };
+              }
+            }
+          } finally {
+            if (!descriptor) await handle.close();
+          }
+        }
+        if (textSnapshot) {
+          const rawLines = textSnapshot.content
+            .replace(/\r\n/g, '\n')
+            .split('\n');
+          const start = offset ?? 0;
+          const end = start + (limit ?? config.getTruncateToolOutputLines());
+          readResult = {
+            content: rawLines.slice(start, end).join('\n'),
+            _meta: {
+              encoding: textSnapshot.encoding,
+              bom: textSnapshot.bom,
+              originalLineCount: rawLines.length,
+            },
+          };
+        } else if (descriptor) {
           const { content, ...metadata } = await readTextContentRangeFromHandle(
             descriptor.fileHandle,
             {
@@ -1659,7 +1735,9 @@ export async function processSingleFileContent(
           });
         }
         const { content, _meta } = readResult;
-        const selectedLines = content.split('\n').map((line) => line.trimEnd());
+        const selectedLines = content
+          .split('\n')
+          .map((line) => (textSnapshot ? line : line.trimEnd()));
         const startLine = offset || 0;
         const selectedLineCount =
           content.length === 0 ? 0 : selectedLines.length;
@@ -1759,6 +1837,18 @@ export async function processSingleFileContent(
           originalLineCountExact,
           linesShown: [startLine + 1, actualEndLine],
           stats,
+          ...(textSnapshot && !contentLengthTruncated
+            ? {
+                textSnapshot: {
+                  ...textSnapshot,
+                  completeEndLine: Math.min(
+                    actualEndLine,
+                    (textSnapshot.content.match(/[^\n]*\n|[^\n]+$/g) ?? [])
+                      .length,
+                  ),
+                },
+              }
+            : {}),
         };
       }
       case 'image': {
