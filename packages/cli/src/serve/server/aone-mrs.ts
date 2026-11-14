@@ -76,7 +76,8 @@ export function setA1ExecForTest(exec?: A1Exec): void {
 
 export const A1_TIMEOUT_MS = 20_000;
 export const A1_MAX_BUFFER = 16 * 1024 * 1024;
-const GIT_ORIGIN_TIMEOUT_MS = 5_000;
+/** Exported so the suites derive their probe budget instead of copying it. */
+export const GIT_ORIGIN_TIMEOUT_MS = 5_000;
 /** Own budget for the `a1 --version` probe (not the git origin's). */
 export const A1_VERSION_TIMEOUT_MS = 10_000;
 /** Display cap for surfaced a1 error messages. */
@@ -167,6 +168,10 @@ export function mapAoneMrState(raw: string | undefined): SessionPrState {
 export async function resolveAoneWorkspaceRepo(
   workspaceCwd: string,
   env?: Readonly<Record<string, string | undefined>>,
+  // Test seam: the suites pass a generous probe budget so a saturated host
+  // cannot turn the origin spawn into a flake; production callers keep the
+  // GIT_ORIGIN_TIMEOUT_MS default.
+  originTimeoutMs: number = GIT_ORIGIN_TIMEOUT_MS,
 ): Promise<AoneWorkspaceRepo | undefined> {
   const gitRoot = findGitRoot(workspaceCwd);
   if (!gitRoot) return undefined;
@@ -177,7 +182,7 @@ export async function resolveAoneWorkspaceRepo(
       ['remote', 'get-url', 'origin'],
       {
         cwd: gitRoot,
-        timeout: GIT_ORIGIN_TIMEOUT_MS,
+        timeout: originTimeoutMs,
         encoding: 'utf8',
         windowsHide: true,
         // Same sanitization as every sibling git spawn in these paths —
