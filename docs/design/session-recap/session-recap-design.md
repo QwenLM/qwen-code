@@ -213,6 +213,18 @@ The `.then` callback **re-checks** `isIdleRef.current`: if the user has
 started a new turn while the LLM was running, the late-arriving recap
 is dropped to avoid inserting it mid-turn.
 
+### Web Shell host
+
+The Web Shell (`packages/web-shell/client/App.tsx`) implements the
+auto-trigger itself against `document.visibilitychange` rather than
+`useAwaySummary`; the table above describes the terminal host only. Two
+behaviours differ by design:
+
+- The away trigger is a hidden tab, not terminal blur.
+- A return that lands mid-turn is **dropped, not deferred** — the handler
+  clears `hiddenAtRef` before the streaming check, so there is no re-fire
+  when the turn finishes.
+
 The `.finally` clears `recapPendingRef`, and clears `inFlightRef` only
 if `inFlightRef.current === controller` (so it doesn't overwrite a
 newer controller).

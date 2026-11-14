@@ -227,11 +227,11 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.description.general.enableAutoUpdate': '启动时自动检查并安装更新。',
   'settings.label.general.showSessionRecap': '显示会话回顾',
   'settings.description.general.showSessionRecap':
-    '离开终端一段时间后返回时，自动显示一行“上次停在这里”的回顾。默认关闭。也可以随时使用 /recap 手动触发。',
+    '离开一段时间后返回时，自动显示一行“上次停在这里”的回顾（终端失焦，或 Web Shell 标签页被切到后台）。默认关闭。也可以随时使用 /recap 手动触发。',
   'settings.label.general.sessionRecapAwayThresholdMinutes':
     '会话回顾离开阈值（分钟）',
   'settings.description.general.sessionRecapAwayThresholdMinutes':
-    '终端失焦多少分钟后，下一次重新聚焦时触发自动回顾。默认与 Claude Code 一致为 5 分钟；如果只是短暂切换窗口，可以调高。',
+    '离开多少分钟后，下一次回来时触发自动回顾（终端失焦，或 Web Shell 标签页被切到后台）。默认与 Claude Code 一致为 5 分钟；如果只是短暂切换窗口，可以调高。',
   'settings.label.general.cleanupPeriodDays': '清理周期（天）',
   'settings.description.general.cleanupPeriodDays':
     '~/.qwen/file-history/ 中用于 /rewind 的会话备份、以及 runtime debug/ 目录下的会话 debug 日志的保留天数。后台清理最多每天运行一次。设为 0 表示最小保留（约 1 小时），仍会保护最近一小时触碰过的会话和当前活动会话。',
