@@ -184,6 +184,13 @@ arm retires a `ci_failure` (pending or parked, at detection or recovery), the
 pin is cleared (if it names the key's SHA) and the matching fired-ring prefix
 entries are removed, so a later genuine failure on the same head fires again.
 A delivered red keeps both suppressors; a head advance drops the pin as before.
+At recovery the release is saved to the watch state BEFORE the dead-letter
+record is written: the recovery dead-letter guard completes a retire on a later
+pass without re-deriving the release, so the release must already be durable
+before the record that lets that guard remove the task exists (a failed release
+save leaves the parked task, and no dead-letter, for the next recovery to fold
+again). The release is fact-driven — CI is positively green on this arm — so it
+is correct even if the dead-letter write then fails and the task retries.
 Retiring a parked predecessor also unblocks the per-PR drain ordering guard,
 so the surviving net `head_change` delivers without waiting for the stale
 event's horizon.
@@ -397,7 +404,7 @@ byte-identical entries for `en`).
 
 ## Validation plan
 
-- Unit tests (collocated, `GithubAdapter.test.ts`, 64 cases in the
+- Unit tests (collocated, `GithubAdapter.test.ts`, 65 cases in the
   `startup backlog` suite): each folding arm on pending events and parked
   tasks (head advanced, CI recovered, conflicts resolved, PR reopened, round
   trip), fact-driven retry after a failed dead-letter write, recovery-time
@@ -408,7 +415,9 @@ byte-identical entries for `en`).
   `watch_coalesced` journal row and end-to-end `headChangeFrom` minting,
   coalescer skipping a dead-lettered pending hop, round trip after a partial
   fan-out delivery queuing the reverse hop, CI-recovered release letting a
-  later same-head failure fire, malformed `headChangeFrom` dropping the entry,
+  later same-head failure fire, a recovery-time release save failure keeping
+  the parked task for a retry that completes the release, malformed
+  `headChangeFrom` dropping the entry,
   overflow retire keeping the event-scoped index current in-process; gap floor
   (6 min no / 11 min yes), interval scaling, in-process outage recovery,
   legacy-cursor tolerance, clock skew; digest body budget (newest survives, no

@@ -5208,20 +5208,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
                 task.issueNumber,
                 entry,
               );
-        if (
-          reason !== undefined &&
-          (this.isDeadLettered(task.envelope.messageId) ||
-            this.appendWatchDeadLetter(
-              task.envelope.messageId,
-              task.issueNumber,
-              task.source.chatId,
-              task.source.threadId ?? `pr:${task.issueNumber}`,
-              task.delivery,
-              task.envelope.text ?? '',
-              reason,
-            ))
-        ) {
-          this.removeInboundTask(task.id);
+        if (reason !== undefined) {
+          // Release the head's suppression durably BEFORE the dead-letter
+          // record exists: the dead-letter guard above completes a retire on
+          // a later recovery without re-deriving the release, so the release
+          // must already be on disk before the record that lets that guard
+          // remove the task. Fact-driven and safe even if the dead-letter
+          // write below fails: CI is positively green here, so freeing the
+          // head's firing slot is correct whether or not the retire commits.
           if (reason === 'superseded: CI recovered' && entry) {
             this.releaseCiFailureSuppression(
               entry,
@@ -5230,16 +5224,30 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             );
             this.savePrWatchState();
           }
-          this.recordChannelEvent({
-            type: 'inbound',
-            outcome: 'skipped',
-            reason: 'watch_superseded',
-            repository: task.envelope.chatId,
-            thread: task.envelope.threadId ?? `pr:${task.issueNumber}`,
-            number: task.issueNumber,
-            messageId: task.envelope.messageId,
-          });
-          continue;
+          if (
+            this.isDeadLettered(task.envelope.messageId) ||
+            this.appendWatchDeadLetter(
+              task.envelope.messageId,
+              task.issueNumber,
+              task.source.chatId,
+              task.source.threadId ?? `pr:${task.issueNumber}`,
+              task.delivery,
+              task.envelope.text ?? '',
+              reason,
+            )
+          ) {
+            this.removeInboundTask(task.id);
+            this.recordChannelEvent({
+              type: 'inbound',
+              outcome: 'skipped',
+              reason: 'watch_superseded',
+              repository: task.envelope.chatId,
+              thread: task.envelope.threadId ?? `pr:${task.issueNumber}`,
+              number: task.issueNumber,
+              messageId: task.envelope.messageId,
+            });
+            continue;
+          }
         }
       }
       this.applyTaskDedupe(task.dedupe);

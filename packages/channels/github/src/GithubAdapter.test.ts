@@ -32628,6 +32628,59 @@ describe('GithubChannel bound-session delivery and PR state watch', () => {
         );
       });
 
+      it('a recovery-time green fold keeps the task when the release save fails', async () => {
+        await initChannel(watchConfig, { boundSessions });
+        const staleKey = 'watch:ci_failure:42:sha-1:1751446800000';
+        seedWatchState({
+          'owner/repo#42': {
+            headSha: 'sha-1',
+            ci: 'success',
+            prState: 'open',
+            ciFiredSha: 'sha-1',
+            fired: [staleKey],
+          },
+        });
+        writeInboundTasks([parkedWatchTask(staleKey)]);
+        const recover = (
+          channel as unknown as { recoverInboundTasks: () => Promise<void> }
+        ).recoverInboundTasks.bind(channel);
+        // The watch-state save fails at the recovery release. The task must
+        // not be removed before the release is durable, or the retry has no
+        // parked task left to fold and the head's suppression is never freed.
+        const saveSpy = vi
+          .spyOn(
+            channel as unknown as { savePrWatchState: () => void },
+            'savePrWatchState',
+          )
+          .mockImplementation(() => {
+            throw new Error('ENOSPC');
+          });
+        const stderr = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation(() => true);
+        try {
+          await recover().catch(() => undefined);
+        } finally {
+          stderr.mockRestore();
+        }
+        expect(existsSync(inboundTaskPath())).toBe(true);
+        saveSpy.mockRestore();
+        // The retry re-applies the release and retires the task durably.
+        await recover();
+        expect(existsSync(inboundTaskPath())).toBe(false);
+        const entry = readWatchState().entries['owner/repo#42']!;
+        expect(entry['ciFiredSha']).toBeUndefined();
+        expect(entry['fired']).not.toContain(staleKey);
+        const records = readFileSync(boundDeadLetterPath(), 'utf-8')
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line) as Record<string, unknown>);
+        expect(
+          records.some((r) => r['reason'] === 'superseded: CI recovered'),
+        ).toBe(true);
+        expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+      });
+
       it('the coalescer skips a dead-lettered pending hop and appends a new one', async () => {
         await initChannel(watchConfig, { boundSessions });
         const deadKey = 'watch:head_change:42:1:1751446800000';
