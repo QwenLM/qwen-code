@@ -2608,6 +2608,53 @@ export class GitWorktreeService {
   }
 
   /**
+   * Detaches a checkout at its current HEAD, releasing any branch it holds
+   * so another checkout can check that branch out (git forbids the same
+   * branch in two worktrees). Uncommitted changes survive the detach.
+   */
+  async detachCheckout(checkoutPath: string): Promise<void> {
+    const { simpleGit } = await loadSimpleGit();
+    await simpleGit(checkoutPath).env(gitEnv()).raw(['checkout', '--detach']);
+  }
+
+  /**
+   * Checks out an existing branch in a checkout (handoff carry). Throws on
+   * git's own refusals (dirty tree, branch checked out elsewhere) so the
+   * caller can map them to a typed refusal.
+   */
+  async checkoutBranchInCheckout(
+    checkoutPath: string,
+    branchName: string,
+  ): Promise<void> {
+    const { simpleGit } = await loadSimpleGit();
+    await simpleGit(checkoutPath).env(gitEnv()).raw(['checkout', branchName]);
+  }
+
+  /**
+   * Captures a checkout's uncommitted tracked changes as a stash commit
+   * without touching its working tree or index (`git stash create`).
+   * Returns '' when there is nothing to capture. Untracked files are not
+   * included — callers copy them separately when needed.
+   */
+  async createStashSnapshot(checkoutPath: string): Promise<string> {
+    const { simpleGit } = await loadSimpleGit();
+    return (
+      await simpleGit(checkoutPath).env(gitEnv()).stash(['create'])
+    ).trim();
+  }
+
+  /** Applies a stash commit snapshot in a checkout (`git stash apply`). */
+  async applyStashSnapshot(
+    checkoutPath: string,
+    snapshot: string,
+  ): Promise<void> {
+    const { simpleGit } = await loadSimpleGit();
+    await simpleGit(checkoutPath)
+      .env(gitEnv())
+      .raw(['stash', 'apply', snapshot]);
+  }
+
+  /**
    * Turns a detached worktree into a named branch at its current HEAD
    * ("Create branch here", Codex parity). Throws when the checkout is not
    * detached or the branch name is already taken — callers validate first

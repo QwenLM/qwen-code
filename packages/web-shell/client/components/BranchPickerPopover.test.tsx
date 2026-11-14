@@ -231,6 +231,7 @@ function mount(
     onOpenWorktrees: () => void;
     onOpenLog: () => void;
     onCreateWorktreeBranch: (name: string) => Promise<void>;
+    onHandoff: (to: 'local' | 'worktree') => Promise<void>;
     onOpenChange: (open: boolean) => void;
     onBranchChanged: () => void;
     open: boolean;
@@ -258,6 +259,7 @@ function mount(
           onOpenWorktrees={overrides.onOpenWorktrees}
           onOpenLog={overrides.onOpenLog}
           onCreateWorktreeBranch={overrides.onCreateWorktreeBranch}
+          onHandoff={overrides.onHandoff}
         >
           <button type="button">trigger</button>
         </BranchPickerPopover>
@@ -638,6 +640,46 @@ describe('BranchPickerPopover actions', () => {
     await flush();
 
     expect(onCreateWorktreeBranch).not.toHaveBeenCalled();
+  });
+
+  it('hands off to local from a worktree session', async () => {
+    const onHandoff = vi.fn().mockResolvedValue(undefined);
+    const onOpenChange = vi.fn();
+    mountWithBranches(
+      { ...BRANCHES, detached: true, head: 'abc123' },
+      {
+        gitCwd: '/repo/.qwen/worktrees/task',
+        gitSessionId: 'sess-1',
+        onHandoff,
+        onOpenChange,
+      },
+    );
+    await flush();
+
+    clickButton('Hand off to local');
+    await flush();
+
+    expect(onHandoff).toHaveBeenCalledWith('local');
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it('offers moving a local session into a worktree', async () => {
+    const onHandoff = vi.fn().mockResolvedValue(undefined);
+    mountWithBranches(BRANCHES, { onHandoff });
+    await flush();
+
+    clickButton('Move to worktree');
+    await flush();
+
+    expect(onHandoff).toHaveBeenCalledWith('worktree');
+  });
+
+  it('hides the handoff action without the callback', async () => {
+    mountWithBranches(BRANCHES, { gitSessionId: 'sess-1' });
+    await flush();
+    expect(
+      document.body.querySelector('[data-testid="branch-picker-handoff"]'),
+    ).toBeNull();
   });
 
   it('wires "Commit" to onOpenCommit and closes', async () => {

@@ -170,18 +170,29 @@ worktree 会话（`gitSessionId` + 拉取到的 `detached` 状态）且 daemon �
 
 ### D6 — Handoff 移动会话并携带工作
 
-两个方向，都构建在现有所有权转移机制（`worktree-reset` 的锁 + sidecar
-supersedes 协议）之上：
+单路由 `POST /session/:id/worktree-handoff`，携带
+`{ to: 'local' | 'worktree', name?: string }`，保持同一会话 id（Codex 移动
+的是 chat，不是替代会话）。迁移用 bridge 的 `changeSessionCwd` 作用于在线
+会话——它排在在途 prompt 之后、prompt 活跃时拒绝——全程持 worktree 键控
+所有权锁。能力标志：`session_worktree_handoff_v1`。
 
-- **Worktree → Local**：本地检出不干净或有其他活跃会话占用时拒绝。worktree
-  处于 detached 且带 commit 或 dirty 状态时，先建分支（自动命名或由用户
-  命名）。在本地检出 checkout 该分支，迁移会话 cwd，翻转 sidecar/marker，
-  worktree 留给保留清理。
-- **Local → Worktree**：从本地 HEAD 创建托管 worktree 并施加 dirty overlay
-  （D3），把会话迁入，翻转 sidecar/marker。本地检出保持原样。
+- **Worktree → Local**（`to: 'local'`）：本地检出（`sidecar.originalCwd`）
+  不干净时拒绝（`local_checkout_dirty`）。先携带工作：命名 worktree 分支在
+  本地检出 checkout；detached 且有超出 base 的 commit 时先建分支（`name`，
+  否则 `worktree-<slug>`）；detached 停在 base 且无工作则不携带。先 detach
+  worktree 释放分支——git 禁止同一分支同时在两个 worktree 检出。worktree
+  的未提交改动以 `git stash create` 快照在 checkout 后应用于本地检出。然后
+  把会话 cwd 迁回本地检出，清除 sidecar 与 bridge worktree 关联，worktree
+  目录（连同 marker）留给保留清理（P6）或手动删除。
+- **Local → Worktree**（`to: 'worktree'`）：会话已有 worktree sidecar 时
+  拒绝。从本地 HEAD 创建 detached 托管 worktree 并施加 dirty overlay（D3），
+  写 sidecar + marker，把会话迁入，设置 bridge worktree 元数据。迁移失败时
+  回滚新建的 worktree、sidecar、marker。本地检出保持原样。
 
-两个方向全程持有 worktree 键控的所有权锁，非法状态回答类型化 409，与
-`worktree-reset` 一致。
+v1 限制（成文而非静默）：以「本地干净」要求代替「无其他活跃会话占用本地
+检出」（bridge 无会话列表探针可查占用）；handoff 不实现 `worktree-reset`
+的崩溃窗口原子回滚——中途崩溃留下可恢复形态（sidecar/marker 仍命名该会话，
+worktree 管理器可见该检出），而非自愈转移。
 
 ### D7 — 快照是工作归档，恢复重建 worktree
 
@@ -322,7 +333,7 @@ E. 钉住分支契约的测试（P3 更新）
 - 验收：detached worktree 会话 → 点击 → 命名分支，chip 更新，commit/push
   流程可用。
 
-### P5 — Handoff
+### P5 — Handoff — 已实现
 
 - 按 D6 的路由 + git 过程；SDK 方法；chat 头部入口。
 - 测试：两个方向、dirty/commit 携带、干净检出拒绝、并发会话拒绝、锁串行、

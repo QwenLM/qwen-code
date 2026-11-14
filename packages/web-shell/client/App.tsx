@@ -13756,6 +13756,15 @@ export function App({
     },
     [sessionActions],
   );
+  // "Hand off": the daemon moves the session between checkouts; the local
+  // worktree association follows the response (null => back on local).
+  const handleHandoff = useCallback(
+    async (to: 'local' | 'worktree') => {
+      const result = await sessionActions.handoffWorktree(to);
+      setSessionWorktree(result.worktree ?? undefined);
+    },
+    [sessionActions],
+  );
   // Every modal the shell itself tracks, plus host-registered interaction
   // blocks. View navigation hotkeys gate on this rather than dialogOpen,
   // because dialogOpen also counts activePanel and the Session Overview is
@@ -26381,6 +26390,15 @@ export function App({
                               'session_worktree_branch_v1',
                             )
                               ? handleCreateWorktreeBranch
+                              : undefined
+                          }
+                          onHandoff={
+                            connection.sessionId &&
+                            workspaceContextActive &&
+                            workspace.capabilities?.features?.includes(
+                              'session_worktree_handoff_v1',
+                            )
+                              ? handleHandoff
                               : undefined
                           }
                           chatWidthMode={chatWidthMode}

@@ -197,6 +197,11 @@ interface BranchPickerPopoverProps {
    * into a named branch. Offered only for detached worktree sessions.
    */
   onCreateWorktreeBranch?: (name: string) => Promise<void>;
+  /**
+   * "Hand off": move the session between its managed worktree and the
+   * local checkout. Direction follows gitCwd (worktree path => 'local').
+   */
+  onHandoff?: (to: 'local' | 'worktree') => Promise<void>;
   children: React.ReactNode;
 }
 
@@ -429,6 +434,7 @@ export function BranchPickerPopover({
   onOpenWorktrees,
   onOpenLog,
   onCreateWorktreeBranch,
+  onHandoff,
   children,
 }: BranchPickerPopoverProps) {
   const { t } = useI18n();
@@ -821,6 +827,27 @@ export function BranchPickerPopover({
     createBranchValue,
     busyAction,
     onCreateWorktreeBranch,
+    onOpenChange,
+    onBranchChanged,
+    showStatus,
+  ]);
+
+  const handleHandoff = useCallback(async () => {
+    if (busyAction || !onHandoff) return;
+    setBusyAction('handoff');
+    try {
+      await onHandoff(gitCwd ? 'local' : 'worktree');
+      onOpenChange(false);
+      onBranchChanged?.();
+    } catch (err) {
+      showStatus(err instanceof Error ? err.message : String(err), 'error');
+    } finally {
+      setBusyAction(null);
+    }
+  }, [
+    busyAction,
+    onHandoff,
+    gitCwd,
     onOpenChange,
     onBranchChanged,
     showStatus,
@@ -1463,6 +1490,8 @@ export function BranchPickerPopover({
     t('branchPicker.action.manageRemotes').toLowerCase().includes(q) ||
     t('branchPicker.action.worktrees').toLowerCase().includes(q) ||
     t('branchPicker.action.createBranchHere').toLowerCase().includes(q) ||
+    t('branchPicker.action.handoffToLocal').toLowerCase().includes(q) ||
+    t('branchPicker.action.moveToWorktree').toLowerCase().includes(q) ||
     t('branchPicker.action.history').toLowerCase().includes(q);
 
   useEffect(() => {
@@ -1795,6 +1824,25 @@ export function BranchPickerPopover({
                             )}
                           </>
                         )}
+                      {onHandoff && (
+                        <button
+                          type="button"
+                          className={styles.actionItem}
+                          disabled={!!busyAction}
+                          onClick={() => void handleHandoff()}
+                          data-testid="branch-picker-handoff"
+                        >
+                          <ArrowLeftIcon
+                            size={14}
+                            className={styles.actionIcon}
+                          />
+                          <span className={styles.actionLabel}>
+                            {gitCwd
+                              ? t('branchPicker.action.handoffToLocal')
+                              : t('branchPicker.action.moveToWorktree')}
+                          </span>
+                        </button>
+                      )}
                       {onOpenWorktrees && (
                         <button
                           type="button"

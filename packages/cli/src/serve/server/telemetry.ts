@@ -87,6 +87,12 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'POST',
+    path: '/session/:id/worktree-handoff',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/worktree-handoff',
+  },
+  {
+    method: 'POST',
     path: '/session/:id/branch',
     attribution: 'handler_resolved',
     route: 'POST /session/:id/branch',

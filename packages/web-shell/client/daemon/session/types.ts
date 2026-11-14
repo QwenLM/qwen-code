@@ -9,6 +9,7 @@ import type {
   CreateSessionRequest,
   DaemonBranchSessionRequest,
   DaemonWorktreeBranchResult,
+  DaemonWorktreeHandoffResult,
   DaemonCapabilities,
   DaemonBackgroundTurn,
   DaemonEvent,
@@ -378,6 +379,7 @@ export type DaemonNoticeOperation =
   | 'btw_session'
   | 'branch_session'
   | 'create_worktree_branch'
+  | 'handoff_worktree'
   | 'fork_session'
   | 'record_session'
   | 'stream'
@@ -858,6 +860,10 @@ export interface DaemonSessionActions {
   }>;
   /** "Create branch here" on the session's detached managed worktree. */
   createWorktreeBranch(name: string): Promise<DaemonWorktreeBranchResult>;
+  /** "Hand off" between the managed worktree and the local checkout. */
+  handoffWorktree(
+    to: 'local' | 'worktree',
+  ): Promise<DaemonWorktreeHandoffResult>;
   forkSession(directive: string): Promise<DaemonForkSessionResult>;
 }
 

@@ -77,6 +77,7 @@ import type {
   DaemonRestoredSession,
   DaemonSession,
   DaemonWorktreeBranchResult,
+  DaemonWorktreeHandoffResult,
   DaemonSessionArchiveState,
   DaemonSessionExportFormat,
   DaemonSessionExportResult,
@@ -4066,6 +4067,47 @@ export class DaemonClient {
           );
         }
         return (await res.json()) as DaemonWorktreeBranchResult;
+      },
+      this.resolveSessionSpawnTimeoutMs(),
+    );
+  }
+
+  /**
+   * Move the same session between its managed worktree and the local
+   * checkout, carrying the work ("Hand off",
+   * `POST /session/:id/worktree-handoff`, capability
+   * `session_worktree_handoff_v1`). `to: 'local'` checks the worktree's
+   * branch out in the local checkout (creating one first for a detached
+   * worktree with commits; `name` overrides the auto-name) and applies its
+   * tracked dirty changes; the local checkout must be clean
+   * (`local_checkout_dirty`). `to: 'worktree'` creates a detached managed
+   * worktree from the session's current checkout with its dirty state.
+   * Refuses while a prompt is active.
+   */
+  async handoffWorktreeSession(
+    sessionId: string,
+    to: 'local' | 'worktree',
+    req: { name?: string; workspaceCwd?: string } = {},
+  ): Promise<DaemonWorktreeHandoffResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/worktree-handoff`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({
+          to,
+          ...(req.name !== undefined ? { name: req.name } : {}),
+          ...(req.workspaceCwd !== undefined ? { cwd: req.workspaceCwd } : {}),
+        }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'POST /session/:id/worktree-handoff',
+          );
+        }
+        return (await res.json()) as DaemonWorktreeHandoffResult;
       },
       this.resolveSessionSpawnTimeoutMs(),
     );

@@ -231,6 +231,7 @@ export {
   type DaemonSessionClosedReason,
   type DaemonWorktreeInfo,
   type DaemonWorktreeBranchResult,
+  type DaemonWorktreeHandoffResult,
   type DaemonBranchInfo,
   type DaemonSessionClientOptions,
   type DaemonSessionContextStatus,

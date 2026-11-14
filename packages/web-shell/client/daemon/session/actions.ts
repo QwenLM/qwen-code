@@ -4173,6 +4173,30 @@ export function createDaemonSessionActions({
       }
     },
 
+    async handoffWorktree(to: 'local' | 'worktree') {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Worktree handoff failed',
+        'handoff_worktree',
+      );
+      try {
+        return await withActionTimeout(
+          session.client.handoffWorktreeSession(session.sessionId, to, {
+            workspaceCwd: session.workspaceCwd,
+          }),
+          'Worktree handoff timed out',
+        );
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Worktree handoff failed',
+          error,
+          'handoff_worktree',
+        );
+      }
+    },
+
     async forkSession(directive: string): Promise<DaemonForkSessionResult> {
       const session = requireSessionForAction(
         addNotice,

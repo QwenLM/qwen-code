@@ -196,20 +196,37 @@ advertises the capability.
 
 ### D6 — Handoff moves the session, carrying the work
 
-Two directions, both built on the existing ownership-transfer machinery
-(`worktree-reset`'s lock + sidecar supersedes protocol):
+One route, `POST /session/:id/worktree-handoff` with
+`{ to: 'local' | 'worktree', name?: string }`, keeps the same session id
+(Codex moves the chat, not a replacement). Relocation uses the bridge's
+`changeSessionCwd` on the live session — it queues behind in-flight prompts
+and refuses while a prompt is active — under the worktree-keyed ownership
+lock. Capability: `session_worktree_handoff_v1`.
 
-- **Worktree → Local**: refuse unless the local checkout is clean and no
-  other active session owns it. If the worktree is detached with commits or
-  dirty state, create a branch first (auto-named, or the user names it).
-  Check that branch out in the local checkout, relocate the session cwd,
-  flip the sidecar/marker, and leave the worktree for retention cleanup.
-- **Local → Worktree**: create a managed worktree from the local HEAD with
-  the dirty overlay (D3), relocate the session into it, flip the
-  sidecar/marker. The local checkout is left as it was.
+- **Worktree → Local** (`to: 'local'`): refuse unless the local checkout
+  (`sidecar.originalCwd`) is clean (`local_checkout_dirty`). Carry the work
+  first: a named worktree branch is checked out in the local checkout; a
+  detached worktree with commits beyond base gets a branch first
+  (`name`, else `worktree-<slug>`); a detached worktree at base with no work
+  carries nothing. The worktree is detached first to release the branch —
+  git forbids the same branch checked out in two worktrees at once. Uncommitted worktree changes travel as a `git stash
+create` snapshot applied in the local checkout after the checkout. Then
+  relocate the session cwd to the local checkout, clear the sidecar and the
+  bridge worktree association, and leave the worktree directory (with its
+  marker) for retention cleanup (P6) or manual removal.
+- **Local → Worktree** (`to: 'worktree'`): refuse if the session already has
+  a worktree sidecar. Create a detached managed worktree from the local
+  HEAD with the dirty overlay (D3), write the sidecar + marker, relocate the
+  session into it, and set the bridge worktree metadata. On relocation
+  failure the fresh worktree, sidecar, and marker are rolled back. The local
+  checkout is left as it was.
 
-Both directions hold the worktree-keyed ownership lock for their whole
-duration and answer typed 409s on invalid state, mirroring `worktree-reset`.
+v1 limitations (documented, not silent): the local-clean requirement stands
+in for "no other active session owns the local checkout" (the bridge has no
+session-list probe to check occupancy); and the handoff does not implement
+`worktree-reset`'s crash-window atomic rollback — a crash mid-handoff leaves
+a recoverable shape (the sidecar/marker still name the session, and the
+worktree manager shows the checkout), not a self-healing transfer.
 
 ### D7 — Snapshots are work archives, restore recreates the worktree
 
@@ -365,7 +382,7 @@ that property for a custom root.
 - Acceptance: detached worktree session → click → named branch, chip updates,
   commit/push flow works.
 
-### P5 — Handoff
+### P5 — Handoff — implemented
 
 - Routes + git procedures per D6; SDK methods; chat-header affordance.
 - Tests: both directions, dirty/commit carry, clean-checkout refusal,

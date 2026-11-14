@@ -1413,6 +1413,14 @@ export interface DaemonWorktreeBranchResult {
   worktree: DaemonWorktreeInfo;
 }
 
+/** Result of `POST /session/:id/worktree-handoff` ("Hand off"). */
+export interface DaemonWorktreeHandoffResult {
+  sessionId: string;
+  /** Null after handing off to the local checkout. */
+  worktree: DaemonWorktreeInfo | null;
+  currentCwd: string;
+}
+
 /** Branch metadata returned when a session is created with a new branch. */
 export interface DaemonBranchInfo {
   name: string;
