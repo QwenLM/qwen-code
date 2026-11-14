@@ -44,6 +44,7 @@ import {
   useTerminalDimensions,
   useRenderer,
 } from '@opentui/react';
+import './stable-markdown.js';
 import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 import { modBandInput } from '../utils/mod-band-tree.js';
 import type { PartListUnion } from '@google/genai';

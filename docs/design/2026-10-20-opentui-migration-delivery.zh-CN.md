@@ -142,6 +142,13 @@ resize/scroll/diff，以及三组产品/产物测试。保持版本与原生 ABI
 除非证据证明上游替代了相同契约，否则保留 Qwen 的 IME、图片、光标和
 长记录应用层保护。只有收益明确且门槛通过才升级；独立对齐修复不等待升版。
 
+升级清单：`packages/cli/src/ui/opentui/stable-markdown.ts` 以子类替换
+`<markdown>` 内建元件，令 `createInitialStyledText` 不返回内容。0.5.10
+在流式更新时会先用 marked 预览重画变动的 block，再由 tree-sitter 取代，
+导致每个 delta 都在两种渲染器之间翻转。升级时需确认该私有方法仍存在，
+并确认预览是否仍会重画更新的 block，再决定保留或移除此覆写。0.8.4 仍会：
+其 streaming-preview 更新路径在每次变更时、tree-sitter 返回前就把预览写入 buffer。
+
 ## 完成与切换门槛
 
 1. 运行时门槛：所有必要消费方及安装产物在支持平台通过，包括 PTY 生命周期、

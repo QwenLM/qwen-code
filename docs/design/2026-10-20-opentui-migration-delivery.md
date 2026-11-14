@@ -165,6 +165,15 @@ unless evidence proves an upstream change replaces their contracts. Upgrading
 is conditional on a measured benefit and passing gates, not the critical path
 for independent parity fixes.
 
+Upgrade checklist: `packages/cli/src/ui/opentui/stable-markdown.ts` replaces
+the `<markdown>` intrinsic with a subclass whose `createInitialStyledText`
+returns nothing. 0.5.10 repaints each updated streaming block with a
+marked-based preview before tree-sitter replaces it, so every delta flipped
+between two renderers. On upgrade, confirm the private method still exists
+and whether the preview still repaints updated blocks before keeping or
+dropping the override. 0.8.4 still does: its streaming-preview update writes
+the preview into the buffer on every change before tree-sitter returns.
+
 ## Completion and rollout gates
 
 1. Runtime gate: required consumers and installed artifacts pass on supported

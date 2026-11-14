@@ -128,7 +128,7 @@ const mocks = vi.hoisted(() => {
     };
     return { jsx, jsxs: jsx, jsxDEV: jsx, Fragment: React.Fragment };
   }
-  return { state, buildJsxRuntime };
+  return { state, buildJsxRuntime, stableMarkdownLoaded: false };
 });
 
 vi.mock('child_process', async (importOriginal) => {
@@ -167,6 +167,10 @@ vi.mock('@opentui/react', () => ({
   useRenderer: () => mocks.state.renderer,
   useTerminalDimensions: () => ({ width: 120, height: 40 }),
 }));
+vi.mock('./stable-markdown.js', () => {
+  mocks.stableMarkdownLoaded = true;
+  return {};
+});
 vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
 vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
 
@@ -301,6 +305,10 @@ const settings = {
 } as unknown as LoadedSettings;
 
 describe('startOpenTuiUI fallback contract', () => {
+  it('loads the stable markdown registration with the entry point', () => {
+    expect(mocks.stableMarkdownLoaded).toBe(true);
+  });
+
   beforeEach(() => {
     vi.mocked(execFile).mockReset();
     vi.mocked(execFileSync).mockReset().mockReturnValue('');

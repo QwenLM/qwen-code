@@ -17,3 +17,4 @@ bun packages/cli/scripts/opentui-statusline-parity.tsx
 bun packages/cli/scripts/opentui-input-ownership.tsx
 bun packages/cli/scripts/opentui-editor-parity.tsx
 bun packages/cli/scripts/opentui-vim-parity.tsx
+bun packages/cli/scripts/opentui-markdown-streaming.ts
