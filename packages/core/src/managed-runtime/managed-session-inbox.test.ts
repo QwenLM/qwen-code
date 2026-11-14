@@ -30,11 +30,11 @@ import { MANAGED_JOURNAL_COMPACT_BYTES } from './managed-journal-snapshot.js';
 
 const limits = { maxPending: 10, maxPendingPerTenant: 5 };
 
-// Sister of the activation-store compaction budget (#15574): the 1024
-// serial fence writes are deterministic in count but not in wall time, and
-// the same fleet contention took all three attempts past the flat 60s
-// budget (run 42997545207). Slow hosts get double the ceiling; fast hosts
-// keep the original budget.
+// Sister of the activation-store compaction budget (#15574): the serial
+// fence writes are deterministic in count but not in wall time, and the
+// same fleet contention took all three attempts past the flat 60s budget
+// (run 42997545207). Slow hosts get double the ceiling; fast hosts keep
+// the original budget.
 const compactionTimeoutMs = isSlowTestHost() ? 120_000 : 60_000;
 
 function userMessage(
@@ -239,9 +239,12 @@ describe('FileManagedSessionInbox', () => {
       // a fast disk, but on the fleet's container storage each fsync costs
       // tens of milliseconds and the loop alone outlasted the flat 60s
       // budget (#16937: three 60s timeouts, no assertion). Derive the epoch
-      // count from one measured entry instead — guaranteed to cross the
-      // compaction boundary with margin, at a fraction of the durable
-      // appends.
+      // count from one measured entry instead — sized to cross the
+      // compaction boundary TWICE with margin, because the second
+      // compaction is the only witness in this package that
+      // compactIfNeeded() still compacts once a snapshot already exists
+      // (review finding: a first-crossing-only count let the
+      // second-compaction-off mutation survive).
       await inbox.beginProcessing(input, activationFence(input.messageId, 1));
       const firstEntry = (await readFile(filePath, 'utf8'))
         .trimEnd()
@@ -250,13 +253,28 @@ describe('FileManagedSessionInbox', () => {
       const perEntryBytes = Buffer.byteLength(firstEntry) + 1;
       const epochs = Math.max(
         64,
-        Math.ceil((MANAGED_JOURNAL_COMPACT_BYTES * 1.25) / perEntryBytes),
+        Math.ceil((2 * MANAGED_JOURNAL_COMPACT_BYTES * 1.25) / perEntryBytes),
       );
+      const firstLineOf = async (): Promise<string> =>
+        (await readFile(filePath, 'utf8')).trimEnd().split('\n')[0]!;
+      // Checkpoint between the two threshold crossings (~40% and ~80% of
+      // the loop): line 0 must already be the first compaction's snapshot
+      // there, and the final read below must show a DIFFERENT snapshot —
+      // the second compaction's. Pinning that difference is what witnesses
+      // compactIfNeeded() still compacting once a snapshot exists.
+      let checkpointLine: string | undefined;
       for (let epoch = 2; epoch <= epochs; epoch++) {
         await inbox.beginProcessing(
           input,
           activationFence(input.messageId, epoch),
         );
+        if (epoch === Math.floor(epochs * 0.6)) {
+          checkpointLine = await firstLineOf();
+          expect(JSON.parse(checkpointLine)).toMatchObject({
+            v: 2,
+            type: 'inbox.snapshot',
+          });
+        }
       }
       const contents = await readFile(filePath, 'utf8');
       const lines = contents.trimEnd().split('\n');
@@ -264,6 +282,7 @@ describe('FileManagedSessionInbox', () => {
         v: 2,
         type: 'inbox.snapshot',
       });
+      expect(lines[0]).not.toBe(checkpointLine);
       expect(Buffer.byteLength(contents)).toBeLessThan(
         MANAGED_JOURNAL_COMPACT_BYTES + Buffer.byteLength(lines[0]) + 512,
       );
