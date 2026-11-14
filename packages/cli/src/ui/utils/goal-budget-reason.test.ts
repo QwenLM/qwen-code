@@ -220,6 +220,25 @@ describe('composeGoalBudgetReason', () => {
       ).toBeUndefined();
     });
 
+    it('for a non-budget limit kind with a permissive dictionary', () => {
+      const tPermissive: GoalT = (key, params) => {
+        if (key.startsWith('goal.reason.unit.')) {
+          return 'unit';
+        }
+        if (key.startsWith('goal.reason.')) {
+          return `sentence(${params?.['count']})`;
+        }
+        return key;
+      };
+      expect(
+        composeGoalBudgetReason(
+          { limitKind: 'evidence_catalog', tokenBudget: 5 },
+          tPermissive,
+          'en',
+        ),
+      ).toBeUndefined();
+    });
+
     it('for a budget kind missing its number', () => {
       expect(
         composeGoalBudgetReason({ limitKind: 'token_budget' }, tEn, 'en'),
