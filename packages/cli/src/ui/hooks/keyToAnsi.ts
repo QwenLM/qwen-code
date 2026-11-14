@@ -17,8 +17,9 @@ export type { Key };
  */
 export function keyToAnsi(key: Key): string | null {
   if (key.ctrl) {
-    // Ctrl + letter
-    if (key.name >= 'a' && key.name <= 'z') {
+    // Only single letters use Ctrl arithmetic. Named keys such as 'down'
+    // also satisfy the string range check and would otherwise emit EOF.
+    if (key.name.length === 1 && key.name >= 'a' && key.name <= 'z') {
       return String.fromCharCode(
         key.name.charCodeAt(0) - 'a'.charCodeAt(0) + 1,
       );
@@ -65,11 +66,11 @@ export function keyToAnsi(key: Key): string | null {
 
   // Enter/Return
   if (key.name === 'return') {
-    return '\r';
+    return key.ctrl || key.meta ? null : '\r';
   }
 
-  // If it's a simple character, return it.
-  if (!key.ctrl && !key.meta && key.sequence) {
+  // Pass through printable characters and unmapped named-key sequences.
+  if ((!key.ctrl || key.name.length > 1) && !key.meta && key.sequence) {
     return key.sequence;
   }
 
