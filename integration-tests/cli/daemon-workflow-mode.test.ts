@@ -19,6 +19,7 @@ import {
   spawnDaemon,
   type SpawnedDaemon,
 } from './_daemon-harness.js';
+import { sharedLoopRoundCount } from '../test-helper.js';
 
 function currentTurnText(
   body: Record<string, unknown>,
@@ -109,7 +110,10 @@ describe.skipIf(process.platform === 'win32').each([false, true])(
             'trustedFolders.json',
           ),
           QWEN_CODE_DISABLE_WORKFLOWS: '0',
-          QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP: '0',
+          // Arm-dependent: an unconditional '0' would force the shared arm
+          // onto the legacy loop now that the env override beats the setting.
+          QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP: shared ? '1' : '0',
+          QWEN_DEBUG_LOG_FILE: '1',
           QWEN_CODE_DISABLE_CRON: '1',
           OPENAI_API_KEY: 'fake-key',
           OPENAI_BASE_URL: server.baseUrl,
@@ -265,6 +269,11 @@ describe.skipIf(process.platform === 'win32').each([false, true])(
         expect(current).toContain('Workflow mode is off for this session.');
         expect(current).not.toContain(
           'Workflow mode is enabled for this session.',
+        );
+        // The arm label must be real: the shared arm runs the shared loop,
+        // the legacy arm never calls runModelRound.
+        expect(sharedLoopRoundCount(path.join(root, 'runtime')) > 0).toBe(
+          shared,
         );
       } finally {
         transport.dispose();

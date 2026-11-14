@@ -219,6 +219,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const isShellFocused = useShellFocusState();
   const uiState = useUIState();
   const uiActions = useUIActions();
+  const feedbackOpenRef = useRef(uiState.isFeedbackDialogOpen);
+  useEffect(() => {
+    feedbackOpenRef.current = uiState.isFeedbackDialogOpen;
+  }, [uiState.isFeedbackDialogOpen]);
   const settings = useSettings();
   const scrollActions = useScrollActions();
   // Mouse interactions (suggestion list + click-to-position cursor) are enabled
@@ -966,15 +970,15 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
       // Handle feedback dialog keyboard interactions before global voice
       // handling so modal UI gets first chance to consume the key.
-      if (uiState.isFeedbackDialogOpen) {
-        // If it's one of the feedback option keys (1-4), let FeedbackDialog handle it
+      if (feedbackOpenRef.current) {
+        // A whole stdin burst can arrive before React renders the dismissal.
+        // Claim only its first key; later digits belong to the composer.
+        feedbackOpenRef.current = false;
         if ((FEEDBACK_DIALOG_KEYS as readonly string[]).includes(key.name)) {
+          uiActions.submitFeedback(Number(key.name));
           return true;
-        } else {
-          // For any other key, close feedback dialog temporarily and continue with normal processing
-          uiActions.temporaryCloseFeedbackDialog();
-          // Continue processing the key for normal input handling
         }
+        uiActions.temporaryCloseFeedbackDialog();
       }
 
       if (voiceInput.status !== 'idle') {

@@ -2343,6 +2343,98 @@ describe('refreshWorkspaceSessionPrStates', () => {
       });
     });
 
+    it('records no state_change the operator did not subscribe', async () => {
+      // The mirror of the case above, and the only witness that the filter
+      // reaches the SECOND producer. The listing write is a producer in its
+      // own right: a filter applied at the view path alone would still queue
+      // this state_change and deliver it to an operator who subscribed only
+      // head_change. The state write itself is not filtered — only the
+      // transition it implies.
+      await seedBinding();
+      await withWatchDir(async (watchDir) => {
+        writePrWatchStateSync(watchDir, identity42, {
+          pr: identity42,
+          state: 'open',
+          headSha: 'c'.repeat(40),
+          checks: 'passing',
+        });
+        fetchGitHubPullRequestsMock.mockResolvedValue({
+          kind: 'ok',
+          pullRequests: [pr(42, 'merged')],
+        });
+        await refreshWorkspaceSessionPrStates(runtime, undefined, {
+          prWatch: {
+            watchDir,
+            locks: new PathMutexRegistry(),
+            allowedHosts,
+            events: new Set(['head_change']),
+          },
+          now: () => Date.parse('2026-11-10T00:00:00.000Z'),
+        });
+        const after = readPrWatchStateSync(watchDir, identity42);
+        expect(after.kind).toBe('state');
+        if (after.kind !== 'state') throw new Error('unreachable');
+        expect(after.state.state).toBe('merged');
+        expect(after.state.pending).toBeUndefined();
+      });
+    });
+
+    it('prefers the per-host subscription over the global set', async () => {
+      // The alias path passes no global set; the listing must use the same
+      // per-host one as the observation, or the second producer would queue a
+      // transition the first one filtered.
+      await seedBinding();
+      await withWatchDir(async (watchDir) => {
+        writePrWatchStateSync(watchDir, identity42, {
+          pr: identity42,
+          state: 'open',
+          headSha: 'c'.repeat(40),
+          checks: 'passing',
+        });
+        fetchGitHubPullRequestsMock.mockResolvedValue({
+          kind: 'ok',
+          pullRequests: [pr(42, 'merged')],
+        });
+        await refreshWorkspaceSessionPrStates(runtime, undefined, {
+          prWatch: {
+            watchDir,
+            locks: new PathMutexRegistry(),
+            allowedHosts,
+            events: new Set(['state_change']),
+            eventsForHost: () => new Set(['head_change']),
+          },
+          now: () => Date.parse('2026-11-10T00:00:00.000Z'),
+        });
+        const after = readPrWatchStateSync(watchDir, identity42);
+        expect(after.kind).toBe('state');
+        if (after.kind !== 'state') throw new Error('unreachable');
+        expect(after.state.state).toBe('merged');
+        expect(after.state.pending).toBeUndefined();
+      });
+    });
+
+    it('writes no baseline for a host the per-host subscription does not cover', async () => {
+      // Advancing a baseline for an unwatched PR would hide the first
+      // transition after the operator subscribes that host.
+      await seedBinding();
+      await withWatchDir(async (watchDir) => {
+        fetchGitHubPullRequestsMock.mockResolvedValue({
+          kind: 'ok',
+          pullRequests: [pr(42, 'merged')],
+        });
+        await refreshWorkspaceSessionPrStates(runtime, undefined, {
+          prWatch: {
+            watchDir,
+            locks: new PathMutexRegistry(),
+            allowedHosts,
+            eventsForHost: () => new Set(),
+          },
+          now: () => Date.parse('2026-11-10T00:00:00.000Z'),
+        });
+        expect(readPrWatchStateSync(watchDir, identity42).kind).toBe('absent');
+      });
+    });
+
     it('initialises silently when the watch file has no head baseline', async () => {
       await seedBinding();
       await withWatchDir(async (watchDir) => {
@@ -2634,6 +2726,445 @@ describe('startSessionPrRefreshTimer', () => {
     ).toBeUndefined();
   });
 
+  it('drainNow keeps watch files the single-workspace scan cannot see', async () => {
+    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+    const registry = createWorkspaceRegistry([trustedRuntime]);
+    await seedPendingBinding(trustedRuntime, SESSION_A, 42);
+    const watchDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-watch-drain-now-'),
+    );
+    // A watch file with no binder in this scan. A targeted drain scans one
+    // workspace, so every other workspace's bindings are absent from the rows:
+    // declaring the coverage complete would delete this file as unbound.
+    const orphan = { host: 'github.com', repo: 'other/repo', number: 99 };
+    writePrWatchStateSync(watchDir, orphan, {
+      pr: orphan,
+      state: 'open',
+      headSha: 'a'.repeat(40),
+      checks: 'passing',
+    });
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: {},
+      observationEnabled: true,
+      getPrDrainDeps: () => ({
+        watchDir,
+        locks: new PathMutexRegistry(),
+        scanBindings: async () => ({
+          bindings: [
+            {
+              sessionId: SESSION_A,
+              workspaceCwd: trustedCwd,
+              prs: [{ number: 42, url: 'https://github.com/o/r/pull/42' }],
+            },
+          ],
+          partial: false,
+        }),
+        resolveRuntime: () => trustedRuntime,
+        isSessionLive: () => false,
+        wakeSession: async () => ({ kind: 'unavailable' as const }),
+        admitPrompt: async () => ({ deduplicated: false }),
+        readPushedHeads: async () => undefined,
+      }),
+    });
+    try {
+      await handle?.drainNow(trustedCwd);
+      expect(readPrWatchStateSync(watchDir, orphan).kind).toBe('state');
+    } finally {
+      handle?.dispose();
+      await removeTempTree(watchDir);
+    }
+  });
+
+  it('drainNow delivers nothing when no drain deps are provisioned', async () => {
+    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+    const registry = createWorkspaceRegistry([trustedRuntime]);
+    const getPrDrainDeps = vi.fn(() => undefined);
+    // No observationEnabled and no deps: enablement is deps presence, which
+    // the daemon derives from the operator's subscription. The getter IS
+    // consulted — the gate moved from "never read the seam" to "read it and
+    // find it unprovisioned" — and a resume must still deliver nothing from
+    // watch files a previous owner left behind.
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: {},
+      getPrDrainDeps,
+    });
+    try {
+      await handle?.drainNow(trustedCwd);
+      expect(getPrDrainDeps).toHaveBeenCalled();
+    } finally {
+      handle?.dispose();
+    }
+  });
+
+  it('drainNow skips an untrusted non-primary workspace', async () => {
+    // The tick only watches trusted-or-primary workspaces. An on-demand drain
+    // must apply the same filter: the ledger runs git in the checkout, and an
+    // untrusted non-primary is never observed in the first place.
+    const untrusted = timerRuntime('un', untrustedCwd, false, false);
+    const primary = timerRuntime('trusted', trustedCwd, true);
+    const registry = createWorkspaceRegistry([primary, untrusted]);
+    const scanBindings = vi.fn(async () => ({ bindings: [], partial: false }));
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: {},
+      observationEnabled: true,
+      getPrDrainDeps: () => ({
+        watchDir: untrustedCwd,
+        locks: new PathMutexRegistry(),
+        scanBindings,
+        resolveRuntime: () => untrusted,
+        isSessionLive: () => false,
+        wakeSession: async () => ({ kind: 'unavailable' as const }),
+        admitPrompt: async () => ({ deduplicated: false }),
+        readPushedHeads: async () => undefined,
+      }),
+    });
+    try {
+      await handle?.drainNow(untrustedCwd);
+      expect(scanBindings).not.toHaveBeenCalled();
+    } finally {
+      handle?.dispose();
+    }
+  });
+
+  it('drainNow is inert without drain deps or a registered workspace', async () => {
+    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+    const registry = createWorkspaceRegistry([trustedRuntime]);
+    const scanBindings = vi.fn(async () => ({ bindings: [], partial: false }));
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: {},
+      observationEnabled: true,
+      getPrDrainDeps: () => undefined,
+    });
+    try {
+      await handle?.drainNow(trustedCwd);
+      expect(scanBindings).not.toHaveBeenCalled();
+      const withDeps = startSessionPrRefreshTimer({
+        workspaceRegistry: registry,
+        env: {},
+        observationEnabled: true,
+        getPrDrainDeps: () => ({
+          watchDir: trustedCwd,
+          locks: new PathMutexRegistry(),
+          scanBindings,
+          resolveRuntime: () => trustedRuntime,
+          isSessionLive: () => false,
+          wakeSession: async () => ({ kind: 'unavailable' as const }),
+          admitPrompt: async () => ({ deduplicated: false }),
+          readPushedHeads: async () => undefined,
+        }),
+      });
+      try {
+        await withDeps?.drainNow('/not-registered');
+        expect(scanBindings).not.toHaveBeenCalled();
+      } finally {
+        withDeps?.dispose();
+      }
+    } finally {
+      handle?.dispose();
+    }
+  });
+
+  it('stopWatch hands back the owner record an on-demand drain claimed', async () => {
+    // The first tick is a minute away, so no observation has run and the
+    // timer's active watch directory is still unset. The drain claims the
+    // owner record regardless, so shutdown must learn about the claim from
+    // drainNow: a leaked record reads as "held by a live pid" to a successor,
+    // whose entire watch then stays inert until this process dies.
+    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+    const registry = createWorkspaceRegistry([trustedRuntime]);
+    const watchDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-watch-drain-now-stop-'),
+    );
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: {},
+      observationEnabled: true,
+      getPrDrainDeps: () => ({
+        watchDir,
+        locks: new PathMutexRegistry(),
+        scanBindings: async () => ({ bindings: [], partial: false }),
+        resolveRuntime: () => trustedRuntime,
+        isSessionLive: () => false,
+        wakeSession: async () => ({ kind: 'unavailable' as const }),
+        admitPrompt: async () => ({ deduplicated: false }),
+        readPushedHeads: async () => undefined,
+      }),
+    });
+    try {
+      // No timer advance: the claim has to come from drainNow alone. Proving
+      // it exists first keeps the release assertion below from passing just
+      // because nothing ever claimed.
+      await handle?.drainNow(trustedCwd);
+      await expect(
+        fsp.access(prWatchOwnerPath(watchDir)),
+      ).resolves.toBeUndefined();
+      await handle?.stopWatch();
+      await expect(fsp.access(prWatchOwnerPath(watchDir))).rejects.toThrow();
+      // A resume arriving after shutdown must not claim it back — nothing
+      // would release that record again.
+      await handle?.drainNow(trustedCwd);
+      await expect(fsp.access(prWatchOwnerPath(watchDir))).rejects.toThrow();
+    } finally {
+      handle?.dispose();
+      await removeTempTree(watchDir);
+    }
+  });
+
+  it('drainNow serves a trusted non-primary workspace', async () => {
+    // Every other positive case lets primary default to trusted, so the trusted
+    // half of the filter was never exercised on its own. The scan call is the
+    // positive evidence that the drain tick actually ran.
+    const secondaryCwd = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-watch-secondary-'),
+    );
+    const primary = timerRuntime('primary', trustedCwd, true);
+    const secondary = timerRuntime('secondary', secondaryCwd, true, false);
+    const registry = createWorkspaceRegistry([primary, secondary]);
+    const watchDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-watch-drain-now-secondary-'),
+    );
+    const scanBindings = vi.fn(async (_runtime: WorkspaceRuntime) => ({
+      bindings: [],
+      partial: false,
+    }));
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: {},
+      observationEnabled: true,
+      getPrDrainDeps: () => ({
+        watchDir,
+        locks: new PathMutexRegistry(),
+        scanBindings,
+        resolveRuntime: () => secondary,
+        isSessionLive: () => false,
+        wakeSession: async () => ({ kind: 'unavailable' as const }),
+        admitPrompt: async () => ({ deduplicated: false }),
+        readPushedHeads: async () => undefined,
+      }),
+    });
+    try {
+      await handle?.drainNow(secondaryCwd);
+      // The trusted non-primary workspace is scanned. The drain now scans every
+      // watched workspace, so assert this one was reached rather than a count.
+      expect(
+        scanBindings.mock.calls.some(
+          ([runtime]) => runtime.workspaceCwd === secondaryCwd,
+        ),
+      ).toBe(true);
+      await expect(
+        fsp.access(prWatchOwnerPath(watchDir)),
+      ).resolves.toBeUndefined();
+    } finally {
+      handle?.dispose();
+      await removeTempTree(watchDir);
+      await removeTempTree(secondaryCwd);
+    }
+  });
+
+  it('drainNow clears the resumed session Gone mark only when given its id', async () => {
+    // The reset this seam exists for. Without the clear, a session excluded by
+    // an earlier archive or worktree loss stays filtered out for the whole
+    // rejoin horizon even after the user resumes it.
+    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+    const registry = createWorkspaceRegistry([trustedRuntime]);
+    await seedPendingBinding(trustedRuntime, SESSION_A, 42);
+    const watchDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-watch-drain-now-gone-'),
+    );
+    const clock = Date.parse('2026-11-08T00:00:00.000Z');
+    const identity = { host: 'github.com', repo: 'o/r', number: 42 };
+    writePrWatchStateSync(watchDir, identity, {
+      pr: identity,
+      observedAt: new Date(clock).toISOString(),
+      state: 'open',
+      headSha: 'a'.repeat(40),
+      checks: 'passing',
+      pending: [
+        {
+          type: 'ci_failure',
+          key: 'k-drain-now-gone',
+          summary: 'CI failing',
+          detectedAt: new Date(clock).toISOString(),
+        },
+      ],
+    });
+    let live = false;
+    const wakeSession = vi.fn(async () => ({ kind: 'gone' as const }));
+    const admitPrompt = vi.fn(async () => ({ deduplicated: false }));
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: {},
+      now: () => clock,
+      observationEnabled: true,
+      getPrDrainDeps: () => ({
+        watchDir,
+        locks: new PathMutexRegistry(),
+        scanBindings: async () => ({
+          bindings: [
+            {
+              sessionId: SESSION_A,
+              workspaceCwd: trustedCwd,
+              prs: [{ number: 42, url: 'https://github.com/o/r/pull/42' }],
+            },
+          ],
+          partial: false,
+        }),
+        resolveRuntime: () => trustedRuntime,
+        isSessionLive: () => live,
+        wakeSession,
+        admitPrompt,
+        readPushedHeads: async () => undefined,
+        // The drain reads its own `now ?? Date.now`. Without this the fixture's
+        // literal detectedAt ages against the real wall clock and the case
+        // starts failing seven days after that date.
+        now: () => clock,
+      }),
+    });
+    const settle = async (): Promise<void> => {
+      for (let i = 0; i < 20; i++) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+    };
+    try {
+      // Dormant and the wake reports Gone: the recipient is marked, not admitted.
+      await handle?.drainNow(trustedCwd);
+      await vi.waitFor(() => expect(wakeSession).toHaveBeenCalledTimes(1));
+      await settle();
+      expect(admitPrompt).not.toHaveBeenCalled();
+
+      // The session is live again, but a drain that does not name it must still
+      // respect the mark. If the mark had never been set this arm would admit,
+      // so the pair below is self-proving rather than vacuous.
+      live = true;
+      await handle?.drainNow(trustedCwd);
+      await settle();
+      expect(admitPrompt).not.toHaveBeenCalled();
+
+      // Naming the restored session clears the mark and delivers.
+      await handle?.drainNow(trustedCwd, SESSION_A);
+      await settle();
+      expect(admitPrompt).toHaveBeenCalledTimes(1);
+    } finally {
+      handle?.dispose();
+      await removeTempTree(watchDir);
+    }
+  });
+
+  it('drainNow keeps a leader in another workspace ahead of a live local binder', async () => {
+    // Recipient choice and the persisted delivered ring are global, while
+    // coveragePartial gates only delete/drop. Scanning just the resumed
+    // workspace would hide the more recent binder, deliver to the local one,
+    // and record the key — consuming the transition the leader is owed.
+    const cwdA = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-watch-leader-a-'),
+    );
+    const cwdB = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-watch-leader-b-'),
+    );
+    const runtimeA = timerRuntime('ws-a', cwdA, true);
+    const runtimeB = timerRuntime('ws-b', cwdB, true, false);
+    const registry = createWorkspaceRegistry([runtimeA, runtimeB]);
+    const watchDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-watch-leader-dir-'),
+    );
+    const clock = Date.parse('2026-11-08T00:00:00.000Z');
+    const identity = { host: 'github.com', repo: 'o/r', number: 42 };
+    const key = 'k-leader-other-workspace';
+    writePrWatchStateSync(watchDir, identity, {
+      pr: identity,
+      observedAt: new Date(clock).toISOString(),
+      state: 'open',
+      headSha: 'a'.repeat(40),
+      checks: 'passing',
+      pending: [
+        {
+          type: 'ci_failure',
+          key,
+          summary: 'CI failing',
+          detectedAt: new Date(clock).toISOString(),
+        },
+      ],
+    });
+    const prs = [{ number: 42, url: 'https://github.com/o/r/pull/42' }];
+    const wakeSession = vi.fn(async () => ({
+      kind: 'restored' as const,
+      release: async () => {},
+    }));
+    const admitPrompt = vi.fn(
+      async (
+        _runtime: WorkspaceRuntime,
+        _sessionId: string,
+        _text: string,
+        _key: string,
+      ) => ({ deduplicated: false }),
+    );
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: {},
+      now: () => clock,
+      observationEnabled: true,
+      getPrDrainDeps: () => ({
+        watchDir,
+        locks: new PathMutexRegistry(),
+        scanBindings: async (runtime: WorkspaceRuntime) => ({
+          bindings:
+            runtime.workspaceCwd === cwdA
+              ? [
+                  {
+                    sessionId: 'S_alt',
+                    workspaceCwd: cwdA,
+                    updatedAt: new Date(clock - 60_000).toISOString(),
+                    prs,
+                  },
+                ]
+              : [
+                  {
+                    sessionId: 'S_leader',
+                    workspaceCwd: cwdB,
+                    updatedAt: new Date(clock).toISOString(),
+                    prs,
+                  },
+                ],
+          partial: false,
+        }),
+        resolveRuntime: (cwd: string) => (cwd === cwdA ? runtimeA : runtimeB),
+        // The leader is dormant, the local binder is live: only the complete
+        // row set keeps the drain from preferring the live one.
+        isSessionLive: (_runtime: WorkspaceRuntime, sessionId: string) =>
+          sessionId === 'S_alt',
+        wakeSession,
+        admitPrompt,
+        readPushedHeads: async () => undefined,
+        now: () => clock,
+      }),
+    });
+    try {
+      await handle?.drainNow(cwdA);
+      for (let i = 0; i < 20; i++) {
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      // The transition goes to the leader, not to the live local binder. With
+      // a one-workspace row set the leader is invisible and this admission
+      // would name S_alt instead, consuming what the leader is owed.
+      expect(wakeSession).toHaveBeenCalledWith('S_leader', cwdB);
+      expect(admitPrompt).toHaveBeenCalledTimes(1);
+      expect(admitPrompt.mock.calls[0]?.[1]).toBe('S_leader');
+      const after = readPrWatchStateSync(watchDir, identity);
+      expect(after.kind).toBe('state');
+      if (after.kind !== 'state') throw new Error('unreachable');
+      expect(after.state.delivered ?? []).toContain(key);
+    } finally {
+      handle?.dispose();
+      await removeTempTree(watchDir);
+      await removeTempTree(cwdA);
+      await removeTempTree(cwdB);
+    }
+  });
+
   it('threads the watch log into the listing write seam', async () => {
     const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
     const registry = createWorkspaceRegistry([trustedRuntime]);
@@ -2691,7 +3222,7 @@ describe('startSessionPrRefreshTimer', () => {
     }
   });
 
-  it('never reads the PR-watch deps while the observation switch is off', async () => {
+  it('never watches when no PR-watch deps are provisioned', async () => {
     const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
     const registry = createWorkspaceRegistry([trustedRuntime]);
     await seedPendingBinding(trustedRuntime, SESSION_A);
@@ -2711,9 +3242,10 @@ describe('startSessionPrRefreshTimer', () => {
     await vi.waitFor(() => {
       expect(fetchGitHubPullRequestsMock).toHaveBeenCalled();
     });
-    // The switch is off: the tick refreshes state but never touches the
-    // PR-watch seam (no claim, no view, no watch-file write).
-    expect(getPrWatchDeps).not.toHaveBeenCalled();
+    // Enablement is deps presence: the tick consults the seam, finds it
+    // unprovisioned, and does nothing further — no claim, no view, no
+    // watch-file write — while the state refresh below still runs.
+    expect(getPrWatchDeps).toHaveBeenCalled();
     handle?.dispose();
   });
 
