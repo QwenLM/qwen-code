@@ -3819,13 +3819,25 @@ describe('startSessionPrRefreshTimer', { timeout: 120_000 }, () => {
       // does not advance the rotation counter — so keep advancing intervals
       // until the second view lands instead of assuming the very next one
       // runs; the executed tick's rotation is 1 either way, and the order
-      // stays [42, 43]. Each advanceTimersByTimeAsync yields real event-loop
-      // turns so the tail's real fs can progress; under the extreme macOS
-      // nightly contention (200s+ of test time across workers) the tail can
-      // outlast a handful of advances, so allow plenty of them. waitFor's
-      // fake-time budget cannot reach the next 60s interval on its own.
+      // stays [42, 43]. advanceTimersByTimeAsync drains fake timers and
+      // microtasks but starves the tail's real fs I/O under extreme macOS
+      // nightly load, so between advances yield REAL macrotasks via a
+      // MessageChannel (not intercepted by fake timers, unlike setImmediate)
+      // to let the tail complete; allow plenty of advances for the worst load.
+      const yieldRealMacrotask = (): Promise<void> =>
+        new Promise((resolve) => {
+          const { port1, port2 } = new MessageChannel();
+          port1.onmessage = () => {
+            port1.close();
+            resolve();
+          };
+          port2.postMessage(0);
+        });
       for (let i = 0; i < 20 && view.mock.calls.length < 2; i++) {
         await vi.advanceTimersByTimeAsync(60_000);
+        for (let k = 0; k < 10; k++) {
+          await yieldRealMacrotask();
+        }
       }
       await vi.waitFor(
         () => {
