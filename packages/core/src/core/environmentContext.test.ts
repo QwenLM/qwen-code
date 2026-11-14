@@ -27,6 +27,7 @@ import {
   markCompressedHistory,
   isSkillListingReminder,
   isSystemReminderContent,
+  isReplayedTurnReminderPart,
   stripSystemReminderBlocks,
   stripStartupContext,
   wrapSystemReminder,
@@ -35,6 +36,17 @@ import {
   SYSTEM_REMINDER_CLOSE,
 } from './environmentContext.js';
 import { prependToFirstTextPart } from '../utils/partUtils.js';
+import {
+  getArenaSystemReminder,
+  getPlanModeSystemReminder,
+} from './prompts.js';
+import {
+  getOutputStyleTurnReminder,
+  type OutputStyleDefinition,
+} from './output-styles.js';
+import { buildLegacyRelevantAutoMemoryPrompt } from '../memory/recall.js';
+import type { ScannedAutoMemoryDocument } from '../memory/structured-scan.js';
+import { formatOmniMemorySideQueryReminder } from '../omni/memory-side-query.js';
 import type { Config } from '../config/config.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
 import { markApiHistoryPrompt } from '../services/session-api-history.js';
@@ -1127,6 +1139,54 @@ describe('startup reminder builders', () => {
       reminder?.indexOf('### server-b') ?? 0,
     );
     expectContains(reminder, 'Use A.', 'Use B.');
+  });
+});
+
+describe('isReplayedTurnReminderPart', () => {
+  it.each([
+    ['plan mode', getPlanModeSystemReminder()],
+    ['plan-only plan mode', getPlanModeSystemReminder(true)],
+    ['arena', getArenaSystemReminder('/arena/config.json')],
+    [
+      'output style',
+      wrapSystemReminder(
+        getOutputStyleTurnReminder({
+          name: 'Concise',
+          turnReminder: 'Be concise.',
+        } as OutputStyleDefinition),
+      ),
+    ],
+  ])('counts the %s reminder', (_name, text) => {
+    expect(isReplayedTurnReminderPart({ text })).toBe(true);
+  });
+
+  it.each([
+    [
+      'recalled memory',
+      buildLegacyRelevantAutoMemoryPrompt([
+        {
+          filePath: '/memory/notes.md',
+          relativePath: 'notes.md',
+          title: 'Notes',
+          description: 'Saved notes',
+          body: 'Prefer pnpm.',
+          mtimeMs: Date.now(),
+        } as ScannedAutoMemoryDocument,
+      ]),
+    ],
+    [
+      'omni media memory',
+      formatOmniMemorySideQueryReminder({
+        status: 'miss',
+        files: [],
+        entries: [],
+        gaps: [],
+      }),
+    ],
+    ['other wrapped text', wrapSystemReminder('Today is 2026-11-14.')],
+    ['plain text', 'Plan mode is active.'],
+  ])('does not count %s', (_name, text) => {
+    expect(isReplayedTurnReminderPart({ text })).toBe(false);
   });
 });
 

@@ -21,6 +21,8 @@ import { Session } from './Session.js';
 import type { Part } from '@google/genai';
 import { getAutoMemorySnapshot } from '@qwen-code/qwen-code-core/memory/request-context.js';
 import { buildLegacyRelevantAutoMemoryPrompt } from '@qwen-code/qwen-code-core/memory/recall.js';
+import { formatOmniMemorySideQueryReminder } from '@qwen-code/qwen-code-core/omni/memory-side-query.js';
+import { getPlanModeSystemReminder } from '@qwen-code/qwen-code-core/core/prompts.js';
 import type { ScannedAutoMemoryDocument } from '@qwen-code/qwen-code-core/memory/structured-scan.js';
 import type { Config, LlmChat } from '@qwen-code/qwen-code-core';
 import {
@@ -455,7 +457,7 @@ describe('Session.pendingWorktreeNotice', () => {
       ];
       if (withReminder) {
         parts.unshift({
-          text: '<system-reminder>Existing plan reminder</system-reminder>',
+          text: getPlanModeSystemReminder(),
         });
       }
       vi.mocked(mockChat.getHistory).mockReturnValue([{ role: 'user', parts }]);
@@ -497,6 +499,38 @@ describe('Session.pendingWorktreeNotice', () => {
             mtimeMs: Date.now(),
           } as ScannedAutoMemoryDocument,
         ]),
+      },
+    ];
+    vi.mocked(mockChat.getHistory).mockReturnValue([{ role: 'user', parts }]);
+    const session = new Session(
+      SESSION_ID,
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+    await session.prompt({
+      sessionId: SESSION_ID,
+      prompt: [],
+      _meta: { 'qwen.daemon.continueLastTurn': true },
+    } as unknown as PromptRequest);
+    expect(capturedMessages).toHaveLength(1);
+    expect(capturedMessages[0]).toEqual([
+      { text: expect.stringContaining('Plan mode is active.') },
+      ...parts,
+    ]);
+  });
+
+  it('adds plan reminders when the replayed run carries only omni media memory', async () => {
+    vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.PLAN);
+    const parts: Part[] = [
+      { text: 'do the thing' },
+      {
+        text: formatOmniMemorySideQueryReminder({
+          status: 'miss',
+          files: [],
+          entries: [],
+          gaps: [],
+        }),
       },
     ];
     vi.mocked(mockChat.getHistory).mockReturnValue([{ role: 'user', parts }]);

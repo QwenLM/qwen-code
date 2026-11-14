@@ -19,6 +19,8 @@ import {
   getShellDisplayName,
 } from '../utils/shell-utils.js';
 import { escapeSystemReminderTags } from '../utils/xml.js';
+import { ARENA_REMINDER_OPENER, PLAN_MODE_REMINDER_OPENER } from './prompts.js';
+import { OUTPUT_STYLE_REMINDER_MARKER } from './output-styles.js';
 import {
   collectAvailableSkillEntries,
   renderAvailableSkillsBlock,
@@ -910,13 +912,24 @@ export function isRecalledMemoryReminderPart(part: Part): boolean {
 
 /**
  * True for a wrapped per-turn reminder that a replayed continuation may
- * already carry. Recalled memory is excluded: it shares the envelope but says
- * nothing about plan mode or the other turn reminders.
+ * already carry: one of the reminders the continuation guards would insert
+ * (plan mode, arena, output style). The match is on each producer's exported
+ * opener, the closed-list pattern `isSkillListingReminder` uses, so other
+ * wrapped producers (recalled memory, omni media memory, the date reminder)
+ * never count as delivered turn reminders.
  */
 export function isReplayedTurnReminderPart(part: Part): boolean {
-  return (
-    isWrappedSystemReminderPart(part) && !isRecalledMemoryReminderPart(part)
-  );
+  if (!isWrappedSystemReminderPart(part)) return false;
+  const text = part.text!;
+  if (text.startsWith(`${SYSTEM_REMINDER_OPEN}${ARENA_REMINDER_OPENER}`)) {
+    return true;
+  }
+  const open = `${SYSTEM_REMINDER_OPEN}\n`;
+  if (!text.startsWith(open)) return false;
+  if (text.startsWith(`${open}${PLAN_MODE_REMINDER_OPENER}`)) return true;
+  const firstLine = text.slice(open.length).split('\n', 1)[0]!;
+  const marker = firstLine.indexOf(OUTPUT_STYLE_REMINDER_MARKER);
+  return marker > 0;
 }
 
 /**

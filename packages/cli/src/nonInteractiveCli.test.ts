@@ -60,6 +60,8 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { getAutoMemorySnapshot } from '@qwen-code/qwen-code-core/memory/request-context.js';
 import { buildLegacyRelevantAutoMemoryPrompt } from '@qwen-code/qwen-code-core/memory/recall.js';
+import { formatOmniMemorySideQueryReminder } from '@qwen-code/qwen-code-core/omni/memory-side-query.js';
+import { getPlanModeSystemReminder } from '@qwen-code/qwen-code-core/core/prompts.js';
 import type { ScannedAutoMemoryDocument } from '@qwen-code/qwen-code-core/memory/structured-scan.js';
 import type { Content, Part } from '@google/genai';
 import { LlmChat } from '@qwen-code/qwen-code-core/core/llm-chat.js';
@@ -3282,9 +3284,15 @@ describe('runNonInteractive', () => {
         withReminder: false,
         withMemory: true,
       },
+      {
+        name: 'omni media memory only',
+        withSnapshot: false,
+        withReminder: false,
+        withOmniMemory: true,
+      },
     ])(
       'adds or deduplicates plan reminders on interrupted replay: $name',
-      async ({ withSnapshot, withReminder, withMemory }) => {
+      async ({ withSnapshot, withReminder, withMemory, withOmniMemory }) => {
         setupMetricsMock();
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
         mockLlmClient.stripOrphanedUserEntriesFromHistory = vi.fn();
@@ -3299,7 +3307,7 @@ describe('runNonInteractive', () => {
         }
         if (withReminder) {
           parts.unshift({
-            text: '<system-reminder>Existing plan reminder</system-reminder>',
+            text: getPlanModeSystemReminder(),
           });
         }
         if (withMemory) {
@@ -3314,6 +3322,16 @@ describe('runNonInteractive', () => {
                 mtimeMs: Date.now(),
               } as ScannedAutoMemoryDocument,
             ]),
+          });
+        }
+        if (withOmniMemory) {
+          parts.push({
+            text: formatOmniMemorySideQueryReminder({
+              status: 'miss',
+              files: [],
+              entries: [],
+              gaps: [],
+            }),
           });
         }
         mockLlmClient.getChat = vi.fn(() => ({
