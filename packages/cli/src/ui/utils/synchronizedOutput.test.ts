@@ -105,12 +105,10 @@ describe('terminalSupportsSynchronizedOutput', () => {
 
   it('honours the disable switch on Windows Terminal', () => {
     expect(
-      terminalSupportsSynchronizedOutput(
-        {
-          WT_SESSION: 'abc',
-          QWEN_CODE_SYNCHRONIZED_OUTPUT: '0',
-        },
-      ),
+      terminalSupportsSynchronizedOutput({
+        WT_SESSION: 'abc',
+        QWEN_CODE_SYNCHRONIZED_OUTPUT: '0',
+      }),
     ).toBe(false);
     expect(terminalSupportsSynchronizedOutput({ WT_SESSION: 'abc' })).toBe(
       true,
