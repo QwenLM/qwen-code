@@ -2199,7 +2199,7 @@ describe('ChatCompressionService.compress cache sharing', () => {
     // model the session already uses yields `openai:test-model` against
     // `getModel()`'s `test-model`. That selector is a different *string* but the
     // same *route*: the send layer resolves it to the main content generator
-    // (baseLlmClient.ts:861-871), so the ceiling reported by that endpoint
+    // (baseLlmClient.ts isMainRouteSelector + resolveForModel's early return), so the ceiling reported by that endpoint
     // describes this side-query and must bind. Sized against the inferred window
     // instead, the unclamped 20_000 reserve overflows the real ceiling and the
     // server rejects the recovery request itself.

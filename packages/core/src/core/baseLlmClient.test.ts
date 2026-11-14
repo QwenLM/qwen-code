@@ -1233,6 +1233,15 @@ describe('BaseLlmClient', () => {
       expect(mockCreateContentGenerator).not.toHaveBeenCalled();
     });
 
+    it('fails closed for an unresolvable alias pinned to another baseUrl', async () => {
+      getResolvedModel.mockReturnValue(undefined); // the bare alias resolves nowhere
+
+      await expect(
+        resolve('fast\0https://other.example.com', { failClosed: true }),
+      ).rejects.toThrow(/not registered/i);
+      expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+    });
+
     it('fails closed (throws) when generator creation fails and failClosed is set', async () => {
       registerOnly(
         AuthType.USE_ANTHROPIC,
