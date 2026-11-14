@@ -144,6 +144,7 @@ final class JournalLifecycleAuthorization {
                                 && row.get("parent_session_id") == null && ((Number) row.get("public_child_agents_version")).intValue() == 0
                         : com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.FILES.equals(profile)
                         || com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.FILES_V3.equals(profile)
+                        || com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.FILES_V4.equals(profile)
                         || com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.isPublicShell(profile))) {
             return null;
         }

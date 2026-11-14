@@ -467,6 +467,7 @@ final class AgentSessionQueries {
                                             && row.getString("parent_session_id") == null && row.getInt("public_child_agents_version") == 0
                                     : WorkspaceToolProfiles.FILES.equals(row.getString("tool_profile"))
                             || WorkspaceToolProfiles.FILES_V3.equals(row.getString("tool_profile"))
+                            || WorkspaceToolProfiles.FILES_V4.equals(row.getString("tool_profile"))
                             || WorkspaceToolProfiles.isPublicShell(row.getString("tool_profile")))) {
                         return null;
                     }

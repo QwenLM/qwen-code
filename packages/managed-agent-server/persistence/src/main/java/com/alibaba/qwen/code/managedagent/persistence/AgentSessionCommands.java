@@ -642,7 +642,7 @@ final class AgentSessionCommands {
     private static final String TURN_SESSION_PROJECTION_GUARD = " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
             + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
             + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-            + " 'hosted-workspace-shell/1','hosted-workspace-shell/3','hosted-workspace-files/3','hosted-workspace-external-files/1')"
+            + " 'hosted-workspace-shell/1','hosted-workspace-shell/3','hosted-workspace-shell/4','hosted-workspace-files/3','hosted-workspace-files/4','hosted-workspace-external-files/1')"
             + " AND (tool_profile <> 'hosted-workspace-external-files/1' OR"
             + " (agent_id = X'7177656e2d636f6465' AND agent_definition_digest IS NULL AND parent_session_id IS NULL))";
 

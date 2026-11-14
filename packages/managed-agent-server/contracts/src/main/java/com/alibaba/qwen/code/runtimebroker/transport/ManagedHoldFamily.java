@@ -3,17 +3,18 @@ package com.alibaba.qwen.code.runtimebroker.transport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 
 /**
- * The two H3 hold-row families. A hold row is a ledger row admitted beside
- * a start execution — never dispatched, non-terminal for the physical
- * work's life — and the family names its maintenance protocol kinds: the
- * background Shell rides {@code shell-status}/{@code shell-terminate}, the
- * Monitor watch rides {@code monitor-status}/{@code monitor-stop}. Both
- * families hold their Runtime Session identically; only the control kinds
- * differ.
+ * The hold-row families. A hold row is a ledger row admitted beside a start
+ * execution — never dispatched, non-terminal for the physical work's life —
+ * and the family names its maintenance protocol kinds: the background Shell
+ * rides {@code shell-status}/{@code shell-terminate}, the Monitor watch rides
+ * {@code monitor-status}/{@code monitor-stop}, and the user terminal rides
+ * {@code terminal-status}/{@code terminal-terminate}. All families hold their
+ * Runtime Session identically; only the control kinds differ.
  */
 public enum ManagedHoldFamily {
     SHELL("background_v3_process", "shell-status", "shell-terminate"),
-    MONITOR("background_v3_monitor", "monitor-status", "monitor-stop");
+    MONITOR("background_v3_monitor", "monitor-status", "monitor-stop"),
+    TERMINAL("web_terminal_process", "terminal-status", "terminal-terminate");
 
     private final String dispatchMode;
     private final String statusKind;

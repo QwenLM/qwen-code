@@ -351,6 +351,7 @@ import {
   LOOP_INPUT_SOURCE,
   type HostedLoopClassifier,
 } from './hosted-loop-session.js';
+import { HostedCronSession } from './hosted-cron-session.js';
 import { ManagedHookActivationController } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
 import {
   parseHookExecution,
@@ -394,6 +395,7 @@ import {
   isHostedWorkspacePublicShellProfile,
   HOSTED_WORKSPACE_FILE_PROFILE_V3,
   HOSTED_WORKSPACE_SHELL_PROFILE_V3,
+  HOSTED_WORKSPACE_SHELL_PROFILE_V4,
 } from './hosted-workspace-profiles.js';
 import {
   HOSTED_AGENT_CALL_NOT_ADMITTED_TEXT,
@@ -824,6 +826,8 @@ interface HostedSession {
   automations?: HostedAutomationSession;
   /** Self-paced /loop wakeups: the Session's single unfired loop input. */
   loops?: HostedLoopSession;
+  /** Fixed-interval /loop: the cron trio over the internal automation routes. */
+  crons?: HostedCronSession;
   /** The active turn's permission classifier, adapted for loop arming; the
    * model turn refreshes it so a wakeup is vetted by the same classifier
    * that vets the turn's other side-effectful tools. */
@@ -941,8 +945,10 @@ async function hostedApprovalForTurn(
       'hosted-workspace-files/1',
       'hosted-workspace-shell/1',
       'hosted-workspace-shell/3',
+      'hosted-workspace-shell/4',
       'hosted-workspace-files/3',
       HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+      'hosted-workspace-files/4',
     ].includes(session.toolProfile ?? '');
   const admission = await readHostedTurnApprovalSelection(
     session.managed,
@@ -4221,6 +4227,7 @@ async function executeHostedTurn(
                   childRuns: session.childRuns,
                   monitors: session.monitors,
                   loops: session.loops,
+                  crons: session.crons,
                   wakeKick: () => session.monitorWake?.kick(),
                   backgroundLane: session.backgroundLane,
                   childAgents: childAgentsOf(session),
@@ -5117,7 +5124,8 @@ export function registerHostedHarnessSessionRoutes(
       (contract.lifecycleV2Profiles?.includes('hosted-workspace-shell/1') ||
         contract.lifecycleV2Profiles?.includes(
           HOSTED_WORKSPACE_SHELL_PROFILE_V3,
-        ));
+        ) ||
+        contract.lifecycleV2Profiles?.includes('hosted-workspace-shell/4'));
     if (
       publicChildAgentsVersion === 1 &&
       (!isHostedWorkspacePublicShellProfile(toolProfile) ||
@@ -5385,6 +5393,7 @@ export function registerHostedHarnessSessionRoutes(
         ![
           'hosted-workspace-shell/1',
           HOSTED_WORKSPACE_SHELL_PROFILE_V3,
+          'hosted-workspace-shell/4',
           HOSTED_MCP_PROFILE,
         ].includes(toolProfile as string) ||
         resident.foregroundOnly ||
@@ -6658,6 +6667,7 @@ export function registerHostedHarnessSessionRoutes(
           ![
             'hosted-workspace-shell/1',
             HOSTED_WORKSPACE_SHELL_PROFILE_V3,
+            'hosted-workspace-shell/4',
             HOSTED_MCP_PROFILE,
           ].includes(toolProfile ?? '') ||
           (session.childDepth ?? 0) !== 0)
@@ -7005,6 +7015,24 @@ export function registerHostedHarnessSessionRoutes(
           }),
         },
       );
+      // Fixed-interval /loop: the cron trio rides the internal automation
+      // routes over the store channel; the arm-time review reuses the active
+      // turn's permission classifier, refused when none is active.
+      session.crons = session.stores
+        ? new HostedCronSession(session.stores, session.loops, {
+            classify: (input) =>
+              session.loopClassify
+                ? session.loopClassify(input)
+                : Promise.resolve({
+                    allowed: false,
+                    reason: 'No active permission classifier for cron arming.',
+                  }),
+            shellAvailable: isHostedWorkspaceShellProfile(session.toolProfile),
+            loopWakeupAvailable:
+              session.toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE_V3 ||
+              session.toolProfile === HOSTED_WORKSPACE_SHELL_PROFILE_V4,
+          })
+        : undefined;
       // H5b: every hosted Session owns its channel funnel — a channel input
       // needs no Runtime, and its reply plans from the settled turn alone.
       if (!externalFiles) {
@@ -8989,15 +9017,19 @@ export function registerHostedHarnessSessionRoutes(
                   'hosted-workspace-files/1',
                   'hosted-workspace-shell/1',
                   'hosted-workspace-shell/3',
+                  'hosted-workspace-shell/4',
                   'hosted-workspace-files/3',
+                  'hosted-workspace-files/4',
                 ]
               : [
                   'hosted-workspace-files/1',
                   'hosted-workspace-shell/1',
                   'hosted-workspace-shell/3',
+                  'hosted-workspace-shell/4',
                   'hosted-workspace-files/2',
                   'hosted-workspace-files/3',
                   HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
+                  'hosted-workspace-files/4',
                 ]
           ).includes(session.toolProfile ?? '') ||
           (approvalSelection.revision === 0 &&
@@ -9014,6 +9046,7 @@ export function registerHostedHarnessSessionRoutes(
           'hosted-workspace-files/1',
           'hosted-workspace-shell/1',
           'hosted-workspace-shell/3',
+          'hosted-workspace-shell/4',
         ].includes(session.toolProfile ?? '') ||
           (session.childDepth ?? 0) !== 0 ||
           session.mcp ||
@@ -9813,6 +9846,7 @@ export function registerHostedHarnessSessionRoutes(
       ![
         'hosted-workspace-shell/1',
         HOSTED_WORKSPACE_SHELL_PROFILE_V3,
+        'hosted-workspace-shell/4',
         HOSTED_MCP_PROFILE,
       ].includes(session.toolProfile ?? '') ||
       !contract.lifecycleV2Profiles?.some(
@@ -9842,6 +9876,7 @@ export function registerHostedHarnessSessionRoutes(
       ![
         'hosted-workspace-shell/1',
         HOSTED_WORKSPACE_SHELL_PROFILE_V3,
+        'hosted-workspace-shell/4',
         HOSTED_MCP_PROFILE,
       ].includes(session.toolProfile ?? '') ||
       !contract.lifecycleV2Profiles?.includes(session.toolProfile!)
@@ -10025,6 +10060,7 @@ export function registerHostedHarnessSessionRoutes(
       ![
         'hosted-workspace-shell/1',
         HOSTED_WORKSPACE_SHELL_PROFILE_V3,
+        'hosted-workspace-shell/4',
         HOSTED_MCP_PROFILE,
       ].includes(session.toolProfile ?? '') ||
       !contract.lifecycleV2Profiles?.includes(session.toolProfile!)
@@ -12136,6 +12172,7 @@ export function registerHostedHarnessSessionRoutes(
             childRuns: session.childRuns,
             monitors: session.monitors,
             loops: session.loops,
+            crons: session.crons,
             wakeKick: () => session.monitorWake?.kick(),
             backgroundLane: session.backgroundLane,
             childAgents: childAgentsOf(session),

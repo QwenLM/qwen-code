@@ -822,6 +822,12 @@ export function createJavaManagedAgentProvider(
       get: (sessionId, itemId, request) =>
         client.getToolDetails(sessionId, itemId, request.signal),
     },
+    terminal: {
+      ticket: (sessionId, terminalId, request) =>
+        client.terminalTicket(sessionId, terminalId, request.signal),
+      webSocketUrl: (sessionId, terminalId) =>
+        client.terminalWebSocketUrl(sessionId, terminalId),
+    },
     toolResults: {
       canDownload: saveArtifact !== undefined,
       getResult: (sessionId, itemId, request) =>
@@ -1198,6 +1204,9 @@ function toSessionSummary(
       ...(session.capabilities?.artifacts === true ? { artifacts: true } : {}),
       ...(session.capabilities?.btw === true ? { btw: true } : {}),
       ...(session.capabilities?.recap === true ? { recap: true } : {}),
+      ...(session.capabilities?.terminal !== undefined
+        ? { terminal: session.capabilities.terminal }
+        : {}),
       ...(session.capabilities?.clientFiles === true
         ? { clientFiles: true }
         : {}),

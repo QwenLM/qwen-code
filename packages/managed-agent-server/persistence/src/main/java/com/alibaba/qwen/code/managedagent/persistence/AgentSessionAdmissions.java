@@ -701,7 +701,7 @@ final class AgentSessionAdmissions {
             String requestDigest, WorkspaceCommand command, boolean internalTeamLead) {
         SessionRecord session = storeRows.requireSession(tenantId, command.sessionId());
         if (!command.requestDigest().equals(requestDigest)
-                || internalTeamLead != WorkspaceToolProfiles.INTERNAL_TEAM_LEAD.equals(session.toolProfile())
+                || internalTeamLead != WorkspaceToolProfiles.isInternalTeamLead(session.toolProfile())
                 || internalTeamLead && (!"qwen-code".equals(session.agentId())
                         || session.agentDefinitionDigest() != null)) {
             throw new ManagedAgentException(409,

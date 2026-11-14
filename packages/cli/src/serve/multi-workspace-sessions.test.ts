@@ -2186,6 +2186,100 @@ describe('multi-workspace session dispatch', () => {
     expect(secondaryBridge.cwdChangeCalls).toEqual([]);
   });
 
+  it('fires the PR-watch resume hook only after a restore succeeded', async () => {
+    // The serve root installs this local and the route's onSessionRestored
+    // reads it at call time, so setting it here exercises the real route seam
+    // rather than a stub of it. The drain itself is switched off in production;
+    // what this pins is that a user's resume reaches the seam at all.
+    const { app } = makeHarness();
+    const drainNow = vi.fn();
+    (
+      app.locals as { prWatchDrainNow?: (workspaceCwd: string) => void }
+    ).prWatchDrainNow = drainNow;
+
+    const ok = await request(app)
+      .post('/session/22222222-2222-4222-a222-222222222222/resume')
+      .set('Host', host())
+      .send({ cwd: SECONDARY_CWD });
+    expect(ok.status).toBe(200);
+    expect(drainNow).toHaveBeenCalledTimes(1);
+    // The session id rides along so the drain can clear a stale Gone mark for
+    // the session that was just restored.
+    expect(drainNow).toHaveBeenCalledWith(
+      SECONDARY_CWD,
+      '22222222-2222-4222-a222-222222222222',
+    );
+
+    // A restore that is attempted and then fails must not schedule a drain.
+    // The failure has to come from the restore itself: an earlier refusal (an
+    // untrusted workspace, say) is rejected long before the hook, so it would
+    // stay green even with the hook moved above restoreSessionCore.
+    const failing = makeHarness();
+    const failingDrain = vi.fn();
+    (
+      failing.app.locals as {
+        prWatchDrainNow?: (workspaceCwd: string, sessionId?: string) => void;
+      }
+    ).prWatchDrainNow = failingDrain;
+    vi.spyOn(failing.secondaryBridge, 'resumeSession').mockRejectedValue(
+      new Error('bridge restore failed'),
+    );
+    const failed = await request(failing.app)
+      .post('/session/22222222-2222-4222-a222-222222222222/resume')
+      .set('Host', host())
+      .send({ cwd: SECONDARY_CWD });
+    expect(failed.status).not.toBe(200);
+    // Proves the core reached the bridge, so the absence below is about the
+    // hook's placement rather than an earlier exit. Asserted on the spy: the
+    // rejection replaces the implementation, so the bridge's own restoreCalls
+    // log is no longer written.
+    expect(failing.secondaryBridge.resumeSession).toHaveBeenCalled();
+    expect(failingDrain).not.toHaveBeenCalled();
+  });
+
+  it('answers a resume without waiting for the drain it scheduled', async () => {
+    // §2 forbids awaiting the hook: the watch's per-PR lock is not re-entrant,
+    // so a restore the drain dispatched would deadlock against its own drain.
+    // A local that never settles is the witness — an awaited hook would hang
+    // this request instead of answering it.
+    const { app } = makeHarness();
+    let scheduled = false;
+    (
+      app.locals as {
+        prWatchDrainNow?: (workspaceCwd: string, sessionId?: string) => void;
+      }
+    ).prWatchDrainNow = () => {
+      scheduled = true;
+      return new Promise<void>(() => {});
+    };
+    const res = await request(app)
+      .post('/session/22222222-2222-4222-a222-222222222222/resume')
+      .set('Host', host())
+      .send({ cwd: SECONDARY_CWD });
+    expect(res.status).toBe(200);
+    expect(scheduled).toBe(true);
+  });
+
+  it('still answers the resume when the scheduled drain throws', async () => {
+    // The hook fires after the response was written, so an escaping throw
+    // would reach sendBridgeError with headers already sent. The inner
+    // try/catch is what keeps a broken drain from corrupting the answer.
+    const { app } = makeHarness();
+    (
+      app.locals as {
+        prWatchDrainNow?: (workspaceCwd: string, sessionId?: string) => void;
+      }
+    ).prWatchDrainNow = () => {
+      throw new Error('drain local blew up');
+    };
+    const res = await request(app)
+      .post('/session/22222222-2222-4222-a222-222222222222/resume')
+      .set('Host', host())
+      .send({ cwd: SECONDARY_CWD });
+    expect(res.status).toBe(200);
+    expect(res.body.sessionId).toBe('22222222-2222-4222-a222-222222222222');
+  });
+
   it('restores cold Live load and resume sessions into their server-derived conversation directories', async () => {
     await withStoredLiveCoordinators(
       [LIVE_COLD_LOAD_ID, LIVE_COLD_RESUME_ID],

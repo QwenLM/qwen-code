@@ -27,6 +27,7 @@ import com.alibaba.qwen.code.runtimebroker.transport.ManagedHookProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedMcpProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedMonitorProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedShellProtocol;
+import com.alibaba.qwen.code.runtimebroker.transport.ManagedTerminalProtocol;
 
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
@@ -539,7 +540,8 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
         if (ManagedMcpProtocol.isOperation(operation) || ManagedHookProtocol.isOperation(operation)
                 || ManagedExtensionCommandProtocol.isOperation(operation)
                 || ManagedShellProtocol.isOperation(operation)
-                || ManagedMonitorProtocol.isOperation(operation)) {
+                || ManagedMonitorProtocol.isOperation(operation)
+                || ManagedTerminalProtocol.isOperation(operation)) {
             if (!managed(session)) {
                 throw WorkspaceExecutionStore.unavailable();
             }
@@ -551,13 +553,16 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
                 ManagedShellProtocol.validateSession(session, operation);
             } else if (ManagedMonitorProtocol.isOperation(operation)) {
                 ManagedMonitorProtocol.validateSession(session, operation);
+            } else if (ManagedTerminalProtocol.isOperation(operation)) {
+                ManagedTerminalProtocol.validateSession(session, operation);
             } else {
                 ManagedMcpProtocol.validateSession(session, operation);
             }
             boolean recovery = ManagedMcpProtocol.isRecovery(operation) || ManagedHookProtocol.isRecovery(operation)
                     || ManagedExtensionCommandProtocol.isRecovery(operation)
                     || ManagedShellProtocol.isRecovery(operation)
-                    || ManagedMonitorProtocol.isRecovery(operation);
+                    || ManagedMonitorProtocol.isRecovery(operation)
+                    || ManagedTerminalProtocol.isRecovery(operation);
             Context context = context(lease, session, !recovery, ManagedHookProtocol.isOperation(operation));
             if (context.runtime().getState() != RuntimeBindingRecord.State.READY
                     && !(recovery && context.runtime().getState() == RuntimeBindingRecord.State.DRAINING)) {

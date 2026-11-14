@@ -17,6 +17,7 @@ export const HOSTED_LIFECYCLE_V2_PROFILES_ENV =
 const LIFECYCLE_V2_PROFILES = [
   'hosted-workspace-shell/1',
   'hosted-workspace-shell/3',
+  'hosted-workspace-shell/4',
   'hosted-workspace-mcp/1',
 ] as const;
 export const HOSTED_HARNESS_PROTOCOL_VERSION = 1 as const;
