@@ -240,10 +240,22 @@ host 按 watch identity 的口径归并（裸 hostname、不带端口），因�
 
 ### 9. 每 tick 的扫描成本
 
-启用把每 workspace 每 tick 零次扫描变成三次。本增量先在真实规模的会话目录上实测成本
-再决定，并无论哪种都记录决策：合并观测与 listing 的扫描（它们在同一 tick、同一模块）
-而保留 drain 那次独立，或保留三次并以实测作为依据。当初推迟这项工作的注记引用的是
-「watch 开关关闭、drain 未填充」；本增量把这两个前提都推翻了，因此不能继承那次推迟。
+启用把每 workspace 每 tick 零次扫描变成三次（`pr-watch-observation.ts`、
+`session-pr-refresh.ts`，以及 `pr-watch-deps.ts` 经 `pr-watch-drain.ts`）。
+2026-11-14 用探针实测：两个 workspace、各 32 个 session（每 workspace 上限），
+`scanWorkspaceBindings` 预热后 20 次迭代：
+
+- 单次扫描 32 个 session sidecar 及其 transcript：**均值 8.49 ms、中位 8.46 ms、
+  p95 10.07 ms**；
+- 每 tick 六次扫描（三个调用点 × 两个 workspace）：**50.9 ms**，即默认 5 分钟
+  间隔的 **0.017%**、1 分钟下限的 **0.085%**；
+- 合并观测与 listing 扫描每 tick 可省下同 tick、同模块的两次扫描：**17 ms**。
+
+**决策：保留三次扫描。** 省下的是每 tick 17 ms，代价是把观测的绑定快照穿到
+refresh 里，并给这份快照一条它现在没有的生命周期规则（观测只持有一个 sweep，
+listing 在同一 tick 稍后才跑）。drain 的扫描继续独立，沿用其既有的 partial scan
+与锁语义。即使在 1 分钟下限，实测成本也远低于 tick 预算；未来若单 session 扫描
+成本上升，应先重跑该探针再接受三次扫描。
 
 ## 涉及文件
 
@@ -350,4 +362,4 @@ host 按 watch identity 的口径归并（裸 hostname、不带端口），因�
 
 仍待定：
 
-1. **扫描：合并两次，还是保留三次并附实测？** 待实测后决定（§9），不提前定。
+1. ~~**扫描：合并两次，还是保留三次并附实测？**~~ 已由 §9 实测决定：保留三次。

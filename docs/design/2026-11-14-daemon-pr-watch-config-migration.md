@@ -305,13 +305,28 @@ rewritten, including the sentence that says the state watch records the title.
 
 ### 9. The per-tick scan cost
 
-Enablement turns zero scans per workspace per tick into three. This increment
-measures the cost on a realistic session directory before deciding, and records
-the decision either way: consolidate the observation and listing scans (they are
-in the same tick and the same module) and leave the drain's separate, or keep
-three with the measurement as justification. The deferred note that postponed
-this work cited "the watch switch off and the drain unprovisioned" as its reason;
-this increment removes both premises, so it cannot inherit the deferral.
+Enablement turns zero scans per workspace per tick into three
+(`pr-watch-observation.ts`, `session-pr-refresh.ts`, and `pr-watch-deps.ts` via
+`pr-watch-drain.ts`). Measured on 2026-11-14 with a probe that seeds two
+workspaces of 32 sessions each — the per-workspace cap — and times
+`scanWorkspaceBindings` over 20 warm iterations:
+
+- one scan of 32 session sidecars and their transcripts: **8.49 ms mean,
+  8.46 ms median, 10.07 ms p95**;
+- one tick's six scans (three call sites × two workspaces): **50.9 ms**, i.e.
+  **0.017%** of the 5-minute default interval and **0.085%** of the one-minute
+  floor;
+- consolidating the observation and listing scans would save the two scans that
+  share a tick and a module: **17 ms per tick**.
+
+**Decision: keep three scans.** The saving is 17 ms per tick, at the cost of
+threading the observation's binding snapshot into the refresh and giving that
+snapshot a lifetime rule it does not have today (the observation holds it for
+one sweep; the listing runs later in the same tick). The drain's scan stays
+separate for its existing partial-scan and lock semantics. The measured cost is
+far below the tick budget even at the one-minute floor; a future change that
+raises the per-session scan cost should re-run this probe before the three
+scans are accepted as-is.
 
 ## Files affected
 
@@ -441,5 +456,5 @@ Decided by the maintainer on 2026-11-14:
 
 Still open:
 
-1. **Scans: consolidate two, or keep three with a measurement?** To be decided
-   with the measurement (§9), not before it.
+1. ~~**Scans: consolidate two, or keep three with a measurement?**~~ Decided by
+   the measurement in §9: keep three.
