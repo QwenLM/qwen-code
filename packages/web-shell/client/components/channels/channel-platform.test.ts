@@ -13,6 +13,7 @@ import {
   isPrivateOnlyChannelType,
   isRepositoryOnlyChannelType,
   isSupportedChannelType,
+  PLATFORM_MARKS,
 } from './channel-platform';
 
 function descriptor(
@@ -33,6 +34,7 @@ describe('Channel platform availability', () => {
         descriptor('wecom'),
         descriptor('wecom-callback'),
         descriptor('feishu'),
+        descriptor('feishu-webhook'),
         descriptor('github'),
         descriptor('gitlab'),
         descriptor('email'),
@@ -43,6 +45,7 @@ describe('Channel platform availability', () => {
         descriptor('github', false),
         descriptor('gitlab', false),
         descriptor('email', false),
+        descriptor('feishu-webhook', false),
       ]
         .filter(isChannelPlatformAvailable)
         .map((item) => item.type),
@@ -54,6 +57,7 @@ describe('Channel platform availability', () => {
       'wecom',
       'wecom-callback',
       'feishu',
+      'feishu-webhook',
       'github',
       'gitlab',
       'email',
@@ -68,6 +72,8 @@ describe('Channel platform availability', () => {
     expect(isSupportedChannelType('wecom')).toBe(true);
     expect(isSupportedChannelType('wecom-callback')).toBe(true);
     expect(isSupportedChannelType('feishu')).toBe(true);
+    expect(isSupportedChannelType('feishu-webhook')).toBe(true);
+    expect(PLATFORM_MARKS['feishu-webhook']).toBe(PLATFORM_MARKS['feishu']);
     expect(isSupportedChannelType('github')).toBe(true);
     expect(isSupportedChannelType('gitlab')).toBe(true);
     expect(isSupportedChannelType('email')).toBe(true);

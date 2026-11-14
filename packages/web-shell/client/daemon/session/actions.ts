@@ -281,6 +281,7 @@ export interface CreateDaemonSessionActionsArgs {
   getDefaultSessionContext: () => DaemonProductSessionContext | undefined;
   getClient?: () => DaemonClient | undefined;
   getConnection: () => DaemonConnectionState;
+  getPromptStatus: () => DaemonPromptStatus;
   getEventDetailMode: () => 'full' | 'summary';
   hasSessionActivePrompt: () => boolean;
   resetCurrentSessionActivePrompt: () => void;
@@ -487,6 +488,7 @@ export function createDaemonSessionActions({
   getDefaultSessionContext,
   getClient,
   getConnection,
+  getPromptStatus,
   getEventDetailMode,
   hasSessionActivePrompt,
   resetCurrentSessionActivePrompt,
@@ -1024,6 +1026,7 @@ export function createDaemonSessionActions({
     options?: {
       workspaceCwd?: string;
       sessionContext?: DaemonProductSessionContext;
+      reconcilePromptActivity?: boolean;
     },
     signal?: AbortSignal,
     replaySource?: PendingSessionLoad['replaySource'],
@@ -1065,6 +1068,9 @@ export function createDaemonSessionActions({
       replaySource,
     );
     const pendingLoad = pendingSessionLoadRef.current;
+    if (pendingLoad && options?.reconcilePromptActivity) {
+      pendingLoad.reconcilePromptActivity = true;
+    }
     const activePrompt = currentSessionId
       ? activePromptsRef.current.get(currentSessionId)
       : undefined;
@@ -1148,7 +1154,9 @@ export function createDaemonSessionActions({
         };
       });
     }
-    setPromptStatus('idle');
+    if (!reloadingCurrentSession || !options?.reconcilePromptActivity) {
+      setPromptStatus('idle');
+    }
     settledPromptsRef.current.clear();
     clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
     if (!reloadingCurrentSession) store.reset();
@@ -1157,6 +1165,12 @@ export function createDaemonSessionActions({
     setRestoreSessionContext(targetSessionContext);
     setRestoreSessionNonce((nonce) => nonce + 1);
     return loadPromise.catch((error: unknown) => {
+      if (
+        pendingLoad?.reconcilePromptActivity &&
+        pendingSessionLoadIdRef.current !== pendingLoad.id
+      ) {
+        throw error;
+      }
       // The failed target stays visible (sessionId + workspaceCwd) so the UI
       // can render the load error in context. Only mark the connection as
       // failed; the next switch's workspace derivation skips a failed
@@ -1168,6 +1182,13 @@ export function createDaemonSessionActions({
         (pendingSessionLoadRef.current === undefined ||
           pendingSessionLoadRef.current === pendingLoad)
       ) {
+        if (
+          pendingLoad?.reconcilePromptActivity &&
+          getConnection().sessionId === sessionId &&
+          !hasLocallySubmittedPrompt(activePromptsRef.current, sessionId)
+        ) {
+          setPromptStatus('idle');
+        }
         setConnection((current) => ({
           ...current,
           error: error instanceof Error ? error.message : String(error),
@@ -1201,6 +1222,14 @@ export function createDaemonSessionActions({
       const connection = getConnection();
       const backstopSession = sessionRef.current;
       if (
+        backstopSession !== undefined &&
+        connection.sessionId === backstopSession.sessionId &&
+        (backstopSession.workspaceCwd !== owner.workspaceCwd ||
+          backstopSession.sessionId !== owner.sessionId)
+      ) {
+        return;
+      }
+      if (
         connection.sessionId === owner.sessionId &&
         backstopSession?.sessionId === owner.sessionId &&
         backstopSession?.workspaceCwd === owner.workspaceCwd &&
@@ -1209,6 +1238,21 @@ export function createDaemonSessionActions({
       )
         return;
       const previous = daemonActivePromptRef.current;
+      const pendingLoad = pendingSessionLoadRef.current;
+      const reconcilingActivity =
+        pendingLoad?.reconcilePromptActivity === true &&
+        pendingLoad.sessionId === owner.sessionId &&
+        backstopSession?.workspaceCwd === owner.workspaceCwd;
+      if (
+        reconcilingActivity &&
+        previous?.active === false &&
+        previous.sessionId === owner.sessionId &&
+        previous.workspaceCwd === owner.workspaceCwd &&
+        active !== false
+      ) {
+        // Completion observed during recovery outranks older active samples.
+        return;
+      }
       daemonActivePromptRef.current = { active, ...owner };
       if (
         active !== undefined &&
@@ -1237,8 +1281,8 @@ export function createDaemonSessionActions({
       // A fresh `false` is a settle signal even when this provider has not seen
       // the preceding `true`; that is how a restored prompt is released after
       // the first post-attach live-state poll. The bridge withholds cached
-      // answers until that fresh poll. `undefined` settles only when it loses a
-      // previously known `true` authority.
+      // answers until that fresh poll. Losing a previously known `true`
+      // reconciles a running observer against a fresh load snapshot.
       // Gaining `true` never revives a finished turn: the live-state poll
       // trails the event stream, so reviving would flash the indicator back on
       // for one poll interval after every turn_complete. A turn that really is
@@ -1274,11 +1318,21 @@ export function createDaemonSessionActions({
       ) {
         return;
       }
+      if (active === undefined && getPromptStatus() !== 'idle') {
+        void startSessionSwitch(backstopSession.sessionId, 'load', {
+          sessionContext:
+            connection.sessionContext ??
+            daemonClientSessionContext(backstopSession),
+          reconcilePromptActivity: true,
+        }).catch(() => undefined);
+        return;
+      }
       const settledRestoredPrompt = settleRestoredActivePrompt();
       if (
         !lostAuthority &&
         !settledRestoredPrompt &&
-        !connection.backgroundTurn
+        !connection.backgroundTurn &&
+        !reconcilingActivity
       )
         return;
       // Commit the buffered batch before reading the store. Without this the
@@ -3210,6 +3264,28 @@ export function createDaemonSessionActions({
           'Rename session failed',
           error,
           'rename_session',
+        );
+      }
+    },
+
+    async bindSessionPr(pr) {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Bind PR failed',
+        'bind_session_pr',
+      );
+      try {
+        return await withActionTimeout(
+          session.updateMetadata({ pr }),
+          'Bind PR timed out',
+        );
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Bind PR failed',
+          error,
+          'bind_session_pr',
         );
       }
     },
