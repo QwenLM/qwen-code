@@ -4910,6 +4910,46 @@ describe('Session', () => {
       expect(result.stopReason).toBe('end_turn');
     });
 
+    it('keeps a failed-recovery rollback truncated as max_tokens', async () => {
+      // Core's synthetic terminal chunk after a failed recovery attempt
+      // carries MAX_TOKENS: the user-visible response is still the cut-off
+      // text, so the turn must not resolve end_turn (issue #12113's symptom).
+      mockChat.sendMessageStream = vi.fn().mockResolvedValueOnce(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [
+                {
+                  content: { parts: [{ text: 'Half an ans' }] },
+                  finishReason: FinishReason.MAX_TOKENS,
+                },
+              ],
+            },
+          },
+          { type: core.StreamEventType.RETRY, isContinuation: true },
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [
+                {
+                  content: { role: 'model', parts: [] },
+                  finishReason: FinishReason.MAX_TOKENS,
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      const result = await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'write it' }],
+      });
+
+      expect(result.stopReason).toBe('max_tokens');
+    });
+
     it('runs the edit a retry produces after a cut-off attempt', async () => {
       const execute = useTool(core.Kind.Edit, 'write_file');
 
@@ -5800,21 +5840,38 @@ describe('Session', () => {
       // The MAX_TOKENS finish belonged to the abandoned attempt; the retried
       // round's own STOP finish must decide the stop reason.
       useSharedRounds([
-        [
-          text('Half an ans'),
-          finished(FinishReason.MAX_TOKENS),
-          {
-            type: core.LlmEventType.Retry,
-            isContinuation: false,
-          } as unknown as RoundEvent,
-          text('The whole answer, redone.'),
-          finished(FinishReason.STOP),
-        ],
+        text('Half an ans'),
+        finished(FinishReason.MAX_TOKENS),
+        {
+          type: core.LlmEventType.Retry,
+          isContinuation: false,
+        } as unknown as RoundEvent,
+        text('The whole answer, redone.'),
+        finished(FinishReason.STOP),
       ]);
 
       const result = await prompt();
 
       expect(result.stopReason).toBe('end_turn');
+    });
+
+    it('keeps a failed-continuation rollback truncated as max_tokens', async () => {
+      // A continuation retry that fails rolls back with a synthetic terminal
+      // MAX_TOKENS (core emits the truthful reason): the user-visible answer
+      // is still cut off, so the turn must not resolve end_turn.
+      useSharedRounds([
+        text('Half an ans'),
+        finished(FinishReason.MAX_TOKENS),
+        {
+          type: core.LlmEventType.Retry,
+          isContinuation: true,
+        } as unknown as RoundEvent,
+        finished(FinishReason.MAX_TOKENS),
+      ]);
+
+      const result = await prompt();
+
+      expect(result.stopReason).toBe('max_tokens');
     });
 
     it('rejects a prompt whose model round the client stopped as a loop', async () => {
