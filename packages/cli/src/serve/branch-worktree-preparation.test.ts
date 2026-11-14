@@ -24,6 +24,79 @@ import {
   updateBranchWorktreeJournal,
 } from './branch-worktree-preparation.js';
 
+// The module under test has exactly four direct child-process spawns — the
+// four `execFileAsync('git', …)` call sites below (audited: this file uses no
+// `execFileSync`/`spawn`/`exec` of its own; everything else goes through
+// simple-git, which already spawns with `windowsHide: true`). Each of them
+// must pass `windowsHide: true`: a detached daemon on Windows raises a
+// visible console window per console-subsystem child otherwise (#17266).
+// The wrapper records the options of each `execFile` call and delegates to
+// the real implementation, so the real-git fixtures in this file keep
+// running unchanged (`execFileSync` stays the real one via the `...actual`
+// spread).
+const { recordedExecFileCalls } = vi.hoisted(() => {
+  const recordedExecFileCalls: Array<{
+    file: string;
+    args: readonly string[];
+    options: Record<string, unknown>;
+  }> = [];
+  return { recordedExecFileCalls };
+});
+vi.mock('node:child_process', async () => {
+  const actual =
+    await vi.importActual<typeof import('node:child_process')>(
+      'node:child_process',
+    );
+  const { promisify: promisifyActual } =
+    await vi.importActual<typeof import('node:util')>('node:util');
+  const wrappedExecFile = ((
+    file: string,
+    args: readonly string[],
+    options: unknown,
+    callback: unknown,
+  ) => {
+    const hasOptions = typeof options === 'object' && options !== null;
+    const callOptions = (hasOptions ? options : {}) as Record<string, unknown>;
+    const callCallback = (hasOptions ? callback : options) as (
+      ...callArgs: never[]
+    ) => void;
+    recordedExecFileCalls.push({ file, args, options: callOptions });
+    return hasOptions
+      ? actual.execFile(
+          file,
+          args,
+          callOptions as Parameters<typeof actual.execFile>[2],
+          callCallback as never,
+        )
+      : actual.execFile(file, args, callCallback as never);
+  }) as unknown as typeof actual.execFile;
+  // The module under test consumes `promisify(execFile)`. Node's real
+  // `execFile` carries a `util.promisify.custom` implementation (rejecting
+  // with the error, resolving `{stdout, stderr}`); a plain wrapper loses it
+  // and generic promisification changes the resolution shape. Keep the real
+  // semantics by delegating the custom path to `promisify(actual.execFile)`
+  // while recording the options of every promisified call too.
+  Object.defineProperty(wrappedExecFile, promisifyActual.custom, {
+    value: (
+      file: string,
+      args: readonly string[],
+      options: Record<string, unknown>,
+    ) => {
+      recordedExecFileCalls.push({
+        file,
+        args,
+        options: options ?? {},
+      });
+      return promisifyActual(actual.execFile)(file, args, options);
+    },
+  });
+  return {
+    ...actual,
+    default: { ...actual, execFile: wrappedExecFile },
+    execFile: wrappedExecFile,
+  };
+});
+
 const targetSessionId = '11111111-1111-4111-8111-111111111111';
 const stalePid = 2_147_483_647;
 let root: string;
@@ -678,5 +751,76 @@ describe('isBranchWorktreeCreationSupported', () => {
         branch: 'main',
       }),
     ).resolves.toBe(false);
+  });
+});
+
+describe('direct git spawns hide the Windows console window', () => {
+  it('passes windowsHide on every execFileAsync git call site', async () => {
+    recordedExecFileCalls.length = 0;
+
+    // Same-repo path: drives `git rev-parse HEAD` (resolveBranchWorktree-
+    // BaseCheckout) plus `git worktree list --porcelain` and `git ls-tree`
+    // (isBranchWorktreeCreationSupported).
+    const resolved = await resolveBranchWorktreeBaseCheckout({
+      workspaceCwd: root,
+      sessionId: targetSessionId,
+      snapshot: { workspaceCwd: root, effectiveCwd: root },
+      sidecarPath,
+    });
+    expect(resolved?.headCommit).toBe(baseCommit);
+    await expect(
+      isBranchWorktreeCreationSupported({
+        repoTop: root,
+        checkoutCwd: root,
+        headCommit: baseCommit,
+        branch: 'main',
+      }),
+    ).resolves.toBe(true);
+
+    // Linked-worktree path: a checkout whose repo top differs from the
+    // workspace additionally drives `git rev-parse --git-common-dir`
+    // (resolveGitCommonDir), even when the sidecar checks then reject the
+    // resolve — the spawns have already happened by then.
+    const wtParent = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-wt-'));
+    const wtPath = path.join(wtParent, 'wt');
+    try {
+      execFileSync('git', ['worktree', 'add', '-q', '-b', 'probe-wt', wtPath], {
+        cwd: root,
+      });
+      await resolveBranchWorktreeBaseCheckout({
+        workspaceCwd: root,
+        sessionId: targetSessionId,
+        snapshot: { workspaceCwd: root, effectiveCwd: wtPath },
+        sidecarPath,
+      });
+    } finally {
+      // Guard the cleanup: `worktree remove` throws when `worktree add`
+      // never succeeded, which would mask the original failure.
+      if ((await fs.stat(wtPath).catch(() => null)) !== null) {
+        execFileSync('git', ['worktree', 'remove', '--force', wtPath], {
+          cwd: root,
+        });
+      }
+      await fs.rm(wtParent, { recursive: true, force: true });
+    }
+
+    const gitCalls = recordedExecFileCalls.filter(
+      (call) => call.file === 'git',
+    );
+    expect(gitCalls.length).toBeGreaterThan(0);
+    const commandLines = gitCalls.map((call) => call.args.join(' '));
+    expect(commandLines.some((cmd) => cmd.includes('rev-parse HEAD'))).toBe(
+      true,
+    );
+    expect(
+      commandLines.some((cmd) => cmd.includes('rev-parse --git-common-dir')),
+    ).toBe(true);
+    expect(commandLines.some((cmd) => cmd.includes('worktree list'))).toBe(
+      true,
+    );
+    expect(commandLines.some((cmd) => cmd.includes('ls-tree'))).toBe(true);
+    for (const call of gitCalls) {
+      expect(call.options['windowsHide']).toBe(true);
+    }
   });
 });
