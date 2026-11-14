@@ -28,7 +28,7 @@
     "@qwen-code/channel-base": "0.27.2",
     "@wecom/aibot-node-sdk": "^1.0.7",
     "saxes": "6.0.0",
-    "undici": "^7.28.0"
+    "undici": "^7.30.2"
   },
   "devDependencies": {
     "typescript": "^5.0.0"

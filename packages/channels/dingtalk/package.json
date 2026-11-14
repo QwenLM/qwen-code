@@ -27,7 +27,7 @@
   "dependencies": {
     "@qwen-code/channel-base": "0.27.2",
     "dingtalk-stream-sdk-nodejs": "^2.0.4",
-    "undici": "^7.28.0"
+    "undici": "^7.30.2"
   },
   "devDependencies": {
     "typescript": "^5.0.0"
