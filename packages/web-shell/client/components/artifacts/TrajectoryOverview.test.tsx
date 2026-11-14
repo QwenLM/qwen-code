@@ -21,6 +21,7 @@ import type {
   TimelineSpan,
 } from '../../trajectory/buildTimeline';
 import type { TrajectoryRow } from '../../trajectory/types';
+import { useTimelineViewport } from '../../trajectory/useTimelineViewport';
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -49,18 +50,26 @@ function render(props: Partial<TrajectoryOverviewProps>): HTMLElement {
   return container;
 }
 
+function ControlledOverview(props: Partial<TrajectoryOverviewProps>) {
+  const viewportControl = useTimelineViewport(props.model);
+  return (
+    <TrajectoryOverview
+      model={undefined}
+      viewportControl={viewportControl}
+      onSelect={() => {}}
+      onRangeChange={() => {}}
+      onModeChange={() => {}}
+      describe={(span) => `about ${span.rowKey}`}
+      {...props}
+    />
+  );
+}
+
 function draw(root: Root, props: Partial<TrajectoryOverviewProps>) {
   act(() => {
     root.render(
       <I18nProvider language="en">
-        <TrajectoryOverview
-          model={undefined}
-          onSelect={() => {}}
-          onRangeChange={() => {}}
-          onModeChange={() => {}}
-          describe={(span) => `about ${span.rowKey}`}
-          {...props}
-        />
+        <ControlledOverview {...props} />
       </I18nProvider>,
     );
   });
@@ -995,14 +1004,20 @@ describe('TrajectoryOverview', () => {
       expect(modeSwitch(clock).getAttribute('aria-pressed')).toBe('true');
     });
 
-    it('asks for the other mode, whichever is in force', () => {
+    it('selects either time mode', () => {
       const onModeChange = vi.fn();
       const container = render({ model: MODEL, onModeChange });
       act(() => modeSwitch(container).click());
       expect(onModeChange).toHaveBeenLastCalledWith('clock');
 
       rerender({ model: CLOCK_MODEL, onModeChange });
-      act(() => modeSwitch(container).click());
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="trajectory-mode-active"]',
+          )!
+          .click(),
+      );
       expect(onModeChange).toHaveBeenLastCalledWith('active');
     });
 

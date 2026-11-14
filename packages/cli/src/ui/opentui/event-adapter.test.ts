@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 import { describe, it, expect } from 'vitest';
+import { emptyGoalSnapshot } from '@qwen-code/qwen-code-core/goals/goal-protocol.js';
+import {
+  foldLiveEvent,
+  snapshotCanonicalHistory,
+} from './live-session-model.js';
 import {
   createEventMapper,
   renderResultDisplay,
@@ -13,6 +18,45 @@ import {
 type AnyEv = Parameters<ReturnType<typeof createEventMapper>>[0];
 
 describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
+  it('formats marked quota results without touching ordinary text', async () => {
+    const { initializeI18n, setLanguageAsync } = await import(
+      '../../i18n/index.js'
+    );
+    await initializeI18n('zh-TW');
+    try {
+      expect(
+        renderResultDisplay({ type: 'subscription_quota', memberType: 'pro' }),
+      ).toBe('週額度已用完，請在額度恢復後重試。');
+      const text =
+        "You've used up your weekly credits. Please try again after the reset.";
+      expect(renderResultDisplay(text)).toBe(text);
+    } finally {
+      await setLanguageAsync('en');
+    }
+  });
+  it('formats native Advisor advice and historical structured reviews', () => {
+    expect(
+      toolResultEvent('consult', {
+        type: 'advisor_advice',
+        model: 'reviewer',
+        text: 'Inspect the failing boundary.',
+      }),
+    ).toEqual({
+      type: 'tool-result',
+      id: 'consult',
+      display: 'Inspect the failing boundary.',
+    });
+    expect(
+      renderResultDisplay({
+        type: 'advisor_review',
+        verdict: 'Sound.',
+        risks: 'None.',
+        missingEvidence: 'Tests.',
+        recommendation: 'Verify.',
+      }),
+    ).toContain('## Verdict\n\nSound.');
+  });
+
   it('maps content to text delta', () => {
     const map = createEventMapper();
     expect(
@@ -234,6 +278,42 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
         text: '⚠  Response stopped due to image safety violations.',
       });
     });
+
+    it('prefers the provider refusal message', () => {
+      const map = createEventMapper();
+      const out = map({
+        type: 'finished',
+        value: {
+          reason: 'SAFETY',
+          finishMessage: 'Response refused due to cyber-related safety policy.',
+        },
+      } as unknown as AnyEv);
+      expect(out).toContainEqual({
+        type: 'info',
+        text: '⚠  Response refused due to cyber-related safety policy.',
+      });
+    });
+
+    it('keeps the curated notice when a non-safety reason carries provider text', () => {
+      const map = createEventMapper();
+      const out = map({
+        type: 'finished',
+        value: {
+          reason: 'MAX_TOKENS',
+          finishMessage: 'Provider-authored stop detail.',
+        },
+      } as unknown as AnyEv);
+      expect(out).toContainEqual({
+        type: 'info',
+        text: '⚠  Response truncated due to token limits.',
+      });
+      expect(
+        out.some(
+          (item) =>
+            item.type === 'info' && item.text.includes('Provider-authored'),
+        ),
+      ).toBe(false);
+    });
   });
 
   describe('error events', () => {
@@ -451,6 +531,27 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
       ]);
     });
 
+    it('maps a loop_detected with a known cause to the headless explanation', () => {
+      const map = createEventMapper();
+      const out = map({
+        type: 'loop_detected',
+        value: {
+          loopType: 'turn_tool_call_cap',
+          loopReason: 'explicit_cap',
+          toolCallCount: 4,
+          toolCallLimit: 3,
+        },
+      } as unknown as AnyEv);
+      expect(out).toEqual([
+        {
+          type: 'info',
+          text: expect.stringContaining(
+            'the per-turn tool-call limit set by `model.maxToolCallsPerTurn` (3)',
+          ),
+        },
+      ]);
+    });
+
     it('maps user_cancelled to a retry clear + info notice', () => {
       const map = createEventMapper();
       const out = map({ type: 'user_cancelled' } as unknown as AnyEv);
@@ -508,6 +609,12 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
           text:
             '✕ UserPromptSubmit operation blocked by hook:\nblocked by policy\n\n' +
             'Original prompt: do it',
+          canonicalHistoryItem: {
+            id: expect.any(Number),
+            type: 'user_prompt_submit_blocked',
+            reason: 'blocked by policy',
+            originalPrompt: 'do it',
+          },
         },
       ]);
     });
@@ -555,6 +662,13 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
         {
           type: 'info',
           text: 'Ran 2 stop hooks\n  ⎿  Stop hook error: last failure',
+          canonicalHistoryItem: {
+            id: expect.any(Number),
+            type: 'stop_hook_loop',
+            iterationCount: 3,
+            reasons: ['first', 'last failure'],
+            stopHookCount: 2,
+          },
         },
       ]);
     });
@@ -579,7 +693,23 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
         value: snapshot,
         cause: 'create',
       } as unknown as AnyEv);
-      expect(out).toEqual([{ type: 'goal', snapshot, cause: 'create' }]);
+      expect(out).toEqual([
+        {
+          type: 'goal',
+          snapshot,
+          cause: 'create',
+          canonicalHistoryItem: {
+            id: expect.any(Number),
+            type: 'goal_state',
+            snapshot,
+            cause: 'create',
+          },
+        },
+      ]);
+      const canonical = out[0].canonicalHistoryItem;
+      expect(canonical && 'snapshot' in canonical && canonical.snapshot).toBe(
+        snapshot,
+      );
     });
 
     it('stays silent for non-displayable causes', () => {
@@ -631,7 +761,17 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
         cause: 'clear',
       } as unknown as AnyEv);
       expect(out).toEqual([
-        { type: 'goal', snapshot: { goal: null }, cause: 'clear' },
+        {
+          type: 'goal',
+          snapshot: { goal: null },
+          cause: 'clear',
+          canonicalHistoryItem: {
+            id: expect.any(Number),
+            type: 'goal_state',
+            snapshot: { goal: null },
+            cause: 'clear',
+          },
+        },
       ]);
     });
 
@@ -915,4 +1055,79 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
       });
     });
   });
+});
+
+it('keeps unformatted blocked, stop-loop and full goal payloads for checkpoints', () => {
+  const mapper = createEventMapper();
+  const blocked = {
+    reason: 'denied',
+    originalPrompt: 'sensitive-original-'.repeat(30),
+  };
+  const loop = {
+    iterationCount: 3,
+    reasons: ['first', 'last'],
+    stopHookCount: 2,
+  };
+  const snapshot = emptyGoalSnapshot();
+  snapshot.clearedGoal = {
+    goalId: 'previous-goal',
+    revision: 4,
+    updatedAt: 123,
+  };
+  const blockedEvent = mapper({
+    type: 'user_prompt_submit_blocked',
+    value: blocked,
+  } as unknown as AnyEv).at(-1)!;
+  const loopEvent = mapper({
+    type: 'stop_hook_loop',
+    value: loop,
+  } as unknown as AnyEv).at(-1)!;
+  const goalEvent = mapper({
+    type: 'goal_state',
+    value: snapshot,
+    cause: 'create',
+  } as unknown as AnyEv).at(-1)!;
+  expect(blockedEvent.canonicalHistoryItem).toEqual({
+    id: expect.any(Number),
+    type: 'user_prompt_submit_blocked',
+    ...blocked,
+  });
+  expect(loopEvent.canonicalHistoryItem).toEqual({
+    id: expect.any(Number),
+    type: 'stop_hook_loop',
+    ...loop,
+  });
+  expect(goalEvent.canonicalHistoryItem).toEqual({
+    id: expect.any(Number),
+    type: 'goal_state',
+    snapshot,
+    cause: 'create',
+  });
+  expect(
+    goalEvent.canonicalHistoryItem &&
+      'snapshot' in goalEvent.canonicalHistoryItem &&
+      goalEvent.canonicalHistoryItem.snapshot,
+  ).toBe(snapshot);
+});
+
+it('allocates a distinct source for the first model event after replaying native history', () => {
+  const original = { id: -1000000, type: 'info' as const, text: 'restored' };
+  const restored = foldLiveEvent([], {
+    type: 'info',
+    text: original.text,
+    historyId: original.id,
+    canonicalHistoryItem: original,
+  });
+  const mapper = createEventMapper();
+  const event = mapper({
+    type: 'goal_state',
+    value: emptyGoalSnapshot(),
+    cause: 'create',
+  } as unknown as AnyEv).at(-1)!;
+  expect(event.canonicalHistoryItem!.id).toBeLessThan(original.id);
+  expect(
+    snapshotCanonicalHistory(foldLiveEvent(restored, event)).map(
+      (item) => item.id,
+    ),
+  ).toEqual([original.id, event.canonicalHistoryItem!.id]);
 });

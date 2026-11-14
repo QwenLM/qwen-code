@@ -11,16 +11,45 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
+const markerCloseFault = vi.hoisted(() => ({ enabled: false, failed: false }));
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return {
+    ...actual,
+    open: async (...args: Parameters<typeof actual.open>) => {
+      const handle = await actual.open(...args);
+      if (
+        markerCloseFault.enabled &&
+        String(args[0]).includes('.qwen-session.') &&
+        String(args[0]).endsWith('.tmp')
+      ) {
+        const close = handle.close.bind(handle);
+        handle.close = async () => {
+          await close();
+          if (!markerCloseFault.failed) {
+            markerCloseFault.failed = true;
+            throw new Error('post-commit close failed');
+          }
+        };
+      }
+      return handle;
+    },
+  };
+});
+
 import {
   setupStartupWorktree,
   buildStartupWorktreeNotice,
   persistStartupWorktreeSidecar,
+  WorktreeOwnershipConflictError,
 } from './worktreeStartup.js';
 import {
   readWorktreeSessionMarker,
+  readWorktreeSession,
   SessionService,
   Storage,
   writeRuntimeStatus,
+  writeWorktreeSession,
   writeWorktreeSessionMarker,
 } from '@qwen-code/qwen-code-core';
 import type { Config } from '@qwen-code/qwen-code-core';
@@ -464,6 +493,159 @@ describe('persistStartupWorktreeSidecar', () => {
     } as unknown as Config;
   }
 
+  it.each(['missing', 'foreign-host'] as const)(
+    'keeps an unverifiable %s owner when re-attaching',
+    async (statusKind) => {
+      tempRepo = await makeTempRepo();
+      process.chdir(tempRepo);
+
+      const setup = await setupStartupWorktree(`adopt-${statusKind}`);
+      expect(setup?.ok).toBe(true);
+      if (!setup?.ok) return;
+      await writeWorktreeSessionMarker(
+        setup.context.worktreePath,
+        'old-session',
+      );
+      if (statusKind === 'foreign-host') {
+        const statusPath = new Storage(
+          setup.context.worktreePath,
+        ).getRuntimeStatusPath('old-session');
+        await fs.mkdir(path.dirname(statusPath), { recursive: true });
+        await fs.writeFile(
+          statusPath,
+          JSON.stringify({
+            schema_version: 1,
+            pid: 2147483647,
+            session_id: 'old-session',
+            work_dir: setup.context.worktreePath,
+            hostname: 'another-host',
+            started_at: Date.now() / 1000,
+            qwen_version: null,
+          }),
+          'utf8',
+        );
+      }
+
+      const config = makeConfig(setup.context.worktreePath, 'new-session');
+      const result = await persistStartupWorktreeSidecar(config, {
+        ...setup.context,
+        wasReattached: true,
+      });
+
+      expect(result.overrodeResumedWorktree).toBe(false);
+      expect(await readWorktreeSessionMarker(setup.context.worktreePath)).toBe(
+        'old-session',
+      );
+      await expect(readWorktreeSession(result.sidecarPath)).resolves.toBeNull();
+    },
+  );
+
+  it('clears a stale sidecar naming another worktree when ownership is unverifiable', async () => {
+    tempRepo = await makeTempRepo();
+    process.chdir(tempRepo);
+
+    const setup = await setupStartupWorktree('stale-sidecar');
+    expect(setup?.ok).toBe(true);
+    if (!setup?.ok) return;
+    await writeWorktreeSessionMarker(setup.context.worktreePath, 'old-session');
+
+    const config = makeConfig(setup.context.worktreePath, 'new-session');
+    // The resumed session was previously bound to a DIFFERENT worktree;
+    // that binding is stale the moment the process runs in this one.
+    await writeWorktreeSession(
+      config.getSessionService().getWorktreeSessionPath('new-session'),
+      {
+        slug: 'other-slug',
+        worktreePath: path.join(tempRepo, '.qwen', 'worktrees', 'other-slug'),
+        worktreeBranch: 'worktree-other-slug',
+        originalCwd: tempRepo,
+        originalBranch: 'main',
+        originalHeadCommit: '0'.repeat(40),
+      },
+    );
+
+    const result = await persistStartupWorktreeSidecar(config, {
+      ...setup.context,
+      wasReattached: true,
+    });
+
+    expect(result.overrodeResumedWorktree).toBe(false);
+    // Ownership of the worktree stays with the unverifiable owner...
+    expect(await readWorktreeSessionMarker(setup.context.worktreePath)).toBe(
+      'old-session',
+    );
+    // ...but the stale binding to the other worktree must not survive — a
+    // later --resume would otherwise restore a worktree this session is
+    // not running in.
+    await expect(readWorktreeSession(result.sidecarPath)).resolves.toBeNull();
+  });
+
+  it('does not write a sidecar when re-attachment marker transfer fails', async () => {
+    tempRepo = await makeTempRepo();
+    process.chdir(tempRepo);
+
+    const setup = await setupStartupWorktree('failed-transfer');
+    expect(setup?.ok).toBe(true);
+    if (!setup?.ok) return;
+    const markerPath = path.join(setup.context.worktreePath, '.qwen-session');
+    await fs.writeFile(markerPath, 'old-session ', 'utf8');
+    await writeRuntimeStatus(
+      new Storage(setup.context.worktreePath).getRuntimeStatusPath(
+        'old-session',
+      ),
+      {
+        sessionId: 'old-session',
+        workDir: setup.context.worktreePath,
+        pid: 2147483647,
+      },
+    );
+    const config = makeConfig(setup.context.worktreePath, 'new-session');
+
+    await expect(
+      persistStartupWorktreeSidecar(config, {
+        ...setup.context,
+        wasReattached: true,
+      }),
+    ).rejects.toThrow('Worktree marker is invalid');
+
+    await expect(fs.readFile(markerPath, 'utf8')).resolves.toBe('old-session ');
+    await expect(
+      readWorktreeSession(
+        config.getSessionService().getWorktreeSessionPath('new-session'),
+      ),
+    ).resolves.toBeNull();
+  });
+
+  it('persists a re-attached sidecar when marker close fails after commit', async () => {
+    tempRepo = await makeTempRepo();
+    process.chdir(tempRepo);
+    const setup = await setupStartupWorktree('committed-marker');
+    expect(setup?.ok).toBe(true);
+    if (!setup?.ok) return;
+    markerCloseFault.enabled = true;
+    markerCloseFault.failed = false;
+
+    let result: Awaited<ReturnType<typeof persistStartupWorktreeSidecar>>;
+    try {
+      result = await persistStartupWorktreeSidecar(
+        makeConfig(setup.context.worktreePath, 'new-session'),
+        { ...setup.context, wasReattached: true },
+      );
+    } finally {
+      markerCloseFault.enabled = false;
+    }
+    expect(markerCloseFault.failed).toBe(true);
+    expect(await readWorktreeSessionMarker(setup.context.worktreePath)).toBe(
+      'new-session',
+    );
+    await expect(
+      readWorktreeSession(result.sidecarPath),
+    ).resolves.toMatchObject({
+      slug: setup.context.slug,
+      worktreePath: setup.context.worktreePath,
+    });
+  });
+
   it('adopts a stale marker when re-attaching to an inactive owner', async () => {
     tempRepo = await makeTempRepo();
     process.chdir(tempRepo);
@@ -493,7 +675,53 @@ describe('persistStartupWorktreeSidecar', () => {
     );
   });
 
-  it('keeps the marker when the owner runtime is still active', async () => {
+  it('repairs the common-dir exclude when re-attaching the same owner', async () => {
+    tempRepo = await makeTempRepo();
+    process.chdir(tempRepo);
+
+    const setup = await setupStartupWorktree('same-owner');
+    expect(setup?.ok).toBe(true);
+    if (!setup?.ok) return;
+    const markerPath = path.join(setup.context.worktreePath, '.qwen-session');
+    await fs.writeFile(markerPath, 'same-session', 'utf8');
+    await fs.chmod(markerPath, 0o400);
+
+    await persistStartupWorktreeSidecar(
+      makeConfig(setup.context.worktreePath, 'same-session'),
+      { ...setup.context, wasReattached: true },
+    );
+
+    expect(
+      await fs.readFile(path.join(tempRepo, '.git', 'info', 'exclude'), 'utf8'),
+    ).toContain('/.qwen-session');
+    expect(await readWorktreeSessionMarker(setup.context.worktreePath)).toBe(
+      'same-session',
+    );
+  });
+
+  it('persists the sidecar when a non-ownership marker write fails', async () => {
+    tempRepo = await makeTempRepo();
+    process.chdir(tempRepo);
+
+    const setup = await setupStartupWorktree('marker-write-failure');
+    expect(setup?.ok).toBe(true);
+    if (!setup?.ok) return;
+    await fs.mkdir(path.join(setup.context.worktreePath, '.qwen-session'), {
+      recursive: true,
+    });
+    const config = makeConfig(setup.context.worktreePath, 'new-session');
+
+    const result = await persistStartupWorktreeSidecar(config, setup.context);
+
+    await expect(
+      readWorktreeSession(result.sidecarPath),
+    ).resolves.toMatchObject({
+      slug: setup.context.slug,
+      worktreePath: setup.context.worktreePath,
+    });
+  });
+
+  it('rejects adoption when the owner runtime is still active', async () => {
     tempRepo = await makeTempRepo();
     process.chdir(tempRepo);
 
@@ -512,17 +740,69 @@ describe('persistStartupWorktreeSidecar', () => {
       },
     );
 
-    await persistStartupWorktreeSidecar(
-      makeConfig(setup.context.worktreePath, 'new-session'),
-      { ...setup.context, wasReattached: true },
-    );
+    await expect(
+      persistStartupWorktreeSidecar(
+        makeConfig(setup.context.worktreePath, 'new-session'),
+        { ...setup.context, wasReattached: true },
+      ),
+    ).rejects.toMatchObject({
+      name: WorktreeOwnershipConflictError.name,
+      ownerSessionId: 'old-session',
+      message: 'Worktree is owned by active session old-session',
+    });
 
     expect(await readWorktreeSessionMarker(setup.context.worktreePath)).toBe(
       'old-session',
     );
   });
 
-  it('finds an active owner under a repo-subdir relative runtime dir', async () => {
+  it('sanitizes terminal escapes from the conflicting owner in the error message', async () => {
+    tempRepo = await makeTempRepo();
+    process.chdir(tempRepo);
+
+    const setup = await setupStartupWorktree('hostile-owner');
+    expect(setup?.ok).toBe(true);
+    if (!setup?.ok) return;
+    // The owner id is raw `.qwen-session` marker content — the lenient
+    // reader only trims — so a tracked or attacker-written marker can
+    // carry terminal escapes, and this error reaches stderr unsanitized
+    // via handleCriticalError's fall-through.
+    const hostileOwner = '\x1b]0;pwned\x07';
+    await writeWorktreeSessionMarker(setup.context.worktreePath, hostileOwner);
+    await writeRuntimeStatus(
+      new Storage(setup.context.worktreePath).getRuntimeStatusPath(
+        hostileOwner,
+      ),
+      {
+        sessionId: hostileOwner,
+        workDir: setup.context.worktreePath,
+        pid: process.pid,
+      },
+    );
+
+    const error = await persistStartupWorktreeSidecar(
+      makeConfig(setup.context.worktreePath, 'new-session'),
+      { ...setup.context, wasReattached: true },
+    ).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(WorktreeOwnershipConflictError);
+    // The raw value stays on the field for the ownership compare-and-swap…
+    expect((error as WorktreeOwnershipConflictError).ownerSessionId).toBe(
+      hostileOwner,
+    );
+    // …but the message that reaches the terminal is sanitized.
+    const message = (error as Error).message;
+    expect(message).not.toContain('\x1b');
+    expect(message).not.toContain('\x07');
+    // The OSC sequence is stripped wholesale, payload included — what
+    // remains is the plain sentence frame.
+    expect(message).toMatch(/^Worktree is owned by active session\s*$/);
+    // Sanitization is message-only: the marker keeps the raw owner.
+    expect(await readWorktreeSessionMarker(setup.context.worktreePath)).toBe(
+      hostileOwner,
+    );
+  });
+
+  it('rejects an active owner under a repo-subdir relative runtime dir', async () => {
     tempRepo = await makeTempRepo();
     process.chdir(tempRepo);
     const packageDir = path.join(tempRepo, 'packages', 'app');
@@ -543,10 +823,12 @@ describe('persistStartupWorktreeSidecar', () => {
     );
 
     Storage.setRuntimeBaseDir('.qwen', setup.context.worktreePath);
-    await persistStartupWorktreeSidecar(
-      makeConfig(setup.context.worktreePath, 'new-session'),
-      { ...setup.context, wasReattached: true },
-    );
+    await expect(
+      persistStartupWorktreeSidecar(
+        makeConfig(setup.context.worktreePath, 'new-session'),
+        { ...setup.context, wasReattached: true },
+      ),
+    ).rejects.toBeInstanceOf(WorktreeOwnershipConflictError);
 
     expect(await readWorktreeSessionMarker(setup.context.worktreePath)).toBe(
       'old-session',

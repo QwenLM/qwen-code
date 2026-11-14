@@ -10,6 +10,7 @@ import os from 'node:os';
 import { execFile } from 'node:child_process';
 import type { CommandContext } from './commands/types.js';
 import { getCliVersion } from '../utils/version.js';
+import { formatAuxModelSelectorForDisplay } from '../utils/aux-model-selector.js';
 import {
   IdeClient,
   AuthType,
@@ -174,7 +175,7 @@ export async function getSystemInfo(
   const nodeVersion = process.version;
   const executionSandbox = formatExecutionSandbox(context.services.config);
   const npmVersion = executionSandbox
-    ? 'unavailable in tool sandbox'
+    ? 'not probed (tool execution sandbox active)'
     : await getNpmVersion();
   const sandboxEnv = executionSandbox ?? getSandboxEnv();
   const modelVersion = context.services.config?.getModel() || 'Unknown';
@@ -233,8 +234,13 @@ export async function getExtendedSystemInfo(
       ? GIT_COMMIT_INFO
       : undefined;
 
-  // Get fast model from settings
-  const fastModel = context.services.settings?.merged?.fastModel || undefined;
+  // Get fast model from settings. The persisted selector can carry a
+  // userinfo-bearing baseUrl suffix — bug reports must not embed it.
+  const fastModelSetting =
+    context.services.settings?.merged?.fastModel || undefined;
+  const fastModel = fastModelSetting
+    ? formatAuxModelSelectorForDisplay(fastModelSetting)
+    : undefined;
   const lspStatus = getLspStatus(context);
 
   return {

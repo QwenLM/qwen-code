@@ -43,6 +43,8 @@ export function isDocumentNavigation(req: Request): boolean {
 export const WEB_SHELL_PAGE_PATHS = [
   '/plugins',
   '/channels',
+  '/channel-events',
+  '/live',
   '/scheduled-tasks',
   '/goals',
   '/settings',

@@ -30,11 +30,13 @@
  * be wiped before the classifier saw it.
  */
 
+import { AUTO_MEMORY_SNAPSHOT_METADATA } from '../core/environmentContext.js';
 import type { Content, Part } from '@google/genai';
 import type { ToolRegistry } from '../tools/tool-registry.js';
 import {
   canonicalToolName,
   resolveBuiltinToolName,
+  resolveRegisteredToolName,
   ToolNames,
 } from '../tools/tool-names.js';
 import type {
@@ -139,6 +141,8 @@ export function buildClassifierContents(
         textParts = [];
       };
       for (const part of msg.parts ?? []) {
+        if (part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true)
+          continue;
         if (typeof (part as Part).text === 'string') {
           textParts.push({ text: (part as Part).text });
           continue;
@@ -366,12 +370,14 @@ function projectFunctionArgs(
     if (typeof rawTargetName !== 'string') return {};
 
     let targetName = canonicalToolName(rawTargetName.trim());
-    const lowerTargetName = targetName.toLowerCase();
-    for (const registeredName of toolRegistry.getAllToolNames?.() ?? []) {
-      if (registeredName.toLowerCase() === lowerTargetName) {
-        targetName = registeredName;
-      }
-    }
+    // Same resolution as tool_call, which refuses a name that matches several
+    // tools only by case; such an entry projects name-only here (#11321).
+    const resolved = resolveRegisteredToolName(
+      targetName,
+      toolRegistry.getAllToolNames?.() ?? [],
+    );
+    if (Array.isArray(resolved)) return { name: targetName };
+    if (resolved !== undefined) targetName = resolved;
     // History is unvalidated. Limit fallback unwrapping to one bridge layer
     // so a nested tool_call envelope cannot recurse or expose its payload.
     const normalizedTargetName =

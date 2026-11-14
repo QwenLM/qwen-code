@@ -11,15 +11,19 @@ import type { Config } from '../config/config.js';
 import type { TelemetryRuntimeConfig } from './runtime-config.js';
 import type { GoalLimitKind, GoalStatus } from '../goals/goal-protocol.js';
 import type {
+  ToolResultSizeEvent,
   GoalStateEvent,
   GoalStateEventCause,
   ModelSlashCommandEvent,
   MemoryRecallDeliveryPhase,
   MemoryRecallDeliveryPoint,
   MemoryRecallDiscardReason,
+  MemoryRecallStrategy,
 } from './types.js';
 import type { ToolExecutionStatus } from '../core/turn.js';
 
+const TOOL_RESULT_CHARS = `${SERVICE_NAME}.tool.result.chars`;
+const TOOL_RESULT_TOKENS = `${SERVICE_NAME}.tool.result.tokens`;
 const TOOL_CALL_COUNT = `${SERVICE_NAME}.tool.call.count`;
 const TOOL_EXECUTION_COUNT = `${SERVICE_NAME}.tool.execution.count`;
 export const REPEATED_TOOL_FAILURE_GUARD_COUNT = `${SERVICE_NAME}.repeated_tool_failure_guard.count`;
@@ -260,6 +264,30 @@ const COUNTER_DEFINITIONS = {
 } as const;
 
 const HISTOGRAM_DEFINITIONS = {
+  [TOOL_RESULT_CHARS]: {
+    description: 'Raw and injected textual tool-result characters per call.',
+    unit: '{character}',
+    valueType: ValueType.INT,
+    assign: (h: Histogram) => (toolResultCharsHistogram = h),
+    attributes: {} as {
+      function_name: string;
+      tool_type: 'native' | 'mcp';
+      truncated?: boolean;
+      phase: 'raw' | 'injected';
+    },
+  },
+  [TOOL_RESULT_TOKENS]: {
+    description: 'Estimated raw and injected tool-result tokens per call.',
+    unit: '{token}',
+    valueType: ValueType.INT,
+    assign: (h: Histogram) => (toolResultTokensHistogram = h),
+    attributes: {} as {
+      function_name: string;
+      tool_type: 'native' | 'mcp';
+      truncated?: boolean;
+      phase: 'raw' | 'injected';
+    },
+  },
   [TOOL_CALL_LATENCY]: {
     description: 'Latency of tool calls in milliseconds.',
     unit: 'ms',
@@ -486,6 +514,8 @@ let cliMeter: Meter | undefined;
 let toolCallCounter: Counter | undefined;
 let toolExecutionCounter: Counter | undefined;
 let repeatedToolFailureGuardCounter: Counter | undefined;
+let toolResultCharsHistogram: Histogram | undefined;
+let toolResultTokensHistogram: Histogram | undefined;
 let toolCallLatencyHistogram: Histogram | undefined;
 let apiRequestCounter: Counter | undefined;
 let apiRequestLatencyHistogram: Histogram | undefined;
@@ -734,6 +764,37 @@ export function recordChatCompressionMetrics(
   chatCompressionCounter.add(1, {
     ...baseMetricDefinition.getCommonAttributes(config),
     ...attributes,
+  });
+}
+
+export function recordToolResultSizeMetrics(
+  config: Config,
+  event: ToolResultSizeEvent,
+): void {
+  if (!isMetricsInitialized) return;
+  const attributes = {
+    ...baseMetricDefinition.getCommonAttributes(config),
+    function_name: event.function_name,
+    tool_type: event.tool_type,
+    ...(event.truncated !== undefined ? { truncated: event.truncated } : {}),
+  };
+  if (event.raw_content_length !== undefined)
+    toolResultCharsHistogram?.record(event.raw_content_length, {
+      ...attributes,
+      phase: 'raw',
+    });
+  if (event.raw_estimated_tokens !== undefined)
+    toolResultTokensHistogram?.record(event.raw_estimated_tokens, {
+      ...attributes,
+      phase: 'raw',
+    });
+  toolResultCharsHistogram?.record(event.injected_content_length, {
+    ...attributes,
+    phase: 'injected',
+  });
+  toolResultTokensHistogram?.record(event.injected_estimated_tokens, {
+    ...attributes,
+    phase: 'injected',
   });
 }
 
@@ -1236,6 +1297,7 @@ export function recordMemoryDreamMetrics(
   durationMs: number,
   attrs: {
     trigger: 'auto' | 'manual';
+    scope?: 'project' | 'user';
     status: 'updated' | 'noop' | 'failed' | 'cancelled';
     deduped_entries: number;
   },
@@ -1245,11 +1307,13 @@ export function recordMemoryDreamMetrics(
   memoryDreamCounter?.add(1, {
     ...common,
     trigger: attrs.trigger,
+    scope: attrs.scope ?? 'project',
     status: attrs.status,
   });
   memoryDreamDurationHistogram?.record(durationMs, {
     ...common,
     trigger: attrs.trigger,
+    scope: attrs.scope ?? 'project',
     status: attrs.status,
   });
 }
@@ -1257,14 +1321,34 @@ export function recordMemoryDreamMetrics(
 export function recordMemoryRecallMetrics(
   config: Config,
   durationMs: number,
-  attrs: { strategy: 'none' | 'heuristic' | 'model'; docs_selected: number },
+  attrs: {
+    strategy: MemoryRecallStrategy;
+    docs_selected: number;
+    /**
+     * Attached only when defined: the `selector_skipped` dimension belongs to
+     * the #13003 skip-selector experiment, so callers pass it solely while
+     * that experiment is enabled. An existing series must not gain the
+     * dimension — not even as a constant `false` — on deployments where the
+     * experiment is off, or every deployment would split the time series.
+     */
+    selector_skipped?: boolean;
+  },
 ): void {
   if (!isMetricsInitialized) return;
   const common = baseMetricDefinition.getCommonAttributes(config);
-  memoryRecallCounter?.add(1, { ...common, strategy: attrs.strategy });
+  const selectorSkippedAttr =
+    attrs.selector_skipped === undefined
+      ? {}
+      : { selector_skipped: attrs.selector_skipped };
+  memoryRecallCounter?.add(1, {
+    ...common,
+    strategy: attrs.strategy,
+    ...selectorSkippedAttr,
+  });
   memoryRecallDurationHistogram?.record(durationMs, {
     ...common,
     strategy: attrs.strategy,
+    ...selectorSkippedAttr,
   });
 }
 

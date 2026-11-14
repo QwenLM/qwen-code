@@ -34,6 +34,7 @@ import {
   reviewLeasePath,
   type ReviewWorktreeLease,
 } from './review-worktree-lease.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 // Set from exactly one test: plants a foreign lease at the legacy path at
 // the moment the new-path lease write happens — the "appears between the
@@ -1248,7 +1249,7 @@ describe('the acquisition mirror at the mounted legacy path', () => {
     },
   );
 
-  it.skipIf(process.platform === 'win32' || process.geteuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'skips the mirror with a warning when the planted symlink cannot be removed — never through it (R30-8)',
     () => {
       // The read-side guard's rmSync fails here (the parent is read-only),
@@ -1279,7 +1280,7 @@ describe('the acquisition mirror at the mounted legacy path', () => {
     },
   );
 
-  it.skipIf(process.platform === 'win32' || process.geteuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'treats an un-removable DIRECTORY at the legacy name as a skipped mirror, not a failed acquisition (R29-5)',
     () => {
       // The wedge shape: a directory where the lease file was, in a parent

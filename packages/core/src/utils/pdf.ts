@@ -5,10 +5,22 @@
  */
 
 import { execFile, type ExecFileOptions } from 'node:child_process';
-import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import {
+  lstat,
+  mkdtemp,
+  open,
+  readdir,
+  readFile,
+  rm,
+  type FileHandle,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { estimateTextTokens } from './request-tokenizer/textTokenizer.js';
+import { base64ByteLength, readFileWithinBase64Limit } from './inline-media.js';
+import { execPDFCommandFromHandle, pdfDescriptorPath } from './pdf-command.js';
+import { readFileHandleBytes } from './file-read-source.js';
 
 const MAX_PDF_TEXT_OUTPUT_CHARS = 100000;
 const PDF_FULL_TEXT_PAGE_LIMIT = 10;
@@ -112,6 +124,7 @@ function execCommand(
   command: string,
   args: string[],
   options: ExecFileOptions = {},
+  fileHandle?: FileHandle,
 ): Promise<{
   stdout: string;
   stderr: string;
@@ -119,12 +132,31 @@ function execCommand(
   maxBufferExceeded: boolean;
   timedOut: boolean;
 }> {
-  return new Promise((resolve) => {
-    execFile(
+  if (fileHandle)
+    return execPDFCommandFromHandle(command, args, fileHandle, options);
+  options.signal?.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    let completed: Parameters<typeof resolve>[0] | undefined;
+    let closed = false;
+    let executionError: Error | null = null;
+    let cancellationTimer: ReturnType<typeof setTimeout> | undefined;
+    const finish = () => {
+      if (!completed || !closed) return;
+      clearTimeout(cancellationTimer);
+      try {
+        options.signal?.throwIfAborted();
+        if (executionError?.name === 'AbortError') throw executionError;
+        resolve(completed);
+      } catch (error) {
+        reject(error);
+      }
+    };
+    const child = execFile(
       command,
       args,
       { encoding: 'utf8', ...options },
       (error, stdout, stderr) => {
+        executionError = error;
         if (error) {
           // Node sets error.code to the string 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
           // when stdout or stderr exceeds the configured maxBuffer — the child
@@ -149,24 +181,47 @@ function execCommand(
                 (errAny.signal === 'SIGTERM' ||
                   errAny.signal === undefined ||
                   errAny.signal === null)));
-          resolve({
+          completed = {
             stdout: String(stdout ?? ''),
             stderr: String(stderr ?? ''),
             code: typeof error.code === 'number' ? error.code : 1,
             maxBufferExceeded,
             timedOut,
-          });
-          return;
+          };
+        } else {
+          completed = {
+            stdout: String(stdout ?? ''),
+            stderr: String(stderr ?? ''),
+            code: 0,
+            maxBufferExceeded: false,
+            timedOut: false,
+          };
         }
-        resolve({
-          stdout: String(stdout ?? ''),
-          stderr: String(stderr ?? ''),
-          code: 0,
-          maxBufferExceeded: false,
-          timedOut: false,
-        });
+        // Give cancellation cleanup a bound even if the child cannot close.
+        if (error?.name === 'AbortError' && !closed) {
+          cancellationTimer = setTimeout(() => {
+            child.kill('SIGKILL');
+            if (closed) return;
+            cancellationTimer = setTimeout(() => {
+              child.unref();
+              child.stdout?.destroy();
+              child.stderr?.destroy();
+              reject(options.signal?.reason ?? error);
+            }, 1000);
+          }, 1000);
+        }
+        // Abort callbacks can precede exit; normally wait before cleanup.
+        queueMicrotask(finish);
       },
     );
+    if (child.pid === undefined) {
+      closed = true;
+    } else {
+      child.once('close', () => {
+        closed = true;
+        finish();
+      });
+    }
   });
 }
 
@@ -232,7 +287,20 @@ let pdftotextAvailablePromise: Promise<boolean> | undefined;
  * promise is also cached so N concurrent callers (e.g. @-reading a
  * directory of PDFs) don't each spawn their own probe subprocess.
  */
-export async function isPdftotextAvailable(): Promise<boolean> {
+export async function isPdftotextAvailable(
+  fileHandle?: FileHandle,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (fileHandle) {
+    const { code } = await execCommand(
+      'pdftotext',
+      ['-v'],
+      { timeout: 5000, signal },
+      fileHandle,
+    );
+    signal?.throwIfAborted();
+    return code === 0;
+  }
   if (pdftotextAvailable !== undefined) return pdftotextAvailable;
   if (pdftotextAvailablePromise) return pdftotextAvailablePromise;
 
@@ -275,15 +343,24 @@ export function resetPdftotextCache(): void {
  * Returns null if pdfinfo is not available or page count cannot be determined.
  */
 export async function getPDFPageCount(
-  filePath: string,
+  source: string | FileHandle,
+  signal?: AbortSignal,
 ): Promise<number | null> {
   try {
+    const filePath = typeof source === 'string' ? source : pdfDescriptorPath();
     // `--` separates options from positional args so a filename starting
     // with `-` (e.g. `-opw=foo.pdf`) can't be mistaken for an option by
     // poppler's option parser.
-    const { stdout, code } = await execCommand('pdfinfo', ['--', filePath], {
-      timeout: 10000,
-    });
+    const { stdout, code } = await execCommand(
+      'pdfinfo',
+      ['--', filePath],
+      {
+        timeout: 10000,
+        signal,
+      },
+      typeof source === 'string' ? undefined : source,
+    );
+    signal?.throwIfAborted();
     if (code !== 0) {
       return null;
     }
@@ -293,7 +370,9 @@ export async function getPDFPageCount(
     }
     const count = parseInt(match[1]!, 10);
     return isNaN(count) ? null : count;
-  } catch {
+  } catch (error) {
+    signal?.throwIfAborted();
+    if (error instanceof Error && error.name === 'AbortError') throw error;
     return null;
   }
 }
@@ -310,10 +389,14 @@ export type PDFTextResult =
  * @param options Optional page range (1-indexed, inclusive)
  */
 export async function extractPDFText(
-  filePath: string,
+  source: string | FileHandle,
   options?: { firstPage?: number; lastPage?: number; signal?: AbortSignal },
 ): Promise<PDFTextResult> {
-  const available = await isPdftotextAvailable();
+  options?.signal?.throwIfAborted();
+  const fileHandle = typeof source === 'string' ? undefined : source;
+  const filePath = typeof source === 'string' ? source : pdfDescriptorPath();
+  const available = await isPdftotextAvailable(fileHandle, options?.signal);
+  options?.signal?.throwIfAborted();
   if (!available) {
     return {
       success: false,
@@ -335,23 +418,26 @@ export async function extractPDFText(
 
   try {
     const { stdout, stderr, code, maxBufferExceeded, timedOut } =
-      await execCommand('pdftotext', args, {
-        timeout: 30000,
-        // Keep the buffer just above MAX_PDF_TEXT_OUTPUT_CHARS — anything
-        // past that is going to be truncated anyway, and capping the child
-        // prevents unbounded memory use on pathological text-dense PDFs.
-        maxBuffer: MAX_PDF_TEXT_OUTPUT_CHARS * 2,
-        // Caller cancellation kills the subprocess instead of blocking the
-        // tool invocation for up to the 30s timeout.
-        signal: options?.signal,
-      });
+      await execCommand(
+        'pdftotext',
+        args,
+        {
+          timeout: 30000,
+          // Keep the buffer just above MAX_PDF_TEXT_OUTPUT_CHARS — anything
+          // past that is going to be truncated anyway, and capping the child
+          // prevents unbounded memory use on pathological text-dense PDFs.
+          maxBuffer: MAX_PDF_TEXT_OUTPUT_CHARS * 2,
+          // Caller cancellation kills the subprocess instead of blocking the
+          // tool invocation for up to the 30s timeout.
+          signal: options?.signal,
+        },
+        fileHandle,
+      );
 
     // execCommand reports a signal-killed child as timedOut (killed +
     // SIGTERM); check the caller's abort first so a user cancel is not
     // misreported as a 30s timeout.
-    if (options?.signal?.aborted) {
-      return { success: false, error: 'PDF text extraction was cancelled.' };
-    }
+    options?.signal?.throwIfAborted();
 
     if (timedOut) {
       return {
@@ -426,6 +512,8 @@ export async function extractPDFText(
 
     return { success: true, text: stdout };
   } catch (e: unknown) {
+    options?.signal?.throwIfAborted();
+    if (e instanceof Error && e.name === 'AbortError') throw e;
     return {
       success: false,
       error: `pdftotext execution failed: ${e instanceof Error ? e.message : String(e)}`,
@@ -441,7 +529,20 @@ let pdftoppmAvailablePromise: Promise<boolean> | undefined;
  * {@link isPdftotextAvailable}: the result and the in-flight probe promise are
  * cached for the process lifetime so concurrent render callers share one probe.
  */
-export async function isPdftoppmAvailable(): Promise<boolean> {
+export async function isPdftoppmAvailable(
+  fileHandle?: FileHandle,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (fileHandle) {
+    const { code } = await execCommand(
+      'pdftoppm',
+      ['-v'],
+      { timeout: 5000, signal },
+      fileHandle,
+    );
+    signal?.throwIfAborted();
+    return code === 0;
+  }
   if (pdftoppmAvailable !== undefined) return pdftoppmAvailable;
   if (pdftoppmAvailablePromise) return pdftoppmAvailablePromise;
 
@@ -482,7 +583,7 @@ export interface PDFRenderedImage {
 
 export type PDFRenderResult =
   | { success: true; images: PDFRenderedImage[]; bytesTruncated: boolean }
-  | { success: false; error: string };
+  | { success: false; error: string; tooLarge?: boolean };
 
 /**
  * Compare two pdftoppm output filenames (e.g. "page-1.jpg", "page-10.jpg") by
@@ -509,17 +610,55 @@ function comparePdfPageFilenames(a: string, b: string): number {
  *   render from the start; an `Infinity` `lastPage` renders through the end.
  */
 export async function renderPDFPagesToImages(
-  filePath: string,
-  options?: { firstPage?: number; lastPage?: number },
+  source: string | FileHandle,
+  options?: {
+    firstPage?: number;
+    lastPage?: number;
+    signal?: AbortSignal;
+    maxTotalBase64Bytes?: number;
+  },
 ): Promise<PDFRenderResult> {
-  const available = await isPdftoppmAvailable();
+  options?.signal?.throwIfAborted();
+  const fileHandle = typeof source === 'string' ? undefined : source;
+  const filePath = typeof source === 'string' ? source : pdfDescriptorPath();
+  const available = await isPdftoppmAvailable(fileHandle, options?.signal);
+  options?.signal?.throwIfAborted();
   if (!available) {
     return { success: false, error: PDF_RENDER_UNAVAILABLE_MESSAGE };
   }
 
   let tempDir: string | undefined;
+  let outputDirectory: FileHandle | undefined;
+  let verifyDirectory: (() => Promise<void>) | undefined;
+  const removeDescriptorOutput = async (directoryPath: string) => {
+    if (!outputDirectory) {
+      await rm(directoryPath, { recursive: true, force: true }).catch(() => {});
+      return;
+    }
+    await verifyDirectory?.();
+    await rm(directoryPath, { recursive: true, force: true });
+  };
   try {
     tempDir = await mkdtemp(join(tmpdir(), 'pdf-render-'));
+    if (fileHandle) {
+      outputDirectory = await open(
+        tempDir,
+        constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+      );
+      const original = await outputDirectory.stat();
+      const directoryPath = tempDir;
+      verifyDirectory = async () => {
+        const current = await lstat(directoryPath);
+        if (
+          !current.isDirectory() ||
+          current.dev !== original.dev ||
+          current.ino !== original.ino
+        ) {
+          throw new Error('PDF output directory identity changed.');
+        }
+      };
+      await verifyDirectory();
+    }
     const outputPrefix = join(tempDir, 'page');
 
     const args: string[] = [
@@ -537,9 +676,17 @@ export async function renderPDFPagesToImages(
     // `-` isn't misread as an option by poppler's parser.
     args.push('--', filePath, outputPrefix);
 
-    const { stderr, code, timedOut } = await execCommand('pdftoppm', args, {
-      timeout: PDF_RENDER_TIMEOUT_MS,
-    });
+    const { stderr, code, timedOut } = await execCommand(
+      'pdftoppm',
+      args,
+      {
+        timeout: PDF_RENDER_TIMEOUT_MS,
+        signal: options?.signal,
+      },
+      fileHandle,
+    );
+    options?.signal?.throwIfAborted();
+    await verifyDirectory?.();
 
     if (timedOut) {
       return {
@@ -570,7 +717,11 @@ export async function renderPDFPagesToImages(
     // The temp dir is fresh and holds only this call's output, so reading and
     // numerically sorting whatever pdftoppm produced is robust to its
     // zero-padding width.
-    const entries = (await readdir(tempDir))
+    const names = await readdir(tempDir);
+    if (fileHandle && names.some((name) => !/^page-\d+\.jpg$/i.test(name))) {
+      throw new Error('PDF renderer produced unexpected output entries.');
+    }
+    const entries = names
       .filter((name) => name.toLowerCase().endsWith('.jpg'))
       .sort(comparePdfPageFilenames);
 
@@ -586,23 +737,71 @@ export async function renderPDFPagesToImages(
     let totalBytes = 0;
     let bytesTruncated = false;
     for (const name of entries) {
-      const buffer = await readFile(join(tempDir, name));
-      const data = buffer.toString('base64');
-      // Always keep the first page; afterwards stop before exceeding the cap so
-      // one tool result can't balloon to tens of MB.
+      options?.signal?.throwIfAborted();
+      const remaining =
+        (options?.maxTotalBase64Bytes ?? PDF_RENDER_MAX_TOTAL_BASE64_BYTES) -
+        totalBytes;
+      let buffer: Buffer | undefined;
+      if (outputDirectory) {
+        await verifyDirectory?.();
+        const outputPath =
+          process.platform === 'linux'
+            ? `/proc/self/fd/${outputDirectory.fd}/${name}`
+            : join(tempDir, name);
+        const output = await open(
+          outputPath,
+          constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+        );
+        try {
+          const stats = await output.stat();
+          if (!stats.isFile())
+            throw new Error('PDF page output is not a regular file.');
+          buffer =
+            options?.maxTotalBase64Bytes !== undefined &&
+            base64ByteLength(stats.size) > remaining
+              ? undefined
+              : await readFileHandleBytes(output, stats.size, options?.signal);
+        } finally {
+          await output.close();
+        }
+        await verifyDirectory?.();
+      } else {
+        buffer =
+          options?.maxTotalBase64Bytes === undefined
+            ? await readFile(join(tempDir, name), { signal: options?.signal })
+            : await readFileWithinBase64Limit(
+                join(tempDir, name),
+                remaining,
+                options.signal,
+              );
+      }
+      options?.signal?.throwIfAborted();
+      // Only the legacy ceiling permits an oversized first page.
       if (
-        images.length > 0 &&
-        totalBytes + data.length > PDF_RENDER_MAX_TOTAL_BASE64_BYTES
+        buffer === undefined ||
+        ((options?.maxTotalBase64Bytes !== undefined || images.length > 0) &&
+          base64ByteLength(buffer.length) > remaining)
       ) {
+        if (images.length === 0) {
+          return {
+            success: false,
+            error:
+              "The first rendered PDF page exceeds the inline media limit. Use the 'pages' parameter with a smaller page or a smaller document.",
+            tooLarge: true,
+          };
+        }
         bytesTruncated = true;
         break;
       }
+      const data = buffer.toString('base64');
       totalBytes += data.length;
       images.push({ data, mimeType: 'image/jpeg' });
     }
 
     return { success: true, images, bytesTruncated };
   } catch (e: unknown) {
+    options?.signal?.throwIfAborted();
+    if (e instanceof Error && e.name === 'AbortError') throw e;
     return {
       success: false,
       error: `pdftoppm execution failed: ${
@@ -611,8 +810,17 @@ export async function renderPDFPagesToImages(
     };
   } finally {
     if (tempDir) {
-      // Best-effort cleanup; never let a cleanup failure mask the result.
-      await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      if (fileHandle) {
+        try {
+          await removeDescriptorOutput(tempDir);
+        } catch {
+          // A cleanup failure must not replace the result already produced.
+        } finally {
+          await outputDirectory?.close().catch(() => undefined);
+        }
+      } else {
+        await rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      }
     }
   }
 }

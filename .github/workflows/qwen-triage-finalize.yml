@@ -33,7 +33,8 @@ on:
     workflows:
       - 'Qwen Code CI'
       - 'Qwen Autofix'
-      - 'SDK Java'
+      - 'Managed Agent gate'
+      - 'Managed Agent loop verification'
       - 'SDK Python'
       - 'Serve A/B'
       - 'Web-shell Visuals'
@@ -44,10 +45,14 @@ permissions:
   contents: 'read'
 
 concurrency:
-  # One finalize at a time per head SHA: concurrent completions (CI + E2E)
-  # would read-modify-write the same comment. cancel-in-progress: false — the
-  # queued run re-reads fresh state, so the last one always converges.
-  group: 'qwen-triage-finalize-${{ github.event.workflow_run.head_sha }}'
+  # PR runs serialize per head SHA because concurrent completions would
+  # read-modify-write the same comment. Non-PR firings can never have a triage
+  # comment to finalize, so give them a unique group instead of letting them
+  # occupy a PR's group before the job-level PR gate skips them.
+  # cancel-in-progress: false — the queued PR run re-reads fresh state, so the
+  # last one always converges.
+  group: >-
+    qwen-triage-finalize-${{ github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.head_sha || github.run_id }}
   cancel-in-progress: false
 
 jobs:

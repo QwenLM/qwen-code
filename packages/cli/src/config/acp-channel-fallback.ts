@@ -12,7 +12,7 @@
  * `cli/src/serve/channel-worker-supervisor.ts`), so a daemon-spawned
  * `qwen --acp` child reports `channel=daemon` instead of the generic `ACP`.
  * The Tauri desktop shell launches `qwen serve` with `QWEN_CODE_DESKTOP=1`
- * (`packages/desktop-shell/src-tauri/src/runtime.rs`) and daemon children
+ * (`packages/desktop/src-tauri/src/runtime.rs`) and daemon children
  * inherit the marker; those sessions report `channel=desktop`, the same
  * client identity the Electron desktop passes explicitly.
  *

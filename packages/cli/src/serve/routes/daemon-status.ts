@@ -23,6 +23,7 @@ import {
 import type { RateLimiterInstance } from '../rate-limit.js';
 import type { ServeOptions } from '../types.js';
 import type { ChannelWorkerSnapshot } from '../channel-worker-supervisor.js';
+import type { ChannelRestoreFailure } from '../channel-restore-failures.js';
 import type { ChannelWorkerGroupSnapshot } from '../channel-worker-group.js';
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
 import { getServeProtocolVersions } from '../capabilities.js';
@@ -50,6 +51,7 @@ interface RegisterDaemonStatusRoutesDeps {
   sessionShellCommandEnabled: boolean;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
   getChannelWorkerSnapshots?: () => ChannelWorkerGroupSnapshot[];
+  getChannelRestoreFailures?: () => readonly ChannelRestoreFailure[];
   maxChannelControlWorkspaces?: number;
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   getMetricsSeries?: () => DaemonMetricsBucket[];
@@ -93,6 +95,7 @@ export function registerDaemonStatusRoutes(
           sessionShellCommandEnabled: deps.sessionShellCommandEnabled,
           getChannelWorkerSnapshot: deps.getChannelWorkerSnapshot,
           getChannelWorkerSnapshots: deps.getChannelWorkerSnapshots,
+          getChannelRestoreFailures: deps.getChannelRestoreFailures,
           maxChannelControlWorkspaces: deps.maxChannelControlWorkspaces,
           getPerfSnapshot: deps.getPerfSnapshot,
           getMetricsSeries: deps.getMetricsSeries,

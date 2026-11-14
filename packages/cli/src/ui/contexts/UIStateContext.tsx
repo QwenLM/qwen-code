@@ -32,6 +32,7 @@ import type {
 import type { DOMElement } from 'ink';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
 import type { PendingMcpServer } from '../hooks/useMcpApproval.js';
+import type { PendingProjectHooks } from '../hooks/use-project-hooks-approval.js';
 import type { ExtensionUpdateState } from '../state/extensions.js';
 import type { UpdateObject } from '../utils/updateCheck.js';
 
@@ -72,6 +73,7 @@ export interface UIState {
   skillReviewPending: { taskId: string; skills: PendingSkillView[] } | null;
   isModelDialogOpen: boolean;
   isFastModelMode: boolean;
+  isAdvisorModelMode: boolean;
   isVoiceModelMode: boolean;
   isVisionModelMode: boolean;
   isCompactionModelMode: boolean;
@@ -102,6 +104,7 @@ export interface UIState {
   loopDetectionConfirmationRequest: LoopDetectionConfirmationRequest | null;
   memoryFileCount: number;
   streamingState: StreamingState;
+  commandCancellationBlocked: boolean;
   initError: string | null;
   pendingLlmHistoryItems: HistoryItemWithoutId[];
   thought: ThoughtSummary | null;
@@ -119,6 +122,8 @@ export interface UIState {
   currentMcpApproval: PendingMcpServer | undefined;
   pendingMcpApprovals: PendingMcpServer[];
   mcpApprovalRemaining: number;
+  isProjectHooksApprovalDialogOpen: boolean;
+  pendingProjectHooks: PendingProjectHooks | undefined;
   isTrustedFolder: boolean | undefined;
   constrainHeight: boolean;
   ideContextState: IdeContext | undefined;
@@ -171,6 +176,7 @@ export interface UIState {
    * indicator; cleared when the turn returns to idle.
    */
   workflowKeywordActive: boolean;
+  pendingPastes?: Map<string, string>;
   sessionStats: SessionStatsState;
   terminalWidth: number;
   terminalHeight: number;

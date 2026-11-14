@@ -19,7 +19,7 @@ vi.mock('node:child_process', async (importOriginal) => {
   };
 });
 
-import { ProcessRegistry } from './process-registry.js';
+import { ProcessRegistry, ProcessExitError } from './process-registry.js';
 
 const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform')!;
 const PS = '/bin/ps';
@@ -256,6 +256,7 @@ describe('ProcessRegistry', () => {
     expect(killSpy).toHaveBeenCalledWith(-1234, 'SIGTERM');
 
     await vi.advanceTimersByTimeAsync(5_000);
+    await expect(terminating).resolves.toBeInstanceOf(ProcessExitError);
     await expect(terminating).resolves.toMatchObject({
       message: expect.stringContaining('exited uncleanly during shutdown'),
     });

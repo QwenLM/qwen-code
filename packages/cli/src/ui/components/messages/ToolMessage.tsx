@@ -22,6 +22,7 @@ import type {
   AgentResultDisplay,
   PlanResultDisplay,
   AnsiOutputDisplay,
+  AdvisorDisplay,
   McpToolProgressData,
   FileDiff,
   TerminalImageDisplay,
@@ -32,13 +33,18 @@ import {
   isVisionBridgeNoticeDisplay,
 } from '@qwen-code/qwen-code-core/services/visionBridge/vision-bridge-service.js';
 import { AGENT_TOOL_NAMES } from '../../utils/agent-tool-names.js';
-import { isTerminalImageDisplay } from '@qwen-code/qwen-code-core/tools/tools.js';
+import {
+  formatAdvisorDisplay,
+  isAdvisorDisplay,
+  isTerminalImageDisplay,
+} from '@qwen-code/qwen-code-core/tools/tools.js';
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
 import { ShellInputPrompt } from '../ShellInputPrompt.js';
 import { SHELL_COMMAND_NAME, SHELL_NAME, ICON } from '../../constants.js';
-import { isCollapsibleTool } from './CompactToolGroupDisplay.js';
-import { localizeToolDisplayName } from '../../../i18n/index.js';
+import { isCollapsibleTool } from '../../utils/tool-group-summary.js';
+import { t, localizeToolDisplayName } from '../../../i18n/index.js';
+import { formatSubscriptionQuotaDisplay } from '@qwen-code/qwen-code-core/utils/subscription-quota.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import { theme } from '../../semantic-colors.js';
 import { useSettings } from '../../contexts/SettingsContext.js';
@@ -61,6 +67,7 @@ import {
 import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
 import { TerminalImage } from '../TerminalImage.js';
 import { formatInlineImageOverflow } from '../../utils/inline-image-parts.js';
+import { AdvisorMessage } from './AdvisorMessage.js';
 
 // How many of the subagent's prior tool calls to list above an approval
 // prompt — enough to show what led up to the request without pushing the
@@ -165,6 +172,7 @@ type DisplayRendererResult =
   | { type: 'todo'; data: TodoResultDisplay }
   | { type: 'findings'; data: FindingsResultDisplay }
   | { type: 'plan'; data: PlanResultDisplay }
+  | { type: 'advisor'; data: AdvisorDisplay }
   | { type: 'string'; data: string }
   | { type: 'diff'; data: { fileDiff: string; fileName: string } }
   | { type: 'task'; data: AgentResultDisplay }
@@ -184,6 +192,13 @@ const useResultDisplayRenderer = (
 
     if (isTerminalImageDisplay(resultDisplay)) {
       return { type: 'image', data: resultDisplay };
+    }
+
+    if (isAdvisorDisplay(resultDisplay)) {
+      return {
+        type: 'advisor',
+        data: resultDisplay,
+      };
     }
 
     // Check for TodoResultDisplay
@@ -923,7 +938,9 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     ? sanitizedDetailedDisplay
     : visionBridgeNoticeDisplay
       ? undefined
-      : resultDisplay;
+      : ((status === ToolCallStatus.Error
+          ? formatSubscriptionQuotaDisplay(resultDisplay, t)
+          : undefined) ?? resultDisplay);
 
   // detailedDisplay is RAW tool output (file content, grep hits, directory
   // listings). Render it as plain text — Markdown formatting would turn the
@@ -1028,6 +1045,15 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
                 data={effectiveDisplayRenderer.data}
                 availableHeight={availableHeight}
                 childWidth={innerWidth}
+              />
+            )}
+            {effectiveDisplayRenderer.type === 'advisor' && (
+              <AdvisorMessage
+                text={formatAdvisorDisplay(effectiveDisplayRenderer.data)}
+                model={effectiveDisplayRenderer.data.model ?? description}
+                containerWidth={innerWidth}
+                availableTerminalHeight={availableHeight}
+                isPending={isPending}
               />
             )}
             {effectiveDisplayRenderer.type === 'task' && config && (

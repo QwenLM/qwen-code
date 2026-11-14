@@ -636,6 +636,113 @@ describe('fetch-pr report assembly', () => {
     expect(report.host).toBe('ghe.example.com');
   });
 
+  it('refuses a symlinked .qwen/tmp before the lease, the worktree or the diff', async () => {
+    // The entry guard runs first: a redirected scratch directory must not
+    // cost a lease write, a `cleanStale`, a worktree, or a diff — every one
+    // of them lands under it. The suite's fs is a mock, so the link is what
+    // `lstat` reports for the two in-repo components.
+    producerMocks.lstatSync.mockImplementation((path?: unknown) => {
+      const p = String(path);
+      if (p === join('.qwen', 'tmp')) {
+        return { isSymbolicLink: () => true } as unknown as ReturnType<
+          typeof producerMocks.lstatSync
+        >;
+      }
+      if (p === '.qwen') {
+        return { isSymbolicLink: () => false } as unknown as ReturnType<
+          typeof producerMocks.lstatSync
+        >;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    const { createReviewWorktreeLease } = await import(
+      '../../services/review-worktree-lease.js'
+    );
+    vi.mocked(createReviewWorktreeLease).mockClear();
+    producerMocks.git.mockClear();
+    await expect(reportFor({})).rejects.toThrow(
+      /^fetch-pr: .*tmp is a symbolic link/s,
+    );
+    expect(vi.mocked(createReviewWorktreeLease)).not.toHaveBeenCalled();
+    expect(
+      producerMocks.git.mock.calls.some((c) => c.includes('worktree')),
+    ).toBe(false);
+    expect(
+      producerMocks.writeFileSync.mock.calls.some(([path]) =>
+        String(path).endsWith('diff.txt'),
+      ),
+    ).toBe(false);
+  });
+
+  it('withholds the cache candidate when the runtime published no identity', async () => {
+    // A merge base, so the candidate block runs at all (the suite's default
+    // is a base-less fetch, which never records pairs).
+    producerMocks.resolveMergeBase.mockReturnValue({
+      sha: 'b'.repeat(40),
+      baseFetchFailed: false,
+    });
+    const said = () =>
+      producerMocks.writeStderrLine.mock.calls
+        .map((c) => String(c[0]))
+        .join('\n');
+    // Control first: under the fixture identity the block RUNS — it writes
+    // the candidate, or names the write it could not make (this suite's fs
+    // is a mock, so the real atomic write may have no directory to land in)
+    // — and never withholds for the identity. The absence below is then the
+    // guard's doing and not the fixture's.
+    producerMocks.writeStderrLine.mockClear();
+    const control = await reportFor({});
+    expect(
+      control.cacheCandidatePath !== undefined ||
+        /could not write the cache candidate/.test(said()),
+    ).toBe(true);
+    expect(said()).not.toContain('published no model identity');
+    // An empty identity never compares equal — the gate reads it as a
+    // mismatch and `cache-commit` refuses it — so announcing the candidate
+    // would send Step 8 into a refusal with no branch, losing the round's
+    // ledger with it. Withheld at the source, the absent field routes the
+    // round to the hand-written fallback, which omits `lastModelId`.
+    const savedModel = process.env['QWEN_CODE_MODEL'];
+    process.env['QWEN_CODE_MODEL'] = '';
+    try {
+      producerMocks.writeStderrLine.mockClear();
+      const handler = fetchPrCommand.handler;
+      if (!handler) throw new Error('fetch-pr handler missing');
+      const savedIdentity = process.env['QWEN_CODE_MODEL_IDENTITY'];
+      process.env['QWEN_CODE_MODEL_IDENTITY'] = '';
+      try {
+        await handler({
+          _: [],
+          $0: 'qwen',
+          pr_number: '42',
+          owner_repo: 'acme/widgets',
+          remote: 'origin',
+          out: '/tmp/fetch-report.json',
+          maxChunkLines: 400,
+        } as unknown as Parameters<typeof handler>[0]);
+      } finally {
+        if (savedIdentity === undefined) {
+          delete process.env['QWEN_CODE_MODEL_IDENTITY'];
+        } else {
+          process.env['QWEN_CODE_MODEL_IDENTITY'] = savedIdentity;
+        }
+      }
+      const call = producerMocks.writeFileSync.mock.calls.findLast(
+        ([path]: unknown[]) => path === '/tmp/fetch-report.json',
+      );
+      if (!call) throw new Error('report was not written');
+      const report = JSON.parse(String(call[1])) as Record<string, unknown>;
+      expect('cacheCandidatePath' in report).toBe(false);
+      expect('reviewModelId' in report).toBe(false);
+      expect(said()).toContain('published no model identity');
+      // …and nothing was attempted: the withholding is at the source.
+      expect(said()).not.toContain('could not write the cache candidate');
+    } finally {
+      if (savedModel === undefined) delete process.env['QWEN_CODE_MODEL'];
+      else process.env['QWEN_CODE_MODEL'] = savedModel;
+    }
+  });
+
   it('refuses a dash-leading baseRefName from the platform metadata', async () => {
     // The base ref is server-controlled and reaches git's argv through the
     // base fetch — a dash-leading name (`--upload-pack=<payload>` is
@@ -1315,6 +1422,13 @@ describe('fetch-pr report assembly', () => {
       );
       expect(producerMocks.releaseWorktree).not.toHaveBeenCalled();
       expect(producerMocks.git).not.toHaveBeenCalled();
+      // `gitRaw` is a git call too, and the scratch-directory guard makes one
+      // (`ls-files -s -z`) and then creates `.qwen/tmp`. It answers an empty
+      // listing under this suite's mock, so a guard placed ahead of the gate
+      // runs silently and the refusal below it still fires — the message
+      // assertion alone cannot see the order.
+      expect(producerMocks.gitRaw).not.toHaveBeenCalled();
+      expect(producerMocks.mkdirSync).not.toHaveBeenCalled();
       expect(producerMocks.execFileSync).not.toHaveBeenCalled();
       expect(vi.mocked(readReviewWorktreeLease)).not.toHaveBeenCalled();
       expect(vi.mocked(createReviewWorktreeLease)).not.toHaveBeenCalled();
@@ -1501,7 +1615,14 @@ describe('fetch-pr report assembly', () => {
       // Nothing was created through the link — no mkdir, no worktree add —
       // and the fetched ref survives the refusal for the next run's
       // cleanStale to sweep (the arm sits outside the rollback try).
-      expect(producerMocks.mkdirSync).not.toHaveBeenCalled();
+      //
+      // ONE mkdir, not none: the entry guard creates `.qwen/tmp` before any
+      // of this, while the mock still answers ENOENT for the relative
+      // spelling it asks about — the link this test plants is the one that
+      // appears afterwards. Step 4's `mkdirSync(dirname(wt))` takes the very
+      // same arguments, so the count is what tells them apart: a second call
+      // is the create through the link.
+      expect(producerMocks.mkdirSync).toHaveBeenCalledTimes(1);
       expect(producerMocks.git).not.toHaveBeenCalledWith(
         'worktree',
         'add',
@@ -1538,7 +1659,8 @@ describe('fetch-pr report assembly', () => {
       await expect(reportFor({})).rejects.toThrow(
         /refusing to create a review worktree at .*is a symlink/,
       );
-      expect(producerMocks.mkdirSync).not.toHaveBeenCalled();
+      // The entry guard's mkdir only — see the ancestor test above.
+      expect(producerMocks.mkdirSync).toHaveBeenCalledTimes(1);
       expect(producerMocks.git).not.toHaveBeenCalledWith(
         'worktree',
         'add',
@@ -4654,6 +4776,8 @@ function resumePlanFields(diffBytes: string): Record<string, unknown> {
   ) as unknown as Record<string, unknown>;
 }
 
+const RESUME_MODEL = 'resume-model@1a2b3c4d';
+
 describe('fetch-pr --resume', () => {
   const OUT = '/tmp/fetch-report.json';
   const DIFF_BYTES = 'diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n+x\n';
@@ -4679,6 +4803,7 @@ describe('fetch-pr --resume', () => {
       prDescriptionHasHan: false,
       isCrossRepository: false,
       diffStat: { files: 1, additions: 1, deletions: 0 },
+      reviewModelId: RESUME_MODEL,
       ...resumePlanFields(DIFF_BYTES),
       ...over,
     });
@@ -4770,6 +4895,9 @@ describe('fetch-pr --resume', () => {
     // BOTH ids before any step runs.
     vi.stubEnv('QWEN_CODE_SESSION_ID', 'S-test');
     vi.stubEnv('QWEN_CODE_PROMPT_ID', 'P-test');
+    // The identity the interrupted attempt recorded (`prevReport`), running
+    // again — the precondition every continuation below assumes.
+    vi.stubEnv('QWEN_CODE_MODEL_IDENTITY', RESUME_MODEL);
   });
 
   async function run(extraArgs: Record<string, unknown> = {}) {
@@ -5094,6 +5222,25 @@ describe('fetch-pr --resume', () => {
       OUT,
       expect.stringContaining('head-moved'),
     );
+    // The refusal teaches the right invocation for next time: this fresh
+    // run IS the re-review, and a plain run is the path that keeps the
+    // restart bound unspent. The cause wording covers rewritten history
+    // too (head-moved is a SHA inequality), and the delta promise is
+    // conditional on the anchor surviving (review R1-3 on #15998).
+    const headMovedStderr = producerMocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(headMovedStderr).toContain(
+      'After future updates use a plain `/review <n>` without --resume',
+    );
+    expect(headMovedStderr).toContain('new or rewritten commits');
+    expect(headMovedStderr).toContain('when the recorded anchor survives');
+    // Review R1-3 on #15998: the cost is announced where recordRestart
+    // actually runs (after the plan write), in the past tense — never
+    // before the fact at the refusal.
+    expect(headMovedStderr).toContain(
+      "This refusal spent the run's one head-movement restart.",
+    );
   });
 
   it('falls through when the diff bytes changed — the content key', async () => {
@@ -5110,6 +5257,15 @@ describe('fetch-pr --resume', () => {
     expect(lines).toEqual([
       { resumed: false, resumeRefused: 'diff-hash-mismatch' },
     ]);
+    // Review R1-4 on #15998: an interruption-state refusal must NOT carry
+    // the re-review guidance — dropping the reason gate would tell a user
+    // with a tampered diff that the PR gained commits and a restart was
+    // spent. Both sentences must stay absent.
+    const stderr = producerMocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(stderr).not.toContain('IS the re-review');
+    expect(stderr).not.toContain('After future updates');
   });
 
   it('falls through when there is no previous report at all', async () => {
@@ -5120,6 +5276,66 @@ describe('fetch-pr --resume', () => {
     expect(reportWritten()).toBe(true);
     const lines = await stdoutJsonLines();
     expect(lines).toEqual([{ resumed: false, resumeRefused: 'no-report' }]);
+    // Review R1-2/R1-3 on #15998: this is the refusal a re-review after a
+    // COMPLETED round actually reaches (cleanup removed the report) — and
+    // equally a first-ever --resume or an unreadable report, so the wording
+    // asserts no cause. The guidance prints, with the anchor condition and
+    // without the restart-cost sentence, which belongs to head-moved alone.
+    const stderr = producerMocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(stderr).toContain('No resumable state was found');
+    expect(stderr).toContain('IS the re-review');
+    expect(stderr).toContain('when the recorded anchor survives');
+    expect(stderr).toContain(
+      'After future updates use a plain `/review <n>` without --resume',
+    );
+    expect(stderr).toContain('This refusal costs nothing');
+    expect(stderr).not.toContain('completed round cleans up');
+    expect(stderr).not.toContain('head-movement restart');
+  });
+
+  it('falls through when the report survived but the worktree is gone', async () => {
+    // Review R1-3 on #15998: worktree-gone requires a SURVIVING report —
+    // it is an interrupted attempt that lost its tree, not a completed
+    // round's cleanup. The guidance must print its own cause-neutral
+    // sentence, never the completed-round claim.
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) return prevReport();
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    const { gitOpt } = await import('./lib/git.js');
+    vi.mocked(gitOpt).mockImplementation((...args: string[]) => {
+      if (args.includes('-C') && args.includes('rev-parse')) return null;
+      if (args.includes('--others')) return '';
+      if (args.includes('ls-tree')) return '';
+      if (args.includes('config')) return '';
+      if (args.includes('merge-base')) return 'baseb45eb45e';
+      if (args.includes('status')) return '';
+      if (args.includes('ls-files')) return 'H f.txt';
+      if (args.includes('--git-common-dir')) return '/repo/.git';
+      if (args.includes('--git-dir')) {
+        return '/repo/.git/worktrees/review-pr-42';
+      }
+      return 'f00df00df00d';
+    });
+    await run();
+    expect(reportWritten()).toBe(true);
+    const lines = await stdoutJsonLines();
+    expect(lines).toEqual([{ resumed: false, resumeRefused: 'worktree-gone' }]);
+    const stderr = producerMocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(stderr).toContain('IS the re-review');
+    expect(stderr).toContain(
+      "The interrupted attempt's worktree is gone while its report survived",
+    );
+    expect(stderr).toContain('This refusal costs nothing');
+    expect(stderr).not.toContain('completed round cleans up');
+    expect(stderr).not.toContain('head-movement restart');
   });
 
   it('without --resume the flag path never runs', async () => {
@@ -5255,6 +5471,28 @@ describe('fetch-pr --resume', () => {
     ]);
   });
 
+  it('refuses a continuation under another identity, and the fresh report names the running one (R26-1)', async () => {
+    // The continuation would republish the interrupted attempt's report and
+    // cache candidate verbatim, both certifying RESUME_MODEL over a review
+    // another model performed.
+    vi.stubEnv('QWEN_CODE_MODEL_IDENTITY', 'other-model@9f8e7d6c');
+    await run();
+    const lines = await stdoutJsonLines();
+    expect(lines[0]).toEqual({
+      resumed: false,
+      resumeRefused: 'model-mismatch',
+    });
+    const written = producerMocks.writeFileSync.mock.calls.find(
+      ([path]) => path === OUT,
+    );
+    expect(written).toBeDefined();
+    expect(
+      (JSON.parse(String(written![1])) as Record<string, unknown>)[
+        'reviewModelId'
+      ],
+    ).toBe('other-model@9f8e7d6c');
+  });
+
   it('resumes at the recorded effort when none is passed, and says so', async () => {
     producerMocks.readFileSync.mockImplementation((path?: unknown) => {
       if (path === OUT) return prevReport({ effort: 'medium' });
@@ -5293,6 +5531,15 @@ describe('fetch-pr --resume', () => {
     expect(lines).toEqual([
       { resumed: false, resumeRefused: 'worktree-dirty' },
     ]);
+    // Review R1-4 on #15998: a dirty worktree is the user's own tree to
+    // fix, not a re-review — the guidance (and its restart-cost claim)
+    // must stay absent, or the user is sent to the PR instead of their
+    // worktree and told a restart was spent when none was.
+    const stderr = producerMocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(stderr).not.toContain('IS the re-review');
+    expect(stderr).not.toContain('After future updates');
   });
 
   it('falls through when the captured diff is gone', async () => {
@@ -5419,6 +5666,7 @@ describe('fetch-pr --resume bookkeeping is counted, not merely called', () => {
       prDescriptionHasHan: false,
       isCrossRepository: false,
       diffStat: { files: 1, additions: 1, deletions: 0 },
+      reviewModelId: RESUME_MODEL,
       ...resumePlanFields(DIFF_BYTES),
       ...over,
     });
@@ -5502,6 +5750,9 @@ describe('fetch-pr --resume bookkeeping is counted, not merely called', () => {
     // BOTH ids before any step runs.
     vi.stubEnv('QWEN_CODE_SESSION_ID', 'S-test');
     vi.stubEnv('QWEN_CODE_PROMPT_ID', 'P-test');
+    // The identity the interrupted attempt recorded (`prevReport`), running
+    // again — the precondition every continuation below assumes.
+    vi.stubEnv('QWEN_CODE_MODEL_IDENTITY', RESUME_MODEL);
   });
 
   async function run(extra: Record<string, unknown> = {}) {

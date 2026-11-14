@@ -1,13 +1,98 @@
+import { pierreResources } from './pierre-build';
+import { exceljsBrowser } from './exceljs-build';
+import { createConnection } from 'node:net';
 import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
-import type { PreviewServer, ProxyOptions, ViteDevServer } from 'vite';
+import type { Connect, PreviewServer, ProxyOptions, ViteDevServer } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import pkg from './package.json' with { type: 'json' };
 import { getAllowedDaemonOrigin } from './client/config/daemon';
 
+// Trim + `||`, not `??`: launchers export the variable empty (or blank) when
+// no daemon URL is configured, and an empty target makes `new URL()` throw at
+// config load.
+const daemonTarget =
+  process.env['QWEN_DAEMON_URL']?.trim() || 'http://127.0.0.1:4170';
+
+// WHATWG URL keeps the brackets an IPv6 literal needs inside a URL, but a TCP
+// probe takes the bare address; `[::1]` reaches DNS and fails with ENOTFOUND.
+export function probeHostname(hostname: string): string {
+  return hostname.startsWith('[') && hostname.endsWith(']')
+    ? hostname.slice(1, -1)
+    : hostname;
+}
+
+// The probe must dial the same authority the proxy does. http-proxy falls back
+// to the protocol's default port, so probing 4170 for a port-less URL reports
+// a healthy daemon while every proxied request fails on port 80.
+export function probeAddress(target: string): { host: string; port: number } {
+  const url = new URL(target);
+  return {
+    host: probeHostname(url.hostname),
+    port: Number(url.port) || (url.protocol === 'https:' ? 443 : 80),
+  };
+}
+
+const probedTargets = new Set<string>();
+
+// One probe per dev server, not per request: an unreachable daemon is not
+// fatal (the E2E suites mock it per page), but the operator learns about it
+// at startup instead of through a suite of slow browser timeouts.
+export function probeDaemonTarget(
+  target: string = daemonTarget,
+  connect: typeof createConnection = createConnection,
+): void {
+  // One probe per target per process: a run that starts several servers
+  // against the same daemon learns nothing from repeating it.
+  if (probedTargets.has(target)) return;
+  probedTargets.add(target);
+  const probe = connect(probeAddress(target), () => probe.destroy());
+  const unreachable = () => {
+    probe.destroy();
+    console.warn(
+      `[web-shell] no daemon is listening at ${target}; proxied ` +
+        'daemon routes answer 502 until one is started (page-level E2E ' +
+        'mocks are unaffected)',
+    );
+  };
+  probe.setTimeout(2_000, unreachable);
+  probe.once('error', unreachable);
+}
+
+// A refused connection, a failed lookup, or a connect-phase timeout means
+// nothing was listening; a reset mid-request means a daemon is there but did
+// not answer. Only the former is `daemon_unreachable`. The proxy sets no
+// read timeout, so ETIMEDOUT here can only come from the connect phase.
+const DAEMON_ABSENT_ERRNOS = new Set([
+  'ECONNREFUSED',
+  'ENOTFOUND',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'ETIMEDOUT',
+  'EAI_AGAIN',
+  'ENETDOWN',
+  'EHOSTDOWN',
+]);
+
+export function daemonProxyFailure(
+  target: string,
+  error: Error & { code?: string },
+): { code: string; error: string } {
+  const absent = DAEMON_ABSENT_ERRNOS.has(error.code ?? '');
+  return {
+    code: absent ? 'daemon_unreachable' : 'daemon_proxy_error',
+    error: absent
+      ? `No daemon answered at ${target} (${error.message}). ` +
+        'Start the daemon or install the page-level mock before this request.'
+      : `The daemon at ${target} did not complete the request ` +
+        `(${error.message}). Check the daemon, or install the page-level mock ` +
+        'before this request.',
+  };
+}
+
 const daemonProxy: ProxyOptions = {
-  target: process.env['QWEN_DAEMON_URL'] ?? 'http://127.0.0.1:4170',
+  target: daemonTarget,
   changeOrigin: true,
   bypass: (req) => {
     if (req.url?.startsWith('/api/')) return undefined;
@@ -34,6 +119,19 @@ const daemonProxy: ProxyOptions = {
     return undefined;
   },
   configure: (proxy) => {
+    // Vite's own listener already answers a dead daemon with an empty 500;
+    // the lost tests in run 42460891896 were the client's retry cadence, not
+    // a hung response. This handler runs first and replaces that empty 500
+    // with a labeled 502, so the failure is correctly attributed.
+    proxy.on('error', (error, _req, res) => {
+      if (!('writeHead' in res) || res.headersSent || res.writableEnded) return;
+      res.writeHead(502, { 'content-type': 'application/json' });
+      res.end(
+        // Human text in `error`, machine token in `code`: readDaemonError
+        // prefers `error`, so the operator-facing sentence must live there.
+        JSON.stringify(daemonProxyFailure(daemonTarget, error)),
+      );
+    });
     proxy.on('proxyReq', (proxyReq) => {
       proxyReq.removeHeader('origin');
       proxyReq.removeHeader('referer');
@@ -45,8 +143,15 @@ const daemonProxy: ProxyOptions = {
   },
 };
 
+const managedAgentJavaProxy: ProxyOptions = {
+  target: process.env['QWEN_MANAGED_AGENT_JAVA_URL'] ?? 'http://127.0.0.1:8080',
+  changeOrigin: true,
+};
+
 export const QUALIFIED_VOICE_STREAM_PROXY =
   '^/workspaces/[^/]+/voice/stream/?$';
+export const MANAGED_AGENT_JAVA_ROUTE_PROXY = '/api/agent/web-shell/v1';
+export const MANAGED_AGENT_PUBLIC_ROUTE_PROXY = '/v1/agents';
 
 // Exact-path on purpose. A bare `/brand` prefix would also match
 // `/brandContext.ts` — the client source module `main.tsx` and `App.tsx` import
@@ -70,13 +175,21 @@ function developmentCsp(requestUrl: string): string {
   const queryStart = requestUrl.indexOf('?');
   const raw = new URLSearchParams(
     queryStart === -1 ? '' : requestUrl.slice(queryStart + 1),
-  ).get('daemon');
-  const origin = getAllowedDaemonOrigin(raw || '');
+  );
   const connectOrigins: string[] = [];
-  if (origin) {
+  for (const value of [raw.get('daemon'), ...raw.getAll('fanout')]) {
+    const origin = getAllowedDaemonOrigin(value || '');
+    if (!origin || connectOrigins.includes(origin)) continue;
     const websocket = new URL(origin);
     websocket.protocol = websocket.protocol === 'https:' ? 'wss:' : 'ws:';
     connectOrigins.push(origin, websocket.origin);
+  }
+  const clientMcpOverWs = process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'];
+  if (
+    clientMcpOverWs !== undefined &&
+    !['0', 'false'].includes(clientMcpOverWs.trim().toLowerCase())
+  ) {
+    connectOrigins.push('http://127.0.0.1:47821');
   }
   return [
     "default-src 'self'",
@@ -93,24 +206,54 @@ function developmentCsp(requestUrl: string): string {
   ].join('; ');
 }
 
-function configureCsp(server: ViteDevServer | PreviewServer): void {
-  server.middlewares.use((req, res, next) => {
+export function createDevelopmentMiddleware(): Connect.NextHandleFunction {
+  return (req, res, next) => {
     res.setHeader('Content-Security-Policy', developmentCsp(req.url || '/'));
+    // Vite resolves the extensionless settings page to settings.ts before SPA fallback.
+    if (
+      req.method === 'GET' &&
+      /^\/settings\/?(?:\?|$)/.test(req.url || '') &&
+      req.headers.accept?.includes('text/html')
+    ) {
+      req.url = '/index.html';
+    }
     next();
-  });
+  };
+}
+
+function configureDevelopmentMiddleware(
+  server: ViteDevServer | PreviewServer,
+): void {
+  probeDaemonTarget();
+  server.middlewares.use(createDevelopmentMiddleware());
 }
 
 export default defineConfig(({ command }) => ({
   root: 'client',
+  // Worker-only imports otherwise trigger a dev-page reload on first preview.
+  optimizeDeps: {
+    exclude: ['@pierre/diffs', 'shiki/wasm', 'exceljs'],
+    include: [
+      'ssf',
+      'shiki-files/core',
+      'shiki-files/engine/javascript',
+      'shiki-files/engine/oniguruma',
+    ],
+  },
   plugins: [
+    pierreResources(),
+    exceljsBrowser(),
     react(),
     tailwindcss(),
     {
-      name: 'web-shell-development-csp',
-      configureServer: configureCsp,
-      configurePreviewServer: configureCsp,
+      name: 'web-shell-development-middleware',
+      configureServer: configureDevelopmentMiddleware,
+      configurePreviewServer: configureDevelopmentMiddleware,
     },
   ],
+  worker: {
+    plugins: () => [exceljsBrowser()],
+  },
   resolve: {
     alias: {
       '@qwen-code/web-shell/daemon-react-sdk': resolve(
@@ -172,7 +315,18 @@ export default defineConfig(({ command }) => ({
       'Referrer-Policy': 'no-referrer',
     },
     port: 5173,
+    // Dev launchers (scripts/managed-agent-dev.js) hand the token-bearing
+    // open path through the environment instead of argv: npm echoes expanded
+    // argv to its inherited stdio, and argv is world-readable in
+    // /proc/<pid>/cmdline. Caveat: server.open spawns the browser launcher
+    // with the full URL as an argv element, so on POSIX the token still
+    // reaches one world-readable argv before landing in the page — this
+    // transport removes only the npm hop's echo. Unset means no browser is
+    // opened, as before.
+    open: process.env['QWEN_WEB_SHELL_OPEN_PATH'],
     proxy: {
+      [MANAGED_AGENT_JAVA_ROUTE_PROXY]: managedAgentJavaProxy,
+      [MANAGED_AGENT_PUBLIC_ROUTE_PROXY]: managedAgentJavaProxy,
       '/health': daemonProxy,
       '/capabilities': daemonProxy,
       // Web Shell brand (`GET /brand`). Without it the SPA fallback answers with
@@ -186,9 +340,12 @@ export default defineConfig(({ command }) => ({
       // it the SPA fallback answers with index.html and the dialog fails JSON
       // parsing in dev.
       '/daemon/status': daemonProxy,
+      '/remote-access': daemonProxy,
       '/standalone/sessions': daemonProxy,
       '/session': daemonProxy,
       '/permission': daemonProxy,
+      '^/workspaces/[^/]+/agent(?:/|$)': daemonProxy,
+      '/agent-hosts': daemonProxy,
       [QUALIFIED_VOICE_STREAM_PROXY]: { ...daemonProxy, ws: true },
       [QUALIFIED_ACP_WS_PROXY]: { ...daemonProxy, ws: true },
       '/workspace': daemonProxy,
@@ -211,6 +368,10 @@ export default defineConfig(({ command }) => ({
       // Goals page (`GET /goals`). Without it the SPA fallback returns
       // index.html in dev and the page fails JSON parsing on open.
       '/goals': daemonProxy,
+      // PR watches page (`GET /autofix-pr/watches`). Same reason as the routes
+      // above. The workspace-qualified form is already reached by the
+      // `/workspace` prefix; only the primary's unqualified route needs this.
+      '/autofix-pr': daemonProxy,
       // Token-usage dashboard (Daemon Status "统计" tab). Same reason as the
       // routes above — without it the SPA fallback returns index.html in dev and
       // the tab fails JSON parsing on `GET /usage/dashboard`.

@@ -123,6 +123,7 @@ export interface LiveStatus {
   blocker?: LiveBlocker;
   message?: string;
   callId?: string;
+  coordinator?: LiveSessionLocator;
   inputMuted?: boolean;
   outputMuted?: boolean;
   transcript?: string;
@@ -307,7 +308,28 @@ export type LiveLanguageResult =
       uiLanguageV1?: LiveLanguageState;
     };
 
+export type LiveScreenFeedPhase =
+  | 'starting'
+  | 'streaming'
+  | 'stopped'
+  | 'error';
+
+export type LiveScreenFeedMessage =
+  | {
+      type: 'host.screen_feed_start';
+      epoch: number;
+      feedId: string;
+    }
+  | { type: 'host.screen_feed_stop'; epoch: number; feedId: string }
+  | {
+      type: 'host.screen_feed_frame';
+      epoch: number;
+      feedId: string;
+      image: string;
+    };
+
 export type LiveHostMessage =
+  | LiveScreenFeedMessage
   | LiveHostHello
   | LiveHostAction
   | LiveHostMemoryAction
@@ -321,7 +343,15 @@ export type LiveHostMessage =
 
 export type LiveDaemonMessage =
   | {
+      type: 'host.screen_feed_state';
+      epoch: number;
+      feedId: string;
+      phase: LiveScreenFeedPhase;
+      message?: string;
+    }
+  | {
       type: 'host.welcome';
+      screenFeedV1?: true;
       protocolVersion: typeof LIVE_HOST_PROTOCOL_VERSION;
       daemonInstanceNonce: string;
       daemonShutdownV1?: true;

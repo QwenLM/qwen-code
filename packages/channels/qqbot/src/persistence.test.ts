@@ -34,15 +34,38 @@ vi.mock('./api.js', () => ({
   fetchGatewayUrl: vi.fn(),
 }));
 
+const { mockLoadCredentials } = vi.hoisted(() => ({
+  mockLoadCredentials: vi.fn<() => { appId: string; appSecret: string } | null>(
+    () => null,
+  ),
+}));
+
 vi.mock('./accounts.js', () => ({
   getCredsFilePath: () => '/tmp/test-creds.json',
-  loadCredentials: () => null,
+  loadCredentials: mockLoadCredentials,
   saveCredentials: vi.fn(),
 }));
 
-vi.mock('./login.js', () => ({
-  qrCodeLogin: vi.fn(),
+const { mockQrCodeLogin } = vi.hoisted(() => ({
+  mockQrCodeLogin: vi.fn(async () => ({
+    appId: 'qr-app',
+    appSecret: 'qr-secret',
+  })),
 }));
+
+vi.mock('./login.js', () => ({
+  qrCodeLogin: mockQrCodeLogin,
+  startQrLogin: vi.fn(),
+}));
+
+// The pure channel-base helpers stay the shipped implementations rather than
+// hand-written mirrors, so a test that drives one cannot diverge from what
+// production imports. Every helper QQChannel imports from
+// `@qwen-code/channel-base` is aliased here and pinned to the real module by
+// the test double suite at the bottom of this file.
+const realChannelBase = await vi.importActual<
+  typeof import('@qwen-code/channel-base')
+>('@qwen-code/channel-base');
 
 vi.mock('@qwen-code/channel-base', () => ({
   ChannelBase: class {
@@ -71,21 +94,13 @@ vi.mock('@qwen-code/channel-base', () => ({
     }
   },
   getGlobalQwenDir: () => '/tmp/test-qwen',
-  sanitizeLogText: (text: string, maxLen: number): string => {
-    const sanitized = Array.from(text, (c) => {
-      const cp = c.codePointAt(0)!;
-      if (cp === 0x1b) return ' '; // ESC
-      if (cp === 0x9b) return ' '; // C1
-      if (cp === 0x85 || cp === 0x2028 || cp === 0x2029) return ' '; // line/paragraph sep
-      if (cp === 0x202e) return ' '; // RLO
-      if (cp === 0x0a || cp === 0x0d) return '\n';
-      if (cp < 0x20) return '';
-      return c;
-    }).join('');
-    return sanitized.length > maxLen
-      ? sanitized.slice(0, maxLen) + '...'
-      : sanitized;
-  },
+  sanitizeSenderName: realChannelBase.sanitizeSenderName,
+  sanitizePromptText: realChannelBase.sanitizePromptText,
+  sanitizeLogText: realChannelBase.sanitizeLogText,
+  singleScopeRoutingKey: realChannelBase.singleScopeRoutingKey,
+  truncateCodePoints: realChannelBase.truncateCodePoints,
+  truncateUtf16Units: realChannelBase.truncateUtf16Units,
+  unwrapMessageRoutingKey: realChannelBase.unwrapMessageRoutingKey,
 }));
 
 const { QQChannel } = await import('./QQChannel.js');
@@ -300,6 +315,31 @@ describe('restoreQQState', () => {
     expect(msgSeqMap.get('msg_abc')).toBe(5);
   });
 
+  it('keeps a sequence counter whose msg_seq is still held by a session anchor', () => {
+    fsStore[statePath] = JSON.stringify({
+      replyMsgId: [['u1', 'msg-current']],
+      msgSeqMap: [
+        ['msg-current', 2],
+        ['msg-live', 5],
+      ],
+    });
+    const ch = makeChannel();
+    // A live session is still anchored to msg-live (the chat-level entry only
+    // names the newer msg-current), so restoring must not drop its counter.
+    const sessionReplyMsgId = (
+      ch as unknown as {
+        sessionReplyMsgId: Map<string, { msgId: string; timestamp: number }>;
+      }
+    ).sessionReplyMsgId;
+    sessionReplyMsgId.set('s1', { msgId: 'msg-live', timestamp: Date.now() });
+    (ch as unknown as { restoreQQState: () => boolean }).restoreQQState();
+
+    const msgSeqMap = (ch as unknown as { msgSeqMap: Map<string, number> })
+      .msgSeqMap;
+    expect(msgSeqMap.get('msg-live')).toBe(5);
+    expect(msgSeqMap.get('msg-current')).toBe(2);
+  });
+
   it('discards sequence counters without a restored reply context', () => {
     fsStore[statePath] = JSON.stringify({
       replyMsgId: [['u1', 'msg-current']],
@@ -467,12 +507,22 @@ describe('backupGlobalSessions / restoreGlobalSessions', () => {
   });
 
   it('backup/restore failures do not crash (caught by try/catch)', () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
     vi.mocked(writeFileSync).mockImplementationOnce(() => {
       throw new Error('disk full');
     });
     fsStore[sessionsPath] = JSON.stringify({ key: 'data' });
     const ch = makeChannel();
-    expect(() => ch.disconnect()).not.toThrow();
+    try {
+      expect(() => ch.disconnect()).not.toThrow();
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('flushQQState write failed: disk full'),
+      );
+    } finally {
+      stderr.mockRestore();
+    }
   });
 });
 
@@ -610,4 +660,165 @@ describe('fixRestoredSessions', () => {
 
     expect(toSession.get('k1')).toBe('already-valid');
   });
+});
+
+// Pin the mock's pure channel-base helpers to the shipped module: dropping an
+// export from the factory (as happened to `truncateUtf16Units`) reddens here
+// instead of leaving a latent "No export is defined on the mock" error for the
+// next test that drives QQChannel's call sites. This covers every helper
+// QQChannel imports from `@qwen-code/channel-base`.
+describe('channel-base test double', () => {
+  it('exposes the shipped channel-base helpers by identity', async () => {
+    const actual = await vi.importActual<
+      typeof import('@qwen-code/channel-base')
+    >('@qwen-code/channel-base');
+    const mocked = await import('@qwen-code/channel-base');
+    expect(mocked.sanitizeSenderName).toBe(actual.sanitizeSenderName);
+    expect(mocked.sanitizePromptText).toBe(actual.sanitizePromptText);
+    expect(mocked.sanitizeLogText).toBe(actual.sanitizeLogText);
+    expect(mocked.singleScopeRoutingKey).toBe(actual.singleScopeRoutingKey);
+    expect(mocked.truncateCodePoints).toBe(actual.truncateCodePoints);
+    expect(mocked.truncateUtf16Units).toBe(actual.truncateUtf16Units);
+    expect(mocked.unwrapMessageRoutingKey).toBe(actual.unwrapMessageRoutingKey);
+  });
+});
+
+describe('shared credentials file adoption', () => {
+  const FOREIGN = { appId: 'OTHER-WORKSPACE-APPID', appSecret: 'other-secret' };
+  const originalServe = process.env['QWEN_CODE_SERVE'];
+
+  const channel = () =>
+    new QQChannel(
+      'qq-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'user' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        groups: {},
+      },
+      {} as unknown as import('@qwen-code/channel-base').AcpBridge,
+    );
+
+  afterEach(() => {
+    if (originalServe === undefined) delete process.env['QWEN_CODE_SERVE'];
+    else process.env['QWEN_CODE_SERVE'] = originalServe;
+    mockLoadCredentials.mockReset();
+    mockLoadCredentials.mockReturnValue(null);
+    vi.restoreAllMocks();
+  });
+
+  it('never adopts the name-keyed file in a daemon worker', async () => {
+    process.env['QWEN_CODE_SERVE'] = '1';
+    mockLoadCredentials.mockReturnValue(FOREIGN);
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const ch = channel();
+    await expect(
+      (ch as unknown as { fetchToken: () => Promise<void> }).fetchToken.call(
+        ch,
+      ),
+    ).rejects.toThrow(/has no appID\/appSecret/);
+    // The file holds another workspace's bot; it must not be consulted at all.
+    expect(mockLoadCredentials).not.toHaveBeenCalled();
+    expect(mockFetchAccessToken).not.toHaveBeenCalled();
+  });
+
+  it('still adopts the file for an interactive CLI run', async () => {
+    delete process.env['QWEN_CODE_SERVE'];
+    mockLoadCredentials.mockReturnValue(FOREIGN);
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    mockFetchAccessToken.mockResolvedValue({
+      accessToken: 'tok',
+      expiresIn: 7200,
+    });
+    const ch = channel();
+    await expect(
+      (ch as unknown as { fetchToken: () => Promise<void> }).fetchToken.call(
+        ch,
+      ),
+    ).resolves.toBeUndefined();
+    expect(mockFetchAccessToken).toHaveBeenCalledWith(
+      FOREIGN.appId,
+      FOREIGN.appSecret,
+    );
+  });
+});
+
+describe('credential-less QR fallback visibility guard', () => {
+  // A stream cannot distinguish a pipe to a human-visible `tee` from a pipe to
+  // a daemon worker, so the guard keys on the supervisor's explicit context.
+  // Every terminal shape must keep working, including the piped ones.
+  const cells: Array<[string, boolean, boolean, boolean, boolean]> = [
+    ['daemon worker, stdout tty', true, true, true, true],
+    ['daemon worker, stdout piped', true, false, false, true],
+    ['terminal, both tty', false, true, true, false],
+    ['terminal, stdout piped through tee', false, false, true, false],
+    ['terminal, stderr redirected', false, true, false, false],
+  ];
+
+  const original = {
+    out: Object.getOwnPropertyDescriptor(process.stdout, 'isTTY'),
+    err: Object.getOwnPropertyDescriptor(process.stderr, 'isTTY'),
+    serve: process.env['QWEN_CODE_SERVE'],
+  };
+  const setTTY = (stream: NodeJS.WriteStream, value: boolean) => {
+    Object.defineProperty(stream, 'isTTY', {
+      value,
+      configurable: true,
+      writable: true,
+    });
+  };
+
+  afterEach(() => {
+    for (const [stream, desc] of [
+      [process.stdout, original.out],
+      [process.stderr, original.err],
+    ] as const) {
+      if (desc) Object.defineProperty(stream, 'isTTY', desc);
+      else delete (stream as unknown as Record<string, unknown>)['isTTY'];
+    }
+    if (original.serve === undefined) delete process.env['QWEN_CODE_SERVE'];
+    else process.env['QWEN_CODE_SERVE'] = original.serve;
+    vi.restoreAllMocks();
+  });
+
+  it.each(cells)(
+    '%s -> throws=%s',
+    async (_label, daemon, stdoutTTY, stderrTTY, shouldThrow) => {
+      if (daemon) process.env['QWEN_CODE_SERVE'] = '1';
+      else delete process.env['QWEN_CODE_SERVE'];
+      setTTY(process.stdout, stdoutTTY);
+      setTTY(process.stderr, stderrTTY);
+      vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      mockFetchAccessToken.mockResolvedValue({
+        accessToken: 'tok',
+        expiresIn: 7200,
+      });
+      const ch = new QQChannel(
+        'guard-bot',
+        {
+          type: 'qq',
+          token: '',
+          senderPolicy: 'open' as const,
+          allowedUsers: [],
+          sessionScope: 'user' as const,
+          cwd: '/tmp',
+          groupPolicy: 'disabled' as const,
+          groups: {},
+        },
+        {} as unknown as import('@qwen-code/channel-base').AcpBridge,
+      );
+      const fetchToken = (
+        ch as unknown as { fetchToken: () => Promise<void> }
+      ).fetchToken.bind(ch);
+      if (shouldThrow) {
+        await expect(fetchToken()).rejects.toThrow(/has no appID\/appSecret/);
+      } else {
+        await expect(fetchToken()).resolves.toBeUndefined();
+      }
+    },
+  );
 });

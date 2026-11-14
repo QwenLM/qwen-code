@@ -40,9 +40,22 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen } from '@testing-library/react';
+import { isValidElement, type ReactNode } from 'react';
+import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { act, render, renderHook, screen } from '@testing-library/react';
 import { OpenTuiApp } from './opentui-app-shell.js';
+import {
+  getDialogMaxHeight,
+  STATIC_EXTRA_HEIGHT,
+} from '../utils/layoutUtils.js';
 import { STATUS_INDICATOR_WIDTH } from './messages.js';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
+import {
+  logoutCommand,
+  upgradeCommand,
+} from '../commands/subscription-commands.js';
 import {
   CONTEXT_FILES_ANNOUNCEMENT_PREFIX,
   hasSlashCommandPathSeparator,
@@ -50,18 +63,53 @@ import {
 import {
   ApprovalMode,
   ToolConfirmationOutcome,
+  getRuntimeContentGenerator,
+  runWithRuntimeContentGenerator,
 } from '@qwen-code/qwen-code-core';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
-import type { SlashCommand } from '../commands/types.js';
+import { CommandKind, type SlashCommand } from '../commands/types.js';
 import type { OpenTuiDispatchOutcome } from './commands-dispatch.js';
+import { createOpenTuiCommandContext } from './commands-context.js';
+import type { OpenTuiAppHost } from './opentui-host.js';
+import type { StatusLineState } from '../hooks/useStatusLine.js';
+import { StreamingState } from '../types.js';
+import * as interactiveMods from '../../services/interactive-mod-session.js';
+import type { HistoryItem } from '../types.js';
+import type { LiveHistoryItem } from './live-session-model.js';
+import {
+  markApiHistoryPrompt,
+  getApiHistoryPromptId,
+} from '@qwen-code/qwen-code-core/services/session-api-history.js';
+import type { Content } from '@google/genai';
+import { historyCommand } from '../commands/historyCommand.js';
+import { restoreCommand } from '../commands/restoreCommand.js';
+import { makeFakeConfig } from '@qwen-code/qwen-code-core/test-utils/config.js';
+import { LlmClient } from '@qwen-code/qwen-code-core/core/client.js';
+import { livePromptEvents } from './live-session.js';
+import type { OpenTuiStreamEvent } from './event-adapter.js';
+import { useOpenTuiLiveTurn, type OpenTuiSubmitOptions } from './live-turn.js';
+import {
+  applyCollapsePolicyAndSummary,
+  expandCollapsedHistory,
+} from '../utils/resumeHistoryUtils.js';
+import { projectHistoryToStreamEvents } from './item-projection.js';
+import type { OpenTuiComposerSlot } from './input-submission.js';
+import {
+  CLIPBOARD_PASTE_FRAMING,
+  framePasteExpansion,
+} from '../utils/paste-placeholders.js';
 
 const mocks = vi.hoisted(() => {
   const state = {
     handleResult: undefined as unknown,
+    modBand: undefined as unknown,
     handleResults: [] as unknown[],
+    handledTyped: [] as unknown[],
+    loadCommandsOverride: null as null | (() => Promise<readonly unknown[]>),
     loadRejects: false,
+    useRealDispatcher: false,
     deferDuringStreaming: false,
     deferGate: null as null | ((text: string) => boolean | Promise<boolean>),
     handledTexts: [] as string[],
@@ -69,17 +117,35 @@ const mocks = vi.hoisted(() => {
     /** One entry per dispatcher construction: churn means the host was rebuilt. */
     hosts: [] as unknown[],
     dispatcherConstructions: 0,
+    cancelCommand: vi.fn(),
     inputProps: null as Record<string, unknown> | null,
     dialogProps: null as Record<string, unknown> | null,
     toolConfirmProps: null as Record<string, unknown> | null,
+    extensionSettingProps: null as Record<string, unknown> | null,
+    extensionChoiceProps: null as Record<string, unknown> | null,
     shellConfirmProps: null as Record<string, unknown> | null,
     actionConfirmProps: null as Record<string, unknown> | null,
     mcpApprovalProps: null as Record<string, unknown> | null,
     /** The gated-server queue the shell's approval hook reports. */
     mcpQueue: [] as Array<Record<string, unknown>>,
     handleMcpApprovalSelect: vi.fn(),
+    hooksApprovalProps: null as Record<string, unknown> | null,
+    /** Hook lines the project hooks approval hook reports as pending. */
+    pendingHookLines: null as string[] | null,
+    handleProjectHooksApprovalSelect: vi.fn(),
+    hooksAddInfo: null as ((text: string) => void) | null,
     bannerProps: null as Record<string, unknown> | null,
     footerProps: null as Record<string, unknown> | null,
+    statusLineState: null as StatusLineState | null,
+    statusVimMode: undefined as string | undefined,
+    worktree: null as null | {
+      slug: string;
+      worktreePath: string;
+      worktreeBranch: string;
+      originalCwd: string;
+      originalBranch: string;
+      originalHeadCommit: string;
+    },
     loadingProps: null as Record<string, unknown> | null,
     keyboardHandlers: [] as Array<(key: unknown) => void>,
     exitInProgress: false,
@@ -150,6 +216,13 @@ vi.mock('@opentui/react', () => ({
 }));
 vi.mock('@opentui/react/jsx-runtime', () => mocks.buildJsxRuntime());
 vi.mock('@opentui/react/jsx-dev-runtime', () => mocks.buildJsxRuntime());
+const isSubscriptionSignedIn = vi.hoisted(() => vi.fn(() => false));
+vi.mock('@qwen-code/qwen-code-core/qwen/subscription-session.js', () => ({
+  QwenSubscriptionSession: class {
+    isSignedIn = isSubscriptionSignedIn;
+    onChange = () => () => {};
+  },
+}));
 vi.mock('@opentui/core', () => ({
   SyntaxStyle: { fromStyles: () => ({}) },
   MouseButton: { LEFT: 0 },
@@ -158,8 +231,10 @@ vi.mock('@opentui/core', () => ({
 // Slash dispatcher: a submission resolves to the next queued handleResults
 // entry, or to handleResult when that queue is empty; the constructor captures
 // the host so history can be driven from a test.
-vi.mock('./commands-dispatch.js', () => ({
-  OpenTuiSlashDispatcher: class {
+vi.mock('./commands-dispatch.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./commands-dispatch.js')>();
+  class StubDispatcher {
     constructor(
       host: unknown,
       _services: unknown,
@@ -176,6 +251,8 @@ vi.mock('./commands-dispatch.js', () => ({
     }
     async loadCommands() {
       if (mocks.state.loadRejects) throw new Error('registry exploded');
+      if (mocks.state.loadCommandsOverride)
+        this._commands = await mocks.state.loadCommandsOverride();
     }
     async mustDeferDuringStreaming(text: string) {
       const gate = mocks.state.deferGate;
@@ -191,9 +268,12 @@ vi.mock('./commands-dispatch.js', () => ({
         trimmed.startsWith('/') && hasSlashCommandPathSeparator(trimmed)
       );
     }
-    cancel() {}
+    cancel() {
+      mocks.state.cancelCommand();
+      mocks.state.releaseHandle?.();
+    }
     dispose() {}
-    async handle(text: string) {
+    async handle(text: string, typed?: unknown) {
       if (
         mocks.state.holdHandleOn === text &&
         mocks.state.releaseHandle === null
@@ -203,12 +283,34 @@ vi.mock('./commands-dispatch.js', () => ({
         });
       }
       mocks.state.handledTexts.push(text);
+      mocks.state.handledTyped.push(typed);
       mocks.state.onHandle?.(text);
       const queued = mocks.state.handleResults;
       return queued.length > 0 ? queued.shift() : mocks.state.handleResult;
     }
-  },
-}));
+  }
+  return {
+    OpenTuiSlashDispatcher: vi
+      .fn()
+      .mockImplementation(
+        (
+          ...args: ConstructorParameters<typeof actual.OpenTuiSlashDispatcher>
+        ) => {
+          if (!mocks.state.useRealDispatcher)
+            return new StubDispatcher(...args);
+          mocks.state.host = args[0];
+          mocks.state.hosts.push(args[0]);
+          mocks.state.dispatcherConstructions += 1;
+          return new actual.OpenTuiSlashDispatcher(...args);
+        },
+      ),
+  };
+});
+
+vi.mock('./live-session.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./live-session.js')>();
+  return { ...actual, livePromptEvents: vi.fn(actual.livePromptEvents) };
+});
 
 // Child widgets: string markers that also record their props for assertions.
 vi.mock('./shell-mode.js', () => ({
@@ -220,6 +322,21 @@ vi.mock('./opentui-dialog-mount.js', () => ({
     const request = props['request'] as { dialog: string };
     return `dialog:${request.dialog}`;
   },
+}));
+vi.mock('./mod-band.js', () => ({
+  OpenTuiModBand: ({
+    band,
+    maxRows,
+  }: {
+    band?: { tree: { children?: string[] } };
+    maxRows: number;
+  }) =>
+    band ? (
+      <span>{`mod-band:${band.tree.children?.[0]}:${maxRows}`}</span>
+    ) : null,
+}));
+vi.mock('../hooks/use-mod-band.js', () => ({
+  useModBand: () => mocks.state.modBand,
 }));
 vi.mock('./input-prompt.js', () => ({
   OpenTuiInputPrompt: (props: Record<string, unknown>) => {
@@ -254,11 +371,32 @@ vi.mock('./dialogs-confirm.js', () => ({
   },
   OpenTuiActionConfirmation: (props: Record<string, unknown>) => {
     mocks.state.actionConfirmProps = props;
-    return 'action-confirm';
+    return (
+      <>
+        <span>action-confirm</span>
+        <span>{props['prompt'] as ReactNode}</span>
+      </>
+    );
   },
   OpenTuiMcpApprovalDialog: (props: Record<string, unknown>) => {
     mocks.state.mcpApprovalProps = props;
     return 'mcp-approval';
+  },
+  OpenTuiProjectHooksApprovalDialog: (props: Record<string, unknown>) => {
+    mocks.state.hooksApprovalProps = props;
+    return 'hooks-approval';
+  },
+}));
+vi.mock('./ExtensionAcquisition.js', () => ({
+  ExtensionPluginChoice: (props: Record<string, unknown>) => {
+    mocks.state.extensionChoiceProps = props;
+    const permission = props['permission'] as { marketplace: { name: string } };
+    return <span>{`extension-choice:${permission.marketplace.name}`}</span>;
+  },
+  ExtensionSettingInput: (props: Record<string, unknown>) => {
+    mocks.state.extensionSettingProps = props;
+    const permission = props['permission'] as { setting: { name: string } };
+    return <span>{`extension-setting:${permission.setting.name}`}</span>;
   },
 }));
 vi.mock('../hooks/useMcpApproval.js', () => ({
@@ -270,22 +408,77 @@ vi.mock('../hooks/useMcpApproval.js', () => ({
     handleMcpApprovalSelect: mocks.state.handleMcpApprovalSelect,
   }),
 }));
+vi.mock('../hooks/use-project-hooks-approval.js', () => ({
+  useProjectHooksApproval: (
+    _config: unknown,
+    _settings: unknown,
+    addInfo?: (text: string) => void,
+  ) => {
+    mocks.state.hooksAddInfo = addInfo ?? null;
+    return {
+      isProjectHooksApprovalDialogOpen: mocks.state.pendingHookLines !== null,
+      pendingProjectHooks: mocks.state.pendingHookLines
+        ? { hooks: {}, lines: mocks.state.pendingHookLines }
+        : undefined,
+      handleProjectHooksApprovalSelect:
+        mocks.state.handleProjectHooksApprovalSelect,
+    };
+  },
+}));
 vi.mock('./exit-lifecycle.js', () => ({
   isExitInProgress: () => mocks.state.exitInProgress,
 }));
 vi.mock('../hooks/useAutoAcceptIndicator.js', () => ({
   emitAutoModeEntryNotices: mocks.state.emitAutoModeEntryNotices,
 }));
+vi.mock('../hooks/useWorktreeSession.js', () => ({
+  useWorktreeSession: () => mocks.state.worktree,
+}));
+vi.mock('../hooks/useGitBranchName.js', () => ({
+  useGitBranchName: () => 'current-branch',
+}));
+vi.mock('../hooks/useStatusLine.js', () => ({
+  useStatusLineState: ({
+    state,
+    vimMode,
+  }: {
+    state: StatusLineState;
+    vimMode?: string;
+  }) => {
+    mocks.state.statusLineState = state;
+    mocks.state.statusVimMode = vimMode;
+    return {
+      lines: [],
+      useThemeColors: true,
+      respectUserColors: false,
+      hideContextIndicator: false,
+    };
+  },
+}));
 
+const extensionManager = {
+  setRequestConsent: vi.fn(),
+  setRequestSetting: vi.fn(),
+  setRequestChoicePlugin: vi.fn(),
+};
 const CONFIG = {
+  getResumedSessionData: () => undefined,
+  getAuthType: () => 'openai',
+  getExtensionManager: () => extensionManager,
+  getSessionId: () => 'test-session',
   getContextFilePaths: () => [],
   getAccessibility: () => ({}),
+  getTargetDir: () => '/repo',
+  getModel: () => 'session-model',
+  onModelChange: () => () => {},
+  setSubscriptionPlan: () => {},
 } as unknown as Config;
 const SETTINGS = { merged: {} } as unknown as LoadedSettings;
 const getSessionStats = () => ({}) as unknown as SessionStatsState;
 
-function renderApp(overrides: Partial<Parameters<typeof OpenTuiApp>[0]> = {}) {
-  const props: Parameters<typeof OpenTuiApp>[0] = {
+type AppProps = Parameters<typeof OpenTuiApp>[0];
+function renderApp(overrides: Partial<AppProps> = {}) {
+  const props: AppProps = {
     config: CONFIG,
     settings: SETTINGS,
     logger: null,
@@ -304,28 +497,45 @@ async function settle() {
 }
 
 /** Run one composer submission and flush the async dispatch. */
-async function submit(text: string, imagePaths?: string[]): Promise<void> {
+async function submit(
+  text: string,
+  imagePaths?: string[],
+  metadata?: Pick<
+    OpenTuiSubmitOptions,
+    'displayText' | 'humanInput' | 'pasteExpansions' | 'restoredDraft'
+  >,
+): Promise<void> {
   const onSubmit = mocks.state.inputProps?.['onSubmit'] as (
     t: string,
     i?: string[],
+    metadata?: OpenTuiSubmitOptions,
   ) => void;
   await act(async () => {
-    onSubmit(text, imagePaths);
+    onSubmit(
+      text,
+      imagePaths,
+      metadata ?? { displayText: text, humanInput: { text } },
+    );
     await Promise.resolve();
   });
 }
 
 describe('OpenTuiApp shell wiring', () => {
   beforeEach(() => {
+    isSubscriptionSignedIn.mockReturnValue(false);
     mocks.state.handleResult = { kind: 'handled' };
     mocks.state.handleResults.length = 0;
+    mocks.state.loadCommandsOverride = null;
     mocks.state.loadRejects = false;
+    mocks.state.useRealDispatcher = false;
     mocks.state.deferDuringStreaming = false;
     mocks.state.deferGate = null;
     mocks.state.handledTexts.length = 0;
+    mocks.state.handledTyped.length = 0;
     mocks.state.host = null;
     mocks.state.hosts.length = 0;
     mocks.state.dispatcherConstructions = 0;
+    mocks.state.cancelCommand.mockClear();
     mocks.state.inputProps = null;
     mocks.state.dialogProps = null;
     mocks.state.toolConfirmProps = null;
@@ -334,6 +544,10 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.mcpApprovalProps = null;
     mocks.state.mcpQueue.length = 0;
     mocks.state.handleMcpApprovalSelect.mockClear();
+    mocks.state.hooksApprovalProps = null;
+    mocks.state.pendingHookLines = null;
+    mocks.state.hooksAddInfo = null;
+    mocks.state.handleProjectHooksApprovalSelect.mockClear();
     mocks.state.bannerProps = null;
     mocks.state.footerProps = null;
     mocks.state.loadingProps = null;
@@ -349,10 +563,647 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.executeUserShell.mockImplementation(() => Promise.resolve());
   });
 
+  it('keeps subscription commands working without the composer hint row', async () => {
+    isSubscriptionSignedIn.mockReturnValue(true);
+    renderApp({
+      config: { ...CONFIG, getAuthType: () => 'qwen-subscription' } as Config,
+    });
+    await settle();
+    expect(mocks.state.inputProps?.['placeholder']).toBe(
+      '  Type your request, or /usage',
+    );
+    expect(document.body.textContent).not.toContain('Try:');
+    expect(document.body.textContent).not.toContain(
+      '/usage  /status  /upgrade  /logout',
+    );
+    expect(screen.getByText('footer')).toBeTruthy();
+    await submit('/usage');
+    expect(mocks.state.handledTexts).toEqual(['/usage']);
+  });
+
+  it('keeps hints absent after login and a response', async () => {
+    const config = {
+      ...CONFIG,
+      getAuthType: () => 'qwen-subscription',
+    } as Config;
+    const props = {
+      config,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+    };
+    const ui = render(
+      <OpenTuiApp {...props} initialDialog={{ dialog: 'auth' }} />,
+    );
+    await settle();
+    act(() => {
+      isSubscriptionSignedIn.mockReturnValue(true);
+      (mocks.state.host as OpenTuiAppHost).addItem(
+        {
+          type: 'info',
+          text: 'new login',
+          presentation: 'subscription-success',
+        },
+        Date.now(),
+      );
+      (mocks.state.dialogProps?.['onClose'] as () => void)();
+    });
+    await settle();
+    expect(document.body.textContent).not.toContain('Try:');
+    ui.rerender(<OpenTuiApp {...props} streaming />);
+    await settle();
+    ui.rerender(<OpenTuiApp {...props} streaming={false} />);
+    await settle();
+    expect(document.body.textContent).not.toContain('Try:');
+    expect(screen.getByText('footer')).toBeTruthy();
+    ui.unmount();
+  });
+
+  it.each(['control', 'retry', 'image'] as const)(
+    'restores once without admitting a competing %s request',
+    async (kind) => {
+      const originalLive =
+        await vi.importActual<typeof import('./live-session.js')>(
+          './live-session.js',
+        );
+      const scratch = mkdtempSync(join(tmpdir(), 'restore-admission-'));
+      try {
+        let releaseRestore!: () => void;
+        const heldRestore = new Promise<void>((resolve) => {
+          releaseRestore = resolve;
+        });
+        let releaseFirst: (() => void) | undefined;
+        let owner!: ReturnType<typeof useOpenTuiLiveTurn>;
+        let coreHistory: Content[] = [];
+        let turnCount = 0;
+        const completed: number[] = [];
+        const replay = vi.fn(() => true);
+        const rewind = vi.fn(async () => {
+          await heldRestore;
+          return { filesChanged: [], filesFailed: [] };
+        });
+        const config = makeFakeConfig({});
+        config.getFileCheckpointingEnabled = () => true;
+        config.getShellExecutionSandbox = () => undefined;
+        config.getContextFilePaths = () => [];
+        config.storage.getProjectTempCheckpointsDir = () => scratch;
+        config.getChatRecordingService = () =>
+          ({ recordSlashCommand: vi.fn() }) as unknown as ReturnType<
+            Config['getChatRecordingService']
+          >;
+        config.getFileHistoryService = () =>
+          ({ rewind }) as unknown as ReturnType<
+            Config['getFileHistoryService']
+          >;
+        config.getFileReadCache = () =>
+          ({ clear: vi.fn() }) as unknown as ReturnType<
+            Config['getFileReadCache']
+          >;
+        config.getMemoryManager = () =>
+          ({
+            invalidatePendingExtract: vi.fn(),
+            restoreMemoryBodiesPresentInHistory: vi.fn(),
+          }) as unknown as ReturnType<Config['getMemoryManager']>;
+        config.clearActiveTodoReminders = vi.fn();
+        const client = new LlmClient(config);
+        const chat = {
+          setHistory(history: Content[]) {
+            coreHistory = history;
+          },
+          getHistory: () => coreHistory,
+          getHistoryShallow: () => coreHistory,
+        };
+        const getChat = vi
+          .spyOn(client, 'getChat')
+          .mockReturnValue(chat as ReturnType<LlmClient['getChat']>);
+        const setHistory = vi.spyOn(client, 'setHistory');
+        config.getLlmClient = () => client;
+        let view: ReturnType<typeof render> | undefined;
+        let pendingRestore: Promise<boolean> | undefined;
+        try {
+          const checkpointApi: Content[] = [
+            { role: 'user', parts: [{ text: 'checkpoint-model' }] },
+          ];
+          const checkpointUi: HistoryItem[] = [
+            { id: 800, type: 'user', text: 'checkpoint-ui', sentToModel: true },
+          ];
+          const toolArgs = { absolute_path: join(scratch, 'owned.txt') };
+          writeFileSync(
+            join(scratch, 'owned.json'),
+            JSON.stringify({
+              promptId: 'checkpoint-prompt',
+              history: checkpointUi,
+              clientHistory: checkpointApi,
+              promptIds: ['checkpoint-prompt'],
+              toolCall: { name: 'read_file', args: toolArgs },
+            }),
+          );
+          const imagePath = join(scratch, 'image.png');
+          writeFileSync(
+            imagePath,
+            Buffer.from(
+              'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aF0cAAAAASUVORK5CYII=',
+              'base64',
+            ),
+          );
+          vi.mocked(livePromptEvents).mockImplementation(
+            async function* (
+              _config,
+              prompt,
+              signal,
+              options,
+            ): AsyncGenerator<OpenTuiStreamEvent> {
+              const turn = ++turnCount;
+              options?.onPreparedRequest?.({
+                content: prompt,
+                inlineModelOverride: false,
+              });
+              if (kind === 'image' && turn === 1) {
+                await new Promise<void>((resolve) => {
+                  releaseFirst = resolve;
+                  signal?.addEventListener('abort', () => resolve(), {
+                    once: true,
+                  });
+                });
+              }
+              if (signal?.aborted) return;
+              if (kind === 'retry' && turn === 1) {
+                yield { type: 'error', text: 'failed seed request' };
+              } else {
+                coreHistory.push({
+                  role: 'model',
+                  parts: [{ text: `answer-${turn}` }],
+                });
+                yield { type: 'text', delta: `answer-${turn}` };
+                yield { type: 'done' };
+              }
+              completed.push(turn);
+            },
+          );
+          mocks.state.useRealDispatcher = true;
+          const commands = [restoreCommand(config)!];
+          function Harness() {
+            owner = useOpenTuiLiveTurn({ config });
+            return (
+              <OpenTuiApp
+                config={config}
+                settings={SETTINGS}
+                logger={null}
+                commands={commands}
+                getSessionStats={getSessionStats}
+                historyItems={owner.items}
+                streaming={owner.streaming}
+                onTranscriptEvent={owner.applyEvent}
+                onTranscriptReset={owner.resetTranscript}
+                onInputProcessed={owner.notifyInputProcessed}
+                onRetryPrompt={owner.retryLastPrompt}
+                onSubmitPrompt={owner.submit}
+                onScheduleTool={replay}
+                isCurrentHistory={owner.isCurrentHistory}
+                onInterrupt={owner.interrupt}
+                messageQueue={owner.messageQueue}
+                onPopQueue={owner.popQueue}
+              />
+            );
+          }
+          const input = () =>
+            mocks.state.inputProps!['onSubmit'] as (
+              text: string,
+              images?: string[],
+              options?: OpenTuiSubmitOptions,
+            ) => Promise<boolean>;
+          view = render(<Harness />);
+          await settle();
+          if (kind !== 'control') {
+            await act(async () => {
+              expect(await input()('seed-request')).toBe(true);
+            });
+            await vi.waitFor(() => expect(turnCount).toBe(1));
+            if (kind === 'retry') {
+              await vi.waitFor(() => expect(owner.streaming).toBe(false));
+              expect(owner.items.at(-1)).toMatchObject({
+                kind: 'error',
+                text: 'failed seed request',
+              });
+            } else expect(owner.streaming).toBe(true);
+          }
+          if (kind === 'image') {
+            await act(async () => {
+              expect(await input()('/restore owned')).toBe(true);
+            });
+            expect(rewind).not.toHaveBeenCalled();
+            await act(async () => {
+              releaseFirst!();
+            });
+          } else {
+            act(() => {
+              pendingRestore = input()('/restore owned');
+            });
+          }
+          await vi.waitFor(() =>
+            expect(rewind).toHaveBeenCalledExactlyOnceWith(
+              'checkpoint-prompt',
+              true,
+            ),
+          );
+          const host = mocks.state.host as OpenTuiAppHost;
+          expect(host.isIdle()).toBe(false);
+          expect(owner.streaming).toBe(false);
+          const expectedTurns = kind === 'control' ? 0 : 1;
+          await act(async () => {
+            expect(await input()('ordinary-while-restoring')).toBe(false);
+          });
+          expect(turnCount).toBe(expectedTurns);
+          if (kind === 'retry') {
+            await act(async () => {
+              expect(
+                (mocks.state.inputProps!['onRetry'] as () => void)(),
+              ).toBeUndefined();
+            });
+          } else if (kind === 'image') {
+            await act(async () => {
+              expect(await input()('image-while-restoring', [imagePath])).toBe(
+                false,
+              );
+            });
+          }
+          expect(turnCount).toBe(expectedTurns);
+          expect(owner.streaming).toBe(false);
+          expect(owner.messageQueue).toEqual([]);
+          expect(setHistory).not.toHaveBeenCalled();
+          expect(replay).not.toHaveBeenCalled();
+          await act(async () => {
+            releaseRestore();
+            await pendingRestore;
+          });
+          await vi.waitFor(() =>
+            expect(replay).toHaveBeenCalledExactlyOnceWith(
+              'read_file',
+              toolArgs,
+            ),
+          );
+          expect(host.isIdle()).toBe(true);
+          expect(structuredClone(coreHistory)).toEqual(checkpointApi);
+          expect(getApiHistoryPromptId(coreHistory[0])).toBe(
+            'checkpoint-prompt',
+          );
+          expect(
+            owner.items
+              .filter((item) => item.kind === 'user')
+              .map((item) => item.text),
+          ).toEqual(['checkpoint-ui']);
+          expect(setHistory).toHaveBeenCalledOnce();
+          expect(setHistory.mock.calls[0][0]).toBe(coreHistory);
+          expect(setHistory.mock.results[0].value).toBeUndefined();
+          expect(turnCount).toBe(expectedTurns);
+          expect(completed).toEqual(kind === 'control' ? [] : [1]);
+          expect(owner.messageQueue).toEqual([]);
+          if (kind === 'retry') {
+            await act(async () => {
+              (mocks.state.inputProps!['onRetry'] as () => void)();
+            });
+            expect(turnCount).toBe(1);
+            expect(owner.items.at(-1)).toMatchObject({
+              kind: 'info',
+              text: 'No failed request to retry.',
+            });
+            expect(setHistory).toHaveBeenCalledOnce();
+            expect(replay).toHaveBeenCalledOnce();
+          }
+        } finally {
+          releaseRestore();
+          releaseFirst?.();
+          try {
+            await act(async () => {
+              await pendingRestore;
+            });
+          } finally {
+            view?.unmount();
+            getChat.mockRestore();
+            setHistory.mockRestore();
+            vi.mocked(livePromptEvents).mockImplementation(
+              originalLive.livePromptEvents,
+            );
+            mocks.state.useRealDispatcher = false;
+          }
+        }
+      } finally {
+        rmSync(scratch, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('draws the Mods band above the composer and hides it behind a dialog', async () => {
+    mocks.state.modBand = {
+      tree: { type: 'Text', children: ['forecast'] },
+      owner: 'token-weather',
+      revision: 1,
+    };
+    try {
+      renderApp();
+      await settle();
+      // The band sits between the queued messages and the prompt input.
+      const text = document.body.textContent ?? '';
+      expect(text.indexOf('mod-band:forecast:13')).toBeGreaterThan(-1);
+      expect(text.indexOf('mod-band:forecast:13')).toBeLessThan(
+        text.indexOf('input-prompt'),
+      );
+      mocks.state.handleResult = {
+        kind: 'open_dialog',
+        request: { dialog: 'help' },
+      } satisfies OpenTuiDispatchOutcome;
+      await submit('/help');
+      expect(screen.getByText('dialog:help')).toBeTruthy();
+      expect(screen.queryByText(/mod-band:/)).toBeNull();
+    } finally {
+      mocks.state.modBand = undefined;
+    }
+  });
+
   it('renders the composer inside the error boundary by default', async () => {
     renderApp();
     await settle();
     expect(screen.getByText('input-prompt')).toBeTruthy();
+  });
+
+  it('updates and clears the composer title from the same session host', async () => {
+    renderApp();
+    await settle();
+    const host = mocks.state.host as OpenTuiAppHost;
+    expect(host.sessionName).toBeNull();
+    expect(mocks.state.inputProps?.['topRightLabel']).toBeUndefined();
+
+    act(() => host.setSessionName('owned session'));
+    expect(mocks.state.inputProps?.['topRightLabel']).toBe('owned session');
+
+    act(() => host.setSessionName('renamed session'));
+    expect(mocks.state.inputProps?.['topRightLabel']).toBe('renamed session');
+
+    act(() => host.setSessionName(null));
+    expect(mocks.state.inputProps?.['topRightLabel']).toBeUndefined();
+    expect(mocks.state.host).toBe(host);
+    expect(mocks.state.dispatcherConstructions).toBe(1);
+  });
+
+  it('switches foreground PTY input without losing the composer and consumes focus keys', async () => {
+    const owner = { callId: 'shell', pid: 4300, turn: 1 };
+    const control = {
+      foregroundShell: owner,
+      promoteShellToBackground: vi.fn(() => false),
+      writeShellInput: vi.fn((_owner: typeof owner, _input: string) => true),
+      resizeShell: vi.fn(() => true),
+      scrollShell: vi.fn(() => true),
+    };
+    const config = {
+      ...CONFIG,
+      getShellExecutionConfig: () => ({}),
+      setShellExecutionConfig: vi.fn(),
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      setApprovalMode: vi.fn(),
+    } as unknown as Config;
+    const renderMain = vi.fn<NonNullable<AppProps['renderMain']>>(() => null);
+    let draft = '';
+    const composerHandle = {
+      current: {
+        getText: () => draft,
+        setText: (text: string) => {
+          draft = text;
+        },
+      },
+    };
+    const view = renderApp({
+      config,
+      foregroundShellControl: control,
+      composerHandle,
+      renderMain,
+    });
+    await settle();
+    const event = (
+      name: string,
+      sequence: string,
+      ctrl = false,
+      shift = false,
+    ) => ({
+      name,
+      sequence,
+      ctrl,
+      shift,
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn(),
+    });
+    expect(mocks.state.inputProps?.['focus']).toBe(true);
+    const focus = event('f', '\x06', true);
+    act(() =>
+      expect(
+        (mocks.state.inputProps!['onShellKey'] as (key: unknown) => boolean)(
+          focus,
+        ),
+      ).toBe(true),
+    );
+    expect(mocks.state.inputProps?.['focus']).toBe(false);
+    expect(renderMain.mock.calls.at(-1)?.[0]).toEqual({ owner, focused: true });
+    expect(control.writeShellInput).not.toHaveBeenCalled();
+    for (const key of [
+      event('a', 'a'),
+      event('left', '\x1b[D'),
+      event('return', '\r'),
+    ]) {
+      act(() => mocks.state.keyboardHandlers.at(-1)!(key));
+      expect(key.preventDefault).toHaveBeenCalledOnce();
+      expect(key.stopPropagation).toHaveBeenCalledOnce();
+    }
+    expect(
+      control.writeShellInput.mock.calls.map(([, bytes]) => bytes),
+    ).toEqual(['a', '\x1b[D', '\r']);
+    const paste = mocks.state.inputProps!['onShellPaste'] as (
+      text: string,
+    ) => boolean;
+    act(() => expect(paste('hello\n世界')).toBe(true));
+    expect(control.writeShellInput).toHaveBeenLastCalledWith(
+      owner,
+      'hello\n世界',
+    );
+    act(() =>
+      mocks.state.keyboardHandlers.at(-1)!(event('up', '\x1b[A', true, true)),
+    );
+    expect(control.scrollShell).toHaveBeenCalledExactlyOnceWith(owner, -1);
+    act(() => mocks.state.keyboardHandlers.at(-1)!(focus));
+    expect(mocks.state.inputProps?.['focus']).toBe(true);
+    expect(control.writeShellInput).toHaveBeenCalledTimes(4);
+    act(() =>
+      (mocks.state.inputProps!['onShellKey'] as (key: unknown) => boolean)(
+        focus,
+      ),
+    );
+    for (const exitKey of [
+      event('c', '\x03', true),
+      event('d', '\x04', true),
+    ]) {
+      act(() => mocks.state.keyboardHandlers.at(-1)!(exitKey));
+      expect(control.writeShellInput).toHaveBeenCalledTimes(4);
+      expect(exitKey.preventDefault).not.toHaveBeenCalled();
+      expect(exitKey.stopPropagation).not.toHaveBeenCalled();
+    }
+    const approval = event('tab', '\x1b[Z', false, true);
+    act(() => mocks.state.keyboardHandlers.at(-1)!(approval));
+    expect(config.setApprovalMode).toHaveBeenCalledExactlyOnceWith(
+      ApprovalMode.AUTO_EDIT,
+    );
+    expect(control.writeShellInput).toHaveBeenLastCalledWith(owner, '\t');
+    expect(approval.stopPropagation).not.toHaveBeenCalled();
+    for (const thinking of [
+      event('o', '\x0f', true),
+      { ...event('t', 't'), meta: true },
+    ]) {
+      act(() => mocks.state.keyboardHandlers.at(-1)!(thinking));
+      expect(thinking.stopPropagation).not.toHaveBeenCalled();
+      expect(thinking.preventDefault).not.toHaveBeenCalled();
+    }
+    expect(control.writeShellInput).toHaveBeenLastCalledWith(owner, '\x0f');
+    draft = 'DRAFT';
+    const eof = event('d', '\x04', true);
+    act(() => mocks.state.keyboardHandlers.at(-1)!(eof));
+    expect(control.writeShellInput).toHaveBeenCalledTimes(7);
+    expect(control.writeShellInput).toHaveBeenLastCalledWith(owner, '\x04');
+    expect(eof.preventDefault).not.toHaveBeenCalled();
+    expect(eof.stopPropagation).not.toHaveBeenCalled();
+    expect(config.setShellExecutionConfig).toHaveBeenCalledWith(
+      expect.objectContaining({ terminalWidth: 106 }),
+    );
+    view.unmount();
+  });
+
+  it('keeps a foreground shell behind a dialog and does not transfer focus to a replacement owner', async () => {
+    const config = {
+      ...CONFIG,
+      getShellExecutionConfig: () => ({}),
+      setShellExecutionConfig: vi.fn(),
+    } as unknown as Config;
+    const owner = { callId: 'shell', pid: 4300, turn: 1 };
+    const control = {
+      foregroundShell: owner,
+      promoteShellToBackground: vi.fn(() => true),
+      writeShellInput: vi.fn(() => true),
+      resizeShell: vi.fn(() => true),
+      scrollShell: vi.fn(() => true),
+    };
+    const props = {
+      config,
+      settings: SETTINGS,
+      logger: null,
+      commands: [],
+      getSessionStats,
+      foregroundShellControl: control,
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+    const key = {
+      name: 'f',
+      sequence: '\x06',
+      ctrl: true,
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn(),
+    };
+    act(() =>
+      (mocks.state.inputProps!['onShellKey'] as (key: unknown) => boolean)(key),
+    );
+    expect(mocks.state.inputProps?.['focus']).toBe(false);
+    view.rerender(
+      <OpenTuiApp
+        {...props}
+        foregroundShellControl={{
+          ...control,
+          foregroundShell: { ...owner, turn: 2 },
+        }}
+      />,
+    );
+    expect(mocks.state.inputProps?.['focus']).toBe(true);
+    mocks.state.handleResult = {
+      kind: 'open_dialog',
+      request: { dialog: 'help' },
+    };
+    await submit('/help');
+    expect(mocks.state.dialogProps).not.toBeNull();
+    const promote = { ...key, name: 'b', sequence: '\x02' };
+    act(() => mocks.state.keyboardHandlers.at(-1)!(promote));
+    expect(control.promoteShellToBackground).not.toHaveBeenCalled();
+    expect(control.writeShellInput).not.toHaveBeenCalled();
+    view.unmount();
+  });
+
+  it('keeps a focused foreground shell behind the project hooks approval', async () => {
+    const owner = { callId: 'shell', pid: 4300, turn: 1 };
+    const control = {
+      foregroundShell: owner,
+      promoteShellToBackground: vi.fn(() => true),
+      writeShellInput: vi.fn(() => true),
+      resizeShell: vi.fn(() => true),
+      scrollShell: vi.fn(() => true),
+    };
+    const props = {
+      config: {
+        ...CONFIG,
+        getShellExecutionConfig: () => ({}),
+        setShellExecutionConfig: vi.fn(),
+      } as unknown as Config,
+      settings: SETTINGS,
+      logger: null,
+      commands: [],
+      getSessionStats,
+      foregroundShellControl: control,
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+    const key = (name: string, sequence: string, ctrl = false) => ({
+      name,
+      sequence,
+      ctrl,
+      preventDefault: vi.fn(),
+      stopPropagation: vi.fn(),
+    });
+    act(() =>
+      (mocks.state.inputProps!['onShellKey'] as (key: unknown) => boolean)(
+        key('f', '\x06', true),
+      ),
+    );
+    expect(mocks.state.inputProps?.['focus']).toBe(false);
+    mocks.state.pendingHookLines = ['SessionStart  ./setup.sh'];
+    const before = mocks.state.keyboardHandlers.length;
+    view.rerender(<OpenTuiApp {...props} />);
+    expect(screen.getByText('hooks-approval')).toBeTruthy();
+    const handlers = mocks.state.keyboardHandlers.slice(before);
+    for (const k of [
+      key('a', 'a'),
+      key('f', '\x06', true),
+      key('a', 'a'),
+      key('b', '\x02', true),
+    ]) {
+      for (const handler of handlers) act(() => handler(k));
+    }
+    expect(control.writeShellInput).not.toHaveBeenCalled();
+    expect(control.promoteShellToBackground).not.toHaveBeenCalled();
+    view.unmount();
+  });
+
+  it('routes composer cancellation to the running command without interrupting the model', async () => {
+    const onInterrupt = vi.fn();
+    renderApp({ onInterrupt });
+    await settle();
+    const cancel = () =>
+      (mocks.state.inputProps?.['onCancelCommand'] as () => boolean)();
+    expect(cancel()).toBe(false);
+    mocks.state.holdHandleOn = '/slow';
+    await submit('/slow');
+    expect(mocks.state.releaseHandle).not.toBeNull();
+    await act(async () => {
+      expect(cancel()).toBe(true);
+    });
+    expect(mocks.state.cancelCommand).toHaveBeenCalledOnce();
+    expect(onInterrupt).not.toHaveBeenCalled();
+    expect(cancel()).toBe(false);
+    await submit('/next');
+    expect(mocks.state.handledTexts).toEqual(['/slow', '/next']);
   });
 
   it('mounts the restored banner and footer, and feeds them the streaming flag', async () => {
@@ -364,11 +1215,149 @@ describe('OpenTuiApp shell wiring', () => {
     expect(mocks.state.loadingProps?.['streaming']).toBe(true);
   });
 
+  it.each(['NORMAL', 'INSERT', undefined] as const)(
+    'passes current Vim mode %s to the status command and footer',
+    async (vimMode) => {
+      renderApp({ vimMode });
+      await settle();
+      expect(mocks.state.statusVimMode).toBe(vimMode);
+      expect(mocks.state.footerProps?.['vimMode']).toBe(vimMode);
+    },
+  );
+
+  it('uses the current render statistics for status output and dialog preview', async () => {
+    const stale = {
+      sessionId: 'old',
+      lastPromptTokenCount: 10,
+    } as SessionStatsState;
+    const current = {
+      sessionId: 'new',
+      lastPromptTokenCount: 500,
+    } as SessionStatsState;
+    renderApp({
+      getSessionStats: () => stale,
+      sessionStats: current,
+      streaming: true,
+    });
+    await settle();
+    expect(mocks.state.statusLineState?.sessionStats).toBe(current);
+    expect(mocks.state.statusLineState?.streamingState).toBe(
+      StreamingState.Responding,
+    );
+    expect(mocks.state.footerProps?.['sessionStats']).toBe(current);
+
+    mocks.state.handleResult = {
+      kind: 'open_dialog',
+      request: { dialog: 'statusline' },
+    };
+    await submit('/statusline');
+    expect(mocks.state.dialogProps?.['statusLineState']).toMatchObject({
+      sessionStats: current,
+      branchName: 'current-branch',
+    });
+  });
+
+  it('keeps the session model across a scoped override and adopts model-change events', async () => {
+    let model = 'session-model';
+    const listeners = new Set<(model: string) => void>();
+    const unsubscribe = vi.fn();
+    const config = {
+      ...CONFIG,
+      getModel: () => model,
+      onModelChange: (listener: (model: string) => void) => {
+        listeners.add(listener);
+        return () => {
+          listeners.delete(listener);
+          unsubscribe();
+        };
+      },
+    } as unknown as Config;
+    const props = {
+      config,
+      settings: SETTINGS,
+      logger: null,
+      commands: [],
+      getSessionStats,
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+    model = 'fast-subagent';
+    view.rerender(<OpenTuiApp {...props} streaming />);
+    expect(mocks.state.statusLineState?.currentModel).toBe('session-model');
+    act(() => listeners.forEach((listener) => listener('selected-model')));
+    expect(mocks.state.statusLineState?.currentModel).toBe('selected-model');
+    view.unmount();
+    expect(unsubscribe).toHaveBeenCalledTimes(2);
+    expect(listeners.size).toBe(0);
+  });
+
+  it('updates subscription entries in help as the connection changes', async () => {
+    isSubscriptionSignedIn.mockReturnValue(true);
+    let authType = AuthType.QWEN_SUBSCRIPTION;
+    const listeners = new Set<(model: string) => void>();
+    const config = {
+      ...CONFIG,
+      getAuthType: () => authType,
+      onModelChange: (listener: (model: string) => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    } as unknown as Config;
+    renderApp({
+      config,
+      commands: [logoutCommand, upgradeCommand],
+      initialDialog: { dialog: 'help' },
+    });
+    await settle();
+    const entries = () =>
+      mocks.state.dialogProps?.['commands'] as readonly SlashCommand[];
+    expect(entries()).toEqual([logoutCommand, upgradeCommand]);
+
+    act(() => {
+      authType = AuthType.USE_OPENAI;
+      listeners.forEach((listener) => listener('same-model'));
+    });
+    expect(entries()).toEqual([]);
+
+    act(() => {
+      authType = AuthType.QWEN_SUBSCRIPTION;
+      listeners.forEach((listener) => listener('same-model'));
+    });
+    expect(entries()).toEqual([logoutCommand, upgradeCommand]);
+  });
+
+  it('projects active worktree details and confirmation state into the status command input', async () => {
+    mocks.state.worktree = {
+      slug: 'feature',
+      worktreePath: '/repo/.worktrees/feature',
+      worktreeBranch: 'feature/one',
+      originalCwd: '/repo',
+      originalBranch: 'main',
+      originalHeadCommit: 'a'.repeat(40),
+    };
+    try {
+      renderApp({ streaming: true, waitingToolCalls: [parkedCall] });
+      await settle();
+      expect(mocks.state.statusLineState).toMatchObject({
+        streamingState: StreamingState.WaitingForConfirmation,
+        activeWorktree: {
+          slug: 'feature',
+          path: '/repo/.worktrees/feature',
+          branch: 'feature/one',
+          originalCwd: '/repo',
+        },
+      });
+    } finally {
+      mocks.state.worktree = null;
+    }
+  });
+
   // ink's Composer drops the phrase, not the row, when this setting is off, so
   // the gate has to reach both mounts of the indicator: the composer's and the
   // waiting row under a parked confirmation.
   function phraseConfig(enableLoadingPhrases: boolean): Config {
     return {
+      ...CONFIG,
       getContextFilePaths: () => [],
       getAccessibility: () => ({ enableLoadingPhrases }),
     } as unknown as Config;
@@ -486,9 +1475,331 @@ describe('OpenTuiApp shell wiring', () => {
       });
     }
 
+    const logger = {
+      getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+    } as unknown as NonNullable<AppProps['logger']>;
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} logger={logger} />);
+    });
+
     expect(mocks.state.dispatcherConstructions).toBe(1);
     expect(new Set(mocks.state.hosts).size).toBe(1);
+    expect((mocks.state.host as OpenTuiAppHost).logger).toBe(logger);
   });
+
+  it.each(['promptId', 'rewindId'] as const)(
+    'rewinds a hidden %s turn from collapsed real host history and cannot expand discarded command rows',
+    async (identityField) => {
+      const targetKey =
+        identityField === 'promptId' ? 'p2' : 'legacy-record:target';
+      const api: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'answer' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+      ];
+      markApiHistoryPrompt(api[0], 'p1');
+      markApiHistoryPrompt(api[2], targetKey);
+      const truncateHistory = vi.fn();
+      const rewindRecording = vi.fn();
+      const getRewindTurnIndex = vi.fn((id: string) =>
+        id === targetKey ? 3 : -1,
+      );
+      const config = {
+        ...CONFIG,
+        getLlmClient: () => ({ getHistoryShallow: () => api, truncateHistory }),
+        getChatRecordingService: () => ({
+          rewindRecording,
+          getRewindTurnIndex,
+        }),
+        getFileHistoryService: () => ({ getSnapshots: () => [] }),
+        getContextFilePaths: () => ['/repo/AGENTS.md'],
+      } as unknown as Config;
+      const owner = renderHook(() => useOpenTuiLiveTurn({ config }));
+      const setText = vi.fn();
+      const invalidateImportedInput = vi.fn();
+      const props: AppProps = {
+        config,
+        settings: SETTINGS,
+        logger: null,
+        commands: [],
+        startupHistory: [
+          {
+            id: 0,
+            type: 'info',
+            text: 'hidden retained source',
+            display: { suppressOnRestore: true },
+          },
+        ],
+        getSessionStats,
+        initialDialog: { dialog: 'rewind' },
+        onTranscriptEvent: owner.result.current.applyEvent,
+        onTranscriptReset: owner.result.current.resetTranscript,
+        onRewindTranscript: owner.result.current.rewindTranscript,
+        onSubmitPrompt: vi.fn(() => true),
+        isCurrentHistory: owner.result.current.isCurrentHistory,
+        composerHandle: {
+          current: { getText: () => '', setText, invalidateImportedInput },
+        },
+      };
+      const view = render(
+        <OpenTuiApp {...props} historyItems={owner.result.current.items} />,
+      );
+      await settle();
+      const host = mocks.state.host as OpenTuiAppHost;
+      let kept: readonly HistoryItem[];
+      await act(async () => {
+        host.addItem(
+          { type: 'user', text: 'first', promptId: 'p1', sentToModel: true },
+          1,
+        );
+        host.addItem({ type: 'user', text: '/help', sentToModel: false }, 2);
+        host.addItem({ type: 'info', text: 'kept line one\nkept line two' }, 3);
+        kept = [...host.getHistory()];
+        host.addItem(
+          {
+            type: 'user',
+            text: 'second',
+            [identityField]: targetKey,
+            sentToModel: true,
+          },
+          4,
+        );
+        host.addItem(
+          { type: 'info', text: 'discarded line one\ndiscarded line two' },
+          5,
+        );
+        host.addItem(
+          { type: 'info', text: 'Read context files: /repo/AGENTS.md' },
+          6,
+        );
+        const collapsed = applyCollapsePolicyAndSummary(
+          [...host.getHistory()],
+          true,
+        );
+        host.loadHistory(collapsed);
+        host.resetTranscript(projectHistoryToStreamEvents(collapsed, {}));
+      });
+      view.rerender(
+        <OpenTuiApp {...props} historyItems={owner.result.current.items} />,
+      );
+      const turns = mocks.state.dialogProps![
+        'rewindTurns'
+      ] as LiveHistoryItem[];
+      const target = turns.find(
+        (item) =>
+          item.kind === 'user' &&
+          item.canonicalHistoryItem?.type === 'user' &&
+          (item.canonicalHistoryItem.promptId ??
+            item.canonicalHistoryItem.rewindId) === targetKey,
+      )!;
+      expect(target.display?.suppressOnRestore).toBe(true);
+      expect(turns.filter((item) => item.kind === 'user')).toHaveLength(2);
+      const rewind = mocks.state.dialogProps!['onRewind'] as (
+        turn: { id: string },
+        option: 'conversation',
+      ) => Promise<void>;
+      await act(async () => {
+        await rewind(target, 'conversation');
+      });
+      expect(truncateHistory).toHaveBeenCalledExactlyOnceWith(2);
+      expect(getRewindTurnIndex).toHaveBeenCalledExactlyOnceWith(targetKey);
+      expect(rewindRecording).toHaveBeenCalledExactlyOnceWith(
+        3,
+        { truncatedCount: 3 },
+        [],
+      );
+      expect(host.getHistory()).toEqual(expandCollapsedHistory([...kept!]));
+      expect(owner.result.current.items.at(-1)).toMatchObject({
+        kind: 'info',
+        text: expect.stringContaining('Conversation rewound'),
+      });
+      await vi.waitFor(() =>
+        expect(setText).toHaveBeenCalledExactlyOnceWith('second'),
+      );
+      expect(invalidateImportedInput).toHaveBeenCalledOnce();
+      expect(
+        owner.result.current.items.every(
+          (item) =>
+            !item.display?.suppressOnRestore &&
+            item.display?.kind !== 'collapse-summary',
+        ),
+      ).toBe(true);
+      expect(
+        owner.result.current.items.some(
+          (item) => 'text' in item && item.text.includes('discarded'),
+        ),
+      ).toBe(false);
+      expect(
+        owner.result.current.items.some(
+          (item) => 'text' in item && item.text.includes('kept line two'),
+        ),
+      ).toBe(true);
+      mocks.state.handleResult = false;
+      await submit('continue after rewind');
+      expect(
+        owner.result.current.items.filter(
+          (item) =>
+            item.kind === 'info' &&
+            item.text.startsWith(CONTEXT_FILES_ANNOUNCEMENT_PREFIX),
+        ),
+      ).toHaveLength(1);
+      await act(async () => {
+        owner.result.current.applyEvent({
+          type: 'user',
+          text: 'new prompt after rewind',
+          promptId: 'p3',
+          sentToModel: true,
+        });
+        owner.result.current.applyEvent({ type: 'text', delta: 'new answer' });
+        owner.result.current.applyEvent({ type: 'done' });
+      });
+      const newLiveRows = owner.result.current.items.slice(-2);
+      // The command-only host has no later model rows. Expanding its restored
+      // prefix must preserve the actual newer live rows and their identities.
+      const afterRewind = [...host.getHistory()];
+      const retained = host
+        .getHistory()
+        .map((item) => ({ ...item, display: { suppressOnRestore: true } }));
+      host.loadHistory(retained);
+      const context = createOpenTuiCommandContext(
+        host,
+        { config, settings: SETTINGS, logger: null },
+        { wasIdleBeforeDispatch: true },
+      );
+      await act(async () => {
+        await historyCommand.subCommands!.find(
+          (command) => command.name === 'expand-now',
+        )!.action!(context, '');
+      });
+      expect(context.ui.history.map((item) => item.id)).toEqual(
+        afterRewind.map((item) => item.id),
+      );
+      for (const item of newLiveRows)
+        expect(owner.result.current.items).toContain(item);
+      expect(owner.result.current.items.at(-2)).toMatchObject({
+        kind: 'user',
+        text: 'new prompt after rewind',
+        promptId: 'p3',
+      });
+      expect(owner.result.current.items.at(-1)).toMatchObject({
+        kind: 'assistant',
+        text: 'new answer',
+        streaming: false,
+      });
+      expect(
+        owner.result.current.items.some(
+          (item) => 'text' in item && item.text === 'hidden retained source',
+        ),
+      ).toBe(true);
+      expect(
+        owner.result.current.items.some(
+          (item) => 'text' in item && item.text.includes('discarded'),
+        ),
+      ).toBe(false);
+      expect(
+        owner.result.current.items.some(
+          (item) => 'text' in item && item.text.includes('kept line two'),
+        ),
+      ).toBe(true);
+    },
+  );
+
+  it.each(['session', 'same-session-resume', 'new-turn'] as const)(
+    'discards delayed file rewind after %s without touching the successor',
+    async (change) => {
+      let sessionId = 'original';
+      let release!: () => void;
+      const filesRestored = vi.fn();
+      const fileRewind = vi.fn(async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        filesRestored();
+        return { filesChanged: ['owned.txt'], filesFailed: [] };
+      });
+      const api: Content[] = [{ role: 'user', parts: [{ text: 'first' }] }];
+      markApiHistoryPrompt(api[0], 'p1');
+      const truncateHistory = vi.fn();
+      const rewindRecording = vi.fn();
+      const onRewindTranscript = vi.fn();
+      const onTranscriptEvent = vi.fn();
+      const config = {
+        ...CONFIG,
+        getSessionId: () => sessionId,
+        getLlmClient: () => ({ getHistoryShallow: () => api, truncateHistory }),
+        getChatRecordingService: () => ({
+          rewindRecording,
+          getRewindTurnIndex: (id: string) => (id === 'p1' ? 0 : -1),
+        }),
+        getFileHistoryService: () => ({
+          rewind: fileRewind,
+          getSnapshots: () => [],
+        }),
+      } as unknown as Config;
+      const initial: readonly LiveHistoryItem[] = [
+        {
+          kind: 'user',
+          id: 'live-first',
+          text: 'first',
+          promptId: 'p1',
+          sentToModel: true,
+        },
+      ];
+      let currentItems = initial;
+      const props: AppProps = {
+        config,
+        settings: SETTINGS,
+        logger: null,
+        commands: [],
+        getSessionStats,
+        initialDialog: { dialog: 'rewind' },
+        onRewindTranscript,
+        isCurrentHistory: (snapshot) => snapshot === currentItems,
+        onTranscriptEvent,
+      };
+      const view = render(<OpenTuiApp {...props} historyItems={initial} />);
+      await settle();
+      const rewind = mocks.state.dialogProps!['onRewind'] as (
+        turn: { id: string },
+        option: 'both',
+      ) => Promise<void>;
+      let pending!: Promise<void>;
+      act(() => {
+        pending = rewind(initial[0], 'both');
+      });
+      expect(fileRewind).toHaveBeenCalledExactlyOnceWith('p1', true);
+      const successor: readonly LiveHistoryItem[] = [
+        {
+          kind: 'user',
+          id: 'successor',
+          text: 'keep me',
+          promptId: 'new',
+          sentToModel: true,
+        },
+      ];
+      currentItems = successor;
+      if (change === 'session') sessionId = 'next';
+      await act(async () => {
+        view.rerender(
+          <OpenTuiApp
+            {...props}
+            historyItems={successor}
+            streaming={change === 'new-turn'}
+          />,
+        );
+      });
+      await act(async () => {
+        release();
+        await pending;
+      });
+      expect(filesRestored).toHaveBeenCalledOnce();
+      expect(truncateHistory).not.toHaveBeenCalled();
+      expect(rewindRecording).not.toHaveBeenCalled();
+      expect(onRewindTranscript).not.toHaveBeenCalled();
+      expect(onTranscriptEvent).not.toHaveBeenCalled();
+      expect((mocks.state.host as OpenTuiAppHost).getHistory()).toEqual([]);
+    },
+  );
 
   it('reserves the update-notification slot, hidden while a dialog is open', async () => {
     renderApp({ updateNotice: 'Update available: v1.2.3' });
@@ -592,8 +1903,438 @@ describe('OpenTuiApp shell wiring', () => {
     expect(setText).toHaveBeenCalledWith('/arena start --models a,b ');
   });
 
+  async function admit(
+    text: string,
+    images?: readonly string[],
+    options?: { submittedPrompt?: string; deferUntilIdle?: boolean },
+  ) {
+    const callback = mocks.state.inputProps?.['onSubmit'] as (
+      text: string,
+      images?: readonly string[],
+      options?: { submittedPrompt?: string; deferUntilIdle?: boolean },
+    ) => Promise<boolean>;
+    let accepted = false;
+    await act(async () => {
+      accepted = await callback(text, images, options);
+    });
+    return accepted;
+  }
+
+  it('acknowledges only an owner that accepts the complete prompt', async () => {
+    mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+    const onSubmitPrompt = vi
+      .fn()
+      .mockReturnValueOnce(false)
+      .mockReturnValue(true);
+    renderApp({ onSubmitPrompt });
+    await settle();
+    expect(await admit('retry', ['/tmp/a.png'])).toBe(false);
+    expect(await admit('retry', ['/tmp/a.png'])).toBe(true);
+    expect(onSubmitPrompt).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects a missing live owner and failed gateway admission', async () => {
+    mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+    const view = renderApp();
+    await settle();
+    expect(await admit('keep draft')).toBe(false);
+    expect(
+      screen.getByText('The live prompt turn is not wired in this shell.'),
+    ).toBeTruthy();
+    view.unmount();
+    mocks.state.loadRejects = true;
+    renderApp({ commands: undefined });
+    await settle();
+    expect(await admit('/help')).toBe(false);
+  });
+
+  it('routes an attached slash prompt to the model with defer and raw provenance', async () => {
+    const onSubmitPrompt = vi.fn(() => true);
+    renderApp({ onSubmitPrompt, streaming: true });
+    await settle();
+    expect(
+      await admit('/help', ['/tmp/a.png'], {
+        submittedPrompt: '/help',
+        deferUntilIdle: true,
+      }),
+    ).toBe(true);
+    expect(mocks.state.handledTexts).toEqual([]);
+    expect(onSubmitPrompt).toHaveBeenCalledExactlyOnceWith(
+      '/help',
+      ['/tmp/a.png'],
+      { submittedPrompt: '/help', deferUntilIdle: true },
+    );
+  });
+
+  it('rejects image-bearing shell input without executing or admitting any part', async () => {
+    const onSubmitPrompt = vi.fn(() => true);
+    renderApp({ onSubmitPrompt });
+    await settle();
+    await act(async () => {
+      (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+    });
+    expect(await admit('echo unsafe', ['/tmp/a.png'])).toBe(false);
+    expect(mocks.state.handledTexts).toEqual([]);
+    expect(mocks.state.executeUserShell).not.toHaveBeenCalled();
+    expect(onSubmitPrompt).not.toHaveBeenCalled();
+    expect(screen.getByText(/Exit shell mode and try again/)).toBeTruthy();
+  });
+
+  it.each([
+    { name: 'c', ctrl: true, sequence: '\x03' },
+    { name: 'escape', ctrl: false, sequence: '\x1b' },
+  ])(
+    'aborts the local shell signal on $name without cancelling the model lane',
+    async (key) => {
+      let release!: () => void;
+      const done = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const signals: AbortSignal[] = [];
+      mocks.state.executeUserShell.mockImplementation(((
+        _config: unknown,
+        _command: string,
+        _emit: unknown,
+        signal: AbortSignal,
+      ) => {
+        signals.push(signal);
+        return done;
+      }) as unknown as () => Promise<void>);
+      mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+      const onInterrupt = vi.fn();
+      renderApp({ streaming: false, onInterrupt, onTranscriptEvent: vi.fn() });
+      await settle();
+      await act(async () => {
+        (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+      });
+      try {
+        await submit('sleep 10');
+        expect(signals).toHaveLength(1);
+        expect(signals[0].aborted).toBe(false);
+        await act(async () => {
+          mocks.state.keyboardHandlers.at(-1)!({
+            ...key,
+            eventType: 'release',
+            preventDefault: vi.fn(),
+          });
+        });
+        expect(signals[0].aborted).toBe(false);
+        expect(onInterrupt).not.toHaveBeenCalled();
+        await act(async () => {
+          mocks.state.keyboardHandlers.at(-1)!({
+            ...key,
+            eventType: 'press',
+            preventDefault: vi.fn(),
+          });
+        });
+        expect(signals[0].aborted).toBe(true);
+        expect(onInterrupt).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => {
+          release();
+          await done;
+        });
+        await settle();
+      }
+    },
+  );
+
+  it.each([
+    { name: 'c', ctrl: true, sequence: '\x03' },
+    { name: 'escape', ctrl: false, sequence: '\x1b' },
+  ])(
+    'leaves the local shell running on $name while the project hooks approval is open',
+    async (key) => {
+      let release!: () => void;
+      const done = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const signals: AbortSignal[] = [];
+      mocks.state.executeUserShell.mockImplementation(((
+        _config: unknown,
+        _command: string,
+        _emit: unknown,
+        signal: AbortSignal,
+      ) => {
+        signals.push(signal);
+        return done;
+      }) as unknown as () => Promise<void>);
+      mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+      const props: AppProps = {
+        config: CONFIG,
+        settings: SETTINGS,
+        logger: null,
+        commands: [],
+        getSessionStats,
+        streaming: false,
+        onTranscriptEvent: vi.fn(),
+      };
+      const view = render(<OpenTuiApp {...props} />);
+      await settle();
+      await act(async () => {
+        (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+      });
+      try {
+        await submit('sleep 10');
+        expect(signals).toHaveLength(1);
+        mocks.state.pendingHookLines = ['SessionStart  ./setup.sh'];
+        view.rerender(<OpenTuiApp {...props} />);
+        await act(async () => {
+          mocks.state.keyboardHandlers.at(-1)!({
+            ...key,
+            eventType: 'press',
+            preventDefault: vi.fn(),
+          });
+        });
+        expect(signals[0].aborted).toBe(false);
+      } finally {
+        await act(async () => {
+          release();
+          await done;
+        });
+        await settle();
+      }
+    },
+  );
+
+  it.each([
+    { name: 'c', ctrl: true, sequence: '\x03' },
+    { name: 'escape', ctrl: false, sequence: '\x1b' },
+  ])(
+    'keeps a held local shell alive while the model owns $name, then cancels it when the model settles',
+    async (key) => {
+      let release!: () => void;
+      const done = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const signals: AbortSignal[] = [];
+      mocks.state.executeUserShell.mockImplementation(((
+        _config: unknown,
+        _command: string,
+        _emit: unknown,
+        signal: AbortSignal,
+      ) => {
+        signals.push(signal);
+        return done;
+      }) as unknown as () => Promise<void>);
+      mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+      const onInterrupt = vi.fn();
+      const props: AppProps = {
+        config: CONFIG,
+        settings: SETTINGS,
+        logger: null,
+        commands: [],
+        getSessionStats,
+        streaming: true,
+        onInterrupt,
+        onTranscriptEvent: vi.fn(),
+      };
+      const view = render(<OpenTuiApp {...props} />);
+      await settle();
+      try {
+        await act(async () => {
+          mocks.state.keyboardHandlers.at(-1)!({
+            ...key,
+            eventType: 'press',
+            preventDefault: vi.fn(),
+          });
+        });
+        expect(mocks.state.executeUserShell).not.toHaveBeenCalled();
+        expect(onInterrupt).not.toHaveBeenCalled();
+        await act(async () => {
+          view.rerender(<OpenTuiApp {...props} streaming={false} />);
+        });
+        await act(async () => {
+          (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+        });
+        await submit('sleep 10');
+        expect(signals).toHaveLength(1);
+        expect(signals[0].aborted).toBe(false);
+        await act(async () => {
+          view.rerender(<OpenTuiApp {...props} streaming />);
+        });
+        await act(async () => {
+          mocks.state.keyboardHandlers.at(-1)!({
+            ...key,
+            eventType: 'press',
+            preventDefault: vi.fn(),
+          });
+        });
+        expect(signals[0].aborted).toBe(false);
+        expect(onInterrupt).not.toHaveBeenCalled();
+        await act(async () => {
+          view.rerender(<OpenTuiApp {...props} streaming={false} />);
+        });
+        await act(async () => {
+          mocks.state.keyboardHandlers.at(-1)!({
+            ...key,
+            eventType: 'press',
+            preventDefault: vi.fn(),
+          });
+        });
+        expect(signals[0].aborted).toBe(true);
+        expect(onInterrupt).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => {
+          release();
+          await done;
+        });
+        view.unmount();
+      }
+    },
+  );
+
+  it.each([
+    { name: 'c', ctrl: true, sequence: '\x03' },
+    { name: 'escape', ctrl: false, sequence: '\x1b' },
+  ])(
+    'leaves a held local shell to the dialog on $name until that dialog closes',
+    async (key) => {
+      let release!: () => void;
+      const done = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const signals: AbortSignal[] = [];
+      mocks.state.executeUserShell.mockImplementation(((
+        _config: unknown,
+        _command: string,
+        _emit: unknown,
+        signal: AbortSignal,
+      ) => {
+        signals.push(signal);
+        return done;
+      }) as unknown as () => Promise<void>);
+      mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+      const onInterrupt = vi.fn();
+      renderApp({ streaming: false, onInterrupt, onTranscriptEvent: vi.fn() });
+      await settle();
+      await act(async () => {
+        (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+      });
+      try {
+        await submit('sleep 10');
+        expect(signals).toHaveLength(1);
+        mocks.state.handleResult = {
+          kind: 'open_dialog',
+          request: { dialog: 'help' },
+        } satisfies OpenTuiDispatchOutcome;
+        await submit('/help');
+        expect(screen.getByText('dialog:help')).toBeTruthy();
+        await act(async () => {
+          mocks.state.keyboardHandlers.at(-1)!({
+            ...key,
+            eventType: 'press',
+            preventDefault: vi.fn(),
+          });
+        });
+        expect(signals[0].aborted).toBe(false);
+        expect(onInterrupt).not.toHaveBeenCalled();
+        await act(async () => {
+          (mocks.state.dialogProps?.['onClose'] as () => void)();
+        });
+        await settle();
+        expect(screen.queryByText('dialog:help')).toBeNull();
+        await act(async () => {
+          mocks.state.keyboardHandlers.at(-1)!({
+            ...key,
+            eventType: 'press',
+            preventDefault: vi.fn(),
+          });
+        });
+        expect(signals[0].aborted).toBe(true);
+        expect(onInterrupt).not.toHaveBeenCalled();
+      } finally {
+        await act(async () => {
+          release();
+          await done;
+        });
+        await settle();
+      }
+    },
+  );
+
+  it('does not retry while a held shell owns the local lane', async () => {
+    let release!: () => void;
+    const shellDone = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    mocks.state.executeUserShell.mockReturnValue(shellDone);
+    mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+    const onRetryPrompt = vi.fn();
+    renderApp({ onRetryPrompt, onTranscriptEvent: vi.fn() });
+    await settle();
+    await act(async () => {
+      (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+    });
+    try {
+      await submit('sleep 1');
+      expect(mocks.state.executeUserShell).toHaveBeenCalledOnce();
+      act(() => {
+        (mocks.state.inputProps!['onRetry'] as () => void)();
+      });
+      expect(onRetryPrompt).not.toHaveBeenCalled();
+      await act(async () => {
+        release();
+        await shellDone;
+      });
+      await settle();
+      act(() => {
+        (mocks.state.inputProps!['onRetry'] as () => void)();
+      });
+      expect(onRetryPrompt).toHaveBeenCalledOnce();
+    } finally {
+      await act(async () => {
+        release();
+        await shellDone;
+      });
+      await settle();
+    }
+  });
+
+  it('retains a previously accepted shell-blocked prompt when later live admission fails', async () => {
+    let release!: () => void;
+    const shellDone = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    mocks.state.executeUserShell.mockReturnValue(shellDone);
+    mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+    const onSubmitPrompt = vi.fn(() => false);
+    renderApp({ onSubmitPrompt, onTranscriptEvent: vi.fn() });
+    await settle();
+    await act(async () => {
+      (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+    });
+    expect(await admit('sleep 1')).toBe(true);
+    await act(async () => {
+      (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+    });
+    expect(
+      await admit('queued', ['/tmp/a.png'], {
+        submittedPrompt: 'raw queued',
+        deferUntilIdle: true,
+      }),
+    ).toBe(true);
+    await act(async () => {
+      release();
+      await shellDone;
+    });
+    expect(onSubmitPrompt).toHaveBeenCalledTimes(1);
+    expect(mocks.state.inputProps?.['queueLength']).toBe(1);
+    let popped: unknown;
+    await act(async () => {
+      popped = (mocks.state.inputProps?.['onPopQueue'] as () => unknown)();
+    });
+    expect(popped).toMatchObject({
+      text: 'queued',
+      imagePaths: ['/tmp/a.png'],
+      submittedPrompt: 'raw queued',
+    });
+    expect(mocks.state.inputProps?.['queueLength']).toBe(0);
+    expect(onSubmitPrompt).toHaveBeenCalledTimes(1);
+  });
+
   it('sends a submit_prompt outcome to the live-turn seam', async () => {
-    const onSubmitPrompt = vi.fn();
+    const onSubmitPrompt = vi.fn(() => true);
     renderApp({ onSubmitPrompt });
     await settle();
     mocks.state.handleResult = {
@@ -617,7 +2358,7 @@ describe('OpenTuiApp shell wiring', () => {
   });
 
   it("forwards a submit_prompt outcome's per-turn options to the seam", async () => {
-    const onSubmitPrompt = vi.fn();
+    const onSubmitPrompt = vi.fn(() => true);
     const onComplete = async () => {};
     renderApp({ onSubmitPrompt });
     await settle();
@@ -627,6 +2368,7 @@ describe('OpenTuiApp shell wiring', () => {
       modelOverride: 'qwen3-max',
       refreshContextFilesOnWrite: true,
       onComplete,
+      promptContext: ['Use the runbook'],
     } satisfies OpenTuiDispatchOutcome;
 
     await submit('/model summarize');
@@ -634,6 +2376,7 @@ describe('OpenTuiApp shell wiring', () => {
       modelOverride: 'qwen3-max',
       refreshContextFilesOnWrite: true,
       onComplete,
+      promptContext: ['Use the runbook'],
       invocationEchoed: true,
     });
   });
@@ -652,8 +2395,61 @@ describe('OpenTuiApp shell wiring', () => {
     expect(onQuit).toHaveBeenCalledWith(messages);
   });
 
+  it('applies live workflow opt-out changes to the selected Config', async () => {
+    const apply = vi.fn();
+    const config = {
+      ...CONFIG,
+      setWorkflowKeywordTriggerEnabled: apply,
+    } as unknown as Config;
+    const settings = {
+      merged: { ui: { disableWorkflowKeywordTrigger: true } },
+    } as LoadedSettings;
+    const view = renderApp({ config, settings });
+    await settle();
+    expect(apply).toHaveBeenLastCalledWith(false);
+    view.rerender(
+      <OpenTuiApp
+        config={config}
+        settings={
+          {
+            merged: { ui: { disableWorkflowKeywordTrigger: false } },
+          } as LoadedSettings
+        }
+        logger={null}
+        commands={[]}
+        getSessionStats={getSessionStats}
+      />,
+    );
+    await settle();
+    expect(apply).toHaveBeenLastCalledWith(true);
+  });
+
+  it('routes a settings restart through the existing quit cleanup flow', async () => {
+    const onQuit = vi.fn();
+    const onInterrupt = vi.fn();
+    const onPopQueue = vi.fn();
+    renderApp({ onQuit, onInterrupt, onPopQueue });
+    await settle();
+    mocks.state.handleResult = {
+      kind: 'open_dialog',
+      request: { dialog: 'settings' },
+    } satisfies OpenTuiDispatchOutcome;
+
+    await submit('/settings');
+    const restart = mocks.state.dialogProps?.['onRestartRequest'];
+    expect(restart).toBeTypeOf('function');
+    act(() => (restart as () => void)());
+
+    expect(onPopQueue).toHaveBeenCalledOnce();
+    expect(onInterrupt).toHaveBeenCalledOnce();
+    expect(onQuit).toHaveBeenCalledWith([]);
+    expect(onInterrupt.mock.invocationCallOrder[0]).toBeLessThan(
+      onQuit.mock.invocationCallOrder[0],
+    );
+  });
+
   it('sends a non-slash input (dispatcher returns false) as a plain prompt', async () => {
-    const onSubmitPrompt = vi.fn();
+    const onSubmitPrompt = vi.fn(() => true);
     renderApp({ onSubmitPrompt });
     await settle();
     mocks.state.handleResult = false;
@@ -664,12 +2460,71 @@ describe('OpenTuiApp shell wiring', () => {
       undefined,
       {
         submittedPrompt: 'summarize the diff',
+        displayText: 'summarize the diff',
+        humanInput: { text: 'summarize the diff' },
       },
     );
   });
 
-  it('passes pasted image paths through structured, not folded into the text', async () => {
+  it('forwards a composer paste snapshot with the display projection into the live queue seam', async () => {
+    mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
     const onSubmitPrompt = vi.fn();
+    renderApp({ onSubmitPrompt });
+    await settle();
+    const displayText = '[Pasted Content 1200 chars]';
+    const body = 'workflow payload'.padEnd(1200, 'x');
+    const pasteExpansions = new Map([[displayText, body]]);
+    const restoredDraft = {
+      modelText: body,
+      displayText,
+      submittedPrompt: displayText,
+      humanInput: { text: displayText },
+      hasUnknownInput: false,
+      pasteExpansions,
+    };
+    await submit(body, undefined, {
+      displayText,
+      humanInput: { text: displayText },
+      pasteExpansions,
+      restoredDraft,
+    });
+    expect(onSubmitPrompt).toHaveBeenCalledWith(body, undefined, {
+      submittedPrompt: body,
+      displayText,
+      humanInput: { text: displayText },
+      pasteExpansions,
+      restoredDraft,
+    });
+  });
+
+  it('does not forward restored composer metadata into a generated slash prompt', async () => {
+    const onSubmitPrompt = vi.fn();
+    renderApp({ onSubmitPrompt });
+    await settle();
+    mocks.state.handleResult = {
+      kind: 'submit_prompt',
+      content: 'generated prompt',
+    };
+    await submit('/generate', undefined, {
+      displayText: '/generate',
+      humanInput: { text: '/generate' },
+      restoredDraft: {
+        modelText: '/generate',
+        displayText: '/generate',
+        submittedPrompt: '/generate',
+        humanInput: { text: '/generate' },
+        hasUnknownInput: false,
+      },
+    });
+    expect(onSubmitPrompt).toHaveBeenCalledOnce();
+    const options = onSubmitPrompt.mock.calls[0]?.[2];
+    expect(options).not.toHaveProperty('restoredDraft');
+    expect(options).not.toHaveProperty('humanInput');
+    expect(options).not.toHaveProperty('hasUnknownInput');
+  });
+
+  it('passes pasted image paths through structured, not folded into the text', async () => {
+    const onSubmitPrompt = vi.fn(() => true);
     renderApp({ onSubmitPrompt });
     await settle();
     mocks.state.handleResult = false;
@@ -680,12 +2535,16 @@ describe('OpenTuiApp shell wiring', () => {
     expect(onSubmitPrompt).toHaveBeenCalledWith(
       'what is in these',
       ['a.png', 'b.png'],
-      { submittedPrompt: 'what is in these' },
+      {
+        submittedPrompt: 'what is in these',
+        displayText: 'what is in these',
+        humanInput: { text: 'what is in these' },
+      },
     );
   });
 
   it('forwards an @-mention raw, leaving expansion to the stream layer', async () => {
-    const onSubmitPrompt = vi.fn();
+    const onSubmitPrompt = vi.fn(() => true);
     renderApp({ onSubmitPrompt });
     await settle();
     mocks.state.handleResult = false;
@@ -696,7 +2555,11 @@ describe('OpenTuiApp shell wiring', () => {
     expect(onSubmitPrompt).toHaveBeenCalledWith(
       'summarize @src/a.ts',
       undefined,
-      { submittedPrompt: 'summarize @src/a.ts' },
+      {
+        submittedPrompt: 'summarize @src/a.ts',
+        displayText: 'summarize @src/a.ts',
+        humanInput: { text: 'summarize @src/a.ts' },
+      },
     );
   });
 
@@ -740,6 +2603,49 @@ describe('OpenTuiApp shell wiring', () => {
     ]);
   });
 
+  it.each(['startup', 'reset'] as const)(
+    'retains the context announcement latch from %s history',
+    async (source) => {
+      const history: HistoryItem[] = [
+        {
+          id: 1,
+          type: 'info',
+          text: 'Read context files: /repo/AGENTS.md',
+          display: { suppressOnRestore: true },
+        },
+      ];
+      const onTranscriptEvent = vi.fn();
+      renderApp({
+        config: {
+          ...CONFIG,
+          getContextFilePaths: () => ['/repo/AGENTS.md'],
+        } as unknown as Config,
+        startupHistory: source === 'startup' ? history : [],
+        onTranscriptEvent,
+        onSubmitPrompt: vi.fn(() => true),
+      });
+      await settle();
+      const host = mocks.state.host as OpenTuiAppHost;
+      if (source === 'reset') {
+        act(() => {
+          host.loadHistory(history);
+          host.resetTranscript(projectHistoryToStreamEvents(history, {}));
+        });
+      }
+      mocks.state.handleResult = false;
+      await submit('after restore');
+      expect(onTranscriptEvent).not.toHaveBeenCalled();
+      act(() => host.clearItems());
+      await submit('after clear');
+      expect(onTranscriptEvent).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          type: 'info',
+          text: 'Read context files: /repo/AGENTS.md',
+        }),
+      );
+    },
+  );
+
   it('reports a not-wired notice for a plain prompt when no seam is provided', async () => {
     renderApp();
     await settle();
@@ -751,8 +2657,103 @@ describe('OpenTuiApp shell wiring', () => {
     ).toBeTruthy();
   });
 
+  it('does not publish a disposed dispatcher reload into the successor app command list', async () => {
+    const initialCommands: readonly SlashCommand[] = [
+      {
+        name: 'before-reload',
+        description: 'Before',
+        kind: CommandKind.BUILT_IN,
+      },
+    ];
+    const successorCommands: readonly SlashCommand[] = [
+      {
+        name: 'healthy-successor',
+        description: 'Healthy',
+        kind: CommandKind.BUILT_IN,
+      },
+    ];
+    const staleCommands: readonly SlashCommand[] = [
+      {
+        name: 'abandoned-config',
+        description: 'Old',
+        kind: CommandKind.BUILT_IN,
+      },
+    ];
+    let release!: (commands: readonly SlashCommand[]) => void;
+    const held = new Promise<readonly SlashCommand[]>((resolve) => {
+      release = resolve;
+    });
+    const firstConfig = {
+      ...CONFIG,
+      getTargetDir: () => '/owned/first',
+      getSessionId: () => 'session-first',
+    } as unknown as Config;
+    const nextConfig = {
+      ...CONFIG,
+      getTargetDir: () => '/owned/next',
+      getSessionId: () => 'session-next',
+    } as unknown as Config;
+    const props = {
+      config: firstConfig,
+      settings: SETTINGS,
+      logger: null,
+      commands: initialCommands,
+      getSessionStats,
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+    const firstHost = mocks.state.host as OpenTuiAppHost;
+    mocks.state.loadCommandsOverride = () => held;
+    let pending!: Promise<void>;
+    act(() => {
+      pending = Promise.resolve(firstHost.reloadCommands()).catch(
+        () => undefined,
+      );
+    });
+    try {
+      expect(mocks.state.dispatcherConstructions).toBe(1);
+      await act(async () => {
+        view.rerender(
+          <OpenTuiApp
+            {...props}
+            config={nextConfig}
+            commands={successorCommands}
+          />,
+        );
+      });
+      await settle();
+      expect(mocks.state.dispatcherConstructions).toBe(2);
+      expect(mocks.state.host).not.toBe(firstHost);
+      expect(mocks.state.inputProps?.['config']).toBe(nextConfig);
+      mocks.state.handleResult = {
+        kind: 'open_dialog',
+        request: { dialog: 'help' },
+      } satisfies OpenTuiDispatchOutcome;
+      await submit('/help');
+      expect(screen.getByText('dialog:help')).toBeTruthy();
+      expect(mocks.state.dialogProps?.['commands']).toEqual(successorCommands);
+      await act(async () => {
+        (mocks.state.dialogProps?.['onClose'] as () => void)();
+      });
+      await act(async () => {
+        release(staleCommands);
+        await pending;
+      });
+      await submit('/help');
+      expect(screen.getByText('dialog:help')).toBeTruthy();
+      expect(mocks.state.dialogProps?.['config']).toBe(nextConfig);
+      expect(mocks.state.dialogProps?.['commands']).toEqual(successorCommands);
+    } finally {
+      release(staleCommands);
+      await act(async () => {
+        await pending;
+      });
+      view.unmount();
+    }
+  });
+
   it('rejects submissions after a failed dispatcher init', async () => {
-    const onSubmitPrompt = vi.fn();
+    const onSubmitPrompt = vi.fn(() => true);
     mocks.state.loadRejects = true;
     renderApp({ commands: undefined, onSubmitPrompt });
     await settle();
@@ -777,20 +2778,105 @@ describe('OpenTuiApp shell wiring', () => {
     expect(userMessages).toContain('earlier question');
   });
 
-  it('routes a host history write to the live transcript (U-28)', async () => {
-    const onTranscriptEvent = vi.fn();
-    renderApp({ onTranscriptEvent });
+  it('merges newest real prompts and refreshes persisted history only when history changes', async () => {
+    let past = ['X', 'A', 'Y'];
+    const getPreviousUserMessages = vi.fn(async () => past);
+    renderApp({
+      userMessages: ['B', 'A', 'B'],
+      logger: { getPreviousUserMessages } as unknown as AppProps['logger'],
+    });
+    await settle();
+    expect(mocks.state.inputProps?.['userMessages']).toEqual([
+      'Y',
+      'X',
+      'A',
+      'B',
+    ]);
+    const host = mocks.state.host as OpenTuiAppHost;
+    await act(async () => host.setStreaming(true));
+    expect(getPreviousUserMessages).toHaveBeenCalledTimes(1);
+    past = ['X'];
+    await act(async () => {
+      host.addItem({ type: 'info', text: 'History changed' }, 1);
+    });
+    expect(getPreviousUserMessages).toHaveBeenCalledTimes(2);
+    expect(mocks.state.inputProps?.['userMessages']).toEqual(['X', 'A', 'B']);
+  });
+
+  it('ignores a late persisted-history result after session replacement', async () => {
+    let finishOld!: (texts: string[]) => void;
+    let sessionId = 'old';
+    const getPreviousUserMessages = vi
+      .fn()
+      .mockReturnValueOnce(
+        new Promise<string[]>((resolve) => {
+          finishOld = resolve;
+        }),
+      )
+      .mockResolvedValue(['fresh']);
+    const props: AppProps = {
+      config: { ...CONFIG, getSessionId: () => sessionId } as Config,
+      settings: SETTINGS,
+      logger: { getPreviousUserMessages } as unknown as AppProps['logger'],
+      commands: [],
+      getSessionStats,
+      userMessages: [],
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+    sessionId = 'new';
+    await act(async () => view.rerender(<OpenTuiApp {...props} />));
+    expect(mocks.state.inputProps?.['userMessages']).toEqual(['fresh']);
+    await act(async () => finishOld(['stale']));
+    expect(mocks.state.inputProps?.['userMessages']).toEqual(['fresh']);
+  });
+
+  it('uses the live display projection for recall and clears it on a new session', async () => {
+    const raw = '<system-reminder>literal</system-reminder> workflow';
+    const view = renderApp({ userMessages: [raw] });
     await settle();
     const host = mocks.state.host as {
       addItem: (item: unknown, ts: number) => void;
     };
     await act(async () => {
+      host.addItem({ type: 'user', text: 'old host history' }, 1000);
+    });
+    expect(mocks.state.inputProps?.['userMessages']).toEqual([raw]);
+    view.rerender(
+      <OpenTuiApp
+        config={CONFIG}
+        settings={SETTINGS}
+        logger={null}
+        commands={[]}
+        getSessionStats={getSessionStats}
+        userMessages={[]}
+      />,
+    );
+    await settle();
+    expect(mocks.state.inputProps?.['userMessages']).toEqual([]);
+  });
+
+  it('routes a host history write to the live transcript (U-28)', async () => {
+    const onTranscriptEvent = vi.fn();
+    renderApp({ onTranscriptEvent });
+    await settle();
+    const host = mocks.state.host as OpenTuiAppHost;
+    await act(async () => {
       host.addItem({ type: 'info', text: 'Report filed.' }, 1000);
     });
-    expect(onTranscriptEvent).toHaveBeenCalledWith({
+    const history = host.getHistory();
+    expect(history).toEqual([
+      { type: 'info', text: 'Report filed.', id: 1001 },
+    ]);
+    expect(onTranscriptEvent).toHaveBeenCalledExactlyOnceWith({
       type: 'info',
       text: 'Report filed.',
+      historyId: history[0].id,
+      canonicalHistoryItem: history[0],
     });
+    expect(onTranscriptEvent.mock.calls[0][0].canonicalHistoryItem).toBe(
+      history[0],
+    );
   });
 
   it('routes a host clear to an empty transcript reset (U-29)', async () => {
@@ -830,6 +2916,511 @@ describe('OpenTuiApp shell wiring', () => {
     expect(
       screen.getByText('Session state was not re-keyed for the new session.'),
     ).toBeTruthy();
+  });
+
+  describe('direct marketplace choice owner', () => {
+    type Manager = ReturnType<Config['getExtensionManager']>;
+    type ChoiceRequest = Parameters<Manager['setRequestChoicePlugin']>[0];
+    type SettingRequest = NonNullable<
+      Parameters<Manager['setRequestSetting']>[0]
+    >;
+    type ConsentRequest = Parameters<Manager['setRequestConsent']>[0];
+    const marketplace: Parameters<ChoiceRequest>[0] = {
+      name: 'Owned marketplace',
+      owner: { name: 'Owned', email: 'owned@example.invalid' },
+      plugins: [
+        {
+          name: 'alpha',
+          version: '1.0.0',
+          source: './alpha',
+          description: 'Owned Alpha',
+        },
+        {
+          name: 'beta',
+          version: '1.0.0',
+          source: './beta',
+          description: 'Owned Beta',
+        },
+      ],
+    };
+    function owner() {
+      const register = vi.fn<(request: ChoiceRequest) => void>();
+      const setting = vi.fn<(request: SettingRequest) => void>();
+      const consent = vi.fn<(request: ConsentRequest) => void>();
+      const config = {
+        ...CONFIG,
+        getExtensionManager: () => ({
+          setRequestChoicePlugin: register,
+          setRequestSetting: setting,
+          setRequestConsent: consent,
+        }),
+      } as unknown as Config;
+      return {
+        config,
+        register,
+        request: () => register.mock.calls.at(-1)![0],
+        setting: () => setting.mock.calls.at(-1)![0],
+        consent: () => consent.mock.calls.at(-1)![0],
+      };
+    }
+    function shell(config: Config, streaming = false) {
+      return (
+        <OpenTuiApp
+          config={config}
+          settings={SETTINGS}
+          logger={null}
+          commands={[]}
+          getSessionStats={getSessionStats}
+          streaming={streaming}
+        />
+      );
+    }
+    function permission() {
+      return mocks.state.extensionChoiceProps!['permission'] as {
+        resolve: (name: string) => void;
+        cancel: () => void;
+      };
+    }
+    it('resolves the selected plugin and preserves pending choice across rerenders', async () => {
+      const o = owner();
+      const view = render(shell(o.config));
+      await settle();
+      let pending!: Promise<string>;
+      await act(async () => {
+        pending = o.request()(marketplace);
+      });
+      expect(
+        screen.getByText('extension-choice:Owned marketplace'),
+      ).toBeTruthy();
+      expect(screen.queryByText('input-prompt')).toBeNull();
+      view.rerender(shell(o.config, true));
+      await settle();
+      expect(o.register).toHaveBeenCalledTimes(1);
+      await act(async () => permission().resolve('beta'));
+      await expect(pending).resolves.toBe('beta');
+      expect(screen.getByText('input-prompt')).toBeTruthy();
+    });
+    it('rejects cancellation rather than supplying an empty plugin name', async () => {
+      const o = owner();
+      render(shell(o.config));
+      await settle();
+      let pending!: Promise<string>;
+      await act(async () => {
+        pending = o.request()(marketplace);
+      });
+      const rejected = pending.catch((error: unknown) => error);
+      await act(async () => permission().cancel());
+      await expect(rejected).resolves.toMatchObject({
+        message: 'Plugin selection cancelled.',
+      });
+      expect(screen.getByText('input-prompt')).toBeTruthy();
+    });
+    it('keeps consecutive choices independent and ignores a stale submit', async () => {
+      const o = owner();
+      render(shell(o.config));
+      await settle();
+      let first!: Promise<string>;
+      let second!: Promise<string>;
+      await act(async () => {
+        first = o.request()(marketplace);
+        second = o.request()({ ...marketplace, name: 'Second marketplace' });
+      });
+      const old = permission();
+      expect(
+        screen.queryByText('extension-choice:Second marketplace'),
+      ).toBeNull();
+      await act(async () => old.resolve('alpha'));
+      await expect(first).resolves.toBe('alpha');
+      expect(
+        screen.getByText('extension-choice:Second marketplace'),
+      ).toBeTruthy();
+      const next = permission();
+      expect(next).not.toBe(old);
+      await act(async () => old.resolve('stale'));
+      expect(
+        screen.getByText('extension-choice:Second marketplace'),
+      ).toBeTruthy();
+      await act(async () => next.resolve('beta'));
+      await expect(second).resolves.toBe('beta');
+    });
+    it('shares FIFO with consent and setting without mixing resolutions', async () => {
+      const o = owner();
+      render(shell(o.config));
+      await settle();
+      let consent!: Promise<void>;
+      let choice!: Promise<string>;
+      let setting!: Promise<string>;
+      await act(async () => {
+        consent = o.consent()({
+          extensionConfig: { name: 'consent-first', version: '1.0.0' },
+          originSource: 'QwenCode',
+        });
+        choice = o.request()(marketplace);
+        setting = o.setting()({
+          name: 'Final setting',
+          description: 'Owned',
+          envVar: 'OWNED_VALUE',
+        });
+      });
+      expect(
+        screen.getByText(/Installing extension "consent-first"/),
+      ).toBeTruthy();
+      expect(
+        screen.queryByText('extension-choice:Owned marketplace'),
+      ).toBeNull();
+      await act(async () =>
+        (
+          mocks.state.actionConfirmProps!['onResolve'] as (yes: boolean) => void
+        )(true),
+      );
+      await expect(consent).resolves.toBeUndefined();
+      expect(
+        screen.getByText('extension-choice:Owned marketplace'),
+      ).toBeTruthy();
+      expect(screen.queryByText('extension-setting:Final setting')).toBeNull();
+      await act(async () => permission().resolve('beta'));
+      await expect(choice).resolves.toBe('beta');
+      expect(screen.getByText('extension-setting:Final setting')).toBeTruthy();
+      await act(async () =>
+        (
+          mocks.state.extensionSettingProps!['permission'] as {
+            resolve: (value: string) => void;
+          }
+        ).resolve('value'),
+      );
+      await expect(setting).resolves.toBe('value');
+    });
+    it.each(['replacement', 'unmount'] as const)(
+      'rejects pending and captured choices on %s',
+      async (change) => {
+        const old = owner();
+        const next = owner();
+        const view = render(shell(old.config));
+        await settle();
+        const captured = old.request();
+        let pending!: Promise<string>;
+        await act(async () => {
+          pending = captured(marketplace);
+        });
+        const rejected = pending.catch((error: unknown) => error);
+        const late = permission().resolve;
+        await act(async () => {
+          if (change === 'replacement') view.rerender(shell(next.config));
+          else view.unmount();
+        });
+        await expect(rejected).resolves.toMatchObject({
+          message: 'Plugin selection cancelled.',
+        });
+        await expect(captured(marketplace)).rejects.toThrow(
+          'Plugin selection cancelled.',
+        );
+        await act(async () => late('stale'));
+        if (change === 'replacement') {
+          let fresh!: Promise<string>;
+          await act(async () => {
+            fresh = next.request()(marketplace);
+          });
+          await act(async () => permission().resolve('beta'));
+          await expect(fresh).resolves.toBe('beta');
+          expect(next.register).toHaveBeenCalledTimes(1);
+        }
+      },
+    );
+  });
+
+  describe('direct extension setting owner', () => {
+    type Manager = ReturnType<Config['getExtensionManager']>;
+    type SettingRequest = NonNullable<
+      Parameters<Manager['setRequestSetting']>[0]
+    >;
+    type ConsentRequest = Parameters<Manager['setRequestConsent']>[0];
+    const setting = {
+      name: 'Owned label',
+      description: 'Required label',
+      envVar: 'OWNED_LABEL',
+    };
+    function owner() {
+      const register = vi.fn<(request: SettingRequest) => void>();
+      const consent = vi.fn<(request: ConsentRequest) => void>();
+      const config = {
+        ...CONFIG,
+        getExtensionManager: () => ({
+          setRequestSetting: register,
+          setRequestChoicePlugin: vi.fn(),
+          setRequestConsent: consent,
+        }),
+      } as unknown as Config;
+      return {
+        config,
+        register,
+        request: () => register.mock.calls.at(-1)![0],
+        consent: () => consent.mock.calls.at(-1)![0],
+      };
+    }
+    function shell(config: Config, streaming = false) {
+      return (
+        <OpenTuiApp
+          config={config}
+          settings={SETTINGS}
+          logger={null}
+          commands={[]}
+          getSessionStats={getSessionStats}
+          streaming={streaming}
+        />
+      );
+    }
+    function permission() {
+      return mocks.state.extensionSettingProps!['permission'] as {
+        resolve: (value: string) => void;
+        cancel: () => void;
+      };
+    }
+    it('owns setting input instead of composer and keeps exact value across rerenders', async () => {
+      const o = owner();
+      const view = render(shell(o.config));
+      await settle();
+      let pending!: Promise<string>;
+      await act(async () => {
+        pending = o.request()(setting);
+      });
+      expect(screen.getByText('extension-setting:Owned label')).toBeTruthy();
+      expect(screen.queryByText('input-prompt')).toBeNull();
+      view.rerender(shell(o.config, true));
+      await settle();
+      expect(o.register).toHaveBeenCalledTimes(1);
+      await act(async () => permission().resolve('owned-value'));
+      await expect(pending).resolves.toBe('owned-value');
+      expect(screen.getByText('input-prompt')).toBeTruthy();
+    });
+    it('keeps settings and consent in one FIFO without sharing resolution', async () => {
+      const o = owner();
+      render(shell(o.config));
+      await settle();
+      let value!: Promise<string>;
+      let consent!: Promise<void>;
+      await act(async () => {
+        value = o.request()(setting);
+        consent = o.consent()({
+          extensionConfig: { name: 'queued', version: '1.0.0' },
+          originSource: 'QwenCode',
+        });
+      });
+      expect(screen.getByText('extension-setting:Owned label')).toBeTruthy();
+      expect(screen.queryByText(/Installing extension "queued"/)).toBeNull();
+      await act(async () => permission().resolve('exact'));
+      await expect(value).resolves.toBe('exact');
+      expect(screen.getByText(/Installing extension "queued"/)).toBeTruthy();
+      await act(async () =>
+        (
+          mocks.state.actionConfirmProps!['onResolve'] as (yes: boolean) => void
+        )(true),
+      );
+      await expect(consent).resolves.toBeUndefined();
+    });
+    it('keeps consecutive setting requests independent and ignores the old submit', async () => {
+      const o = owner();
+      render(shell(o.config));
+      await settle();
+      let first!: Promise<string>;
+      let second!: Promise<string>;
+      await act(async () => {
+        first = o.request()(setting);
+        second = o.request()({
+          ...setting,
+          name: 'Second label',
+          envVar: 'SECOND_LABEL',
+        });
+      });
+      const old = permission();
+      expect(screen.queryByText('extension-setting:Second label')).toBeNull();
+      await act(async () => old.resolve('first-value'));
+      await expect(first).resolves.toBe('first-value');
+      expect(screen.getByText('extension-setting:Second label')).toBeTruthy();
+      const next = permission();
+      expect(next).not.toBe(old);
+      await act(async () => old.resolve('stale-value'));
+      expect(screen.getByText('extension-setting:Second label')).toBeTruthy();
+      await act(async () => next.resolve('second-value'));
+      await expect(second).resolves.toBe('second-value');
+    });
+    it('rejects a cancelled setting without committing a value', async () => {
+      const o = owner();
+      render(shell(o.config));
+      await settle();
+      let pending!: Promise<string>;
+      await act(async () => {
+        pending = o.request()(setting);
+      });
+      const rejected = pending.catch((error: unknown) => error);
+      await act(async () => permission().cancel());
+      await expect(rejected).resolves.toMatchObject({
+        message: 'Setting input cancelled',
+      });
+      expect(screen.getByText('input-prompt')).toBeTruthy();
+    });
+    it.each(['replacement', 'unmount'] as const)(
+      'rejects stale setting ownership on %s',
+      async (change) => {
+        const old = owner();
+        const next = owner();
+        const view = render(shell(old.config));
+        await settle();
+        const captured = old.request();
+        let pending!: Promise<string>;
+        await act(async () => {
+          pending = captured(setting);
+        });
+        const rejected = pending.catch((error: unknown) => error);
+        const late = permission().resolve;
+        await act(async () => {
+          if (change === 'replacement') view.rerender(shell(next.config));
+          else view.unmount();
+        });
+        await expect(rejected).resolves.toMatchObject({
+          message: 'Setting input cancelled',
+        });
+        await expect(captured(setting)).rejects.toThrow(
+          'Setting input cancelled',
+        );
+        await act(async () => late('stale'));
+        if (change === 'replacement') {
+          let fresh!: Promise<string>;
+          await act(async () => {
+            fresh = next.request()(setting);
+          });
+          await act(async () => permission().resolve('new'));
+          await expect(fresh).resolves.toBe('new');
+          expect(next.register).toHaveBeenCalledTimes(1);
+        }
+      },
+    );
+  });
+
+  describe('direct extension consent owner', () => {
+    type Consent = Parameters<
+      ReturnType<Config['getExtensionManager']>['setRequestConsent']
+    >[0];
+    const options = (name: string) => ({
+      extensionConfig: { name, version: '1.0.0' },
+      originSource: 'QwenCode' as const,
+    });
+    function owner() {
+      const register = vi.fn<(request: Consent) => void>();
+      const config = {
+        ...CONFIG,
+        getExtensionManager: () => ({
+          setRequestConsent: register,
+          setRequestSetting: vi.fn(),
+          setRequestChoicePlugin: vi.fn(),
+        }),
+      } as unknown as Config;
+      return {
+        config,
+        register,
+        request: () => register.mock.calls.at(-1)![0],
+      };
+    }
+    function shell(config: Config, streaming = false) {
+      return (
+        <OpenTuiApp
+          config={config}
+          settings={SETTINGS}
+          logger={null}
+          commands={[]}
+          getSessionStats={getSessionStats}
+          streaming={streaming}
+        />
+      );
+    }
+    const answer = (yes: boolean) =>
+      (mocks.state.actionConfirmProps!['onResolve'] as (yes: boolean) => void)(
+        yes,
+      );
+
+    it('formats direct consent and preserves its pending owner on ordinary rerenders', async () => {
+      const o = owner();
+      const view = render(shell(o.config));
+      await settle();
+      let pending!: Promise<void>;
+      await act(async () => {
+        pending = o.request()(options('owned'));
+      });
+      const prompt = mocks.state.actionConfirmProps!['prompt'];
+      expect(isValidElement(prompt)).toBe(true);
+      if (!isValidElement(prompt))
+        throw new Error('native prompt node missing');
+      // buildJsxRuntime maps native text to span; raw strings still fail above.
+      expect(prompt.type).toBe('span');
+      expect(screen.getByText(/Installing extension "owned"/)).toBeTruthy();
+      view.rerender(shell(o.config, true));
+      await settle();
+      expect(o.register).toHaveBeenCalledTimes(1);
+      expect(screen.getByText(/Installing extension "owned"/)).toBeTruthy();
+      await act(async () => answer(true));
+      await expect(pending).resolves.toBeUndefined();
+    });
+
+    it('keeps independent FIFO Yes and No resolutions', async () => {
+      const o = owner();
+      render(shell(o.config));
+      await settle();
+      let first!: Promise<void>;
+      let second!: Promise<void>;
+      await act(async () => {
+        first = o.request()(options('first'));
+        second = o.request()(options('second'));
+      });
+      const rejected = second.catch((error: unknown) => error);
+      expect(screen.getByText(/Installing extension "first"/)).toBeTruthy();
+      expect(screen.queryByText(/Installing extension "second"/)).toBeNull();
+      await act(async () => answer(true));
+      await expect(first).resolves.toBeUndefined();
+      expect(screen.getByText(/Installing extension "second"/)).toBeTruthy();
+      await act(async () => answer(false));
+      await expect(rejected).resolves.toMatchObject({
+        message: expect.stringContaining('Installation cancelled'),
+      });
+    });
+
+    it.each(['replacement', 'unmount'] as const)(
+      'rejects pending and captured stale callbacks on %s',
+      async (change) => {
+        const old = owner();
+        const next = owner();
+        const view = render(shell(old.config));
+        await settle();
+        const captured = old.request();
+        let pending!: Promise<void>;
+        await act(async () => {
+          pending = captured(options('old'));
+        });
+        const rejected = pending.catch((error: unknown) => error);
+        const late = mocks.state.actionConfirmProps!['onResolve'] as (
+          yes: boolean,
+        ) => void;
+        await act(async () => {
+          if (change === 'replacement') view.rerender(shell(next.config));
+          else view.unmount();
+        });
+        await expect(rejected).resolves.toMatchObject({
+          message: expect.stringContaining('Installation cancelled'),
+        });
+        await expect(captured(options('stale'))).rejects.toThrow(
+          'Extension installation cancelled',
+        );
+        await act(async () => late(true));
+        if (change === 'replacement') {
+          expect(screen.queryByText(/Installing extension "old"/)).toBeNull();
+          let fresh!: Promise<void>;
+          await act(async () => {
+            fresh = next.request()(options('new'));
+          });
+          await act(async () => answer(true));
+          await expect(fresh).resolves.toBeUndefined();
+          expect(next.register).toHaveBeenCalledTimes(1);
+        }
+      },
+    );
   });
 
   it('renders the shell confirmation modal and settles with its resolution', async () => {
@@ -874,6 +3465,125 @@ describe('OpenTuiApp shell wiring', () => {
       );
     });
     await expect(actionPending).resolves.toBe(true);
+  });
+
+  it.each(['abort', 'current loss'] as const)(
+    'removes only owned A on %s and rejects stale callbacks',
+    async (mode) => {
+      const view = renderApp();
+      await settle();
+      const host = mocks.state.host as OpenTuiAppHost;
+      const controller = new AbortController();
+      let current = true;
+      const a = vi.fn();
+      const b = vi.fn();
+      await act(async () => {
+        host.addConfirmUpdateExtensionRequest({
+          prompt: 'owned A',
+          signal: controller.signal,
+          isCurrent: () => current,
+          onConfirm: a,
+        });
+        host.addConfirmUpdateExtensionRequest({
+          prompt: 'owned B',
+          onConfirm: b,
+        });
+      });
+      expect(screen.getByText('owned A')).toBeTruthy();
+      const lateA = mocks.state.actionConfirmProps!['onResolve'] as (
+        value: boolean,
+      ) => void;
+      if (mode === 'abort') {
+        await act(async () => controller.abort());
+      } else {
+        current = false;
+        view.rerender(
+          <OpenTuiApp
+            config={CONFIG}
+            settings={SETTINGS}
+            logger={null}
+            commands={[]}
+            getSessionStats={getSessionStats}
+          />,
+        );
+        await settle();
+      }
+      expect(a.mock.calls).toEqual([[false]]);
+      expect(screen.queryByText('owned A')).toBeNull();
+      expect(screen.getByText('owned B')).toBeTruthy();
+      await act(async () => {
+        lateA(true);
+        lateA(false);
+      });
+      expect(a.mock.calls).toEqual([[false]]);
+      expect(b).not.toHaveBeenCalled();
+      expect(screen.getByText('owned B')).toBeTruthy();
+      await act(async () =>
+        (
+          mocks.state.actionConfirmProps!['onResolve'] as (
+            value: boolean,
+          ) => void
+        )(true),
+      );
+      expect(b.mock.calls).toEqual([[true]]);
+      expect(screen.getByText('input-prompt')).toBeTruthy();
+    },
+  );
+
+  it('denies an owned late yes even before current loss has rendered', async () => {
+    renderApp();
+    await settle();
+    let current = true;
+    const onConfirm = vi.fn();
+    await act(async () =>
+      (mocks.state.host as OpenTuiAppHost).addConfirmUpdateExtensionRequest({
+        prompt: 'owned',
+        isCurrent: () => current,
+        onConfirm,
+      }),
+    );
+    const late = mocks.state.actionConfirmProps!['onResolve'] as (
+      value: boolean,
+    ) => void;
+    current = false;
+    await act(async () => late(true));
+    expect(onConfirm.mock.calls).toEqual([[false]]);
+    expect(screen.queryByText('owned')).toBeNull();
+  });
+
+  it('does not render pre-aborted consent and denies owned consent once on unmount', async () => {
+    const view = renderApp();
+    await settle();
+    const host = mocks.state.host as OpenTuiAppHost;
+    const dead = new AbortController();
+    dead.abort();
+    const live = new AbortController();
+    const a = vi.fn();
+    const b = vi.fn();
+    await act(async () => {
+      host.addConfirmUpdateExtensionRequest({
+        prompt: 'dead',
+        signal: dead.signal,
+        onConfirm: a,
+      });
+      host.addConfirmUpdateExtensionRequest({
+        prompt: 'live',
+        signal: live.signal,
+        onConfirm: b,
+      });
+    });
+    expect(a.mock.calls).toEqual([[false]]);
+    expect(screen.queryByText('dead')).toBeNull();
+    expect(screen.getByText('live')).toBeTruthy();
+    const late = mocks.state.actionConfirmProps!['onResolve'] as (
+      value: boolean,
+    ) => void;
+    view.unmount();
+    await act(async () => {
+      live.abort();
+      late(true);
+    });
+    expect(b.mock.calls).toEqual([[false]]);
   });
 
   it('gives a waiting tool call priority over the composer and settles it', async () => {
@@ -929,6 +3639,68 @@ describe('OpenTuiApp shell wiring', () => {
     expect(mocks.state.handleMcpApprovalSelect).toHaveBeenCalledWith('approve');
   });
 
+  it('shows the project hooks approval below MCP, above a parked tool call, without the footer', async () => {
+    mocks.state.pendingHookLines = ['SessionStart  ./setup.sh'];
+    mocks.state.mcpQueue.push({ name: 'acceptance-server' });
+    renderApp({
+      waitingToolCalls: [
+        {
+          callId: 'call-1',
+          name: 'run_shell_command',
+          confirmationDetails: { type: 'info', title: 'ok?' },
+        } as never,
+      ],
+      onToolCallSettled: vi.fn(),
+    });
+    await settle();
+    expect(screen.getByText('mcp-approval')).toBeTruthy();
+    expect(screen.queryByText('hooks-approval')).toBeNull();
+  });
+
+  it('routes the project hooks choice to the approval hook', async () => {
+    mocks.state.pendingHookLines = ['SessionStart  ./setup.sh'];
+    renderApp({
+      waitingToolCalls: [
+        {
+          callId: 'call-1',
+          name: 'run_shell_command',
+          confirmationDetails: { type: 'info', title: 'ok?' },
+        } as never,
+      ],
+      onToolCallSettled: vi.fn(),
+    });
+    await settle();
+    expect(screen.getByText('hooks-approval')).toBeTruthy();
+    expect(screen.queryByText('tool-confirm')).toBeNull();
+    expect(screen.queryByText('footer')).toBeNull();
+    expect(mocks.state.hooksApprovalProps?.['lines']).toEqual([
+      'SessionStart  ./setup.sh',
+    ]);
+    const onSelect = mocks.state.hooksApprovalProps?.['onSelect'] as
+      | ((choice: string) => void)
+      | undefined;
+    if (typeof onSelect !== 'function') {
+      throw new Error('hooks approval dialog was not given onSelect');
+    }
+    onSelect('approve');
+    expect(mocks.state.handleProjectHooksApprovalSelect).toHaveBeenCalledWith(
+      'approve',
+    );
+  });
+
+  it('writes the hooks approval note to the transcript', async () => {
+    const onTranscriptEvent = vi.fn();
+    renderApp({ onTranscriptEvent });
+    await settle();
+    await act(async () => {
+      mocks.state.hooksAddInfo?.('Project hooks were not loaded.');
+    });
+    expect(onTranscriptEvent).toHaveBeenCalledWith({
+      type: 'info',
+      text: 'Project hooks were not loaded.',
+    });
+  });
+
   it('passes streaming state and interrupt through to the composer', async () => {
     const onInterrupt = vi.fn();
     renderApp({ streaming: true, onInterrupt });
@@ -936,6 +3708,47 @@ describe('OpenTuiApp shell wiring', () => {
     expect(mocks.state.inputProps?.['streaming']).toBe(true);
     (mocks.state.inputProps?.['onInterrupt'] as () => void)();
     expect(onInterrupt).toHaveBeenCalled();
+  });
+
+  // A command's isIdleRef reads host.isStreaming() live, and the shell's
+  // mirror is its only writer: it must follow the prop, never the dispatch.
+  it('mirrors only the streaming prop onto the host a command reads', async () => {
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+    };
+    const view = render(<OpenTuiApp {...props} streaming={false} />);
+    await settle();
+    const rerender = (streaming: boolean) =>
+      act(async () => {
+        view.rerender(<OpenTuiApp {...props} streaming={streaming} />);
+        await Promise.resolve();
+      });
+    const host = mocks.state.host as OpenTuiAppHost;
+
+    // The dispatcher samples idle, then marks itself processing.
+    const context = createOpenTuiCommandContext(
+      host,
+      { config: CONFIG, settings: SETTINGS, logger: null },
+      { wasIdleBeforeDispatch: host.isIdle() },
+    );
+    await act(async () => {
+      host.setIsProcessing(true);
+    });
+    expect(host.isIdle()).toBe(false);
+    expect(host.isStreaming()).toBe(false);
+    expect(context.ui.isIdleRef.current).toBe(true);
+
+    await rerender(true);
+    expect(host.isStreaming()).toBe(true);
+    expect(context.ui.isIdleRef.current).toBe(false);
+
+    await rerender(false);
+    expect(host.isStreaming()).toBe(false);
+    expect(context.ui.isIdleRef.current).toBe(true);
   });
 
   it('passes the follow-up suggestion and its dismiss through (U-7)', async () => {
@@ -969,6 +3782,157 @@ describe('OpenTuiApp shell wiring', () => {
       await Promise.resolve();
     });
     expect(mocks.state.handledTexts).toEqual(['/compress']);
+  });
+
+  it('hands a queued ?-form command the Mods refused back to the composer', async () => {
+    mocks.state.deferDuringStreaming = true;
+    mocks.state.handleResults.push({ kind: 'refused' });
+    const restoreSubmission = vi.fn();
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+      streaming: true,
+      composerHandle: {
+        current: { getText: () => '', setText: vi.fn(), restoreSubmission },
+      },
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+
+    await submit('?compress now');
+    expect(screen.getByText(/Queued \?compress now/)).toBeTruthy();
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} streaming={false} />);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(restoreSubmission).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ text: '?compress now' }),
+      ),
+    );
+    expect(mocks.state.handledTexts).toEqual(['?compress now']);
+  });
+
+  it('hands refused queued ?-form inputs back once, in the order sent, with their pastes', async () => {
+    mocks.state.deferDuringStreaming = true;
+    mocks.state.handleResults.push({ kind: 'refused' }, { kind: 'refused' });
+    const restoreSubmission = vi.fn();
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+      streaming: true,
+      composerHandle: {
+        current: { getText: () => '', setText: vi.fn(), restoreSubmission },
+      },
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+
+    const entry = (name: string) => {
+      const placeholder = `[Pasted Content ${name}]`;
+      const pastes = new Map([[placeholder, `${name} `.repeat(300)]]);
+      const displayText = `?compress ${placeholder}`;
+      return {
+        framed: framePasteExpansion(displayText, pastes),
+        displayText,
+        pastes,
+      };
+    };
+    const alpha = entry('alpha');
+    const beta = entry('beta');
+    for (const { framed, displayText, pastes } of [alpha, beta]) {
+      await submit(framed, undefined, {
+        displayText,
+        pasteExpansions: pastes,
+      });
+    }
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} streaming={false} />);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(restoreSubmission).toHaveBeenCalled());
+    expect(restoreSubmission).toHaveBeenCalledOnce();
+    // The hooks were offered what the composer showed.
+    expect(mocks.state.handledTyped).toEqual([
+      { displayText: alpha.displayText, pasteExpansions: alpha.pastes },
+      { displayText: beta.displayText, pasteExpansions: beta.pastes },
+    ]);
+    const restored = restoreSubmission.mock.calls[0][0];
+    expect(restored.text).toBe(`${alpha.displayText}\n\n${beta.displayText}`);
+    expect(restored.restoredDraft.pasteExpansions).toEqual(
+      new Map([...alpha.pastes, ...beta.pastes]),
+    );
+    // What the resubmit sends carries both pastes, framed once.
+    const modelText: string = restored.restoredDraft.modelText;
+    for (const { pastes } of [alpha, beta])
+      expect(modelText).toContain([...pastes.values()][0]);
+    expect(modelText.endsWith(CLIPBOARD_PASTE_FRAMING)).toBe(true);
+    expect(modelText.split(CLIPBOARD_PASTE_FRAMING)).toHaveLength(2);
+  });
+
+  it('keeps refused queued input for the composer a dialog opened behind it unmounts', async () => {
+    mocks.state.deferDuringStreaming = true;
+    mocks.state.handleResults.push(
+      { kind: 'refused' },
+      { kind: 'open_dialog', request: { dialog: 'help' } },
+    );
+    const restoreSubmission = vi.fn();
+    const composerHandle: OpenTuiComposerSlot = {
+      current: { getText: () => '', setText: vi.fn(), restoreSubmission },
+    };
+    const props = {
+      config: CONFIG,
+      settings: SETTINGS,
+      logger: null,
+      commands: [] as readonly SlashCommand[],
+      getSessionStats,
+      streaming: true,
+      composerHandle,
+    };
+    const view = render(<OpenTuiApp {...props} />);
+    await settle();
+
+    await submit('?compress now');
+    await submit('/help');
+    await act(async () => {
+      view.rerender(<OpenTuiApp {...props} streaming={false} />);
+      await Promise.resolve();
+    });
+    await vi.waitFor(() =>
+      expect(screen.getByText('dialog:help')).toBeTruthy(),
+    );
+    expect(mocks.state.handledTexts).toEqual(['?compress now', '/help']);
+    // The composer is about to unmount, so the text waits for its next mount.
+    expect(restoreSubmission).not.toHaveBeenCalled();
+    expect(composerHandle.returned).toEqual(
+      expect.objectContaining({ text: '?compress now' }),
+    );
+  });
+
+  it('keeps ?-form input the Mods refused at once in the composer', async () => {
+    mocks.state.handleResults.push({ kind: 'refused' });
+    renderApp({ streaming: false });
+    await settle();
+    const onSubmit = mocks.state.inputProps?.['onSubmit'] as (
+      t: string,
+      i?: string[],
+      metadata?: OpenTuiSubmitOptions,
+    ) => Promise<boolean>;
+    let accepted: boolean | undefined;
+    await act(async () => {
+      accepted = await onSubmit('?btw key AKIA1', undefined, {
+        displayText: '?btw key AKIA1',
+      });
+    });
+    expect(mocks.state.handledTexts).toEqual(['?btw key AKIA1']);
+    // Not accepted, so the composer keeps the draft to edit.
+    expect(accepted).toBe(false);
   });
 
   it('runs a mid-turn slash command that opted into streaming at once', async () => {
@@ -1082,7 +4046,7 @@ describe('OpenTuiApp shell wiring', () => {
     } satisfies OpenTuiDispatchOutcome);
     const onQuit = vi.fn();
     const onInterrupt = vi.fn();
-    const onSubmitPrompt = vi.fn();
+    const onSubmitPrompt = vi.fn(() => true);
     renderApp({
       onQuit,
       onInterrupt,
@@ -1119,7 +4083,7 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.executeUserShell.mockImplementation(() => shellDone);
     mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
     const onTranscriptEvent = vi.fn();
-    const onSubmitPrompt = vi.fn();
+    const onSubmitPrompt = vi.fn(() => true);
     renderApp({ onSubmitPrompt, onTranscriptEvent });
     await settle();
     await act(async () => {
@@ -1145,7 +4109,11 @@ describe('OpenTuiApp shell wiring', () => {
     expect(onSubmitPrompt).toHaveBeenCalledWith(
       'hello',
       undefined,
-      expect.objectContaining({ submittedPrompt: 'hello' }),
+      expect.objectContaining({
+        submittedPrompt: 'hello',
+        displayText: 'hello',
+        humanInput: { text: 'hello' },
+      }),
     );
   });
 
@@ -1157,7 +4125,7 @@ describe('OpenTuiApp shell wiring', () => {
     mocks.state.executeUserShell.mockImplementation(() => shellDone);
     mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
     const onTranscriptEvent = vi.fn();
-    const onSubmitPrompt = vi.fn();
+    const onSubmitPrompt = vi.fn(() => true);
     renderApp({ onSubmitPrompt, onTranscriptEvent });
     await settle();
     await act(async () => {
@@ -1168,7 +4136,18 @@ describe('OpenTuiApp shell wiring', () => {
     await act(async () => {
       (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
     });
-    await submit('explain this', ['/tmp/screenshot.png']);
+    const restoredDraft = {
+      modelText: 'original expanded model copy',
+      displayText: 'explain this',
+      submittedPrompt: 'explain this',
+      humanInput: { text: 'explain this' },
+      hasUnknownInput: false,
+    };
+    await submit('explain this', ['/tmp/screenshot.png'], {
+      displayText: 'explain this',
+      humanInput: { text: 'explain this' },
+      restoredDraft,
+    });
     expect(screen.getByText(/Queued explain this/)).toBeTruthy();
     expect(onSubmitPrompt).not.toHaveBeenCalled();
 
@@ -1179,7 +4158,12 @@ describe('OpenTuiApp shell wiring', () => {
     expect(onSubmitPrompt).toHaveBeenCalledWith(
       'explain this',
       ['/tmp/screenshot.png'],
-      expect.objectContaining({ submittedPrompt: 'explain this' }),
+      expect.objectContaining({
+        submittedPrompt: 'explain this',
+        displayText: 'explain this',
+        humanInput: { text: 'explain this' },
+        restoredDraft,
+      }),
     );
   });
 
@@ -1403,7 +4387,7 @@ describe('OpenTuiApp shell wiring', () => {
       return command.startsWith('/') && command !== '/quit';
     };
     const onQuit = vi.fn();
-    const onSubmitPrompt = vi.fn();
+    const onSubmitPrompt = vi.fn(() => true);
     renderApp({ streaming: true, onQuit, onSubmitPrompt });
     await settle();
     mocks.state.handleResult = {
@@ -1471,8 +4455,344 @@ describe('OpenTuiApp shell wiring', () => {
     expect(mocks.state.handledTexts).toEqual(['/compress']);
   });
 
+  describe("a Mod's own prompts", () => {
+    afterEach(() => {
+      vi.mocked(interactiveMods.getInteractiveModSession).mockRestore?.();
+    });
+    function installMods(waiting: number) {
+      const listeners = new Set<() => void>();
+      const mods = {
+        waiting,
+        notePersonPrompt: vi.fn(),
+        subscribePrompts: (listener: () => void) => {
+          listeners.add(listener);
+          return () => listeners.delete(listener);
+        },
+        get hasSubmittedPrompts() {
+          return mods.waiting > 0;
+        },
+      };
+      vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue(
+        mods as unknown as ReturnType<
+          typeof interactiveMods.getInteractiveModSession
+        >,
+      );
+      const queue = async (count = 1) => {
+        mods.waiting += count;
+        await act(async () => {
+          for (const listener of listeners) listener();
+          await Promise.resolve();
+        });
+      };
+      return { mods, queue };
+    }
+    const runner = (mods: { waiting: number }) =>
+      vi.fn(() => {
+        if (mods.waiting === 0) return false;
+        mods.waiting -= 1;
+        return true;
+      });
+
+    it('runs one once idle, and the next when it is queued', async () => {
+      const { mods, queue } = installMods(0);
+      const onRunModPrompt = runner(mods);
+      const props = {
+        config: CONFIG,
+        settings: SETTINGS,
+        logger: null,
+        commands: [] as readonly SlashCommand[],
+        getSessionStats,
+        onRunModPrompt,
+        streaming: true,
+      };
+      const view = render(<OpenTuiApp {...props} />);
+      await settle();
+      await queue();
+      expect(onRunModPrompt).not.toHaveBeenCalled();
+
+      await act(async () => {
+        view.rerender(<OpenTuiApp {...props} streaming={false} />);
+        await Promise.resolve();
+      });
+      expect(onRunModPrompt).toHaveBeenCalledTimes(1);
+
+      await queue();
+      expect(onRunModPrompt).toHaveBeenCalledTimes(2);
+      expect(mods.waiting).toBe(0);
+      expect(mods.notePersonPrompt).not.toHaveBeenCalled();
+    });
+
+    // #7156: a subagent's progress update, made inside its agent frame, can
+    // batch into the commit that runs the drain, and the Mod's turn would
+    // then resolve the subagent's model.
+    it("starts the Mod's turn outside a subagent's frame", async () => {
+      const { mods, queue } = installMods(0);
+      let runtimeView: unknown = 'unset';
+      const onRunModPrompt = vi.fn(() => {
+        runtimeView = getRuntimeContentGenerator();
+        mods.waiting -= 1;
+        return true;
+      });
+      renderApp({ onRunModPrompt });
+      await settle();
+      const subagentView = {
+        contentGenerator: {},
+        contentGeneratorConfig: { model: 'small-default' },
+      } as never;
+      await runWithRuntimeContentGenerator(subagentView, () => queue());
+
+      expect(onRunModPrompt).toHaveBeenCalledTimes(1);
+      expect(runtimeView).toBeUndefined();
+    });
+
+    it('waits while a Goal owns the turns, and runs once it lets go', async () => {
+      const { mods, queue } = installMods(0);
+      const onRunModPrompt = runner(mods);
+      const goalListeners = new Set<() => void>();
+      let goalStatus: 'active' | 'complete' = 'active';
+      const goalRuntime = {
+        getSnapshot: () => ({
+          v: 2,
+          goal: { status: goalStatus },
+          activity: 'idle',
+        }),
+        subscribe: (listener: () => void) => {
+          goalListeners.add(listener);
+          return () => goalListeners.delete(listener);
+        },
+      };
+      renderApp({
+        config: {
+          ...CONFIG,
+          getGoalRuntime: () => goalRuntime,
+        } as unknown as Config,
+        onRunModPrompt,
+      });
+      await settle();
+      await queue();
+      // Core would run it as the person's Goal turn.
+      expect(onRunModPrompt).not.toHaveBeenCalled();
+
+      goalStatus = 'complete';
+      await act(async () => {
+        for (const listener of goalListeners) listener();
+        await Promise.resolve();
+      });
+      expect(onRunModPrompt).toHaveBeenCalledTimes(1);
+      expect(mods.waiting).toBe(0);
+    });
+
+    it("waits for the person's command still being routed, which resets the count", async () => {
+      const { mods, queue } = installMods(0);
+      const onRunModPrompt = runner(mods);
+      renderApp({ onRunModPrompt });
+      await settle();
+      mocks.state.holdHandleOn = '/slow';
+      await submit('/slow');
+      expect(mods.notePersonPrompt).toHaveBeenCalledTimes(1);
+      await queue();
+      expect(onRunModPrompt).not.toHaveBeenCalled();
+      // Input refused while it runs is no prompt of the person's.
+      await submit('/other');
+      await submit('look', ['/tmp/a.png']);
+      expect(mods.notePersonPrompt).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        mocks.state.releaseHandle?.();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(mocks.state.handledTexts).toEqual(['/slow']);
+      expect(onRunModPrompt).toHaveBeenCalledTimes(1);
+    });
+
+    it("leaves a plain prompt's count to its turn", async () => {
+      const { mods } = installMods(0);
+      mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+      const onSubmitPrompt = vi.fn(() => true);
+      renderApp({ onSubmitPrompt });
+      await settle();
+      await submit('hello');
+      expect(onSubmitPrompt).toHaveBeenCalledTimes(1);
+      // The live turn counts it when it starts, as ink's submitQuery does.
+      expect(mods.notePersonPrompt).not.toHaveBeenCalled();
+    });
+
+    it('waits for a command whose defer verdict is still out when the turn ends', async () => {
+      const { mods } = installMods(1);
+      const order: string[] = [];
+      const onRunModPrompt = vi.fn(() => {
+        order.push('mod');
+        mods.waiting = 0;
+        return true;
+      });
+      const gate: { release: (defer: boolean) => void } = {
+        release: () => {
+          throw new Error('the mid-turn gate never asked for a verdict');
+        },
+      };
+      mocks.state.deferGate = () =>
+        new Promise<boolean>((resolve) => {
+          gate.release = resolve;
+        });
+      mocks.state.onHandle = (text) => order.push(text);
+      const props = {
+        config: CONFIG,
+        settings: SETTINGS,
+        logger: null,
+        commands: [] as readonly SlashCommand[],
+        getSessionStats,
+        onRunModPrompt,
+        streaming: true,
+      };
+      const view = render(<OpenTuiApp {...props} />);
+      await settle();
+      await submit('/compress');
+      await act(async () => {
+        view.rerender(<OpenTuiApp {...props} streaming={false} />);
+        await Promise.resolve();
+      });
+      // The person's command has not been queued or run yet; the Mod's
+      // prompt must not take the idle moment from it.
+      expect(order).toEqual([]);
+
+      await act(async () => {
+        gate.release(true);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(order).toEqual(['/compress', 'mod']);
+    });
+
+    it("runs after the person's commands held back by the turn", async () => {
+      const { mods } = installMods(1);
+      const order: string[] = [];
+      const onRunModPrompt = vi.fn(() => {
+        order.push('mod');
+        mods.waiting = 0;
+        return true;
+      });
+      mocks.state.deferDuringStreaming = true;
+      mocks.state.onHandle = (text) => order.push(text);
+      const props = {
+        config: CONFIG,
+        settings: SETTINGS,
+        logger: null,
+        commands: [] as readonly SlashCommand[],
+        getSessionStats,
+        onRunModPrompt,
+        streaming: true,
+      };
+      const view = render(<OpenTuiApp {...props} />);
+      await settle();
+      await submit('/compress');
+      expect(order).toEqual([]);
+
+      await act(async () => {
+        view.rerender(<OpenTuiApp {...props} streaming={false} />);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(order).toEqual(['/compress', 'mod']);
+    });
+
+    it('waits while a dialog is open, and runs once it closes', async () => {
+      const { mods, queue } = installMods(0);
+      const onRunModPrompt = runner(mods);
+      renderApp({ onRunModPrompt, initialDialog: { dialog: 'help' } });
+      await settle();
+      await queue();
+      expect(onRunModPrompt).not.toHaveBeenCalled();
+
+      await act(async () => {
+        (mocks.state.dialogProps?.['onClose'] as () => void)();
+        await Promise.resolve();
+      });
+      expect(onRunModPrompt).toHaveBeenCalledTimes(1);
+    });
+
+    it("counts the person's `!` command and waits while it runs", async () => {
+      const { mods, queue } = installMods(0);
+      const onRunModPrompt = runner(mods);
+      let release!: () => void;
+      const shellDone = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      mocks.state.executeUserShell.mockReturnValue(shellDone);
+      mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+      renderApp({ onRunModPrompt, onTranscriptEvent: vi.fn() });
+      await settle();
+      await act(async () => {
+        (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+      });
+      await submit('sleep 1');
+      expect(mocks.state.executeUserShell).toHaveBeenCalledOnce();
+      expect(mods.notePersonPrompt).toHaveBeenCalledTimes(1);
+      await queue();
+      expect(onRunModPrompt).not.toHaveBeenCalled();
+
+      await act(async () => {
+        release();
+        await shellDone;
+      });
+      await settle();
+      expect(onRunModPrompt).toHaveBeenCalledTimes(1);
+    });
+
+    it("counts the person's `!` command the turn held back when it runs", async () => {
+      const { mods } = installMods(0);
+      const props = {
+        config: CONFIG,
+        settings: SETTINGS,
+        logger: null,
+        commands: [] as readonly SlashCommand[],
+        getSessionStats,
+        streaming: true,
+        onTranscriptEvent: vi.fn(),
+      };
+      const view = render(<OpenTuiApp {...props} />);
+      await settle();
+      await act(async () => {
+        (mocks.state.inputProps?.['onToggleShellMode'] as () => void)();
+      });
+      await submit('ls');
+      expect(mocks.state.executeUserShell).not.toHaveBeenCalled();
+      expect(mods.notePersonPrompt).not.toHaveBeenCalled();
+
+      await act(async () => {
+        view.rerender(<OpenTuiApp {...props} streaming={false} />);
+        await Promise.resolve();
+      });
+      expect(mocks.state.executeUserShell).toHaveBeenCalledOnce();
+      expect(mods.notePersonPrompt).toHaveBeenCalledTimes(1);
+    });
+
+    it("waits for the person's submission while the command stack loads", async () => {
+      const { mods, queue } = installMods(0);
+      const onRunModPrompt = runner(mods);
+      let load!: () => void;
+      const loaded = new Promise<readonly unknown[]>((resolve) => {
+        load = () => resolve([]);
+      });
+      mocks.state.loadCommandsOverride = () => loaded;
+      mocks.state.handleResult = false as unknown as OpenTuiDispatchOutcome;
+      const onSubmitPrompt = vi.fn(() => true);
+      renderApp({ commands: undefined, onRunModPrompt, onSubmitPrompt });
+      await settle();
+      // The dispatch waits for the command stack before the gateway is busy.
+      await submit('hello');
+      await queue();
+      expect(onSubmitPrompt).not.toHaveBeenCalled();
+      expect(onRunModPrompt).not.toHaveBeenCalled();
+
+      await act(async () => {
+        load();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(onSubmitPrompt).toHaveBeenCalledTimes(1);
+      expect(onRunModPrompt).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('replays held commands in submission order, pausing behind a submit_prompt', async () => {
-    const onSubmitPrompt = vi.fn();
+    const onSubmitPrompt = vi.fn(() => true);
     mocks.state.deferDuringStreaming = true;
     mocks.state.handleResults = [
       { kind: 'submit_prompt', content: 'generated' },
@@ -1601,7 +4921,7 @@ describe('OpenTuiApp shell wiring', () => {
   it('drops both mid-turn queues when a quit exits during the turn', async () => {
     const onQuit = vi.fn();
     const onInterrupt = vi.fn();
-    const onPopQueue = vi.fn(() => 'queued prompt');
+    const onPopQueue = vi.fn(() => ({ text: 'queued prompt' }));
     mocks.state.deferDuringStreaming = true;
     const props = {
       config: CONFIG,
@@ -1722,6 +5042,7 @@ describe('OpenTuiApp approval-mode cycling (F-2)', () => {
     mocks.state.handleResult = { kind: 'handled' };
     mocks.state.handleResults.length = 0;
     mocks.state.handledTexts.length = 0;
+    mocks.state.handledTyped.length = 0;
     mocks.state.host = null;
     mocks.state.hosts.length = 0;
     mocks.state.dispatcherConstructions = 0;
@@ -1733,6 +5054,10 @@ describe('OpenTuiApp approval-mode cycling (F-2)', () => {
     mocks.state.mcpApprovalProps = null;
     mocks.state.mcpQueue.length = 0;
     mocks.state.handleMcpApprovalSelect.mockClear();
+    mocks.state.hooksApprovalProps = null;
+    mocks.state.pendingHookLines = null;
+    mocks.state.hooksAddInfo = null;
+    mocks.state.handleProjectHooksApprovalSelect.mockClear();
   });
 
   function fakeConfig(
@@ -1906,7 +5231,9 @@ describe('OpenTuiApp approval-mode cycling (F-2)', () => {
     renderApp({
       config,
       approvalMode: ApprovalMode.DEFAULT,
-      onTranscriptEvent: (event) => events.push(event),
+      onTranscriptEvent: (event) => {
+        events.push(event);
+      },
     });
     await settle();
     await cycleOnce();
@@ -1981,6 +5308,7 @@ describe('OpenTuiApp transcript scroll region', () => {
     mocks.state.handleResult = { kind: 'handled' };
     mocks.state.handleResults.length = 0;
     mocks.state.handledTexts.length = 0;
+    mocks.state.handledTyped.length = 0;
     mocks.state.host = null;
     mocks.state.hosts.length = 0;
     mocks.state.dispatcherConstructions = 0;
@@ -1992,6 +5320,10 @@ describe('OpenTuiApp transcript scroll region', () => {
     mocks.state.mcpApprovalProps = null;
     mocks.state.mcpQueue.length = 0;
     mocks.state.handleMcpApprovalSelect.mockClear();
+    mocks.state.hooksApprovalProps = null;
+    mocks.state.pendingHookLines = null;
+    mocks.state.hooksAddInfo = null;
+    mocks.state.handleProjectHooksApprovalSelect.mockClear();
   });
 
   const layoutOf = (
@@ -2059,6 +5391,35 @@ describe('OpenTuiApp transcript scroll region', () => {
     expect(screen.getByText('dialog:theme')).toBeTruthy();
     expect(region?.textContent).not.toContain('dialog:theme');
     expect(chrome?.textContent).toContain('dialog:theme');
+  });
+
+  it("gives the dialog region ink's fixed, clipped row budget", async () => {
+    // ink renders every popup inside a region of exactly
+    // `rows - STATIC_EXTRA_HEIGHT(3) - MAIN_CONTENT_HEIGHT_RESERVATION(2)`
+    // rows, clipped and top-aligned, with the composer swapped out. A
+    // content-height region bottom-anchors the popup instead: a dialog ink
+    // stretches to fill the viewport stayed short, and a picker taller than
+    // the region pushed the composer off screen. The expectation is derived
+    // from the shared constant rather than written as a literal, so the two
+    // renderers' budgets cannot drift apart with the suite green.
+    const regionHeight = getDialogMaxHeight(40, STATIC_EXTRA_HEIGHT);
+    await renderWithTranscript();
+    mocks.state.handleResult = {
+      kind: 'open_dialog',
+      request: { dialog: 'theme' },
+    } satisfies OpenTuiDispatchOutcome;
+    await submit('/theme');
+    // The mount stub returns a bare string, so its parent is the region box.
+    expect(layoutOf(screen.getByText('dialog:theme'))).toMatchObject({
+      flexDirection: 'column',
+      height: regionHeight,
+      overflow: 'hidden',
+    });
+    // The same budget has to reach the dialogs: a list that sized itself to the
+    // full terminal would push its footer hint out of the clipped region.
+    expect(mocks.state.dialogProps?.['availableTerminalHeight']).toBe(
+      regionHeight,
+    );
   });
 
   it('shows queued prompts in the chrome, above the composer itself', async () => {

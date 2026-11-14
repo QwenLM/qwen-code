@@ -62,6 +62,97 @@ describe('bundled review skill', () => {
     expect(body).toContain('decided stop with no composed artifact');
   });
 
+  it('re-anchors a completed review at the moved head — never abandons it', () => {
+    // The maintainer's ruling (PR #15578, "提交评论啊"): head movement posts
+    // the completed review at the new head, it does not throw the round
+    // away. Both movement paths — the proactive anchorsAtRisk branch and
+    // the reactive 422 recovery — must route to the one protocol, and the
+    // old abandon-and-restart wording must not survive anywhere in the
+    // corpus (a compressor that keeps only one path would re-teach it).
+    const body = skillBody();
+    expect(body).toContain(
+      'The re-anchor protocol — post the completed review at the new head',
+    );
+    expect(body).toContain(
+      'Do NOT abandon the submission and do NOT restart the review',
+    );
+    expect(body).toContain('Run the **re-anchor protocol** above');
+    // The protocol's honesty machinery: per-finding delta ruling, the
+    // unread-delta disclosure, and the post-without-asking ruling.
+    expect(body).toContain('Rule every finding against the delta');
+    expect(body).toContain(
+      'head advanced <reviewedSha>..<liveHeadSha> — re-anchored: the delta was ruled per-finding, not fully reviewed',
+    );
+    expect(body).toContain('**Post the COMMENT without asking**');
+    // The bound survives the rename: one pass per review, both paths.
+    expect(body).toContain(
+      'a review re-anchors **at most once** for head movement',
+    );
+    // The deterministic-lint refresh (PR #16001 review): dropping authored
+    // findings alone republished the gate's stale blocker. The protocol must
+    // recompute the lint at the new head and name the freshness-basis field.
+    expect(body).toContain('Refresh the deterministic lint at the new head');
+    expect(body).toContain('lintDiffPath');
+    expect(body).toContain(
+      '--diff .qwen/tmp/qwen-review-{target}-reanchor.diff',
+    );
+    // Round 3: the config trust boundary is the merge base (trusted
+    // exceptions survive, head suppressions never read), and an empty
+    // refresh diff is a successful parse, not a fallback to the old hunks.
+    expect(body).toContain("MERGE-BASE tree's `.github/actionlint.yaml`");
+    expect(body).toContain('an EMPTY refresh diff');
+    // Round 4: the base config is applied with the worktree as the linter's
+    // cwd — path-scoped exceptions are inert in a session-cwd spawn.
+    expect(body).toContain(
+      "applied with the review worktree as the linter's cwd",
+    );
+    // Revert guards: the abandon-and-restart wording is gone for good.
+    expect(body).not.toContain(
+      'Abandon this submission and start the review again',
+    );
+    expect(body).not.toContain(
+      'abandon this submission, say so, and restart at the new SHA',
+    );
+    expect(body).not.toContain(
+      'Do not re-resolve the old findings against the new diff and submit those',
+    );
+  });
+
+  it('accounts the blocker re-check walk against the inventory — prose alone was skipped', () => {
+    // #15974: the walk is prose, and a round posted past a blocker an
+    // earlier review had filed. The rule must name the inventory file, the
+    // state field, and the cap — the three pieces the arithmetic joins.
+    const body = skillBody();
+    expect(body).toContain('qwen-review-pr-<n>-context-blockers.json');
+    expect(body).toContain('blockerRulings');
+    expect(body).toContain(
+      'Record the walk as accounting, not just as verdicts',
+    );
+    expect(body).toContain(
+      'an inventory key with no entry is unreviewed scope and caps the verdict at `COMMENT`',
+    );
+    // The floor/ceiling split: the inventory is the mechanical floor, the
+    // semantic walk may rule on more. A rewrite that makes the inventory
+    // the CEILING would retire the semantic selection rule.
+    expect(body).toContain(
+      'The inventory is the mechanical FLOOR of the walk, not its ceiling',
+    );
+  });
+
+  it('names --dry-run as the only probe and the landed review as never re-submittable', () => {
+    // #15853: the sanctioned probe existed in the CLI but was undocumented
+    // on the GitHub path, so a 422 diagnosis reached for a curl probe
+    // write; and a re-submit over a landed payload replied this round's
+    // own roots back to themselves. Both rules must survive in the corpus.
+    const body = skillBody();
+    expect(body).toContain('`--dry-run` is the only sanctioned probe');
+    expect(body).toContain('already-posted-this-commit');
+    expect(body).toContain('a landed review is never re-submitted');
+    expect(body).toContain(
+      'The question has a sanctioned, write-free answer: `submit --dry-run`',
+    );
+  });
+
   it('rules an unplanned declarer under the eighth coverage failure, not a ninth', () => {
     // `check-coverage` names a declarer whose chunk id the plan does not
     // carry in the SAME `ERROR:` line as the planned ones, so the skill's
@@ -322,10 +413,46 @@ describe('bundled review skill', () => {
       '**Whether a PLAN exists is a separate field: `diffPath`.**',
     );
     // …and the re-run instruction, including the flag-replacement rule that
-    // keeps a second `--since` from reading as two anchors.
+    // keeps a second `--since`/`--since-model` from reading as two anchors.
     expect(body).toContain(
-      'REPLACING any `--since` it already carries, never appending a second one',
+      'REPLACING any `--since` and any `--since-model` it already carries, ' +
+        'never appending a second one',
     );
+    // The marker recovery re-run must carry BOTH fields, taken from the side
+    // file's `sha`/`model` pair. The command "above" it carries neither on this
+    // path (no cache), or another model's when the cache anchor was withheld —
+    // so a reader who copies the model half from there is refused as
+    // `cross-model-anchor` and reviews the full diff. Sliced to THIS sentence
+    // — the same `--since <sha>` words occur in the cache path, where they are
+    // already correct — so the assertion cannot be satisfied by that other
+    // occurrence.
+    const reRunAt = body.indexOf(
+      're-run the `fetch-pr` command from above with',
+    );
+    expect(reRunAt).toBeGreaterThan(-1);
+    const reRunSentence = body.slice(
+      reRunAt,
+      body.indexOf('never appending a second one', reRunAt),
+    );
+    expect(reRunSentence).toContain('--since-model');
+  });
+
+  it('describes the effective incremental scope without the retired range model', () => {
+    // The `effective: true` bullet used to call the report's diff `since..head`
+    // — the full-range model the narrowing replaced. Naming that range invites
+    // a reader to hand the anchor to git, which this same section forbids; the
+    // published scope is `incremental.scope`'s file classes.
+    const body = skillBody();
+    const at = body.indexOf('`effective: true` (no `upToDate`)');
+    expect(at).toBeGreaterThan(-1);
+    const rest = body.slice(at + 1);
+    const nextBullet = rest.indexOf('\n    - `');
+    expect(nextBullet).toBeGreaterThan(-1);
+    const bullet = rest.slice(0, nextBullet);
+    expect(bullet).not.toMatch(/since\.\.head/);
+    expect(bullet).toContain('`deltaFiles`');
+    expect(bullet).toContain('`interaction[]`');
+    expect(bullet).toContain('`contextFileCount`');
   });
 
   it('pins which refusal reasons the recovery flow may retry', () => {
@@ -932,6 +1059,138 @@ describe('bundled review skill', () => {
     expect(body).toContain('One slice of this fact survives a resume');
     expect(body).toContain(
       "Only a never-resumed run's re-entry records nothing",
+    );
+  });
+
+  it('pins the conversational-intent routing and the resume exclusion', () => {
+    // A prose re-review request ("有更新了，重新评审") carries no target the
+    // parser could classify: alone it becomes a file path, and beside a PR
+    // number it stole the target (the parser half is pinned in
+    // parse-args.test.ts). The routing clause is the ONE sanctioned
+    // departure from copy-verbatim, so pin its boundary sentences too —
+    // widening it re-opens the transcribed-argument incident.
+    const body = skillBody();
+    expect(body).toContain(
+      'Route conversational intent, guarded by the parser',
+    );
+    expect(body).toContain(
+      'never guess, and never review the prose as a file path',
+    );
+    expect(body).toContain(
+      'any input already carrying a number, URL, or path goes to the parser untouched',
+    );
+    expect(body).toContain("keep the CLI's args file untouched");
+    expect(body).toContain('copy it, do not reconstruct it');
+    // Resolution is for PR re-review requests only, and a bare `/review`
+    // stays a local review. Without these boundaries the clause reads as
+    // "no classifiable target → resolve a PR", hijacking local runs.
+    expect(body).toContain(
+      'Resolution is for requests to review a PULL REQUEST again',
+    );
+    // Review R2-3: the guard keys on what the user SPELLED, not on the
+    // verdict's target type — prose parses to a file target, so a
+    // verdict-keyed guard excludes the only input the clause exists for.
+    expect(body).toContain('spells no target of its own');
+    expect(body).toContain(
+      "Judge by what the user SPELLED, not by the verdict's target type",
+    );
+    expect(body).toContain(
+      'that fallback is exactly the shape this clause rescues',
+    );
+    expect(body).toContain(
+      'a bare `/review` with no arguments is a local review',
+    );
+    // Verification F1 (prose local-write hijack): "review my local changes
+    // --fix" matches the no-target trigger, and resolving a PR into it
+    // disarms --fix. The guard is mechanical — the ORIGINAL verdict's
+    // fix.effective — not a wording guess; prose local intent without
+    // --fix is excluded too. The hash-decoration rule closes the "#15998"
+    // copy ambiguity the same report measured.
+    expect(body).toContain(
+      'when the original verdict has `fix.effective: true`',
+    );
+    expect(body).toContain('never resolve a PR into it');
+    expect(body).toContain(
+      'Prose that asks for a LOCAL review is not re-review intent',
+    );
+    expect(body).toContain(
+      'a `#` prefix is reference decoration, not part of the target',
+    );
+    // Verification F2: delta scoping is high-only; the clause must not
+    // promise it to lower efforts.
+    expect(body).toContain(
+      'at high effort the incremental check below scopes the delta',
+    );
+    // Review R1-1: the rationale must mark the prose-steals-target half as
+    // PRE-FIX behavior — the parser preference in this same PR closed it,
+    // and a prompt describing it as live re-derives a closed bug.
+    expect(body).toContain('Before the PR-shape preference in parse-args');
+    expect(body).toContain(
+      'this paragraph must not be read as describing current behavior',
+    );
+    // Review R2-1/R2-2: a promoted bare number never carries posting
+    // authority — the parser withholds comment.effective, and the clause
+    // confirms the target before running. The local-intent move must be
+    // executable (prose never parses to local), and the hash form has an
+    // operational resolution, not just a decoration note.
+    expect(body).toContain(
+      'a promoted bare number never carries posting authority',
+    );
+    expect(body).toContain(
+      'When the verdict marks the target as a promoted bare number (`promotedNumberTarget`), confirm the target with the user before running',
+    );
+    expect(body).toContain('never post on it silently');
+    expect(body).toContain('prose never parses to a local target');
+    expect(body).toContain('resolve to the bare number (or ask for it)');
+    expect(body).toContain(
+      'requested posting on a PR target whose bare number was promoted from prose',
+    );
+    // Review R1-2: the restart cost belongs to a SURVIVING interrupted
+    // attempt only; after a completed round the refusal costs nothing,
+    // and worktree-gone is its own shape (report survived, tree vanished).
+    expect(body).toContain(
+      'after a completed round the state is cleaned up and the refusal',
+    );
+    expect(body).toContain(
+      "worktree-gone` means the report survived but the attempt's worktree vanished",
+    );
+    // The resolved invocation keeps the flags the input already carries,
+    // so the parser still sees them — but carrying a flag is NOT posting
+    // authority (see the hard-boundary pins below).
+    expect(body).toContain(
+      'the target plus any flags the input already carries',
+    );
+    // Review P2 (option-only hijack): `/review --fix` and `/review --effort
+    // low` are non-empty and carry no classifiable target, so the routing
+    // condition literally matched them and would retarget a working-tree
+    // run into the last PR — disarming `--fix` on the way. The exclusion
+    // must survive verbatim.
+    expect(body).toContain(
+      'an option-only invocation — flags and their values alone, like `/review --fix` or `/review --effort low` — is a supported local review the parser owns verbatim',
+    );
+    // Review P2 (authorization break): the write gate re-parses the CLI's
+    // verbatim record on purpose, so a model-written resolution can never
+    // authorise posting. The clause must keep the hard boundary (present
+    // the resolved invocation, ask for an explicit re-run) instead of
+    // promising a posting authority the gate refuses.
+    expect(body).toContain("Posting is the resolution's hard boundary.");
+    expect(body).toContain(
+      'a model-written resolution is not an authorization source',
+    );
+    expect(body).toContain(
+      'do not run a review whose submission is already refused',
+    );
+    expect(body).toContain('ask the user to re-invoke it explicitly');
+    // --resume continues an interrupted run at an UNMOVED head only. The
+    // exclusion must survive in the verdict bullet and the routing clause,
+    // the two surfaces read before the flag is chosen; the frontmatter
+    // description carries the same exclusion for the invoking model.
+    expect(body).toContain(
+      'It is never the flag for a re-review after the PR gained commits',
+    );
+    expect(body).toContain('at an UNMOVED head');
+    expect(coreBody()).toContain(
+      'at an unmoved head (a re-review after new commits is a plain `/review <pr-number>`)',
     );
   });
 
@@ -1607,10 +1866,10 @@ describe('bundled review skill', () => {
     expect(body).not.toContain(
       'the context-unavailable cap keeps an **Approve** verdict at Comment',
     );
-    // The drift re-review is bounded by the once-per-review restart bound;
-    // the stale variant ordered it unconditionally.
+    // The drift re-review is bounded by the once-per-review head-movement
+    // bound; the stale variant ordered it unconditionally.
     expect(body).toContain(
-      'but ONLY while the per-review head-movement restart bound is unspent',
+      'but ONLY while the per-review head-movement bound is unspent',
     );
     // The could-not-re-verify relay the corrected variant adds: submit
     // prints the warning on both the success and the mid-batch-failure path.
@@ -1710,6 +1969,54 @@ describe('bundled review skill', () => {
     expect(posting).not.toContain('occurs _anywhere_ in its body');
   });
 
+  it('warns that --new-findings is not the canonical artifact (#9218)', () => {
+    // Revert guard: the artifact's `line` is the agent's claim and its `id`
+    // sits on every finding, so handing this flag the artifact makes the
+    // overlap dedup key on a line no comment was placed at — a duplicate then
+    // reads as disjoint. The step that writes the file has to say so, name the
+    // resolver's input as the other forbidden sibling, and keep the three
+    // qualifications that make the recipe safe: the body-only placeholder the
+    // resolver cannot carry, the carried-only `id`, and the `startLine` rename
+    // a mechanical projection trips over (#9218 review).
+    const posting = referenceBody('posting.md');
+    // Unique to this sentence. The bare phrase "is the agent's claim" also sits
+    // in the resolver section, where it would keep the assertion green after
+    // the rationale here was reworded (#9218 review, R1-6).
+    expect(posting).toContain(
+      "the artifact's `locations[].line` is the agent's claim",
+    );
+    expect(posting).toContain("nor the resolver's INPUT `…-anchors.json`");
+    expect(posting).toContain('raw `…-anchors-resolved.json` output');
+    expect(posting).toContain(
+      'only `path`, `line`, `start_line`, and optional carried `id`',
+    );
+    expect(posting).toContain('drop `anchor` and all other resolver metadata');
+    expect(posting).toContain(
+      'spells the range field `startLine`, so rename it',
+    );
+    expect(posting).toContain(
+      '`line` must be a nonnegative integer (missing/null means 0)',
+    );
+    expect(posting).toContain(
+      '`start_line`, when present, must be a positive integer with a positive `line`',
+    );
+    expect(posting).toContain(
+      'still add one id-less placeholder `{path, line}` for every body-only Critical',
+    );
+    expect(posting).toContain(
+      "an aggregate's locations carry `<id>-k`, which this shape refuses",
+    );
+    expect(posting).toContain(
+      'Match the full finding ID or its `<findingId>-k` expansion',
+    );
+    expect(posting).toContain(
+      'never blindly strip a trailing `-<n>`, because a standalone ledger ID such as `R3-2` is already complete',
+    );
+    expect(posting).toContain(
+      'must never be written over the canonical artifact',
+    );
+  });
+
   it("joins the repost exemption on the id alone — a carry-reply entry sits at the reply's location, not the finding's (#9940 review, round 29)", () => {
     // presubmit's reply carrier matches a wanted id at ANY location (its
     // anchor may be unmapped or the finding moved); a location-qualified
@@ -1763,18 +2070,19 @@ describe('bundled review skill', () => {
     expect(posting).toContain('ones past a 2000-point total');
   });
 
-  it('names the CI salvage contract as the one exception to the drift restart', () => {
+  it('names the CI salvage contract as the one exception to the drift re-anchor', () => {
     // The workflow's supersede watcher arms a salvage past its threshold
     // and exports QWEN_REVIEW_SALVAGE_POST beside the marker; without this
-    // exception the anchorsAtRisk=true rule commands abandon-and-restart in
-    // exactly the drifted state a salvage creates (R32-2). Cross-pinned with
+    // exception the anchorsAtRisk=true rule commands a re-anchor pass in
+    // exactly the drifted state a salvage creates (R32-2) — a queued
+    // replacement run already owns the new head. Cross-pinned with
     // scripts/tests/qwen-pr-review-workflow.test.js, which pins the export.
     const posting = referenceBody('posting.md');
     expect(posting).toContain(
       '**One exception — the CI salvage contract:** when the environment carries `QWEN_REVIEW_SALVAGE_POST=1` **and** the file named by `QWEN_CI_REVIEW_SALVAGE_OK_FILE` exists with content equal to `headDrift.reviewedSha`',
     );
-    expect(posting).toContain('do **not** restart: submit as planned');
-    expect(posting).toContain('this consumes no restart');
+    expect(posting).toContain('do **not** re-anchor: submit as planned');
+    expect(posting).toContain('this consumes no re-anchor pass');
   });
 
   it('gates every reference file on the verdict in the core body', () => {
@@ -2017,6 +2325,19 @@ describe('bundled review skill', () => {
       'The incremental scope kept nothing to review, but untracked files were not enumerated (--no-untracked)',
     );
   });
+  it('has Step 0 WRITE its verdict, not pipe it past the guard', () => {
+    // The round's first write into `.qwen/tmp` is Step 0's. Through `tee` it
+    // was a shell redirection no command could guard, so a workspace that
+    // committed `.qwen/tmp` as a symlink took that write before anything
+    // checked; `--out` routes it through `ensureReviewTmpDir`. A drift back
+    // to `tee` re-opens it with every suite still green.
+    const body = skillBody();
+    expect(body).toContain(
+      'review parse-args --stdin --out .qwen/tmp/qwen-review-parse-args.json',
+    );
+    expect(body).not.toContain('| tee .qwen/tmp/qwen-review-parse-args.json');
+  });
+
   it('checks the candidate is this round\u2019s own before promoting', () => {
     // R17-4: the candidate path is stable per target and local/file reviews
     // take no lease, so a concurrent same-target run overwrites the file
@@ -2026,8 +2347,19 @@ describe('bundled review skill', () => {
     const body = skillBody();
     expect(body).toContain('`cacheCandidateStateId`');
     expect(body).toContain(
-      'A mismatch (or an absent `cacheCandidateStateId` field on a plan that published a path) is treated exactly like a withheld candidate',
+      "The command's refusal (or an absent `cacheCandidateStateId` field on a plan that published a path) is treated exactly like a withheld candidate",
     );
+    // R24-2: the check is the COMMAND's, bound to the bytes it promotes — a
+    // check the orchestrator made against the same stable path minutes
+    // earlier did not bind the read that followed it.
+    expect(body).toContain("--state-id <the plan's cacheCandidateStateId>");
+    // R25-1: the ledger name is per-round for the same concurrency reason —
+    // and by the report's clock, not the tree's hash, which two concurrent
+    // rounds over an unchanged tree compute alike.
+    expect(body).toContain(
+      '`.qwen/tmp/qwen-review-<target>-ledger-<timestamp>.json`',
+    );
+    expect(body).toContain("Not the tree's `stateId`");
   });
 
   it('has both PR stops write the sidecar the run reader expects', () => {
@@ -2055,8 +2387,11 @@ describe('bundled review skill', () => {
     // conditions instead of re-enumerating them, so one definition serves
     // both writes and the two cannot drift.
     const body = skillBody();
+    // Located by THIS branch's opening for the same paragraph: the write
+    // became one command (`cache-commit`) for both flows, so the sentence the
+    // rule lives under changed while the rule did not.
     const start = body.indexOf(
-      '**A local or file-path review at high effort writes its cache the same way',
+      '**The write is one command, for PR and local alike',
     );
     const end = body.indexOf(
       '**The cache advances exactly when the marker anchored',

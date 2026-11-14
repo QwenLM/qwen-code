@@ -15,6 +15,7 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { isInternalCodeModeToolResult } from '@qwen-code/qwen-code-core/transcriptRecords';
 import {
   extractStructuredResult,
   formatToolArgs,
@@ -124,7 +125,7 @@ export function transcribeSession(
       }
       continue;
     }
-    if (o.type === 'tool_result') {
+    if (o.type === 'tool_result' && !isInternalCodeModeToolResult(o)) {
       const r = o.toolCallResult ?? {};
       const id = r.callId ?? pendingIdlessIds.shift() ?? `tool-${++toolSeq}`;
       if (r.resultDisplay) {

@@ -13,15 +13,18 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import {
-  mkdirSync,
   mkdtempSync,
+  mkdirSync,
   rmSync,
   readFileSync,
   existsSync,
+  readdirSync,
+  realpathSync,
+  symlinkSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { seedParseArgs } from './lib/test-utils.js';
+import { isLedgerOnlyCandidate, seedParseArgs } from './lib/test-utils.js';
 import {
   COMPOSE_FLOOR_ENV,
   DEADLINE_ENV,
@@ -101,8 +104,21 @@ function capture(over: Record<string, unknown> = {}) {
   });
 }
 
+let savedIdentity: string | undefined;
+
 beforeEach(() => {
-  dir = mkdtempSync(join(tmpdir(), 'capture-local-'));
+  // Every real round runs under a published identity, and the candidate
+  // anchors nothing without one (it carries the findings ledger alone) — so
+  // the fixtures publish one, and the test about the
+  // empty case blanks it itself.
+  savedIdentity = process.env['QWEN_CODE_MODEL_IDENTITY'];
+  process.env['QWEN_CODE_MODEL_IDENTITY'] = 'fixture-model@1a2b3c4d';
+  // `realpathSync`: several path comparisons in this command family resolve
+  // real paths against lexical ones, and `tmpdir()` IS a symlink on macOS
+  // (`/var/folders/…` → `/private/var/folders/…`). Without the wrap a test
+  // can fail on a developer's Mac while CI stays green on its real-path
+  // TMPDIR — the trap this directory's sibling suites hit.
+  dir = realpathSync(mkdtempSync(join(tmpdir(), 'capture-local-')));
   cwd = process.cwd();
   process.chdir(dir);
   errs = [];
@@ -118,6 +134,9 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  if (savedIdentity === undefined)
+    delete process.env['QWEN_CODE_MODEL_IDENTITY'];
+  else process.env['QWEN_CODE_MODEL_IDENTITY'] = savedIdentity;
   process.chdir(cwd);
   rmSync(dir, { recursive: true, force: true });
   process.exitCode = undefined;
@@ -191,6 +210,83 @@ describe('capture-local (command boundary)', () => {
     expect(plan.selection.sourceArtifactSha256).toBe(
       createHash('sha256').update(writtenDiff, 'utf8').digest('hex'),
     );
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses the round on a symlinked `.qwen/tmp`, before writing anything',
+    () => {
+      // The scratch directory is deterministic and in-repo: a contributor
+      // branch can commit `.qwen/tmp` (or `.qwen`) as a link — gitignore
+      // does not stop `git add -f` — and every side file of the round (the
+      // diff, the plan, the stop sidecar, the candidate) would land wherever
+      // it points, with the plan then read back from there. Guarding the
+      // writers one at a time re-found the class every round; the round is
+      // refused at the directory instead, and nothing reaches the victim.
+      const elsewhere = realpathSync(mkdtempSync(join(tmpdir(), 'victim-')));
+      mkdirSync(join(dir, '.qwen'), { recursive: true });
+      symlinkSync(elsewhere, join(dir, '.qwen', 'tmp'));
+      try {
+        capture();
+        // Reported, not thrown: the handler prints one line and exits 1 — a
+        // runtime refusal, not the usage class. ONE prefix: the guard names
+        // the command itself, and the handler must not name it again.
+        expect(() => run(join(dir, 'plan.json'))).not.toThrow();
+        expect(process.exitCode).toBe(1);
+        expect(errs.join('')).toMatch(
+          /^capture-local: \.qwen[/\\]tmp is a symbolic link/,
+        );
+        expect(errs.join('')).not.toContain('capture-local: capture-local:');
+        expect(existsSync(join(dir, 'plan.json'))).toBe(false);
+        expect(readdirSync(elsewhere)).toEqual([]);
+
+        // `.qwen` itself as the link: same refusal, same empty victim.
+        rmSync(join(dir, '.qwen'), { recursive: true, force: true });
+        symlinkSync(elsewhere, join(dir, '.qwen'));
+        capture();
+        process.exitCode = undefined;
+        errs = [];
+        expect(() => run(join(dir, 'plan.json'))).not.toThrow();
+        expect(process.exitCode).toBe(1);
+        expect(errs.join('')).toMatch(
+          /^capture-local: \.qwen is a symbolic link/,
+        );
+        expect(readdirSync(elsewhere)).toEqual([]);
+      } finally {
+        rmSync(elsewhere, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('writes the cache candidate WITHOUT an identity when the runtime published none (R24-1)', () => {
+    // A local round posts no marker, so the candidate is the only write path
+    // its findings ledger has. Withheld, round N+1 saw no ledger and re-filed
+    // round N's open Criticals under fresh ids. Written with the key OMITTED
+    // (never `''`, which `cache-commit` refuses), it promotes as the ledger
+    // alone and anchors nothing.
+    process.env['QWEN_CODE_MODEL_IDENTITY'] = '';
+    const savedModel = process.env['QWEN_CODE_MODEL'];
+    process.env['QWEN_CODE_MODEL'] = '';
+    try {
+      capture();
+      run(join(dir, 'plan.json'));
+      const plan = JSON.parse(
+        readFileSync(join(dir, 'plan.json'), 'utf8'),
+      ) as Record<string, unknown>;
+      expect(plan['diffPath']).toBeTruthy();
+      expect(plan['cacheCandidatePath']).toBeTruthy();
+      expect(typeof plan['cacheCandidateStateId']).toBe('string');
+      const candidate = JSON.parse(
+        readFileSync(
+          join(dir, '.qwen/tmp/qwen-review-local-cache-candidate.json'),
+          'utf8',
+        ),
+      ) as Record<string, unknown>;
+      expect('lastModelId' in candidate).toBe(false);
+      expect(errs.join('\n')).toContain('published no model identity');
+    } finally {
+      if (savedModel === undefined) delete process.env['QWEN_CODE_MODEL'];
+      else process.env['QWEN_CODE_MODEL'] = savedModel;
+    }
   });
 
   it('creates the output directory the caller chose', () => {
@@ -307,7 +403,7 @@ describe('capture-local (command boundary)', () => {
     expect(plan.effort).toBeUndefined();
   });
 
-  it('withholds the cache candidate when the visibility bits cannot be enumerated', () => {
+  it('writes no anchor when the visibility bits cannot be enumerated', () => {
     // The candidate records the identity of the tree this round reviewed;
     // an oracle the capture cannot run leaves that identity uncertified, so
     // the write fails closed exactly like the decided stops do.
@@ -315,12 +411,22 @@ describe('capture-local (command boundary)', () => {
     visibilityMock.mockReturnValue(null);
     run('plan.json');
     expect(
-      existsSync(join(dir, '.qwen/tmp/qwen-review-local-cache-candidate.json')),
-    ).toBe(false);
+      isLedgerOnlyCandidate(
+        join(dir, '.qwen/tmp/qwen-review-local-cache-candidate.json'),
+      ),
+    ).toBe(true);
     expect(errs.join('')).toContain('could not be enumerated');
+    expect(
+      JSON.parse(
+        readFileSync(
+          join(dir, '.qwen/tmp/qwen-review-local-cache-candidate.json'),
+          'utf8',
+        ),
+      )['ledgerOnly'],
+    ).toBe('the tracked-file visibility bits could not be enumerated');
   });
 
-  it('withholds the cache candidate while tracked paths carry a visibility bit', () => {
+  it('writes no anchor while tracked paths carry a visibility bit', () => {
     // `hash-object` reads through a set --assume-unchanged/--skip-worktree
     // bit while `git diff` cannot see the edit it hides — the candidate
     // would record the identity of bytes this round never reviewed.
@@ -328,9 +434,41 @@ describe('capture-local (command boundary)', () => {
     visibilityMock.mockReturnValue(['src/pay.ts']);
     run('plan.json');
     expect(
-      existsSync(join(dir, '.qwen/tmp/qwen-review-local-cache-candidate.json')),
-    ).toBe(false);
-    expect(errs.join('')).toContain('the cache candidate is withheld');
+      isLedgerOnlyCandidate(
+        join(dir, '.qwen/tmp/qwen-review-local-cache-candidate.json'),
+      ),
+    ).toBe(true);
+    expect(errs.join('')).toContain('findings ledger only, no anchor');
+    expect(
+      JSON.parse(
+        readFileSync(
+          join(dir, '.qwen/tmp/qwen-review-local-cache-candidate.json'),
+          'utf8',
+        ),
+      )['ledgerOnly'],
+    ).toBe('tracked-file visibility bits hide bytes from the diff');
+  });
+
+  it('escapes the classes JSON.stringify passes raw, not just C0', () => {
+    // This sink kept its own C0+DEL copy of the rule long after `inertText`
+    // was extracted "so the newer sinks cannot each re-derive it (and
+    // re-forget it)" — so U+2028 (a forged second line wherever the message
+    // is re-rendered), the 8-bit C1 introducers and the invisible Cf class
+    // all reached the terminal verbatim and UNQUOTED from here.
+    capture({
+      untracked: [
+        `evil${String.fromCodePoint(0x2028)}fake.ts`,
+        `bidi${String.fromCodePoint(0x202e)}.ts`,
+      ],
+      skipped: [],
+    });
+    run('plan.json');
+
+    const out = errs.join('');
+    expect(out).not.toContain(String.fromCodePoint(0x2028));
+    expect(out).not.toContain(String.fromCodePoint(0x202e));
+    expect(out).toContain('\\u2028');
+    expect(out).toContain('\\u202e');
   });
 
   it('escapes a filename carrying terminal control characters', () => {

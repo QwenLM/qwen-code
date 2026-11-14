@@ -23,6 +23,12 @@ const BUFFER = '\u2592'; // ▒ - medium shade (autocompact buffer)
 const EMPTY = '\u2591'; // ░ - light shade (free space)
 
 const CONTENT_WIDTH = 56;
+/** Label column of a category row; a wider translated label wraps the row. */
+export const CATEGORY_LABEL_WIDTH = 24;
+/** Label column of a compaction-threshold row. */
+export const THRESHOLD_LABEL_WIDTH = 22;
+/** Label column of a loaded skill's body sub-row. */
+export const BODY_LOADED_LABEL_WIDTH = 30;
 
 interface ContextUsageProps {
   modelName: string;
@@ -31,6 +37,7 @@ interface ContextUsageProps {
   breakdown: ContextCategoryBreakdown;
   builtinTools: ContextToolDetail[];
   mcpTools: ContextToolDetail[];
+  instructionFiles?: ContextMemoryDetail[];
   memoryFiles: ContextMemoryDetail[];
   skills: ContextSkillDetail[];
   /** True when totalTokens is estimated (no API call yet) */
@@ -51,6 +58,10 @@ function truncateName(name: string, maxLen: number): string {
  * Format token count for display (e.g. 1234 -> "1.2k", 123456 -> "123.5k")
  */
 function formatTokens(tokens: number): string {
+  // 999,950 rounds to 1000.0k, so it belongs in the next unit.
+  if (tokens >= 999_950) {
+    return `${(tokens / 1_000_000).toFixed(1)}m`;
+  }
   if (tokens >= 1000) {
     return `${(tokens / 1000).toFixed(1)}k`;
   }
@@ -130,7 +141,7 @@ const CategoryRow: React.FC<{
       <Box width={2}>
         <Text color={symbolColor || theme.text.secondary}>{symbol}</Text>
       </Box>
-      <Box width={24}>
+      <Box width={CATEGORY_LABEL_WIDTH}>
         <Text color={theme.text.primary}>{label}</Text>
       </Box>
       <Box flexGrow={1} justifyContent="flex-end">
@@ -160,7 +171,7 @@ const ThresholdRow: React.FC<{
           {isCurrent ? '▶' : ' '}
         </Text>
       </Box>
-      <Box width={22}>
+      <Box width={THRESHOLD_LABEL_WIDTH}>
         <Text color={theme.text.primary}>{label}</Text>
       </Box>
       <Box flexGrow={1} justifyContent="flex-end">
@@ -230,7 +241,7 @@ const CompactionThresholds: React.FC<{
       <Box width={2}>
         <Text> </Text>
       </Box>
-      <Box width={22}>
+      <Box width={THRESHOLD_LABEL_WIDTH}>
         <Text color={theme.text.primary}>{t('Current tier')}</Text>
       </Box>
       <Box flexGrow={1} justifyContent="flex-end">
@@ -275,11 +286,14 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
   breakdown,
   builtinTools,
   mcpTools,
+  instructionFiles = [],
   memoryFiles,
   skills,
   isEstimated,
   showDetails = false,
 }) => {
+  const memoryLabel =
+    breakdown.instructionFiles === undefined ? 'Memory files' : 'Auto memory';
   const hasTokenCount = totalTokens > 0;
   const percentage =
     contextWindowSize > 0 ? (totalTokens / contextWindowSize) * 100 : 0;
@@ -295,7 +309,7 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
   );
   // Sort skills: loaded first, then by total token cost descending
   const sortedSkills = [...skills].sort((a, b) => {
-    if (a.loaded !== b.loaded) return a.loaded ? -1 : 1;
+    if (!a.loaded !== !b.loaded) return a.loaded ? -1 : 1;
     const aTotal = a.tokens + (a.bodyTokens ?? 0);
     const bTotal = b.tokens + (b.bodyTokens ?? 0);
     return bTotal - aTotal;
@@ -320,13 +334,20 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
           {/* No API data yet — show hint instead of progress bar */}
           <Box marginBottom={1}>
             <Text color={theme.status.warning} italic>
-              {t('No API response yet. Send a message to see actual usage.')}
+              {breakdown.messages > 0
+                ? t(
+                    'No provider usage yet. These are local estimates, including the conversation.',
+                  )
+                : t('No API response yet. Send a message to see actual usage.')}
             </Text>
           </Box>
 
-          {/* Estimated overhead categories */}
+          {/* Estimated categories; they include the conversation after
+              /model, /restore or a resume (#12235). */}
           <Text bold color={theme.text.primary}>
-            {t('Estimated pre-conversation overhead')}
+            {breakdown.messages > 0
+              ? t('Estimated usage, including the conversation')
+              : t('Estimated pre-conversation overhead')}
           </Text>
           <Text color={theme.text.secondary}>
             {t('Model')}: {modelName}
@@ -445,9 +466,18 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
           symbolColor={theme.text.accent}
         />
       )}
+      {breakdown.instructionFiles !== undefined && (
+        <CategoryRow
+          symbol={FILLED}
+          label={t('Instruction files')}
+          tokens={breakdown.instructionFiles}
+          contextWindowSize={contextWindowSize}
+          symbolColor={theme.text.accent}
+        />
+      )}
       <CategoryRow
         symbol={FILLED}
-        label={t('Memory files')}
+        label={t(memoryLabel)}
         tokens={breakdown.memoryFiles}
         contextWindowSize={contextWindowSize}
         symbolColor={theme.text.accent}
@@ -468,23 +498,16 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
           symbolColor={theme.text.accent}
         />
       )}
-      {/* Show Messages whenever a numeric token count is available. */}
-      {hasTokenCount && (
+      {/* Show Messages whenever a token count is available, or when an
+          estimated history (after /model, /restore or a resume) drives the
+          tier. */}
+      {(hasTokenCount || breakdown.messages > 0) && (
         <CategoryRow
           symbol={FILLED}
           label={t('Messages')}
           tokens={breakdown.messages}
           contextWindowSize={contextWindowSize}
           symbolColor={theme.text.accent}
-        />
-      )}
-      {hasTokenCount && (breakdown.unattributed ?? 0) > 0 && (
-        <CategoryRow
-          symbol={FILLED}
-          label={t('Unattributed')}
-          tokens={breakdown.unattributed!}
-          contextWindowSize={contextWindowSize}
-          symbolColor={theme.text.secondary}
         />
       )}
 
@@ -531,11 +554,27 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
             </Box>
           )}
 
+          {instructionFiles.length > 0 && (
+            <Box flexDirection="column" marginTop={1}>
+              <Text bold color={theme.text.primary}>
+                {t('Instruction files')}
+              </Text>
+              {[...instructionFiles]
+                .sort((a, b) => b.tokens - a.tokens)
+                .map((file) => (
+                  <DetailRow
+                    key={file.path}
+                    name={file.path}
+                    tokens={file.tokens}
+                  />
+                ))}
+            </Box>
+          )}
           {/* Memory files detail */}
           {sortedMemoryFiles.length > 0 && (
             <Box flexDirection="column" marginTop={1}>
               <Text bold color={theme.text.primary}>
-                {t('Memory files')}
+                {t(memoryLabel)}
               </Text>
               {sortedMemoryFiles.map((file) => (
                 <DetailRow
@@ -573,7 +612,7 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
                     skill.bodyTokens > 0 && (
                       <Box width={CONTENT_WIDTH} paddingLeft={4}>
                         <Text color={theme.text.secondary}>{'  \u2514'} </Text>
-                        <Box width={30}>
+                        <Box width={BODY_LOADED_LABEL_WIDTH}>
                           <Text color={theme.text.secondary} italic>
                             {t('body loaded')}
                           </Text>

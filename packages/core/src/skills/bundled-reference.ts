@@ -207,8 +207,8 @@ export function resolveBundledReferenceSurface(
  * Whether a registered tool's schema can be withheld from the request:
  * permission-deferred by a `tools.eager` allowlist and not listed in
  * `tools.visible`. A ToolSearch reveal is not consulted, because `/clear`
- * drops it — a decision recorded once has to ask this. CodeModeOnly hides the
- * bridge, so deferred tools remain reachable through `exec` instead.
+ * drops it — a decision recorded once has to ask this. CodeModeOnly invokes
+ * deferred tools through `exec` instead of the Direct-mode bridge.
  */
 function isToolDeferredBehindToolSearch(config: Config, name: string): boolean {
   if (config.getToolMode?.() === ToolMode.CodeModeOnly) return false;
@@ -217,20 +217,21 @@ function isToolDeferredBehindToolSearch(config: Config, name: string): boolean {
 }
 
 /**
- * Whether a registered tool's schema is withheld from the request right now:
- * deferred as above and not revealed through ToolSearch yet. For a question
- * asked again on every turn, such as the Workflow keyword reminder's.
+ * Whether a registered tool's schema is withheld from the Direct-mode request
+ * right now. Used each turn by the Workflow keyword and mode reminders.
  *
- * Mirrors `ToolRegistry.isDeferredAndHidden`, which cannot be used here: it
- * answers false for a tool that is still only a lazy factory, which is exactly
- * the state while the tool asking the question is being constructed.
+ * The registry covers native deferral, but a permission-deferred lazy factory
+ * has no instance yet and still needs the construction-time fallback.
  */
 export function isToolHiddenBehindToolSearch(
   config: Config,
   name: string,
 ): boolean {
+  if (config.getToolMode?.() === ToolMode.CodeModeOnly) return false;
+  const registry = config.getToolRegistry?.();
+  if (registry?.isDeferredAndHidden?.(name)) return true;
   if (!isToolDeferredBehindToolSearch(config, name)) return false;
-  return !config.getToolRegistry?.()?.isDeferredToolRevealed?.(name);
+  return !registry?.isDeferredToolRevealed?.(name);
 }
 
 /**

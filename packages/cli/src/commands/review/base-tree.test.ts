@@ -124,6 +124,13 @@ const failedBuild = {
 // file's coverage for the lane the fence never speaks on.
 const itWhereContainmentExists = it.skipIf(process.platform === 'win32');
 
+// A fixture holding a raw 0xff name byte only exists where the filesystem
+// stores name bytes verbatim: NTFS is UTF-16 and cannot hold it, and APFS
+// rejects invalid UTF-8 with EILSEQ. Linux is the only lane this fixture is
+// verified on, so the gate is linux-only — the sibling `lib/worktree.test.ts`
+// gates its own `itWhereRawByteNamesExist` the same way.
+const itWhereByteExactNamesExist = it.skipIf(process.platform !== 'linux');
+
 describe('runBaseTree', () => {
   let repo: string;
   let worktree: string;
@@ -995,7 +1002,7 @@ describe('runBaseTree', () => {
     },
   );
 
-  itWhereContainmentExists(
+  itWhereByteExactNamesExist(
     'records a filename holding a non-UTF-8 byte instead of dying on it (R1-26)',
     () => {
       // `ls-files -z` exists to preserve a byte-exact filename, and decoding

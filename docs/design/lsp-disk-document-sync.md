@@ -118,12 +118,100 @@ retryable stale error. Ordinary non-file requests pass through unchanged.
   warmup errors; failure of a different warmup file does not prevent querying a
   synchronized target. Propagated failures reach the tool's existing failure
   message rather than claiming a clean or complete result. Successful empty
-  diagnostics still display as clean. Existing request/pull catches and public
+  diagnostics still display as clean. For the two diagnostics pulls the error
+  result design is now in place: a failed pull and an unusable response (no
+  response, or reported items none of which survive normalization) are
+  recorded per server. A `-32601` refusal is not a failure: the server never
+  implemented the pull, so it is recorded on a separate `unsupported` ledger
+  that never vetoes on either leg. A document answer is refused for it only
+  when the refusing server declares the queried extension and no answering
+  server owns it. A workspace query has no queried file and so no extension to
+  attribute a refusal to: the refusal neither vetoes a sibling's report nor
+  excuses one, and appears only in a rejection the gate already owes to
+  another cause. A document query that
+  retrieves nothing rejects when a recorded failure belongs to a server the
+  queried file does not exclude, when a declared owner's refusal stands
+  unbacked, or when a server that could own the queried file was unreachable;
+  the tool surfaces the rejection as `ToolErrorType.EXECUTION_FAILED`. An
+  authoritative empty report is clean only when it is both relevant and, for an
+  extension the tables or an explicit mapping can place, positively owned; a
+  file whose extension neither can place (an unknown extension without a
+  mapping, or an extensionless name) has no decidable owner
+  and is judged on relevance alone, as it was before ownership became a
+  requirement. A non-`file:` URI (`jdt://…`) reaches the same undecidable case
+  by another route: `synchronizeDocument` returns before sending any `didOpen`,
+  so the server answers for a document it was never sent, and the pass-through
+  is kept rather than refused, because refusing would break servers that
+  diagnose their own virtual documents. Its empty answer is therefore surfaced
+  as clean on relevance alone — as it was before this change, so it is a
+  pre-existing fail-open on the merge base rather than a regression, and no
+  scan can distinguish it from a genuinely clean render. That kept pass-through
+  is pinned at the same gate as the unplaceable-extension case, so a later
+  ownership change cannot silently turn it into a refusal. Whether such an answer
+  should instead be labelled unbacked is an open ruling, not something this
+  change settles. Relevance is decided against every extension the diagnostics
+  tables can place — the language-ID mapping, the diagnostics-local alias rows
+  and the identity-mapped language IDs — and the JS/TS family widening is
+  one-directional: a `typescript` declaration covers the JavaScript side, while
+  a `javascript`-only declaration cannot claim `.ts` or `.tsx`. The rejection
+  names which condition failed: a failure, refusal, or unreachable owner is
+  named when possible; otherwise it distinguishes a server that answered but
+  could not be attributed from the case where no configured server covers the
+  file. A server that could never own the queried file does not veto a document query;
+  a workspace query refuses an unbacked clean report while any configured
+  server is unreachable, and while any pull failed for a reason other than a
+  refusal. A server that finishes starting while a query is in flight is asked
+  before that decision, not reported as unreachable: each pull re-reads live
+  handle state and appends whatever became ready, and only handles not queried
+  yet are added, so the pass is bounded and cannot repeat a server. A handle
+  whose readiness becomes observable only after the last such read still vetoes
+  as never asked. That relevance rule excuses a server from vetoing
+  _another_ server's answer, never from being the only answer: a document
+  query that no queried server answered rejects even when every recorded
+  failure belongs to a server the queried file excludes. Other request/pull
+  catches and public
   query catches other than hierarchy provenance handling are unchanged and can
   return empty arrays or null; these are **not evidence of clean diagnostics**.
-  Broader error result design remains PR2.
 - Notification delivery is not acknowledged by the transport. This change does
   not redesign asynchronous writes/closed connections.
+
+### Explicit diagnostic ownership
+
+An `extensionToLanguage` key is direct ownership evidence even when it is not
+in the built-in extension tables. Such an extension is attributable across the
+configured servers, so a foreign empty answer cannot replace its owner's
+missing answer, and a failed foreign server cannot veto that owner's clean
+report. Explicit keys must match the document synchronization lookup (the
+lowercase extension, with or without its leading dot). This change does not
+introduce whitespace normalization; mapping values still contribute recognized
+language aliases. The diagnostics-local tables include common secondary
+extensions such as `.mts`, `.h`, and `.pyi`. A non-empty, whitespace-free
+language ID outside those tables owns its same-named extension unless it is also
+the configured server name; that distinction admits live language IDs without
+maintaining a closed allowlist while preserving the conservative treatment of
+malformed declarations and server-name keys. Without any recognized declaration
+or explicit mapping, a server-name key remains unknown and keeps its
+conservative veto. Unknown extensions without an explicit mapping retain the
+fallback above. Workspace-symbol warmup selection is unchanged.
+
+Known limitation: ownership remains fail-closed when an attributable extension
+cannot be reached from a server's declared language ID through the built-in
+tables or an explicit mapping. A healthy server using an unlisted alias can
+therefore have an authoritative clean answer refused (for example, a `pyright`
+language ID serving `.pyi`). This change does not resolve that provenance gap or
+change the fail-closed behavior; choosing between carrying configuration
+provenance and relaxing the ownership requirement requires a separate
+maintainer decision.
+
+The consumers are diagnostic ownership accounting, failure and unsupported
+attribution, initial unavailable-server reporting, newly-ready selection, and
+the final unreachable-server veto. Attribution is evaluated against live
+configuration at the final decision, and newly-ready owners' answers are counted
+even if their extension was unknown when the query began. Workspace diagnostics
+have no file extension and retain their existing relevance semantics. Regression
+tests cover custom mapping ownership, foreign vetoes, unnormalized and unknown
+declarations, owners added during a query, and the unchanged unknown-extension
+fallback.
 
 ## Costs
 
@@ -159,7 +247,11 @@ nested items, line-shifting edits, sibling queries, disk-reading servers and
 in-flight response races. Workspace diagnostic ordering, result-limit scoping,
 and symbol retries are pinned. Actual-client/tool tests reject deleted tracked
 files, thrown sends, and unsupported workspace changes, including after an
-earlier server returned results, while preserving ordinary pull-request catches. Initialization tests exercise capability production through startup.
+earlier server returned results. Other (non-diagnostics) request/pull catches
+are preserved; the two diagnostics pulls now reject a failed or unusable pull
+instead, pinned by `rejects a failed diagnostics pull instead of reporting
+clean` and its workspace twin. Initialization tests exercise capability
+production through startup.
 Mutation checks must kill each named mutant, all in `native-lsp-service.ts`
 unless another file is named, with the listed test going red: R1-5,
 `ensureDocumentSynchronized` returns a constant `true` instead of the open flag
@@ -177,7 +269,51 @@ server's tracking (`retains the unchanged server snapshot when only its sibling
 reloads`); R1-15, forced warmup passes `false` instead of the force flag
 (`forces unchanged TypeScript warmup with a monotonic didChange before retry`).
 R1-14 is the negative control: raising `DEFAULT_LSP_WARMUP_DELAY_MS` to 300 in
-`constants.ts` must leave `preserves replayed snapshots` green.
+`constants.ts` must leave `preserves replayed snapshots` green. The refusal
+gate adds four more: the `rust` row leaves `DIAGNOSTIC_LANGUAGE_ALIASES`
+(`lets a -32601 refusal from the rust owner veto a non-owner empty answer`);
+`declaredOwnerExtensions` gains the JS/TS family widening (`does not let a
+javascript-only answerer back a typescript refusal`);
+`declaredDiagnosticExtensions` stops reading the `extensionToLanguage` values
+(`clears a clean answer through a partial extensionToLanguage mapping` and
+`names the failed owner a partial mapping leaves unanswered`); the second
+rejection names the unfiltered `failures`/`unsupported` ledgers (`does not
+blame an irrelevant server whose pull resolved to nothing`). The attribution
+split adds two more: reverting the `serverDeclaredIrrelevant` guard to
+`KNOWN_DIAGNOSTIC_EXTENSIONS` (`does not let a failed sibling veto a clean
+answer for a placeable extension`, and the `pyright` row of `refuses an empty
+answer with no attributable owner from` goes red); requiring ownership when an
+extension is not attributable (`keeps a clean answer from the declared owner`,
+the `Dockerfile` row, and `keeps a clean answer for a non-file URI the tables
+cannot place`). The workspace leg and the
+attribution tables add four more: the workspace catch routes `pullUnsupported`
+back into `failures` (`keeps a clean workspace report from the pull-capable of
+two servers`, `does not treat a lone -32601 workspace refusal as a failed
+pull`, and `names a -32601 workspace refusal beside the failure that did
+veto`); `serverDeclaredIrrelevant`'s attribution predicate returns to
+`KNOWN_DIAGNOSTIC_EXTENSIONS` / `DIAGNOSTIC_LANGUAGE_IDS` (`does not let a
+downed kotlin sibling veto a clean answer it cannot own`, and the `kotlin` row
+of `refuses an empty answer with no attributable owner from` goes red);
+`declaredDiagnosticExtensions` widens all four JS/TS family IDs again
+(`does not let a downed javascript sibling veto a clean answer it cannot own`
+and its `javascriptreact` twin); the document leg drops the queried `uri` from
+its `unreachableDiagnosticServers` call (`does not let a downed python sibling
+veto a clean answer it cannot own`, with the identity-mapped rows). The
+late-ready retry adds one: dropping either leg's `pending.push` of
+`newlyReadyDiagnosticHandles` (`asks a server that became ready during the
+diagnostics query before deciding` for the document leg, its
+`workspaceDiagnostics` twin for the sweep).
+
+Explicit ownership adds six focused mutations: restoring a closed self-naming
+ID allowlist (`accepts self-naming ownership omitted from the attribution
+allowlist`);
+restoring inherited-prone mapping reads (`does not treat inherited mapping key`);
+removing the secondary TypeScript, JavaScript, C/C++, or Python rows (`keeps a
+failed owner as a veto for mapped` and the `.mts` refusal case); restoring the
+trim filter for mapping keys (`matches ownership to an untrimmed mapping key`);
+deleting the dotless mapping lookup (`accepts a dotless mapping key from the
+config loader`); and selecting terminal wording from `answeredRelevant` instead
+of `answeredAny` (`reports an answering foreign server as unattributed`).
 
 The touched service and manager and their collocated unit tests were renamed to
 kebab-case per AGENTS.md. Their barrel exports, native client type imports,

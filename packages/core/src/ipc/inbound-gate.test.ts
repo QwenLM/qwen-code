@@ -15,7 +15,9 @@ import {
   MAX_SETTLED_IDS,
   parseHeldExpiry,
   modeClass,
+  type InboundGateOptions,
   type InboundPolicy,
+  type PeerOrigin,
   type PolicyScope,
 } from './inbound-gate.js';
 import {
@@ -46,37 +48,13 @@ function unmeteredAdmission(): PeerAdmission {
   });
 }
 
-interface Harness {
-  gate: InboundGate;
-  setHeldExpiryMs: (ms: number | null) => void;
-  delivered: PeerUserFrame[];
-  /** `selfSent` as the gate reported it to `deliver`, per delivery. */
-  deliveredAsSelfSent: boolean[];
-  /** The controller grant the gate reported to `deliver`, per delivery. */
-  deliveredControllers: Array<PeerControllerIdentity | undefined>;
-  statuses: Array<{ msgId: string; status: string }>;
-  /** What the gate told senders it had dropped. */
-  drops: Array<{ msgId: string; reason: PeerDropReason }>;
-  /** What the gate told this session's user it had dropped. */
-  dropNotices: Array<{
-    msgId: string;
-    reason: PeerDropReason;
-    selfSent: boolean;
-    controller?: PeerControllerIdentity;
-  }>;
-  heldChanges: number;
-  setMode: (mode: ApprovalMode | null) => void;
-  setPolicy: (policy: InboundPolicy | undefined) => void;
-  /** Deliberately un-typed: settings.json is not type-checked. */
-  setRawPolicy: (policy: unknown) => void;
-  setScope: (scope: PolicyScope | undefined) => void;
-  throwOnMode: () => void;
-  throwOnPolicy: () => void;
-  throwOnExpiry: () => void;
-  throwOnScope: () => void;
-  failDelivery: () => void;
-  recoverDelivery: () => void;
-}
+/** A real meter, optionally with a tighter burst. */
+const meter = (bucketCapacity?: number) =>
+  new PeerAdmission(
+    bucketCapacity === undefined ? undefined : { limits: { bucketCapacity } },
+  );
+
+type Harness = ReturnType<typeof harness>;
 
 function harness(
   initial: {
@@ -87,32 +65,48 @@ function harness(
     isControllerValid?: (id: string) => boolean;
     admission?: PeerAdmission;
   } = {},
-): Harness {
-  let mode: ApprovalMode | null =
-    initial.mode === undefined ? ApprovalMode.DEFAULT : initial.mode;
-  let policy: unknown = initial.policy;
-  let heldExpiryMs: number | null =
-    initial.heldExpiryMs === undefined
+) {
+  const s = {
+    mode: (initial.mode === undefined
+      ? ApprovalMode.DEFAULT
+      : initial.mode) as ApprovalMode | null,
+    policy: initial.policy as unknown,
+    heldExpiryMs: (initial.heldExpiryMs === undefined
       ? DEFAULT_HELD_EXPIRY_MS
-      : initial.heldExpiryMs;
-  let modeThrows = false;
-  let policyThrows = false;
-  let expiryThrows = false;
-  let scope: PolicyScope | undefined = initial.scope;
-  let scopeThrows = false;
+      : initial.heldExpiryMs) as number | null,
+    scope: initial.scope as PolicyScope | undefined,
+    modeThrows: false,
+    policyThrows: false,
+    expiryThrows: false,
+    scopeThrows: false,
+    deliveryFails: false,
+    heldChanges: 0,
+  };
+  type S = typeof s;
+  const set =
+    <K extends keyof S>(key: K) =>
+    (value: S[K]) => {
+      s[key] = value;
+    };
+  const read = <T>(throws: boolean, what: string, value: T): T => {
+    if (throws) throw new Error(`${what} exploded`);
+    return value;
+  };
   const delivered: PeerUserFrame[] = [];
+  /** `selfSent` as the gate reported it to `deliver`, per delivery. */
   const deliveredAsSelfSent: boolean[] = [];
+  /** The controller grant the gate reported to `deliver`, per delivery. */
   const deliveredControllers: Array<PeerControllerIdentity | undefined> = [];
   const statuses: Array<{ msgId: string; status: string }> = [];
+  /** What the gate told senders it had dropped. */
   const drops: Array<{ msgId: string; reason: PeerDropReason }> = [];
+  /** What the gate told this session's user it had dropped. */
   const dropNotices: Array<{
     msgId: string;
     reason: PeerDropReason;
     selfSent: boolean;
     controller?: PeerControllerIdentity;
   }> = [];
-  const state = { heldChanges: 0 };
-  let deliveryFails = false;
 
   const gate = new InboundGate({
     admission: initial.admission ?? unmeteredAdmission(),
@@ -124,27 +118,21 @@ function harness(
         selfSent: origin.selfSent,
         ...(origin.controller ? { controller: origin.controller } : {}),
       }),
-    getApprovalMode: () => {
-      if (modeThrows) throw new Error('mode getter exploded');
-      return mode;
-    },
-    getPolicySetting: () => {
-      if (policyThrows) throw new Error('settings getter exploded');
-      return policy as InboundPolicy | undefined;
-    },
-    getHeldExpiryMs: () => {
-      if (expiryThrows) throw new Error('settings read exploded');
-      return heldExpiryMs;
-    },
-    getPolicyScope: () => {
-      if (scopeThrows) throw new Error('scope getter exploded');
-      return scope;
-    },
+    getApprovalMode: () => read(s.modeThrows, 'mode getter', s.mode),
+    getPolicySetting: () =>
+      read(s.policyThrows, 'settings getter', s.policy) as
+        | InboundPolicy
+        | undefined,
+    getHeldExpiryMs: () =>
+      read(s.expiryThrows, 'settings read', s.heldExpiryMs),
+    getPolicyScope: () => read(s.scopeThrows, 'scope getter', s.scope),
     ...(initial.isControllerValid
       ? { isControllerValid: initial.isControllerValid }
       : {}),
     deliver: (frame, origin) => {
-      if (deliveryFails) throw new Error('accepted-message backlog is full');
+      if (s.deliveryFails) {
+        throw new Error('accepted-message backlog is full');
+      }
       delivered.push(frame);
       deliveredAsSelfSent.push(origin.selfSent);
       deliveredControllers.push(origin.controller);
@@ -152,7 +140,7 @@ function harness(
     reportStatus: (frame, status) =>
       statuses.push({ msgId: frame.msgId, status }),
     onHeldChange: () => {
-      state.heldChanges += 1;
+      s.heldChanges += 1;
     },
   });
 
@@ -164,43 +152,22 @@ function harness(
     statuses,
     drops,
     dropNotices,
-    setHeldExpiryMs: (next) => {
-      heldExpiryMs = next;
-    },
     get heldChanges() {
-      return state.heldChanges;
+      return s.heldChanges;
     },
-    setMode: (next) => {
-      mode = next;
-    },
-    setPolicy: (next) => {
-      policy = next;
-    },
-    setRawPolicy: (next: unknown) => {
-      policy = next;
-    },
-    setScope: (next) => {
-      scope = next;
-    },
-    throwOnMode: () => {
-      modeThrows = true;
-    },
-    throwOnPolicy: () => {
-      policyThrows = true;
-    },
-    throwOnExpiry: () => {
-      expiryThrows = true;
-    },
-    throwOnScope: () => {
-      scopeThrows = true;
-    },
-    failDelivery: () => {
-      deliveryFails = true;
-    },
-    recoverDelivery: () => {
-      deliveryFails = false;
-    },
-  } as Harness;
+    setHeldExpiryMs: set('heldExpiryMs'),
+    setMode: set('mode'),
+    setPolicy: set('policy') as (policy: InboundPolicy | undefined) => void,
+    /** Deliberately un-typed: settings.json is not type-checked. */
+    setRawPolicy: set('policy'),
+    setScope: set('scope'),
+    throwOnMode: () => set('modeThrows')(true),
+    throwOnPolicy: () => set('policyThrows')(true),
+    throwOnExpiry: () => set('expiryThrows')(true),
+    throwOnScope: () => set('scopeThrows')(true),
+    failDelivery: () => set('deliveryFails')(true),
+    recoverDelivery: () => set('deliveryFails')(false),
+  };
 }
 
 /**
@@ -216,6 +183,40 @@ function frame(over: Partial<PeerUserFrame> = {}): PeerUserFrame {
     ...over,
   };
 }
+const prompting = (over: Partial<PeerUserFrame> = {}) =>
+  frame({ fromMode: 'prompting', ...over });
+const bypassing = (over: Partial<PeerUserFrame> = {}) =>
+  frame({ fromMode: 'bypass', ...over });
+const fromA = (over: Partial<PeerUserFrame> = {}) =>
+  frame({ from: '/tmp/a.sock', ...over });
+
+/** A receipt as the harness records it. */
+const receipt = (msgId: string, status: string) => ({ msgId, status });
+
+/** A harness with one frame already admitted, its verdict unchecked. */
+function withOne(
+  opts: Parameters<typeof harness>[0],
+  f: PeerUserFrame = frame(),
+  origin?: PeerOrigin,
+) {
+  const h = harness(opts);
+  h.gate.admit(f, origin);
+  return { h, f };
+}
+
+/** A bare gate that records what it delivers and each receipt status. */
+function recordingGate(
+  options: Omit<InboundGateOptions, 'deliver' | 'reportStatus'>,
+) {
+  const delivered: PeerUserFrame[] = [];
+  const statuses: string[] = [];
+  const gate = new InboundGate({
+    ...options,
+    deliver: (candidate) => delivered.push(candidate),
+    reportStatus: (_candidate, status) => statuses.push(status),
+  });
+  return { gate, delivered, statuses };
+}
 
 describe('mode parity (no explicit setting)', () => {
   let h: Harness;
@@ -225,7 +226,7 @@ describe('mode parity (no explicit setting)', () => {
 
   it('accepts a prompting sender when the receiver prompts', () => {
     h.setMode(ApprovalMode.DEFAULT);
-    const f = frame({ fromMode: 'prompting' });
+    const f = prompting();
     expect(h.gate.admit(f)).toBe('accept');
     expect(h.delivered).toEqual([f]);
   });
@@ -234,7 +235,7 @@ describe('mode parity (no explicit setting)', () => {
     // The per-action prompts guard single actions, not the agenda: a
     // message nobody watched being written waits for the user here too.
     h.setMode(ApprovalMode.DEFAULT);
-    expect(h.gate.admit(frame({ fromMode: 'bypass' }))).toBe('held');
+    expect(h.gate.admit(bypassing())).toBe('held');
     expect(h.delivered).toHaveLength(0);
     expect(h.gate.getHeld()[0].cause).toBe('mode-mismatch');
   });
@@ -247,18 +248,18 @@ describe('mode parity (no explicit setting)', () => {
 
   it('treats plan mode as prompting', () => {
     h.setMode(ApprovalMode.PLAN);
-    expect(h.gate.admit(frame({ fromMode: 'prompting' }))).toBe('accept');
-    expect(h.gate.admit(frame({ fromMode: 'bypass' }))).toBe('held');
+    expect(h.gate.admit(prompting())).toBe('accept');
+    expect(h.gate.admit(bypassing())).toBe('held');
   });
 
   it('accepts a bypassing sender when the receiver also bypasses', () => {
     h.setMode(ApprovalMode.YOLO);
-    expect(h.gate.admit(frame({ fromMode: 'bypass' }))).toBe('accept');
+    expect(h.gate.admit(bypassing())).toBe('accept');
   });
 
   it('holds a prompting sender when the receiver bypasses', () => {
     h.setMode(ApprovalMode.YOLO);
-    expect(h.gate.admit(frame({ fromMode: 'prompting' }))).toBe('held');
+    expect(h.gate.admit(prompting())).toBe('held');
     expect(h.gate.getHeld()[0].cause).toBe('mode-mismatch');
     expect(h.delivered).toHaveLength(0);
   });
@@ -271,13 +272,13 @@ describe('mode parity (no explicit setting)', () => {
 
   it('fails closed when the mode is unknown', () => {
     h.setMode(null);
-    expect(h.gate.admit(frame({ fromMode: 'bypass' }))).toBe('held');
+    expect(h.gate.admit(bypassing())).toBe('held');
     expect(h.gate.getHeld()[0].cause).toBe('mode-unknown');
   });
 
   it('fails closed when the mode getter throws', () => {
     h.throwOnMode();
-    expect(h.gate.admit(frame({ fromMode: 'bypass' }))).toBe('held');
+    expect(h.gate.admit(bypassing())).toBe('held');
     expect(h.gate.getHeld()[0].cause).toBe('mode-unknown');
   });
 });
@@ -287,32 +288,32 @@ describe('receiver modes that do not review every action', () => {
     // AUTO_EDIT applies every edit-shaped tool call with no prompt and no
     // classifier, so an accepted message can rewrite files unseen.
     const h = harness({ mode: ApprovalMode.AUTO_EDIT });
-    expect(h.gate.admit(frame({ fromMode: 'prompting' }))).toBe('held');
+    expect(h.gate.admit(prompting())).toBe('held');
     expect(h.gate.admit(frame())).toBe('held');
     expect(h.delivered).toHaveLength(0);
   });
 
   it('still accepts a bypassing sender in auto-edit', () => {
     const h = harness({ mode: ApprovalMode.AUTO_EDIT });
-    expect(h.gate.admit(frame({ fromMode: 'bypass' }))).toBe('accept');
+    expect(h.gate.admit(bypassing())).toBe('accept');
   });
 
   it('holds in AUTO because workspace edits bypass the classifier', () => {
     const h = harness({ mode: ApprovalMode.AUTO });
-    expect(h.gate.admit(frame({ fromMode: 'prompting' }))).toBe('held');
+    expect(h.gate.admit(prompting())).toBe('held');
     expect(h.gate.admit(frame())).toBe('held');
     expect(h.delivered).toHaveLength(0);
   });
 
   it('still accepts a bypassing sender in AUTO', () => {
     const h = harness({ mode: ApprovalMode.AUTO });
-    expect(h.gate.admit(frame({ fromMode: 'bypass' }))).toBe('accept');
+    expect(h.gate.admit(bypassing())).toBe('accept');
   });
 
   it('fails closed on a mode value this build does not know', () => {
     const h = harness();
     h.setMode('turbo' as ApprovalMode);
-    expect(h.gate.admit(frame({ fromMode: 'bypass' }))).toBe('held');
+    expect(h.gate.admit(bypassing())).toBe('held');
     expect(h.gate.getHeld()[0].cause).toBe('mode-unknown');
   });
 });
@@ -371,7 +372,7 @@ describe('review classes', () => {
 
   it('releases a bypassing sender once the receiver bypasses too', () => {
     const h = harness({ mode: ApprovalMode.DEFAULT });
-    const f = frame({ fromMode: 'bypass' });
+    const f = bypassing();
     expect(h.gate.admit(f)).toBe('held');
     h.setMode(ApprovalMode.YOLO);
     expect(h.gate.reevaluate('mode-changed')).toBe(1);
@@ -379,8 +380,7 @@ describe('review classes', () => {
   });
 
   it('keeps holding an unasserted sender across a mode change', () => {
-    const h = harness({ mode: ApprovalMode.DEFAULT });
-    h.gate.admit(frame());
+    const { h } = withOne({ mode: ApprovalMode.DEFAULT });
     h.setMode(ApprovalMode.YOLO);
     expect(h.gate.reevaluate('mode-changed')).toBe(0);
     expect(h.gate.getHeld()).toHaveLength(1);
@@ -390,7 +390,7 @@ describe('review classes', () => {
 describe('policy scope', () => {
   it('records which scope set a hold on the held entry', () => {
     const h = harness({ policy: 'hold', scope: 'workspace' });
-    h.gate.admit(frame({ fromMode: 'prompting' }));
+    h.gate.admit(prompting());
     expect(h.gate.getHeld()[0]).toMatchObject({
       cause: 'explicit-setting',
       policyScope: 'workspace',
@@ -399,14 +399,14 @@ describe('policy scope', () => {
 
   it('leaves the scope off the entry when the host does not report one', () => {
     const h = harness({ policy: 'hold' });
-    h.gate.admit(frame({ fromMode: 'prompting' }));
+    h.gate.admit(prompting());
     expect(h.gate.getHeld()[0]).not.toHaveProperty('policyScope');
   });
 
   it('records the scope of an unreadable value too', () => {
     const h = harness({ scope: 'system' });
     h.setRawPolicy('maybe');
-    h.gate.admit(frame({ fromMode: 'prompting' }));
+    h.gate.admit(prompting());
     expect(h.gate.getHeld()[0]).toMatchObject({
       cause: 'policy-unreadable',
       policyScope: 'system',
@@ -416,7 +416,7 @@ describe('policy scope', () => {
   it('does not let a broken scope getter change the verdict', () => {
     const h = harness({ policy: 'hold' });
     h.throwOnScope();
-    expect(h.gate.admit(frame({ fromMode: 'prompting' }))).toBe('held');
+    expect(h.gate.admit(prompting())).toBe('held');
     expect(h.gate.getHeld()[0]).toMatchObject({ cause: 'explicit-setting' });
     expect(h.gate.getHeld()[0]).not.toHaveProperty('policyScope');
   });
@@ -427,7 +427,7 @@ describe('policy scope', () => {
       policy: 'hold',
       scope: 'user',
     });
-    const f = frame({ fromMode: 'prompting' });
+    const f = prompting();
     h.gate.admit(f);
     expect(h.gate.getHeld()[0].policyScope).toBe('user');
 
@@ -445,7 +445,7 @@ describe('policy scope', () => {
 
   it('keeps the entry identity when nothing about the hold changed', () => {
     const h = harness({ policy: 'hold', scope: 'user' });
-    h.gate.admit(frame({ fromMode: 'prompting' }));
+    h.gate.admit(prompting());
     const before = h.gate.getHeld()[0];
     h.gate.reevaluate('no-op');
     expect(h.gate.getHeld()[0]).toBe(before);
@@ -455,12 +455,12 @@ describe('policy scope', () => {
 describe('explicit setting', () => {
   it('accept overrides a mode mismatch', () => {
     const h = harness({ mode: ApprovalMode.YOLO, policy: 'accept' });
-    expect(h.gate.admit(frame({ fromMode: 'prompting' }))).toBe('accept');
+    expect(h.gate.admit(prompting())).toBe('accept');
   });
 
   it('hold overrides an otherwise-accepting parity result', () => {
     const h = harness({ mode: ApprovalMode.DEFAULT, policy: 'hold' });
-    expect(h.gate.admit(frame({ fromMode: 'prompting' }))).toBe('held');
+    expect(h.gate.admit(prompting())).toBe('held');
     expect(h.gate.getHeld()[0].cause).toBe('explicit-setting');
   });
 
@@ -501,21 +501,32 @@ describe('unreadable policy setting', () => {
 });
 
 describe('duplicate msgId', () => {
-  it('keeps one held entry per id and repeats the verdict', () => {
-    // Two entries under one id can never be decided individually: /peers
-    // refuses an id that matches more than one message.
+  /**
+   * Parks a benign frame, then a copy with another body (re-spelled as
+   * `twinId` if given); exactly one entry must remain.
+   */
+  function admitTwins(forged: string, firstId?: string, twinId?: string) {
     const h = harness({ mode: ApprovalMode.YOLO });
-    const first = frame({ message: { role: 'user', content: 'benign' } });
-    const forgery = {
+    const message = { role: 'user' as const, content: 'benign' };
+    const first = frame(firstId ? { msgId: firstId, message } : { message });
+    const twin = {
       ...first,
-      message: { role: 'user' as const, content: 'rm -rf /' },
+      ...(twinId ? { msgId: twinId } : {}),
+      message: { role: 'user' as const, content: forged },
     };
 
     expect(h.gate.admit(first)).toBe('held');
-    expect(h.gate.admit(forgery)).toBe('held');
+    expect(h.gate.admit(twin)).toBe('held');
 
     expect(h.gate.getHeld()).toHaveLength(1);
     expect(h.gate.getHeld()[0].frame.message.content).toBe('benign');
+    return { h, first };
+  }
+
+  it('keeps one held entry per id and repeats the verdict', () => {
+    // Two entries under one id can never be decided individually: /peers
+    // refuses an id that matches more than one message.
+    const { h, first } = admitTwins('rm -rf /');
     expect(h.gate.decide(first.msgId, 'approve')).toBe('done');
     expect(h.delivered).toEqual([first]);
   });
@@ -524,22 +535,7 @@ describe('duplicate msgId', () => {
     // /peers resolves case-insensitively, so 'Task-01' and 'task-01' are
     // the same handle: parking both would make neither individually
     // decidable, and approving one would release the other with it.
-    const h = harness({ mode: ApprovalMode.YOLO });
-    const first = frame({
-      msgId: 'Task-01',
-      message: { role: 'user', content: 'benign' },
-    });
-    const clone = {
-      ...first,
-      msgId: 'task-01',
-      message: { role: 'user' as const, content: 'malicious' },
-    };
-
-    expect(h.gate.admit(first)).toBe('held');
-    expect(h.gate.admit(clone)).toBe('held');
-
-    expect(h.gate.getHeld()).toHaveLength(1);
-    expect(h.gate.getHeld()[0].frame.message.content).toBe('benign');
+    admitTwins('malicious', 'Task-01', 'task-01');
   });
 
   it('treats a dash-variant id as the same message', () => {
@@ -547,32 +543,16 @@ describe('duplicate msgId', () => {
     // and 'task0001' render the identical handle: parking both would make
     // neither individually decidable, and only accept-all/deny-all could
     // reach them.
-    const h = harness({ mode: ApprovalMode.YOLO });
-    const first = frame({
-      msgId: 'task-0001',
-      message: { role: 'user', content: 'benign' },
-    });
-    const clone = {
-      ...first,
-      msgId: 'task0001',
-      message: { role: 'user' as const, content: 'malicious' },
-    };
-
-    expect(h.gate.admit(first)).toBe('held');
-    expect(h.gate.admit(clone)).toBe('held');
-
-    expect(h.gate.getHeld()).toHaveLength(1);
-    expect(h.gate.getHeld()[0].frame.message.content).toBe('benign');
+    admitTwins('malicious', 'task-0001', 'task0001');
   });
 });
 
 describe('settled ids', () => {
   it('refuses a re-sent id after a refusal even when the policy flips', () => {
-    // A refusal is terminal on the sender's ledger too, so re-admitting
-    // the id would leave the sending transcript saying "don't re-send
-    // it" while this session acts on the message: `settleSentPeerMessage`
-    // returns undefined for the follow-up `delivered` receipt, and the
-    // sender is never told.
+    // A refusal is terminal on the sender's ledger too: re-admitting the id
+    // would leave the sending transcript saying "don't re-send it" while
+    // this session acts on it: `settleSentPeerMessage` returns undefined
+    // for the follow-up `delivered` receipt, and the sender is never told.
     const h = harness({ policy: 'refuse' });
     const f = frame({ msgId: 'task-0002' });
 
@@ -588,55 +568,45 @@ describe('settled ids', () => {
     // The user's denial is final: a peer re-sending the same id with a
     // swapped body must not get a second decision once modes change.
     const h = harness({ mode: ApprovalMode.YOLO });
-    const f = frame({
+    const f = prompting({
       msgId: 'task-0001',
-      fromMode: 'prompting',
       message: { role: 'user', content: 'benign' },
     });
     expect(h.gate.admit(f)).toBe('held');
     expect(h.gate.decide(f.msgId, 'deny')).toBe('done');
 
     h.setMode(ApprovalMode.DEFAULT);
-    const forgery = frame({
+    const forgery = prompting({
       msgId: 'task-0001',
-      fromMode: 'prompting',
       message: { role: 'user', content: 'malicious' },
     });
     expect(h.gate.admit(forgery)).toBe('refused');
     expect(h.delivered).toHaveLength(0);
     expect(h.gate.getHeld()).toHaveLength(0);
-    expect(h.statuses.at(-1)).toEqual({
-      msgId: 'task-0001',
-      status: 'denied',
-    });
+    expect(h.statuses.at(-1)).toEqual(receipt('task-0001', 'denied'));
 
     // Canonical form: a case/dash-variant resend is the same settled id.
-    const variant = frame({ msgId: 'TASK0001', fromMode: 'prompting' });
+    const variant = prompting({ msgId: 'TASK0001' });
     expect(h.gate.admit(variant)).toBe('refused');
   });
 
   it('acks but does not re-deliver an id that was already delivered', () => {
     const h = harness({ mode: ApprovalMode.DEFAULT });
-    const f = frame({ msgId: 'task-0002', fromMode: 'prompting' });
+    const f = prompting({ msgId: 'task-0002' });
     expect(h.gate.admit(f)).toBe('accept');
     expect(h.delivered).toHaveLength(1);
-    expect(
-      h.gate.admit(frame({ msgId: 'task-0002', fromMode: 'prompting' })),
-    ).toBe('refused');
+    expect(h.gate.admit(prompting({ msgId: 'task-0002' }))).toBe('refused');
     expect(h.delivered).toHaveLength(1);
-    expect(h.statuses.at(-1)).toEqual({
-      msgId: 'task-0002',
-      status: 'delivered',
-    });
+    expect(h.statuses.at(-1)).toEqual(receipt('task-0002', 'delivered'));
   });
 
   it('settles an approved id against re-sends', () => {
     const h = harness({ mode: ApprovalMode.YOLO });
-    const f = frame({ msgId: 'task-0003', fromMode: 'prompting' });
+    const f = prompting({ msgId: 'task-0003' });
     expect(h.gate.admit(f)).toBe('held');
     expect(h.gate.decide(f.msgId, 'approve')).toBe('done');
 
-    const resend = frame({ msgId: 'task-0003', fromMode: 'prompting' });
+    const resend = prompting({ msgId: 'task-0003' });
     expect(h.gate.admit(resend)).toBe('refused');
     expect(h.delivered).toHaveLength(1);
   });
@@ -646,16 +616,16 @@ describe('settled ids', () => {
     // flood can neither destroy the entry the user is looking at nor free
     // its handle for a re-sent body to occupy.
     const h = harness({ mode: ApprovalMode.YOLO });
-    const first = frame({ msgId: 'task-0004', fromMode: 'prompting' });
+    const first = prompting({ msgId: 'task-0004' });
     expect(h.gate.admit(first)).toBe('held');
     for (let i = 0; i < MAX_HELD_MESSAGES; i++) {
-      h.gate.admit(frame({ msgId: `filler-${i}`, fromMode: 'prompting' }));
+      h.gate.admit(prompting({ msgId: `filler-${i}` }));
     }
     const isHeld = (msgId: string) =>
       h.gate.getHeld().some((e) => e.frame.msgId === msgId);
     expect(isHeld('task-0004')).toBe(true);
 
-    const forgery = frame({ msgId: 'task-0004', fromMode: 'prompting' });
+    const forgery = prompting({ msgId: 'task-0004' });
     expect(h.gate.admit(forgery)).toBe('held');
     expect(
       h.gate.getHeld().filter((e) => e.frame.msgId === 'task-0004'),
@@ -678,7 +648,7 @@ describe('settled ids', () => {
     // A failed delivery is not a verdict; the retry must still land.
     const h = harness({ mode: ApprovalMode.DEFAULT });
     h.failDelivery();
-    const f = frame({ msgId: 'task-0007', fromMode: 'prompting' });
+    const f = prompting({ msgId: 'task-0007' });
     expect(h.gate.admit(f)).toBe('dropped');
     // A full queue is a drop with a reason of its own, not an expiry: no
     // decision was pending, so none can have run out.
@@ -695,16 +665,12 @@ describe('settled ids', () => {
 
   it('lets an honest retry of the same body land after a queue-full drop', () => {
     // On a real meter the failed delivery's body is rolled back with the
-    // drop: a verbatim retry once the queue drains must meet the same
-    // repeat check it would have met had the first attempt never
-    // arrived, not be dropped as a duplicate of a message that never
-    // landed.
-    const h = harness({
-      mode: ApprovalMode.DEFAULT,
-      admission: new PeerAdmission(),
-    });
+    // drop: a verbatim retry once the queue drains must meet the repeat
+    // check as if the first attempt never arrived, not be dropped as a
+    // duplicate of a message that never landed.
+    const h = harness({ mode: ApprovalMode.DEFAULT, admission: meter() });
     h.failDelivery();
-    const f = frame({ msgId: 'task-0007', fromMode: 'prompting' });
+    const f = prompting({ msgId: 'task-0007' });
     expect(h.gate.admit(f)).toBe('dropped');
     expect(h.drops.at(-1)).toEqual({
       msgId: 'task-0007',
@@ -719,14 +685,12 @@ describe('settled ids', () => {
   it('prunes the oldest settled ids beyond the cap', () => {
     const h = harness({ mode: ApprovalMode.DEFAULT });
     const ids = Array.from({ length: MAX_SETTLED_IDS + 1 }, (_, i) => `s-${i}`);
-    const prompting = (msgId: string) =>
-      frame({ msgId, fromMode: 'prompting' });
     for (const msgId of ids) {
-      expect(h.gate.admit(prompting(msgId))).toBe('accept');
+      expect(h.gate.admit(prompting({ msgId }))).toBe('accept');
     }
     // The oldest fell out of memory; the newest repeats its verdict.
-    expect(h.gate.admit(prompting(ids[0]))).toBe('accept');
-    expect(h.gate.admit(prompting(ids[ids.length - 1]))).toBe('refused');
+    expect(h.gate.admit(prompting({ msgId: ids[0] }))).toBe('accept');
+    expect(h.gate.admit(prompting({ msgId: ids.at(-1) }))).toBe('refused');
   });
 });
 
@@ -771,7 +735,7 @@ describe('a transport that throws', () => {
       reportStatus: (_frame, status) => statuses.push(status),
       reportDropped: (_frame, reason) => drops.push(reason),
     });
-    expect(gate.admit(frame({ fromMode: 'prompting' }))).toBe('dropped');
+    expect(gate.admit(prompting())).toBe('dropped');
     expect(statuses).toEqual([]);
     expect(drops).toEqual(['queue-full']);
   });
@@ -779,38 +743,27 @@ describe('a transport that throws', () => {
 
 describe('receipts', () => {
   it('reports delivered on accept', () => {
-    const h = harness({ mode: ApprovalMode.DEFAULT });
-    const f = frame({ fromMode: 'prompting' });
-    h.gate.admit(f);
-    expect(h.statuses).toEqual([{ msgId: f.msgId, status: 'delivered' }]);
+    const { h, f } = withOne({ mode: ApprovalMode.DEFAULT }, prompting());
+    expect(h.statuses).toEqual([receipt(f.msgId, 'delivered')]);
   });
 
   it('reports held on hold, then delivered on approval', () => {
-    const h = harness({ mode: ApprovalMode.YOLO });
-    const f = frame();
-    h.gate.admit(f);
-    expect(h.statuses).toEqual([{ msgId: f.msgId, status: 'held' }]);
+    const { h, f } = withOne({ mode: ApprovalMode.YOLO });
+    expect(h.statuses).toEqual([receipt(f.msgId, 'held')]);
 
     expect(h.gate.decide(f.msgId, 'approve')).toBe('done');
     expect(h.delivered).toEqual([f]);
-    expect(h.statuses.at(-1)).toEqual({ msgId: f.msgId, status: 'delivered' });
+    expect(h.statuses.at(-1)).toEqual(receipt(f.msgId, 'delivered'));
   });
 
   it('drops an approved hold when a session swap invalidates its pin', () => {
     let currentSessionId = 'session-a';
-    const delivered: PeerUserFrame[] = [];
-    const statuses: string[] = [];
-    const gate = new InboundGate({
+    const { gate, delivered, statuses } = recordingGate({
       getApprovalMode: () => ApprovalMode.YOLO,
       getPolicySetting: () => undefined,
       getSessionId: () => currentSessionId,
-      deliver: (candidate) => delivered.push(candidate),
-      reportStatus: (_candidate, status) => statuses.push(status),
     });
-    const held = frame({
-      fromMode: 'prompting',
-      toSessionId: 'session-a',
-    });
+    const held = prompting({ toSessionId: 'session-a' });
     expect(gate.admit(held)).toBe('held');
 
     currentSessionId = 'session-b';
@@ -828,16 +781,13 @@ describe('receipts', () => {
     // watching `/peers`, and the release path already reports
     // `misaddressed` if they act on it.
     let currentSessionId = 'session-a';
-    const statuses: string[] = [];
     let policy: InboundPolicy | undefined = 'hold';
-    const gate = new InboundGate({
+    const { gate, statuses } = recordingGate({
       getApprovalMode: () => ApprovalMode.DEFAULT,
       getPolicySetting: () => policy,
       getSessionId: () => currentSessionId,
-      deliver: () => {},
-      reportStatus: (_candidate, status) => statuses.push(status),
     });
-    const parked = frame({ fromMode: 'prompting', toSessionId: 'session-a' });
+    const parked = prompting({ toSessionId: 'session-a' });
     expect(gate.admit(parked)).toBe('held');
 
     currentSessionId = 'session-b';
@@ -858,17 +808,13 @@ describe('receipts', () => {
     // unanswered question is not "yes": releasing on it would deliver to
     // an address nobody confirmed and receipt the sender `delivered`.
     let owns: (id: string) => boolean = () => true;
-    const delivered: PeerUserFrame[] = [];
-    const statuses: string[] = [];
-    const gate = new InboundGate({
+    const { gate, delivered, statuses } = recordingGate({
       admission: unmeteredAdmission(),
       getApprovalMode: () => ApprovalMode.DEFAULT,
       getPolicySetting: () => 'hold',
       ownsSessionId: (id) => owns(id),
-      deliver: (candidate) => delivered.push(candidate),
-      reportStatus: (_candidate, status) => statuses.push(status),
     });
-    const parked = frame({ fromMode: 'prompting', toSessionId: 'session-a' });
+    const parked = prompting({ toSessionId: 'session-a' });
     expect(gate.admit(parked)).toBe('held');
 
     owns = () => {
@@ -896,17 +842,13 @@ describe('receipts', () => {
     // parked message, and the pin check throws while it is being let out.
     let owns: (id: string) => boolean = () => true;
     let mode: ApprovalMode = ApprovalMode.DEFAULT;
-    const delivered: PeerUserFrame[] = [];
-    const statuses: string[] = [];
-    const gate = new InboundGate({
+    const { gate, delivered, statuses } = recordingGate({
       admission: unmeteredAdmission(),
       getApprovalMode: () => mode,
       getPolicySetting: () => undefined,
       ownsSessionId: (id) => owns(id),
-      deliver: (candidate) => delivered.push(candidate),
-      reportStatus: (_candidate, status) => statuses.push(status),
     });
-    const parked = frame({ fromMode: 'bypass', toSessionId: 'session-a' });
+    const parked = bypassing({ toSessionId: 'session-a' });
     expect(gate.admit(parked)).toBe('held');
 
     mode = ApprovalMode.YOLO;
@@ -924,24 +866,20 @@ describe('receipts', () => {
     // path asks whether the frame's addressee is still one of them — a
     // hosted session can go while its message waits for review.
     const hosted = new Set(['session-a', 'session-b']);
-    const delivered: PeerUserFrame[] = [];
-    const statuses: string[] = [];
-    const gate = new InboundGate({
+    const { gate, delivered, statuses } = recordingGate({
       getApprovalMode: () => ApprovalMode.YOLO,
       getPolicySetting: () => 'hold',
       ownsSessionId: (id) => hosted.has(id),
-      deliver: (candidate) => delivered.push(candidate),
-      reportStatus: (_candidate, status) => statuses.push(status),
     });
 
-    const forB = frame({ fromMode: 'prompting', toSessionId: 'session-b' });
+    const forB = prompting({ toSessionId: 'session-b' });
     expect(gate.admit(forB)).toBe('held');
     expect(gate.decide(forB.msgId, 'approve')).toBe('done');
     expect(delivered).toEqual([forB]);
 
     // The addressee goes while its message waits: releasing it now would
     // hand one session's message to whatever else the process hosts.
-    const forA = frame({ fromMode: 'prompting', toSessionId: 'session-a' });
+    const forA = prompting({ toSessionId: 'session-a' });
     expect(gate.admit(forA)).toBe('held');
     hosted.delete('session-a');
     expect(gate.decide(forA.msgId, 'approve')).toBe('gone');
@@ -953,17 +891,13 @@ describe('receipts', () => {
     // With one session an unpinned frame could only have meant that one;
     // with several there is nothing to guess from, so it is misaddressed
     // on the release path exactly as it is on arrival.
-    const delivered: PeerUserFrame[] = [];
-    const statuses: string[] = [];
-    const gate = new InboundGate({
+    const { gate, delivered, statuses } = recordingGate({
       getApprovalMode: () => ApprovalMode.YOLO,
       getPolicySetting: () => 'hold',
       ownsSessionId: () => true,
-      deliver: (candidate) => delivered.push(candidate),
-      reportStatus: (_candidate, status) => statuses.push(status),
     });
 
-    const unpinned = frame({ fromMode: 'prompting' });
+    const unpinned = prompting();
     expect(gate.admit(unpinned)).toBe('held');
     expect(gate.decide(unpinned.msgId, 'approve')).toBe('gone');
     expect(delivered).toEqual([]);
@@ -974,16 +908,12 @@ describe('receipts', () => {
     for (const path of ['decide', 'reevaluate'] as const) {
       let currentSessionId = 'session-a';
       let mode = ApprovalMode.YOLO;
-      const delivered: PeerUserFrame[] = [];
-      const statuses: string[] = [];
-      const gate = new InboundGate({
+      const { gate, delivered, statuses } = recordingGate({
         getApprovalMode: () => mode,
         getPolicySetting: () => undefined,
         getSessionId: () => currentSessionId,
-        deliver: (candidate) => delivered.push(candidate),
-        reportStatus: (_candidate, status) => statuses.push(status),
       });
-      const held = frame({ fromMode: 'prompting', toSessionId: 'session-a' });
+      const held = prompting({ toSessionId: 'session-a' });
       expect(gate.admit(held)).toBe('held');
       currentSessionId = 'session-b';
       if (path === 'decide') {
@@ -1011,12 +941,10 @@ describe('receipts', () => {
   });
 
   it('reports denied when a held message is rejected', () => {
-    const h = harness({ mode: ApprovalMode.YOLO });
-    const f = frame();
-    h.gate.admit(f);
+    const { h, f } = withOne({ mode: ApprovalMode.YOLO });
     expect(h.gate.decide(f.msgId, 'deny')).toBe('done');
     expect(h.delivered).toHaveLength(0);
-    expect(h.statuses.at(-1)).toEqual({ msgId: f.msgId, status: 'denied' });
+    expect(h.statuses.at(-1)).toEqual(receipt(f.msgId, 'denied'));
   });
 
   it('reports a decision on an unknown id as gone rather than throwing', () => {
@@ -1081,9 +1009,7 @@ describe('hold buffer bounds', () => {
 
 describe('reevaluate', () => {
   it('releases messages once the modes agree', () => {
-    const h = harness({ mode: ApprovalMode.YOLO });
-    const f = frame({ fromMode: 'prompting' });
-    h.gate.admit(f);
+    const { h, f } = withOne({ mode: ApprovalMode.YOLO }, prompting());
     expect(h.delivered).toHaveLength(0);
 
     h.setMode(ApprovalMode.DEFAULT);
@@ -1095,19 +1021,12 @@ describe('reevaluate', () => {
   it('drops a releasable hold when a session swap invalidates its pin', () => {
     let mode = ApprovalMode.YOLO;
     let currentSessionId = 'session-a';
-    const delivered: PeerUserFrame[] = [];
-    const statuses: string[] = [];
-    const gate = new InboundGate({
+    const { gate, delivered, statuses } = recordingGate({
       getApprovalMode: () => mode,
       getPolicySetting: () => undefined,
       getSessionId: () => currentSessionId,
-      deliver: (candidate) => delivered.push(candidate),
-      reportStatus: (_candidate, status) => statuses.push(status),
     });
-    const held = frame({
-      fromMode: 'prompting',
-      toSessionId: 'session-a',
-    });
+    const held = prompting({ toSessionId: 'session-a' });
     expect(gate.admit(held)).toBe('held');
 
     currentSessionId = 'session-b';
@@ -1119,21 +1038,17 @@ describe('reevaluate', () => {
   });
 
   it('drops the backlog when the policy becomes refuse', () => {
-    const h = harness({ mode: ApprovalMode.YOLO });
-    const f = frame();
-    h.gate.admit(f);
+    const { h, f } = withOne({ mode: ApprovalMode.YOLO });
 
     h.setPolicy('refuse');
     expect(h.gate.reevaluate('setting-changed')).toBe(0);
     expect(h.gate.getHeld()).toHaveLength(0);
     expect(h.delivered).toHaveLength(0);
-    expect(h.statuses.at(-1)).toEqual({ msgId: f.msgId, status: 'denied' });
+    expect(h.statuses.at(-1)).toEqual(receipt(f.msgId, 'denied'));
   });
 
   it('keeps holding and refreshes the cause when it changes', () => {
-    const h = harness({ mode: ApprovalMode.YOLO });
-    const f = frame();
-    h.gate.admit(f);
+    const { h } = withOne({ mode: ApprovalMode.YOLO });
     expect(h.gate.getHeld()[0].cause).toBe('no-mode-asserted');
 
     h.setPolicy('hold');
@@ -1152,13 +1067,11 @@ describe('reevaluate', () => {
 
 describe('shutdown', () => {
   it('settles everything held as expired', () => {
-    const h = harness({ mode: ApprovalMode.YOLO });
-    const f = frame();
-    h.gate.admit(f);
+    const { h, f } = withOne({ mode: ApprovalMode.YOLO });
 
     h.gate.shutdown();
     expect(h.gate.getHeld()).toHaveLength(0);
-    expect(h.statuses.at(-1)).toEqual({ msgId: f.msgId, status: 'expired' });
+    expect(h.statuses.at(-1)).toEqual(receipt(f.msgId, 'expired'));
   });
 
   it('expires a late arrival instead of parking it forever', () => {
@@ -1168,7 +1081,7 @@ describe('shutdown', () => {
     const late = frame();
     expect(h.gate.admit(late)).toBe('refused');
     expect(h.gate.getHeld()).toHaveLength(0);
-    expect(h.statuses.at(-1)).toEqual({ msgId: late.msgId, status: 'expired' });
+    expect(h.statuses.at(-1)).toEqual(receipt(late.msgId, 'expired'));
   });
 
   it('expires an accepted message that arrives after shutdown', () => {
@@ -1179,15 +1092,13 @@ describe('shutdown', () => {
     const late = frame();
     expect(h.gate.admit(late)).toBe('refused');
     expect(h.delivered).toHaveLength(0);
-    expect(h.statuses.at(-1)).toEqual({ msgId: late.msgId, status: 'expired' });
+    expect(h.statuses.at(-1)).toEqual(receipt(late.msgId, 'expired'));
   });
 });
 
 describe('onHeldChange', () => {
   it('fires on hold and on decision', () => {
-    const h = harness({ mode: ApprovalMode.YOLO });
-    const f = frame();
-    h.gate.admit(f);
+    const { h, f } = withOne({ mode: ApprovalMode.YOLO });
     expect(h.heldChanges).toBe(1);
     h.gate.decide(f.msgId, 'deny');
     expect(h.heldChanges).toBe(2);
@@ -1216,7 +1127,7 @@ describe('delivery failure after review', () => {
     // unrecoverable drop: the message stays reviewable and the sender
     // hears it is still waiting, not that it expired.
     const h = harness({ mode: ApprovalMode.YOLO });
-    const f = frame({ fromMode: 'prompting' });
+    const f = prompting();
     expect(h.gate.admit(f)).toBe('held');
 
     h.failDelivery();
@@ -1224,13 +1135,11 @@ describe('delivery failure after review', () => {
     expect(h.delivered).toHaveLength(0);
     expect(h.gate.getHeld()).toHaveLength(1);
     expect(h.gate.getHeld()[0].frame.msgId).toBe(f.msgId);
-    expect(h.statuses.at(-1)).toEqual({ msgId: f.msgId, status: 'held' });
+    expect(h.statuses.at(-1)).toEqual(receipt(f.msgId, 'held'));
   });
 
   it('lets the user retry a failed approval once delivery recovers', () => {
-    const h = harness({ mode: ApprovalMode.YOLO });
-    const f = frame({ fromMode: 'prompting' });
-    h.gate.admit(f);
+    const { h, f } = withOne({ mode: ApprovalMode.YOLO }, prompting());
     h.failDelivery();
     expect(h.gate.decide(f.msgId, 'approve')).toBe('failed');
 
@@ -1238,13 +1147,13 @@ describe('delivery failure after review', () => {
     expect(h.gate.decide(f.msgId, 'approve')).toBe('done');
     expect(h.delivered).toEqual([f]);
     expect(h.gate.getHeld()).toHaveLength(0);
-    expect(h.statuses.at(-1)).toEqual({ msgId: f.msgId, status: 'delivered' });
+    expect(h.statuses.at(-1)).toEqual(receipt(f.msgId, 'delivered'));
   });
 
   it('reinserts a failed approval at its original position', () => {
     const h = harness({ mode: ApprovalMode.YOLO });
-    const first = frame({ fromMode: 'prompting' });
-    const second = frame({ fromMode: 'prompting' });
+    const first = prompting();
+    const second = prompting();
     h.gate.admit(first);
     h.gate.admit(second);
 
@@ -1257,9 +1166,7 @@ describe('delivery failure after review', () => {
   });
 
   it('re-holds messages whose delivery fails during reevaluate', () => {
-    const h = harness({ mode: ApprovalMode.YOLO });
-    const f = frame({ fromMode: 'prompting' });
-    h.gate.admit(f);
+    const { h, f } = withOne({ mode: ApprovalMode.YOLO }, prompting());
 
     h.failDelivery();
     h.setMode(ApprovalMode.DEFAULT);
@@ -1267,42 +1174,36 @@ describe('delivery failure after review', () => {
     expect(h.delivered).toHaveLength(0);
     expect(h.gate.getHeld()).toHaveLength(1);
     expect(h.gate.getHeld()[0].frame.msgId).toBe(f.msgId);
-    expect(h.statuses.at(-1)).toEqual({ msgId: f.msgId, status: 'held' });
+    expect(h.statuses.at(-1)).toEqual(receipt(f.msgId, 'held'));
   });
 });
 
 describe('describeHoldCause', () => {
   it('explains every cause in user terms', () => {
-    expect(describeHoldCause('explicit-setting')).toContain(
-      'crossSessionInbound',
-    );
-    expect(describeHoldCause('mode-mismatch')).toContain('without per-action');
-    expect(describeHoldCause('mode-mismatch')).toContain(
-      'different review modes',
-    );
-    expect(describeHoldCause('no-mode-asserted')).toContain('did not say');
-    expect(describeHoldCause('mode-unknown')).toContain('could not be');
-    expect(describeHoldCause('policy-unreadable')).toContain(
-      'crossSessionInbound',
-    );
+    for (const [cause, text] of [
+      ['explicit-setting', 'crossSessionInbound'],
+      ['mode-mismatch', 'without per-action'],
+      ['mode-mismatch', 'different review modes'],
+      ['no-mode-asserted', 'did not say'],
+      ['mode-unknown', 'could not be'],
+      ['policy-unreadable', 'crossSessionInbound'],
+    ] as const) {
+      expect(describeHoldCause(cause)).toContain(text);
+    }
   });
 
   it('names who set the policy instead of blaming the user', () => {
-    expect(describeHoldCause('explicit-setting', 'user')).toContain('your ');
-    expect(describeHoldCause('explicit-setting', 'workspace')).toContain(
-      'repository',
-    );
+    for (const [cause, scope, text] of [
+      ['explicit-setting', 'user', 'your '],
+      ['explicit-setting', 'workspace', 'repository'],
+      ['explicit-setting', 'system', 'system setting'],
+      ['policy-unreadable', 'workspace', 'workspace settings'],
+      ['policy-unreadable', 'system', 'system settings'],
+    ] as const) {
+      expect(describeHoldCause(cause, scope)).toContain(text);
+    }
     expect(describeHoldCause('explicit-setting', 'workspace')).not.toContain(
       'your ',
-    );
-    expect(describeHoldCause('explicit-setting', 'system')).toContain(
-      'system setting',
-    );
-    expect(describeHoldCause('policy-unreadable', 'workspace')).toContain(
-      'workspace settings',
-    );
-    expect(describeHoldCause('policy-unreadable', 'system')).toContain(
-      'system settings',
     );
     // The parity causes have no scope to name; passing one is harmless.
     expect(describeHoldCause('mode-mismatch', 'workspace')).toBe(
@@ -1322,7 +1223,7 @@ describe('self-sent messages (child token)', () => {
     expect(h.gate.admit(f, own)).toBe('accept');
     expect(h.delivered).toEqual([f]);
     expect(h.deliveredAsSelfSent).toEqual([true]);
-    expect(h.statuses).toEqual([{ msgId: f.msgId, status: 'delivered' }]);
+    expect(h.statuses).toEqual([receipt(f.msgId, 'delivered')]);
   });
 
   it('holds the same frame when the transport does not vouch for it', () => {
@@ -1356,13 +1257,11 @@ describe('self-sent messages (child token)', () => {
     const h = harness({ policy: 'refuse' });
     const f = frame();
     expect(h.gate.admit(f, own)).toBe('refused');
-    expect(h.statuses).toEqual([{ msgId: f.msgId, status: 'refused' }]);
+    expect(h.statuses).toEqual([receipt(f.msgId, 'refused')]);
   });
 
   it('keeps its origin through a manual approval', () => {
-    const h = harness({ policy: 'hold' });
-    const f = frame();
-    h.gate.admit(f, own);
+    const { h, f } = withOne({ policy: 'hold' }, frame(), own);
     expect(h.gate.decide(f.msgId, 'approve')).toBe('done');
     expect(h.deliveredAsSelfSent).toEqual([true]);
   });
@@ -1379,6 +1278,18 @@ describe('self-sent messages (child token)', () => {
 describe('controller grants', () => {
   const VOICE: PeerControllerIdentity = { id: 'c_0123abcd', label: 'voice' };
   const viaController = { selfSent: false, controller: VOICE };
+  const holdAtDefault = { mode: ApprovalMode.DEFAULT, policy: 'hold' } as const;
+  /** One frame held (policy `hold`) on a grant valid until `revoke()`. */
+  function onRevocableGrant(mode?: ApprovalMode) {
+    let isValid = true;
+    const opts = {
+      mode,
+      policy: 'hold' as const,
+      isControllerValid: () => isValid,
+    };
+    const { h, f } = withOne(opts, frame(), viaController);
+    return { h, f, revoke: () => (isValid = false) };
+  }
 
   it('accepts a message a peer would be held for', () => {
     // No `fromMode` at all: an external program has no review class to
@@ -1388,7 +1299,7 @@ describe('controller grants', () => {
     expect(h.gate.admit(f, viaController)).toBe('accept');
     expect(h.delivered).toEqual([f]);
     expect(h.deliveredControllers).toEqual([VOICE]);
-    expect(h.statuses).toEqual([{ msgId: f.msgId, status: 'delivered' }]);
+    expect(h.statuses).toEqual([receipt(f.msgId, 'delivered')]);
   });
 
   it('accepts into either review class', () => {
@@ -1410,7 +1321,7 @@ describe('controller grants', () => {
   });
 
   it('yields to an explicit hold and keeps the grant on the entry', () => {
-    const h = harness({ mode: ApprovalMode.DEFAULT, policy: 'hold' });
+    const h = harness(holdAtDefault);
     const f = frame();
     expect(h.gate.admit(f, viaController)).toBe('held');
     expect(h.gate.getHeld()[0]).toMatchObject({
@@ -1424,7 +1335,7 @@ describe('controller grants', () => {
     const h = harness({ policy: 'refuse' });
     const f = frame();
     expect(h.gate.admit(f, viaController)).toBe('refused');
-    expect(h.statuses).toEqual([{ msgId: f.msgId, status: 'refused' }]);
+    expect(h.statuses).toEqual([receipt(f.msgId, 'refused')]);
   });
 
   it('fails closed when the configured policy is invalid', () => {
@@ -1440,18 +1351,14 @@ describe('controller grants', () => {
   it('keeps its origin through a manual approval', () => {
     // Releasing a parked message has to rebuild the envelope it would
     // have had on arrival, controller attribution included.
-    const h = harness({ policy: 'hold' });
-    const f = frame();
-    h.gate.admit(f, viaController);
+    const { h, f } = withOne({ policy: 'hold' }, frame(), viaController);
     expect(h.gate.decide(f.msgId, 'approve')).toBe('done');
     expect(h.deliveredControllers).toEqual([VOICE]);
     expect(h.deliveredAsSelfSent).toEqual([false]);
   });
 
   it('keeps its origin through a re-evaluation', () => {
-    const h = harness({ mode: ApprovalMode.DEFAULT, policy: 'hold' });
-    const f = frame();
-    h.gate.admit(f, viaController);
+    const { h, f } = withOne(holdAtDefault, frame(), viaController);
     h.setPolicy(undefined);
     expect(h.gate.reevaluate('setting cleared')).toBe(1);
     expect(h.delivered).toEqual([f]);
@@ -1459,9 +1366,7 @@ describe('controller grants', () => {
   });
 
   it('forgets a revoked grant before automatic re-evaluation', () => {
-    const h = harness({ mode: ApprovalMode.DEFAULT, policy: 'hold' });
-    const f = frame();
-    h.gate.admit(f, viaController);
+    const { h } = withOne(holdAtDefault, frame(), viaController);
 
     expect(h.gate.forgetController(VOICE.id)).toBe(1);
     expect(h.gate.getHeld()).toMatchObject([{ cause: 'explicit-setting' }]);
@@ -1474,35 +1379,22 @@ describe('controller grants', () => {
   });
 
   it('forgets every invalid id removed with the same credential', () => {
-    let isValid = true;
-    const h = harness({
-      policy: 'hold',
-      isControllerValid: () => isValid,
-    });
+    const { h, revoke } = onRevocableGrant();
     const other: PeerControllerIdentity = {
       id: 'c_9999ffff',
       label: 'voice alias',
     };
-    h.gate.admit(frame(), viaController);
     h.gate.admit(frame(), { selfSent: false, controller: other });
 
-    isValid = false;
+    revoke();
     expect(h.gate.forgetController(VOICE.id)).toBe(2);
     expect(h.gate.getHeld()).toHaveLength(2);
     expect(h.gate.getHeld().every((entry) => !entry.controller)).toBe(true);
   });
 
   it('forgets a grant that is no longer valid before automatic re-evaluation', () => {
-    let isValid = true;
-    const h = harness({
-      mode: ApprovalMode.DEFAULT,
-      policy: 'hold',
-      isControllerValid: () => isValid,
-    });
-    const f = frame();
-    h.gate.admit(f, viaController);
-
-    isValid = false;
+    const { h, revoke } = onRevocableGrant(ApprovalMode.DEFAULT);
+    revoke();
     h.setPolicy(undefined);
     expect(h.gate.reevaluate('setting cleared')).toBe(0);
     expect(h.delivered).toHaveLength(0);
@@ -1511,24 +1403,15 @@ describe('controller grants', () => {
   });
 
   it('does not attribute a manually approved message to an invalid grant', () => {
-    let isValid = true;
-    const h = harness({
-      policy: 'hold',
-      isControllerValid: () => isValid,
-    });
-    const f = frame();
-    h.gate.admit(f, viaController);
-
-    isValid = false;
+    const { h, f, revoke } = onRevocableGrant();
+    revoke();
     expect(h.gate.decide(f.msgId, 'approve')).toBe('done');
     expect(h.delivered).toEqual([f]);
     expect(h.deliveredControllers).toEqual([undefined]);
   });
 
   it('keeps its origin when re-evaluation changes only the hold cause', () => {
-    const h = harness({ mode: ApprovalMode.DEFAULT, policy: 'hold' });
-    const f = frame();
-    h.gate.admit(f, viaController);
+    const { h } = withOne(holdAtDefault, frame(), viaController);
     h.throwOnPolicy();
     expect(h.gate.reevaluate('policy became unreadable')).toBe(0);
     expect(h.gate.getHeld()[0]).toMatchObject({
@@ -1555,13 +1438,9 @@ describe('controller grants', () => {
     // The order that matters: `hold` beats the grant, and the grant
     // beats a class mismatch.
     const h = harness({ mode: ApprovalMode.DEFAULT });
-    expect(h.gate.admit(frame({ fromMode: 'bypass' }), viaController)).toBe(
-      'accept',
-    );
+    expect(h.gate.admit(bypassing(), viaController)).toBe('accept');
     h.setPolicy('hold');
-    expect(h.gate.admit(frame({ fromMode: 'bypass' }), viaController)).toBe(
-      'held',
-    );
+    expect(h.gate.admit(bypassing(), viaController)).toBe('held');
   });
 });
 
@@ -1571,25 +1450,34 @@ describe('held message expiry', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.useRealTimers();
   });
+
+  /** Drives performance.now() by hand, so the wall clock can step alone. */
+  function pinMonotonic() {
+    let now = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => now);
+    return (ms: number) => {
+      now += ms;
+    };
+  }
 
   it('expires a held message and tells the sender nobody answered', () => {
     const h = harness({ policy: 'hold', heldExpiryMs: 60_000 });
     const f = frame();
     expect(h.gate.admit(f)).toBe('held');
-    expect(h.statuses).toEqual([{ msgId: f.msgId, status: 'held' }]);
+    expect(h.statuses).toEqual([receipt(f.msgId, 'held')]);
 
     vi.advanceTimersByTime(60_001);
 
     expect(h.gate.getHeld()).toHaveLength(0);
-    expect(h.statuses.at(-1)).toEqual({ msgId: f.msgId, status: 'expired' });
+    expect(h.statuses.at(-1)).toEqual(receipt(f.msgId, 'expired'));
     expect(h.delivered).toHaveLength(0);
   });
 
   it('leaves a message alone until its hold actually runs out', () => {
-    const h = harness({ policy: 'hold', heldExpiryMs: 60_000 });
-    h.gate.admit(frame());
+    const { h } = withOne({ policy: 'hold', heldExpiryMs: 60_000 });
     vi.advanceTimersByTime(59_000);
     expect(h.gate.getHeld()).toHaveLength(1);
     vi.advanceTimersByTime(2_000);
@@ -1597,16 +1485,14 @@ describe('held message expiry', () => {
   });
 
   it('notifies the UI when a message expires', () => {
-    const h = harness({ policy: 'hold', heldExpiryMs: 60_000 });
-    h.gate.admit(frame());
+    const { h } = withOne({ policy: 'hold', heldExpiryMs: 60_000 });
     const before = h.heldChanges;
     vi.advanceTimersByTime(60_001);
     expect(h.heldChanges).toBeGreaterThan(before);
   });
 
   it('never expires when the lifetime is null', () => {
-    const h = harness({ policy: 'hold', heldExpiryMs: null });
-    h.gate.admit(frame());
+    const { h } = withOne({ policy: 'hold', heldExpiryMs: null });
     vi.advanceTimersByTime(24 * 60 * 60 * 1000);
     expect(h.gate.getHeld()).toHaveLength(1);
     expect(h.statuses.map((s) => s.status)).toEqual(['held']);
@@ -1623,39 +1509,28 @@ describe('held message expiry', () => {
     // The first is 60 s old here, the second only 30 s.
     vi.advanceTimersByTime(30_001);
     expect(h.gate.getHeld().map((e) => e.frame.msgId)).toEqual([second.msgId]);
-    expect(h.statuses.at(-1)).toEqual({
-      msgId: first.msgId,
-      status: 'expired',
-    });
+    expect(h.statuses.at(-1)).toEqual(receipt(first.msgId, 'expired'));
 
     vi.advanceTimersByTime(30_000);
     expect(h.gate.getHeld()).toHaveLength(0);
-    expect(h.statuses.at(-1)).toEqual({
-      msgId: second.msgId,
-      status: 'expired',
-    });
+    expect(h.statuses.at(-1)).toEqual(receipt(second.msgId, 'expired'));
   });
 
   it('is gone rather than releasable once it has expired', () => {
-    const h = harness({ policy: 'hold', heldExpiryMs: 60_000 });
-    const f = frame();
-    h.gate.admit(f);
-    // `setSystemTime`, not `advanceTimersByTime`: advancing fires the
-    // armed timer, which sweeps before `decide()` is even called, so the
-    // guard at the top of `decide()` would never run and deleting it
-    // would leave this test green. A suspended or starved clock is the
-    // case the guard exists for -- and the one where a user who ran
-    // /peers (which does not sweep) would otherwise have an overdue
-    // message injected and receipted 'delivered'.
+    const { h, f } = withOne({ policy: 'hold', heldExpiryMs: 60_000 });
+    // `setSystemTime`, not `advanceTimersByTime`: advancing fires the armed
+    // timer, which sweeps before `decide()` runs, so the guard at its top
+    // would never run and deleting it would leave this test green. A
+    // suspended or starved clock is what the guard is for, and where a user
+    // who ran /peers (which does not sweep) would get an overdue message
+    // injected and receipted 'delivered'.
     vi.setSystemTime(Date.now() + 60_001);
     expect(h.gate.decide(f.msgId, 'approve')).toBe('gone');
     expect(h.delivered).toHaveLength(0);
   });
 
   it('applies a shortened lifetime to messages already waiting', () => {
-    const h = harness({ policy: 'hold', heldExpiryMs: 10 * 60_000 });
-    const f = frame();
-    h.gate.admit(f);
+    const { h, f } = withOne({ policy: 'hold', heldExpiryMs: 10 * 60_000 });
     vi.advanceTimersByTime(2 * 60_000);
     expect(h.gate.getHeld()).toHaveLength(1);
 
@@ -1665,12 +1540,11 @@ describe('held message expiry', () => {
     h.gate.reevaluate('setting changed');
 
     expect(h.gate.getHeld()).toHaveLength(0);
-    expect(h.statuses.at(-1)).toEqual({ msgId: f.msgId, status: 'expired' });
+    expect(h.statuses.at(-1)).toEqual(receipt(f.msgId, 'expired'));
   });
 
   it('gives a longer lifetime to messages already waiting', () => {
-    const h = harness({ policy: 'hold', heldExpiryMs: 60_000 });
-    h.gate.admit(frame());
+    const { h } = withOne({ policy: 'hold', heldExpiryMs: 60_000 });
     vi.advanceTimersByTime(30_000);
     h.setHeldExpiryMs(10 * 60_000);
     h.gate.reevaluate('setting changed');
@@ -1680,8 +1554,7 @@ describe('held message expiry', () => {
   });
 
   it('stops expiring once the lifetime becomes null', () => {
-    const h = harness({ policy: 'hold', heldExpiryMs: 60_000 });
-    h.gate.admit(frame());
+    const { h } = withOne({ policy: 'hold', heldExpiryMs: 60_000 });
     h.setHeldExpiryMs(null);
     h.gate.reevaluate('setting changed');
 
@@ -1690,9 +1563,7 @@ describe('held message expiry', () => {
   });
 
   it('does not restart the clock when a release fails', () => {
-    const h = harness({ policy: 'hold', heldExpiryMs: 60_000 });
-    const f = frame();
-    h.gate.admit(f);
+    const { h, f } = withOne({ policy: 'hold', heldExpiryMs: 60_000 });
     vi.advanceTimersByTime(50_000);
 
     h.failDelivery();
@@ -1702,7 +1573,7 @@ describe('held message expiry', () => {
     // Ten seconds of its minute are left, not a fresh minute.
     vi.advanceTimersByTime(10_001);
     expect(h.gate.getHeld()).toHaveLength(0);
-    expect(h.statuses.at(-1)).toEqual({ msgId: f.msgId, status: 'expired' });
+    expect(h.statuses.at(-1)).toEqual(receipt(f.msgId, 'expired'));
   });
 
   it('sweeps on arrival even if the timer never fired', () => {
@@ -1723,92 +1594,76 @@ describe('held message expiry', () => {
   it('clamps the delay for an entry with no monotonic anchor', () => {
     // The clamp is only reachable through the wall-clock fallback: every
     // entry `admit()` builds carries `monotonicAt`, so its age is never
-    // negative and the delay never exceeds the lifetime. An entry
-    // without the anchor -- an older caller, or a hand-built one -- ages
-    // on the wall clock alone, and a far-backward step then makes
-    // `expiryMs - age` overflow setTimeout's 32-bit ceiling. Node clamps
-    // such a delay to 1 ms and warns, so the callback re-arms the same
-    // oversized value and spins at ~1 kHz until the buffer drains.
+    // negative and the delay never exceeds the lifetime. An entry without
+    // the anchor (an older caller, or a hand-built one) ages on the wall
+    // clock alone, and a far-backward step then makes `expiryMs - age`
+    // overflow setTimeout's 32-bit ceiling. Node clamps such a delay to
+    // 1 ms and warns, so the callback re-arms the same oversized value and
+    // spins at ~1 kHz until the buffer drains.
     //
-    // `vi.setSystemTime` cannot be used to reach this through `ageOf`:
-    // vitest's faked `performance.now` moves with it, so the monotonic
-    // side never diverges and the age stays ~0.
+    // `vi.setSystemTime` cannot reach this through `ageOf`: vitest's faked
+    // `performance.now` moves with it, so the age stays ~0.
     const delays: number[] = [];
-    const spy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(((
       fn: () => void,
       ms?: number,
     ) => {
       delays.push(ms ?? 0);
       return { unref: () => {} } as unknown as NodeJS.Timeout;
     }) as unknown as typeof setTimeout);
-    try {
-      const h = harness({ policy: 'hold', heldExpiryMs: 60_000 });
-      h.gate.admit(frame());
-      // Strip the anchor, then step the wall clock back 30 days.
-      const entry = h.gate.getHeld()[0] as { monotonicAt?: number };
-      delete entry.monotonicAt;
-      vi.setSystemTime(Date.now() - 30 * 24 * 60 * 60_000);
-      delays.length = 0;
+    const { h } = withOne({ policy: 'hold', heldExpiryMs: 60_000 });
+    // Strip the anchor, then step the wall clock back 30 days.
+    const entry = h.gate.getHeld()[0] as { monotonicAt?: number };
+    delete entry.monotonicAt;
+    vi.setSystemTime(Date.now() - 30 * 24 * 60 * 60_000);
+    delays.length = 0;
 
-      h.gate.reevaluate('clock-step');
+    h.gate.reevaluate('clock-step');
 
-      expect(delays.length).toBeGreaterThan(0);
-      // Unclamped this would be ~2.592e12; the ceiling is what stops the
-      // 1 ms re-arm loop.
-      expect(delays[0]).toBe(2 ** 31 - 1);
-    } finally {
-      spy.mockRestore();
-    }
+    expect(delays.length).toBeGreaterThan(0);
+    // Unclamped this would be ~2.592e12; the ceiling is what stops the
+    // 1 ms re-arm loop.
+    expect(delays[0]).toBe(2 ** 31 - 1);
   });
 
   it('expires on the monotonic clock when the wall clock steps backward', () => {
-    // The reason `monotonicAt` exists. A backward NTP correction makes
-    // the wall age negative, so a wall-only reading never sees the hold
-    // as overdue and the message is parked past its lifetime with no
-    // receipt. The clocks have to be driven apart explicitly: under fake
-    // timers `vi.setSystemTime` moves both.
-    let monotonic = 0;
-    const perf = vi
-      .spyOn(performance, 'now')
-      .mockImplementation(() => monotonic);
-    try {
-      const h = harness({ policy: 'hold', heldExpiryMs: 60_000 });
-      const f = frame();
-      h.gate.admit(f);
+    // The reason `monotonicAt` exists. A backward NTP correction makes the
+    // wall age negative, so a wall-only reading never sees the hold as
+    // overdue and the message is parked past its lifetime with no receipt.
+    // Under fake timers `vi.setSystemTime` moves both clocks, so the
+    // monotonic one is driven apart by hand.
+    const advanceMonotonic = pinMonotonic();
+    const { h, f } = withOne({ policy: 'hold', heldExpiryMs: 60_000 });
 
-      // An hour backward, four seconds in: wall age is now about -1h.
-      monotonic += 4_000;
-      vi.setSystemTime(Date.now() - 60 * 60_000);
-      expect(Date.now() - h.gate.getHeld()[0].heldAt).toBeLessThan(0);
+    // An hour backward, four seconds in: wall age is now about -1h.
+    advanceMonotonic(4_000);
+    vi.setSystemTime(Date.now() - 60 * 60_000);
+    expect(Date.now() - h.gate.getHeld()[0].heldAt).toBeLessThan(0);
 
-      // A full lifetime of monotonic time passes.
-      monotonic += 60_001;
-      h.gate.admit(frame());
+    // A full lifetime of monotonic time passes.
+    advanceMonotonic(60_001);
+    h.gate.admit(frame());
 
-      expect(
-        h.statuses.some((s) => s.msgId === f.msgId && s.status === 'expired'),
-      ).toBe(true);
-    } finally {
-      perf.mockRestore();
-    }
+    expect(
+      h.statuses.some((s) => s.msgId === f.msgId && s.status === 'expired'),
+    ).toBe(true);
   });
 
   it('keeps the buffer oldest-first when a failed release re-parks', () => {
-    // `reevaluate` walks the buffer in order but appends a failed release
-    // at the END, keeping its original (older) timestamp -- so the buffer
-    // stops being oldest-first. That misaims two things that read it
-    // positionally: the expiry timer armed from the head, and the
-    // `held.shift()` eviction at MAX_HELD_MESSAGES, which would then
-    // evict the newest message instead of the oldest.
+    // `reevaluate` walks the buffer in order but appended a failed release
+    // at the END with its original (older) timestamp, so the buffer stopped
+    // being oldest-first. That misaims both positional readers: the expiry
+    // timer armed from the head, and the `held.shift()` eviction at
+    // MAX_HELD_MESSAGES, which would evict the newest instead of the oldest.
     //
-    // Park both under an unknown mode, then resolve it to one that
-    // releases exactly one of them: `bypass` is accepted by an auto-edit
-    // receiver, `prompting` is still held on the mode mismatch.
+    // Park both under an unknown mode, then resolve it to one that releases
+    // exactly one: an auto-edit receiver accepts `bypass` and still holds
+    // `prompting` on the mode mismatch.
     const h = harness({ mode: null, heldExpiryMs: 60_000 });
-    const older = frame({ fromMode: 'bypass' });
+    const older = bypassing();
     expect(h.gate.admit(older)).toBe('held');
     vi.advanceTimersByTime(10_000);
-    const newer = frame({ fromMode: 'prompting' });
+    const newer = prompting();
     expect(h.gate.admit(newer)).toBe('held');
 
     h.failDelivery();
@@ -1850,59 +1705,46 @@ describe('held message expiry', () => {
   });
 
   it('evicts by age, not by wall clock, after the clocks diverge', () => {
-    // The buffer is ordered so `held.shift()` evicts the oldest at the
-    // cap. Sorting on `heldAt` alone reintroduces the inversion the sort
-    // exists to prevent: after a backward wall-clock step, an entry
-    // admitted since the step carries a smaller `heldAt` and would sort
-    // ahead of a genuinely older one -- so the newer message is evicted
-    // and its sender receipted `expired` early.
-    //
-    // `vi.setSystemTime` alone cannot diverge the clocks: it moves
-    // Date.now() while the fake timers also move performance.now(). The
-    // monotonic side is pinned separately so only the wall clock steps.
-    let monotonic = 0;
-    const perf = vi
-      .spyOn(performance, 'now')
-      .mockImplementation(() => monotonic);
-    try {
-      const h = harness({ policy: 'hold', heldExpiryMs: null });
-      const older = frame();
-      h.gate.admit(older);
-      monotonic += 60_000;
-      // The wall clock steps back an hour; the monotonic clock does not.
-      vi.setSystemTime(Date.now() - 60 * 60_000);
-      const newer = frame();
-      h.gate.admit(newer);
+    // The buffer is ordered so `held.shift()` evicts the oldest at the cap.
+    // Sorting on `heldAt` alone reintroduces the inversion the sort exists
+    // to prevent: after a backward wall-clock step, an entry admitted since
+    // carries a smaller `heldAt` and would sort ahead of a genuinely older
+    // one, so the newer message is evicted and its sender receipted
+    // `expired` early. `vi.setSystemTime` alone moves both clocks under
+    // fake timers, so the monotonic side is pinned separately.
+    const advanceMonotonic = pinMonotonic();
+    const h = harness({ policy: 'hold', heldExpiryMs: null });
+    const older = frame();
+    h.gate.admit(older);
+    advanceMonotonic(60_000);
+    // The wall clock steps back an hour; the monotonic clock does not.
+    vi.setSystemTime(Date.now() - 60 * 60_000);
+    const newer = frame();
+    h.gate.admit(newer);
 
-      // By `heldAt` the newer entry now looks older and would sort first.
-      const held = h.gate.getHeld();
-      expect(held[0].frame.msgId).toBe(older.msgId);
-      expect(held[1].heldAt).toBeLessThan(held[0].heldAt);
+    // By `heldAt` the newer entry now looks older and would sort first.
+    const held = h.gate.getHeld();
+    expect(held[0].frame.msgId).toBe(older.msgId);
+    expect(held[1].heldAt).toBeLessThan(held[0].heldAt);
 
-      h.gate.reevaluate('test');
-      expect(h.gate.getHeld().map((e) => e.frame.msgId)).toEqual([
-        older.msgId,
-        newer.msgId,
-      ]);
+    h.gate.reevaluate('test');
+    expect(h.gate.getHeld().map((e) => e.frame.msgId)).toEqual([
+      older.msgId,
+      newer.msgId,
+    ]);
 
-      // Fill to the cap. Nothing is evicted any more, so what the order
-      // still decides is what `/peers` shows first — and that must be the
-      // genuinely oldest entry, not the one with the smaller wall-clock
-      // stamp.
-      for (let i = 0; i < MAX_HELD_MESSAGES - 2; i++) h.gate.admit(frame());
-      expect(h.gate.getHeld()).toHaveLength(MAX_HELD_MESSAGES);
-      expect(h.gate.admit(frame())).toBe('dropped');
-      expect(h.gate.getHeld()[0]!.frame.msgId).toBe(older.msgId);
-      expect(h.statuses.some((s) => s.status === 'expired')).toBe(false);
-    } finally {
-      perf.mockRestore();
-    }
+    // Fill to the cap. Nothing is evicted any more, so the order decides
+    // what `/peers` shows first, and that must be the genuinely oldest
+    // entry, not the one with the smaller wall-clock stamp.
+    for (let i = 0; i < MAX_HELD_MESSAGES - 2; i++) h.gate.admit(frame());
+    expect(h.gate.getHeld()).toHaveLength(MAX_HELD_MESSAGES);
+    expect(h.gate.admit(frame())).toBe('dropped');
+    expect(h.gate.getHeld()[0]!.frame.msgId).toBe(older.msgId);
+    expect(h.statuses.some((s) => s.status === 'expired')).toBe(false);
   });
 
   it('takes a still-unexpired message through the gate normally', () => {
-    const h = harness({ policy: 'hold', heldExpiryMs: 60_000 });
-    const f = frame();
-    h.gate.admit(f);
+    const { h, f } = withOne({ policy: 'hold', heldExpiryMs: 60_000 });
     vi.advanceTimersByTime(30_000);
     expect(h.gate.decide(f.msgId, 'approve')).toBe('done');
     expect(h.delivered).toHaveLength(1);
@@ -1941,14 +1783,11 @@ describe('admission', () => {
   }
 
   it('drops a sender that outruns its burst, before any policy runs', () => {
-    const h = harness({
-      policy: 'accept',
-      admission: new PeerAdmission({ limits: { bucketCapacity: 2 } }),
-    });
+    const h = harness({ policy: 'accept', admission: meter(2) });
 
-    expect(h.gate.admit(frame({ from: '/tmp/a.sock' }))).toBe('accept');
-    expect(h.gate.admit(frame({ from: '/tmp/a.sock' }))).toBe('accept');
-    expect(h.gate.admit(frame({ from: '/tmp/a.sock' }))).toBe('dropped');
+    expect(h.gate.admit(fromA())).toBe('accept');
+    expect(h.gate.admit(fromA())).toBe('accept');
+    expect(h.gate.admit(fromA())).toBe('dropped');
 
     expect(h.delivered).toHaveLength(2);
     expect(h.drops).toHaveLength(1);
@@ -1959,31 +1798,25 @@ describe('admission', () => {
   it('meters before it looks the id up, so a re-sent id cannot draw a receipt each time', () => {
     // The settled and held lookups both answer with a receipt, and
     // receipts are the first thing a flood starves.
-    const h = harness({
-      policy: 'hold',
-      admission: new PeerAdmission({ limits: { bucketCapacity: 1 } }),
-    });
-    const f = frame({ from: '/tmp/a.sock' });
+    const h = harness({ policy: 'hold', admission: meter(1) });
+    const f = fromA();
 
     expect(h.gate.admit(f)).toBe('held');
     expect(h.gate.admit(f)).toBe('dropped');
     expect(h.gate.admit(f)).toBe('dropped');
 
     // One 'held' receipt for the message that landed, and nothing more.
-    expect(h.statuses).toEqual([{ msgId: f.msgId, status: 'held' }]);
+    expect(h.statuses).toEqual([receipt(f.msgId, 'held')]);
     expect(h.drops).toHaveLength(2);
   });
 
   it('meters a sender a refusing session would have turned away anyway', () => {
     // Otherwise `refuse` is the cheapest way to make a session generate
     // one outbound connection per inbound frame.
-    const h = harness({
-      policy: 'refuse',
-      admission: new PeerAdmission({ limits: { bucketCapacity: 1 } }),
-    });
+    const h = harness({ policy: 'refuse', admission: meter(1) });
 
-    expect(h.gate.admit(frame({ from: '/tmp/a.sock' }))).toBe('refused');
-    expect(h.gate.admit(frame({ from: '/tmp/a.sock' }))).toBe('dropped');
+    expect(h.gate.admit(fromA())).toBe('refused');
+    expect(h.gate.admit(fromA())).toBe('dropped');
     expect(h.statuses.filter((s) => s.status === 'refused')).toHaveLength(1);
   });
 
@@ -1999,8 +1832,8 @@ describe('admission', () => {
       }),
     });
 
-    h.gate.admit(frame({ from: '/tmp/a.sock', msgId: 'first' }));
-    const rejected = frame({ from: '/tmp/a.sock', msgId: 'second' });
+    h.gate.admit(fromA({ msgId: 'first' }));
+    const rejected = fromA({ msgId: 'second' });
     expect(h.gate.admit(rejected)).toBe('dropped');
 
     clock.advance(2000);
@@ -2010,8 +1843,7 @@ describe('admission', () => {
 
   /** The same words twice, under a fresh id each time. */
   function repeat(over: Partial<PeerUserFrame> = {}): PeerUserFrame {
-    return frame({
-      from: '/tmp/a.sock',
+    return fromA({
       message: { role: 'user', content: 'are you done yet' },
       ...over,
     });
@@ -2020,7 +1852,7 @@ describe('admission', () => {
   it('drops a peer repeating itself, and says which it was', () => {
     // A fresh id every time, which is what a model in a retry loop mints:
     // the id guard cannot see it, so the body is what has to.
-    const h = harness({ policy: 'accept', admission: new PeerAdmission() });
+    const h = harness({ policy: 'accept', admission: meter() });
 
     expect(h.gate.admit(repeat())).toBe('accept');
     expect(h.gate.admit(repeat({ msgId: 'fresh-id' }))).toBe('dropped');
@@ -2029,7 +1861,7 @@ describe('admission', () => {
 
   it('does not call a repeat from this session own processes a duplicate', () => {
     // A hook that reports the same line twice is reporting two facts.
-    const h = harness({ policy: 'accept', admission: new PeerAdmission() });
+    const h = harness({ policy: 'accept', admission: meter() });
 
     expect(h.gate.admit(repeat(), { selfSent: true })).toBe('accept');
     expect(
@@ -2040,64 +1872,46 @@ describe('admission', () => {
 
   it('does not call a repeat from a trusted controller a duplicate', () => {
     const controller = { id: 'c_1234abcd', label: 'voice' };
-    const h = harness({ policy: 'accept', admission: new PeerAdmission() });
+    const viaGrant = { selfSent: false, controller };
+    const h = harness({ policy: 'accept', admission: meter() });
 
-    expect(h.gate.admit(repeat(), { selfSent: false, controller })).toBe(
+    expect(h.gate.admit(repeat(), viaGrant)).toBe('accept');
+    expect(h.gate.admit(repeat({ msgId: 'fresh-id' }), viaGrant)).toBe(
       'accept',
     );
-    expect(
-      h.gate.admit(repeat({ msgId: 'fresh-id' }), {
-        selfSent: false,
-        controller,
-      }),
-    ).toBe('accept');
     expect(h.drops).toHaveLength(0);
   });
 
   it('still rate limits a sender that is exempt from the repeat check', () => {
-    const h = harness({
-      policy: 'accept',
-      admission: new PeerAdmission({ limits: { bucketCapacity: 1 } }),
-    });
+    const h = harness({ policy: 'accept', admission: meter(1) });
 
-    h.gate.admit(frame({ from: '/tmp/a.sock' }), { selfSent: true });
-    expect(
-      h.gate.admit(frame({ from: '/tmp/a.sock' }), { selfSent: true }),
-    ).toBe('dropped');
+    h.gate.admit(fromA(), { selfSent: true });
+    expect(h.gate.admit(fromA(), { selfSent: true })).toBe('dropped');
     expect(h.drops.at(-1)?.reason).toBe('rate-limited');
   });
 
   it('meters each sender separately', () => {
-    const h = harness({
-      policy: 'accept',
-      admission: new PeerAdmission({ limits: { bucketCapacity: 1 } }),
-    });
+    const h = harness({ policy: 'accept', admission: meter(1) });
 
-    expect(h.gate.admit(frame({ from: '/tmp/a.sock' }))).toBe('accept');
-    expect(h.gate.admit(frame({ from: '/tmp/a.sock' }))).toBe('dropped');
+    expect(h.gate.admit(fromA())).toBe('accept');
+    expect(h.gate.admit(fromA())).toBe('dropped');
     // A noisy peer must not mute a quiet one.
     expect(h.gate.admit(frame({ from: '/tmp/b.sock' }))).toBe('accept');
   });
 
   it('tells both audiences which origin the dropped message came from', () => {
-    const h = harness({
-      policy: 'accept',
-      admission: new PeerAdmission({ limits: { bucketCapacity: 1 } }),
-    });
+    const h = harness({ policy: 'accept', admission: meter(1) });
 
-    h.gate.admit(frame({ from: '/tmp/a.sock' }), { selfSent: true });
-    h.gate.admit(frame({ from: '/tmp/a.sock' }), { selfSent: true });
+    h.gate.admit(fromA(), { selfSent: true });
+    h.gate.admit(fromA(), { selfSent: true });
 
     expect(h.dropNotices.at(-1)?.selfSent).toBe(true);
   });
 
   it('does not hold, deliver or announce a dropped message', () => {
-    const h = harness({
-      policy: 'hold',
-      admission: new PeerAdmission({ limits: { bucketCapacity: 0 } }),
-    });
+    const h = harness({ policy: 'hold', admission: meter(0) });
 
-    expect(h.gate.admit(frame({ from: '/tmp/a.sock' }))).toBe('dropped');
+    expect(h.gate.admit(fromA())).toBe('dropped');
     expect(h.gate.getHeld()).toHaveLength(0);
     expect(h.delivered).toHaveLength(0);
     expect(h.heldChanges).toBe(0);
@@ -2109,7 +1923,7 @@ describe('admission', () => {
     const reported: string[] = [];
     const announced: string[] = [];
     const gate = new InboundGate({
-      admission: new PeerAdmission({ limits: { bucketCapacity: 0 } }),
+      admission: meter(0),
       getApprovalMode: () => ApprovalMode.DEFAULT,
       getPolicySetting: () => 'accept',
       deliver: () => {},
@@ -2123,7 +1937,7 @@ describe('admission', () => {
       },
     });
 
-    expect(() => gate.admit(frame({ from: '/tmp/a.sock' }))).not.toThrow();
+    expect(() => gate.admit(fromA())).not.toThrow();
     expect(reported).toEqual(['rate-limited']);
     expect(announced).toEqual(['rate-limited']);
   });
@@ -2136,14 +1950,15 @@ describe('admission', () => {
     });
 
     for (let i = 0; i < PEER_ADMISSION_LIMITS.bucketCapacity; i++) {
-      expect(gate.admit(frame({ from: '/tmp/a.sock' }))).toBe('accept');
+      expect(gate.admit(fromA())).toBe('accept');
     }
-    expect(gate.admit(frame({ from: '/tmp/a.sock' }))).toBe('dropped');
+    expect(gate.admit(fromA())).toBe('dropped');
   });
 });
 
 describe('the metering key', () => {
   const controller = { id: 'c_1234abcd', label: 'voice' };
+  const viaGrant = { selfSent: false, controller };
 
   it('keeps a peer out of the identities the transport establishes', () => {
     // `from` is a field in a frame. A peer writing `own-process` there
@@ -2159,13 +1974,11 @@ describe('the metering key', () => {
         { from: `controller:${controller.id}` },
         { selfSent: false },
       ),
-    ).not.toBe(
-      peerSenderKey({ from: undefined }, { selfSent: false, controller }),
-    );
+    ).not.toBe(peerSenderKey({ from: undefined }, viaGrant));
   });
 
   it('meters a squatting peer apart from the session own processes', () => {
-    const h = harness({ policy: 'accept', admission: new PeerAdmission() });
+    const h = harness({ policy: 'accept', admission: meter() });
     for (let i = 0; i < PEER_ADMISSION_LIMITS.bucketCapacity; i++) {
       h.gate.admit(frame({ from: 'own-process' }));
     }
@@ -2178,7 +1991,7 @@ describe('the metering key', () => {
   });
 
   it('meters a squatting peer apart from a trusted controller', () => {
-    const h = harness({ policy: 'accept', admission: new PeerAdmission() });
+    const h = harness({ policy: 'accept', admission: meter() });
     for (let i = 0; i < PEER_ADMISSION_LIMITS.bucketCapacity; i++) {
       h.gate.admit(frame({ from: `controller:${controller.id}` }));
     }
@@ -2186,21 +1999,14 @@ describe('the metering key', () => {
       'dropped',
     );
 
-    expect(
-      h.gate.admit(frame({ from: undefined }), { selfSent: false, controller }),
-    ).toBe('accept');
+    expect(h.gate.admit(frame({ from: undefined }), viaGrant)).toBe('accept');
   });
 
   it('gives two controllers their own meters', () => {
     const other = { id: 'c_beefcafe', label: 'dictation' };
-    const h = harness({
-      policy: 'accept',
-      admission: new PeerAdmission({ limits: { bucketCapacity: 1 } }),
-    });
-    h.gate.admit(frame({ from: undefined }), { selfSent: false, controller });
-    expect(
-      h.gate.admit(frame({ from: undefined }), { selfSent: false, controller }),
-    ).toBe('dropped');
+    const h = harness({ policy: 'accept', admission: meter(1) });
+    h.gate.admit(frame({ from: undefined }), viaGrant);
+    expect(h.gate.admit(frame({ from: undefined }), viaGrant)).toBe('dropped');
     expect(
       h.gate.admit(frame({ from: undefined }), {
         selfSent: false,
@@ -2217,14 +2023,8 @@ describe('the metering key', () => {
   });
 
   it('forwards the grant a dropped controller message came in on', () => {
-    const h = harness({
-      policy: 'accept',
-      admission: new PeerAdmission({ limits: { bucketCapacity: 0 } }),
-    });
-    h.gate.admit(frame({ from: '/tmp/a.sock' }), {
-      selfSent: false,
-      controller,
-    });
+    const h = harness({ policy: 'accept', admission: meter(0) });
+    h.gate.admit(fromA(), viaGrant);
     expect(h.dropNotices.at(-1)?.controller).toEqual(controller);
   });
 });
@@ -2241,10 +2041,7 @@ describe('a message settled without the far model seeing it', () => {
   }
 
   it('lets an honest retry land after a queue-full drop', () => {
-    const h = harness({
-      mode: ApprovalMode.DEFAULT,
-      admission: new PeerAdmission(),
-    });
+    const h = harness({ mode: ApprovalMode.DEFAULT, admission: meter() });
     h.failDelivery();
     expect(h.gate.admit(retry())).toBe('dropped');
     h.recoverDelivery();
@@ -2272,14 +2069,14 @@ describe('a message settled without the far model seeing it', () => {
   it('keeps telling a refusing session refuses, rather than calling it a repeat', () => {
     // 'refused' says stop; 'duplicate' says fold it into a later message,
     // which invites a session that turns everything away to be tried again.
-    const h = harness({ policy: 'refuse', admission: new PeerAdmission() });
+    const h = harness({ policy: 'refuse', admission: meter() });
     expect(h.gate.admit(retry())).toBe('refused');
     expect(h.gate.admit(retry({ msgId: 'again-0003' }))).toBe('refused');
     expect(h.drops).toHaveLength(0);
   });
 
   it('lets a denied message be sent again for review', () => {
-    const h = harness({ policy: 'hold', admission: new PeerAdmission() });
+    const h = harness({ policy: 'hold', admission: meter() });
     const f = retry();
     h.gate.admit(f);
     h.gate.decide(f.msgId, 'deny');
@@ -2295,7 +2092,7 @@ describe('a message settled without the far model seeing it', () => {
       const h = harness({
         policy: 'hold',
         heldExpiryMs: 1_000,
-        admission: new PeerAdmission(),
+        admission: meter(),
       });
       expect(h.gate.admit(retry())).toBe('held');
       vi.advanceTimersByTime(1_001);
@@ -2312,7 +2109,7 @@ describe('a message settled without the far model seeing it', () => {
     // Nobody read it either: the setting changed while it waited, and
     // the sender may reasonably send the same thing again once the
     // setting is put back.
-    const h = harness({ policy: 'hold', admission: new PeerAdmission() });
+    const h = harness({ policy: 'hold', admission: meter() });
     expect(h.gate.admit(retry())).toBe('held');
 
     h.setPolicy('refuse');
@@ -2332,7 +2129,7 @@ describe('a message settled without the far model seeing it', () => {
     let currentSessionId = 'session-a';
     const drops: PeerDropReason[] = [];
     const gate = new InboundGate({
-      admission: new PeerAdmission({ limits: { bucketCapacity: 1 } }),
+      admission: meter(1),
       getApprovalMode: () => ApprovalMode.YOLO,
       getPolicySetting: () => undefined,
       getSessionId: () => currentSessionId,
@@ -2360,18 +2157,15 @@ describe('a message settled without the far model seeing it', () => {
   });
 
   it('keeps the token spent, so a full queue still bounds the attempts', () => {
-    const h = harness({
-      mode: ApprovalMode.DEFAULT,
-      admission: new PeerAdmission({ limits: { bucketCapacity: 1 } }),
-    });
+    const h = harness({ mode: ApprovalMode.DEFAULT, admission: meter(1) });
     h.failDelivery();
-    expect(h.gate.admit(frame({ fromMode: 'prompting' }))).toBe('dropped');
+    expect(h.gate.admit(prompting())).toBe('dropped');
     expect(h.drops.at(-1)?.reason).toBe('queue-full');
 
     h.recoverDelivery();
     // A different body from the same sender: the rollback returns the
     // repeat memory, never the allowance.
-    expect(h.gate.admit(frame({ fromMode: 'prompting' }))).toBe('dropped');
+    expect(h.gate.admit(prompting())).toBe('dropped');
     expect(h.drops.at(-1)?.reason).toBe('rate-limited');
   });
 });
@@ -2435,8 +2229,8 @@ describe('a gate for a process hosting several sessions', () => {
 
   it('judges each message by the settings of the session it is addressed to', () => {
     const host = hostOfTwo();
-    const forStrict = frame({ fromMode: 'prompting', toSessionId: 'strict' });
-    const forRelaxed = frame({ fromMode: 'prompting', toSessionId: 'relaxed' });
+    const forStrict = prompting({ toSessionId: 'strict' });
+    const forRelaxed = prompting({ toSessionId: 'relaxed' });
 
     // Same sender, same claimed review class: the strict session's
     // explicit hold parks it, the relaxed one's parity delivers it.
@@ -2456,7 +2250,7 @@ describe('a gate for a process hosting several sessions', () => {
 
   it('re-judges a held message for its own session when a mode changes', () => {
     const host = hostOfTwo();
-    const forRelaxed = frame({ fromMode: 'bypass', toSessionId: 'relaxed' });
+    const forRelaxed = bypassing({ toSessionId: 'relaxed' });
     expect(host.gate.admit(forRelaxed)).toBe('held');
 
     host.settings['relaxed']!.mode = ApprovalMode.YOLO;
@@ -2466,8 +2260,8 @@ describe('a gate for a process hosting several sessions', () => {
 
   it("expires each held message on its own session's schedule", () => {
     const host = hostOfTwo();
-    const forStrict = frame({ fromMode: 'bypass', toSessionId: 'strict' });
-    const forRelaxed = frame({ fromMode: 'bypass', toSessionId: 'relaxed' });
+    const forStrict = bypassing({ toSessionId: 'strict' });
+    const forRelaxed = bypassing({ toSessionId: 'relaxed' });
     host.gate.admit(forRelaxed);
     host.gate.admit(forStrict);
     expect(host.gate.getHeld()).toHaveLength(2);
@@ -2478,39 +2272,31 @@ describe('a gate for a process hosting several sessions', () => {
     expect(host.gate.getHeld().map((entry) => entry.frame.msgId)).toEqual([
       forRelaxed.msgId,
     ]);
-    expect(host.statuses.at(-1)).toEqual({
-      msgId: forStrict.msgId,
-      status: 'expired',
-    });
+    expect(host.statuses.at(-1)).toEqual(receipt(forStrict.msgId, 'expired'));
 
     vi.advanceTimersByTime(240_000);
     expect(host.gate.getHeld()).toHaveLength(0);
-    expect(host.statuses.at(-1)).toEqual({
-      msgId: forRelaxed.msgId,
-      status: 'expired',
-    });
+    expect(host.statuses.at(-1)).toEqual(receipt(forRelaxed.msgId, 'expired'));
   });
 
   it('caps held messages per session, so one backlog cannot turn away another', () => {
     const host = hostOfTwo();
     for (let i = 0; i < MAX_HELD_MESSAGES; i++) {
-      expect(
-        host.gate.admit(frame({ fromMode: 'bypass', toSessionId: 'strict' })),
-      ).toBe('held');
+      expect(host.gate.admit(bypassing({ toSessionId: 'strict' }))).toBe(
+        'held',
+      );
     }
     // Full for `strict`, respelled or not...
-    expect(
-      host.gate.admit(frame({ fromMode: 'bypass', toSessionId: 'STRICT' })),
-    ).toBe('dropped');
+    expect(host.gate.admit(bypassing({ toSessionId: 'STRICT' }))).toBe(
+      'dropped',
+    );
     // ...and still open for its sibling.
-    expect(
-      host.gate.admit(frame({ fromMode: 'bypass', toSessionId: 'relaxed' })),
-    ).toBe('held');
+    expect(host.gate.admit(bypassing({ toSessionId: 'relaxed' }))).toBe('held');
   });
 
   it('answers a held message whose session is gone misaddressed, not denied', () => {
     const host = hostOfTwo();
-    const forStrict = frame({ fromMode: 'bypass', toSessionId: 'strict' });
+    const forStrict = bypassing({ toSessionId: 'strict' });
     host.gate.admit(forStrict);
     // The session leaves without its holds being settled; a sibling's mode
     // change then re-judges the backlog.
@@ -2518,9 +2304,8 @@ describe('a gate for a process hosting several sessions', () => {
     host.gate.reevaluate('approval-mode-changed');
 
     expect(host.gate.getHeld()).toHaveLength(0);
-    expect(host.statuses.at(-1)).toEqual({
-      msgId: forStrict.msgId,
-      status: 'misaddressed',
-    });
+    expect(host.statuses.at(-1)).toEqual(
+      receipt(forStrict.msgId, 'misaddressed'),
+    );
   });
 });

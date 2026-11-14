@@ -16,8 +16,10 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { globSync } from 'glob';
 import { describe, expect, it } from 'vitest';
 
+import integrationConfig from '../../integration-tests/vitest.config.js';
 import { getWorkflowJob, getWorkflowStep } from './workflow-helpers.js';
 
 const ROOT = path.resolve(import.meta.dirname, '../..');
@@ -37,7 +39,7 @@ describe('no-AK integration CI wiring', () => {
         path.join(ROOT, '.github/workflows/ci.yml'),
         'utf8',
       );
-      const routingBlocks = ['test', 'test_macos', 'test_windows'].map(
+      const routingBlocks = ['test', 'test_macos_shards', 'test_windows'].map(
         (jobName) => {
           const testStep = getWorkflowStep(
             getWorkflowJob(workflow, jobName),
@@ -103,7 +105,7 @@ describe('no-AK integration CI wiring', () => {
       'utf8',
     );
 
-    for (const jobName of ['test', 'test_macos', 'test_windows']) {
+    for (const jobName of ['test', 'test_macos_shards']) {
       const testStep = getWorkflowStep(
         getWorkflowJob(workflow, jobName),
         'Run tests and generate reports',
@@ -114,7 +116,10 @@ describe('no-AK integration CI wiring', () => {
       let previous = -1;
       for (const command of [
         'set +e',
-        'npm run test:ci',
+        // The Linux job runs the suites through the lane script.
+        jobName === 'test'
+          ? '.github/scripts/ci/run-unit-test-lanes.sh'
+          : 'node scripts/run-macos-ci-group.js',
         'RC=$?',
         'set -e',
         'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true',
@@ -125,6 +130,33 @@ describe('no-AK integration CI wiring', () => {
         expect(index, `${jobName}: ${command}`).toBeGreaterThan(previous);
         previous = index;
       }
+    }
+
+    const windowsStep = getWorkflowStep(
+      getWorkflowJob(workflow, 'test_windows'),
+      'Run tests and generate reports',
+    );
+    let previous = -1;
+    for (const command of [
+      'set +e',
+      'npm run test:ci:workspaces',
+      'WORKSPACE_RC=$?',
+      'if [ "$WORKSPACE_RC" -ne 0 ]; then',
+      '::warning::The Windows workspace suite has known baseline failures',
+      'npm run test:scripts',
+      'SCRIPTS_RC=$?',
+      'if [ "$SCRIPTS_RC" -ne 0 ]; then',
+      '::warning::The complete Windows script suite has known baseline failures',
+      'npx vitest run scripts/tests/install-script.test.js scripts/tests/opentui-preview-install.test.js --config scripts/tests/vitest.config.ts --retry=0 --bail=1 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false',
+      'INSTALLER_RC=$?',
+      'set -e',
+      'pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true',
+      'kill "$SAMPLER_PID" 2>/dev/null || true',
+      'exit "$INSTALLER_RC"',
+    ]) {
+      const index = windowsStep.indexOf(command);
+      expect(index, `test_windows: ${command}`).toBeGreaterThan(previous);
+      previous = index;
     }
   });
 
@@ -167,37 +199,222 @@ describe('no-AK integration CI wiring', () => {
     expect(packageJson.scripts.typecheck).toContain(
       `npm run ${INTEGRATION_TYPECHECK_SCRIPT}`,
     );
+    const expectedFiles = [
+      './fake-openai-server.test.ts',
+      './generated-ui-acceptance/fixtures.test.ts',
+      './generated-ui-acceptance/harness.test.ts',
+      './generated-ui-acceptance/live-case.test.ts',
+      './generated-ui-acceptance/live-config.test.ts',
+      './test-helper.test.ts',
+      './chat-transcript-contract.test.ts',
+      './skill-hooks-invocation-parity.test.ts',
+      './skill-hooks-resume.test.ts',
+      './qwen-live-m4-acp-call.test.ts',
+      './qwen-live-m4-acp-permission.test.ts',
+      './qwen-live-m4-acp-steering.test.ts',
+      './qwen-live-m4-acp-multibackend.test.ts',
+      './qwen-live-m1-call.test.ts',
+      './qwen-live-m2-inject.test.ts',
+      './qwen-live-m2-permission.test.ts',
+      './qwen-live-m2-steering.test.ts',
+      './cli/_prompt-latency-policy.test.ts',
+      './cli/agent-loop-parity.test.ts',
+      './cli/acp-agent-loop-parity.test.ts',
+      './cli/hosted-harness-process.test.ts',
+      './cli/daemon-invocation-context.test.ts',
+      './cli/headless-workflow-skill.test.ts',
+      './cli/workflow-ancestor-discovery.test.ts',
+      './cli/daemon-workflow-ancestor-trust.test.ts',
+      './cli/workflow-intent.test.ts',
+      './cli/workflow-mode.test.ts',
+      './cli/acp-workflow-mode.test.ts',
+      './cli/daemon-workflow-intent.test.ts',
+      './cli/daemon-workflow-mode.test.ts',
+      './cli/daemon-workflow-background.test.ts',
+      './cli/list_directory.test.ts',
+      './cli/tool-hook-context.test.ts',
+      './cli/tool-hook-updated-input.test.ts',
+      './cli/mods-prompt-submit.test.ts',
+      './cli/qwen-serve-conversations-root.test.ts',
+      './cli/qwen-serve-routes.test.ts',
+      './cli/qwen-serve-session-cd.test.ts',
+      './cli/qwen-serve-streaming.test.ts',
+      './cli/qwen-serve-standalone-concurrency.test.ts',
+      './helpers/hosted-sse-observer.test.ts',
+      './interactive/workflow-completion.test.ts',
+      './interactive/workflow-intent.test.ts',
+      './interactive/workflow-mode.test.ts',
+      './interactive/mods-tool-middleware.test.ts',
+      './interactive/mods-prompt-submit.test.ts',
+      './interactive/mods-assistant-message.test.ts',
+      './interactive/statusline-parity.test.ts',
+      './interactive/tui-editor-parity.test.ts',
+      './interactive/tui-input-ownership.test.ts',
+      './interactive/tui-agent-loop-parity.test.ts',
+      './sdk-typescript/abort-and-lifecycle.test.ts',
+      './sdk-typescript/permission-control.test.ts',
+      './sdk-typescript/sdk-mcp-server.test.ts',
+      './sdk-typescript/subagents.test.ts',
+      './sdk-typescript/system-control.test.ts',
+      './sdk-typescript/tool-control.test.ts',
+      './sdk-typescript/workflow-intent.test.ts',
+      './sdk-typescript/workflow-mode.test.ts',
+    ];
     expect(packageJson.scripts[NO_AK_SCRIPT]).toBe(
       [
         'cross-env QWEN_SANDBOX=false vitest run --root ./integration-tests --poolOptions.forks.maxForks 2',
-        './fake-openai-server.test.ts',
-        './test-helper.test.ts',
-        './chat-transcript-contract.test.ts',
-        './skill-hooks-invocation-parity.test.ts',
-        './skill-hooks-resume.test.ts',
-        './qwen-live-m4-acp-call.test.ts',
-        './qwen-live-m4-acp-permission.test.ts',
-        './qwen-live-m4-acp-steering.test.ts',
-        './qwen-live-m4-acp-multibackend.test.ts',
-        './qwen-live-m1-call.test.ts',
-        './qwen-live-m2-inject.test.ts',
-        './qwen-live-m2-permission.test.ts',
-        './qwen-live-m2-steering.test.ts',
-        './cli/_prompt-latency-policy.test.ts',
-        './cli/daemon-invocation-context.test.ts',
-        './cli/headless-workflow-skill.test.ts',
-        './cli/list_directory.test.ts',
-        './cli/qwen-serve-routes.test.ts',
-        './cli/qwen-serve-streaming.test.ts',
-        './cli/qwen-serve-standalone-concurrency.test.ts',
-        './sdk-typescript/abort-and-lifecycle.test.ts',
-        './sdk-typescript/permission-control.test.ts',
-        './sdk-typescript/sdk-mcp-server.test.ts',
-        './sdk-typescript/subagents.test.ts',
-        './sdk-typescript/system-control.test.ts',
-        './sdk-typescript/tool-control.test.ts',
+        ...expectedFiles,
       ].join(' '),
     );
+    // Vitest positional args are filename filters, not paths: a renamed entry
+    // matches nothing while the other filters keep vitest exiting 0, so the
+    // gate would report pass with that file's coverage silently gone.
+    for (const entry of expectedFiles) {
+      expect(
+        existsSync(path.join(ROOT, 'integration-tests', entry)),
+        entry,
+      ).toBe(true);
+    }
+  });
+
+  it('accounts for every runnable integration test and every no-AK filter', () => {
+    const integrationRoot = path.join(ROOT, 'integration-tests');
+    const collectedFiles = new Set(
+      globSync(integrationConfig.test.include, {
+        cwd: integrationRoot,
+        ignore: integrationConfig.test.exclude,
+        dot: true,
+        nodir: true,
+        posix: true,
+      }),
+    );
+    const candidates = execFileSync(
+      'git',
+      ['ls-files', '-z', '--', 'integration-tests'],
+      { cwd: ROOT, encoding: 'utf8' },
+    )
+      .split('\0')
+      .map((file) => file.slice('integration-tests/'.length))
+      .filter((file) => file.endsWith('.test.ts') && collectedFiles.has(file));
+    const packageJson = JSON.parse(
+      readFileSync(path.join(ROOT, 'package.json'), 'utf8'),
+    );
+    const entries = packageJson.scripts[NO_AK_SCRIPT].split(/\s+/).filter(
+      (arg, index, args) =>
+        arg.startsWith('./') && args[index - 1] !== '--root',
+    );
+    const selected = new Set();
+    for (const entry of entries) {
+      const filter = entry.slice(2).toLocaleLowerCase();
+      const matches = candidates
+        .filter((file) => file.toLocaleLowerCase().includes(filter))
+        .sort();
+      if (entry === './test-helper.test.ts') {
+        // Existing substring collision; pin both files without expanding CI.
+        expect(matches, entry).toEqual([
+          'sdk-typescript/test-helper.test.ts',
+          'test-helper.test.ts',
+        ]);
+      } else {
+        expect(matches, `${entry}: ${matches.join(', ')}`).toHaveLength(1);
+      }
+      for (const file of matches) selected.add(file);
+    }
+
+    // The no-AK job has a 20-minute budget. Keep existing omissions explicit;
+    // credential-free suites need a runtime-budget decision before enrollment.
+    const exemptions = {
+      'channel-plugin.test.ts': 'Real model required',
+      'chat-transcript-document.test.ts': 'Browser gate; runtime budget',
+      'cli/_first-output-benchmark.test.ts': 'Runtime budget',
+      'cli/acp-cron.test.ts': 'Runtime budget',
+      'cli/acp-integration.test.ts': 'Runtime budget',
+      'cli/advisor-tool.test.ts': 'Runtime budget',
+      'cli/cron-tools.test.ts': 'Real model required',
+      'cli/edit.test.ts': 'Real model required',
+      'cli/extensions-install.test.ts': 'Runtime budget',
+      'cli/external-context-mem0-daemon-delete.test.ts': 'Runtime budget',
+      'cli/external-context-mem0-daemon-write.test.ts': 'Runtime budget',
+      'cli/file-system.test.ts': 'Real model required',
+      'cli/gen-ai-telemetry.test.ts': 'Runtime budget',
+      'cli/hosted-latency-baseline.test.ts': 'Runtime budget',
+      'cli/json-output.test.ts': 'Runtime budget',
+      'cli/json-schema.test.ts': 'Real model required',
+      'cli/mcp_server_cyclic_schema.test.ts': 'Real model required',
+      'cli/mock-acp-typecheck.test.ts': 'Runtime budget',
+      'cli/monitor.test.ts': 'Real model required',
+      'cli/notebook-edit.test.ts': 'Real model required',
+      'cli/qwen-config-dir.test.ts': 'Real model required',
+      'cli/qwen-daemon-startup-benchmark.test.ts': 'Benchmark runtime budget',
+      'cli/qwen-daemon-vs-cli-benchmark.test.ts': 'Benchmark runtime budget',
+      'cli/qwen-serve-baseline.test.ts': 'Benchmark runtime budget',
+      'cli/qwen-serve-channel-workers.test.ts': 'Runtime budget',
+      'cli/qwen-serve-client-mcp.test.ts': 'Runtime budget',
+      'cli/qwen-serve-live-journal-recovery.test.ts': 'Runtime budget',
+      'cli/qwen-serve-web-shell-live-journal-recovery.test.ts':
+        'Runtime budget',
+      'cli/read_many_files.test.ts': 'Real model required',
+      'cli/run_shell_command.test.ts': 'Real model required',
+      'cli/save_memory.test.ts': 'Real model required',
+      'cli/settings-migration.test.ts': 'Runtime budget',
+      'cli/simple-mcp-server.test.ts': 'Real model required',
+      'cli/sleep-interception.test.ts': 'Real model required',
+      'cli/stdin-context.test.ts': 'Real model required',
+      'cli/subagent-hook-owner.test.ts': 'Runtime budget',
+      'cli/telemetry.test.ts': 'Real model required',
+      'cli/todo_write.test.ts': 'Real model required',
+      'cli/tool-search.test.ts': 'Real model required',
+      'cli/update-target-version.test.ts': 'Runtime budget',
+      'cli/utf-bom-encoding.test.ts': 'Runtime budget',
+      'cli/write_file.test.ts': 'Real model required',
+      'export-artifact-contract.test.ts': 'Runtime budget',
+      'generated-ui-acceptance/cases.test.ts':
+        'Opt-in Chromium evaluator tests',
+      'generated-ui-acceptance/live.test.ts':
+        'Real model and Chromium required',
+      'generated-ui-acceptance/replay.test.ts':
+        'Opt-in Chromium replay; runtime budget',
+      'globalSetup.test.ts': 'Runtime budget',
+      'helpers/hosted-relay-headers.test.ts': 'Runtime budget',
+      'helpers/wire-rows.test.ts': 'Runtime budget',
+      'interactive/command-output-visibility.test.ts': 'Runtime budget',
+      'interactive/context-compress-interactive.test.ts': 'Runtime budget',
+      'interactive/cron-interactive.test.ts': 'Real model required',
+      'interactive/ctrl-c-exit.test.ts': 'Runtime budget',
+      'interactive/external-context-auto-recall.test.ts': 'Runtime budget',
+      'interactive/external-context-mem0-write.test.ts': 'Runtime budget',
+      'interactive/file-system-interactive.test.ts': 'Runtime budget',
+      'interactive/hooks-command.test.ts': 'Runtime budget',
+      'interactive/interactive-session-viewport.test.ts': 'Runtime budget',
+      'interactive/interactive-session.test.ts': 'Runtime budget',
+      'interactive/mid-turn-submit-interactive.test.ts': 'Runtime budget',
+      'interactive/mixed-input-crash.test.ts': 'Runtime budget',
+      'interactive/protocol-tags-interactive.test.ts': 'Runtime budget',
+      'interactive/submitted-prompt-provenance.test.ts': 'Runtime budget',
+      'interactive/tui-checkpoint-restore.test.ts': 'Dedicated TUI parity gate',
+      'interactive/tui-clipboard-source.test.ts': 'Dedicated TUI parity gate',
+      'interactive/tui-extension-acquisition.test.ts':
+        'Dedicated TUI parity gate',
+      'interactive/tui-foreground-shell.test.ts': 'Dedicated TUI parity gate',
+      'interactive/tui-dual-output.test.ts': 'Dedicated TUI parity gate',
+      'interactive/tui-migration.test.ts': 'Runtime budget',
+      'interactive/tui-session-recovery.test.ts': 'Dedicated TUI parity gate',
+      'renderer-matrix.test.ts': 'Runtime budget',
+      'scratch-dir.test.ts': 'Runtime budget',
+      'sdk-typescript/configuration-options.test.ts': 'Real model required',
+      'sdk-typescript/mcp-server.test.ts': 'Real model required',
+      'sdk-typescript/message-event-pairing.test.ts': 'Real model required',
+      'sdk-typescript/multi-turn.test.ts': 'Real model required',
+      'sdk-typescript/session-id.test.ts': 'Real model required',
+      'sdk-typescript/single-turn.test.ts': 'Real model required',
+    };
+    for (const [file, reason] of Object.entries(exemptions)) {
+      expect(reason, `${file}: exemption reason`).toMatch(/\S/);
+    }
+    expect(
+      candidates.filter((file) => !selected.has(file)).sort(),
+      'Every runnable test must be selected or explicitly exempted with a reason',
+    ).toEqual(Object.keys(exemptions).sort());
   });
 
   it('runs the no-AK integration script as its own check on PRs and the merge queue', () => {
@@ -214,7 +431,7 @@ describe('no-AK integration CI wiring', () => {
       'utf8',
     );
     const ubuntuJob = getWorkflowJob(workflow, 'test');
-    const macosJob = getWorkflowJob(workflow, 'test_macos');
+    const macosJob = getWorkflowJob(workflow, 'test_macos_shards');
     const windowsJob = getWorkflowJob(workflow, 'test_windows');
     const gateJob = getWorkflowJob(workflow, 'integration_no_ak');
     const classifyJob = getWorkflowJob(workflow, 'classify_pr');
@@ -227,7 +444,7 @@ describe('no-AK integration CI wiring', () => {
     expect(workflow.split(`npm run ${NO_AK_SCRIPT}`).length - 1).toBe(1);
     for (const [name, job] of Object.entries({
       test: ubuntuJob,
-      test_macos: macosJob,
+      test_macos_shards: macosJob,
       test_windows: windowsJob,
     })) {
       expect(job, `${name} must not run the no-AK script`).not.toContain(
@@ -235,12 +452,40 @@ describe('no-AK integration CI wiring', () => {
       );
     }
 
+    // The gate runs as two shards over test_build's tree; the aggregate
+    // job carries the required check name and fails when the build or any
+    // shard fails.
     expect(gateJob).toContain(
+      "    name: 'Integration Tests (no-AK, shard ${{ matrix.shard }}/2)'",
+    );
+    expect(gateJob).toContain(
+      "    needs:\n      - 'classify_pr'\n      - 'test_build'\n",
+    );
+    expect(gateJob).toContain('        shard: [1, 2]');
+    expect(gateJob).toContain(
+      `npm run ${NO_AK_SCRIPT} -- --shard=\${{ matrix.shard }}/2`,
+    );
+    const resultJob = getWorkflowJob(workflow, 'integration_no_ak_result');
+    expect(resultJob).toContain(
       "    name: 'Integration Tests (no-AK, No Sandbox)'",
     );
-    expect(gateJob).toContain("    needs: 'classify_pr'");
-    // Same runner routing as the Ubuntu gate, never a hard-coded pool.
-    expect(gateJob).toContain('needs.classify_pr.outputs.ubuntu_runner');
+    expect(resultJob).toContain(
+      "      - 'test_build'\n      - 'integration_no_ak'\n",
+    );
+    expect(resultJob).toContain(
+      'test "$BUILD_RESULT" = success && test "$SHARDS_RESULT" = success',
+    );
+    expect(
+      resultJob.split('\n').find((line) => line.startsWith('    if:')),
+    ).toBe(gateJob.split('\n').find((line) => line.startsWith('    if:')));
+    // Same trust class as lint (PR code on the pool, zero secrets by
+    // construction — 2026-11-02 extension of the 2026-10-31 decision),
+    // never a hard-coded pool. Pin the runs-on line itself: the timeout line
+    // also mentions lint_runner, so a bare substring stays green under a
+    // runs-on-only revert.
+    expect(gateJob).toContain(
+      "runs-on: '${{ fromJSON(needs.classify_pr.outputs.lint_runner",
+    );
     const jobIf = gateJob
       .split('\n')
       .find((line) => line.startsWith('    if:'));
@@ -248,11 +493,11 @@ describe('no-AK integration CI wiring', () => {
     expect(jobIf).toContain(
       "(github.event_name == 'pull_request' || github.event_name == 'merge_group')",
     );
-    // PR head ref on pull_request, queue head on merge_group — the same
+    // Event PR head SHA on pull_request, queue head on merge_group — the same
     // shape the Ubuntu gate uses, so this check tests the pushed tree, not
     // the lagging merge ref.
     expect(getWorkflowStep(gateJob, 'Checkout')).toContain(
-      "format('refs/pull/{0}/head', github.event.pull_request.number)",
+      "github.event_name == 'pull_request' && github.event.pull_request.head.sha",
     );
     const trustedClassifierCheckout = getWorkflowStep(
       classifyJob,
@@ -295,7 +540,9 @@ describe('no-AK integration CI wiring', () => {
     expect(trustedClassifier).toContain(
       'trusted-ci-classifier/.github/scripts/ci/classify-pr-profile.sh "${GITHUB_REPOSITORY}" "${PR_NUMBER}"',
     );
-    expect(trustedClassifier).toContain('docs_only|github_ci_only|full) ;;');
+    expect(trustedClassifier).toContain(
+      'docs_only|github_ci_only|java_only|full) ;;',
+    );
     expect(trustedClassifier).toContain('profile=full');
     // The classify_pr job output resolves against the step ID: renaming it
     // empties the output and every consumer silently falls back to `full` —
@@ -334,7 +581,12 @@ describe('no-AK integration CI wiring', () => {
       // steps.ci_profile.outputs.ci_profile, so every downstream profile
       // gate mis-compares; dropping the case line lets an unexpected
       // profile value pass through unnormalized.
-      expect(profileStep).toContain('docs_only|github_ci_only|full) ;;');
+      // java_only either passes through (the gate and test skip their
+      // steps on it) or, in lint_and_static, maps to its full payload.
+      expect(profileStep).toMatch(
+        /docs_only\|github_ci_only\|(?:java_only\|)?full\) ;;/,
+      );
+      expect(profileStep).toContain('java_only');
       expect(profileStep).toContain(
         'echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"',
       );
@@ -392,19 +644,74 @@ describe('no-AK integration CI wiring', () => {
     expect(gateStep.indexOf(integrationTypecheckCommand)).toBeLessThan(
       gateStep.indexOf(`npm run ${NO_AK_SCRIPT}`),
     );
+    // The job's first step publishes the run-unique HOME via GITHUB_ENV
+    // (2026-11-02 round-2: fork code starts at checkout/install, not at the
+    // gate — HOME/USERPROFILE are job-wide, not gate-scoped); the gate keeps
+    // QWEN_HOME + the key scrub.
     expect(gateStep).toContain(
-      "QWEN_HOME: '${{ runner.temp }}/qwen-no-ak-home/.qwen'",
+      "QWEN_HOME: '${{ runner.temp }}/qwen-no-ak-home-${{ github.run_id }}-${{ github.run_attempt }}/.qwen'",
     );
     expect(gateStep).toContain('timeout-minutes: 20');
+    // The typecheck carries no heap cap of its own, unlike the workspace test
+    // scripts, so it inherits Node's default old-space. Node 22 sizes that from
+    // the CONTAINER's cgroup limit, not from the memory it can see: inside these
+    // containers os.totalmem() reports the whole host (245 GB) and is irrelevant
+    // to the heap ceiling. Measured on 2026-11-12 in throwaway containers from
+    // the pool's own runner image (Node v22.23.4, the incident's version), no
+    // NODE_OPTIONS set — `--memory` -> default heap_size_limit:
+    //   2g -> 1048 MB   3g -> 1584 MB   4g -> 2096 MB   6g -> 2096 MB
+    //   8g -> 2096 MB  12g -> 2096 MB  15g -> 4144 MB  16g -> 4144 MB
+    // A tiered table, not an exact halving, hence the measurements over a
+    // formula. On 2026-11-11 the typecheck died at ~2040 MB (job 130506292678)
+    // on a container whose limit was 8 GiB — recovered from the hosts'
+    // timestamped config backups, both snapshots bracketing the incident reading
+    // 8g — which is exactly the 2096 MB row above. So Node's own default was the
+    // cap and no host pressure was involved, but NOT because the container had
+    // 4 GiB: it had 8, and 8 GiB defaults to ~2 GiB. The job log carries no heap
+    // flag and no NODE_OPTIONS.
+    //
+    // With the flag, at --memory=8g the limit measures 4144 MB against that
+    // 2096 MB default, leaving ~4 GiB of the container for the rest of tsc's RSS
+    // (8 GiB − 4144 MiB ≈ 3.95 GiB, with no separate reserve claimed for the
+    // resident set) — a real 2x raise, not a cap that lets old-space reach the
+    // container ceiling and trade a diagnosable V8 abort for a kernel OOM kill.
+    // That arithmetic is also the flag's floor: it is only safe from 8 GiB up.
+    // At 4g the container's own default is 2096 MB, so a 4096 MB cap would take
+    // the whole container and leave nothing for the rest of the process; below
+    // 8 GiB the cap has to follow the container size instead. Do not lower it to
+    // 3072 on the theory that it endangers an 8 GiB container; at or above
+    // 8 GiB the evidence does not support that hazard.
+    //
+    // Both hosts moved to 16 GiB on 2026-11-12, where the default is already
+    // 4144 MB and this cap is a no-op. It is kept because every config snapshot
+    // since the 2026-11-08 scale-up used 8g — both snapshots bracketing the
+    // incident read 8g, and the earlier 4g row predates that scale-up — so the
+    // flag is what stops a future downscale from silently restoring the default
+    // that failed. config.example.json is a template, not the live budget — that
+    // lives in each host's /etc/qwen-ephemeral-runner/config.json. The hosted
+    // lane keeps the default it has always passed with, under the same fleet
+    // predicate as the worker caps.
+    //
+    // Through `env` on that one command, NOT the step's env block: the
+    // zero-secrets contract above requires every value there but QWEN_HOME to
+    // be the empty string, and is enforced by value on purpose so a credential
+    // under an unanticipated name cannot ship green. A heap flag has no
+    // business joining that exemption list.
     expect(gateStep).toContain(
-      "\n          HOME: '${{ runner.temp }}/qwen-no-ak-home'",
+      "ecs-qwen-*) typecheck_heap=('NODE_OPTIONS=--max-old-space-size=4096') ;;",
     );
     expect(gateStep).toContain(
-      "\n          USERPROFILE: '${{ runner.temp }}/qwen-no-ak-home'",
+      'env "${typecheck_heap[@]}" npm run typecheck:integration',
     );
+    expect(gateStep).not.toContain('\n          NODE_OPTIONS: ');
+    // HOME/USERPROFILE are job-wide now (first-step GITHUB_ENV), so the
+    // gate must not re-pin them step-locally.
+    expect(gateStep).not.toContain('\n          HOME: ');
+    expect(gateStep).not.toContain('\n          USERPROFILE: ');
     for (const key of [
       'API_KEY',
       'ANTHROPIC_API_KEY',
+      'ANTHROPIC_AUTH_TOKEN',
       'ANTHROPIC_BASE_URL',
       'ANTHROPIC_MODEL',
       'BAILIAN_CODING_PLAN_API_KEY',
@@ -424,6 +731,8 @@ describe('no-AK integration CI wiring', () => {
       'OPENAI_MODEL',
       'OPENROUTER_API_KEY',
       'QWEN_API_KEY',
+      'QWENCLOUD_API_KEY',
+      'QWENCLOUD_TOKEN_PLAN_API_KEY',
       'QWEN_DEFAULT_AUTH_TYPE',
       'QWEN_MODEL',
       'REQUESTY_API_KEY',
@@ -439,25 +748,27 @@ describe('no-AK integration CI wiring', () => {
     }
   });
 
-  it('checks out the immutable PR head ref instead of the lagging merge ref', () => {
+  it('pins PR checkouts to the event head even after the PR ref advances', () => {
     const workflow = readFileSync(
       path.join(ROOT, '.github/workflows/ci.yml'),
       'utf8',
     );
     const ubuntuJob = getWorkflowJob(workflow, 'test');
     const webShellJob = getWorkflowJob(workflow, 'web_shell_e2e_smoke');
-    const macosJob = getWorkflowJob(workflow, 'test_macos');
+    const lintJob = getWorkflowJob(workflow, 'lint_and_static');
     const windowsJob = getWorkflowJob(workflow, 'test_windows');
     const integrationJob = getWorkflowJob(workflow, 'integration_cli');
     const noAkJob = getWorkflowJob(workflow, 'integration_no_ak');
 
-    // On PRs every gate checks out refs/pull/N/head, which is published the
-    // instant the branch is pushed, instead of the merge ref that GitHub
-    // rebuilds asynchronously and can serve stale for minutes.
-    for (const job of [ubuntuJob, macosJob, windowsJob, noAkJob]) {
-      expect(job).toContain(
-        "format('refs/pull/{0}/head', github.event.pull_request.number)",
+    // A retry retains the event head SHA while refs/pull/N/head may advance.
+    // Only these four lanes currently run on pull_request.
+    for (const job of [ubuntuJob, lintJob, webShellJob, noAkJob]) {
+      const checkout = getWorkflowStep(job, 'Checkout');
+      expect(checkout).toContain(
+        "github.event_name == 'pull_request' && github.event.pull_request.head.sha",
       );
+      expect(checkout).not.toContain('refs/pull/');
+      expect(checkout).toContain('fetch-depth: 1');
     }
 
     // The brittle merge-ref retry/refresh machinery is gone: in particular the
@@ -498,7 +809,6 @@ describe('no-AK integration CI wiring', () => {
     // stale ones this guard must reject, while the pin above stays green.
     expect(guardAction).toContain("EXPECTED_SHA: '${{ inputs.expected_sha }}'");
 
-    const lintJob = getWorkflowJob(workflow, 'lint_and_static');
     const guardCalls = {
       test: getWorkflowStep(ubuntuJob, GUARD_STEP),
       lint_and_static: getWorkflowStep(lintJob, GUARD_STEP),
@@ -792,7 +1102,7 @@ describe('no-AK integration CI wiring', () => {
     expect(nodeAction).toContain('::warning::Expected Node 22.x but found');
   });
 
-  it('keeps install-script.test.js out of the win32 exclude list', () => {
+  it('keeps both installer files out of the win32 exclude list', () => {
     // install-script.test.js is the only home of the nine Windows installer
     // end-to-end cases; excluding it on win32 would silently drop coverage
     // docs/design/windows-ecs-ci-validation.md declares required.
@@ -802,6 +1112,9 @@ describe('no-AK integration CI wiring', () => {
     );
     expect(scriptSuiteConfig).not.toContain(
       "'scripts/tests/install-script.test.js'",
+    );
+    expect(scriptSuiteConfig).not.toContain(
+      "'scripts/tests/opentui-preview-install.test.js'",
     );
   });
 
@@ -851,14 +1164,19 @@ describe('no-AK integration CI wiring', () => {
     );
   });
 
-  it('installs Playwright system dependencies only on hosted runners', () => {
+  it('installs Playwright system dependencies on hosted runners, and on pool hosts only when missing', () => {
     const workflow = readFileSync(
       path.join(ROOT, '.github/workflows/ci.yml'),
       'utf8',
     );
     const webShellJob = getWorkflowJob(workflow, 'web_shell_e2e_smoke');
 
-    expect(webShellJob).toContain("runs-on: 'ubuntu-latest'");
+    // The lane still takes its runner from the classifier, so an untrusted
+    // fork PR cannot reach a self-hosted host; the architecture override it
+    // applies on top is pinned in scripts/tests/ci-platform-lanes.test.js.
+    expect(webShellJob).toMatch(
+      /runs-on: .*needs\.classify_pr\.outputs\.ubuntu_runner/,
+    );
     const hostedInstall = getWorkflowStep(
       webShellJob,
       'Install Playwright Chromium and WebKit (hosted)',
@@ -875,11 +1193,29 @@ describe('no-AK integration CI wiring', () => {
       'node node_modules/playwright/cli.js install chromium webkit',
     );
     expect(selfHostedInstall).not.toContain('install --with-deps chromium');
+    // Pool hosts lacked WebKit's libraries: install them once per host, gated
+    // on Playwright's own validation, without prompting or racing apt locks.
+    expect(selfHostedInstall).toContain(
+      'if grep -q \'Host system is missing dependencies\' "${install_log}"; then',
+    );
+    expect(selfHostedInstall).toContain('DPkg::Lock::Timeout');
+    expect(selfHostedInstall).toContain(
+      'sudo -n env APT_CONFIG="${apt_config}" "$(command -v node)" node_modules/playwright/cli.js install-deps chromium webkit',
+    );
     for (const step of [hostedInstall, selfHostedInstall]) {
       expect(step).toContain(
         "nested_cli='node_modules/@playwright/test/node_modules/playwright/cli.js'",
       );
       expect(step).toContain('node "${nested_cli}" install chromium webkit');
+      // The disposable pool image bakes Chromium and its system libraries and
+      // is what sets PLAYWRIGHT_BROWSERS_PATH; its root-owned tree cannot even
+      // be verified by a job's own install (playwright writes a lock and a
+      // `.links` entry before it checks what is present), so every install
+      // site skips on that env instead of failing.
+      expect(step).toContain('if [ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ]; then');
+      expect(step).toContain(
+        "echo 'browsers baked into the image, skipping install'",
+      );
     }
   });
 
@@ -980,10 +1316,81 @@ describe('Windows temp short-alias guard', () => {
     },
   );
 
+  it.runIf(process.platform === 'linux')(
+    'checks each temp key on its own, so the loop cannot drop one',
+    () => {
+      const base = realpathSync(
+        mkdtempSync(path.join(tmpdir(), 'temp-guard-')),
+      );
+      try {
+        const canonical = path.join(base, 'runneradmin');
+        mkdirSync(canonical);
+        const alias = path.join(base, 'RUNNER~1');
+        symlinkSync(canonical, alias);
+
+        // Every case above hands both keys the same value, so a guard loop
+        // narrowed to one key still passes all of them. Only a split pairing
+        // pins that the second key is visited at all, and that the failure
+        // names it.
+        expect(() => runGuard({ TEMP: canonical, TMP: alias })).toThrow(
+          /TMP carries a short alias/,
+        );
+        expect(() => runGuard({ TEMP: alias, TMP: canonical })).toThrow(
+          /TEMP carries a short alias/,
+        );
+      } finally {
+        rmSync(base, { recursive: true, force: true });
+      }
+    },
+  );
+
   it('fails loudly when temp is unset instead of throwing on undefined', () => {
     // configure-windows-runner and the hosted redirect both set TEMP and TMP,
     // so an unset value means one of them stopped running — a clear message
     // beats realpathSync(undefined)'s TypeError.
     expect(() => runGuard({ TEMP: '', TMP: '' })).toThrow(/TEMP is not set/);
   });
+
+  it('annotates an unset temp so the failure reaches the check UI', () => {
+    // A bare console.error leaves the run reporting only "Process completed
+    // with exit code 1". The `::error::` prefix is what GitHub turns into an
+    // annotation attached to the check — the same channel the
+    // hosted-process-suite step in this workflow already uses.
+    let err;
+    try {
+      runGuard({ TEMP: '', TMP: '' });
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeDefined();
+    expect(err.stderr).toContain('::error::');
+    expect(err.stderr).toContain('TEMP is not set');
+  });
+
+  it.runIf(process.platform === 'linux')(
+    'annotates a short alias so the failure reaches the check UI',
+    () => {
+      const base = realpathSync(
+        mkdtempSync(path.join(tmpdir(), 'temp-guard-')),
+      );
+      try {
+        const canonical = path.join(base, 'runneradmin');
+        mkdirSync(canonical);
+        const alias = path.join(base, 'RUNNER~1');
+        symlinkSync(canonical, alias);
+
+        let err;
+        try {
+          runGuard({ TEMP: alias, TMP: alias });
+        } catch (e) {
+          err = e;
+        }
+        expect(err).toBeDefined();
+        expect(err.stderr).toContain('::error::');
+        expect(err.stderr).toContain('TEMP carries a short alias');
+      } finally {
+        rmSync(base, { recursive: true, force: true });
+      }
+    },
+  );
 });

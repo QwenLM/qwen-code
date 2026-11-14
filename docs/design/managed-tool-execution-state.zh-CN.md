@@ -2,7 +2,9 @@
 
 [English](managed-tool-execution-state.md) | [简体中文](managed-tool-execution-state.zh-CN.md)
 
-状态：已在内存 Repository 边界实现
+状态：已由 `JdbcToolExecutionRepository` 实现。最初的内存参考实现已在
+[2026-11-11-retire-inmemory-runtime-repositories.zh-CN.md](2026-11-11-retire-inmemory-runtime-repositories.zh-CN.md)
+中退役。
 
 ## 问题
 
@@ -17,7 +19,6 @@ Runtime Broker 状态基础能够标识 Runtime binding 和逻辑 Runtime Sessio
 - 使用 owner、过期时间和单调递增 generation 隔离派发所有权。
 - 使用乐观 compare-and-set version 保护更新。
 - 保留取消意图、不明确结果、有序结果进度和最终结果。
-- 为测试和单进程原型提供同步的内存 Repository。
 
 ## 非目标
 
@@ -91,9 +92,8 @@ claim 或续租。租约是否过期由 Repository 的时钟判定；多实例�
 
 ## 并发边界
 
-`InMemoryToolExecutionRepository` 对所有复合操作进行同步。它是单进程参考实现，
-不是多 JVM 协调机制。`JdbcToolExecutionRepository` 通过数据库约束和行锁保持
-相同的身份、幂等、version、租约、迁移合法性和 fencing 语义。
+`JdbcToolExecutionRepository` 是唯一实现。它通过数据库约束和行锁保证身份、
+幂等、version、租约、迁移合法性和 fencing 语义。
 
 ## 安全与租户
 
@@ -131,11 +131,12 @@ workspace 值。调用引用与结果属于 Broker 私有载荷；若没有独�
 - 不可变 execution 身份不能通过 compare-and-set 被替换。
 - 已结算 execution 不能再被修改或重新激活。
 - 结果状态、sequence 和结算约束失败关闭。
-- 内存 Repository 边界不引入 JDBC、Runtime transport、Hosted Harness、Spring
-  或公开 API 依赖。
+- `ToolExecutionRepository` 契约本身不引入 JDBC、Runtime transport、Hosted
+  Harness、Spring 或公开 API 依赖。
 
 ## 后续工作
 
 该契约的 JDBC 实现见 `JdbcToolExecutionRepository`，参见
-`managed-runtime-broker-jdbc.md`。Runtime 派发集成在响应不明确后必须查询原
-`executionCallId`，不能重放 Tool 调用。
+`managed-runtime-broker-jdbc.md`。响应不明确后，Broker 可以按需按原始 `reference`
+查询原调用，只在 Runtime 给出终态证据时调用 `resolveUnknown`，从不重放 Tool
+调用。参见 `managed-runtime-broker-service-core.zh-CN.md` 的 UNKNOWN 对账一节。

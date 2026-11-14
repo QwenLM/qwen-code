@@ -46,8 +46,12 @@
 import type { CommandModule } from 'yargs';
 import { roundModelIdFrom } from './lib/round-model.js';
 import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
-import { mkdirSync, readFileSync } from 'node:fs';
-import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { readFileSync } from 'node:fs';
+import {
+  writeStdoutLine,
+  writeStderrLine,
+  writeStderrLineSafe,
+} from '../../utils/stdioHelpers.js';
 import { getCliVersion } from '../../utils/version.js';
 import { operatorReviewSettings } from './lib/review-settings.js';
 import {
@@ -58,7 +62,7 @@ import {
   resolveGhHost,
   setGhHost,
 } from './lib/gh.js';
-import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
+import { ensureReviewTmpDir, tmpFile } from './lib/paths.js';
 import {
   parseReceiptCommentIds,
   parseReceiptIds,
@@ -178,7 +182,7 @@ function recordAoneReceipt(pr: number, newIds: number[], event: string): void {
     const receiptPath = tmpFile(`pr-${pr}`, 'submit-receipt.json');
     const priorIds = readReceiptIds(receiptPath, parseReceiptCommentIds);
     const commentIds = [...new Set([...priorIds, ...newIds])];
-    mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+    ensureReviewTmpDir('submit');
     atomicWriteFileSync(
       receiptPath,
       `${JSON.stringify({
@@ -188,8 +192,16 @@ function recordAoneReceipt(pr: number, newIds: number[], event: string): void {
         postedAt: new Date().toISOString(),
       })}\n`,
     );
-  } catch {
-    /* audit metadata only — the post itself succeeded */
+  } catch (err) {
+    // Audit metadata only — the post itself succeeded — but never silent:
+    // cleanup's bypass audit reads this receipt, and a missing one earns the
+    // operator a bypass warning for their own sanctioned review. The SAFE
+    // writer: this catch's contract is that a review which DID post never
+    // fails here, and `writeStderrLine` throws on EPIPE.
+    writeStderrLineSafe(
+      `submit: could not record the receipt (${(err as Error).message}); ` +
+        `cleanup's bypass audit will not see this review's ids.`,
+    );
   }
 }
 
@@ -1698,6 +1710,41 @@ function submit(
         };
       });
 
+  // Same-commit retry tripwire (GitHub only). The Create Review POST is
+  // atomic: a receipt recording THIS commit means every inline finding is
+  // already on the PR. A re-run is not a no-op — the thread lifecycle below
+  // would find this round's OWN roots, read them as carried re-post targets,
+  // and reply a second copy of every finding into its own thread (measured;
+  // DESIGN.md — The retry that replied to itself (PR #15853)). Refuse before
+  // the thread read, in the one refusal shape Step 7 treats as a complete
+  // outcome. Failed thread replies are named in the landed submit's output
+  // and re-ruled next round by design — a re-submit is not how they finish.
+  // The Aone path keeps its own partial-post contract (references/aone.md:
+  // `partial: true` is already the do-not-retry signal there).
+  const submitReceiptPath = tmpFile(`pr-${args.pr}`, 'submit-receipt.json');
+  const priorReceipt = aoneWrite ? {} : readReceiptObject(submitReceiptPath);
+  const alreadyPostedThisCommit =
+    !aoneWrite &&
+    typeof priorReceipt['lastCommitId'] === 'string' &&
+    priorReceipt['lastCommitId'] === payload.commit_id;
+  if (alreadyPostedThisCommit && !args.dryRun) {
+    const priorIds = Array.isArray(priorReceipt['reviewIds'])
+      ? (priorReceipt['reviewIds'] as unknown[]).join(', ')
+      : 'unknown';
+    refuse(
+      `REFUSED to post to ${args.repo}#${args.pr}: a review of commit ` +
+        `${payload.commit_id} already posted from this workspace ` +
+        `(review ${priorIds}). The Create Review call is atomic — every ` +
+        `inline finding is on the PR, and a re-run would reply a second ` +
+        `copy of each into its own thread. Thread replies that failed are ` +
+        `named in that submit's output and re-ruled next round; they are ` +
+        `not finished by a re-submit. A deliberate second review of the ` +
+        `same commit is the user's call — run \`qwen review cleanup ` +
+        `pr-${args.pr}\` first. Nothing was written.`,
+      'already-posted-this-commit',
+    );
+  }
+
   // The thread lifecycle (GitHub only — #9906). Two postings this pass
   // makes BEYOND the review itself, both into threads this account opened
   // in earlier rounds:
@@ -1919,9 +1966,14 @@ function submit(
           // A dry run whose gate could not run (missing capture) composes
           // the preview but reports the real post would refuse — the
           // reason distinguishes it from both a would-post and the
-          // real write's exit-3 refusal shape.
-          wouldPost: !anchorsUnchecked,
-          ...(anchorsUnchecked ? { reason: 'aone-diff-missing' } : {}),
+          // real write's exit-3 refusal shape. The same-commit tripwire
+          // previews its refusal the same way.
+          wouldPost: !anchorsUnchecked && !alreadyPostedThisCommit,
+          ...(alreadyPostedThisCommit
+            ? { reason: 'already-posted-this-commit' }
+            : anchorsUnchecked
+              ? { reason: 'aone-diff-missing' }
+              : {}),
           target,
           event,
           cappedBy,
@@ -2236,19 +2288,28 @@ function submit(
       const receiptPath = tmpFile(`pr-${args.pr}`, 'submit-receipt.json');
       const priorIds = readReceiptIds(receiptPath, parseReceiptIds);
       const reviewIds = [...new Set([...priorIds, reviewId])];
-      mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+      ensureReviewTmpDir('submit');
       atomicWriteFileSync(
         receiptPath,
         `${JSON.stringify({
           ...readReceiptObject(receiptPath),
           reviewIds,
           event,
+          // The commit the landed review posted — the same-commit retry
+          // tripwire's key. A re-submit at this commit would reply this
+          // round's own roots back to themselves (PR #15853).
+          lastCommitId: payload.commit_id,
           postedAt: new Date().toISOString(),
         })}\n`,
       );
     }
-  } catch {
-    /* audit metadata only — the post itself succeeded */
+  } catch (err) {
+    // Audit metadata only — the post itself succeeded — but never silent,
+    // and never through the throwing writer (see recordAoneReceipt).
+    writeStderrLineSafe(
+      `submit: could not record the receipt (${(err as Error).message}); ` +
+        `cleanup's bypass audit will not see this review's id.`,
+    );
   }
   writeStderrLine(
     `Posted ${event} to ${args.repo}#${args.pr} — ${auth.why}` +

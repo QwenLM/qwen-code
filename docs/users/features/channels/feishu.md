@@ -2,6 +2,11 @@
 
 This guide covers setting up a Qwen Code channel on Feishu (飞书) / Lark.
 
+To send task results to a group without an application bot, use
+[Feishu Webhook Sending](./feishu-webhook). That custom-bot integration is
+separate from this guide's application-bot event connection: an outbound
+WebSocket by default, or an HTTP webhook when `webhookPort` is set.
+
 ## Prerequisites
 
 - A Feishu organization account
@@ -156,6 +161,11 @@ You can send photos and documents to the bot:
 
 - **Images:** Analyzed using multimodal vision capabilities
 - **Files:** Downloaded and saved locally for the agent to read
+
+On systems with POSIX permissions, downloaded files and their temporary folders
+are accessible only to the account running Qwen Code. If a downloaded file
+cannot be saved locally, the message still reaches the agent with an indication
+that the media is unavailable. Any quoted message is preserved.
 
 ### Concurrent Messages
 
