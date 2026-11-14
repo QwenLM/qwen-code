@@ -2,7 +2,7 @@
 
 [English](2026-10-23-unified-agent-loop.md) | [简体中文](2026-10-23-unified-agent-loop.zh-CN.md)
 
-- **Status**: accepted in #15343. The headless (PR 1, #15369), ACP (PR 2, #15509–#16190), Ink TUI (PR 3, #16206–#16704) and OpenTUI (PR 4, #16743–#16820) migrations are merged; each surface's default flip waits on the nightly unified-loop E2E gate (#16192). PR 5 (AgentCore) is in progress: 5a (#16880) and 5b (#17035) are merged. The remaining steps are tracked in #17045. PR 6a (speculation's model round, #17029) is in review.
+- **Status**: accepted in #15343. The headless (PR 1, #15369), ACP (PR 2, #15509–#16190), Ink TUI (PR 3, #16206–#16704) and OpenTUI (PR 4, #16743–#16820) migrations are merged; each surface's default flip waits on the nightly unified-loop E2E gate (#16192). PR 5 (AgentCore) is in progress: 5a (#16880) and 5b (#17035) are merged. The remaining steps are tracked in #17045. PR 6a (speculation's model round, #17029) is merged.
 - **Date**: 2026-10-23, against upstream `779a4d5d0d`.
 - **Related**:
   - tracking issue #15327;
@@ -581,7 +581,7 @@ The unit suite in `speculation.test.ts` runs a text-only round, a single call, a
 | 5d    | AgentCore: default on, then remove its current loop                                                                                                 |
 | 6a    | speculation: every model round on the loop's round, on a `Turn` over the forked chat; speculation keeps its tool gate and direct execution          |
 | 6b    | speculation: default on, then remove its current round                                                                                              |
-| —     | Hosted Harness: separate evaluation                                                                                                                 |
+| —     | Hosted Harness: separate evaluation — see the [migration evaluation](2026-11-14-hosted-harness-loop-evaluation.md)                                  |
 
 PR 6b is speculation's default-on and removal step.
 
@@ -790,4 +790,4 @@ End state:
 ## Follow-up
 
 - Session-level scheduling: one place that decides when a notification, cron job, Goal turn or teammate message starts a loop.
-- The Hosted Harness evaluation: whether its journaled dispatch becomes a scheduler behind the same `schedule` contract.
+- The Hosted Harness evaluation: whether its journaled dispatch becomes a scheduler behind the same `schedule` contract. Answered by the [migration evaluation](2026-11-14-hosted-harness-loop-evaluation.md): the journaled dispatch stays; only the model round can move to the shared round.
