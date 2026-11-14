@@ -171,9 +171,10 @@ test('global turn navigation follows transcript scrolling @smoke', async ({
   await expect.poll(() => ariaOrdinal(page)).toBeGreaterThan(inMiddle + 3);
   await expect.poll(() => railScrollTop(page)).toBeGreaterThan(0);
 
-  // Narrowing below the rail threshold hides the rail; scrolling there must
-  // not corrupt its window — widening brings the marker back inside the band.
-  await page.setViewportSize({ width: 1100, height: 900 });
+  // The rail needs 56 px gutters beside a row of at least 440 px; at 900 px
+  // the responsive row sits on its 440 px floor with short gutters. Scrolling
+  // there must not corrupt its window — widening brings the marker back.
+  await page.setViewportSize({ width: 900, height: 900 });
   await expect(rail).toBeHidden();
   await scrollTranscriptTo(page, 0.5);
   await expect.poll(() => ariaOrdinal(page)).toBeNull();
