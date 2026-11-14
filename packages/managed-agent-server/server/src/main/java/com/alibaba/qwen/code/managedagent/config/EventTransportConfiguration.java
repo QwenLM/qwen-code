@@ -8,7 +8,7 @@ import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.event.EventTransportConsumer;
 import com.alibaba.qwen.code.managedagent.event.MessageMaterializer;
 import com.alibaba.qwen.code.managedagent.event.TransportWakeActivator;
-import com.alibaba.qwen.code.managedagent.persistence.TransportConsumerStore;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcTransportConsumerStore;
 import com.alibaba.qwen.code.managedagent.session.OwnerSubscriptions;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -76,32 +76,32 @@ public class EventTransportConfiguration {
     }
 
     @Bean
-    public TransportConsumerStore transportConsumerStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
-        return new TransportConsumerStore(jdbc);
+    public JdbcTransportConsumerStore transportConsumerStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc) {
+        return new JdbcTransportConsumerStore(jdbc);
     }
 
     @Bean(destroyMethod = "close")
     public LiteTopicPublicEventTransport liteTopicPublicEventTransport(RocketMqEventClients.Publisher producer, RocketMqEventClients provider,
-            ManagedAgentProperties properties, @Qualifier("managedAgentObjectMapper") ObjectMapper objectMapper, TransportConsumerStore store) {
+            ManagedAgentProperties properties, @Qualifier("managedAgentObjectMapper") ObjectMapper objectMapper, JdbcTransportConsumerStore store) {
         return provider.publicEvents(producer, properties, objectMapper, store::workspaceOf);
     }
 
     @Bean
     public OwnerSubscriptions ownerSubscriptions(HarnessConnector harness,
-            TransportConsumerStore store) {
+            JdbcTransportConsumerStore store) {
         return new OwnerSubscriptions(harness, store);
     }
 
     @Bean(destroyMethod = "close")
     public TransportWakeActivator transportWakeActivator(
-            TransportConsumerStore store, HarnessConnector harness,
+            JdbcTransportConsumerStore store, HarnessConnector harness,
             OwnerSubscriptions owners) {
         return new TransportWakeActivator(store, harness, owners::subscribe);
     }
 
     @Bean(destroyMethod = "close")
     public EventTransportConsumer eventTransportConsumer(
-            TransportWakeActivator wakes, TransportConsumerStore store,
+            TransportWakeActivator wakes, JdbcTransportConsumerStore store,
             MessageMaterializer materializer) {
         return new EventTransportConsumer(wakes, store, materializer);
     }

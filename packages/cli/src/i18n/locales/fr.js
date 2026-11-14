@@ -1567,6 +1567,7 @@ export default {
   Reqs: 'Req.',
   'Input Tokens': "Tokens d'entrée",
   'Output Tokens': 'Tokens de sortie',
+  'Output (incl. Reasoning)': 'Sortie (avec raisonnement)',
   'Savings Highlight:': 'Économies notables :',
   'of input tokens were served from the cache, reducing costs.':
     "des tokens d'entrée ont été servis depuis le cache, réduisant les coûts.",
@@ -2056,6 +2057,8 @@ export default {
     "Échec de la revue de l'advisor : {{error}}",
   'No conversation context available for /advisor':
     'Aucun contexte de conversation disponible pour /advisor',
+  'No conversation context available for /btw':
+    'Aucun contexte de conversation disponible pour /btw',
   'Focus too long (max {{max}} chars)':
     'Focus trop long (max {{max}} caractères)',
   'Another operation is in progress, wait for it to complete before running /advisor':
@@ -2138,6 +2141,26 @@ export default {
     'Utilisation : /forget <texte de mémoire à supprimer>',
   'No managed auto-memory entries matched: {{query}}':
     'Aucune entrée de mémoire automatique gérée ne correspond à : {{query}}',
+  'Bind a GitHub pull request to this session':
+    'Lier une pull request GitHub à cette session',
+  'Usage: /pr <number | url>': 'Utilisation : /pr <numéro | url>',
+  'No PRs bound to this session.': 'Aucune PR liée à cette session.',
+  'Bound PRs: {{list}}': 'PR liées : {{list}}',
+  'Invalid PR reference. Usage: /pr <number | url>':
+    'Référence de PR invalide. Utilisation : /pr <numéro | url>',
+  'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
+    'Impossible de résoudre la PR #{{number}} via gh. Indiquez l’URL complète de la PR.',
+  'Bound PR #{{number}} to this session: {{url}}':
+    'PR #{{number}} liée à cette session : {{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}':
+    'La PR #{{number}} est déjà liée à cette session : {{url}}',
+  'Failed to bind PR #{{number}}.': 'Échec de la liaison de la PR #{{number}}.',
+  'Failed to bind PR #{{number}}: {{message}}':
+    'Échec de la liaison de la PR #{{number}} : {{message}}',
+  'Could not read the PR bindings for this session.':
+    'Impossible de lire les liaisons PR de cette session.',
+  'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.':
+    'GitHub CLI (gh) est indisponible ou a expiré. Indiquez l’URL complète de la PR pour lier sans lui.',
   'Consolidate managed auto-memory topic files.':
     'Consolider les fichiers de sujets de mémoire automatique gérée.',
   'Press c to copy the authorization URL to your clipboard.':

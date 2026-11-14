@@ -1519,6 +1519,22 @@ jobs:
           RUNNER_GID="$(stat -c '%g' "$RUNNER_TEMP" 2>/dev/null || stat -f '%g' "$RUNNER_TEMP" 2>/dev/null || echo 0)"
           if [ "$RUNNER_UID" != "0" ]; then
             chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || echo "::warning::could not restore workspace ownership"
+            # QWEN_HOME lives under RUNNER_TEMP, which persists across jobs on
+            # this pool. The context step chowned it to node (uid 1000); left
+            # that way, the next host-user job (e.g. PR review) cannot rm it
+            # and dies writing settings.json (PR #16610 incident). Hand it
+            # back too, not just the workspace — same for the draft/result
+            # dirs the context step chowned to node. The quarantine names are
+            # this container's only chance to reclaim them: a review renames a
+            # foreign-owned home instead of failing, and that copy keeps the
+            # owner that made it unremovable, so nothing unprivileged can
+            # delete it later. An unmatched glob fails the -d guard below.
+            QWEN_HOME="${RUNNER_TEMP:?}/qwen-home"
+            for handback in "$QWEN_HOME" "$RUNNER_TEMP"/qwen-home.stale-* "$RUNNER_TEMP/triage-drafts" "$RUNNER_TEMP/triage-results" "$RUNNER_TEMP/triage-context"; do
+              if [ -d "$handback" ]; then
+                chown -R "$RUNNER_UID:$RUNNER_GID" "$handback" 2>/dev/null || echo "::warning::could not restore ownership of $handback; the next job on this runner may fail on EACCES"
+              fi
+            done
           else
             echo "::warning::could not determine runner UID; skipping ownership restore"
           fi
@@ -2832,17 +2848,20 @@ jobs:
     #                                (≤~345s)
     #   resolver/tools, checkout,
     #   pin, upload, cleanup         ~5m
+    #   deepen history               ≤ 3m: `timeout -k 10 140` on the
+    #                                history fetch, `timeout -k 5 25` on
+    #                                the previous head; 7-10s measured
     #   java toolchain + Maven repo
     #   + sibling modules            ≤ ~20m, and only when the diff touches
     #                                a Java module. curl --max-time caps
     #                                each download; `timeout 300` caps each
     #                                mvn install
     #   ------------------------------------
-    #   worst case                   ~200m  ⇒ 210 leaves 10m of headroom.
+    #   worst case                   ~203m  ⇒ 213 leaves 10m of headroom.
     #
     # Cost of the raise, stated so it is a decision and not a surprise: a
     # verify run now occupies one ECS slot for up to ~3.5h instead of 1h.
-    timeout-minutes: 210
+    timeout-minutes: 213
     runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
     # The job checks out and executes PR code. Run the steps in a container so
     # package scripts/builds cannot persist changes in the self-hosted runner's
@@ -2857,6 +2876,10 @@ jobs:
       contents: 'read'
     outputs:
       pr_number: '${{ steps.pr.outputs.pr_number || github.event.issue.number }}'
+      # The head the pr step pinned and the pin step checked against the
+      # checkout: publish-verify stamps it into the report header so the
+      # next round's deepen step reads it as data, not report prose.
+      head_oid: '${{ steps.pr.outputs.head_oid }}'
       # steps.run sets the verdict for a real agent run; steps.prepare sets
       # 'fail' when install/build dies; steps.pr sets 'skipped'/'n/a'. All
       # empty -> the job broke before deciding (publish reports infra).
@@ -2980,7 +3003,7 @@ jobs:
           # Snapshot PR metadata for the token-free agent: the agent env
           # carries no GitHub credential, so everything it may cite (title,
           # body, commit messages) is read from this file, and the tree/diff
-          # comes from git parents (see the depth-2 checkout below).
+          # comes from git (see the checkout and 'Deepen history' below).
           # rm first: RUNNER_TEMP hygiene between jobs is runner-managed and
           # this pool is persistent — a stale previous-report.md from another
           # PR's run must never masquerade as this PR's prior round.
@@ -3178,6 +3201,25 @@ jobs:
             rm -f "$RUNNER_TEMP/verify-context/review-threads.json"
             echo "::warning::Could not snapshot the PR's review threads; the round reports them as not covered."
           fi
+          # How far back 'Deepen history for the verify round' fetches: the
+          # oldest date among the PR's commits AND their parents. A fetch cut
+          # at a date also cuts every commit with one parent older than it,
+          # so a merge of an older base would hide the PR's earlier commits.
+          # Only for the head pr.json pinned: after a push the list is
+          # another head's. Here because this step holds the token; empty
+          # on failure.
+          # shellcheck disable=SC2016 # $owner and friends are GraphQL's
+          history_since="$(gh api graphql --paginate --slurp -f owner="${GITHUB_REPOSITORY%/*}" \
+              -f name="${GITHUB_REPOSITORY#*/}" -F number="$PR_NUMBER" \
+              -f query='query($owner: String!, $name: String!, $number: Int!, $endCursor: String) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { headRefOid commits(first: 100, after: $endCursor) { pageInfo { hasNextPage endCursor } nodes { commit { committedDate parents(first: 10) { nodes { committedDate } } } } } } } }' |
+            jq -r --slurpfile pr "$RUNNER_TEMP/verify-context/pr.json" '
+              select(all(.[]; .data.repository.pullRequest.headRefOid == $pr[0].headRefOid))
+              | [.[].data.repository.pullRequest.commits.nodes[].commit
+              | .committedDate, .parents.nodes[].committedDate] | min // empty')" ||
+            history_since=''
+          [[ "$history_since" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] ||
+            history_since=''
+          echo "history_since=${history_since}" >> "$GITHUB_OUTPUT"
           # Status comment with the live run link; publish-verify rewrites
           # this same comment with the final report. Best-effort.
           MARKER='<!-- qwen-triage:verify -->'
@@ -3599,6 +3641,66 @@ jobs:
             exit 1
           fi
           echo "agent inputs pinned from base $(git rev-parse --short 'HEAD^1'); head ${ACTUAL_HEAD} matches the authorized head"
+
+      # Depth 2 holds the merge commit and its two parents only: 38 of 67
+      # follow-up rounds re-ran everything because the previous head or a
+      # merge base was out of reach, and multi-commit rounds could not diff
+      # commit by commit. Deepen both sides to the resolve step's date, and
+      # fetch the previous report's verified head when a force-push dropped
+      # it. Root and before PR code, like the checkout, with no token.
+      # Best-effort: on failure the round keeps depth 2 and the skill's
+      # shallow fallbacks.
+      - name: 'Deepen history for the verify round'
+        if: "steps.pr.outputs.decision == 'run'"
+        env:
+          HISTORY_SINCE: '${{ steps.pr.outputs.history_since }}'
+        run: |-
+          set -uo pipefail
+          base="$(git rev-parse 'HEAD^1')"
+          head="$(git rev-parse 'HEAD^2')"
+          since="$HISTORY_SINCE"
+          # A long-lived branch would pull its whole life of the base;
+          # 90 days is about a third of main's history.
+          floor="$(date -u -d '90 days ago' +%Y-%m-%dT%H:%M:%SZ)" || floor=''
+          if [ -n "$since" ] && [[ "$since" < "$floor" ]]; then
+            echo "::warning::The PR reaches back to ${since}; history stops at ${floor}."
+            since="$floor"
+          fi
+          if [ -z "$since" ]; then
+            echo "::warning::No date to deepen to; the round sees the merge commit and its two parents only."
+          elif ! timeout -k 10 140 git fetch --no-tags --quiet --shallow-since="$since" origin "$base" "$head"; then
+            echo "::warning::Could not deepen the checkout to ${since}; the round sees the merge commit and its two parents only."
+            since=''
+          fi
+          # The previous round's verified head: publish-verify stamps it as
+          # a header marker, and this reads that, not the report prose — a
+          # reworded verdict line must not silently empty it. Header-scoped
+          # and line-exact, like every other marker lookup: a report can
+          # quote the marker further down. A report published before the
+          # marker carries none and warns below. Deepening brings the head
+          # when it is an ancestor; otherwise, after a force-push or a
+          # deepen that fell short, it arrives alone, without parents.
+          # `sed`, not `head`: under pipefail, a reader that exits at the
+          # first line would SIGPIPE the one feeding it. `-k`: SIGKILL if a
+          # fetch outlives its SIGTERM.
+          prev="$(sed -n '1,/^$/p' "$RUNNER_TEMP/verify-context/previous-report.md" 2>/dev/null |
+            sed -n 's/^<!-- qwen-triage:verify-head=\([0-9a-f]\{40\}\) -->$/\1/p' | sed -n 1p)" || prev=''
+          if [ -n "$prev" ] && ! git cat-file -e "${prev}^{commit}" 2>/dev/null; then
+            timeout -k 5 25 git fetch --no-tags --quiet --depth=1 origin "${prev}:refs/verify/previous" ||
+              { echo "::warning::Could not fetch the previous verified head ${prev}."; prev=''; }
+          elif [ -z "$prev" ] && [ -s "$RUNNER_TEMP/verify-context/previous-report.md" ]; then
+            # A first round has no report; a follow-up whose report carries
+            # no head marker re-runs everything, and should say why.
+            echo "::warning::The previous report names no verified head; the round cannot classify against it."
+          fi
+          mb="$(git merge-base "$base" "$head" 2>/dev/null)" || mb=''
+          [ -n "$mb" ] ||
+            echo "::warning::No merge base is local; the round cannot classify a merge or list what the base added."
+          # Also in the step summary, where a degraded round can be counted:
+          # what the step reached, not what it asked for.
+          summary="history from ${since:-nowhere}: $(git rev-list --count "$head" --not "$base") PR commits, merge base ${mb:-not reachable}, previous head ${prev:-none}"
+          echo "$summary"
+          { echo "$summary" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"; } 2>/dev/null || true
 
       # The flakiness gate (#9125) re-runs the PR's changed test files and
       # compares outcomes across identical rounds. The file list is recorded
@@ -5932,6 +6034,7 @@ jobs:
           VERIFY_MODEL: '${{ needs.verify.outputs.model }}'
           VERIFY_CLI_VERSION: '${{ needs.verify.outputs.cli_version }}'
           VERIFY_SKILL_HASH: '${{ needs.verify.outputs.skill_hash }}'
+          VERIFY_HEAD_OID: '${{ needs.verify.outputs.head_oid }}'
           FLAKE_VERDICT: '${{ needs.verify.outputs.flake_verdict }}'
           FLAKE_SUMMARY: '${{ needs.verify.outputs.flake_summary }}'
           SKIP_REASON: '${{ needs.verify.outputs.skip_reason }}'
@@ -6401,11 +6504,11 @@ jobs:
           PARTIAL_ZH='本次验证运行未正常结束，下列内容可能不完整甚至缺失。仅作为评审证据，**不构成评审、批准或 CI 检查**。'
 
           # Every body opens with a header: the verify marker, this run's
-          # marker, the flaky marker when the gate demoted the run and, on a
-          # body that carries findings, the substantive marker, ended by a
-          # blank line. Every lookup reads markers only
-          # from a header, so it is started once, here, and each branch below
-          # appends to it.
+          # marker, the flaky marker when the gate demoted the run, the head
+          # marker when the pinned head is known and, on a body that carries
+          # findings, the substantive marker, ended by a blank line. Every
+          # lookup reads markers only from a header, so it is started once,
+          # here, and each branch below appends to it.
           printf '%s\n%s\n' '<!-- qwen-triage:verify -->' "$RUN_MARKER" > "$BODY_FILE"
           # Every branch a flaky verdict can reach demotes on it (the gate step
           # runs only on a prepared round it was asked to verify), so the
@@ -6414,6 +6517,14 @@ jobs:
           FLAKY_MARKER='<!-- qwen-triage:verify-flaky -->'
           if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
             printf '%s\n' "$FLAKY_MARKER" >> "$BODY_FILE"
+          fi
+          # The head this round pinned, as data for the next round: its
+          # deepen step reads this marker, not the report prose a reworded
+          # verdict line could silently empty. Empty when the verify job
+          # broke before pinning (a cancellation empties the outputs), and
+          # the 40-hex guard then stamps nothing.
+          if [[ "${VERIFY_HEAD_OID:-}" =~ ^[0-9a-f]{40}$ ]]; then
+            printf '<!-- qwen-triage:verify-head=%s -->\n' "$VERIFY_HEAD_OID" >> "$BODY_FILE"
           fi
 
           # The gate verdict travels via job outputs: it survives a later
