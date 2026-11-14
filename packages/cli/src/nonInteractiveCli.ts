@@ -100,7 +100,11 @@ import {
   buildGoalContinuationParts,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
-import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
+import type {
+  CLIResultMessage,
+  CLIUserMessage,
+  PermissionMode,
+} from './nonInteractive/types.js';
 import type { JsonOutputAdapterInterface } from './nonInteractive/io/BaseJsonOutputAdapter.js';
 import { JsonOutputAdapter } from './nonInteractive/io/JsonOutputAdapter.js';
 import { StreamJsonOutputAdapter } from './nonInteractive/io/StreamJsonOutputAdapter.js';
@@ -392,10 +396,14 @@ function emitNonInteractiveAssistantText(
   message: string,
 ): void {
   adapter.startAssistantMessage();
+  const producedTextBefore = adapter.getTurnProducedText?.() ?? false;
   adapter.processEvent({
     type: LlmEventType.Content,
     value: message,
   } as unknown as Parameters<JsonOutputAdapterInterface['processEvent']>[0]);
+  // A command's reply is not a prompt's answer: the Mod turn submitted next
+  // must not let a refused first send inherit it as this turn's text.
+  adapter.setTurnProducedText?.(producedTextBefore);
   adapter.finalizeAssistantMessage();
 }
 
@@ -661,17 +669,18 @@ export async function runNonInteractive(
     let resultEmitted = false;
     const emitResult = async (
       result: Parameters<JsonOutputAdapterInterface['emitResult']>[0],
-    ): Promise<void> => {
+    ): Promise<CLIResultMessage> => {
       try {
         await settleBeforeTerminalOutput();
         // Fire the callback only after a successful emit. The continue caller
         // (session.ts) uses it to mark the result as delivered and swallow any
         // later error; if emitResult itself throws, the flag must stay unset so
         // the error still surfaces instead of losing both result and error.
-        adapter.emitResult(result);
+        const resultMessage = adapter.emitResult(result);
         resultEmitted = true;
         options.onResultEmitted?.();
         await modSession?.flushOutput();
+        return resultMessage;
       } finally {
         // Write the result first, but keep the invocation alive for memory
         // writes — unbounded on a success terminal, as in the base; an
@@ -4094,7 +4103,10 @@ export async function runNonInteractive(
             return 1;
           }
 
-          await emitResult({
+          // The envelope decides the exit status: a refusal latched by the
+          // adapter turns this success call into an error result, and the
+          // process must not report success for a turn that produced none.
+          const terminalResult = await emitResult({
             isError: false,
             durationMs: Date.now() - startTime,
             apiDurationMs: totalApiDurationMs,
@@ -4102,7 +4114,7 @@ export async function runNonInteractive(
             usage,
             stats,
           });
-          return 0;
+          return terminalResult.is_error ? 1 : 0;
         }
       }
     } catch (error) {
