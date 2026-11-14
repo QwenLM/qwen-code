@@ -7615,7 +7615,7 @@ export class Session implements SessionContext {
             // and Agent Host sessions also keep ACP's tool executor and guards
             // instead of the shared tool batch.
             const sharedModelRound =
-              this.config.isUnifiedAgentLoopEnabled?.() === true;
+              this.config.isUnifiedAgentLoopEnabled?.('acp') === true;
             // A retry, a continue or a restore re-enters a turn: its first
             // round is a Retry.
             const firstRoundType = isRuntimeContinuation
@@ -7653,7 +7653,7 @@ export class Session implements SessionContext {
               if (promptAdmission.blocked) {
                 // The first round reports the block without sending anything.
                 debugLogger.debug(
-                  `model round on the shared agent loop (prompt ${promptId})`,
+                  `round in its own runAgentLoop call (prompt ${promptId})`,
                 );
                 await runAgentLoop({
                   client: this.config.getLlmClient(),
@@ -7671,7 +7671,7 @@ export class Session implements SessionContext {
                   },
                   maxRounds: 1,
                   useEventBus:
-                    this.config.isEventBusAgentLoopEnabled?.() === true,
+                    this.config.isEventBusAgentLoopEnabled?.('acp') === true,
                   host: {
                     onModelEvent: async (event) => {
                       if (event.type === LlmEventType.UserPromptSubmitBlocked) {
@@ -8910,6 +8910,9 @@ export class Session implements SessionContext {
    * turn around it runs the tool batch and decides what is sent next.
    */
   async #runSharedRound(round: SharedRound): Promise<SharedRoundResult> {
+    debugLogger.debug(
+      `[ACP] model round on the shared agent loop (prompt ${round.promptId})`,
+    );
     const {
       message,
       promptId,
@@ -8989,7 +8992,7 @@ export class Session implements SessionContext {
     const sendRound: typeof runModelRound = round.sharedToolBatch
       ? (_client, request, roundSignal, host) => {
           debugLogger.debug(
-            `model round on the shared agent loop (prompt ${request.promptId})`,
+            `round in its own runAgentLoop call (prompt ${request.promptId})`,
           );
           const loop = startSharedLoopRound(
             this.config.getLlmClient(),
@@ -8999,7 +9002,8 @@ export class Session implements SessionContext {
               signal: roundSignal,
               // Each result is recorded as the batch settles it.
               deferRecording: false,
-              useEventBus: this.config.isEventBusAgentLoopEnabled?.() === true,
+              useEventBus:
+                this.config.isEventBusAgentLoopEnabled?.('acp') === true,
               onModelEvent: host.onModelEvent!,
             },
           );
@@ -13222,7 +13226,7 @@ export class Session implements SessionContext {
               // state, adds the system and todo reminders and recalls memory,
               // as for the other surfaces. The session records the prompt
               // once it reached history.
-              if (this.config.isUnifiedAgentLoopEnabled?.() === true) {
+              if (this.config.isUnifiedAgentLoopEnabled?.('acp') === true) {
                 const cronRecord: UserTurnRecord = {
                   kind: 'cron',
                   message: [{ text: modelText }],
@@ -14649,7 +14653,7 @@ export class Session implements SessionContext {
           // `LlmClient` as a Notification send. The session keeps the
           // notification's record and reminders, and shows each response
           // as one background message once it ended.
-          if (this.config.isUnifiedAgentLoopEnabled?.() === true) {
+          if (this.config.isUnifiedAgentLoopEnabled?.('acp') === true) {
             const result = await this.#runAutomaticTurnOnSharedLoop({
               message: nextMessage,
               type: SendMessageType.Notification,
@@ -15915,6 +15919,9 @@ export class Session implements SessionContext {
     toolLoopState: DaemonToolLoopState,
     onFullTurnModel?: (model: string) => boolean,
   ): Promise<RunToolResult> {
+    debugLogger.debug(
+      `[ACP] tool batch on the shared agent loop (prompt ${promptId}, ${requests.length} call(s))`,
+    );
     promptIdContext.enterWith(promptId);
     todoWorkChainContext.enterWith(
       this.config.getActiveTodoWorkChainOwner(promptId),
