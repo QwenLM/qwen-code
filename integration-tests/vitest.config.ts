@@ -23,6 +23,7 @@ export default defineConfig({
       '**/installed/**',
       '**/terminal-bench/*.test.ts',
       '**/hook-integration/**',
+      '**/managed-loop/**',
       '**/qwen-daemon-loadtest*',
       '**/qwen-daemon-first-output-benchmark*',
       '**/node_modules/**',

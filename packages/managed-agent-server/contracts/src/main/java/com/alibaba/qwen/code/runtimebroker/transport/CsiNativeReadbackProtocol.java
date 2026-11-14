@@ -216,8 +216,7 @@ public final class CsiNativeReadbackProtocol {
         uuid(value.get("requestId"));
         var identity = map(value.get("identity"));
         closed(identity, Set.of("profile", "sessionId", "capabilityDigest"));
-        require(CsiFilesRetirementProfile.PROFILE.equals(identity.get("profile"))
-                && CsiFilesRetirementProfile.CAPABILITY_DIGEST.equals(identity.get("capabilityDigest")));
+        require(CsiFilesRetirementProfile.matches(identity.get("profile"), identity.get("capabilityDigest")));
         uuid(identity.get("sessionId"));
         var context = map(value.get("context"));
         closed(context, Set.of("protocolVersion", "managedContext", "runtimeInstanceId", "runtimeIncarnation", "leaseId",

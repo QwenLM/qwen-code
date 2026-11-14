@@ -53,6 +53,7 @@ const BUILT_IN_COMMANDS = new Set([
   'new',
   'permissions',
   'plan',
+  'pr',
   'quit',
   'recap',
   'remember',

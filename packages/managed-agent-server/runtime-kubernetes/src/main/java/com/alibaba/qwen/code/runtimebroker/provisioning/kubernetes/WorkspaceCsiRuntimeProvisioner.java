@@ -194,6 +194,7 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
             var pod = create("pods", pod(request, seed));
             checkObject(pod, pod(request, seed), null);
             String podUid = uid(pod);
+            long pause = 200;
             while (true) {
                 admitted(request, seed, original);
                 pod = get("pods", name(seed));
@@ -231,11 +232,12 @@ public final class WorkspaceCsiRuntimeProvisioner implements RuntimeProvisioner 
                     return handle;
                 }
                 try {
-                    Thread.sleep(100);
+                    Thread.sleep(pause);
                 } catch (InterruptedException interrupted) {
                     Thread.currentThread().interrupt();
                     throw timeout();
                 }
+                pause = Math.min(pause * 2, 2_000);
             }
         });
     }

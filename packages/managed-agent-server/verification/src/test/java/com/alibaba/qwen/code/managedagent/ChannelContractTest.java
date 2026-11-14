@@ -45,6 +45,7 @@ class ChannelContractTest {
             "PublicChannel",
             "PublicChannelList",
             "PublicChannelDelivery",
+            "PublicChannelDeliverySegment",
             "PublicChannelDeliveryList");
 
     @Test
