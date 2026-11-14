@@ -17,8 +17,8 @@ import {
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, posix } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { getLintScope } from './lint-scope.js';
+import { isEntryPoint } from './lib/entry-point.js';
 
 const ACTIONLINT_VERSION = '1.7.12';
 const SHELLCHECK_VERSION = '0.11.0';
@@ -586,10 +586,7 @@ async function main() {
 // instead of installing anything, silently, under continue-on-error
 // (PR #16001 review, round 4). The argv[1] guard keeps `node -e` imports
 // (no argv[1]) inert too.
-if (
-  process.argv[1] &&
-  import.meta.url === pathToFileURL(process.argv[1]).href
-) {
+if (isEntryPoint(import.meta.url, process.argv[1])) {
   main().catch((error) => {
     console.error(error);
     process.exitCode = 1;
