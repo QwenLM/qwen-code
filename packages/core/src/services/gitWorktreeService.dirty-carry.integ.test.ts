@@ -253,6 +253,91 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
     expect(removed.error).toBe('Worktree contains changes');
   });
 
+  it('prepared rollback removes a carried overlay with special-character names', async () => {
+    // core.quotepath C-quotes these names in line-based status output;
+    // the exemption compares raw carried paths, so a quoted form would
+    // strand the worktree and its journal forever.
+    await makeDirty(repoRoot);
+    const names = ['中文.txt', 'quote"name.txt', 'nl\nname.txt', ' pad.txt '];
+    for (const name of names) {
+      await fs.writeFile(path.join(repoRoot, name), `content:${name}\n`);
+    }
+    // A source-side staged rename lands as delete + untracked after the
+    // stash apply (no --index); both names must be exempt.
+    git(repoRoot, 'mv', 'tracked.txt', 'renamed.txt');
+    const base = git(repoRoot, 'rev-parse', 'HEAD');
+    const service = new GitWorktreeService(repoRoot);
+    const created = await service.createUserWorktree(
+      'prepared-special',
+      'main',
+      {
+        detached: true,
+        carryDirtyState: true,
+      },
+    );
+    expect(created.success).toBe(true);
+    const removed = await service.removePreparedUserWorktree(
+      'prepared-special',
+      null,
+      base,
+      undefined,
+      true,
+      created.carriedPaths,
+    );
+    expect(removed.success).toBe(true);
+    await expect(fs.lstat(created.worktree!.path)).rejects.toThrow();
+  });
+
+  it('prepared rollback removes a carried overlay with an untracked directory', async () => {
+    // The carry records file-level paths; a directory-collapsing listing
+    // ("Would remove dir/") would never match the exemption set.
+    await makeDirty(repoRoot);
+    await fs.mkdir(path.join(repoRoot, 'dir', 'sub'), { recursive: true });
+    await fs.writeFile(path.join(repoRoot, 'dir', 'a.txt'), 'a\n');
+    await fs.writeFile(path.join(repoRoot, 'dir', 'sub', 'b.txt'), 'b\n');
+    const base = git(repoRoot, 'rev-parse', 'HEAD');
+    const service = new GitWorktreeService(repoRoot);
+    const created = await service.createUserWorktree('prepared-dir', 'main', {
+      detached: true,
+      carryDirtyState: true,
+    });
+    expect(created.success).toBe(true);
+    const removed = await service.removePreparedUserWorktree(
+      'prepared-dir',
+      null,
+      base,
+      undefined,
+      true,
+      created.carriedPaths,
+    );
+    expect(removed.success).toBe(true);
+    await expect(fs.lstat(created.worktree!.path)).rejects.toThrow();
+  });
+
+  it('prepared rollback refuses index surgery inside the worktree', async () => {
+    await makeDirty(repoRoot);
+    const base = git(repoRoot, 'rev-parse', 'HEAD');
+    const service = new GitWorktreeService(repoRoot);
+    const created = await service.createUserWorktree('prepared-mv', 'main', {
+      detached: true,
+      carryDirtyState: true,
+    });
+    expect(created.success).toBe(true);
+    // The carry never stages anything; a rename record means the index
+    // was touched inside this never-attached worktree.
+    git(created.worktree!.path, 'mv', 'README.md', 'moved.md');
+    const removed = await service.removePreparedUserWorktree(
+      'prepared-mv',
+      null,
+      base,
+      undefined,
+      true,
+      created.carriedPaths,
+    );
+    expect(removed.success).toBe(false);
+    expect(removed.error).toBe('Worktree contains changes');
+  });
+
   it('without the option the worktree holds only committed state', async () => {
     await makeDirty(repoRoot);
     const worktree = await create('opt-out');

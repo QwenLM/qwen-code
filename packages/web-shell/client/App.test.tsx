@@ -25513,6 +25513,43 @@ describe('App session callbacks', () => {
     });
   });
 
+  it('keeps the composer off worktree mode when the workspace has no commits', async () => {
+    mockConnection.sessionId = undefined;
+    testState.settings = [worktreeDefaultSetting(true)];
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi
+        .fn()
+        .mockResolvedValue({ branch: 'main', hasHead: false }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+
+    // An unborn HEAD has no worktree base; the create path would refuse
+    // with worktree_base_unavailable, so the composer must stay current.
+    expect(testState.latestChatEditorProps?.gitModeIntent).toBeUndefined();
+    expect(
+      testState.latestChatEditorProps?.onGitModeIntentChange,
+    ).toBeUndefined();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('unborn head session');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+
+    const request = mockSessionActions.createSession.mock.calls[0][0];
+    expect(request.worktree).toBeUndefined();
+    expect(request.branch).toBeUndefined();
+  });
+
   it('re-arms the worktree default on New chat from an empty draft', async () => {
     mockConnection.sessionId = undefined;
     testState.settings = [worktreeDefaultSetting(true)];

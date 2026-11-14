@@ -3262,7 +3262,12 @@ export class GitWorktreeService {
         }
         // Verify against git itself: a rule that matches nothing would
         // silently bring back the dirty-checkout failure this replaces.
-        const probe = path.join(realRoot, '.qwen', WORKTREES_DIR, 'probe');
+        // Forward slashes: a win32 native path would read as an escaped
+        // pathspec and spuriously report the rule as ineffective.
+        const probe = path
+          .join(realRoot, '.qwen', WORKTREES_DIR, 'probe')
+          .split(path.sep)
+          .join('/');
         const ignored = await git
           .raw(['check-ignore', '-q', '--', probe])
           .then(() => true)
@@ -3303,11 +3308,10 @@ export class GitWorktreeService {
         return;
       }
       const git = await this.getGit();
-      const tracked = await git.raw([
-        'ls-files',
-        '--',
-        path.join('.qwen', '.gitignore'),
-      ]);
+      // A git pathspec, not a filesystem path: path.join would produce
+      // backslashes on win32, which git parses as escapes, matching
+      // nothing and unlinking a file the user committed.
+      const tracked = await git.raw(['ls-files', '--', '.qwen/.gitignore']);
       if (tracked.trim().length === 0) {
         await fs.unlink(legacyGitignore);
       }
@@ -3573,31 +3577,36 @@ export class GitWorktreeService {
       // A prepared worktree is created with carryDirtyState and never
       // attached: its dirty content is the carried overlay, a copy of
       // state the source checkout still holds, and the atBase /
-      // checkoutMatches gates below prove no commit was added. A
-      // status/clean-ndx gate here can therefore never pass for a dirty
-      // source and would strand the worktree + journal forever. Only
-      // the index-state hazards (hidden bits, populated gitlinks) still
-      // refuse — the carry never produces those.
-      // The carried overlay is a copy of state the source checkout still
-      // holds, so it is exempt from the cleanliness gate — but ONLY the
-      // exact carried paths: any other file (a nested marker-like name, a
-      // late-arriving ignored file) still refuses the removal.
+      // checkoutMatches gates below prove no commit was added. A plain
+      // cleanliness gate could therefore never pass for a dirty source
+      // and would strand the worktree + journal forever. The overlay is
+      // exempt — but ONLY the exact carried paths: any other file (a
+      // nested marker-like name, a late-arriving ignored file) still
+      // refuses the removal.
       const exempt = new Set(carriedPaths ?? []);
-      const statusPath = (line: string): string => {
-        const p = line.slice(3);
-        const arrow = p.indexOf(' -> ');
-        return arrow >= 0 ? p.slice(arrow + 4) : p;
-      };
+      // The daemon's own bookkeeping names, mirroring the anchored
+      // info/exclude rules: the root-level marker and its staged siblings.
+      const markerTmpPattern = new RegExp(
+        `^${WORKTREE_SESSION_FILE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.[^/]*\\.tmp$`,
+      );
       const isClean = async () => {
+        // -z keeps raw bytes: line-based output C-quotes non-ASCII,
+        // quotes, and newlines (core.quotepath), and the quoted form
+        // would never match the raw carried paths in the exemption set.
         const status = await worktreeGit.raw([
           'status',
           '--porcelain',
           '--untracked-files=all',
+          '-z',
         ]);
-        const hasNonCarriedChange = status
-          .split('\n')
-          .some((line) => line.length > 0 && !exempt.has(statusPath(line)));
-        if (hasNonCarriedChange) return false;
+        for (const entry of status.split('\0')) {
+          if (entry.length === 0) continue;
+          // The carry applies the stash without --index, so the overlay
+          // never contains rename/copy records; one means the index was
+          // touched inside this never-attached worktree. Refuse.
+          if (entry[0] === 'R' || entry[0] === 'C') return false;
+          if (!exempt.has(entry.slice(3))) return false;
+        }
         const hiddenIndexEntries = await worktreeGit.raw([
           'ls-files',
           '-v',
@@ -3608,20 +3617,19 @@ export class GitWorktreeService {
           .some((entry) => /^(?:S|[a-z])/.test(entry));
         if (hasHiddenIndexBits) return false;
         if (await hasPopulatedGitlink()) return false;
-        const cleanOut = await worktreeGit.raw([
-          'clean',
-          '-ndx',
-          '-e',
-          `/${WORKTREE_SESSION_FILE}`,
-          '-e',
-          `/${WORKTREE_SESSION_FILE}.*.tmp`,
-        ]);
-        return cleanOut
-          .split('\n')
+        // clean -ndx has no -z form and collapses untracked directories
+        // to "dir/", which never matches the file-level carried paths.
+        // ls-files --others lists raw file-level paths, ignored ones
+        // included — a late-arriving ignored file must still refuse.
+        const others = await worktreeGit.raw(['ls-files', '--others', '-z']);
+        return others
+          .split('\0')
           .every(
-            (line) =>
-              line.length === 0 ||
-              exempt.has(line.replace(/^Would remove /, '')),
+            (p) =>
+              p.length === 0 ||
+              exempt.has(p) ||
+              p === WORKTREE_SESSION_FILE ||
+              markerTmpPattern.test(p),
           );
       };
       if (!(await isClean())) {
