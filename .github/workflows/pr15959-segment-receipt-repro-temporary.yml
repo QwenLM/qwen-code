@@ -60,7 +60,7 @@ jobs:
           out = Path('.verify-evidence')
           module = Path('packages/managed-agent-server')
           command = ['mvn', '--batch-mode', '--no-transfer-progress', '-Pmysql-integration',
-              '-Dtest=__no_selected_unit_test__', '-Dsurefire.failIfNoSpecifiedTests=false',
+              '-Dtest=ToolPublicationContractTest',
               '-Dit.test=ToolPublicationAsyncVerificationMySqlIT#asynchronousSegmentVerificationPreservesTheSegmentReceipt',
               '-Dmysql.url=jdbc:mysql://mysql:3306/qwen_verify?allowPublicKeyRetrieval=true&useSSL=false',
               '-Dmysql.user=root', '-Dmysql.password=verify-fixture', 'clean', 'verify', 'checkstyle:check']
