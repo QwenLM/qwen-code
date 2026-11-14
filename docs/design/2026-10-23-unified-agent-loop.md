@@ -2,7 +2,7 @@
 
 [English](2026-10-23-unified-agent-loop.md) | [简体中文](2026-10-23-unified-agent-loop.zh-CN.md)
 
-- **Status**: accepted in #15343. The headless (PR 1, #15369), ACP (PR 2, #15509–#16190), Ink TUI (PR 3, #16206–#16704) and OpenTUI (PR 4, #16743–#16820) migrations are merged; each surface's default flip waits on the nightly unified-loop E2E gate (#16192). PR 5 (AgentCore) is in progress: 5a (#16880) and 5b (#17035) are merged. The remaining steps are tracked in #17045. PR 6a (speculation's model round, #17029) is in review.
+- **Status**: accepted in #15343. The headless (PR 1, #15369), ACP (PR 2, #15509–#16190), Ink TUI (PR 3, #16206–#16704) and OpenTUI (PR 4, #16743–#16820) migrations are merged; each surface's default flip waits on the nightly unified-loop E2E gate (#16192). PR 5 (AgentCore) is in progress: 5a (#16880) and 5b (#17035) are merged. The remaining steps are tracked in #17045. PR 6a (speculation's model round, #17029) is merged.
 - **Date**: 2026-10-23, against upstream `779a4d5d0d`.
 - **Related**:
   - tracking issue #15327;
@@ -203,12 +203,12 @@ ACP passes one policy, the Todo Stop Guard. The current turn's background result
 
 ### The setting
 
-`experimental.unifiedAgentLoop` is a boolean, `false` by default, and takes effect after a restart. `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1` overrides it, which lets CI and scripts run the suites with the shared loop. Both follow the pattern of `experimental.agentTeam` / `QWEN_CODE_ENABLE_AGENT_TEAM`.
+`experimental.unifiedAgentLoop` is a boolean, `false` by default, and takes effect after a restart. The `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` environment variable overrides it per surface: `1` forces every surface on, `0` forces every surface off, and a comma-separated list such as `headless,acp=0` forces individual surfaces. This lets CI and scripts run the suites with the shared loop, and lets an operator force a surface back off. It extends the force-on-only pattern of `experimental.agentTeam` / `QWEN_CODE_ENABLE_AGENT_TEAM` with force-off and per-surface control, so a new loop switch should copy this grammar rather than the agentTeam one.
 
-`Config.isUnifiedAgentLoopEnabled()` exposes it. Each surface reads it at its loop's entry point:
+`Config.isUnifiedAgentLoopEnabled(surface)` exposes it. Each surface reads it at its loop's entry point, naming itself (`headless`, `acp`, `ink`, `opentui`, `agent-core`, `speculation`):
 
 ```ts
-if (config.isUnifiedAgentLoopEnabled()) {
+if (config.isUnifiedAgentLoopEnabled('headless')) {
   return runOnSharedLoop(...);
 }
 // current loop, unchanged
@@ -216,7 +216,7 @@ if (config.isUnifiedAgentLoopEnabled()) {
 
 The current loop stays as the `else` branch and is not refactored while the setting exists. A surface that has not moved yet ignores the setting, and the setting's description names the surfaces it covers. ACP children started by `qwen serve` read the same settings, so the daemon and Web Shell follow the setting for the ACP turns that have moved. The Web Shell settings panel lists the setting from PR 2a on.
 
-Once surfaces change their defaults one at a time, the setting has no schema default. `Config.isUnifiedAgentLoopEnabled(surface)` returns the setting when it is set, and otherwise the surface's own default. The environment variable still overrides both.
+Per-surface resolution landed in #17045 (block B): the environment override wins when it addresses the surface, else the explicit setting when set, else the surface's built-in default (`false` everywhere today). The setting is tri-state at runtime — unset is distinct from explicitly off — while the schema keeps `default: false` until the first surface default flips. See `2026-11-12-loop-rollout-switches.md` for the resolution rules and the rollout ladder.
 
 ### Headless on the shared loop (PR 1)
 
@@ -581,7 +581,7 @@ The unit suite in `speculation.test.ts` runs a text-only round, a single call, a
 | 5d    | AgentCore: default on, then remove its current loop                                                                                                 |
 | 6a    | speculation: every model round on the loop's round, on a `Turn` over the forked chat; speculation keeps its tool gate and direct execution          |
 | 6b    | speculation: default on, then remove its current round                                                                                              |
-| —     | Hosted Harness: separate evaluation                                                                                                                 |
+| —     | Hosted Harness: separate evaluation — see the [migration evaluation](2026-11-14-hosted-harness-loop-evaluation.md)                                  |
 
 PR 6b is speculation's default-on and removal step.
 
@@ -598,7 +598,7 @@ Its current loop is removed one release after its default changed. Until then, s
 
 `integration-tests/fake-openai-server.ts` already records every request body.
 
-**How it runs.** The suite runs each scripted scenario on a surface twice, once with `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` unset and once with it set to `1`. It compares:
+**How it runs.** The suite runs each scripted scenario on a surface twice, once with the shared loop forced off and once with it forced on — the ACP and TUI suites set `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` to `0` and `1` per arm, and the headless suite forces the setting per arm — so a surface default turning on cannot make the off arm run the new path. It compares:
 
 - the request sequence the model saw, normalized by removing timestamps, the date reminder, ids and durations;
 - the surface's output: the stream-json frames for headless; for ACP the `session/update` notifications and each prompt's stop reason, without `available_commands_update`, which arrives on its own schedule.
@@ -790,4 +790,4 @@ End state:
 ## Follow-up
 
 - Session-level scheduling: one place that decides when a notification, cron job, Goal turn or teammate message starts a loop.
-- The Hosted Harness evaluation: whether its journaled dispatch becomes a scheduler behind the same `schedule` contract.
+- The Hosted Harness evaluation: whether its journaled dispatch becomes a scheduler behind the same `schedule` contract. Answered by the [migration evaluation](2026-11-14-hosted-harness-loop-evaluation.md): the journaled dispatch stays; only the model round can move to the shared round.
