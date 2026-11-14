@@ -8,6 +8,7 @@ import {
   ToastHost,
   WindowToastHost,
   requestToast,
+  TOAST_REQUEST_EVENT,
   MAX_TOASTS,
   type WebShellToast,
 } from './ToastHost';
@@ -236,34 +237,106 @@ describe('WindowToastHost', () => {
     }
   });
 
-  it('scopes notices to the acting shell when co-mounted (R4-6)', () => {
-    function mountShell(): { shell: HTMLElement; host: HTMLElement } {
-      const shell = document.createElement('div');
-      shell.setAttribute('data-web-shell-root', '');
-      const button = document.createElement('button');
-      shell.appendChild(button);
-      const host = document.createElement('div');
-      shell.appendChild(host);
+  function mountShell(inShadow = false): {
+    shell: HTMLElement;
+    host: HTMLElement;
+    button: HTMLButtonElement;
+  } {
+    const shell = document.createElement('div');
+    shell.setAttribute('data-web-shell-root', '');
+    const button = document.createElement('button');
+    shell.appendChild(button);
+    const host = document.createElement('div');
+    shell.appendChild(host);
+    let outer: HTMLElement = shell;
+    if (inShadow) {
+      const shadowHost = document.createElement('div');
+      document.body.appendChild(shadowHost);
+      const shadow = shadowHost.attachShadow({ mode: 'open' });
+      shadow.appendChild(shell);
+      outer = shadowHost;
+    } else {
       document.body.appendChild(shell);
-      const root = createRoot(host);
-      mounted.push({ root, containers: [shell] });
-      act(() => {
-        root.render(
-          <I18nProvider language="en">
-            <WindowToastHost scope={shell} />
-          </I18nProvider>,
-        );
-      });
-      return { shell, host };
     }
+    const root = createRoot(host);
+    mounted.push({ root, containers: [outer] });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <WindowToastHost scope={shell} />
+        </I18nProvider>,
+      );
+    });
+    return { shell, host, button };
+  }
+
+  it('scopes notices to the acting shell when co-mounted (R4-6)', () => {
     const a = mountShell();
     const b = mountShell();
     // The acting control lives in shell A; its notice must not reach B.
-    (a.shell.querySelector('button') as HTMLButtonElement).focus();
+    a.button.focus();
     act(() => {
       requestToast('error', 'shell-a notice');
     });
     expect(toasts(a.host)).toHaveLength(1);
     expect(toasts(b.host)).toHaveLength(0);
+  });
+
+  it('delivers an unfocused notice to the single mounted shell (R4-6)', () => {
+    const a = mountShell();
+    // document.activeElement stays on body: an effect-driven call must not
+    // vanish just because nothing inside the shell holds focus.
+    act(() => {
+      requestToast('error', 'unfocused notice');
+    });
+    expect(toasts(a.host)).toHaveLength(1);
+  });
+
+  it('delivers a notice from a shell mounted in a shadow root (R4-6)', () => {
+    const a = mountShell(true);
+    a.button.focus();
+    // document.activeElement is the shadow host; the walk must descend.
+    act(() => {
+      requestToast('error', 'shadow notice');
+    });
+    expect(toasts(a.host)).toHaveLength(1);
+  });
+
+  it('an explicit scope wins over focus in another shell (R4-6)', () => {
+    const a = mountShell();
+    const b = mountShell();
+    b.button.focus();
+    act(() => {
+      requestToast('error', 'owned by a', a.shell);
+    });
+    expect(toasts(a.host)).toHaveLength(1);
+    expect(toasts(b.host)).toHaveLength(0);
+  });
+
+  it('bubbles from a scoped descendant to the shell host (R4-4)', () => {
+    const a = mountShell();
+    act(() => {
+      // Dispatch on a descendant: the host on the shell root only receives
+      // it while the event bubbles.
+      requestToast('info', 'bubbling notice', a.button);
+    });
+    expect(toasts(a.host)).toHaveLength(1);
+  });
+
+  it('still reaches a window listener from a shell-root dispatch (R4-4)', () => {
+    const a = mountShell();
+    const windowListener = vi.fn();
+    window.addEventListener(TOAST_REQUEST_EVENT, windowListener);
+    try {
+      act(() => {
+        requestToast('info', 'for app', a.shell);
+      });
+      // App's daemon-shell host listens on window; dropping bubbles would
+      // cut it off from shell-root dispatches.
+      expect(windowListener).toHaveBeenCalledOnce();
+      expect(toasts(a.host)).toHaveLength(1);
+    } finally {
+      window.removeEventListener(TOAST_REQUEST_EVENT, windowListener);
+    }
   });
 });

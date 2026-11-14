@@ -61,7 +61,7 @@ tooltip 变为 `本地文件 — <状态>`，在有目录名时追加 `（<rootN
 - `forcePicker` 下的选择器结果保持运行中桥的真实性：
   - 取消 → 不写状态、无返回值（旧桥继续运行，handler 保持静默）；
   - 失败/不可用 → 保留连接前状态而非写 `failed`，因为旧桥仍连接，写 `failed` 既误报状态，又会让后续重试卡在同条目短路上。hook 返回 `repick-failed` 结果，控制将其呈现为错误 toast，使这次点击不静默；
-  - 重选已绑定的条目（经 `isSameEntry` 判同一性，而非 basename）保留运行中的桥，不拆掉重建。两个 hook 都先保存再短路，因此重复确认已绑定目录会把记录中已丢失的授权重新写入（对端标签页的 Disconnect 会清掉按 origin 作用域的记录），但绝不重新注册绑定。`isSameEntry` 抛错时按「不同」失败关闭：变更继续，而非把用户困在旧授权上。
+  - 重选已绑定的条目（经 `isSameEntry` 判同一性，而非 basename）保留运行中的桥，不拆掉重建。两个 hook 都先保存再短路，因此重复确认已绑定目录会把记录中已丢失的授权重新写入（对端标签页的 Disconnect 会清掉按 origin 作用域的记录），但绝不重新注册绑定。`isSameEntry` 抛错时按「不同」失败关闭：变更继续，而非把用户困在旧授权上。身份 await 之后的 generation 复检覆盖**两个**分支：落在 await 期间的 disconnect 必须胜出，否则 connect 会把用户刚撤销的授权复活。
 - 强制路径上保存软失败（配额/驱逐）在**两个** hook 中都按重选失败处理：整笔变更被拒绝，活桥继续服务旧目录，记录继续持有旧目录，handler 弹出错误 toast。若内存中服务新目录而记录仍是旧目录，刷新会静默回绑用户刻意换走的目录。
 - 瞬态 resolving 抖动期间，daemon hook 寄存一个强制重建义务而非在抖动中重建；rebind effect 在判定落定后消费它。该义务是必需的：rebind 的保桥豁免只比较 basename，分不清同名新目录与旧目录。暂存结果返回 `change-deferred` 判别值，控制弹出 info toast（「变更已保存，工作区解析完成后生效」）：抖动可能远长于这次点击，而活桥仍在服务旧目录，静默成功会把变更误报为已生效。
 
@@ -77,7 +77,7 @@ tooltip 变为 `本地文件 — <状态>`，在有目录名时追加 `（<rootN
 
 ### 4.5 可执行的阻断文案
 
-- `unsupported-daemon`：「复制启动命令」按钮复制 `QWEN_SERVE_CLIENT_MCP_OVER_WS=1 qwen serve`。
+- `unsupported-daemon`：「复制启动命令」按钮复制 `QWEN_SERVE_CLIENT_MCP_OVER_WS=1 qwen serve`——当客户端平台探测（`navigator.userAgentData?.platform`，回退 `navigator.platform`）报告 Windows 时，复制 PowerShell 形式 `$env:QWEN_SERVE_CLIENT_MCP_OVER_WS=1; qwen serve`（POSIX 环境变量前缀形式在 PowerShell 中无法解析）。变量名保持 `run-qwen-serve.ts` 读取的字面量。
 - `insecure-context`：先于 `unsupported-browser` 诊断——安全上下文是 picker 的前提，因此在本阻断所针对的纯 http 非回环部署上 picker 必然缺失，先诊断它会把隧道指引藏在「请用 Chrome」后面。当控制能推导出绝对 daemon URL 时，「复制 SSH 隧道命令」按钮复制 `ssh -L <localPort>:localhost:<remotePort> <hostname>`——远端端口取自 URL（缺省按协议），特权远端端口（<1024）本地映射为 `remotePort + 8000`，使隧道无需特权本地绑定。host 走白名单（`[A-Za-z0-9._:-]`、禁止前导 `-`、保留 IPv6 的 `:`），因为命令要粘贴进 shell，而 WHATWG URL 解析器会保留 host 中的 shell 元字符；不安全的 host 不产生命令。解释文案点名要打开的**本地**绑定（`http://localhost:<localPort>`）——命令中唯一的 `localhost` 是远端。推导不出端口时（Managed 面渲染此阻断且无复制按钮），文案保留可替换的 `http://localhost:<port>` 占位符，而非裸 `http://localhost`——后者会落在没有任何 Web Shell 监听的 80 端口。
 - `workspace-ineligible`：文案改写为给出下一步——在受信任的普通工作区会话中使用——而非只点名内部条件。
 - 带有名授权的 `failed`：连接按钮标「重试」；无授权时仍标「连接目录…」。两者都调用同一 `onConnect`。
@@ -88,7 +88,7 @@ tooltip 变为 `本地文件 — <状态>`，在有目录名时追加 `（<rootN
 
 `requestToast` 是 `CustomEvent`，daemon 宿主外壳中唯一的文档级监听器在 App。managed-only 启动路径（`ManagedStandaloneApp` → `ManagedAgentWebShell`）现在挂载 `WindowToastHost`——一个自包含宿主，与 App 监听器同一契约：非空 message 校验、tone+message 去重、上限栈、按截止时间自动消失。没有它，「更换目录」失败 toast 会派发进一个没有监听器的文档而被静默丢弃。toast 栈常量放在 `ToastHost.tsx` 并与 App 共享，使两个宿主不会漂移。
 
-通道按 shell 作用域隔离：`requestToast` 派发到动作所在 shell 的 `[data-web-shell-root]`（从焦点元素向上找，冒泡到 window 供 App 宿主接收），每个 `WindowToastHost` 只监听自己的 shell root。`renderManagedAgentWebShell` 是公开嵌入 API，宿主页面可在同一文档挂载多个 shell；不做隔离时，一个 shell 抛出的提示会同时出现在另一个 shell——可能属于另一个租户。
+通道按 shell 作用域隔离，且归属绝不单靠焦点推断：控件经 `useWebShellPortalRoot` 把自己的 shell root 作为显式 scope 传入，优先于任何焦点状态。无 scope 时，`requestToast` 沿焦点元素下钻 shadow root（`document.activeElement` 是 shadow 宿主而非聚焦控件）找到其 `[data-web-shell-root]`；再找不到时，唯一挂载的 shell root 仍会收到提示，因此无焦点或 effect 驱动的调用不会丢失。只有没有唯一 shell 的文档才回退到 window。事件带 `bubbles`（App 的 window 监听器仍能收到 shell-root 派发）与 `composed`（跨越 shadow 边界）。每个 `WindowToastHost` 只监听自己的 shell root。`renderManagedAgentWebShell` 是公开嵌入 API，宿主页面可在同一文档挂载多个 shell；不做隔离时，一个 shell 抛出的提示会同时出现在另一个 shell——可能属于另一个租户。
 
 ## 5. 设计决策与理由
 
@@ -110,6 +110,7 @@ tooltip 变为 `本地文件 — <状态>`，在有目录名时追加 `（<rootN
 - `packages/web-shell/client/ManagedAgentWebShell.tsx` — 挂载 toast 宿主。
 - `packages/web-shell/client/App.tsx` — 消费共享 toast 常量。
 - `packages/web-shell/client/i18n.tsx` — 新增 EN/ZH 键（两种语言）；insecure-context 指引为带本地端口的函数值。
+- `packages/web-templates/src/export-html/build.mjs` — 导出包字节上限按新增文案的实测增量提升。
 - 测试：`LocalFilesPanel.test.tsx`、`LocalFilesControl.test.tsx`、`ManagedLocalFilesControl.test.tsx`、`ManagedSessionsPage.test.tsx`、`ManagedAgentWebShell.test.tsx`、`ToastHost.test.tsx`、`capabilities.test.ts`、`i18n.test.ts`、hook 测试、`client/e2e/managed-local-files.spec.ts`，以及 `client/e2e/web-shell.local-files-toast.spec.ts`。
 
 ## 7. 约束与风险
@@ -121,9 +122,9 @@ tooltip 变为 `本地文件 — <状态>`，在有目录名时追加 `（<rootN
 
 ## 8. 验证计划
 
-- 单元：扩展 `LocalFilesPanel.test.tsx`（按阶段的新可供性、两种语言）、控制接线测试（toast 去重、复制命令、会话名、更换目录），以及 `forcePicker` 的 hook 测试（重选、取消保留桥、失败保留状态）。重建用例经新 socket 上的真实 `list_directory` 工具调用探测实际服务的目录（同名 handle 使按名断言失明）；两个 hook 的测试都读取 `repick-failed` 返回契约，取消的姊妹用例断言静默；探针优先级、恶意 host 白名单、本地端口文案、managed toast 宿主、改写阻断文案的 zh≠en 对照各有专用用例。每个新守卫都经变异验证并字节级还原。
-- `npm run build && npm run typecheck`，外加从 `packages/web-shell` 跑聚焦 vitest 套件。
-- E2E：扩展 `managed-local-files.spec.ts`，在真实浏览器中断言已连接态的更换目录可供性与会话名；并新增 `web-shell.local-files-toast.spec.ts`，恢复一个权限为 `prompt` 的持久化授权（在 IndexedDB 层拦截），断言一次性警告 toast 在不打开 popover 的情况下到达真实 toast 宿主。非安全上下文的剪贴板回退还在非回环源上实跑（`execCommand('copy')` 携带推导出的隧道命令）。命令类功能所用的 CLI 级 dry-run 不适用于纯浏览器 UI；基线是既有单元 + E2E 套件。
+- 单元：扩展 `LocalFilesPanel.test.tsx`（按阶段的新可供性、两种语言）、控制接线测试（toast 去重、复制命令、会话名、更换目录），以及 `forcePicker` 的 hook 测试（重选、取消保留桥、失败保留状态）。重建用例经新 socket 上的真实 `list_directory` 工具调用探测实际服务的目录（同名 handle 使按名断言失明）；两个 hook 的测试都读取 `repick-failed` 返回契约，取消的姊妹用例断言静默；探针优先级、恶意 host 白名单、本地端口文案、managed toast 宿主、改写阻断文案的 zh≠en 对照各有专用用例。toast 通道的承重细节逐条钉住：`bubbles`（window 监听器必须仍能收到 shell-root 派发）、挂载层 scope（两个共挂载 shell）、无焦点提示、shadow root 中的 shell、显式 scope 压过另一 shell 的焦点、落在身份 await 期间的 disconnect、Managed 同名不同目录重选、重建的终态断言、Windows 的 PowerShell 启动命令、`execCommand` 回退的两种结果。每个新守卫都经变异验证并字节级还原。
+- `npm run build && npm run typecheck`，外加从 `packages/web-shell` 跑聚焦 vitest 套件。导出包字节预算（`packages/web-templates/src/export-html/build.mjs`）携带整份 i18n 表，新增文案按实测增量提升上限，沿用该文件的 convention。
+- E2E：扩展 `managed-local-files.spec.ts`，在真实浏览器中断言已连接态的更换目录可供性与会话名；并新增 `web-shell.local-files-toast.spec.ts`，恢复一个权限为 `prompt` 的持久化授权（在 IndexedDB 层拦截），断言一次性警告 toast 在不打开 popover 的情况下到达真实 toast 宿主。非安全上下文的剪贴板回退由 stub `execCommand` 两种结果的单测覆盖，并在本地验证中于非回环源上实跑过（不属于 CI 套件——其 Playwright 服务绑定回环地址，属安全上下文）。命令类功能所用的 CLI 级 dry-run 不适用于纯浏览器 UI；基线是既有单元 + E2E 套件。
 
 ## 9. 验收标准
 

@@ -695,6 +695,47 @@ describe('useLocalFilesBridge forcePicker', () => {
     h.unmount();
   });
 
+  it('a disconnect inside the identity await wins over the forced re-pick', async () => {
+    const first = fakeHandle('project', { query: 'granted' });
+    // Same basename, different entry: the only shape that actually awaits
+    // isSameEntry (the picker reopens the last location, so this is ordinary).
+    const second = fakeHandle('project', { query: 'granted' });
+    const pick = vi.fn(async () => first);
+    const h = renderWithPick(pick);
+    await h.flush();
+    await connectAndDrive(h);
+    expect(h.sockets).toHaveLength(1);
+
+    let releaseIdentity!: (same: boolean) => void;
+    const gate = new Promise<boolean>((resolve) => {
+      releaseIdentity = resolve;
+    });
+    (
+      first as unknown as { isSameEntry: ReturnType<typeof vi.fn> }
+    ).isSameEntry = vi.fn(() => gate);
+    pick.mockClear();
+    pick.mockImplementation(async () => second);
+    let connectDone: Promise<unknown> | undefined;
+    await act(async () => {
+      connectDone = h.get().connect({ forcePicker: true });
+      await h.flush();
+    });
+    // Disconnect lands while isSameEntry is still in flight.
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    releaseIdentity(false);
+    await act(async () => {
+      await connectDone;
+    });
+    await h.flush();
+    // The revoked grant must not be resurrected: no second bridge, idle panel.
+    expect(h.sockets).toHaveLength(1);
+    expect(h.sockets[0]!.closeCount).toBe(1);
+    expect(h.get().status.phase).toBe('idle');
+    h.unmount();
+  });
+
   it('a cancelled forcePicker pick keeps the running bridge', async () => {
     const first = fakeHandle('first', { query: 'granted' });
     const pick = vi.fn(async () => first);

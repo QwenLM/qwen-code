@@ -946,11 +946,11 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         // A re-pick that fails must not misreport the still-running bridge as
         // failed, nor strand a later retry on the same-entry short-circuit:
         // leave the connected status (and the old grant) untouched. Report the
-        // outcome so the Change-directory handler can surface it (R1-5).
-        if (
-          forcePicker &&
-          (result.kind === 'unavailable' || result.kind === 'failed')
-        ) {
+        // outcome so the Change-directory handler can surface it (R1-5). The
+        // picker is only entered when the window capability probe is clean
+        // (detected.blocker wins over withheldBlocker), so it can never answer
+        // 'unavailable' here — only 'failed' needs the forced-path guard.
+        if (forcePicker && result.kind === 'failed') {
           return { kind: 'repick-failed' } as const;
         }
         if (result.kind === 'unavailable') {
@@ -1018,9 +1018,12 @@ export function useLocalFilesBridge(options: UseLocalFilesBridgeOptions) {
         // Re-picking the already-bound entry must not tear down the live bridge:
         // the picker reopens the last choice, so confirming without navigating
         // lands here. Identity, not basename — a same-named folder elsewhere is
-        // a different directory and still rebuilds.
-        if (forcePicker && (await sameBoundEntry(result.handle))) {
-          if (stale()) return;
+        // a different directory and still rebuilds. A disconnect or unmount
+        // that landed inside the identity await must win on BOTH exits:
+        // re-binding would resurrect the grant behind it.
+        const same = forcePicker && (await sameBoundEntry(result.handle));
+        if (stale()) return;
+        if (same) {
           handleRef.current = result.handle;
           pendingForceRebuildRef.current = undefined;
           return;

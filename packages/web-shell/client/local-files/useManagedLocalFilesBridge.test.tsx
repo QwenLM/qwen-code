@@ -177,7 +177,28 @@ describe('useManagedLocalFilesBridge', () => {
           }),
       ),
     );
-    vi.clearAllMocks();
+    // clearAllMocks keeps implementations AND once queues, so a leaked
+    // mockResolvedValue feeds the next test's restore() a stale handle and
+    // masks identity mutations. Reset fully, then re-establish the factory
+    // defaults (a bare resetAllMocks would leave save resolving undefined).
+    vi.mocked(pickDirectoryHandle).mockReset();
+    vi.mocked(pickDirectoryHandle).mockImplementation(async () => ({
+      kind: 'picked',
+      handle: fakeHandle,
+    }));
+    vi.mocked(ensureReadwritePermission).mockReset();
+    vi.mocked(ensureReadwritePermission).mockResolvedValue({
+      state: 'prompt',
+      requested: false,
+    });
+    storeSpies.save.mockReset();
+    storeSpies.save.mockResolvedValue(true);
+    storeSpies.load.mockReset();
+    storeSpies.load.mockResolvedValue(
+      undefined as unknown as FileSystemDirectoryHandle,
+    );
+    storeSpies.clear.mockReset();
+    storeSpies.clear.mockResolvedValue(true);
   });
 
   it('connects through the picker and reports the tool count', async () => {
@@ -800,9 +821,7 @@ describe('useManagedLocalFilesBridge', () => {
         win: fakeWin,
       }),
     );
-    storeSpies.load.mockResolvedValue(
-      undefined as unknown as FileSystemDirectoryHandle,
-    );
+    storeSpies.load.mockResolvedValue(fakeHandle);
     act(() => {
       void result.current.connect();
     });
@@ -888,6 +907,58 @@ describe('useManagedLocalFilesBridge', () => {
     });
   });
 
+  it('a same-basename different-entry re-pick rebuilds onto the new entry', async () => {
+    const peer = await startPeer();
+    servers.push(peer.server);
+    const fakeWin = {
+      location: { origin: 'http://localhost' },
+    } as unknown as Window;
+    const { result } = renderHook(() =>
+      useManagedLocalFilesBridge({
+        sessionId: 'session-1',
+        baseUrl: peer.baseUrl,
+        fetch: peerFetch,
+        win: fakeWin,
+      }),
+    );
+    // The record holds the bound handle from the start so the first connect's
+    // rebind effect keeps handleRef deterministically (a record that lands
+    // later races the rebind and can clear it).
+    storeSpies.load.mockResolvedValue(fakeHandle);
+    act(() => {
+      void result.current.connect();
+    });
+    await waitFor(() => expect(result.current.status.phase).toBe('connected'));
+    const firstId = peer.registeredConnectionId();
+    // SAME basename as the bound handle ('my-dir'), different entry: a name
+    // compare would short-circuit this as "no change" and keep serving the
+    // old directory. Identity must drive the rebuild.
+    const twinHandle = {
+      name: 'my-dir',
+      isSameEntry: async (other: unknown) => other === twinHandle,
+    } as unknown as FileSystemDirectoryHandle;
+    vi.mocked(pickDirectoryHandle).mockImplementationOnce(async () => ({
+      kind: 'picked',
+      handle: twinHandle,
+    }));
+    await act(async () => {
+      await result.current.connect({ forcePicker: true });
+    });
+    expect(storeSpies.save).toHaveBeenCalledWith(twinHandle);
+    // The superseded registration is released and a new one takes its place.
+    await waitFor(() => expect(peer.unregistered.length).toBe(1));
+    await waitFor(() =>
+      expect(peer.registeredConnectionId()).not.toBe(firstId),
+    );
+    // Terminal phase, not just rootName (which is also published while
+    // connecting): the rebuild must actually complete.
+    await waitFor(() => expect(result.current.status.phase).toBe('connected'));
+    expect(result.current.status.rootName).toBe('my-dir');
+    await act(async () => {
+      await result.current.disconnect();
+    });
+  });
+
   it('a successful Change directory save persists the picked handle and never clears', async () => {
     const peer = await startPeer();
     servers.push(peer.server);
@@ -929,7 +1000,9 @@ describe('useManagedLocalFilesBridge', () => {
     // retained one; and a committed save is never followed by a clear.
     expect(storeSpies.save).toHaveBeenCalledWith(newHandle);
     expect(storeSpies.clear).not.toHaveBeenCalled();
-    await waitFor(() => expect(result.current.status.rootName).toBe('new-dir'));
+    // Terminal phase, not just rootName (also published while connecting).
+    await waitFor(() => expect(result.current.status.phase).toBe('connected'));
+    expect(result.current.status.rootName).toBe('new-dir');
     // A real change releases the superseded registration; dropping the
     // teardown would leave the old binding active on the control plane.
     await waitFor(() => expect(peer.unregistered.length).toBe(1));

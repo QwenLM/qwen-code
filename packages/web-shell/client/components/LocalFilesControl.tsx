@@ -40,6 +40,7 @@ import { Button } from './ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { Spinner } from './ui/spinner';
 import { requestToast } from './ToastHost';
+import { useWebShellPortalRoot } from '../portalRoot';
 import { cn } from '@/lib/utils';
 
 const STATUS_KEY: Record<LocalFilesPhase, string> = {
@@ -73,6 +74,20 @@ const BUSY: readonly LocalFilesPhase[] = [
 /** Concrete command that enables the reverse channel on the daemon. */
 export const LOCAL_FILES_DAEMON_COMMAND =
   'QWEN_SERVE_CLIENT_MCP_OVER_WS=1 qwen serve';
+
+/**
+ * The startup command in the user's shell syntax: the POSIX env-prefix form
+ * is not parseable by PowerShell, so on Windows the affordance must copy the
+ * `$env:` form or the one action the blocker offers cannot enable the feature.
+ * The variable name is the literal run-qwen-serve.ts reads.
+ */
+export function deriveLocalFilesDaemonCommand(
+  platform: string | undefined,
+): string {
+  return /win/i.test(platform ?? '')
+    ? '$env:QWEN_SERVE_CLIENT_MCP_OVER_WS=1; qwen serve'
+    : LOCAL_FILES_DAEMON_COMMAND;
+}
 
 /**
  * Trigger dot color per phase. `null` means no dot. Failed and needs-gesture
@@ -187,6 +202,8 @@ export interface LocalFilesPanelProps {
   tunnelCommand?: string;
   /** Local port the tunnel binds; the blocker copy names the address to open. */
   tunnelLocalPort?: number;
+  /** Daemon startup command in the user's shell syntax; defaults to POSIX. */
+  daemonCommand?: string;
 }
 
 /**
@@ -204,6 +221,7 @@ export function LocalFilesPanel({
   onCopyCommand,
   tunnelCommand,
   tunnelLocalPort,
+  daemonCommand,
 }: LocalFilesPanelProps) {
   const { t } = useI18n();
   const busy = BUSY.includes(status.phase);
@@ -286,7 +304,9 @@ export function LocalFilesPanel({
               type="button"
               variant="outline"
               size="sm"
-              onClick={() => onCopyCommand(LOCAL_FILES_DAEMON_COMMAND)}
+              onClick={() =>
+                onCopyCommand(daemonCommand ?? LOCAL_FILES_DAEMON_COMMAND)
+              }
             >
               {t('localFiles.copyStartupCommand')}
             </Button>
@@ -512,6 +532,9 @@ export function LocalFilesControl({
   const sessionActions = useActions();
   const { sessionId, workspaceCwd, displayName } = useConnection();
   const [open, setOpen] = useState(false);
+  // Own the toast dispatch scope: ownership must not be inferred from focus,
+  // which can sit in a co-mounted shell or nowhere at all.
+  const toastScope = useWebShellPortalRoot();
   useEffect(() => {
     if (portalContainer === null) setOpen(false);
   }, [portalContainer]);
@@ -575,18 +598,19 @@ export function LocalFilesControl({
       requestToast(
         'warning',
         t('localFiles.gestureToast', { name: status.rootName ?? '' }),
+        toastScope,
       );
     }
-  }, [status.phase, status.rootName, t]);
+  }, [status.phase, status.rootName, t, toastScope]);
 
   const handleCopyCommand = useCallback(
     (command: string) => {
       void writeClipboardText(command).then(
-        () => requestToast('success', t('localFiles.copied')),
-        () => requestToast('error', t('localFiles.copyFailed')),
+        () => requestToast('success', t('localFiles.copied'), toastScope),
+        () => requestToast('error', t('localFiles.copyFailed'), toastScope),
       );
     },
-    [t],
+    [t, toastScope],
   );
 
   // Concrete SSH tunnel for the insecure-context blocker, when the daemon URL
@@ -599,6 +623,16 @@ export function LocalFilesControl({
     () => deriveLocalFilesTunnelLocalPort(baseUrl),
     [baseUrl],
   );
+  // PowerShell cannot parse the POSIX env-prefix form; copy the syntax the
+  // user's shell actually accepts.
+  const daemonCommand = useMemo(() => {
+    const nav = navigator as Navigator & {
+      userAgentData?: { platform?: string };
+    };
+    return deriveLocalFilesDaemonCommand(
+      nav.userAgentData?.platform ?? nav.platform,
+    );
+  }, []);
 
   const dotClass = getLocalFilesDotClass(status);
   // The state is colour + a native tooltip, both invisible to assistive tech.
@@ -651,11 +685,19 @@ export function LocalFilesControl({
               // A failed re-pick keeps the running bridge connected, but the
               // click must not be silent (R1-5).
               if (result?.kind === 'repick-failed') {
-                requestToast('error', t('localFiles.changeDirectoryFailed'));
+                requestToast(
+                  'error',
+                  t('localFiles.changeDirectoryFailed'),
+                  toastScope,
+                );
               } else if (result?.kind === 'change-deferred') {
                 // The grant is saved but the live bridge keeps serving the old
                 // directory until the workspace verdict settles; say so.
-                requestToast('info', t('localFiles.changeDirectoryDeferred'));
+                requestToast(
+                  'info',
+                  t('localFiles.changeDirectoryDeferred'),
+                  toastScope,
+                );
               }
             });
           }}
@@ -667,6 +709,7 @@ export function LocalFilesControl({
           onCopyCommand={handleCopyCommand}
           tunnelCommand={tunnelCommand}
           tunnelLocalPort={tunnelLocalPort}
+          daemonCommand={daemonCommand}
         />
       </PopoverContent>
     </Popover>

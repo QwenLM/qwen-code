@@ -431,6 +431,24 @@ describe('LocalFilesPanel usability affordances', () => {
     );
   });
 
+  it('copies the platform-specific startup command when provided (R5-3)', () => {
+    const onCopyCommand = vi.fn();
+    mountExtra(
+      { phase: 'unavailable', blocker: 'unsupported-daemon' },
+      {
+        onCopyCommand,
+        daemonCommand: '$env:QWEN_SERVE_CLIENT_MCP_OVER_WS=1; qwen serve',
+      },
+    );
+    act(() => {
+      buttonByLabel('Copy startup command')!.click();
+    });
+    // PowerShell cannot parse the POSIX env-prefix form.
+    expect(onCopyCommand).toHaveBeenCalledWith(
+      '$env:QWEN_SERVE_CLIENT_MCP_OVER_WS=1; qwen serve',
+    );
+  });
+
   it('copies the tunnel command for insecure-context when provided', () => {
     const onCopyCommand = vi.fn();
     const tunnelCommand = 'ssh -L 4170:localhost:4170 daemon.example';

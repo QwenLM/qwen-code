@@ -244,11 +244,10 @@ export function useManagedLocalFilesBridge(
           if (picked.kind === 'cancelled') return;
           // A failed re-pick must not misreport the still-running bridge; leave
           // the connected status and the old grant untouched. Report the outcome
-          // so the Change-directory handler can surface it (R1-5).
-          if (
-            forcePicker &&
-            (picked.kind === 'unavailable' || picked.kind === 'failed')
-          ) {
+          // so the Change-directory handler can surface it (R1-5). The picker
+          // is only entered when the window capability probe is clean, so it
+          // can never answer 'unavailable' here.
+          if (forcePicker && picked.kind === 'failed') {
             return { kind: 'repick-failed' } as const;
           }
           if (picked.kind === 'unavailable') {

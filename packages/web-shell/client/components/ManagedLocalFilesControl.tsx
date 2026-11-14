@@ -16,6 +16,7 @@ import {
   getLocalFilesTooltip,
 } from './LocalFilesControl';
 import { requestToast } from './ToastHost';
+import { useWebShellPortalRoot } from '../portalRoot';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import { cn } from '@/lib/utils';
 
@@ -42,6 +43,9 @@ export function ManagedLocalFilesControl({
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const stateDescriptionId = useId();
+  // Own the toast dispatch scope so the notice lands in this shell even when
+  // focus sits elsewhere (or nowhere) in the host document.
+  const toastScope = useWebShellPortalRoot();
 
   const transport = provider.clientFiles?.transport();
   const unavailableFetch = (async () =>
@@ -99,7 +103,11 @@ export function ManagedLocalFilesControl({
               // A failed re-pick keeps the running bridge connected, but the
               // click must not be silent (R1-5).
               if (result?.kind === 'repick-failed') {
-                requestToast('error', t('localFiles.changeDirectoryFailed'));
+                requestToast(
+                  'error',
+                  t('localFiles.changeDirectoryFailed'),
+                  toastScope,
+                );
               }
             });
           }}

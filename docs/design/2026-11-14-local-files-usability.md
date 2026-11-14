@@ -129,7 +129,10 @@ stable.
     bound folder re-persists a grant the record has lost (a peer tab's
     Disconnect clears the origin-scoped slot) yet never re-registers the
     binding. A throwing `isSameEntry` fails closed (not same): the change
-    proceeds rather than stranding the user on the old grant.
+    proceeds rather than stranding the user on the old grant. The generation
+    re-check after the identity await covers BOTH arms: a disconnect that
+    lands inside the await must win, or the connect would resurrect the grant
+    the user just revoked.
 - A soft-failed save (quota/eviction) on the forced path is treated as a
   failed re-pick in **both** hooks: the change is rejected wholesale, the live
   bridge keeps serving the old directory, the record keeps holding it, and
@@ -174,7 +177,12 @@ daemon-only.
 ### 4.5 Actionable blockers
 
 - `unsupported-daemon`: a "Copy startup command" button copies
-  `QWEN_SERVE_CLIENT_MCP_OVER_WS=1 qwen serve`.
+  `QWEN_SERVE_CLIENT_MCP_OVER_WS=1 qwen serve` — or, when the client's platform
+  probe (`navigator.userAgentData?.platform`, falling back to
+  `navigator.platform`) reports Windows, the PowerShell form
+  `$env:QWEN_SERVE_CLIENT_MCP_OVER_WS=1; qwen serve`, which the POSIX
+  env-prefix form is not parseable as. The variable name stays the literal
+  `run-qwen-serve.ts` reads.
 - `insecure-context`: diagnosed **before** `unsupported-browser` — a secure
   context is a precondition for the picker, so on the plain-http non-loopback
   deployment this blocker exists for, the picker is always absent and
@@ -219,12 +227,20 @@ failure toast dispatches into a document with no listener and is silently
 dropped. The toast stack constants live in `ToastHost.tsx` and are shared
 with App so the two hosts cannot drift.
 
-The channel is shell-scoped: `requestToast` dispatches on the acting shell's
-`[data-web-shell-root]` (found from the focused element, bubbling to window
-for App's host), and each `WindowToastHost` listens on its own shell root.
-`renderManagedAgentWebShell` is a public embedding API, so a host page may
-mount several shells in one document; without the scoping, a notice raised
-in one shell would also appear in another — possibly a different tenant's.
+The channel is shell-scoped, and ownership is never inferred from focus
+alone: a control passes its own shell root (via `useWebShellPortalRoot`) as
+an explicit scope, which wins over any focus state. Without a scope,
+`requestToast` walks the focused element through shadow roots
+(`document.activeElement` is the shadow host, not the focused control) to its
+`[data-web-shell-root]`; failing that, a single mounted shell root still
+receives the notice, so an unfocused or effect-driven call is not dropped.
+Only a document with no unique shell falls back to window. Events carry
+`bubbles` (so App's window listener still receives shell-root dispatches) and
+`composed` (so they cross a shadow boundary). Each `WindowToastHost` listens
+on its own shell root. `renderManagedAgentWebShell` is a public embedding
+API, so a host page may mount several shells in one document; without the
+scoping, a notice raised in one shell would also appear in another — possibly
+a different tenant's.
 
 ## 5. Design decisions and rationale
 
@@ -270,6 +286,8 @@ in one shell would also appear in another — possibly a different tenant's.
 - `packages/web-shell/client/App.tsx` — consume the shared toast constants.
 - `packages/web-shell/client/i18n.tsx` — new EN/ZH keys (both locales); the
   insecure-context instruction is function-valued with the local port.
+- `packages/web-templates/src/export-html/build.mjs` — the export bundle byte
+  ceiling raised by the measured delta of the new copy.
 - Tests: `LocalFilesPanel.test.tsx`, `LocalFilesControl.test.tsx`,
   `ManagedLocalFilesControl.test.tsx`, `ManagedSessionsPage.test.tsx`,
   `ManagedAgentWebShell.test.tsx`, `ToastHost.test.tsx`, `capabilities.test.ts`,
@@ -303,19 +321,31 @@ in one shell would also appear in another — possibly a different tenant's.
   the `repick-failed` return contract and the cancelled sibling asserts
   silence; the capability precedence, hostile-host allowlist, local-port
   copy, managed toast host, and zh≠en parity of the rewritten blocker copy
-  each have dedicated cases. Every new guard is mutation-verified with
+  each have dedicated cases. The toast channel's load-bearing details are
+  pinned individually: `bubbles` (a window listener must still receive a
+  shell-root dispatch), the mount-level scope (two co-mounted shells), an
+  unfocused notice, a shadow-root shell, an explicit scope overriding focus
+  in another shell, a disconnect landing inside the identity await, a
+  same-basename/different-identity Managed re-pick, terminal-phase rebuild
+  assertions, the PowerShell startup command on Windows, and both
+  `execCommand` fallback outcomes. Every new guard is mutation-verified with
   byte-level restore.
 - `npm run build && npm run typecheck` plus the focused vitest suites from
-  `packages/web-shell`.
+  `packages/web-shell`. The export bundle's byte budget
+  (`packages/web-templates/src/export-html/build.mjs`) carries the whole i18n
+  table, so the new copy is measured against it and the ceiling raised by the
+  measured delta, per that file's convention.
 - E2E: extend `managed-local-files.spec.ts` to assert the connected-state
   change-directory affordance and session name in a real browser, and add
   `web-shell.local-files-toast.spec.ts`, which restores a persisted grant with
   `prompt` permission (intercepted at IndexedDB) and asserts the one-time
   warning toast reaches the real toast host without opening the popover. The
-  non-secure-context clipboard fallback is additionally exercised live over a
-  non-loopback origin (`execCommand('copy')` with the derived tunnel command).
-  The CLI-level dry-run used for command features does not apply to browser-only
-  UI; the baseline is the existing unit + E2E suites.
+  non-secure-context clipboard fallback is covered by unit tests that stub
+  `execCommand` to both outcomes, and was additionally exercised live over a
+  non-loopback origin in local verification (not part of the CI suite, whose
+  Playwright server binds loopback — a secure context). The CLI-level dry-run
+  used for command features does not apply to browser-only UI; the baseline
+  is the existing unit + E2E suites.
 
 ## 9. Acceptance criteria
 

@@ -120,6 +120,7 @@ describe('ManagedLocalFilesControl', () => {
     expect(toastSpy).toHaveBeenCalledWith(
       'error',
       'localFiles.changeDirectoryFailed',
+      null,
     );
     toastSpy.mockClear();
     await act(async () => {

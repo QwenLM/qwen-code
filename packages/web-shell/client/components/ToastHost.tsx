@@ -19,20 +19,44 @@ export interface ToastRequestDetail {
   message: string;
 }
 
-export function requestToast(tone: ToastTone, message: string): void {
-  // Dispatch on the acting shell's root so co-mounted shells (the managed
-  // embedding API allows several per document) do not receive each other's
-  // notices; the event bubbles to window, where App's document-wide host
-  // listens. Falls back to window when no focused shell root is found.
-  const active =
-    typeof document !== 'undefined' ? document.activeElement : null;
-  const root =
+/**
+ * Resolve the dispatch target for a toast request. An explicit scope (the
+ * calling control's shell root) wins — ownership must not be inferred from
+ * focus, which can sit in a co-mounted shell or nowhere at all. Without one,
+ * walk the focused element through shadow roots (document.activeElement is
+ * the shadow host, not the focused control) and use its shell root; failing
+ * that, a single mounted shell root still receives the notice so an
+ * unfocused or effect-driven call is not dropped. Only a document with no
+ * unique shell falls back to window, where App's document-wide host listens.
+ */
+function resolveToastTarget(scope?: Element | null): Element | Window {
+  if (scope) return scope;
+  if (typeof document === 'undefined') return window;
+  let active: Element | null = document.activeElement;
+  while (active?.shadowRoot?.activeElement) {
+    active = active.shadowRoot.activeElement;
+  }
+  const focusedRoot =
     active instanceof Element ? active.closest('[data-web-shell-root]') : null;
-  const target: Element | Window = root ?? window;
-  target.dispatchEvent(
+  if (focusedRoot) return focusedRoot;
+  const roots = document.querySelectorAll('[data-web-shell-root]');
+  if (roots.length === 1) return roots[0]!;
+  return window;
+}
+
+export function requestToast(
+  tone: ToastTone,
+  message: string,
+  scope?: Element | null,
+): void {
+  // bubbles keeps the event reaching App's window listener from a shell
+  // root; composed lets it cross a shadow boundary when the shell is
+  // embedded in one.
+  resolveToastTarget(scope).dispatchEvent(
     new CustomEvent<ToastRequestDetail>(TOAST_REQUEST_EVENT, {
       detail: { tone, message },
       bubbles: true,
+      composed: true,
     }),
   );
 }

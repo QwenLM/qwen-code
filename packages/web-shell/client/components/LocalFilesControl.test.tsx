@@ -25,6 +25,7 @@ import {
   getLocalFilesTooltip,
   deriveLocalFilesTunnelCommand,
   deriveLocalFilesTunnelLocalPort,
+  deriveLocalFilesDaemonCommand,
 } from './LocalFilesControl';
 
 const bridgeLifecycle = vi.hoisted(() => ({
@@ -655,6 +656,26 @@ describe('deriveLocalFilesTunnelCommand (R1-3)', () => {
   });
 });
 
+describe('deriveLocalFilesDaemonCommand (R5-3)', () => {
+  it('uses the PowerShell form on Windows and POSIX elsewhere', () => {
+    expect(deriveLocalFilesDaemonCommand('Windows')).toBe(
+      '$env:QWEN_SERVE_CLIENT_MCP_OVER_WS=1; qwen serve',
+    );
+    expect(deriveLocalFilesDaemonCommand('Win32')).toBe(
+      '$env:QWEN_SERVE_CLIENT_MCP_OVER_WS=1; qwen serve',
+    );
+    expect(deriveLocalFilesDaemonCommand('Linux')).toBe(
+      'QWEN_SERVE_CLIENT_MCP_OVER_WS=1 qwen serve',
+    );
+    expect(deriveLocalFilesDaemonCommand('MacIntel')).toBe(
+      'QWEN_SERVE_CLIENT_MCP_OVER_WS=1 qwen serve',
+    );
+    expect(deriveLocalFilesDaemonCommand(undefined)).toBe(
+      'QWEN_SERVE_CLIENT_MCP_OVER_WS=1 qwen serve',
+    );
+  });
+});
+
 describe('deriveLocalFilesTunnelLocalPort (R3-15)', () => {
   it('names the local bind the copied tunnel actually opens', () => {
     // The blocker copy tells the user which address to open; with the
@@ -789,6 +810,7 @@ describe('LocalFilesControl trigger and notices', () => {
     expect(toastSpy).toHaveBeenCalledWith(
       'warning',
       expect.stringContaining('proj'),
+      null,
     );
     // Force the effect to re-run with the same phase (rootName is a dep):
     // the dedupe ref must suppress a second toast.
@@ -877,6 +899,7 @@ describe('LocalFilesControl trigger and notices', () => {
     expect(toastSpy).toHaveBeenCalledWith(
       'error',
       'Could not change the directory. The current directory is still connected.',
+      null,
     );
     toastSpy.mockClear();
     await act(async () => {
@@ -903,6 +926,7 @@ describe('LocalFilesControl trigger and notices', () => {
     expect(toastSpy).toHaveBeenCalledWith(
       'info',
       'Directory change saved. It takes effect once the workspace finishes resolving; until then the current directory stays connected.',
+      null,
     );
   });
 
@@ -948,7 +972,34 @@ describe('LocalFilesControl trigger and notices', () => {
     expect(writeText).toHaveBeenCalledWith(
       'QWEN_SERVE_CLIENT_MCP_OVER_WS=1 qwen serve',
     );
-    expect(toastSpy).toHaveBeenCalledWith('success', 'Command copied');
+    expect(toastSpy).toHaveBeenCalledWith('success', 'Command copied', null);
+  });
+
+  it('copies the PowerShell startup command on Windows (R5-3)', async () => {
+    const writeText = stubClipboard();
+    Object.defineProperty(navigator, 'platform', {
+      value: 'Win32',
+      configurable: true,
+    });
+    try {
+      bridgeStatusOverride.current = {
+        phase: 'unavailable',
+        blocker: 'unsupported-daemon',
+      };
+      const { container } = await renderControl();
+      openPopover(container);
+      await act(async () => {
+        panelButton('Copy startup command').click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      // The POSIX env-prefix form is not parseable by PowerShell; dropping
+      // the platform branch copies a command that cannot enable the feature.
+      expect(writeText).toHaveBeenCalledWith(
+        '$env:QWEN_SERVE_CLIENT_MCP_OVER_WS=1; qwen serve',
+      );
+    } finally {
+      delete (navigator as { platform?: string }).platform;
+    }
   });
 
   it('reports a clipboard rejection instead of claiming success (R1-13)', async () => {
@@ -972,8 +1023,85 @@ describe('LocalFilesControl trigger and notices', () => {
     expect(toastSpy).toHaveBeenCalledWith(
       'error',
       'Could not copy the command',
+      null,
     );
-    expect(toastSpy).not.toHaveBeenCalledWith('success', 'Command copied');
+    expect(toastSpy).not.toHaveBeenCalledWith(
+      'success',
+      'Command copied',
+      null,
+    );
+  });
+
+  it('reports success when the execCommand fallback carries the copy (R4-4)', async () => {
+    const writeText = vi.fn(async () => {
+      throw new Error('no async clipboard');
+    });
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+    const execCommand = vi.fn(() => true);
+    Object.defineProperty(document, 'execCommand', {
+      value: execCommand,
+      configurable: true,
+    });
+    try {
+      bridgeStatusOverride.current = {
+        phase: 'unavailable',
+        blocker: 'unsupported-daemon',
+      };
+      const { container } = await renderControl();
+      openPopover(container);
+      await act(async () => {
+        panelButton('Copy startup command').click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(execCommand).toHaveBeenCalledWith('copy');
+      expect(toastSpy).toHaveBeenCalledWith('success', 'Command copied', null);
+    } finally {
+      delete (document as { execCommand?: unknown }).execCommand;
+    }
+  });
+
+  it('reports failure when the execCommand fallback also fails (R4-4)', async () => {
+    const writeText = vi.fn(async () => {
+      throw new Error('no async clipboard');
+    });
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+    const execCommand = vi.fn(() => false);
+    Object.defineProperty(document, 'execCommand', {
+      value: execCommand,
+      configurable: true,
+    });
+    try {
+      bridgeStatusOverride.current = {
+        phase: 'unavailable',
+        blocker: 'unsupported-daemon',
+      };
+      const { container } = await renderControl();
+      openPopover(container);
+      await act(async () => {
+        panelButton('Copy startup command').click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      // Forcing copyViaExecCommand to fail must surface the error, not claim
+      // success.
+      expect(toastSpy).toHaveBeenCalledWith(
+        'error',
+        'Could not copy the command',
+        null,
+      );
+      expect(toastSpy).not.toHaveBeenCalledWith(
+        'success',
+        'Command copied',
+        null,
+      );
+    } finally {
+      delete (document as { execCommand?: unknown }).execCommand;
+    }
   });
 
   it('derives and copies the SSH tunnel command for an insecure origin', async () => {

@@ -75,7 +75,7 @@ vi.mock('./components/managed/java-managed-agent-provider', async () => {
 });
 
 import { ManagedAgentWebShell } from './ManagedAgentWebShell';
-import { TOAST_REQUEST_EVENT } from './components/ToastHost';
+import { requestToast } from './components/ToastHost';
 import { createJavaManagedAgentProvider } from './components/managed/java-managed-agent-provider';
 import shellStyles from './App.module.css';
 import { artifact } from './components/managed/managed-tool-result.test-fixtures';
@@ -191,27 +191,56 @@ describe('ManagedAgentWebShell', () => {
   it('hosts the window toast channel so nested notices are not dropped (R3-2)', async () => {
     // The managed-only shell has no App toast state: without a host here,
     // requestToast from a nested control (e.g. the local-files Change
-    // directory failure) dispatches into a document with no listener. The
-    // host is scoped to this shell's root, so dispatch there exactly as
-    // requestToast does when the acting control is focused inside the shell.
+    // directory failure) dispatches into a document with no listener. No
+    // element holds focus, so this also pins the unfocused delivery path.
     const provider = { storageKey: 'tenant-a:actor-a' } as ManagedAgentProvider;
     await act(async () => {
       root.render(<ManagedAgentWebShell managedAgentProvider={provider} />);
     });
     expect(container.querySelector('[data-web-shell-toast]')).toBeNull();
-    const shellRoot = container.querySelector('[data-web-shell-root]')!;
     await act(async () => {
-      shellRoot.dispatchEvent(
-        new CustomEvent(TOAST_REQUEST_EVENT, {
-          detail: { tone: 'error', message: 'Could not change the directory.' },
-          bubbles: true,
-        }),
-      );
+      requestToast('error', 'Could not change the directory.');
     });
     const toast = container.querySelector('[data-web-shell-toast]');
     expect(toast).not.toBeNull();
     expect(toast!.textContent).toContain('Could not change the directory.');
     expect(toast!.getAttribute('data-tone')).toBe('error');
+  });
+
+  it('keeps co-mounted shells from showing each other’s notices (R4-4)', async () => {
+    // Mount-level isolation: the host must be scoped to its own shell root.
+    // An unscoped host listens on window, where a shell-root dispatch also
+    // arrives via bubbling — both shells would then render the notice.
+    const providerA = {
+      storageKey: 'tenant-a:actor-a',
+    } as ManagedAgentProvider;
+    const providerB = {
+      storageKey: 'tenant-b:actor-b',
+    } as ManagedAgentProvider;
+    const containerB = document.createElement('div');
+    document.body.appendChild(containerB);
+    const rootB = createRoot(containerB);
+    try {
+      await act(async () => {
+        root.render(<ManagedAgentWebShell managedAgentProvider={providerA} />);
+      });
+      await act(async () => {
+        rootB.render(<ManagedAgentWebShell managedAgentProvider={providerB} />);
+      });
+      const shellA = container.querySelector('[data-web-shell-root]')!;
+      await act(async () => {
+        requestToast('error', 'shell-a failure', shellA);
+      });
+      expect(container.querySelectorAll('[data-web-shell-toast]')).toHaveLength(
+        1,
+      );
+      expect(
+        containerB.querySelectorAll('[data-web-shell-toast]'),
+      ).toHaveLength(0);
+    } finally {
+      await act(async () => rootB.unmount());
+      containerB.remove();
+    }
   });
 
   it('rejects a null base URL, not just an absent one', async () => {
