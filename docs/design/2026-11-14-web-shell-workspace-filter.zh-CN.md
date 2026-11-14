@@ -38,11 +38,11 @@
 
 ## 无障碍与展示
 
-实现沿用现有 Radix dropdown primitives 和 portal 集成。嵌套菜单保留键盘焦点管理，并暴露 `menuitemradio`/`aria-checked`。工作区长名称会截断，通过 `title` 提供完整名称；子菜单超出最大高度时可滚动。新增文案具有对应的英文和中文条目。
+实现沿用现有 Radix dropdown primitives 和 portal 集成。嵌套菜单保留键盘焦点管理，并暴露 `menuitemradio`/`aria-checked`。工作区长名称会截断，通过 `title` 提供完整名称；子菜单超出最大高度时可滚动。内部 Live 工作区显示为 `Live sessions`，不暴露 Conversations 目录名称。新增文案具有对应的英文和中文条目。
 
 ## 验证
 
-- 7 个受影响的 Vitest 文件：320 个测试通过。
+- 7 个受影响的 Vitest 文件：321 个测试通过。
 - `npm run typecheck`：通过。
 - `npm run build`：通过。
 - 所有改动的实现、测试和本地化文件的 ESLint 与 Prettier 检查：通过。

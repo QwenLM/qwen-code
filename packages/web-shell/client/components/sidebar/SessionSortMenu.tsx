@@ -95,7 +95,9 @@ export function SessionSortMenu({
       : workspaceValue === 'standalone'
         ? t('sidebar.noWorkspace')
         : selectedWorkspace
-          ? workspaceLabel(selectedWorkspace)
+          ? selectedWorkspace.kind === 'live'
+            ? t('sidebar.liveSessions')
+            : workspaceLabel(selectedWorkspace)
           : (selectedWorkspaceCwd ?? t('sidebar.filterAll'));
 
   return (
@@ -171,7 +173,10 @@ export function SessionSortMenu({
               </DropdownMenuRadioItem>
               {workspaces.length > 0 && <DropdownMenuSeparator />}
               {workspaces.map((workspace) => {
-                const label = workspaceLabel(workspace);
+                const label =
+                  workspace.kind === 'live'
+                    ? t('sidebar.liveSessions')
+                    : workspaceLabel(workspace);
                 return (
                   <DropdownMenuRadioItem
                     key={workspace.id}

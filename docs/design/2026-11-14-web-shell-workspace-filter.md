@@ -38,11 +38,11 @@ Pinned candidates, including in-flight optimistic pins, use the same workspace p
 
 ## Accessibility and presentation
 
-The implementation uses the existing Radix dropdown primitives and portal integration. Nested menus retain keyboard focus management and expose `menuitemradio`/`aria-checked`. Workspace rows truncate long labels, expose the full label through `title`, and scroll when the submenu exceeds its maximum height. New strings have matching English and Chinese entries.
+The implementation uses the existing Radix dropdown primitives and portal integration. Nested menus retain keyboard focus management and expose `menuitemradio`/`aria-checked`. Workspace rows truncate long labels, expose the full label through `title`, and scroll when the submenu exceeds its maximum height. The internal live workspace is labeled `Live sessions` instead of exposing its Conversations directory name. New strings have matching English and Chinese entries.
 
 ## Validation
 
-- Seven affected Vitest files: 320 tests passed.
+- Seven affected Vitest files: 321 tests passed.
 - `npm run typecheck`: passed.
 - `npm run build`: passed.
 - ESLint and Prettier checks for every changed implementation, test, and localization file: passed.

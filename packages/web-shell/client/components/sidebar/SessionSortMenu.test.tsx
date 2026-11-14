@@ -40,6 +40,13 @@ const workspaces: DaemonWorkspaceCapability[] = [
     primary: false,
     trusted: true,
   },
+  {
+    id: 'live',
+    cwd: '/tmp/conversations',
+    primary: false,
+    trusted: true,
+    kind: 'live',
+  },
 ];
 
 let container: HTMLDivElement;
@@ -167,6 +174,7 @@ describe('SessionSortMenu', () => {
       'No workspace',
       'Qwen Code',
       'opencode',
+      'Live sessions',
     ]);
     expect(items[0]!.getAttribute('aria-checked')).toBe('true');
     await act(async () => click(items[2]!));
@@ -181,6 +189,14 @@ describe('SessionSortMenu', () => {
     const selectedItems = radioItems();
     expect(selectedItems[0]!.getAttribute('aria-checked')).toBe('false');
     expect(selectedItems[2]!.getAttribute('aria-checked')).toBe('true');
+  });
+
+  it('labels the internal Live workspace as Live sessions', async () => {
+    await renderMenu({ workspaceValue: 'workspace:/tmp/conversations' });
+    await openMenu();
+    expect(menuItem('Workspace')?.textContent).toContain('Live sessions');
+    await openSubmenu('Workspace');
+    expect(radioItems()[4]!.getAttribute('aria-checked')).toBe('true');
   });
 
   it('persists workspace filtering per host and ignores invalid values', () => {
