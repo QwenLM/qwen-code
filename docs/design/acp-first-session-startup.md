@@ -16,6 +16,8 @@ Profile the remaining cold path on the current main-branch baseline. Make furthe
 
 ACP Config initialization also starts the existing ripgrep health check after binding the session execution engine and overlaps it with resource loading. The original tool-registration decision awaits the same result, preserving backend selection and fallback diagnostics. This applies only to local ACP configurations that use ripgrep; managed execution, delegated execution, shell sandboxes and bare mode keep their existing paths. Safe mode retains its existing ripgrep selection.
 
+The diagnostic `ripgrepProbeMs` measures the remaining wait when tool registration joins that result at the original read site. It can approach zero when the early health check finishes during resource I/O; it does not measure the check's full wall time or imply that its earlier work disappeared. The profile's `complete` flag means its required duration fields are present and valid, not that every overlapped operation has its own full-duration measurement. External first-SDK and total-startup clocks remain separate.
+
 An initialization-owned abort controller combines with the caller and execution-shutdown signals. Initialization always cancels and drains its probe on exit, including resource-load failures. A later registry rebuild performs a fresh normal check after failure; no failed promise is cached across configurations or inherited by a derived subagent configuration.
 
 Affected implementation paths are CLI startup, Core Config initialization, the ripgrep health-check helper and their collocated tests. The optional registry promise is supplied only by initialization; direct registry callers retain the existing behavior.
