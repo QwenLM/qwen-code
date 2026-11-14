@@ -5,6 +5,7 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import com.alibaba.qwen.code.managedagent.AutomationHarnessFake;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.contracts.automation.AutomationSessionModels;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
@@ -60,6 +61,8 @@ import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /**
  * H6b: the scanner and the service against the real ledger on H2 and the
@@ -168,6 +171,116 @@ class AutomationScannerTest {
                 clock::get);
     }
 
+    private String activeOtherSession() {
+        String other = sessions.createWorkspaceSession(tenant, ACTOR,
+                "create-" + UUID.randomUUID(), "qwen-code", null, "Other",
+                Map.of(), List.of(), new WorkspaceSelection(WORKSPACE, "."))
+                .sessionId();
+        jdbc.update("UPDATE ma_session SET status = 'ACTIVE'"
+                + " WHERE tenant_id = ? AND session_id = ?", tenant, other);
+        return other;
+    }
+
+    @Test
+    void listSessionReturnsOnlyTheBoundSessionsDefinitions() {
+        PublicAutomation mine = service.create(tenant, ACTOR,
+                "iso-list-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true))
+                .body();
+        String other = activeOtherSession();
+        service.create(tenant, ACTOR, "iso-list-other-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(other, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true));
+        PublicList<PublicAutomation> page = service.listSession(tenant,
+                sessionId, null, 100);
+        assertThat(page.data()).extracting(PublicAutomation::id)
+                .containsExactly(mine.id());
+    }
+
+    @Test
+    void listSessionOmitsRetiredDefinitionsSoThePageIsBoundedByLiveCapacity() {
+        PublicAutomation live = service.create(tenant, ACTOR,
+                "iso-live-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true))
+                .body();
+        PublicAutomation retired = service.create(tenant, ACTOR,
+                "iso-retired-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true))
+                .body();
+        service.retireSession(tenant, sessionId, ACTOR, retired.id(),
+                "iso-retire-key-" + UUID.randomUUID());
+        // Retire only flips state (there is no production DELETE): without the
+        // live filter the Session's lifetime creations would accumulate in the
+        // model's inline cron_list tool_result instead of its 32 live slots.
+        assertThat(ledger.findSchedule(tenant, retired.id()).orElseThrow().state())
+                .isEqualTo(AutomationLedgerStore.STATE_RETIRED);
+        PublicList<PublicAutomation> page = service.listSession(tenant,
+                sessionId, null, 100);
+        assertThat(page.data()).extracting(PublicAutomation::id)
+                .containsExactly(live.id());
+    }
+
+    @Test
+    void retireSessionRefusesAForeignDefinitionAndLeavesItLive() {
+        PublicAutomation mine = service.create(tenant, ACTOR,
+                "iso-retire-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true))
+                .body();
+        String other = activeOtherSession();
+        assertThatThrownBy(() -> service.retireSession(tenant, other, ACTOR,
+                mine.id(), "iso-foreign-" + UUID.randomUUID()))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(404);
+                    assertThat(error.getCode()).isEqualTo("automation_not_found");
+                });
+        assertThat(ledger.findSchedule(tenant, mine.id()).orElseThrow().state())
+                .isEqualTo(AutomationLedgerStore.STATE_LIVE);
+    }
+
+    @Test
+    void retireSessionVerifiesOwnershipBeforeAnsweringAReplay() {
+        PublicAutomation mine = service.create(tenant, ACTOR,
+                "iso-replay-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true))
+                .body();
+        // Land a replay receipt under this key by retiring once as the owner.
+        String key = "iso-replay-key-" + UUID.randomUUID();
+        service.retireSession(tenant, sessionId, ACTOR, mine.id(), key);
+        String other = activeOtherSession();
+        // A foreign Session presenting the same key and automationId must be
+        // refused, not handed the owner's replayed record.
+        assertThatThrownBy(() -> service.retireSession(tenant, other, ACTOR,
+                mine.id(), key))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(404);
+                    assertThat(error.getCode()).isEqualTo("automation_not_found");
+                });
+    }
+
+    @Test
+    void createForcesTheBoundSessionEvenWhenTheBodyNamesAnother() {
+        String other = activeOtherSession();
+        ManagedSessionStore sessionStore = mock(ManagedSessionStore.class);
+        when(sessionStore.creatorActor(tenant, sessionId)).thenReturn(ACTOR);
+        ManagedAutomationSessionService sessionService =
+                new ManagedAutomationSessionService(sessionStore, service);
+        AutomationSessionModels.Create request = new AutomationSessionModels.Create(
+                WORKSPACE, "writer", 1,
+                new AutomationDefinitionRequest(other, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true));
+        PublicAutomation created = sessionService.create(tenant, sessionId,
+                "writer-token", "iso-create-" + UUID.randomUUID(), request)
+                .body();
+        assertThat(created.sessionId()).isEqualTo(sessionId);
+        assertThat(ledger.findSchedule(tenant, created.id()).orElseThrow()
+                .sessionId()).isEqualTo(sessionId);
+    }
+
     private PublicAutomation defineGated(String gate) {
         return service.create(tenant, ACTOR, "key-" + UUID.randomUUID(),
                 new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
@@ -178,6 +291,34 @@ class AutomationScannerTest {
     private JdbcAutomationLedgerStore.OccurrenceRow occurrence(String automationId,
             String key) {
         return ledger.findOccurrence(tenant, automationId, key).orElseThrow();
+    }
+
+    // The fixed-interval /loop entry path: the internal automations:create
+    // route delegates to this create, which mirrors the definition into the
+    // scanner's index. The witness is that a tool-created definition fires at
+    // its next due slot, and that the mirror — not the journal — is what the
+    // scanner discovers: a definition with no mirror row never fires.
+    @Test
+    void aToolCreatedDefinitionIsMirroredAndFiresAtItsNextDueSlot() {
+        PublicAutomation automation = service.create(tenant, ACTOR,
+                "key-" + UUID.randomUUID(),
+                new AutomationDefinitionRequest(sessionId, "Goal", "* * * * *",
+                        "UTC", "Run it.", null, "skip", "none", null, true,
+                        null)).body();
+        assertThat(ledger.findSchedule(tenant, automation.id())).isPresent();
+        clock.set(T0 + MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(1);
+        assertThat(occurrence(automation.id(), "schedule:2026-06-01T10:01:00Z")
+                .outcome()).isEqualTo(JdbcAutomationLedgerStore.OUTCOME_FIRED);
+        assertThat(fake.fires()).isEqualTo(1);
+
+        // Removing the mirror row (a journal-only definition) makes the
+        // definition undiscoverable: the next due slot fires nothing.
+        jdbc.update("DELETE FROM ma_schedule WHERE tenant_id=? AND schedule_id=?",
+                tenant, automation.id());
+        clock.set(T0 + 2 * MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(0);
+        assertThat(fake.fires()).isEqualTo(1);
     }
 
     @Test

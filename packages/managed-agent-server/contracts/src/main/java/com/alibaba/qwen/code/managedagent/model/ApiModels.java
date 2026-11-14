@@ -163,7 +163,9 @@ public final class ApiModels {
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean approvalModeChange,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean inputAttachments,
             @JsonInclude(JsonInclude.Include.NON_NULL) Boolean rename, boolean contextCompression,
-            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean childAgents, boolean btw, boolean recap) {
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean childAgents, boolean btw, boolean recap,
+            @JsonInclude(JsonInclude.Include.NON_NULL) Boolean terminal,
+            boolean clientFiles) {
         @JsonProperty("diagnostics")
         public boolean diagnostics() {
             return tasks;
@@ -315,6 +317,14 @@ public final class ApiModels {
     }
 
     public record WebShellSessionRequest(@NotBlank String sessionId) {
+    }
+
+    public record WebShellTerminalTicketRequest(
+            @NotBlank @Pattern(regexp = "[A-Za-z0-9._-]{1,256}") String sessionId,
+            @NotBlank @Pattern(regexp = "[A-Za-z0-9._-]{1,256}") String terminalId) {
+    }
+
+    public record WebShellTerminalTicket(String ticket, long expiresInSeconds) {
     }
 
     public record WebShellActivityQueryRequest(@NotBlank String sessionId, @NotBlank String kind,
