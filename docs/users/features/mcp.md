@@ -541,7 +541,13 @@ instead of adjusting its limits.
 
 You can always configure MCP servers by manually editing `settings.json`, but the CLI is usually faster.
 
+Registered global options can appear between `mcp` and its subcommand: `qwen mcp --debug list` runs the list command. This management fast path accepts the prefix for compatibility but does not apply its non-help options or values, including `--debug`, `--safe-mode`, `--proxy`, `--insecure`, and `--telemetry-*`. `--help` still prints MCP help without running a subcommand. Adding a global prefix does not change how server arguments are parsed; for example, `qwen mcp --debug add srv docker run -d alpine` preserves `-d` in the saved command.
+
+An explicit `--` immediately after `mcp` disables global-option prefix parsing. `qwen mcp -- list` still runs the list command, while `qwen mcp -- --safe-mode remove srv` prints MCP help without removing the server.
+
 #### Adding a server (`qwen mcp add`)
+
+Put server-only options after `--` to preserve them literally; for example, `qwen mcp add srv docker run -- --env-file .env image` retains the env-file option and its value. Before that separator, ambiguous options such as `--env-file` are rejected before settings are written.
 
 ```bash
 qwen mcp add [options] <name> <commandOrUrl> [args...]

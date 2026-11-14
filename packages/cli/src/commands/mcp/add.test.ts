@@ -72,14 +72,15 @@ describe('mcp add command', () => {
 
   it('should add a stdio server to user settings by default', async () => {
     await parser.parseAsync(
-      'add my-server /path/to/server arg1 arg2 -e FOO=bar',
+      'add my-server /path/to/server arg1 arg2 0x10 -e FOO=bar --timeout 1500',
     );
 
     expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
       'my-server': {
         command: '/path/to/server',
-        args: ['arg1', 'arg2'],
+        args: ['arg1', 'arg2', '0x10'],
         env: { FOO: 'bar' },
+        timeout: 1500,
       },
     });
   });
@@ -165,29 +166,98 @@ describe('mcp add command', () => {
 
   it('should handle MCP server args with -- separator', async () => {
     await parser.parseAsync(
-      'add my-server npx -- -y http://example.com/some-package',
+      'add my-server npx -- -y http://example.com/some-package 0x10 --args value',
     );
 
     expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
       'my-server': {
         command: 'npx',
-        args: ['-y', 'http://example.com/some-package'],
+        args: [
+          '-y',
+          'http://example.com/some-package',
+          '0x10',
+          '--args',
+          'value',
+        ],
       },
     });
   });
 
-  it('should handle unknown options as MCP server args', async () => {
-    await parser.parseAsync(
-      'add test-server npx -y http://example.com/some-package',
-    );
+  it.each([
+    ['-y', 'http://example.com/some-package'],
+    ['run', 'image', '--args', 'value'],
+    ['run', 'image', '--args=value', 'img'],
+    ['run', 'image', '--serverArgs', 'value'],
+    ['run', 'image', '--server-args', 'value'],
+  ])(
+    'should handle unknown options as MCP server args (%j)',
+    async (...args) => {
+      await parser.parseAsync(['add', 'test-server', 'npx', ...args]);
+
+      expect(mockSetValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'mcpServers',
+        {
+          'test-server': {
+            command: 'npx',
+            args,
+          },
+        },
+      );
+    },
+  );
+
+  it.each([
+    ['--env-file', '.env', 'image'],
+    ['--env-file=.env', 'image'],
+    ['--timeout-secs', '5', 'image'],
+    ['--header-x=y', 'image'],
+    ['--trust-all', 'image'],
+    ['--description-x', 'value', 'image'],
+    ['--scope-x', 'value', 'image'],
+  ])('rejects ambiguous server flags without saving (%j)', async (...args) => {
+    parser.exitProcess(false).showHelpOnFail(false).fail(vi.fn());
+
+    await expect(
+      Promise.resolve().then(() =>
+        parser.parseAsync(['add', 'test-server', 'docker', 'run', ...args]),
+      ),
+    ).rejects.toThrow('Unknown arguments');
+
+    expect(mockSetValue).not.toHaveBeenCalled();
+  });
+
+  it('keeps both server argument tails under a strict parent', async () => {
+    parser.strict().strictCommands();
+
+    await parser.parseAsync('add my-server npx infix -- dash --env-file .env');
 
     expect(mockSetValue).toHaveBeenCalledWith(SettingScope.User, 'mcpServers', {
-      'test-server': {
+      'my-server': {
         command: 'npx',
-        args: ['-y', 'http://example.com/some-package'],
+        args: ['infix', 'dash', '--env-file', '.env'],
       },
     });
   });
+
+  it.each([
+    { args: ['add', 'test-server'], error: 'Not enough non-option arguments' },
+    {
+      args: ['add', 'test-server', 'npx', '--transport', 'invalid'],
+      error: 'Invalid values',
+    },
+  ])(
+    'should still reject invalid MCP options ($args)',
+    async ({ args, error }) => {
+      parser.exitProcess(false).showHelpOnFail(false).strict().strictCommands();
+
+      await expect(
+        Promise.resolve().then(() => parser.parseAsync(args)),
+      ).rejects.toThrow(error);
+
+      expect(mockSetValue).not.toHaveBeenCalled();
+    },
+  );
 
   it('should keep dash-prefixed server args in the add tail', async () => {
     // `unknown-options-as-args` means the server command's own flags belong in

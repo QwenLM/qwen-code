@@ -119,16 +119,24 @@ vi.mock('./commands/mcp.js', () => ({
           handler: mocks.mcpListHandler,
         })
         .command({
-          // Mirror the real add command's variadic tail and
-          // `unknown-options-as-args` so version-looking server args are
-          // captured into `args` exactly like production.
-          command: 'add <name> <commandOrUrl> [args...]',
+          // Mirror the real add command's raw tail handling.
+          command: 'add <name> <commandOrUrl>',
           describe: 'Add a server',
           builder: (subYargs: Argv) =>
-            subYargs.parserConfiguration({
-              'unknown-options-as-args': true,
-              'populate--': true,
-            }),
+            subYargs
+              .parserConfiguration({
+                'unknown-options-as-args': true,
+                'populate--': true,
+                'parse-positional-numbers': false,
+              })
+              .strict(false)
+              .strictCommands(false)
+              .middleware((argv) => {
+                const args = argv._.slice(argv._.indexOf('add') + 1);
+                argv['args'] = argv['--']
+                  ? [...args, ...(argv['--'] as string[])]
+                  : args;
+              }),
           handler: mocks.mcpAddHandler,
         })
         .command({
@@ -1046,11 +1054,120 @@ describe('runCliEntry', () => {
     expect(mocks.initCpuProfiler).not.toHaveBeenCalled();
   });
 
+  it('does not interpret positional tokens after mcp -- as global options', async () => {
+    await runCliEntry(['mcp', '--', '--safe-mode', 'remove', 'victim']);
+
+    expect(mocks.mcpRemoveHandler).not.toHaveBeenCalled();
+    expect(stdout.join('')).toContain('Usage: qwen mcp');
+    expect(mocks.main).not.toHaveBeenCalled();
+    expect(process.exitCode).toBeUndefined();
+  });
+
+  it.each([
+    { prefix: [] },
+    { prefix: ['--debug'] },
+    { prefix: ['-d'] },
+    { prefix: ['--debug=false'] },
+    { prefix: ['--no-debug'] },
+    { prefix: ['--safe-mode'] },
+    { prefix: ['--proxy', 'http://proxy.invalid'] },
+    { prefix: ['--telemetry-outfile', 'cli.log'] },
+  ])(
+    'preserves MCP server arguments after global prefix $prefix',
+    async ({ prefix }) => {
+      const serverArgs = [
+        'run',
+        '-d',
+        '--proxy',
+        'server-proxy',
+        '--telemetry-outfile',
+        'server.log',
+        'alpine',
+        '0x10',
+        '--args',
+        'value',
+      ];
+
+      await runCliEntry([
+        'mcp',
+        ...prefix,
+        'add',
+        'server',
+        'docker',
+        ...serverArgs,
+      ]);
+
+      expect(mocks.mcpAddHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'server',
+          commandOrUrl: 'docker',
+          args: serverArgs,
+        }),
+      );
+      expect(mocks.main).not.toHaveBeenCalled();
+    },
+  );
+
   it('uses the full CLI when global flags precede MCP commands', async () => {
     await runCliEntry(['--safe-mode', 'mcp', 'list']);
 
     expect(mocks.main).toHaveBeenCalledTimes(1);
     expect(mocks.mcpListHandler).not.toHaveBeenCalled();
+  });
+
+  it.each(['--debug', '--safe-mode'])(
+    'dispatches MCP commands through the dedicated parser when %s precedes the subcommand',
+    async (option) => {
+      await runCliEntry(['mcp', option, 'list']);
+
+      expect(mocks.main).not.toHaveBeenCalled();
+      expect(mocks.mcpListHandler).toHaveBeenCalledTimes(1);
+      expect(stdout.join('')).not.toContain('Usage: qwen mcp');
+    },
+  );
+
+  it.each([
+    { argv: ['mcp', '--debug'] },
+    { argv: ['mcp', '--debug', '--help'] },
+    { argv: ['mcp', '--debug', '--help', 'add', 'server', 'command'] },
+  ])(
+    'prints MCP help without executing a subcommand: $argv',
+    async ({ argv }) => {
+      await runCliEntry(argv);
+
+      expect(stdout.join('')).toContain('Usage: qwen mcp');
+      expect(mocks.mcpAddHandler).not.toHaveBeenCalled();
+      expect(mocks.main).not.toHaveBeenCalled();
+      expect(process.exitCode).toBeUndefined();
+    },
+  );
+
+  it('keeps a global option value separate from the MCP command', async () => {
+    await runCliEntry(['mcp', '--proxy', 'list', 'add', 'server', 'command']);
+
+    expect(mocks.mcpListHandler).not.toHaveBeenCalled();
+    expect(mocks.mcpAddHandler).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'server', commandOrUrl: 'command' }),
+    );
+  });
+
+  it('rejects unknown prefix options before running MCP commands', async () => {
+    await runCliEntry(['mcp', '--unknown', 'list']);
+
+    expect(process.exitCode).toBe(1);
+    expect(stderr.join('')).toContain('Unknown argument: unknown');
+    expect(stdout.join('')).toContain('Usage: qwen mcp');
+    expect(mocks.mcpListHandler).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+  });
+
+  it('rejects default-command options before an MCP subcommand', async () => {
+    await runCliEntry(['mcp', '--model', 'test-model', 'list']);
+
+    expect(process.exitCode).toBe(1);
+    expect(stderr.join('')).toContain('Unknown argument: model');
+    expect(mocks.mcpListHandler).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
   });
 
   it('lets the entrypoint report a fatal MCP configuration failure once', async () => {
