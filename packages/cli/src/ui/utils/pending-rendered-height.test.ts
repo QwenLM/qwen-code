@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import {
   TABLE_CHROME_ROWS,
   estimateWrappedRows,
+  estimateLineRows,
   isTableStart,
   fitPendingSlice,
   splitMarkdownTableRow,
@@ -76,6 +77,43 @@ describe('estimateWrappedRows', () => {
   });
 });
 
+describe('estimateLineRows', () => {
+  it('charges a bullet at the width its text box actually gets', () => {
+    // MarkdownDisplay insets the item text by the padding (1) and the "x "
+    // marker (2), so 98 chars get 97 cols and wrap to 2 rows; charging the
+    // whole line at contentWidth 100 would call it one row.
+    expect(estimateWrappedRows(`- ${'x'.repeat(98)}`, 100)).toBe(1);
+    expect(estimateLineRows(`- ${'x'.repeat(98)}`, 100)).toBe(2);
+    expect(estimateLineRows(`- ${'x'.repeat(97)}`, 100)).toBe(1);
+  });
+
+  it('charges a blockquote at the width left of its marker', () => {
+    // "│ " is 2 cols plus the 1-col block padding.
+    expect(estimateWrappedRows(`> ${'x'.repeat(98)}`, 100)).toBe(1);
+    expect(estimateLineRows(`> ${'x'.repeat(98)}`, 100)).toBe(2);
+  });
+
+  it('widens the marker for ordered list items', () => {
+    // "100. " is 5 cols, so the item text gets 94 cols.
+    expect(estimateLineRows(`100. ${'x'.repeat(95)}`, 100)).toBe(2);
+    expect(estimateLineRows(`100. ${'x'.repeat(94)}`, 100)).toBe(1);
+  });
+
+  it('leaves a plain line on the full content width', () => {
+    expect(estimateLineRows('x'.repeat(100), 100)).toBe(1);
+    expect(estimateLineRows('x'.repeat(101), 100)).toBe(2);
+  });
+
+  it('does not narrow a nested bullet a second time', () => {
+    // Nested items keep their leading whitespace as indentation; the source
+    // line already carries those columns, so only the marker inset applies.
+    const line = `  - ${'x'.repeat(90)}`;
+    expect(estimateLineRows(line, 100)).toBe(
+      estimateWrappedRows(`- ${'x'.repeat(90)}`, 100),
+    );
+  });
+});
+
 describe('isTableStart', () => {
   const lines = ['| A | B |', '| --- | --- |', '| 1 | 2 |', 'text'];
 
@@ -114,7 +152,23 @@ describe('fitPendingSlice', () => {
     expect(fitPendingSlice(lines, 80, 10, CLAMP)).toEqual({
       keptLines: 3,
       clipped: false,
+      renderedRows: 3,
     });
+  });
+
+  it('reports renderedRows even when a kept first table overflows the budget', () => {
+    // The over-budget leading table is kept whole (the cut is gated on
+    // `i > 0`), so `clipped` is false. A height gate reading `clipped` would
+    // conclude the result fits; `renderedRows` is what says it does not.
+    const lines = [
+      '| A | B |',
+      '| - | - |',
+      ...Array.from({ length: 12 }, (_, i) => `|${i}|x|`),
+    ];
+    const result = fitPendingSlice(lines, 80, 14, CLAMP);
+    expect(result.clipped).toBe(false);
+    expect(result.keptLines).toBe(lines.length);
+    expect(result.renderedRows).toBeGreaterThan(14);
   });
 
   it('clips plain text at the budget', () => {

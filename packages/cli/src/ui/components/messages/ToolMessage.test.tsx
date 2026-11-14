@@ -518,6 +518,223 @@ describe('<ToolMessage />', () => {
     expect(lastFrame()).toContain('MockMarkdown:Test result');
   });
 
+  describe('markdown survives a terminal height budget', () => {
+    // availableHeight = 20 - STATIC_HEIGHT(1) - RESERVED_LINE_COUNT(5) = 14.
+    const BUDGET = { availableTerminalHeight: 20 } as const;
+
+    it('renders a short result as markdown when the budget has room', () => {
+      // The ask_user_question answer summary (`**Color**: Blue`) used to be
+      // demoted to plain text whenever ANY budget was present, so the bold
+      // markers showed up verbatim even though the two lines fit 14 rows
+      // (#13956).
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ask_user_question"
+          resultDisplay={'**Color**: Blue\n\n**Later**: Green'}
+          renderOutputAsMarkdown
+          {...BUDGET}
+        />,
+        StreamingState.Idle,
+      );
+
+      expect(lastFrame()).toContain('MockMarkdown:**Color**: Blue');
+    });
+
+    it('falls back to plain text when the result is taller than the budget', () => {
+      const tooTall = Array.from(
+        { length: 40 },
+        (_, i) => `line ${i + 1}`,
+      ).join('\n');
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ask_user_question"
+          resultDisplay={tooTall}
+          renderOutputAsMarkdown
+          {...BUDGET}
+        />,
+        StreamingState.Idle,
+      );
+
+      const output = lastFrame()!;
+      expect(output).not.toContain('MockMarkdown:');
+      expect(output).toContain('line 40');
+    });
+
+    it('keeps shell output on the plain-text path under the same budget', () => {
+      // Shell output is bounded by `ui.shellOutputMaxLines`, which renders
+      // through MaxSizedBox and counts its hidden lines there.
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="Shell"
+          resultDisplay={'Shell'}
+          renderOutputAsMarkdown
+          {...BUDGET}
+        />,
+        StreamingState.Idle,
+      );
+
+      expect(lastFrame()).not.toContain('MockMarkdown:');
+    });
+
+    it('keeps shell output on the plain-text path with no budget and no cap', () => {
+      // ShellTool does not declare `isOutputMarkdown: false` — it inherits
+      // DeclarativeTool's `true` — so without the `isShellTool` branch this
+      // result (no availableTerminalHeight, no `Capped` status) would take the
+      // markdown path and lose the MaxSizedBox hidden-lines cue.
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="Shell"
+          resultDisplay={'**not markdown**'}
+          renderOutputAsMarkdown
+          availableTerminalHeight={undefined}
+        />,
+        StreamingState.Idle,
+      );
+
+      const output = lastFrame()!;
+      expect(output).not.toContain('MockMarkdown:');
+      expect(output).toContain('**not markdown**');
+    });
+
+    it('measures the object shape ask_user_question actually returns', () => {
+      // #13956's real shape: `returnDisplay` is
+      // `{ type: 'ask_user_question_answers', text, answers }`, which
+      // `useResultDisplayRenderer` maps to a string. A raw-prop `typeof ===
+      // 'string'` check never saw it, so the height gate never ran.
+      const tooTall = Array.from(
+        { length: 40 },
+        (_, i) => `**Q${i + 1}**: answer ${i + 1}`,
+      ).join('\n');
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ask_user_question"
+          resultDisplay={{
+            type: 'ask_user_question_answers',
+            text: tooTall,
+            answers: [],
+          }}
+          renderOutputAsMarkdown
+          {...BUDGET}
+        />,
+        StreamingState.Idle,
+      );
+
+      expect(lastFrame()).not.toContain('MockMarkdown:');
+    });
+
+    it('keeps a short object-shaped result as markdown', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ask_user_question"
+          resultDisplay={{
+            type: 'ask_user_question_answers',
+            text: '**Color**: Blue',
+            answers: [],
+          }}
+          renderOutputAsMarkdown
+          {...BUDGET}
+        />,
+        StreamingState.Idle,
+      );
+
+      expect(lastFrame()).toContain('MockMarkdown:**Color**: Blue');
+    });
+
+    it('keeps a resumed shell result on the plain-text path with no budget', () => {
+      // Resumed sessions rebuild tool displays without `renderOutputAsMarkdown`
+      // (ToolMessage defaults it to true) and ctrl+s drops the height budget.
+      // Shell output must still stay plain text: ShellTool does not declare
+      // `isOutputMarkdown: false` — it inherits DeclarativeTool's `true` — so
+      // the `isShellTool` branch is the only thing keeping the
+      // ui.shellOutputMaxLines cap in force (#10640).
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="Shell"
+          resultDisplay={'**not markdown**'}
+          availableTerminalHeight={undefined}
+        />,
+        StreamingState.Idle,
+      );
+
+      expect(lastFrame()).not.toContain('MockMarkdown:');
+    });
+
+    it('falls back for a single table taller than the budget', () => {
+      // `fitPendingSlice` keeps an over-budget LEADING table whole (the cut is
+      // gated on `i > 0`), so `clipped` stays false for a table-only result.
+      // The gate has to read the accumulated rendered rows instead.
+      const table = [
+        '| name | value |',
+        '| --- | --- |',
+        ...Array.from({ length: 12 }, (_, i) => `| row${i} | v${i} |`),
+      ].join('\n');
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ask_user_question"
+          resultDisplay={table}
+          renderOutputAsMarkdown
+          {...BUDGET}
+        />,
+        StreamingState.Idle,
+      );
+
+      expect(lastFrame()).not.toContain('MockMarkdown:');
+    });
+
+    it('falls back for wrapped bullet lines that render two rows each', () => {
+      // The estimator charges a source line one row at `contentWidth`, but
+      // MarkdownDisplay wraps list items narrower, so 14 bullets of ~78 chars
+      // render ~28 rows.
+      const bullets = Array.from(
+        { length: 14 },
+        (_, i) => `- ${`item ${i + 1} `.padEnd(78, 'x')}`,
+      ).join('\n');
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ask_user_question"
+          resultDisplay={bullets}
+          renderOutputAsMarkdown
+          {...BUDGET}
+        />,
+        StreamingState.Idle,
+      );
+
+      expect(lastFrame()).not.toContain('MockMarkdown:');
+    });
+
+    it('falls back when a bullet wraps one row past the content width', () => {
+      // contentWidth 80 → innerWidth 78. A bullet's text box is 78 - 1
+      // (padding) - 2 (marker) = 75 cols, so 76 chars of text wrap to 2 rows
+      // while a full-width charge calls the line one row. 14 such rows is 28
+      // rendered rows against a budget of 14.
+      const bullets = Array.from(
+        { length: 14 },
+        () => `- ${'x'.repeat(76)}`,
+      ).join('\n');
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ask_user_question"
+          resultDisplay={bullets}
+          renderOutputAsMarkdown
+          {...BUDGET}
+        />,
+        StreamingState.Idle,
+      );
+
+      expect(lastFrame()).not.toContain('MockMarkdown:');
+    });
+  });
+
   describe('fullDetail (§4.9 transcript) data-source switch', () => {
     it('swaps summary for detailedDisplay on a collapsible tool in fullDetail mode', () => {
       const { lastFrame } = renderWithContext(
@@ -1835,6 +2052,10 @@ describe('<ToolMessage />', () => {
   });
 
   it('does not pre-slice string output that exactly fits available height', () => {
+    // Plain-text path: this result fits its budget, so `sliceTextForMaxHeight`
+    // must slice nothing. `renderOutputAsMarkdown={false}` keeps the case on
+    // the branch the boundary lives on — with markdown on, a short result now
+    // takes `MarkdownDisplay` instead and the slice never runs (#13956).
     const exactFitString = Array.from(
       { length: 6 },
       (_, i) => `line ${i + 1}`,
@@ -1845,6 +2066,7 @@ describe('<ToolMessage />', () => {
         name="some-other-tool"
         resultDisplay={exactFitString}
         status={ToolCallStatus.Success}
+        renderOutputAsMarkdown={false}
         availableTerminalHeight={12}
         forceShowResult
       />,
@@ -1852,6 +2074,7 @@ describe('<ToolMessage />', () => {
     );
     const output = lastFrame()!;
 
+    expect(output).not.toContain('MockMarkdown:');
     expect(output).not.toContain('lines hidden');
     expect(output).toContain('line 1');
     expect(output).toContain('line 6');

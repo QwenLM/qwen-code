@@ -207,6 +207,7 @@ function convertToHistoryItems(
     args?: Record<string, unknown>;
     resultDisplay: ToolResultDisplay | undefined;
     visionBridgeNotice?: string;
+    renderOutputAsMarkdown?: boolean;
     detailedDisplay?: string;
     images?: InlineImageData[];
     omittedImageCount?: number;
@@ -596,6 +597,10 @@ function convertToHistoryItems(
             // resumed session shows the same args row as a live one.
             args: fc.args,
             resultDisplay: undefined,
+            // Carried from the registry so a resumed result renders with the
+            // depth its tool declared; leaving it unset lets ToolMessage's
+            // `= true` default markdown-parse tools that opted out.
+            renderOutputAsMarkdown: tool?.isOutputMarkdown,
             // Without a recorded result, completion cannot be established.
             status: ToolCallStatus.Error,
             confirmationDetails: undefined,
