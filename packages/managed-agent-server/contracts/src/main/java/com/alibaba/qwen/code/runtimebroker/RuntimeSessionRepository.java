@@ -44,4 +44,17 @@ public interface RuntimeSessionRepository {
         throw new RuntimeBrokerException(409, "workspace_close_identity_unverified",
                 "Harness Session inventory is unavailable", false);
     }
+
+    /**
+     * As {@link #findActiveByHarnessSession(String, String, RuntimeSessionRecord, int)},
+     * but skips Sessions whose {@code turn_kind} equals {@code excludeTurnKind}
+     * (null excludes nothing). The MCP owner page uses this to ignore the
+     * terminal's derived Runtime Session, which is not a second MCP owner;
+     * drain and release keep the unfiltered page so they still enumerate it.
+     */
+    public default List<RuntimeSessionRecord> findActiveByHarnessSession(String tenantId,
+            String harnessSessionId, RuntimeSessionRecord after, int limit,
+            String excludeTurnKind) {
+        return findActiveByHarnessSession(tenantId, harnessSessionId, after, limit);
+    }
 }

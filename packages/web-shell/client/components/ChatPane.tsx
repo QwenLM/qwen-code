@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { randomUUID } from '../utils/random-uuid.js';
 import { useWorkspaceFileChanges } from './artifacts/useWorkspaceFileChanges';
 import { useModelRefresh } from '../hooks/useModelRefresh';
 import { useSubscriptionLogout } from '../hooks/useSubscriptionLogout';
@@ -651,7 +652,7 @@ export function ChatPane({
       store.dispatch([
         {
           type: 'status',
-          promptId: `local-command:${crypto.randomUUID()}`,
+          promptId: `local-command:${randomUUID()}`,
           text: message,
         },
       ]),
@@ -1134,7 +1135,7 @@ export function ChatPane({
             ? operation.objective
             : undefined;
         store.appendLocalUserMessage(text, undefined, {
-          localCommandId: `local-command:${crypto.randomUUID()}`,
+          localCommandId: `local-command:${randomUUID()}`,
         });
         void controlGoal(action, objective).catch((error: unknown) => {
           reportError(error, `Failed to ${operation.kind} /goal`);
@@ -1574,7 +1575,7 @@ export function ChatPane({
       return;
     }
     const owner = sessionOwnerGuard.capture();
-    const localCommandId = `local-command:${crypto.randomUUID()}`;
+    const localCommandId = `local-command:${randomUUID()}`;
     beginLocalCommand(store, localCommandId);
     if (streamingStateRef.current === 'idle') {
       store.appendLocalUserMessage('/context', undefined, { localCommandId });

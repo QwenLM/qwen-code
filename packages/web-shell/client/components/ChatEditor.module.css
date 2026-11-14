@@ -1954,6 +1954,20 @@
   color: var(--chat-editor-text-primary);
 }
 
+/* The trigger names the active mode, so Full Access stays dangerous after it
+   is selected, not only inside the picker. Hover tiles the generic rule above
+   on specificity and would otherwise drop the warning color. */
+.toolBtn.modeToolBtnDanger,
+.toolBtn.modeToolBtnDanger .toolBtnText {
+  color: var(--destructive);
+}
+
+.toolBtn.modeToolBtnDanger:not(:disabled):not([data-disabled]):hover,
+.toolBtn.modeToolBtnDanger:not(:disabled):not([data-disabled]):hover
+  .toolBtnText {
+  color: var(--destructive);
+}
+
 .planControl {
   flex: 0 0 auto;
 }

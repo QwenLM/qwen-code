@@ -1160,7 +1160,9 @@ describe('channel registry', () => {
       'email',
       'wecom',
       'wecom-callback',
+      'wecom-webhook',
       'feishu',
+      'feishu-webhook',
       'qq',
       'github',
       'gitlab',
@@ -1177,7 +1179,9 @@ describe('channel registry', () => {
       'email',
       'wecom',
       'wecom-callback',
+      'wecom-webhook',
       'feishu',
+      'feishu-webhook',
       'qq',
       'github',
       'gitlab',
@@ -1251,16 +1255,43 @@ describe('channel registry', () => {
         required: true,
       }),
     );
-    const webhook = catalog.find((entry) => entry.type === 'dingtalk-webhook');
-    expect(webhook).toMatchObject({
+    for (const type of ['dingtalk-webhook', 'feishu-webhook']) {
+      const webhook = catalog.find((entry) => entry.type === type);
+      expect(webhook).toMatchObject({
+        manageable: true,
+        outboundOnly: true,
+        defaultDeliveryTarget: { type: 'chat', id: 'default' },
+      });
+      expect(webhook?.fields).toEqual([
+        expect.objectContaining({
+          key: 'webhookUrl',
+          kind: 'secret',
+          required: true,
+          envResolvable: true,
+        }),
+        expect.objectContaining({
+          key: 'signingSecret',
+          kind: 'secret',
+          envResolvable: true,
+        }),
+      ]);
+    }
+    expect(
+      catalog.find((entry) => entry.type === 'wecom-webhook'),
+    ).toMatchObject({
       manageable: true,
       outboundOnly: true,
       defaultDeliveryTarget: { type: 'chat', id: 'default' },
+      fields: [
+        {
+          key: 'webhookUrl',
+          label: 'Webhook URL',
+          kind: 'secret',
+          required: true,
+          envResolvable: true,
+        },
+      ],
     });
-    expect(webhook?.fields.map((field) => field.key)).toEqual([
-      'webhookUrl',
-      'signingSecret',
-    ]);
     for (const type of ['dingtalk', 'wecom', 'feishu'] as const) {
       const fields = catalog.find((entry) => entry.type === type)?.fields;
       expect(fields).not.toContainEqual(

@@ -1183,6 +1183,7 @@ export async function main() {
 
     const extensionRefreshState = new ExtensionRefreshState();
     const extensionFileWatcher =
+      isAcpMode ||
       isBareMode(argv.bare) ||
       config.isSafeMode() ||
       config.getShellExecutionSandbox?.()
