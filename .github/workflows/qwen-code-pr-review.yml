@@ -1253,14 +1253,14 @@ jobs:
           # rationale, budget and fail-open contract: cli lib/prebuild.ts.
           QWEN_REVIEW_PREBUILD: '1'
           # Opt CI into the #9556 execution sandbox for the PR's own
-          # install/build/test commands. With the default (off) those commands
-          # inherit this step's GH_TOKEN and OPENAI_API_KEY — a postinstall can
-          # read them in one line. `required` runs them behind the container env
-          # allowlist and refuses unsandboxed execution (build/test evidence then
-          # reports unavailable; the review itself continues, it is not a hard
-          # break). It does NOT contain the agent's own shell probes, so #9556
-          # stays open. Fleet rollout is gated on a runner canary — see the PR
-          # description; do not merge before it passes.
+          # install/build/test: off, they inherit this step's GH_TOKEN +
+          # OPENAI_API_KEY. `required` refuses unsandboxed execution (evidence
+          # unavailable, review continues) — but a contained command that fails
+          # (no git in the mount, toolchain gaps, egress) is a PR-attributed
+          # failure, not "unavailable", and a refused prebuild leaves the tree
+          # bare for every agent (#10108). Does NOT contain the agent's own shell
+          # probes, so #9556 stays open. Mechanism: cli lib/sandboxed-exec.ts.
+          # DRAFT: canary-gated (PR #17282); delete this line once it passes.
           QWEN_REVIEW_SANDBOX: 'required'
           TMPDIR: '${{ steps.review_scratch.outputs.dir }}'
         run: |-

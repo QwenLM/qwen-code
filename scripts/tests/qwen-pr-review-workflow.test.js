@@ -3016,6 +3016,45 @@ describe('review worktree prebuild (issue #10108)', () => {
   });
 });
 
+describe('review execution sandbox opt-in (#9556)', () => {
+  // `required` opts the PR's own install/build/test into the #9556 execution
+  // sandbox. Like the prebuild switch, the literal lives on two sides: the
+  // CLI's policy reader and this step's env. Read both out of the source so a
+  // rename or a typo on either side reds this test instead of silently
+  // resolving to `off` (the default) with CI green — the failure mode the
+  // expression-length and unpullable-image incidents already taught us.
+  const doc = parse(workflow);
+  const review = doc.jobs['review-pr'].steps.find(
+    (s) => s.name === 'Run review',
+  );
+  const source = readFileSync(
+    'packages/cli/src/commands/review/lib/sandboxed-exec.ts',
+    'utf8',
+  );
+  const envName = source.match(/env\['(QWEN_REVIEW_SANDBOX)'\]/)?.[1];
+  const policies = source
+    .match(/const POLICIES[^=]*=\s*\[([^\]]+)\]/)?.[1]
+    ?.split(',')
+    .map((p) => p.trim().replace(/'/g, ''));
+
+  it('sets the policy the CLI reads on the Run review step', () => {
+    expect(envName).toBe('QWEN_REVIEW_SANDBOX');
+    expect(review.env[envName]).toBe('required');
+    expect(policies).toContain('required');
+  });
+
+  it('is opt-in from that step and nowhere else in the workflow', () => {
+    expect(doc.env?.[envName]).toBeUndefined();
+    for (const [jobName, job] of Object.entries(doc.jobs)) {
+      expect(job.env?.[envName]).toBeUndefined();
+      for (const step of job.steps ?? []) {
+        if (jobName === 'review-pr' && step.name === 'Run review') continue;
+        expect(step.env?.[envName]).toBeUndefined();
+      }
+    }
+  });
+});
+
 describe('workflow expression length', () => {
   // A `run:` body containing `${{ }}` is evaluated as ONE expression template,
   // and GitHub caps a single expression at 21000 characters. Blowing that cap
