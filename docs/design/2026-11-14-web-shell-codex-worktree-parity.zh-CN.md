@@ -135,11 +135,14 @@ handoff 的本地干净门拒绝每一个干净仓库、cleanup 的有工作门�
 HEAD 停在冻结的 base commit 上，供清理与 handoff 逻辑依赖。
 
 **与 cleanliness 门的交互（已核实）。** 以未提交状态携带 dirty 会让
-`worktreeHasWork` 与 `removePreparedUserWorktree` 的 `isClean` 门看到工作，
-因此显式删除会话时会保留 worktree 而非删除。这是安全的中间态：只保留、
-不丢失，worktree 在 Worktrees 管理器中可见。P6 以 Codex 的方式解决——
-对托管会话 worktree 用「先快照再删除」取代 cleanliness 拒绝，归档时先归档
-工作再删除检出。刻意不用 baseline commit：它会让 HEAD 越过冻结的 base
+`worktreeHasWork` 看到工作，因此显式删除会话时会保留 worktree 而非删除。
+这是安全的中间态：只保留、不丢失，worktree 在 Worktrees 管理器中可见。
+P6 以 Codex 的方式解决——对托管会话 worktree 用「先快照再删除」取代
+cleanliness 拒绝，归档时先归档工作再删除检出。prepared worktree 的回滚
+（`removePreparedUserWorktree`）则**不能**把 carry 本身当作工作保留：
+`createUserWorktree` 返回携带的仓库相对路径，preparation journal 记录之
+（`carriedPaths`），回滚的 cleanliness 门精确豁免这些路径——任何其他文件
+（嵌套的类 marker 文件名、迟到的被忽略文件）仍拒绝删除。刻意不用 baseline commit：它会让 HEAD 越过冻结的 base
 commit，破坏 P3 引入的 HEAD 等值门（正是普查指出的
 `removePreparedUserWorktree` tip 检查的同一冲突）。
 
@@ -321,7 +324,7 @@ B. 生命周期门（风险最高——漏掉即 fail-closed 泄漏）
 | ---------------------------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `gitWorktreeService.ts` `checkoutMatches`                              | `HEAD == base && branch == worktree-<slug>`                          | `HEAD == base`；分支等值仅限命名模式                                                                                                                                                 |
 | `gitWorktreeService.ts` tip 检查（×2）                                 | `for-each-ref refs/heads/worktree-<slug>` tip `== base`              | detached：由 HEAD 等值覆盖；命名：不变                                                                                                                                               |
-| `gitWorktreeService.ts` `finalizePreparedUserWorktreeBranch`           | tip null → no-op；否则 `branch -d`                                   | 已容忍（无分支 → no-op）；`worktree add -b` 拒绝既有分支，故所有权安全；保留                                                                                                         |
+| `gitWorktreeService.ts` `finalizePreparedUserWorktreeBranch`           | tip null → no-op；否则 `branch -d`                                   | journal 推导 `branchOwned`：命名 preparation 拥有其分支（`worktree add -b` 拒绝既有名）；detached preparation 绝不删除按 slug 推导的 ref                                             |
 | `gitWorktreeService.ts` `removeUserWorktree`                           | `-d`/`-D worktree-<slug>`；`branchPreserved`                         | detached：HEAD 携带未合并 commit 时拒绝删除（force 可退出）；绝不删除按 slug 推导的分支（从未拥有）；命名：不变                                                                      |
 | `gitWorktreeService.ts` `hasUnmergedWorktreeCommits`                   | `rev-parse worktree-<slug>`，出错 fail-closed `true`                 | detached：按 HEAD 可达性判定——范本 `cli/serve/routes/workspace-git-worktrees.ts`（`commitIsReachable`）；命名：不变                                                                  |
 | `cli/serve/server/worktree-orphan-cleanup.ts` `executeWorktreeCleanup` | `worktreeHasWork` 门 + `removeUserWorktree` + `branchPreserved` 日志 | P3 门不变（dirty 工作保留，见 D3）；detached 删除被拒时重察文件系统并记录保留；P6 快照解除该门                                                                                       |

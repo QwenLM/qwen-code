@@ -219,9 +219,38 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
       'prepared',
       null,
       base,
+      undefined,
+      true,
+      created.carriedPaths,
     );
     expect(removed.success).toBe(true);
     await expect(fs.lstat(created.worktree!.path)).rejects.toThrow();
+  });
+
+  it('prepared rollback still refuses a non-carried file alongside the overlay', async () => {
+    await makeDirty(repoRoot);
+    const base = git(repoRoot, 'rev-parse', 'HEAD');
+    const service = new GitWorktreeService(repoRoot);
+    const created = await service.createUserWorktree('prepared-extra', 'main', {
+      detached: true,
+      carryDirtyState: true,
+    });
+    expect(created.success).toBe(true);
+    // A file that is NOT part of the carried overlay must still refuse.
+    await fs.writeFile(
+      path.join(created.worktree!.path, 'intruder.txt'),
+      'not carried\n',
+    );
+    const removed = await service.removePreparedUserWorktree(
+      'prepared-extra',
+      null,
+      base,
+      undefined,
+      true,
+      created.carriedPaths,
+    );
+    expect(removed.success).toBe(false);
+    expect(removed.error).toBe('Worktree contains changes');
   });
 
   it('without the option the worktree holds only committed state', async () => {

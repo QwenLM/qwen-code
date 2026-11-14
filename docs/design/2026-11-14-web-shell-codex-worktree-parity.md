@@ -151,13 +151,17 @@ shows them exactly as the user had them. This also keeps the detached HEAD
 at the frozen base commit, which the cleanup and handoff logic rely on.
 
 **Interaction with the cleanliness gates (verified).** Carrying dirty state
-as uncommitted changes makes `worktreeHasWork` and the `isClean` gate in
-`removePreparedUserWorktree` see work, so explicit session deletion preserves
-the worktree instead of removing it. That is the safe interim: preservation,
-never loss, and the worktree stays visible in the Worktrees manager. P6
-resolves it the Codex way — snapshot-then-delete replaces the cleanliness
-refusal for managed session worktrees, so archiving deletes the checkout
-after archiving its work. A baseline commit is deliberately not used: it
+as uncommitted changes makes `worktreeHasWork` see work, so explicit session
+deletion preserves the worktree instead of removing it. That is the safe
+interim: preservation, never loss, and the worktree stays visible in the
+Worktrees manager. P6 resolves it the Codex way — snapshot-then-delete
+replaces the cleanliness refusal for managed session worktrees, so archiving
+deletes the checkout after archiving its work. The prepared-worktree
+rollback (`removePreparedUserWorktree`) must NOT preserve the carry itself:
+`createUserWorktree` returns the carried repo-relative paths, the preparation
+journal records them (`carriedPaths`), and the rollback's cleanliness gate
+exempts exactly those paths — any other file (a nested marker-like name, a
+late-arriving ignored file) still refuses the removal. A baseline commit is deliberately not used: it
 would advance HEAD past the frozen base commit and break the HEAD-equality
 gates P3 introduces (the same conflict the census flags for
 `removePreparedUserWorktree`'s tip checks).
@@ -388,7 +392,7 @@ B. Lifecycle gates (highest risk — fail-closed leaks if missed)
 | ------------------------------------------------------------------------ | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `gitWorktreeService.ts` `removePreparedUserWorktree` `checkoutMatches`   | `HEAD == base && branch == worktree-<slug>`                           | `HEAD == base`; branch equality only in named mode                                                                                                                                                                              |
 | `gitWorktreeService.ts` `removePreparedUserWorktree` `atBase` tip checks | `for-each-ref refs/heads/worktree-<slug>` tip `== base`               | Detached: covered by HEAD equality; named: unchanged                                                                                                                                                                            |
-| `gitWorktreeService.ts` `finalizePreparedUserWorktreeBranch`             | Tip null → no-op; else `branch -d`                                    | Already tolerant (no branch → no-op); ownership-safe because `worktree add -b` refused a pre-existing branch; keep                                                                                                              |
+| `gitWorktreeService.ts` `finalizePreparedUserWorktreeBranch`             | Tip null → no-op; else `branch -d`                                    | `branchOwned` from the journal: named preparation owns its branch (`worktree add -b` refused a pre-existing one); detached preparation never deletes the slug-derived ref                                                       |
 | `gitWorktreeService.ts` `removeUserWorktree`                             | `-d`/`-D worktree-<slug>`; `branchPreserved`                          | Detached: refuse removal when HEAD carries unmerged commits (force opts out); never delete the slug-derived branch (never owned); named: unchanged                                                                              |
 | `gitWorktreeService.ts` `hasUnmergedWorktreeCommits`                     | `rev-parse worktree-<slug>`, fail-closed `true` on error              | Detached: judge by HEAD reachability — exemplar `cli/serve/routes/workspace-git-worktrees.ts` (`commitIsReachable`); named: unchanged                                                                                           |
 | `cli/serve/server/worktree-orphan-cleanup.ts` `executeWorktreeCleanup`   | `worktreeHasWork` gate + `removeUserWorktree` + `branchPreserved` log | Gate unchanged in P3 (dirty work preserved, see D3); a refused detached removal re-observes the filesystem and logs the preserve; P6 snapshot lifts the gate                                                                    |

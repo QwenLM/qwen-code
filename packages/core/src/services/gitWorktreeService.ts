@@ -1008,6 +1008,12 @@ export interface CreateWorktreeResult {
   success: boolean;
   worktree?: WorktreeInfo;
   error?: string;
+  /**
+   * Repo-relative paths the dirty carry applied (tracked + untracked),
+   * present when carryDirtyState was requested. A prepared-worktree
+   * rollback exempts exactly these from its cleanliness gate.
+   */
+  carriedPaths?: string[];
 }
 
 export interface WorktreeSetupResult {
@@ -1380,6 +1386,7 @@ export class GitWorktreeService {
   private async captureDirtyState(): Promise<{
     stashCommit: string;
     untrackedFiles: string[];
+    trackedFiles: string[];
     repoTop: string;
   }> {
     // NOTE: `git stash create` does NOT support --include-untracked;
@@ -1389,6 +1396,19 @@ export class GitWorktreeService {
       stashCommit = (await (await this.getGit()).stash(['create'])).trim();
     } catch {
       // Ignore — proceed without dirty state if stash create fails
+    }
+    // The tracked paths the stash carries, so a rollback can exempt
+    // exactly the carried overlay from its cleanliness gate.
+    let trackedFiles: string[] = [];
+    if (stashCommit) {
+      try {
+        const raw = await (
+          await this.getGit()
+        ).raw(['stash', 'show', '--name-only', '-z', stashCommit]);
+        trackedFiles = raw.split('\0').filter(Boolean);
+      } catch {
+        // Non-fatal: the rollback gate stays conservative.
+      }
     }
     // The service may be rooted at a subdirectory of the repository;
     // --full-name keeps untracked paths repository-relative so the overlay
@@ -1408,6 +1428,7 @@ export class GitWorktreeService {
     return {
       stashCommit,
       untrackedFiles,
+      trackedFiles,
       repoTop: repoTop ?? this.sourceRepoPath,
     };
   }
@@ -2657,6 +2678,7 @@ export class GitWorktreeService {
         });
       }
 
+      let carriedPaths: string[] | undefined;
       if (options?.carryDirtyState === true) {
         const captureService =
           options.dirtyStateSource !== undefined &&
@@ -2665,6 +2687,10 @@ export class GitWorktreeService {
             : this;
         const dirtyState = await captureService.captureDirtyState();
         await this.applyDirtyState(worktreePath, dirtyState);
+        carriedPaths = [
+          ...dirtyState.trackedFiles,
+          ...dirtyState.untrackedFiles,
+        ];
       }
 
       const worktree: WorktreeInfo = {
@@ -2675,7 +2701,7 @@ export class GitWorktreeService {
         isActive: true,
         createdAt: Date.now(),
       };
-      return { success: true, worktree };
+      return { success: true, worktree, carriedPaths };
     } catch (error) {
       const message = `Failed to create worktree "${slug}": ${error instanceof Error ? error.message : 'Unknown error'}`;
       debugLogger.warn(`createUserWorktree: ${message}`);
@@ -3403,6 +3429,7 @@ export class GitWorktreeService {
     expectedBaseCommit: string,
     onWorktreeRemoved?: () => Promise<void>,
     branchOwned = true,
+    carriedPaths?: readonly string[],
   ): Promise<{
     success: boolean;
     error?: string;
@@ -3540,7 +3567,26 @@ export class GitWorktreeService {
       // source and would strand the worktree + journal forever. Only
       // the index-state hazards (hidden bits, populated gitlinks) still
       // refuse — the carry never produces those.
-      const hasProtectedIndexState = async () => {
+      // The carried overlay is a copy of state the source checkout still
+      // holds, so it is exempt from the cleanliness gate — but ONLY the
+      // exact carried paths: any other file (a nested marker-like name, a
+      // late-arriving ignored file) still refuses the removal.
+      const exempt = new Set(carriedPaths ?? []);
+      const statusPath = (line: string): string => {
+        const p = line.slice(3);
+        const arrow = p.indexOf(' -> ');
+        return arrow >= 0 ? p.slice(arrow + 4) : p;
+      };
+      const isClean = async () => {
+        const status = await worktreeGit.raw([
+          'status',
+          '--porcelain',
+          '--untracked-files=all',
+        ]);
+        const hasNonCarriedChange = status
+          .split('\n')
+          .some((line) => line.length > 0 && !exempt.has(statusPath(line)));
+        if (hasNonCarriedChange) return false;
         const hiddenIndexEntries = await worktreeGit.raw([
           'ls-files',
           '-v',
@@ -3549,15 +3595,31 @@ export class GitWorktreeService {
         const hasHiddenIndexBits = hiddenIndexEntries
           .split('\0')
           .some((entry) => /^(?:S|[a-z])/.test(entry));
-        return hasHiddenIndexBits || (await hasPopulatedGitlink());
+        if (hasHiddenIndexBits) return false;
+        if (await hasPopulatedGitlink()) return false;
+        const cleanOut = await worktreeGit.raw([
+          'clean',
+          '-ndx',
+          '-e',
+          `/${WORKTREE_SESSION_FILE}`,
+          '-e',
+          `/${WORKTREE_SESSION_FILE}.*.tmp`,
+        ]);
+        return cleanOut
+          .split('\n')
+          .every(
+            (line) =>
+              line.length === 0 ||
+              exempt.has(line.replace(/^Would remove /, '')),
+          );
       };
-      if (await hasProtectedIndexState()) {
+      if (!(await isClean())) {
         return { success: false, error: 'Worktree contains changes' };
       }
       if (!(await atBase())) {
         return { success: false, error: 'Worktree branch changed' };
       }
-      if (await hasProtectedIndexState()) {
+      if (!(await isClean())) {
         return { success: false, error: 'Worktree contains changes' };
       }
       if (!(await atBase())) {

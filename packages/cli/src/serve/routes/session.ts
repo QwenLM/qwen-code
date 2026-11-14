@@ -5766,6 +5766,7 @@ export function registerSessionRoutes(
                       runtime.generationGuard?.assertOpen();
                     },
                     journal!.worktreeBranch !== '',
+                    journal!.carriedPaths,
                   );
                 if (!removed.success) {
                   daemonLog?.warn('branch worktree cleanup refused', {
@@ -5882,7 +5883,7 @@ export function registerSessionRoutes(
                 worktreeCreated = true;
                 journal = await updateBranchWorktreeJournal(
                   journalPath,
-                  journal,
+                  { ...journal, carriedPaths: worktreeResult.carriedPaths },
                   'worktree-created',
                 );
                 runtime.generationGuard?.assertOpen();

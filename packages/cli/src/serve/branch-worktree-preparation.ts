@@ -64,6 +64,9 @@ export interface BranchWorktreePreparationJournal {
   markerCreated: boolean;
   sidecarCreated: boolean;
   phase: BranchWorktreePreparationPhase;
+  /** Repo-relative paths the dirty carry applied; the rollback gate
+   * exempts exactly these. Absent on journals from older builds. */
+  carriedPaths?: string[];
 }
 
 const PREPARATION_PHASES = new Set<BranchWorktreePreparationPhase>([
@@ -367,7 +370,10 @@ function isPreparationJournal(
     typeof record['markerCreated'] === 'boolean' &&
     typeof record['sidecarCreated'] === 'boolean' &&
     typeof record['phase'] === 'string' &&
-    PREPARATION_PHASES.has(record['phase'] as BranchWorktreePreparationPhase)
+    PREPARATION_PHASES.has(record['phase'] as BranchWorktreePreparationPhase) &&
+    (record['carriedPaths'] === undefined ||
+      (Array.isArray(record['carriedPaths']) &&
+        record['carriedPaths'].every((x) => typeof x === 'string')))
   );
 }
 
@@ -569,6 +575,7 @@ export function recoverBranchWorktreePreparations(args: {
             args.assertGenerationOpen?.();
           },
           journal.worktreeBranch !== '',
+          journal.carriedPaths,
         );
         if (!removed.success) {
           args.warn?.('branch worktree recovery refused cleanup', {
