@@ -888,6 +888,24 @@ describe('extractCommandRules', () => {
     ])('%s', async (_title, command, rules) => {
       expect(await extractCommandRules(command)).toEqual(rules);
     });
+
+    // A character bash treats as part of a word must not end up in the rule:
+    // `git status\u00a0` would otherwise offer a rule whose pattern has an
+    // invisible NBSP glued to the command name, and `git status\r` an
+    // untypeable CR.
+    it('trims only the separators bash treats as layout', async () => {
+      expect(await extractCommandRules('git status\u00a0')).toEqual([
+        'git status',
+      ]);
+      expect(await extractCommandRules('\u00a0git log -1')).toEqual([
+        'git log *',
+      ]);
+      expect(await extractCommandRules('git status\r')).toEqual(['git status']);
+      // A CR that is a redirect target is not layout; the parser reads it as an
+      // unknown target and suggests the command without it, so the gate below
+      // is what keeps that target addressable for the write rules.
+      expect(await extractCommandRules('echo x >\r')).toEqual(['echo *']);
+    });
   });
 });
 // =========================================================================
