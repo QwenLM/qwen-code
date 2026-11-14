@@ -1515,6 +1515,54 @@ class ManagedWorkspaceAdmissionTest {
                         }));
     }
 
+    // The unbound requester of the same collision, and the opposite verdict.
+    // An unbound Session is private, so a key recorded on a Workspace-bound
+    // Session must answer the 404 the in-store receipt probe gives once the
+    // receipt lands: requireSessionAuthority passes for a bound recorded
+    // Session, so deleting the pre-read arm turns this answer into
+    // idempotency_conflict, which confirms the foreign key is live. Same actor
+    // and same input on both Sessions, so only the recorded Session's
+    // Workspace binding can decide the verdict — an actor or ownership
+    // difference would refuse it even with the arm deleted.
+    @Test
+    void anUnboundSessionReusingABoundRecordedKeyGetsTheReceiptProbesNotFound() {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-a", "storage-a",
+                WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        grant(tenant, "ws-a", "actor-a", true);
+        String bound = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor-a")
+                .idempotencyKey("create-bound")
+                .requestDigest("sha256:" + "a".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("ws-a", "."))
+                .build()).sessionId();
+        ManagedAgentService service = boundServiceWithWorkingHarness();
+        TransactionTemplate transaction = new TransactionTemplate(
+                transactionManager);
+        List<InputBlock> input = List.of(new InputBlock("text", "go"));
+        var recorder = com.alibaba.qwen.code.managedagent.model.SessionPrincipal
+                .of(tenant, "actor-a", "subject-a");
+        transaction.executeWithoutResult(status ->
+                service.submitTurn(recorder, "k1", bound, input));
+        String unbound = transaction.execute(status ->
+                service.createSession(recorder, "create-unbound", "qwen-code",
+                        null, "private", Map.of(), List.of()).sessionId());
+        assertThat(store.requireSession(tenant, unbound).workspace()).isNull();
+        assertThat(store.requireSession(tenant, bound).workspace()).isNotNull();
+        transaction.executeWithoutResult(status ->
+                assertThatThrownBy(() -> service.submitTurn(recorder, "k1",
+                        unbound, input))
+                        .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                            assertThat(error.getCode())
+                                    .isEqualTo("session_not_found");
+                            assertThat(error.getStatus())
+                                    .isEqualTo(HttpStatus.NOT_FOUND.value());
+                        }));
+    }
+
     // The recorded rename's actor gate covers the UNFINISHED row too, not
     // only the completed outcome: beginSessionRename compares key, Session
     // and digest, never the actor, so without the gate a non-recorder
