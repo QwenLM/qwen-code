@@ -4,7 +4,7 @@
 
 ## Status and scope
 
-P1–P5 implemented (this PR); P6–P7 planned as follow-up. Full parity with
+P1–P5 implemented (PR #17228); P6–P7 planned as follow-up. Full parity with
 Codex managed worktrees for Web Shell sessions, delivered in ordered phases
 (P1–P7). Each phase is independently shippable; the end state matches the
 Codex reference behavior below. Maintainer-authored

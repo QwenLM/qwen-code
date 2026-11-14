@@ -4,7 +4,7 @@
 
 ## 状态与范围
 
-P1–P5 已实现（本 PR）；P6–P7 计划后续。Web Shell 会话完整对齐 Codex 托管
+P1–P5 已实现（PR #17228）；P6–P7 计划后续。Web Shell 会话完整对齐 Codex 托管
 worktree，按有序阶段（P1–P7）交付。每个阶段可独立发布；终态与下文 Codex
 参考行为一致。P3 的 detached-HEAD
 重构属于 maintainer 发起的核心改动，豁免外部 PR 两级门禁，但仍遵循通用设计
