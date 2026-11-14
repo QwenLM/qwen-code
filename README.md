@@ -179,7 +179,7 @@ Qwen Code ships with a complete agent harness — multi-agent orchestration, per
 
 - **[Auto-Memory](https://qwenlm.github.io/qwen-code-docs/en/users/features/memory/)** — the agent writes its own notes and recalls them across sessions; your `QWEN.md` and `AGENTS.md` briefings load automatically.
 - **[Skills & Auto-Skills](https://qwenlm.github.io/qwen-code-docs/en/users/features/skills/)** — built-in skills (`/review`, `/batch`, `/bugfix`…) work out of the box; `/learn` distills docs or code into new skills, the agent can generate skills on its own _(opt-in)_, and `/curator` maintains the library.
-- **[Session management](https://qwenlm.github.io/qwen-code-docs/en/users/features/session-overview/)** — resume past conversations with `/resume`, and browse, rename, or archive sessions.
+- **[Session management](https://qwenlm.github.io/qwen-code-docs/en/users/features/session-overview/)** — resume past conversations with [`/resume`](https://qwenlm.github.io/qwen-code-docs/en/users/features/commands/), and browse, rename, or archive sessions.
 
 ### Extensibility and control
 
@@ -192,9 +192,9 @@ Qwen Code ships with a complete agent harness — multi-agent orchestration, per
 
 ### Open and multi-platform
 
-- **Open source, inside and out** — the framework and the Qwen models are open source and evolve together.
-- **[Multi-protocol](https://qwenlm.github.io/qwen-code-docs/en/users/configuration/model-providers/)** — OpenAI, Anthropic, Gemini, and Qwen APIs, plus any third-party provider or local model (Ollama / vLLM). Switch at runtime.
-- **Beyond the terminal** — IDE plugins, desktop app, Web UI, IM channels, headless mode, SDKs, and daemon mode. See [How to Use Qwen Code](#how-to-use-qwen-code).
+- **Open framework and models** — the framework and the Qwen models are open source and evolve together.
+- **[Any provider](https://qwenlm.github.io/qwen-code-docs/en/users/configuration/model-providers/)** — OpenAI, Anthropic, Gemini, and Qwen APIs, plus any third-party provider or local model (Ollama / vLLM). Switch at runtime.
+- **Every interface** — IDE plugins, desktop app, Web UI, IM channels, headless mode, SDKs, and daemon mode. See [How to Use Qwen Code](#how-to-use-qwen-code).
 
 ## Qwen Code Evaluation
 
