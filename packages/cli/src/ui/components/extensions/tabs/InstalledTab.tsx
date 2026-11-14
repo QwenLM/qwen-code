@@ -595,17 +595,19 @@ export const InstalledTab = ({
           ]) {
             const excluded =
               settings.forScope(scope).settings.mcp?.excluded ?? [];
-            if (excluded.includes(item.name)) {
-              settings.setValue(
-                scope,
-                'mcp.excluded',
-                excluded.filter((n: string) => n !== item.name),
-              );
+            const remaining = excluded.filter(
+              (pattern: string) =>
+                !matchesAnyServerPattern(item.name, [pattern]),
+            );
+            if (remaining.length !== excluded.length) {
+              settings.setValue(scope, 'mcp.excluded', remaining);
             }
           }
           const runtimeExcluded = config.getExcludedMcpServers() ?? [];
           config.setExcludedMcpServers(
-            runtimeExcluded.filter((n) => n !== item.name),
+            runtimeExcluded.filter(
+              (pattern) => !matchesAnyServerPattern(item.name, [pattern]),
+            ),
           );
           await toolRegistry?.discoverToolsForServer(item.name);
         }

@@ -1804,15 +1804,16 @@ describe('workspace-qualified core REST', () => {
     }
   });
 
-  it('rejects enabling an MCP server blocked by a wildcard exclusion', async () => {
+  it('rejects enabling an MCP server blocked by a wildcard in a higher scope', async () => {
     const h = await makeHarness({ token: 'secret' });
+    const systemSettingsPath = path.join(h.scratch, 'system-settings.json');
+    await fsp.writeFile(
+      systemSettingsPath,
+      JSON.stringify({ mcp: { excluded: ['docs*'] } }),
+    );
+    const previousSystemPath = process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
+    process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = systemSettingsPath;
     try {
-      await fsp.mkdir(path.join(h.secondaryCwd, '.qwen'), { recursive: true });
-      await fsp.writeFile(
-        path.join(h.secondaryCwd, '.qwen', 'settings.json'),
-        JSON.stringify({ mcp: { excluded: ['docs*'] } }),
-      );
-
       const response = await request(h.app)
         .post(
           `/workspaces/${encodeURIComponent(h.secondaryId)}/config/mcp/docs/enable`,
@@ -1827,6 +1828,129 @@ describe('workspace-qualified core REST', () => {
         patterns: ['docs*'],
       });
       expect(h.persistSetting).not.toHaveBeenCalled();
+    } finally {
+      if (previousSystemPath === undefined) {
+        delete process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
+      } else {
+        process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = previousSystemPath;
+      }
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a user-scope enable that a workspace pattern still excludes', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    // Only the workspace scope holds a pattern; a user-scope write must still
+    // refuse, because `mcp.excluded` concatenates across scopes.
+    await fsp.mkdir(path.join(h.primaryCwd, '.qwen'), { recursive: true });
+    await fsp.writeFile(
+      path.join(h.primaryCwd, '.qwen', 'settings.json'),
+      JSON.stringify({ mcp: { excluded: ['docs*'] } }),
+    );
+    try {
+      const response = await request(h.app)
+        .post('/workspace/config/mcp/docs/enable')
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ scope: 'user' });
+
+      expect(response.status).toBe(409);
+      expect(response.body).toMatchObject({ code: 'mcp_excluded_by_pattern' });
+      expect(h.persistSetting).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('lifts a wildcard exclusion from the scope being enabled', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      await fsp.mkdir(path.join(h.secondaryCwd, '.qwen'), { recursive: true });
+      await fsp.writeFile(
+        path.join(h.secondaryCwd, '.qwen', 'settings.json'),
+        JSON.stringify({ mcp: { excluded: ['docs*', 'keep-*'] } }),
+      );
+
+      const response = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/config/mcp/docs/enable`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ scope: 'workspace' });
+
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({ changed: true });
+      expect(h.persistSetting).toHaveBeenCalledWith(
+        h.secondaryCwd,
+        expect.any(String),
+        'mcp.excluded',
+        ['keep-*'],
+        expect.any(Function),
+      );
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a covering pattern from enabling its siblings', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      await fsp.mkdir(path.join(h.secondaryCwd, '.qwen'), { recursive: true });
+      await fsp.writeFile(
+        path.join(h.secondaryCwd, '.qwen', 'settings.json'),
+        JSON.stringify({
+          mcp: { excluded: ['docs*'] },
+          mcpServers: {
+            docs: { command: 'node' },
+            'docs-upstream': { command: 'node' },
+            'docs-admin': { command: 'node' },
+          },
+        }),
+      );
+
+      const response = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/config/mcp/docs/enable`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ scope: 'workspace' });
+
+      expect(response.status).toBe(200);
+      // Deleting the pattern outright would erase the deny for every sibling it
+      // covers, so it is narrowed to exactly those names instead.
+      expect(h.persistSetting).toHaveBeenCalledWith(
+        h.secondaryCwd,
+        expect.any(String),
+        'mcp.excluded',
+        ['docs-admin', 'docs-upstream'],
+        expect.any(Function),
+      );
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('does not refuse on a workspace pattern an untrusted workspace drops', async () => {
+    const h = await makeHarness({ primaryTrusted: false, token: 'secret' });
+    try {
+      // The merge substitutes an empty workspace scope for an untrusted
+      // folder, so this pattern excludes nothing at runtime and refusing on it
+      // would be a refusal no route could clear.
+      await fsp.mkdir(path.join(h.primaryCwd, '.qwen'), { recursive: true });
+      await fsp.writeFile(
+        path.join(h.primaryCwd, '.qwen', 'settings.json'),
+        JSON.stringify({ mcp: { excluded: ['docs*'] } }),
+      );
+
+      const response = await request(h.app)
+        .post('/workspace/config/mcp/docs/enable')
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ scope: 'user' });
+
+      expect(response.status).not.toBe(409);
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }

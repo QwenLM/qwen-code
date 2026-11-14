@@ -479,23 +479,35 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
           ?.setMcpServerDisabled(extensionName, server.name, false);
       }
 
-      // Remove from user and workspace exclusion lists
+      // Remove from user and workspace exclusion lists. Match patterns too:
+      // `--disable-mcp-server` and `mcp.excluded` accept globs, so an
+      // exact-name filter leaves `foo-*` behind and the enable is a no-op
+      // (#14465).
+      const removedPatterns = new Set<string>();
       for (const scope of [SettingScope.User, SettingScope.Workspace]) {
         const scopeSettings = settings.forScope(scope).settings;
         const currentExcluded = scopeSettings.mcp?.excluded || [];
 
-        if (currentExcluded.includes(server.name)) {
-          const newExcluded = currentExcluded.filter(
-            (name: string) => name !== server.name,
-          );
+        const newExcluded = currentExcluded.filter(
+          (pattern: string) => !matchesAnyServerPattern(server.name, [pattern]),
+        );
+        if (newExcluded.length !== currentExcluded.length) {
+          for (const pattern of currentExcluded) {
+            if (!newExcluded.includes(pattern)) removedPatterns.add(pattern);
+          }
           settings.setValue(scope, 'mcp.excluded', newExcluded);
         }
       }
 
-      // Update runtime config exclusion list
+      // Update runtime config exclusion list. Only the entries this handler
+      // actually removed from a scope it can write may leave the runtime list:
+      // it is the merged set (every scope) plus `--disable-mcp-server`, so
+      // filtering it by the server name alone would also drop an operator's
+      // `System` pattern and connect a server whose exclusion is still on disk.
+      const removed = removedPatterns;
       const currentExcluded = config.getExcludedMcpServers() || [];
       const newExcluded = currentExcluded.filter(
-        (name: string) => name !== server.name,
+        (pattern: string) => !removed.has(pattern),
       );
       config.setExcludedMcpServers(newExcluded);
 

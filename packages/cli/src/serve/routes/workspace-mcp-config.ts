@@ -332,33 +332,77 @@ function registerFor(
                 const existing =
                   settings.forScope(settingScope).settings.mcp?.excluded ?? [];
                 if (action === 'enable') {
+                  // `mcp.excluded` concatenates across scopes, so a pattern
+                  // in any other scope re-excludes the server on the next
+                  // recompute. Report it instead of writing settings that
+                  // would be undone (#14465).
+                  //
+                  // Only scopes the merge actually applies can block: the
+                  // workspace layer is substituted with an empty object for an
+                  // untrusted folder, so a pattern there excludes nothing at
+                  // runtime and refusing on it would be a permanent refusal no
+                  // route could clear.
+                  const trusted = isTrustedTarget(
+                    deps.workspaceRegistry,
+                    target,
+                  );
                   const blockingScopes = [
                     SettingScope.SystemDefaults,
                     SettingScope.System,
                     SettingScope.User,
-                    ...(settingScope === SettingScope.Workspace
-                      ? [SettingScope.Workspace]
-                      : []),
-                  ];
+                    ...(trusted ? [SettingScope.Workspace] : []),
+                  ].filter((candidateScope) => candidateScope !== settingScope);
                   blocking = blockingScopes.flatMap((candidateScope) =>
                     (
                       settings.forScope(candidateScope).settings.mcp
                         ?.excluded ?? []
-                    ).filter(
-                      (pattern) =>
-                        matchesAnyServerPattern(serverName, [pattern]) &&
-                        (candidateScope !== settingScope ||
-                          pattern !== serverName),
+                    ).filter((pattern) =>
+                      matchesAnyServerPattern(serverName, [pattern]),
                     ),
                   );
                   if (blocking.length > 0) return;
                 }
-                next =
-                  action === 'enable'
-                    ? existing.filter((pattern) => pattern !== serverName)
-                    : existing.includes(serverName)
-                      ? existing
-                      : [...existing, serverName];
+                if (action === 'enable') {
+                  // A covering pattern also excludes every sibling it matches,
+                  // so deleting it would silently connect servers nobody
+                  // enabled (`*` would erase the whole policy). Lift a pattern
+                  // only when nothing but this name matches it; otherwise keep
+                  // it and narrow it to the siblings it still has to deny.
+                  const serverNames = collectConfiguredMcpServerNames(
+                    settings,
+                    target.workspaceCwd,
+                  );
+                  next = [];
+                  for (const pattern of existing) {
+                    if (!matchesAnyServerPattern(serverName, [pattern])) {
+                      next.push(pattern);
+                      continue;
+                    }
+                    // `mcp.excluded` has no negation form and no "exact" form
+                    // other than the bare name, so a pattern's remaining
+                    // coverage is spelled as its sibling names — every server
+                    // it still has to deny.
+                    const siblings = serverNames.filter(
+                      (candidate) =>
+                        candidate !== serverName &&
+                        matchesAnyServerPattern(candidate, [pattern]),
+                    );
+                    if (siblings.length === 0) continue;
+                    next.push(...siblings);
+                  }
+                  if (next.length === 0 && existing.length > 0) {
+                    // Never persist `[]` over a policy: an empty list is
+                    // indistinguishable from "no exclusions" to every later
+                    // reader.
+                    blocking = [existing.join(', ')];
+                    return;
+                  }
+                  next = dedupe(next);
+                } else {
+                  next = existing.includes(serverName)
+                    ? existing
+                    : [...existing, serverName];
+                }
                 changed = next.length !== existing.length;
                 if (changed) {
                   await deps.persistSetting(
@@ -451,6 +495,52 @@ function publishConfiguration(
   } catch {
     // Durable configuration is already committed.
   }
+}
+
+/**
+ * Every MCP server name the merged settings know about, across all layers.
+ * Used to spell out what a lifted glob pattern still has to exclude.
+ */
+function collectConfiguredMcpServerNames(
+  settings: ReturnType<typeof loadSettings>,
+): string[] {
+  const names = new Set<string>();
+  for (const scope of [
+    SettingScope.SystemDefaults,
+    SettingScope.System,
+    SettingScope.User,
+    SettingScope.Workspace,
+  ]) {
+    for (const name of Object.keys(
+      settings.forScope(scope).settings.mcpServers ?? {},
+    )) {
+      names.add(name);
+    }
+  }
+  return [...names].sort();
+}
+
+/**
+ * Whether the merge will apply this workspace's own settings. `loadSettings`
+ * reads and merges the raw workspace layer regardless, so a guard keyed on the
+ * file alone refuses on patterns an untrusted folder never contributes.
+ */
+function isTrustedTarget(
+  registry: WorkspaceRegistry,
+  target: McpConfigTarget,
+): boolean {
+  if (target.runtime) return target.runtime.trusted;
+  const entry =
+    registry.getEntryByWorkspaceCwd(target.workspaceCwd) ??
+    registry.primaryEntry;
+  return (
+    registry.listManaged().find((runtime) => runtime.primary)?.trusted ??
+    entry.primary
+  );
+}
+
+function dedupe(values: string[]): string[] {
+  return [...new Set(values)];
 }
 
 export function registerWorkspaceMcpConfigRoutes(

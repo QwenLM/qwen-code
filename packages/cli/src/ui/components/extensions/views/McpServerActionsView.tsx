@@ -290,17 +290,19 @@ export const McpServerActionsView = ({
         for (const scope of [SettingScope.User, SettingScope.Workspace]) {
           const excluded =
             settings.forScope(scope).settings.mcp?.excluded || [];
-          if (excluded.includes(serverName)) {
-            settings.setValue(
-              scope,
-              'mcp.excluded',
-              excluded.filter((n: string) => n !== serverName),
-            );
+          const remaining = excluded.filter(
+            (pattern: string) =>
+              !matchesAnyServerPattern(serverName, [pattern]),
+          );
+          if (remaining.length !== excluded.length) {
+            settings.setValue(scope, 'mcp.excluded', remaining);
           }
         }
         const runtimeExcluded = config.getExcludedMcpServers() || [];
         config.setExcludedMcpServers(
-          runtimeExcluded.filter((n) => n !== serverName),
+          runtimeExcluded.filter(
+            (pattern) => !matchesAnyServerPattern(serverName, [pattern]),
+          ),
         );
         await toolRegistry?.discoverToolsForServer(serverName);
       } else if (server.source === 'extension') {
