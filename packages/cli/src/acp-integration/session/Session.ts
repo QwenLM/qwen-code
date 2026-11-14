@@ -16437,10 +16437,19 @@ export class Session implements SessionContext {
           const provenance = ToolCallEmitter.resolveToolProvenance(
             request.name,
           );
+          // A todo_write never emits a start frame, so channel transports have
+          // no remembered kind to fall back on and drop a kindless update.
+          // `think` matches the kind the todo_write emitter stamps on its
+          // failure frames.
+          const { title } = this.toolCallEmitter.resolveToolMetadata(
+            request.name,
+          );
           await this.sendUpdate({
             sessionUpdate: 'tool_call_update',
             toolCallId: response.callId,
             status: 'failed',
+            title,
+            kind: 'think',
             content: [
               {
                 type: 'content',
