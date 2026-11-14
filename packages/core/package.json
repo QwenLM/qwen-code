@@ -132,6 +132,7 @@
     "@opentelemetry/sdk-node": "^0.221.0",
     "@opentelemetry/sdk-trace-node": "^2.10.0",
     "@opentelemetry/semantic-conventions": "^1.36.0",
+    "@qwen-code/channel-base": "file:../channels/base",
     "@xterm/headless": "5.5.0",
     "acorn": "^8.18.0",
     "acorn-walk": "^8.3.5",

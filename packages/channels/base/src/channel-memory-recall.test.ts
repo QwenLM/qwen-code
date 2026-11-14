@@ -88,6 +88,41 @@ describe('selectRelevantChannelMemory', () => {
     ]);
   });
 
+  it('does not form bigrams across adjacent CJK scripts', () => {
+    const mixedScript = entry('mixed-script', longFact('漢あ'));
+
+    expect(selectRelevantChannelMemory('漢あ', [mixedScript])).toEqual([]);
+  });
+
+  it('tokenizes adjacent Latin letters and numbers as separate terms', () => {
+    const separated = entry('separated', longFact('abc 123'));
+
+    expect(selectRelevantChannelMemory('abc123', [separated])).toEqual([
+      separated,
+    ]);
+  });
+
+  it('does not tokenize alphabetic scripts outside Latin and CJK', () => {
+    const cyrillic = entry('cyrillic', longFact('развёртывания'));
+
+    expect(selectRelevantChannelMemory('развёртывания', [cyrillic])).toEqual(
+      [],
+    );
+  });
+
+  it('keeps terms from the middle of long messages', () => {
+    const tokens = Array.from({ length: 100 }, (_, index) => {
+      const first = String.fromCharCode(97 + Math.floor(index / 26));
+      const second = String.fromCharCode(97 + (index % 26));
+      return `token${first}${second}`;
+    });
+    const middle = entry('middle', longFact(tokens[50]!));
+
+    expect(selectRelevantChannelMemory(tokens.join(' '), [middle])).toEqual([
+      middle,
+    ]);
+  });
+
   it('treats punctuation, whitespace, and unsafe invisibles as separators', () => {
     const joined = entry(
       'joined',

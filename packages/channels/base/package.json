@@ -15,6 +15,10 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./recallTokenizer": {
+      "types": "./dist/recall-tokenizer.d.ts",
+      "default": "./dist/recall-tokenizer.js"
+    },
     "./markdown-chunks": {
       "types": "./dist/markdown-chunks.d.ts",
       "default": "./dist/markdown-chunks.js"
