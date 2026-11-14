@@ -85,6 +85,7 @@ Legacy 团队这四项都有。本切片把它们带到 Hosted 团队。成员�
      - 64 次尝试后 relay 放弃。交接前放弃时,outbound 变为 `cancelled`,与 H4d-b 的放弃一样。交接后放弃时,若 lead 持有回执,放弃会像 `answered` 那样复制它的回复;否则 outbound 变为 `unknown`。
      - 在 `execute` 已提交任何东西之后遇到的、lead 的 authority 作出的确定性拒绝,是其回复的一部分(决策 3),绝不是 relay 会重试的错误。
      - 每一步都凭命令 id 保证重放安全,正如 H4d-b 的各步凭消息 id 保证。
+     - 命令操作路由对格式错误的 `reply` 文档返回 400 `invalid_command_operation`。解析之后，`answered` 与其他命令动词使用相同的错误分类：状态冲突返回 409 `session_command_conflict`，持久命令记录缺失或无效返回 409 `session_command_record`，存储、传输或写入已停止故障返回 503 `session_command_failed` 并记录存储失败日志。成功及相同回复的重放仍返回 202。
    - **关闭挡板。** 欠着的命令从不挡住成员的结算或关闭:child result relay 对欠交接 outbox 的检查只读取 `session_message`,并保持如此。
    - **延迟。** 一条命令需要 relay 走一遍:一次扫描延迟(2 秒)与三次 Harness 调用。在 outbound 提交时立即触发一次(kick),就像 `ActionResponseCoordinator.dispatch` 那样,可以消除扫描延迟;这留给开放问题 2。
 

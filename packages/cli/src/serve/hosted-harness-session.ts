@@ -11408,11 +11408,9 @@ export function registerHostedHarnessSessionRoutes(
           break;
         }
         case 'answered': {
+          let parsedReply: SessionCommandReply;
           try {
-            await commands.answered(
-              commandId,
-              parseSessionCommandReply(body?.['reply']),
-            );
+            parsedReply = parseSessionCommandReply(body?.['reply']);
           } catch (cause) {
             // A store-side append outcome is not the request's shape: let it
             // reach the outer catch, which answers the retryable 503.
@@ -11429,6 +11427,7 @@ export function registerHostedHarnessSessionRoutes(
             }
             throw cause;
           }
+          await commands.answered(commandId, parsedReply);
           break;
         }
         case 'cancelled':
