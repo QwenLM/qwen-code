@@ -190,7 +190,7 @@ export const plugin: ChannelPlugin = {
         label: 'PR Watch Events (Deprecated)',
         kind: 'string-list',
         description:
-          'Deprecated. The daemon now detects PR-state transitions: configure serve.sessionPrWatch in the daemon settings. This channel no longer watches bound PRs. For one minor release the key is accepted and read as a per-host alias when that setting is unset, for PRs on this channel’s web host. Requires Deliver To PR-Bound Sessions.',
+          'Deprecated. The daemon now detects PR-state transitions: configure serve.sessionPrWatch in the daemon settings. This channel no longer watches bound PRs. For one minor release the key is accepted and read as a per-host alias when that setting is unset, for PRs on this channel’s web host; read only while Deliver To PR-Bound Sessions is on.',
         // Built from the adapter's exported vocabulary so the UI options can
         // never drift from the alias vocabulary (R2-18).
         options: PR_WATCH_EVENTS.map((value) => ({ value, label: value })),

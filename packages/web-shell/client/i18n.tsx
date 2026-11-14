@@ -4970,7 +4970,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     'Poll same-account conversation and inline review comments on bound PRs and deliver each new one to every bound session that did not post it. Enabled by default; turn off to disable. Requires Deliver To PR-Bound Sessions.',
   'channels.editor.field.github.prWatchEvents': 'PR Watch Events',
   'channels.editor.field.github.prWatchEvents.description':
-    'Optional. State transitions to watch for bound PRs (requires Deliver To PR-Bound Sessions). Leave empty to disable.',
+    'Deprecated. The daemon now detects PR-state transitions: configure serve.sessionPrWatch in the daemon settings. For one minor release the key is accepted and read as a per-host alias for PRs on this channel’s web host while that setting is unset and Deliver To PR-Bound Sessions is on.',
   'channels.editor.field.github.prWatchEvents.disabledHint':
     'Enable "Deliver To PR-Bound Sessions" above to select watch events.',
   'channels.editor.field.github.prWatchEvents.option.ci_failure':
@@ -9890,7 +9890,7 @@ const ZH: Messages = {
     '开启上方「投递到 PR 绑定会话」后即可要求活跃监视。',
   'channels.editor.field.github.prWatchEvents': 'PR 状态监视事件',
   'channels.editor.field.github.prWatchEvents.description':
-    '可选。为绑定 PR 监视的状态转换（需开启"投递到 PR 绑定会话"）。留空则禁用。',
+    '已弃用。PR 状态跃迁现由 daemon 检测：请在 daemon 设置里配置 serve.sessionPrWatch。为兼容保留一个 minor 版本：当该设置未配置且已开启"投递到 PR 绑定会话"时，本键按 host 作为别名，用于本渠道 web host 上的 PR。',
   'channels.editor.field.github.prWatchEvents.disabledHint':
     '开启上方「投递到 PR 绑定会话」后即可选择监视事件。',
   'channels.editor.field.github.prWatchEvents.option.ci_failure':

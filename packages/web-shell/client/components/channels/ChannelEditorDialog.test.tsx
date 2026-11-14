@@ -981,7 +981,10 @@ describe('ChannelEditorDialog', () => {
       descriptionOf(fieldByLabel('Deliver To PR-Bound Sessions')),
     ).toContain('instead of a channel-owned session');
     expect(descriptionOf(fieldByLabel('PR Watch Events'))).toContain(
-      'Leave empty to disable',
+      'Deprecated',
+    );
+    expect(descriptionOf(fieldByLabel('PR Watch Events'))).toContain(
+      'configure serve.sessionPrWatch',
     );
   });
 
@@ -1005,9 +1008,9 @@ describe('ChannelEditorDialog', () => {
     expect(descriptionOf(fieldByLabel('投递到 PR 绑定会话'))).toContain(
       '以 prompt 形式投递进该会话，而不是频道自有会话',
     );
-    expect(descriptionOf(fieldByLabel('PR 状态监视事件'))).toContain(
-      '为绑定 PR 监视的状态转换',
-    );
+    // The field no longer watches; the copy must say so and point at the
+    // daemon setting, or the editor advertises a control that does nothing.
+    expect(descriptionOf(fieldByLabel('PR 状态监视事件'))).toContain('已弃用');
   });
 
   it('frames both bound-session fields in one panel', async () => {
