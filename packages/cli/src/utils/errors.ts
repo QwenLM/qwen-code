@@ -37,11 +37,19 @@ const debugLogger = createDebugLogger('CLI_ERRORS');
 export class AlreadyReportedError extends Error {
   /** Exit code to surface — defaults to 1 for generic upstream failures. */
   exitCode: number;
+  /**
+   * Provider HTTP status behind this failure, kept for the terminal result
+   * envelope. The status is deliberately not the exit code.
+   */
+  status?: number;
 
-  constructor(message: string, exitCode = 1) {
+  constructor(message: string, exitCode = 1, status?: number) {
     super(message);
     this.name = 'AlreadyReportedError';
     this.exitCode = exitCode;
+    if (status !== undefined) {
+      this.status = status;
+    }
   }
 }
 

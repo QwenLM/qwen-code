@@ -150,6 +150,7 @@ public class SDKResultMessage extends MessageBase {
      *
      * @param error Whether the result represents an error
      */
+    @JSONField(name = "is_error")
     public void setError(boolean error) {
         isError = error;
     }
@@ -292,6 +293,10 @@ public class SDKResultMessage extends MessageBase {
          * Error message.
          */
         private String message;
+        /**
+         * Provider HTTP status, when the failure came from an API response.
+         */
+        private Integer status;
 
         /**
          * Gets the error type.
@@ -309,6 +314,25 @@ public class SDKResultMessage extends MessageBase {
          */
         public void setType(String type) {
             this.type = type;
+        }
+
+        /**
+         * Gets the provider HTTP status.
+         *
+         * @return The provider HTTP status, or null when the failure was not
+         *     an API response
+         */
+        public Integer getStatus() {
+            return status;
+        }
+
+        /**
+         * Sets the provider HTTP status.
+         *
+         * @param status The provider HTTP status
+         */
+        public void setStatus(Integer status) {
+            this.status = status;
         }
 
         /**

@@ -9432,6 +9432,153 @@ describe('runNonInteractive', () => {
     });
   });
 
+  it.each(bothLoops)(
+    'keeps the provider status on the stream-json terminal error result ($loop)',
+    async ({ shared }) => {
+      // Regression for #8967: the result envelope kept only the formatted
+      // message, so headless consumers had to parse "[API Error: ...]" prose to
+      // tell a 401 from a 429. The status travels as its own optional field and
+      // must not become the process exit code. The shared loop reaches the
+      // helper from its own `onModelEvent` hook, so both arms are pinned here.
+      if (shared) useSharedLoopWithModToolHooks();
+      (mockConfig.getOutputFormat as Mock).mockReturnValue(
+        OutputFormat.STREAM_JSON,
+      );
+      setupMetricsMock();
+      const apiErrorEvent: ServerLlmStreamEvent = {
+        type: LlmEventType.Error,
+        value: {
+          error: {
+            message: '429 Too Many Requests',
+            status: 429,
+          },
+        },
+      };
+      mockLlmClient.sendMessageStream.mockReturnValue(
+        createStreamFromEvents([apiErrorEvent]),
+      );
+
+      await expect(
+        runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'Test input',
+          'prompt-id-stream-api-error-status',
+        ),
+      ).rejects.toMatchObject({ exitCode: 1 });
+
+      const messages = processStdoutSpy.mock.calls
+        .map((call) => String(call[0]).trim())
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as { [key: string]: unknown });
+      const results = messages.filter(
+        (message) => message['type'] === 'result',
+      );
+
+      expect(results).toHaveLength(1);
+      expect(results[0]).toMatchObject({
+        subtype: 'error_during_execution',
+        is_error: true,
+        error: {
+          message: expect.stringContaining('429 Too Many Requests'),
+          status: 429,
+        },
+      });
+    },
+  );
+
+  it('omits the provider status when the error carries no HTTP status', async () => {
+    // A transport-level failure (socket closed, malformed body) has no HTTP
+    // status; the field must stay absent rather than being filled with a
+    // sentinel that consumers would read as a provider response.
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    setupMetricsMock();
+    const apiErrorEvent: ServerLlmStreamEvent = {
+      type: LlmEventType.Error,
+      value: { error: { message: 'Socket closed' } },
+    };
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([apiErrorEvent]),
+    );
+
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Test input',
+        'prompt-id-stream-api-error-no-status',
+      ),
+    ).rejects.toBeInstanceOf(AlreadyReportedError);
+
+    const messages = processStdoutSpy.mock.calls
+      .map((call) => String(call[0]).trim())
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { [key: string]: unknown });
+    const results = messages.filter((message) => message['type'] === 'result');
+
+    expect(results).toHaveLength(1);
+    const error = results[0]?.['error'] as { [key: string]: unknown };
+    expect(error).not.toHaveProperty('status');
+  });
+
+  it('keeps the provider status on a drain item error result', async () => {
+    // The drain-item loop calls the same helper from its own error branch, so
+    // a queued follow-up that fails must carry the status too. Nothing else in
+    // the suite runs that line.
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    setupMetricsMock();
+    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+      if (cb)
+        cb('Monitor ready', '<task-notification>ready</task-notification>', {
+          monitorId: 'mon_drain_status',
+          toolUseId: 'tool_monitor',
+          status: 'running',
+          eventCount: 1,
+        });
+    });
+    mockLlmClient.sendMessageStream
+      .mockReturnValueOnce(createStreamFromEvents([...finishedEvents]))
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          {
+            type: LlmEventType.Error,
+            value: {
+              error: { message: '503 Service Unavailable', status: 503 },
+            },
+          },
+        ]),
+      );
+
+    await expect(
+      runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'Test input',
+        'prompt-id-drain-api-error-status',
+      ),
+    ).rejects.toMatchObject({ exitCode: 1 });
+
+    const messages = processStdoutSpy.mock.calls
+      .map((call) => String(call[0]).trim())
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { [key: string]: unknown });
+    const results = messages.filter((message) => message['type'] === 'result');
+
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({
+      subtype: 'error_during_execution',
+      is_error: true,
+      error: {
+        message: expect.stringContaining('503 Service Unavailable'),
+        status: 503,
+      },
+    });
+  });
+
   it('does not double-wrap or double-format an API error in non-interactive mode', async () => {
     // Regression test for the bug where a 4xx error event flowed through
     // both the stream handler and handleError, each calling
