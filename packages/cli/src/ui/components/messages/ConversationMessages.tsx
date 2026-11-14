@@ -35,10 +35,12 @@ export const toggleKeyHint = 'ctrl+o';
 
 interface UserMessageProps {
   text: string;
+  contentWidth: number;
 }
 
 interface UserShellMessageProps {
   text: string;
+  contentWidth: number;
 }
 
 interface AssistantMessageProps {
@@ -91,6 +93,7 @@ interface PrefixedTextMessageProps {
   prefix: string;
   prefixColor: string;
   textColor: string;
+  contentWidth: number;
   ariaLabel?: string;
   marginTop?: number;
   alignSelf?: 'auto' | 'flex-start' | 'center' | 'flex-end';
@@ -134,11 +137,13 @@ const PrefixedTextMessage: React.FC<PrefixedTextMessageProps> = ({
   prefix,
   prefixColor,
   textColor,
+  contentWidth,
   ariaLabel,
   marginTop = 0,
   alignSelf,
 }) => {
   const prefixWidth = getPrefixWidth(prefix);
+  const textWidth = Math.max(0, contentWidth - prefixWidth);
 
   return (
     <Box
@@ -152,7 +157,7 @@ const PrefixedTextMessage: React.FC<PrefixedTextMessageProps> = ({
           {prefix}
         </Text>
       </Box>
-      <Box flexGrow={1}>
+      <Box flexGrow={1} maxWidth={textWidth}>
         <Text wrap="wrap" color={textColor}>
           {text}
         </Text>
@@ -201,6 +206,7 @@ const PrefixedMarkdownMessage: React.FC<PrefixedMarkdownMessageProps> = ({
             isPending={isPending}
             availableTerminalHeight={availableTerminalHeight}
             contentWidth={contentWidth - prefixWidth}
+            constrainBlockWidth
             textColor={textColor}
             sourceCopyIndexOffsets={sourceCopyIndexOffsets}
             sourceCopyText={sourceCopyText}
@@ -256,6 +262,7 @@ const ContinuationMarkdownMessage: React.FC<
           isPending={isPending}
           availableTerminalHeight={availableTerminalHeight}
           contentWidth={contentWidth - prefixWidth}
+          constrainBlockWidth
           textColor={textColor}
           sourceCopyIndexOffsets={sourceCopyIndexOffsets}
           sourceCopyText={sourceCopyText}
@@ -276,7 +283,10 @@ const ContinuationMarkdownMessage: React.FC<
   );
 };
 
-export const UserMessage: React.FC<UserMessageProps> = ({ text }) => (
+export const UserMessage: React.FC<UserMessageProps> = ({
+  text,
+  contentWidth,
+}) => (
   // The TUI paints no background of its own; user messages render directly on
   // the terminal background so they blend in across terminals and themes.
   <PrefixedTextMessage
@@ -284,13 +294,17 @@ export const UserMessage: React.FC<UserMessageProps> = ({ text }) => (
     prefix=">"
     prefixColor={theme.text.accent}
     textColor={theme.text.accent}
+    contentWidth={contentWidth}
     ariaLabel={SCREEN_READER_USER_PREFIX}
     alignSelf="flex-start"
     marginTop={1}
   />
 );
 
-export const UserShellMessage: React.FC<UserShellMessageProps> = ({ text }) => {
+export const UserShellMessage: React.FC<UserShellMessageProps> = ({
+  text,
+  contentWidth,
+}) => {
   const commandToDisplay = text.startsWith('!') ? text.substring(1) : text;
 
   return (
@@ -299,6 +313,7 @@ export const UserShellMessage: React.FC<UserShellMessageProps> = ({ text }) => {
       prefix="$"
       prefixColor={theme.text.link}
       textColor={theme.text.primary}
+      contentWidth={contentWidth}
     />
   );
 };
@@ -383,6 +398,7 @@ const ThinkBody: React.FC<{
           isPending={isPending}
           availableTerminalHeight={availableTerminalHeight}
           contentWidth={contentWidth - 2}
+          constrainBlockWidth
           textColor={theme.text.secondary}
         />
       </ErrorBoundary>

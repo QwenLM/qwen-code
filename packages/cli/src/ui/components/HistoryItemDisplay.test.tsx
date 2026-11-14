@@ -10,7 +10,7 @@ import type chalk from 'chalk';
 import stripAnsi from 'strip-ansi';
 import { theme } from '../semantic-colors.js';
 import { subscriptionSuccessMessage } from '../auth/subscription-success.js';
-import { Box, Text } from 'ink';
+import { Box, Static, Text } from 'ink';
 import stringWidth from 'string-width';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { type HistoryItem, ToolCallStatus } from '../types.js';
@@ -112,6 +112,278 @@ describe('<HistoryItemDisplay />', () => {
     expect(output.startsWith('\n')).toBe(true);
     expect(output).toContain('◆\uFE0E Hello');
   });
+
+  // #14075: without a width of its own a paragraph was wrapped by yoga's implicit
+  // measurement and could overrun the right margin. The test library pins its
+  // frame to 100 columns (`render` takes no options and `stdout.columns` has no
+  // setter), so widths above 100 cannot be exercised here.
+  it.each(['gemini', 'user', 'gemini_content'] as const)(
+    'keeps %s lines inside the right margin on the static path',
+    (type) => {
+      for (const terminalWidth of [90, 100]) {
+        const item = {
+          id: 1,
+          type,
+          text: "This is a long paragraph about the history of computing from the earliest mechanical counting machines and Babbage's analytic engine through vacuum tube and transistor computers, integrated circuits and modern processors with many cores and caches.",
+        } as HistoryItem;
+        const { lastFrame } = renderWithProviders(
+          <Static
+            items={[
+              <HistoryItemDisplay
+                key="row"
+                item={item}
+                terminalWidth={terminalWidth}
+                isPending={false}
+              />,
+            ]}
+          >
+            {(row) => row}
+          </Static>,
+        );
+
+        const frame = stripAnsi(lastFrame() ?? '');
+        // Guards the check below: a blank frame would make it pass vacuously.
+        expect(frame).toContain('This is a long paragraph');
+
+        const lines = frame.split('\n');
+        // Row reserves marginLeft/marginRight=2, so nothing may render past
+        // terminalWidth - 2.
+        const overWide = lines.filter(
+          (line) => stringWidth(line) > terminalWidth - 2,
+        );
+        expect(overWide).toEqual([]);
+
+        // Wrapping too early wastes the same right margin, so the widest line
+        // has to reach it as well.
+        const widest = Math.max(...lines.map((line) => stringWidth(line)));
+        expect(widest).toBeGreaterThanOrEqual(terminalWidth - 4);
+      }
+    },
+  );
+
+  // A definite block width wider than the column the row is laid out in is
+  // clipped instead of wrapped. Screen-reader mode puts the transcript in a
+  // 90% column under an overflow-hidden ancestor, so the width has to yield to
+  // a narrower parent.
+  it.each(['gemini', 'gemini_content', 'user', 'user_shell'] as const)(
+    'keeps every %s word inside a column narrower than the terminal',
+    (type) => {
+      const item = {
+        id: 1,
+        type,
+        text: "This is a long paragraph about the history of computing from the earliest mechanical counting machines and Babbage's analytic engine through vacuum tube and transistor computers, integrated circuits and modern processors with many cores and caches.",
+      } as HistoryItem;
+      const { lastFrame } = renderWithProviders(
+        <Box width={90} overflow="hidden">
+          <HistoryItemDisplay
+            item={item}
+            terminalWidth={100}
+            mainAreaWidth={96}
+            isPending={false}
+          />
+        </Box>,
+      );
+
+      const frame = stripAnsi(lastFrame() ?? '');
+      // Guards the check below: a blank frame would make it pass vacuously.
+      expect(frame).toContain('This is a long paragraph');
+      expect(frame).toContain('counting machines');
+    },
+  );
+
+  it('keeps markdown list items inside the right margin on the static path', () => {
+    const item = {
+      id: 1,
+      type: 'gemini',
+      text: [
+        '1. This is the first numbered item about the history of computing from the earliest mechanical counting machines and engines.',
+        '2. This is the second numbered item about vacuum tube computers and transistor machines through integrated circuits and processors.',
+      ].join('\n'),
+    } as HistoryItem;
+    const { lastFrame } = renderWithProviders(
+      <Static
+        items={[
+          <HistoryItemDisplay
+            key="row"
+            item={item}
+            terminalWidth={100}
+            isPending={false}
+          />,
+        ]}
+      >
+        {(row) => row}
+      </Static>,
+    );
+
+    const frame = stripAnsi(lastFrame() ?? '');
+    // Guards the check below: a blank frame would make it pass vacuously.
+    expect(frame).toContain('first numbered item');
+
+    const lines = frame.split('\n');
+    const overWide = lines.filter((line) => stringWidth(line) > 98);
+    expect(overWide).toEqual([]);
+
+    // The widest item reaches the margin, so a narrower wrap is a regression
+    // too, not only an overrun.
+    const widest = Math.max(...lines.map((line) => stringWidth(line)));
+    expect(widest).toBeGreaterThanOrEqual(90);
+  });
+
+  it('keeps nested markdown list items inside the right margin', () => {
+    const item = {
+      id: 1,
+      type: 'gemini',
+      text: [
+        '1. This is the outer numbered item about the history of computing from the earliest mechanical machines.',
+        '   1. This is the inner numbered item about vacuum tube computers and transistor machines through circuits.',
+      ].join('\n'),
+    } as HistoryItem;
+    const { lastFrame } = renderWithProviders(
+      <Static
+        items={[
+          <HistoryItemDisplay
+            key="row"
+            item={item}
+            terminalWidth={100}
+            isPending={false}
+          />,
+        ]}
+      >
+        {(row) => row}
+      </Static>,
+    );
+
+    const frame = stripAnsi(lastFrame() ?? '');
+    // Guards the check below: a blank frame would make it pass vacuously.
+    expect(frame).toContain('inner numbered item');
+
+    const lines = frame.split('\n');
+    const overWide = lines.filter((line) => stringWidth(line) > 98);
+    expect(overWide).toEqual([]);
+
+    const widest = Math.max(...lines.map((line) => stringWidth(line)));
+    expect(widest).toBeGreaterThanOrEqual(90);
+  });
+
+  it('keeps markdown blockquote lines inside the right margin', () => {
+    const item = {
+      id: 1,
+      type: 'gemini',
+      text: '> This is a quoted passage about the history of computing from the earliest mechanical counting machines and engines through vacuum tube computers and transistor machines.',
+    } as HistoryItem;
+    const { lastFrame } = renderWithProviders(
+      <Static
+        items={[
+          <HistoryItemDisplay
+            key="row"
+            item={item}
+            terminalWidth={100}
+            isPending={false}
+          />,
+        ]}
+      >
+        {(row) => row}
+      </Static>,
+    );
+
+    const frame = stripAnsi(lastFrame() ?? '');
+    // Guards the check below: a blank frame would make it pass vacuously.
+    expect(frame).toContain('quoted passage');
+
+    const lines = frame.split('\n');
+    const overWide = lines.filter((line) => stringWidth(line) > 98);
+    expect(overWide).toEqual([]);
+
+    const widest = Math.max(...lines.map((line) => stringWidth(line)));
+    expect(widest).toBeGreaterThanOrEqual(90);
+  });
+
+  it('keeps markdown headings inside the right margin on the static path', () => {
+    for (const terminalWidth of [90, 100]) {
+      const item = {
+        id: 1,
+        type: 'gemini',
+        text: '## This is a long heading about the history of computing from the earliest mechanical counting machines and Babbage analytic engine',
+      } as HistoryItem;
+      const { lastFrame } = renderWithProviders(
+        <Static
+          items={[
+            <HistoryItemDisplay
+              key="row"
+              item={item}
+              terminalWidth={terminalWidth}
+              isPending={false}
+            />,
+          ]}
+        >
+          {(row) => row}
+        </Static>,
+      );
+
+      const frame = stripAnsi(lastFrame() ?? '');
+      // Guards the check below: a blank frame would make it pass vacuously.
+      expect(frame).toContain('long heading');
+
+      const lines = frame.split('\n');
+      const overWide = lines.filter(
+        (line) => stringWidth(line) > terminalWidth - 2,
+      );
+      expect(overWide).toEqual([]);
+
+      const widest = Math.max(...lines.map((line) => stringWidth(line)));
+      expect(widest).toBeGreaterThanOrEqual(terminalWidth - 6);
+    }
+  });
+
+  it.each([90, 100])(
+    'keeps an expanded thought inside the right margin at %i columns',
+    (terminalWidth) => {
+      const item: HistoryItem = {
+        id: 1,
+        type: 'gemini_thought',
+        text: 'This is a long reasoning passage about the history of computing from the earliest mechanical counting machines and Babbage analytic engine through vacuum tube computers.',
+        durationMs: 1200,
+      };
+      const { lastFrame } = renderWithProviders(
+        <ThoughtExpandedProvider
+          value={{
+            allExpanded: true,
+            expandedHeadIds: new Set<number>(),
+            toggle: () => {},
+          }}
+        >
+          <Static
+            items={[
+              <HistoryItemDisplay
+                key="row"
+                item={item}
+                terminalWidth={terminalWidth}
+                isPending={false}
+              />,
+            ]}
+          >
+            {(row) => row}
+          </Static>
+        </ThoughtExpandedProvider>,
+      );
+
+      const frame = stripAnsi(lastFrame() ?? '');
+      // Guards the check below: a blank frame would make it pass vacuously.
+      expect(frame).toContain('long reasoning passage');
+
+      const lines = frame.split('\n');
+      const overWide = lines.filter(
+        (line) => stringWidth(line) > terminalWidth - 2,
+      );
+      expect(overWide).toEqual([]);
+
+      // Without `constrainBlockWidth` the thought body is measured implicitly
+      // and overruns the margin at 90 columns; the lower bound catches the
+      // opposite failure, wrapping narrower than the margin allows.
+      const widest = Math.max(...lines.map((line) => stringWidth(line)));
+      expect(widest).toBeGreaterThanOrEqual(terminalWidth - 6);
+    },
+  );
 
   it.each(['gemini', 'gemini_content'] as const)(
     'passes images from a %s history item to the assistant renderer',

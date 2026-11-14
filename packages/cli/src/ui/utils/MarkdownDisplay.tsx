@@ -59,6 +59,16 @@ interface MarkdownDisplayProps {
    * respects the same viewport budget the outer wrapper enforces. See #6867.
    */
   enforceHeightBudget?: boolean;
+  /**
+   * Give the wrapping text blocks — paragraphs, list items and blockquotes — an
+   * explicit width instead of letting yoga measure the wrapping `<Text>`
+   * implicitly. Without it a block that fills the terminal can overrun the right
+   * margin and be hard-wrapped by the terminal mid-word. Pass it only where
+   * `contentWidth` is exactly the width those blocks may use; callers whose
+   * `contentWidth` already accounts for their own border and padding must not
+   * opt in, or the block gets clipped instead of overflowing.
+   */
+  constrainBlockWidth?: boolean;
 }
 
 export interface MarkdownSourceCopyIndexOffsets {
@@ -183,6 +193,7 @@ const CODE_BLOCK_PREFIX_PADDING = 1;
 const LIST_ITEM_PREFIX_PADDING = 1;
 const LIST_ITEM_TEXT_FLEX_GROW = 1;
 const BLOCKQUOTE_PREFIX_PADDING = 1;
+const BLOCKQUOTE_PREFIX = '│ ';
 const MATH_BLOCK_PREFIX_PADDING = 1;
 
 const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
@@ -194,6 +205,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   sourceCopyIndexOffsets,
   sourceCopyText,
   enforceHeightBudget = false,
+  constrainBlockWidth = false,
 }) => {
   const { renderMode } = useRenderMode();
   const copyHint = React.useMemo(
@@ -206,6 +218,9 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   if (!text) return <></>;
 
   const renderVisualBlocks = renderMode === 'render';
+  const blockWidth = constrainBlockWidth
+    ? Math.max(0, contentWidth)
+    : undefined;
   // Some models stream long runs of trailing newlines after useful content.
   // Trim them from the live preview so blank rows do not push stable streaming
   // text into scrollback on every repaint. The committed transcript still
@@ -581,7 +596,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       } else {
         // Not a table, treat as regular text
         addContentBlock(
-          <Box key={key}>
+          <Box key={key} maxWidth={blockWidth}>
             <Text wrap="wrap">
               <RenderInline
                 text={line}
@@ -658,7 +673,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       // Process current line as normal
       if (line.trim().length > 0) {
         addContentBlock(
-          <Box key={key}>
+          <Box key={key} maxWidth={blockWidth}>
             <Text wrap="wrap">
               <RenderInline
                 text={line}
@@ -682,6 +697,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
           quoteText={blockquoteMatch[1]}
           textColor={textColor}
           enableInlineMath={renderVisualBlocks}
+          availableWidth={blockWidth}
         />,
       );
     } else if (headerMatch) {
@@ -745,7 +761,12 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
           );
           break;
       }
-      if (headerNode) addContentBlock(<Box key={key}>{headerNode}</Box>);
+      if (headerNode)
+        addContentBlock(
+          <Box key={key} maxWidth={blockWidth}>
+            {headerNode}
+          </Box>,
+        );
     } else if (ulMatch) {
       const leadingWhitespace = ulMatch[1];
       const marker = ulMatch[2];
@@ -759,6 +780,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
           leadingWhitespace={leadingWhitespace}
           textColor={textColor}
           renderVisualBlocks={renderVisualBlocks}
+          availableWidth={blockWidth}
         />,
       );
     } else if (olMatch) {
@@ -774,6 +796,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
           leadingWhitespace={leadingWhitespace}
           textColor={textColor}
           renderVisualBlocks={renderVisualBlocks}
+          availableWidth={blockWidth}
         />,
       );
     } else {
@@ -786,7 +809,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         }
       } else {
         addContentBlock(
-          <Box key={key}>
+          <Box key={key} maxWidth={blockWidth}>
             <Text wrap="wrap" color={textColor}>
               <RenderInline
                 text={line}
@@ -1126,26 +1149,49 @@ interface RenderBlockquoteProps {
   quoteText: string;
   textColor?: string;
   enableInlineMath?: boolean;
+  /**
+   * Width the whole quote may use, the `│ ` marker included. Pass it only where
+   * `contentWidth` is exactly the width the quote may use; without it the text
+   * box is measured implicitly by yoga and can consume the right margin.
+   */
+  availableWidth?: number;
 }
 
 const RenderBlockquoteInternal: React.FC<RenderBlockquoteProps> = ({
   quoteText,
   textColor = theme.text.primary,
   enableInlineMath = true,
-}) => (
-  <Box paddingLeft={BLOCKQUOTE_PREFIX_PADDING} flexDirection="row">
-    <Text color={theme.text.secondary}>│ </Text>
-    <Box flexGrow={LIST_ITEM_TEXT_FLEX_GROW}>
-      <Text wrap="wrap" color={textColor} italic>
-        <RenderInline
-          text={quoteText}
-          textColor={textColor}
-          enableInlineMath={enableInlineMath}
-        />
-      </Text>
+  availableWidth,
+}) => {
+  const textWidth =
+    availableWidth === undefined
+      ? undefined
+      : Math.max(
+          0,
+          availableWidth -
+            BLOCKQUOTE_PREFIX_PADDING -
+            stringWidth(BLOCKQUOTE_PREFIX),
+        );
+  const textContainerProps =
+    textWidth === undefined
+      ? { flexGrow: LIST_ITEM_TEXT_FLEX_GROW }
+      : { width: textWidth };
+
+  return (
+    <Box paddingLeft={BLOCKQUOTE_PREFIX_PADDING} flexDirection="row">
+      <Text color={theme.text.secondary}>{BLOCKQUOTE_PREFIX}</Text>
+      <Box {...textContainerProps}>
+        <Text wrap="wrap" color={textColor} italic>
+          <RenderInline
+            text={quoteText}
+            textColor={textColor}
+            enableInlineMath={enableInlineMath}
+          />
+        </Text>
+      </Box>
     </Box>
-  </Box>
-);
+  );
+};
 
 const RenderBlockquote = React.memo(RenderBlockquoteInternal);
 
@@ -1156,6 +1202,12 @@ interface RenderListItemProps {
   leadingWhitespace?: string;
   textColor?: string;
   renderVisualBlocks?: boolean;
+  /**
+   * Width the whole item may use, marker and indentation included. Pass it only
+   * where `contentWidth` is exactly the width the item may use; without it the
+   * text box is measured implicitly by yoga and can consume the right margin.
+   */
+  availableWidth?: number;
 }
 
 const RenderListItemInternal: React.FC<RenderListItemProps> = ({
@@ -1165,6 +1217,7 @@ const RenderListItemInternal: React.FC<RenderListItemProps> = ({
   leadingWhitespace = '',
   textColor = theme.text.primary,
   renderVisualBlocks = true,
+  availableWidth,
 }) => {
   const taskMatch = itemText.match(/^\[([ xX])\]\s+(.*)$/);
   const isTaskItem = taskMatch !== null && renderVisualBlocks;
@@ -1177,6 +1230,17 @@ const RenderListItemInternal: React.FC<RenderListItemProps> = ({
       : `${marker} `;
   const prefixWidth = stringWidth(prefix);
   const indentation = leadingWhitespace.length;
+  const textWidth =
+    availableWidth === undefined
+      ? undefined
+      : Math.max(
+          0,
+          availableWidth - indentation - LIST_ITEM_PREFIX_PADDING - prefixWidth,
+        );
+  const textContainerProps =
+    textWidth === undefined
+      ? { flexGrow: LIST_ITEM_TEXT_FLEX_GROW }
+      : { width: textWidth };
 
   return (
     <Box
@@ -1186,7 +1250,7 @@ const RenderListItemInternal: React.FC<RenderListItemProps> = ({
       <Box width={prefixWidth}>
         <Text color={textColor}>{prefix}</Text>
       </Box>
-      <Box flexGrow={LIST_ITEM_TEXT_FLEX_GROW}>
+      <Box {...textContainerProps}>
         <Text wrap="wrap" color={textColor}>
           <RenderInline
             text={effectiveItemText}
