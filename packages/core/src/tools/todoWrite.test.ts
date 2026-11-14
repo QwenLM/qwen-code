@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { TodoWriteParams } from './todoWrite.js';
 import { TodoWriteTool, listTodoSessions } from './todoWrite.js';
 import type { ToolResult } from './tools.js';
+import { ToolErrorType } from './tool-error.js';
 import { DefaultHookOutput, HookPhase, type TodoItem } from '../hooks/types.js';
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
@@ -753,6 +754,12 @@ describe('TodoWriteTool', () => {
       expect(mockAtomicWrite).not.toHaveBeenCalled();
       expect(result.llmContent).toContain(message);
       expect(result.returnDisplay).toBe(message);
+      // A blocked hook must classify as a failure, or Session.runTool
+      // persists the call as success and no failure frame reaches the wire.
+      expect(result.error).toEqual({
+        message,
+        type: ToolErrorType.EXECUTION_FAILED,
+      });
     }
 
     it('should block todo creation when validation hook returns block', async () => {

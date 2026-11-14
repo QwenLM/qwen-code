@@ -306,6 +306,10 @@ function createBlockedTodoResult(
 ${systemMessage}
 </system-reminder>`,
     returnDisplay: message,
+    // A hook block must classify as a failure: Session.runTool derives the
+    // status from `error` alone, so without it a blocked todo_write is
+    // persisted as success and no failure frame reaches the wire.
+    error: { message, type: ToolErrorType.EXECUTION_FAILED },
   };
 }
 

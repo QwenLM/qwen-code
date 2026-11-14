@@ -376,6 +376,15 @@ describe('ToolCallEmitter', () => {
       });
     });
 
+    it('suppresses discarded preparations for todo_write', async () => {
+      // TodoWrite has no preparation frame: the early return must swallow the
+      // discard rather than emit a failed terminal frame for a call that
+      // never started.
+      await emitter.emitPreparationDiscarded('call-todo', ToolNames.TODO_WRITE);
+
+      expect(sendUpdateSpy).not.toHaveBeenCalled();
+    });
+
     it.each(['result', 'error'] as const)(
       'clears prepared state after terminal %s',
       async (terminal) => {

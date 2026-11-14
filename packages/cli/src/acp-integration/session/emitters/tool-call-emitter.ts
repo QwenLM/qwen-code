@@ -204,7 +204,9 @@ export class ToolCallEmitter extends BaseEmitter {
 
   /**
    * Emits a terminal frame when a prepared tool call is discarded before
-   * execution. TodoWrite remains represented exclusively by plan updates.
+   * execution. TodoWrite preparations are still not announced (the tool is
+   * represented by plan updates while it runs); only its terminal failure
+   * frames are emitted.
    *
    * @param callId - ID of the prepared tool call
    * @param toolName - Name of the prepared tool
