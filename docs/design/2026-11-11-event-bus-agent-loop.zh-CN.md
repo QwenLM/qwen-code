@@ -114,7 +114,7 @@ preview 按 `queryId` 路由、用 UUID `roundId` 标记轮次。main 的循环�
 | `tool.settled`   | `{ round }`                            | Tool，批结束时                  |
 | `handler.failed` | `{ source, eventType, round?, error }` | 总线，监听器失败时              |
 
-标记*规划中*的事件已在词汇表中，但尚未发射；它们随流式派发（#17045 S 块）到来。preview 的 `query.output` 在这里没有对应：main 的各入口通过宿主回调得知轮次的内容，因此 `loop.output` 已从词汇表中删除，等有使用方时再加。
+标记*规划中*的事件将在[流式派发的后续实现](2026-11-11-streaming-tool-dispatch.zh-CN.md)中获得发布方。#17045 S 块记录推迟实现的决定。Main 的各入口通过宿主回调接收轮次输出，因此词汇表暂时省略 `loop.output`（对应 Preview 的 `query.output`），等有使用方时再加入。
 
 `llm.settled` 是轮结束信号；终止分类（今天 `runModelRound` 做的 `STOP_EVENTS` 映射）存于 run 状态（`state.model.stop`），Conversation 是把该轮末状态转成循环结果的唯一位置。去重/replay 记账留在 Tool handler，使用现有 `toolCallIdUtils` 助手，位置与今天 `runToolBatch` 完全一致。事件载荷只携带路由与决策数据；完整的模型结果与工具批按所有权存于 run 状态的对应槽位，总线不重复承载它们。
 
@@ -204,7 +204,7 @@ G5 通过隔离的用户设置文件启用两个标志、不用任何环境变�
 - **回调顺序是契约。** surface 依赖 `onModelEvent`/`onToolResult`/输出回调的精确顺序。适配器必须保持；parity 套件是检查，PR 2 另加显式顺序测试。
 - **`runModelRound`/`runToolBatch` 是公共接缝。** ACP 已合入的轮次步（#15509）直接调用它们；PR 2 把它们保留为 handler 的内部实现，而不是删除。
 - **轮次身份。** 数字轮次比 preview 的 UUID 简单且与 main 日志一致；若未来 surface 需要全局唯一轮次 id，事件载荷可同时携带两者而不改路由。
-- **流式派发**仍是未决产品决策（时延收益 vs 审批/顺序语义）；Phase 3 的存在就是把这个决策显式化，而不是夹带进来。
+- **流式派发**已在 Phase 3 评估。[流式派发设计](2026-11-11-streaming-tool-dispatch.zh-CN.md)记录了决定和后续 opt-in 实现的范围。
 - **重复劳动风险。** 1.0 线最终可能整体替换 main；只要 main 的统一循环计划继续，本移植就是正当的。它复用 main 的类型与契约，正是为了让工作不绑定 preview。
 
 ## 受影响文件
