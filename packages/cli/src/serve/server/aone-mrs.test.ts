@@ -143,6 +143,40 @@ describe('resolveAoneWorkspaceRepo', () => {
     expect(resolved?.gitRoot).toBe(path.resolve(repo));
     expect(resolved?.repoPath).toBe('jspt/agentic_coding');
   });
+
+  // POSIX-only like the sibling fake-binary suites: the shim is a shebang
+  // script, which Windows does not run through execFile's PATH lookup.
+  it.runIf(process.platform !== 'win32')(
+    'carries the injected probe budget to the origin spawn',
+    async () => {
+      // The exec options are not observable through a mock here (file
+      // header), so make the budget observable through its effect: a git
+      // shim that answers later than the injected budget. Inlining the
+      // parameter back to GIT_ORIGIN_TIMEOUT_MS lets the first call resolve
+      // — the silent regression that returns the macOS-nightly flake.
+      const binDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-aone-bin-'),
+      );
+      try {
+        const shim = path.join(binDir, 'git');
+        await fsp.writeFile(
+          shim,
+          '#!/usr/bin/env node\nsetTimeout(() => process.stdout.write("git@gitlab.alibaba-inc.com:jspt/agentic_coding.git\\n"), 1000);\n',
+        );
+        await fsp.chmod(shim, 0o755);
+        const env = {
+          PATH: `${binDir}${path.delimiter}${process.env['PATH'] ?? ''}`,
+        };
+        expect(await resolveAoneWorkspaceRepo(repo, env, 100)).toBeUndefined();
+        expect(await resolveAoneWorkspaceRepo(repo, env, 15_000)).toEqual({
+          gitRoot: path.resolve(repo),
+          repoPath: 'jspt/agentic_coding',
+        });
+      } finally {
+        await fsp.rm(binDir, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 describe('parseAoneMrListPage', () => {

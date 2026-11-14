@@ -76,7 +76,8 @@ export function setA1ExecForTest(exec?: A1Exec): void {
 
 export const A1_TIMEOUT_MS = 20_000;
 export const A1_MAX_BUFFER = 16 * 1024 * 1024;
-const GIT_ORIGIN_TIMEOUT_MS = 5_000;
+/** Exported so the suites derive their probe budget instead of copying it. */
+export const GIT_ORIGIN_TIMEOUT_MS = 5_000;
 /** Own budget for the `a1 --version` probe (not the git origin's). */
 export const A1_VERSION_TIMEOUT_MS = 10_000;
 /** Display cap for surfaced a1 error messages. */

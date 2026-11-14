@@ -460,6 +460,42 @@ describe('shared-pool test timeout', () => {
     }
   });
 
+  it('keys the cli hook ceiling on the macOS runner, not the host platform', async () => {
+    // cli gives the contended macOS nightly hosts the pool's hook ceiling.
+    // Sample the runner signal against the host platform in both directions
+    // so this reads the config's logic on any host: dropping, inverting or
+    // flattening the arm fails here, and so does keying it on
+    // process.platform, which cannot tell a 3-core nightly runner from an
+    // idle laptop. The ECS arm stays pinned by `autofix gate load clamps`.
+    const originalPlatform = process.platform;
+    const setPlatform = (platform: NodeJS.Platform) =>
+      Object.defineProperty(process, 'platform', {
+        configurable: true,
+        enumerable: true,
+        value: platform,
+      });
+    vi.stubEnv('RUNNER_NAME', undefined);
+    try {
+      for (const [runnerOs, platform, hookTimeout] of [
+        ['macOS', 'linux', 60_000],
+        ['Linux', 'darwin', undefined],
+        [undefined, 'darwin', undefined],
+      ] as const) {
+        vi.stubEnv('RUNNER_OS', runnerOs);
+        setPlatform(platform);
+        vi.resetModules();
+        const cli = await configModules['packages/cli']!();
+        const label = `RUNNER_OS=${runnerOs} platform=${platform}`;
+        expect(cli.default.test?.hookTimeout, label).toBe(hookTimeout);
+        // Hooks only: the per-test ceiling keeps its off-pool value.
+        expect(cli.default.test?.testTimeout, label).toBe(15_000);
+      }
+    } finally {
+      setPlatform(originalPlatform);
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('registers every guarded config in exactly one off-pool arm', () => {
     // OFF_POOL_DEFAULT and OFF_POOL_PINNED are hand-maintained: dropping a
     // name from either removes its off-pool assertion and nothing else goes

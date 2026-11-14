@@ -69,20 +69,26 @@ const removeTempTree = (dir: string) =>
 
 // Delegating spy: the Aone tests seed a real repository, so resolution must
 // really run — the spy only makes its per-sweep cost observable. The probe
-// budget is test-generous (production keeps GIT_ORIGIN_TIMEOUT_MS = 5s): on
-// a saturated host the default 5s spawn can time out and degrade resolution
-// to undefined, trading the case's value assertion for a host artifact. A
-// single attempt with headroom keeps the assertion reading "resolution
-// succeeded" instead of "the second attempt succeeded".
+// budget is test-generous: on a saturated host the production spawn can time
+// out and degrade resolution to undefined, trading the case's value
+// assertion for a host artifact. A single attempt with headroom keeps the
+// assertion reading "resolution succeeded" instead of "the second attempt
+// succeeded".
 const aoneMocks = vi.hoisted(() => ({
   resolveAoneWorkspaceRepo: vi.fn(),
-  originProbeTimeoutMs: 12_000,
 }));
 vi.mock('./aone-mrs.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./aone-mrs.js')>();
   aoneMocks.resolveAoneWorkspaceRepo.mockImplementation(
     (cwd: string, env?: Readonly<Record<string, string | undefined>>) =>
-      actual.resolveAoneWorkspaceRepo(cwd, env, aoneMocks.originProbeTimeoutMs),
+      // Derived, not copied: a hand-written literal would drop below the
+      // production budget if GIT_ORIGIN_TIMEOUT_MS ever rose, and resolution
+      // would degrade to undefined again on a saturated host.
+      actual.resolveAoneWorkspaceRepo(
+        cwd,
+        env,
+        actual.GIT_ORIGIN_TIMEOUT_MS * 3,
+      ),
   );
   return {
     ...actual,
