@@ -10,6 +10,7 @@ import {
   test,
   type Frame,
   type FrameLocator,
+  type Locator,
   type Page,
   type Route,
   type TestInfo,
@@ -91,6 +92,15 @@ test.beforeAll(async () => {
 test.afterAll(async () => {
   await sandbox?.close();
 });
+
+// The session timeline rail overlays the transcript's left gutter and its
+// ticks take pointer events, so a wheel aimed there scrolls the rail instead
+// of the transcript. Aim at the right edge, where the list is the pointer
+// target, rather than at the centre, which lands on a message row.
+async function hoverForTranscriptWheel(scroll: Locator) {
+  const width = await scroll.evaluate((element) => element.clientWidth);
+  await scroll.hover({ position: { x: width - 10, y: 10 } });
+}
 
 async function observeRuntime(page: Page, holdInit = false) {
   const lifecycle: LifecycleEvent[] = [];
@@ -474,12 +484,12 @@ async function openCards(
       eventEpoch = 'generated-ui-retention-epoch-2';
     },
     async park() {
-      await scroll.hover({ position: { x: 10, y: 10 } });
+      await hoverForTranscriptWheel(scroll);
       await page.mouse.wheel(0, -100_000);
       await expect(visibleCards).toHaveCount(0);
     },
     async returnToCard() {
-      await scroll.hover({ position: { x: 10, y: 10 } });
+      await hoverForTranscriptWheel(scroll);
       await page.mouse.wheel(0, 100_000);
       await expect(visibleCards).toHaveCount(count);
       await visibleCards.last().scrollIntoViewIfNeeded();
@@ -1256,7 +1266,7 @@ test('parking a fifth card evicts only the oldest runtime and requires reopening
     .poll(() => probe.workers.filter(({ closed }) => closed).length)
     .toBe(1);
   expect(probe.workers).toHaveLength(5);
-  await scroll.hover({ position: { x: 10, y: 10 } });
+  await hoverForTranscriptWheel(scroll);
   await page.mouse.wheel(0, 100_000);
   await expect(visibleCards).toHaveCount(4);
   const reopen = page.getByRole('button', { name: /Reopen interactive view/i });
@@ -1411,7 +1421,7 @@ test('missing moveBefore offers an explicit cold start after a row unmount', asy
   await expect
     .poll(() => probe.workers.filter(({ closed }) => closed).length)
     .toBe(1);
-  await scroll.hover({ position: { x: 10, y: 10 } });
+  await hoverForTranscriptWheel(scroll);
   await page.mouse.wheel(0, 100_000);
   const reopen = page.getByRole('button', { name: /Reopen interactive view/i });
   await expect(reopen).toBeVisible();
@@ -1440,7 +1450,7 @@ test('observed policy revocation releases a parked runtime without dispatch', as
   await expect
     .poll(() => probe.workers.filter(({ closed }) => closed).length)
     .toBe(1);
-  await scroll.hover({ position: { x: 10, y: 10 } });
+  await hoverForTranscriptWheel(scroll);
   await page.mouse.wheel(0, 100_000);
   await expect(page.getByText(input.summary, { exact: true })).toBeVisible();
   expect(probe.workers).toHaveLength(1);
@@ -1467,7 +1477,7 @@ test('epoch reset never reattaches the previous runtime', async ({
   await expect
     .poll(() => probe.workers.filter(({ closed }) => closed).length)
     .toBe(1);
-  await scroll.hover({ position: { x: 10, y: 10 } });
+  await hoverForTranscriptWheel(scroll);
   await page.mouse.wheel(0, 100_000);
   const reopen = page.getByRole('button', { name: /Reopen interactive view/i });
   await expect(reopen).toBeVisible();
