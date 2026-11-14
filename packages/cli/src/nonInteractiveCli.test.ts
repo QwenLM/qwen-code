@@ -562,10 +562,13 @@ describe('runNonInteractive', () => {
 
   it.each([
     { reason: 'SIGINT', stderr: 'once' },
+    { reason: 'SIGHUP', stderr: 'once' },
     { reason: 'budget', stderr: 'once' },
     { reason: 'SIGINT', stderr: 'always' },
+    { reason: 'SIGHUP', stderr: 'always' },
     { reason: 'budget', stderr: 'always' },
     { reason: 'SIGINT', stderr: 'healthy' },
+    { reason: 'SIGHUP', stderr: 'healthy' },
     { reason: 'budget', stderr: 'healthy' },
   ] as const)(
     'preserves terminal output after $reason with stderr=$stderr',
@@ -582,6 +585,7 @@ describe('runNonInteractive', () => {
       const controller = new AbortController();
       const beforeSigint = process.listeners('SIGINT');
       const beforeSigterm = process.listeners('SIGTERM');
+      const beforeSighup = process.listeners('SIGHUP');
       const beforeStdout = process.stdout.listeners('error');
       const beforeAbort = getEventListeners(controller.signal, 'abort');
       const stderrError = new Error('stderr write failed');
@@ -643,8 +647,8 @@ describe('runNonInteractive', () => {
           status: 'running',
           eventCount: 1,
         });
-        if (reason === 'SIGINT') {
-          process.emit('SIGINT');
+        if (reason === 'SIGINT' || reason === 'SIGHUP') {
+          process.emit(reason);
         } else {
           await new Promise<void>((resolve) =>
             controller.signal.addEventListener('abort', () => resolve(), {
@@ -737,6 +741,7 @@ describe('runNonInteractive', () => {
         }
         expect(process.listeners('SIGINT')).toEqual(beforeSigint);
         expect(process.listeners('SIGTERM')).toEqual(beforeSigterm);
+        expect(process.listeners('SIGHUP')).toEqual(beforeSighup);
         expect(process.stdout.listeners('error')).toEqual(beforeStdout);
         expect(getEventListeners(controller.signal, 'abort')).toEqual(
           beforeAbort,
@@ -750,6 +755,10 @@ describe('runNonInteractive', () => {
         for (const listener of process.listeners('SIGTERM')) {
           if (!beforeSigterm.includes(listener))
             process.off('SIGTERM', listener);
+        }
+        for (const listener of process.listeners('SIGHUP')) {
+          if (!beforeSighup.includes(listener))
+            process.off('SIGHUP', listener);
         }
         for (const listener of process.stdout.listeners('error')) {
           if (!beforeStdout.includes(listener))

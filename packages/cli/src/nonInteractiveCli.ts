@@ -1217,6 +1217,7 @@ export async function runNonInteractive(
 
       process.on('SIGINT', shutdownHandler);
       process.on('SIGTERM', shutdownHandler);
+      process.on('SIGHUP', shutdownHandler);
 
       try {
         await modSession?.initialize(abortController.signal);
@@ -4303,6 +4304,7 @@ export async function runNonInteractive(
       // Cleanup signal handlers
       process.removeListener('SIGINT', shutdownHandler);
       process.removeListener('SIGTERM', shutdownHandler);
+      process.removeListener('SIGHUP', shutdownHandler);
       if (isTelemetrySdkInitialized()) {
         await shutdownTelemetry();
       }
