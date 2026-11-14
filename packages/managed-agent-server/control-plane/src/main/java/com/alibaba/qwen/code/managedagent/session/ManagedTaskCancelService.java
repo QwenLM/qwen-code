@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicCommandOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCommandOperation;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
@@ -46,7 +47,8 @@ public class ManagedTaskCancelService {
     public PublicCommandOperation cancelPublic(String tenantId,
             String actorId, String idempotencyKey, String sessionId,
             String taskId) {
-        OperationAdmission admission = admit(tenantId, actorId,
+        OperationAdmission admission = admit(tenantId,
+                actorId,
                 idempotencyKey, sessionId, taskId);
         return operations.publicOperation(admission.operation(),
                 admission.replayed());
@@ -55,15 +57,42 @@ public class ManagedTaskCancelService {
     public WebShellCommandOperation cancelWebShell(String tenantId,
             String actorId, String idempotencyKey, String sessionId,
             String taskId) {
-        OperationAdmission admission = admit(tenantId, actorId,
+        OperationAdmission admission = admit(tenantId,
+                actorId,
                 idempotencyKey, sessionId, taskId);
         return operations.webShellOperation(admission.operation(),
                 admission.replayed());
     }
 
-    private OperationAdmission admit(String tenantId, String actorId,
+    public PublicCommandOperation cancelPublic(SessionPrincipal principal,
+            String idempotencyKey, String sessionId, String taskId) {
+        OperationAdmission admission = admit(
+                principal == null ? null : principal.tenantId(),
+                principal, principal == null ? null : principal.userId(),
+                idempotencyKey, sessionId, taskId);
+        return operations.publicOperation(admission.operation(),
+                admission.replayed());
+    }
+
+    public WebShellCommandOperation cancelWebShell(
+            SessionPrincipal principal, String idempotencyKey,
+            String sessionId, String taskId) {
+        OperationAdmission admission = admit(
+                principal == null ? null : principal.tenantId(),
+                principal, principal == null ? null : principal.userId(),
+                idempotencyKey, sessionId, taskId);
+        return operations.webShellOperation(admission.operation(),
+                admission.replayed());
+    }
+
+    private OperationAdmission admit(String tenantId,
+            String actorId,
             String idempotencyKey, String sessionId, String taskId) {
         ManagedAgentService.validateIdempotencyKey(idempotencyKey);
+        // A blank actor is the anonymous caller, matching the principal path.
+        if (actorId != null && actorId.isBlank()) {
+            actorId = null;
+        }
         // Access is current, never replayed: a caller who lost the Session,
         // the task or the role since admission gets 404 or 403 even while
         // its operation is retained.
@@ -74,12 +103,57 @@ public class ManagedTaskCancelService {
                     "The task was not found.");
         }
         sessions.requireTaskCanceller(session, actorId);
+        // The raw route never synthesises a principal: the unbound digest
+        // keys on the raw actor id (the pre-ownership shape), so a
+        // filter-admitted byte-long non-ASCII actor keeps cancelling (R11-1).
+        return record(tenantId, session, null, actorId,
+                idempotencyKey, sessionId, taskId);
+    }
+
+    // The trusted-boundary overload keeps its supplied principal (business
+    // actor subject included); the raw-actor path above builds one only
+    // after the bound-arm gates passed, so a byte-long non-ASCII actor
+    // keeps cancelling a Workspace task.
+    private OperationAdmission admit(String tenantId,
+            SessionPrincipal principal, String actorId,
+            String idempotencyKey, String sessionId, String taskId) {
+        ManagedAgentService.validateIdempotencyKey(idempotencyKey);
+        SessionRecord session = sessions.requireReadableSession(tenantId,
+                principal, sessionId);
+        if (records.findTask(tenantId, sessionId, taskId).isEmpty()) {
+            throw new ManagedAgentException(404, "task_not_found",
+                    "The task was not found.");
+        }
+        sessions.requireTaskCanceller(session, principal);
+        return record(tenantId, session, principal,
+                principal == null ? null : principal.userId(),
+                idempotencyKey, sessionId, taskId);
+    }
+
+    private OperationAdmission record(String tenantId, SessionRecord session,
+            SessionPrincipal principal, String rawActorId, String idempotencyKey,
+            String sessionId, String taskId) {
         // The digest names the task and nothing trace-only, so a retry
         // carrying another request id still replays.
         String requestDigest = digests.digest(Map.of("sessionId", sessionId,
                 "operation", "TASK_CANCEL", "taskId", taskId));
-        String actorDigest = actorId == null ? ""
-                : digests.digest(Map.of("actorId", actorId));
+        String actorDigest;
+        if (session.workspace() != null || principal == null) {
+            // Bound arm and raw unbound arm both key on the raw actor id —
+            // the pre-ownership shape ("" for the anonymous caller), so
+            // rows recorded before a rolling deploy still replay (R7-4).
+            actorDigest = rawActorId == null ? ""
+                    : digests.digest(Map.of("actorId", rawActorId));
+        } else if (!principal.actorPresent()) {
+            // No business actor: keep the pre-ownership {actorId} digest so
+            // idempotency rows written before this deploy still replay. The
+            // tenant is already part of the operation's UNIQUE key (R7-4).
+            actorDigest = digests.digest(Map.of("actorId", principal.userId()));
+        } else {
+            actorDigest = digests.digest(Map.of("userId", principal.userId(),
+                    "actorPresent", principal.actorPresent(),
+                    "actorSubjectId", principal.actorSubjectId()));
+        }
         OperationAdmission admission = store.beginTaskCancelOperation(
                 tenantId, sessionId, taskId, actorDigest, idempotencyKey,
                 requestDigest);

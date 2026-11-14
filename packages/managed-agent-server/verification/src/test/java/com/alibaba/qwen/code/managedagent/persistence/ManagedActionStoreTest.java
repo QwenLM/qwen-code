@@ -536,7 +536,7 @@ class ManagedActionStoreTest {
     }
 
     private OperationAdmission admitAs(String actor, String key, String digest, JsonNode body, long now) {
-        return transactions.execute(status -> actions.admit(TENANT, SESSION, actor,
+        return transactions.execute(status -> actions.admit(TENANT, SESSION, null, actor,
                 actor == null ? "anonymous" : actor + "-digest", key, digest, ACTION, body, now));
     }
 

@@ -67,6 +67,33 @@ class ExternalHttpRuntimeClientTest {
     }
 
     @Test
+    void sendsAuthenticatedReattachToTheDedicatedPath() throws Exception {
+        var received = new AtomicReference<Map<String, Object>>();
+        var authorization = new AtomicReference<String>();
+        var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/runtime/reattach", exchange -> {
+            try (exchange) {
+                authorization.set(exchange.getRequestHeaders().getFirst("Authorization"));
+                received.set(JsonCodec.parseObject(exchange.getRequestBody().readAllBytes(), "request"));
+                byte[] body = JsonCodec.encode(Map.of("protocolVersion", 1, "state", "UNKNOWN"));
+                exchange.sendResponseHeaders(200, body.length);
+                exchange.getResponseBody().write(body);
+            }
+        });
+        server.start();
+        try {
+            var request = Map.<String, Object>of("protocolVersion", 1,
+                    "provisionRequestId", "request-1", "endpoint", "https://worker.example/");
+            var result = client(server).reattach(request).toCompletableFuture().join();
+            assertEquals(request, received.get());
+            assertEquals("Bearer " + TOKEN, authorization.get());
+            assertEquals("UNKNOWN", result.get("state"));
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
     void doesNotFollowRedirectsOrExposeProviderErrorBody() throws Exception {
         var server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         var redirected = new AtomicReference<Boolean>(false);

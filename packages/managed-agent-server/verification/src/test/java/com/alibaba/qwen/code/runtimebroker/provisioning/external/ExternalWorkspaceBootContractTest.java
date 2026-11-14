@@ -13,6 +13,8 @@ import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.condition.DisabledOnOs;
 import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -42,8 +44,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * actual {@code provision} boot document and a rotated-equivalent
  * {@code registration.json} descriptor into a private directory, and the existing
  * {@code readManagedRuntimeContainerBoot} (TypeScript, via {@code tsx}) admits or
- * refuses it. No CLI, worker or registration-write change is made — the shipped
- * {@code boot-v2 + storage} contract is exercised as it stands.
+ * refuses it. Both isolation classes are exercised: a single-Session external
+ * boot is {@code session}-isolated and a shared resident external Workspace boot
+ * is {@code workspace}-isolated; the shipped worker must admit each on the
+ * external boot path while plain v1 boots keep the session requirement.
  *
  * <p>The always-on Java mirror checks the same closed shape, so a skipped
  * cross-language run still fails when the document drifts.
@@ -63,20 +67,30 @@ class ExternalWorkspaceBootContractTest {
     @TempDir
     Path temporary;
 
-    private static RuntimeScope scope(String mountRoot) {
+    private static RuntimeScope scope(String mountRoot, String isolationClass) {
         return new RuntimeScope(TENANT, ALIAS, "1", mountRoot,
-                WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session");
+                WorkspaceExecutionProfile.CAPABILITY_DIGEST, isolationClass);
     }
 
-    private static Map<String, Object> mintedBoot(String mountRoot) throws Exception {
+    private static Map<String, Object> mintedBoot(String mountRoot, String isolationClass) throws Exception {
+        return mintedBoot(mountRoot, isolationClass, false);
+    }
+
+    private static Map<String, Object> mintedBoot(String mountRoot, String isolationClass,
+            boolean ephemeral) throws Exception {
         ExternalStorageRegistry registry = (tenant, alias) -> Optional.of(
-                new ExternalStorageRegistry.RegisteredExternalStorage(PROVIDER, PHYSICAL, 1,
-                        ALIAS, ALIAS_PATH, mountRoot));
+                ephemeral
+                        ? new ExternalStorageRegistry.RegisteredExternalStorage(PROVIDER, null, 1,
+                                ALIAS, ALIAS_PATH, mountRoot, TENANT)
+                        : new ExternalStorageRegistry.RegisteredExternalStorage(PROVIDER, PHYSICAL, 1,
+                                ALIAS, ALIAS_PATH, mountRoot));
         var client = new CapturingClient();
         try (var provisioner = new ExternalWorkspaceProvisioner(client, registry, PROVIDER,
                 Duration.ofSeconds(5))) {
-            RuntimeProvisionRequest request = provisioner.createRequest(scope(mountRoot),
-                    "isolation-a");
+            // A shared resident Workspace is workspace-isolated with a null
+            // isolation key; a single-Session external boot keeps its key.
+            RuntimeProvisionRequest request = provisioner.createRequest(scope(mountRoot, isolationClass),
+                    "workspace".equals(isolationClass) ? null : "isolation-a");
             RuntimeProvisionSeed seed = new RuntimeProvisionSeed("request-a", "runtime-a",
                     "incarnation-a", "lease-a", 1, "token-a");
             var handle = provisioner.ensureResource(request, seed, null)
@@ -89,9 +103,10 @@ class ExternalWorkspaceBootContractTest {
         }
     }
 
-    @Test
-    void theMintedBootKeepsTheShippedManagedContextShape() throws Exception {
-        Map<String, Object> boot = mintedBoot("/mnt/external/workspace-a");
+    @ParameterizedTest
+    @ValueSource(strings = {"session", "workspace"})
+    void theMintedBootKeepsTheShippedManagedContextShape(String isolationClass) throws Exception {
+        Map<String, Object> boot = mintedBoot("/mnt/external/workspace-a", isolationClass);
 
         List<String> keys = new ArrayList<>(boot.keySet());
         keys.sort(String::compareTo);
@@ -107,14 +122,15 @@ class ExternalWorkspaceBootContractTest {
         assertEquals("external", storage.get("kind"));
         assertEquals(boot.get("mountRoot"), storage.get("mountRoot"),
                 "the worker requires the context mount root to equal the storage one");
-        assertEquals("session", boot.get("isolationClass"));
+        assertEquals(isolationClass, boot.get("isolationClass"));
         assertEquals(WorkspaceExecutionProfile.CAPABILITY_DIGEST, boot.get("capabilityDigest"));
     }
 
-    @Test
+    @ParameterizedTest
+    @ValueSource(strings = {"session", "workspace"})
     @Timeout(120)
     @DisabledOnOs(OS.WINDOWS)
-    void theShippedWorkerParserAdmitsTheMintedBoot() throws Exception {
+    void theShippedWorkerParserAdmitsTheMintedBoot(String isolationClass) throws Exception {
         Path repoRoot = VerificationFixtures.repositoryRoot();
         Assumptions.assumeTrue(Files.isRegularFile(repoRoot.resolve(
                         "packages/cli/src/serve/managed-runtime-attestation-worker.ts")),
@@ -130,7 +146,7 @@ class ExternalWorkspaceBootContractTest {
         Path mountRoot = Files.createDirectory(directory.resolve("workspace"));
         privateDirectory(mountRoot, Set.of(PosixFilePermission.OWNER_READ,
                 PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE));
-        Map<String, Object> boot = mintedBoot(mountRoot.toString());
+        Map<String, Object> boot = mintedBoot(mountRoot.toString(), isolationClass);
         Path bootFile = writeBoot(directory, boot);
         writeDescriptor(directory, PHYSICAL);
 
@@ -145,6 +161,46 @@ class ExternalWorkspaceBootContractTest {
         writeDescriptor(directory, "physical-other");
         Run refused = runParser(repoRoot, bootFile);
         assertNotEquals(0, refused.exitCode(), "a foreign registration must be refused");
+        assertTrue(refused.stderr().contains("boot payload is invalid"), refused.stderr());
+    }
+
+    @Test
+    @Timeout(120)
+    @DisabledOnOs(OS.WINDOWS)
+    void theShippedWorkerParserAdmitsTheMintedEphemeralBoot() throws Exception {
+        Path repoRoot = VerificationFixtures.repositoryRoot();
+        Assumptions.assumeTrue(Files.isRegularFile(repoRoot.resolve(
+                        "packages/cli/src/serve/managed-runtime-attestation-worker.ts")),
+                "needs the qwen-code checkout this module lives in");
+        Assumptions.assumeTrue(Files.isDirectory(repoRoot.resolve("node_modules/tsx")),
+                "needs the repository root dev install (node_modules/tsx) to run the worker parser");
+
+        Path directory = Files.createDirectory(temporary.toRealPath().resolve("boot"));
+        privateDirectory(directory, Set.of(PosixFilePermission.OWNER_READ,
+                PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE));
+        Path mountRoot = Files.createDirectory(directory.resolve("workspace"));
+        privateDirectory(mountRoot, Set.of(PosixFilePermission.OWNER_READ,
+                PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE));
+        // No registration.json: sandbox-owned storage carries its identity in
+        // the trusted boot envelope itself.
+        Map<String, Object> boot = mintedBoot(mountRoot.toString(), "workspace", true);
+        Path bootFile = writeBoot(directory, boot);
+
+        Run admitted = runParser(repoRoot, bootFile);
+        assertEquals(0, admitted.exitCode(), admitted.stderr());
+        assertTrue(admitted.stdout().contains("\"kind\":\"ephemeral\""), admitted.stdout());
+
+        // Negative control: identity drift against the boot envelope must be
+        // refused, proving the ephemeral arm fences something.
+        @SuppressWarnings("unchecked")
+        Map<String, Object> storage = (Map<String, Object>) boot.get("storage");
+        Map<String, Object> drifted = new java.util.LinkedHashMap<>(boot);
+        Map<String, Object> driftedStorage = new java.util.LinkedHashMap<>(storage);
+        driftedStorage.put("runtimeIncarnation", "incarnation-other");
+        drifted.put("storage", driftedStorage);
+        writeBoot(directory, drifted);
+        Run refused = runParser(repoRoot, bootFile);
+        assertNotEquals(0, refused.exitCode(), "a drifted ephemeral identity must be refused");
         assertTrue(refused.stderr().contains("boot payload is invalid"), refused.stderr());
     }
 
@@ -220,6 +276,11 @@ class ExternalWorkspaceBootContractTest {
         public CompletionStage<Map<String, Object>> observe(Map<String, Object> request) {
             return CompletableFuture.completedFuture(Map.of("protocolVersion", 1,
                     "state", "RUNNING", "endpoint", "http://127.0.0.1:43190"));
+        }
+
+        @Override
+        public CompletionStage<Map<String, Object>> reattach(Map<String, Object> request) {
+            return CompletableFuture.failedFuture(new UnsupportedOperationException("reattach not used"));
         }
 
         @SuppressWarnings("unchecked")

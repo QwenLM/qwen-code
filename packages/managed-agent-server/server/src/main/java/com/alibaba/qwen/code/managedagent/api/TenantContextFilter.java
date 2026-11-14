@@ -85,10 +85,16 @@ public class TenantContextFilter extends OncePerRequestFilter {
         }
         Principal principal = request.getUserPrincipal();
         String actorId = null;
+        String actorSubjectId = null;
         if (principal instanceof AuthenticatedTenantActor actor) {
             String claimedActorId = actor.actorId();
+            String claimedActorSubjectId = actor.actorSubjectId();
             if (!tenantId.equals(actor.tenantId())
-                    || !validActorId(tenantId, claimedActorId)) {
+                    || !validActorId(tenantId, claimedActorId)
+                    || claimedActorSubjectId != null
+                            && !validActorSubject(tenantId,
+                                    claimedActorId,
+                                    claimedActorSubjectId)) {
                 response.setStatus(HttpServletResponse.SC_FORBIDDEN);
                 response.setContentType(MediaType.APPLICATION_JSON_VALUE);
                 objectMapper.writeValue(response.getOutputStream(),
@@ -98,16 +104,51 @@ public class TenantContextFilter extends OncePerRequestFilter {
                 return;
             }
             actorId = claimedActorId;
+            actorSubjectId = claimedActorSubjectId;
         }
-        request.setAttribute(ATTRIBUTE, new TenantContext(tenantId, actorId));
+        request.setAttribute(ATTRIBUTE,
+                new TenantContext(tenantId, actorId, actorSubjectId));
         chain.doFilter(request, response);
     }
 
     private static boolean validActorId(String tenantId, String actorId) {
+        if (actorId == null || actorId.isBlank()) {
+            return false;
+        }
         try {
             new WorkspaceActor(tenantId, actorId);
+            // The global gate keeps the Workspace surface's actor contract, not
+            // the principal's 512-UTF-8-byte bound: a 512-code-point BMP actor
+            // (e.g. 512 CJK characters, 1536 bytes) is admitted here so
+            // workspace-only routes keep working. The bound counts code
+            // points, exactly as WorkspaceValues.requireText does — a
+            // UTF-16 length check would refuse astral actors the Workspace
+            // contract admits. The stricter byte bound is enforced where a
+            // principal is actually built (TenantContext.requirePrincipal /
+            // the ownership row), so a Session can never be committed under
+            // an actor the principal cannot represent.
+            if (actorId.codePointCount(0, actorId.length())
+                    > com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceValues.MAXIMUM_TEXT_CODE_POINTS) {
+                return false;
+            }
             return true;
-        } catch (IllegalArgumentException error) {
+        } catch (IllegalArgumentException
+                | com.alibaba.qwen.code.managedagent.exception.ManagedAgentException error) {
+            return false;
+        }
+    }
+
+    private static boolean validActorSubject(String tenantId, String actorId,
+            String actorSubjectId) {
+        if (actorId == null || actorId.isBlank()) {
+            return false;
+        }
+        try {
+            com.alibaba.qwen.code.managedagent.model.SessionPrincipal.of(
+                    tenantId, actorId, actorSubjectId);
+            return true;
+        } catch (com.alibaba.qwen.code.managedagent.exception.ManagedAgentException
+                error) {
             return false;
         }
     }

@@ -429,8 +429,10 @@ class Issue13181QueryBudgetTest {
         fixture.ledger.reset();
         assertThat(fixture.service.getWebShellSession(plain, null,
                 plainIds.get(0)).sessionId()).isEqualTo(plainIds.get(0));
-        // Session read + latest turns + environment events + lifecycle summary, one each.
-        assertThat(fixture.ledger.total()).isEqualTo(4);
+        // Session read + latest turns + environment events + lifecycle summary,
+        // plus the read-authority decision, which re-reads the ownership row
+        // instead of trusting a cross-call snapshot.
+        assertThat(fixture.ledger.total()).isEqualTo(5);
 
         String bound = "tenant-" + UUID.randomUUID();
         fixture.jdbc.update("INSERT INTO ma_workspace"

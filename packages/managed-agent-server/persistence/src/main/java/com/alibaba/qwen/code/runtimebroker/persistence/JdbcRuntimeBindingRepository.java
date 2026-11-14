@@ -1,7 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker.persistence;
 
 import com.alibaba.qwen.code.managedagent.persistence.JdbcJournalPacks;
-import com.alibaba.qwen.code.managedagent.persistence.JdbcWorkspaceExecutionStore;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
@@ -52,7 +51,6 @@ import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFe
 import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.fence;
 import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.hasHarnessDrain;
 import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.harnessDrainKey;
-import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.localStorageOwnerKey;
 import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.requirePhysicalStorageAdmission;
 import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.requireResidentWorkspaceAdmission;
 import static com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences.requireStorageAdmission;
@@ -108,6 +106,7 @@ public final class JdbcRuntimeBindingRepository
     private final DataSource dataSource;
     private final SecretProtector secretProtector;
     private final Supplier<String> idSupplier;
+    private final RuntimeBindingSessionRelease sessionRelease;
     private final JdbcJournalPacks journalPacks;
 
     public JdbcRuntimeBindingRepository(DataSource dataSource,
@@ -137,6 +136,7 @@ public final class JdbcRuntimeBindingRepository
             throw new IllegalArgumentException("idSupplier is required");
         }
         this.idSupplier = idSupplier;
+        this.sessionRelease = new RuntimeBindingSessionRelease(this.dataSource, this);
         this.journalPacks = journalPacks;
     }
 
@@ -147,158 +147,19 @@ public final class JdbcRuntimeBindingRepository
     @Override
     public RuntimeSessionRecord completeSessionRelease(RuntimeSessionRepository sessions,
             RuntimeSessionRecord expected) {
-        if (!(sessions instanceof JdbcRuntimeSessionRepository jdbcSessions)
-                || !jdbcSessions.usesDataSource(dataSource)) {
-            throw new IllegalArgumentException("Release requires the same DataSource");
-        }
-        return JdbcRepositorySupport.transaction(
-                dataSource,
-                connection -> {
-                    if (JdbcCsiFilesRetirementGuard.lockRuntimeSession(connection, expected)
-                            != null) {
-                        throw CsiFilesRetirementProfile.releaseUnavailable();
-                    }
-                    RuntimeBindingRecord binding =
-                            selectById(connection, expected.getBindingId(), true);
-                    RuntimeAdmission.requireRelease(binding, expected);
-                    return JdbcRuntimeSessionRepository.compareAndSet(
-                            connection,
-                            expected,
-                            expected.withState(
-                                    RuntimeSessionRecord.State.RELEASED,
-                                    JdbcRepositorySupport.databaseNow(connection)));
-                });
+        return sessionRelease.completeSessionRelease(sessions, expected);
     }
 
     @Override
     public RuntimeSessionRecord completeStoppedSessionRelease(RuntimeSessionRepository sessions,
             ToolExecutionRepository executions, RuntimeSessionRecord expected, RuntimeBindingRecord claim) {
-        requireSameDataSource(sessions, executions, "Release requires the same DataSource");
-        return JdbcRepositorySupport.transaction(dataSource, connection -> {
-            lockPlacementDomain(connection, claim.getRequest().getScope().getTenantId()); // binding, then storage rows
-            boolean external = WorkspaceExecutionProfile.isExternalWorkspaceRequest(claim.getRequest());
-            var externalOwner = external ? JdbcExternalWorkspaceOwnership.lockStoppedRelease(connection, claim) : null;
-            RuntimeBindingRecord binding = external
-                    ? JdbcExternalWorkspaceOwnership.requireCurrent(connection, this, claim, false)
-                    : selectById(connection, expected.getBindingId(), true);
-            String physical = external ? null : localStorageOwnerKey(connection, claim.getRequest().getScope().getTenantId(),
-                    claim.getRequest().getStorageId(), true);
-            if (physical != null) {
-                try (var lock = connection.prepareStatement("SELECT physical_key FROM ma_storage_owner WHERE storage_key = ?"
-                        + " AND storage_kind = (SELECT storage_kind FROM ma_storage WHERE alias_key = ?)"
-                        + " FOR UPDATE")) {
-                    lock.setString(1, physical);
-                    lock.setString(2, storageAliasKey(claim.getRequest().getScope().getTenantId(), claim.getRequest().getStorageId()));
-                    try (var rows = lock.executeQuery()) {
-                        if (!rows.next() || !physical.equals(rows.getString(1))
-                                || !com.alibaba.qwen.code.managedagent.persistence.StorageOwnerMembership.membersAllowed(connection, physical, true)) {
-                            throw JdbcRepositorySupport.unverifiedWorkspaceHolder();
-                        }
-                    }
-                }
-            }
-            var authority = claim.getRequest().getScope().getLifecycleAuthority();
-            if (authority != null) {
-                RuntimeAdmissionFences.requireHarnessAdmission(connection, claim.getRequest().getScope(), claim.getRequest().getIsolationKey(),
-                        authority, fence(false, HarnessFence.CLEANUP));
-            }
-            RuntimeAdmission.requireStoppedRelease(binding, claim, expected, JdbcRepositorySupport.databaseNowPrecise(connection));
-            if (JdbcToolExecutionRepository.hasActiveByBinding(connection, binding.getBindingId(), binding.getGeneration())) {
-                throw new RuntimeBrokerException(409, "workspace_close_execution_unsettled",
-                        "Original resources remain active", false);
-            }
-            RuntimeSessionRecord updated = JdbcRuntimeSessionRepository.compareAndSet(connection, expected,
-                    expected.withState(RuntimeSessionRecord.State.RELEASED, JdbcRepositorySupport.databaseNow(connection)));
-            if (updated != null) {
-                JdbcExternalWorkspaceOwnership.releaseStoppedMember(connection, external, externalOwner, binding, claim, expected, physical);
-                RuntimeAdmission.requireStoppedRelease(binding, claim, expected, JdbcRepositorySupport.databaseNowPrecise(connection));
-            }
-            return updated;
-        });
-    }
-
-    static void clearStoppedMember(Connection connection, String key, RuntimeSessionRecord session) throws SQLException {
-        try (var read = connection.prepareStatement("SELECT execution_storage_key FROM ma_runtime_session"
-                + " WHERE binding_id = ? AND runtime_generation = ? AND runtime_session_id = ? FOR UPDATE")) {
-            JdbcRepositorySupport.setIdentity(read, 1, session.getBindingId());
-            read.setLong(2, session.getRuntimeGeneration());
-            JdbcRepositorySupport.setIdentity(read, 3, session.getRuntimeSessionId());
-            try (var rows = read.executeQuery()) {
-                if (!rows.next() || rows.getString(1) != null && !key.equals(rows.getString(1))) {
-                    throw JdbcRepositorySupport.unverifiedWorkspaceHolder();
-                }
-            }
-        }
-        try (var clear = connection.prepareStatement("UPDATE ma_runtime_session SET execution_storage_key = NULL,"
-                + " is_rewind_pending = FALSE WHERE execution_storage_key = ? AND binding_id = ?"
-                + " AND runtime_generation = ? AND runtime_session_id = ?")) {
-            clear.setString(1, key);
-            JdbcRepositorySupport.setIdentity(clear, 2, session.getBindingId());
-            clear.setLong(3, session.getRuntimeGeneration());
-            JdbcRepositorySupport.setIdentity(clear, 4, session.getRuntimeSessionId());
-            JdbcWorkspaceExecutionStore.releaseMembers(connection, key,
-                    clear.executeUpdate());
-        }
+        return sessionRelease.completeStoppedSessionRelease(sessions, executions, expected, claim);
     }
 
     @Override
     public RuntimeSessionRecord beginSessionRelease(RuntimeSessionRepository sessions,
             ToolExecutionRepository executions, RuntimeSessionRecord expected) {
-        requireSameDataSource(sessions, executions, "Release requires the same DataSource");
-        return JdbcRepositorySupport.transaction(
-                dataSource,
-                connection -> {
-                    if (JdbcCsiFilesRetirementGuard.lockRuntimeSession(connection, expected)
-                            != null) {
-                        throw CsiFilesRetirementProfile.releaseUnavailable();
-                    }
-                    // Statement order is load-bearing under InnoDB REPEATABLE READ:
-                    // this locking read must stay first, and the plain execution read
-                    // below must stay the transaction's first consistent read, so its
-                    // read view is built after the row lock is held and therefore
-                    // sees an admission that committed before it. A read moved ahead
-                    // of the lock silently reopens the race, and H2 would not show it.
-                    RuntimeSessionRecord current =
-                            JdbcRuntimeSessionRepository.selectSession(
-                                    connection,
-                                    expected.getSession().getScope(),
-                                    expected.getRuntimeSessionId(),
-                                    true);
-                    if (current == null
-                            || !current.sameIdentity(expected)
-                            || current.getVersion() != expected.getVersion()) {
-                        return null;
-                    }
-                    if (current.getState() == RuntimeSessionRecord.State.RELEASING
-                            || current.getState() == RuntimeSessionRecord.State.RELEASED) {
-                        return current;
-                    }
-                    if (current.getState() != RuntimeSessionRecord.State.READY
-                            && current.getState() != RuntimeSessionRecord.State.ACQUIRING) {
-                        throw new RuntimeBrokerException(
-                                409,
-                                "runtime_session_not_ready",
-                                "Runtime Session is not ready for release",
-                                false);
-                    }
-                    if (JdbcToolExecutionRepository.hasActiveByRuntimeSession(
-                            connection,
-                            current.getBindingId(),
-                            current.getRuntimeGeneration(),
-                            current.getRuntimeSessionId())) {
-                        throw new RuntimeBrokerException(
-                                409,
-                                "runtime_session_busy",
-                                "Runtime Session has an active operation",
-                                false);
-                    }
-                    return JdbcRuntimeSessionRepository.compareAndSet(
-                            connection,
-                            current,
-                            current.withState(
-                                    RuntimeSessionRecord.State.RELEASING,
-                                    JdbcRepositorySupport.databaseNow(connection)));
-                });
+        return sessionRelease.beginSessionRelease(sessions, executions, expected);
     }
 
     @Override
@@ -524,7 +385,7 @@ public final class JdbcRuntimeBindingRepository
     public ToolExecutionRecord admitExecution(RuntimeSessionRepository sessions,
             ToolExecutionRepository executions, ToolExecutionRecord candidate) {
         requireSameDataSource(sessions, executions, "Admission requires the same DataSource");
-        JdbcToolExecutionRepository.requireCandidate(candidate);
+        ToolExecutionRows.requireCandidate(candidate);
         ToolExecutionRecord existing = executions.findByIdempotencyKey(candidate.getIdempotencyKey());
         RuntimeBindingRecord original = findById(candidate.getBindingId());
         if (original == null) {
@@ -584,7 +445,7 @@ public final class JdbcRuntimeBindingRepository
                             }
                             return receipt;
                         }
-                        JdbcToolExecutionRepository.insertExecution(connection, candidate);
+                        ToolExecutionRows.insertExecution(connection, candidate);
                         return candidate;
                     });
         } catch (IllegalStateException failure) {
@@ -608,7 +469,7 @@ public final class JdbcRuntimeBindingRepository
             byte[] input,
             byte[] definition) {
         requireSameDataSource(sessions, executions, "CSI allocation requires the same DataSource");
-        JdbcToolExecutionRepository.requireCandidate(candidate);
+        ToolExecutionRows.requireCandidate(candidate);
         return JdbcRepositorySupport.transaction(
                 dataSource,
                 connection -> {
@@ -1330,6 +1191,56 @@ public final class JdbcRuntimeBindingRepository
     }
 
     @Override
+    public RuntimeBindingRecord findLatestForRequest(RuntimeProvisionRequest request) {
+        requireRequest(request);
+        // One transaction snapshot: under autoCommit the slot and binding
+        // reads straddle a concurrent release and the locked-read consistency
+        // check would throw on a legally retired generation.
+        return JdbcRepositorySupport.transaction(dataSource, connection -> {
+            Slot slot = selectSlot(connection, JdbcRepositorySupport.requestKey(request), false);
+            if (slot != null) {
+                requireSlotIdentity(slot, request);
+                if (slot.activeBindingId != null) {
+                    RuntimeBindingRecord active =
+                            selectById(connection, slot.activeBindingId, false);
+                    if (active == null || !active.getRequest().equals(request)) {
+                        throw new IllegalStateException(
+                                "Runtime binding slot is inconsistent");
+                    }
+                    if (active.isActive()) {
+                        return active;
+                    }
+                    // A release committed between the two statements: fall
+                    // through to the durable latest generation, which this
+                    // contract must return even when retired.
+                }
+            }
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "SELECT " + BINDING_COLUMNS
+                            + " FROM ma_runtime_binding WHERE request_key = ?"
+                            + " ORDER BY runtime_generation DESC LIMIT 2")) {
+                statement.setString(1, JdbcRepositorySupport.requestKey(request));
+                try (ResultSet result = statement.executeQuery()) {
+                    if (!result.next()) {
+                        return null;
+                    }
+                    RuntimeBindingRecord record = mapBinding(result);
+                    if (result.next() && result.getLong("runtime_generation")
+                            == record.getGeneration()) {
+                        throw new IllegalStateException(
+                                "Runtime binding generation is ambiguous");
+                    }
+                    if (!record.getRequest().equals(request)) {
+                        throw new IllegalStateException(
+                                "Runtime binding request identity is inconsistent");
+                    }
+                    return record;
+                }
+            }
+        });
+    }
+
+    @Override
     public List<RuntimeBindingRecord> findActiveByIsolationKey(
             RuntimeScope scope, String isolationKey) {
         if (scope == null) {
@@ -1850,6 +1761,136 @@ public final class JdbcRuntimeBindingRepository
         return released;
     }
 
+    /** 平台已证明实例终止后结清 external binding；历史记录可保留，活动执行不可退役。 */
+    public RuntimeBindingRecord retireUnacquiredExternal(Connection connection,
+            RuntimeBindingRecord expected) throws SQLException {
+        RuntimeBindingRecord current = lockActiveForRetirement(
+                connection, expected);
+        Instant now = JdbcRepositorySupport.databaseNowPrecise(connection);
+        if (!WorkspaceExecutionProfile.isExternalWorkspaceRequest(
+                    current.getRequest())
+                || !"workspace".equals(
+                        current.getRequest().getScope().getIsolationClass())
+                || current.getVersion() != expected.getVersion()
+                || current.isDrainRequested()
+                || current.hasLiveOperationAt(now)
+                || current.getState()
+                        != RuntimeBindingRecord.State.PROVISIONING
+                        && current.getState()
+                                != RuntimeBindingRecord.State.RECOVERY_BLOCKED
+                        && current.getState()
+                                != RuntimeBindingRecord.State.READY) {
+            throw new IllegalStateException(
+                    "Original terminated external binding is unavailable");
+        }
+        for (String table : List.of("ma_runtime_session", "ma_tool_execution")) {
+            String nonterminal = "ma_runtime_session".equals(table)
+                    ? " AND session_state NOT IN ('RELEASED', 'FAILED')"
+                    : " AND execution_state NOT IN ('SETTLED', 'ABANDONED')";
+            try (var statement = connection.prepareStatement(
+                    "SELECT binding_id FROM " + table
+                            + " WHERE binding_id = ?"
+                            + " AND runtime_generation = ?" + nonterminal
+                            + " LIMIT 1 FOR UPDATE")) {
+                JdbcRepositorySupport.setIdentity(
+                        statement, 1, current.getBindingId());
+                statement.setLong(2, current.getGeneration());
+                try (var rows = statement.executeQuery()) {
+                    if (rows.next()) {
+                        throw new IllegalStateException(
+                                "Original runtime has nonterminal execution");
+                    }
+                }
+            }
+        }
+        String storageOwnerKey;
+        try (var statement = connection.prepareStatement(
+                "SELECT physical_key FROM ma_storage WHERE alias_key = ?")) {
+            statement.setString(1, storageAliasKey(
+                    current.getRequest().getScope().getTenantId(),
+                    current.getRequest().getStorageId()));
+            try (var rows = statement.executeQuery()) {
+                if (!rows.next()) {
+                    throw new IllegalStateException(
+                            "Workspace storage registration is unavailable");
+                }
+                storageOwnerKey = rows.getString(1);
+            }
+        }
+        try (var statement = connection.prepareStatement(
+                "SELECT holder_key, binding_id, runtime_generation, runtime_session_id,"
+                        + " maintenance_id, maintenance_generation"
+                        + " FROM ma_storage_owner WHERE storage_key = ? FOR UPDATE")) {
+            statement.setString(1, storageOwnerKey);
+            try (var rows = statement.executeQuery()) {
+                if (!rows.next()) {
+                    throw new IllegalStateException(
+                            "Workspace owner is unavailable");
+                }
+                boolean emptyOwner = rows.getObject("holder_key") == null
+                        && rows.getObject("binding_id") == null
+                        && rows.getObject("runtime_generation") == null
+                        && rows.getObject("runtime_session_id") == null;
+                boolean exactOwner = rows.getObject("holder_key") != null
+                        && current.getBindingId().equals(rows.getString("binding_id"))
+                        && rows.getObject("runtime_generation") != null
+                        && current.getGeneration() == rows.getLong("runtime_generation");
+                if (rows.getObject("maintenance_id") != null
+                        || rows.getObject("maintenance_generation") != null
+                        || !emptyOwner && !exactOwner) {
+                    throw new IllegalStateException(
+                            "Workspace owner does not match terminated binding");
+                }
+            }
+        }
+        try (var statement = connection.prepareStatement(
+                "UPDATE ma_storage_owner SET holder_key = NULL,"
+                        + " binding_id = NULL, runtime_generation = NULL,"
+                        + " runtime_session_id = NULL"
+                        + " WHERE storage_key = ? AND ((binding_id = ?"
+                        + " AND runtime_generation = ?) OR (holder_key IS NULL"
+                        + " AND binding_id IS NULL AND runtime_generation IS NULL"
+                        + " AND runtime_session_id IS NULL))")) {
+            statement.setString(1, storageOwnerKey);
+            JdbcRepositorySupport.setIdentity(
+                    statement, 2, current.getBindingId());
+            statement.setLong(3, current.getGeneration());
+            if (statement.executeUpdate() != 1) {
+                throw new IllegalStateException(
+                        "Terminated workspace owner changed");
+            }
+        }
+        RuntimeBindingRecord released =
+                current.withState(
+                                RuntimeBindingRecord.State.RELEASED,
+                                null,
+                                now)
+                        .withDrainRequested(true, now)
+                        .withOperation(
+                                null, null,
+                                current.getOperationGeneration() + 1)
+                        .withVersion(current.getVersion() + 1);
+        updateBinding(connection, released);
+        try (var statement = connection.prepareStatement(
+                "UPDATE ma_runtime_slot"
+                        + " SET active_binding_id = NULL"
+                        + " WHERE request_key = ?"
+                        + " AND active_binding_id = ?"
+                        + " AND last_generation = ?")) {
+            statement.setString(
+                    1, JdbcRepositorySupport.requestKey(
+                            current.getRequest()));
+            JdbcRepositorySupport.setIdentity(
+                    statement, 2, current.getBindingId());
+            statement.setLong(3, current.getGeneration());
+            if (statement.executeUpdate() != 1) {
+                throw new IllegalStateException(
+                        "Original external slot changed");
+            }
+        }
+        return released;
+    }
+
     public RuntimeBindingRecord findByIdInReadOnlySnapshot(Connection connection,
             String bindingId) throws SQLException {
         if (connection == null || connection.getAutoCommit() || !connection.isReadOnly()
@@ -1860,12 +1901,12 @@ public final class JdbcRuntimeBindingRepository
         return selectById(connection, BrokerValues.requireId(bindingId, "bindingId"), false, 10);
     }
 
-    private RuntimeBindingRecord selectById(Connection connection,
+    RuntimeBindingRecord selectById(Connection connection,
             String bindingId, boolean forUpdate) throws SQLException {
         return selectById(connection, bindingId, forUpdate, 0);
     }
 
-    private RuntimeBindingRecord selectById(Connection connection,
+    RuntimeBindingRecord selectById(Connection connection,
             String bindingId, boolean forUpdate, int queryTimeoutSeconds) throws SQLException {
         String sql = "SELECT " + BINDING_COLUMNS
                 + " FROM ma_runtime_binding WHERE binding_id = ?"

@@ -844,7 +844,7 @@ class ManagedSessionLifecycleTest {
     }
 
     private String emptySession(String tenant) throws Exception {
-        return objectMapper.readTree(mvc.perform(post("/v1/agents/sessions")
+        String id = objectMapper.readTree(mvc.perform(post("/v1/agents/sessions").principal(actor(tenant, "actor-a"))
                         .header(TENANT, tenant)
                         .header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
@@ -852,12 +852,15 @@ class ManagedSessionLifecycleTest {
                 .andExpect(status().isAccepted())
                 .andReturn().getResponse().getContentAsString())
                 .get("id").asText();
+        legacyState(tenant, id);
+        return id;
     }
 
     // A Session whose completed Turn attached it to the Harness.
     private String attachedSession(String tenant) throws Exception {
         String sessionId = objectMapper.readTree(mvc.perform(post(
                         "/v1/agents/sessions").header(TENANT, tenant)
+                        .principal(actor(tenant, "actor-a"))
                         .header("Idempotency-Key", UUID.randomUUID().toString())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("""
@@ -872,6 +875,7 @@ class ManagedSessionLifecycleTest {
                         .containsKey(sessionId)
                         && store.requireSession(tenant, sessionId)
                                 .harnessBootId() != null);
+        legacyState(tenant, sessionId);
         return sessionId;
     }
 
@@ -1009,5 +1013,11 @@ class ManagedSessionLifecycleTest {
         void failDrains(int count) {
             drainFailures.set(count);
         }
+    }
+
+    private void legacyState(String tenant, String sessionId) {
+        jdbc.update("DELETE FROM ma_session_principal WHERE tenant_id = ? AND session_id = ?", tenant, sessionId);
+        jdbc.update("UPDATE ma_request_receipt SET actor_id = NULL WHERE tenant_id = ? AND session_id = ?"
+                + " AND namespace = 'SESSION_COMMAND' AND operation = 'CREATE_SESSION'", tenant, sessionId);
     }
 }

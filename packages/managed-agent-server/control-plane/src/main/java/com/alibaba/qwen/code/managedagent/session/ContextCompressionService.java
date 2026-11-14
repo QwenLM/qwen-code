@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicContextCompressionOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellContextCompressionOperation;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationAdmission;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore;
@@ -23,7 +24,8 @@ public class ContextCompressionService {
     private final ContextCompressionCoordinator coordinator;
     private final ManagedExtensionRecordStore records;
 
-    public ContextCompressionService(SessionLifecycleStore store, RequestDigests digests,
+    public ContextCompressionService(
+            SessionLifecycleStore store, RequestDigests digests,
             HarnessConnector harness, ContextCompressionCoordinator coordinator,
             ManagedExtensionRecordStore records) {
         this.store = store;
@@ -35,22 +37,55 @@ public class ContextCompressionService {
 
     public PublicContextCompressionOperation admitPublic(String tenantId, String actorId,
             String sessionId, String key, Long revision) {
-        OperationAdmission admitted = admit(tenantId, actorId, sessionId, key, revision);
+        OperationAdmission admitted = admit(tenantId, actorId, sessionId, key,
+                revision);
+        return publicOperation(admitted.operation(), admitted.replayed());
+    }
+
+    public PublicContextCompressionOperation admitPublic(
+            SessionPrincipal principal, String sessionId, String key,
+            Long revision) {
+        OperationAdmission admitted = admit(
+                principal == null ? null : principal.tenantId(),
+                principal == null ? null : principal.userId(),
+                sessionId, key, revision, principal != null);
         return publicOperation(admitted.operation(), admitted.replayed());
     }
 
     public WebShellContextCompressionOperation admitWebShell(String tenantId, String actorId,
             String sessionId, String key, Long revision) {
-        OperationAdmission admitted = admit(tenantId, actorId, sessionId, key, revision);
+        OperationAdmission admitted = admit(tenantId, actorId, sessionId, key,
+                revision);
         return webOperation(admitted.operation(), admitted.replayed());
     }
 
-    private OperationAdmission admit(String tenantId, String actorId, String sessionId,
-            String key, Long revision) {
-        if (actorId == null || actorId.isEmpty()) {
+    public WebShellContextCompressionOperation admitWebShell(
+            SessionPrincipal principal, String sessionId, String key,
+            Long revision) {
+        OperationAdmission admitted = admit(
+                principal == null ? null : principal.tenantId(),
+                principal == null ? null : principal.userId(),
+                sessionId, key, revision, principal != null);
+        return webOperation(admitted.operation(), admitted.replayed());
+    }
+
+    // Compression serves only Workspace Sessions, whose store gate keys on
+    // the raw actor: the filter-admitted actor never needs a byte-bounded
+    // principal here (R7-1). A null/blank actor keeps the 401 either way.
+    private OperationAdmission admit(String tenantId, String actorId,
+            String sessionId, String key, Long revision) {
+        return admit(tenantId, actorId, sessionId, key, revision, true);
+    }
+
+    private OperationAdmission admit(String tenantId, String actorId,
+            String sessionId, String key, Long revision, boolean actorVerified) {
+        if (!actorVerified || actorId == null || actorId.isBlank()) {
             throw new ManagedAgentException(401, "actor_required",
                     "A trusted actor is required.");
         }
+        // The store enforces the read grant immediately before its receipt
+        // replay; a visibility pre-read here would tombstone-fence retries of
+        // an already-recorded compression and answer 404 instead of replaying.
         ManagedAgentService.validateIdempotencyKey(key);
         if (revision == null || revision < 0 || revision > 9_007_199_254_740_991L) {
             throw new ManagedAgentException(400, "invalid_request",
@@ -58,11 +93,13 @@ public class ContextCompressionService {
         }
         String digest = digests.digest(Map.of("sessionId", sessionId,
                 "operation", "CONTEXT_COMPRESSION", "expectedCompactionRevision", revision));
-        OperationAdmission admitted = store.beginContextCompression(tenantId, sessionId,
-                actorId, digests.digest(Map.of("actorId", actorId)), key, digest,
+        OperationAdmission admitted = store.beginContextCompression(
+                tenantId, sessionId, actorId,
+                digests.digest(Map.of("actorId", actorId)), key, digest,
                 revision, harness.supportsContextCompression());
         if (!admitted.replayed() && "PENDING".equals(admitted.operation().state())) {
-            coordinator.dispatch(tenantId, sessionId, admitted.operation().operationId());
+            coordinator.dispatch(tenantId, sessionId,
+                    admitted.operation().operationId());
         }
         return admitted;
     }

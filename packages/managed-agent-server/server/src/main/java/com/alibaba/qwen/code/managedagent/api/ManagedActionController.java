@@ -8,6 +8,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellActionQueryReq
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellActionRespondRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellCommandOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellPage;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
 import com.alibaba.qwen.code.managedagent.session.ManagedActionService;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -38,13 +39,22 @@ public class ManagedActionController {
             @RequestParam(required = false) String cursor,
             @RequestParam(defaultValue = "20") int limit,
             @RequestParam(name = "include_children", defaultValue = "false") boolean includeChildren) {
-        return actions.listPublic(tenant.tenantId(), tenant.actorId(), sessionId, cursor, limit, includeChildren);
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return principal == null
+                ? actions.listPublic(tenant.tenantId(), tenant.actorId(),
+                        sessionId, cursor, limit, includeChildren)
+                : actions.listPublic(principal, sessionId, cursor, limit,
+                        includeChildren);
     }
 
     @GetMapping("/v1/agents/sessions/{sessionId}/actions/{actionId}")
     public JsonNode get(
             TenantContext tenant, @PathVariable String sessionId, @PathVariable String actionId) {
-        return actions.get(tenant.tenantId(), tenant.actorId(), sessionId, actionId, false);
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return principal == null
+                ? actions.get(tenant.tenantId(), tenant.actorId(), sessionId,
+                        actionId, false)
+                : actions.get(principal, sessionId, actionId, false);
     }
 
     @PostMapping("/v1/agents/sessions/{sessionId}/actions/{actionId}/responses")
@@ -54,10 +64,21 @@ public class ManagedActionController {
             @PathVariable String actionId,
             @RequestHeader("Idempotency-Key") String idempotencyKey,
             @Valid @RequestBody PermissionResponse response) {
-        var admission =
-                actions.respond(
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        var admission = principal == null
+                ? actions.respond(
                         tenant.tenantId(),
                         tenant.actorId(),
+                        sessionId,
+                        actionId,
+                        idempotencyKey,
+                        response.kind(),
+                        response.inputRevision(),
+                        response.policyRevision(),
+                        response.optionId(), response.answers(), true)
+                : actions.respond(
+                        tenant.tenantId(),
+                        principal,
                         sessionId,
                         actionId,
                         idempotencyKey,
@@ -73,19 +94,25 @@ public class ManagedActionController {
     @PostMapping("/api/agent/web-shell/v1/actions/query")
     public WebShellPage<JsonNode> query(
             TenantContext tenant, @Valid @RequestBody WebShellActionQueryRequest request) {
-        return actions.listWebShell(
-                tenant.tenantId(),
-                tenant.actorId(),
-                request.sessionId(),
-                request.cursor(),
-                request.limit() == null ? 20 : request.limit(), Boolean.TRUE.equals(request.includeChildren()));
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        int limit = request.limit() == null ? 20 : request.limit();
+        boolean includeChildren = Boolean.TRUE.equals(request.includeChildren());
+        return principal == null
+                ? actions.listWebShell(tenant.tenantId(), tenant.actorId(),
+                        request.sessionId(), request.cursor(), limit, includeChildren)
+                : actions.listWebShell(principal, request.sessionId(),
+                        request.cursor(), limit, includeChildren);
     }
 
     @PostMapping("/api/agent/web-shell/v1/actions/get")
     public JsonNode getWebShell(
             TenantContext tenant, @Valid @RequestBody WebShellActionGetRequest request) {
-        return actions.get(
-                tenant.tenantId(), tenant.actorId(), request.sessionId(), request.actionId(), true);
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        return principal == null
+                ? actions.get(tenant.tenantId(), tenant.actorId(),
+                        request.sessionId(), request.actionId(), true)
+                : actions.get(principal, request.sessionId(),
+                        request.actionId(), true);
     }
 
     @PostMapping("/api/agent/web-shell/v1/actions/respond")
@@ -96,10 +123,21 @@ public class ManagedActionController {
             HttpServletResponse httpResponse) {
         RequestIdFilter.useClientId(httpRequest, httpResponse, request.requestId());
         var response = request.response();
-        var admission =
-                actions.respond(
+        SessionPrincipal principal = tenant.subjectPrincipal();
+        var admission = principal == null
+                ? actions.respond(
                         tenant.tenantId(),
                         tenant.actorId(),
+                        request.sessionId(),
+                        request.actionId(),
+                        request.idempotencyKey(),
+                        response.kind(),
+                        response.inputRevision(),
+                        response.policyRevision(),
+                        response.optionId(), response.answers(), false)
+                : actions.respond(
+                        tenant.tenantId(),
+                        principal,
                         request.sessionId(),
                         request.actionId(),
                         request.idempotencyKey(),

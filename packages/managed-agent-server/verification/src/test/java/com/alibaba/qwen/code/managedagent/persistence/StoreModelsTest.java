@@ -62,15 +62,15 @@ class StoreModelsTest {
         assertThat(command(recorder).admitsReplayBy("actor-a")).isTrue();
         assertThat(command(recorder).admitsReplayBy("actor-b")).isFalse();
         assertThat(command(recorder).admitsReplayBy("bad\nactor")).isFalse();
-        assertThat(command(recorder).admitsReplayBy(null)).isFalse();
+        assertThat(command(recorder).admitsReplayBy((String) null)).isFalse();
 
         assertThat(command(ManagedReceipts.UNATTRIBUTED).admitsReplayBy("actor-a"))
                 .isFalse();
-        assertThat(command(ManagedReceipts.UNATTRIBUTED).admitsReplayBy(null))
+        assertThat(command(ManagedReceipts.UNATTRIBUTED).admitsReplayBy((String) null))
                 .isFalse();
 
         assertThat(command(null).admitsReplayBy("actor-b")).isFalse();
-        assertThat(command(null).admitsReplayBy(null)).isFalse();
+        assertThat(command(null).admitsReplayBy((String) null)).isFalse();
     }
 
     // Every command receipt this build writes carries a recorder column: an

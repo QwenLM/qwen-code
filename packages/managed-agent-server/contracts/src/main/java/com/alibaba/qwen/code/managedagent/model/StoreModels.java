@@ -145,6 +145,12 @@ public final class StoreModels {
                 return false;
             }
         }
+
+        /** The principal-carried twin of {@link #admitsReplayBy(String)}. */
+        public boolean admitsReplayBy(SessionPrincipal principal) {
+            return principal != null && actorKey != null
+                    && Arrays.equals(actorKey, principal.receiptActorKey());
+        }
     }
 
     /**

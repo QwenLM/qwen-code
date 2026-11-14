@@ -199,9 +199,21 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
                 RuntimeObservation observation = observe(request, seed, handle);
                 URI originalEndpoint = retained.endpoint() != null ? retained.endpoint()
                         : lastLease == null ? null : lastLease.getEndpoint();
-                if ((lastLease != null && !lastLease.getEndpoint().equals(originalEndpoint))
-                        || (observation.getOutcome() == RuntimeObservation.Outcome.READY
-                        && originalEndpoint != null && !originalEndpoint.equals(observation.getEndpoint()))) {
+                // The endpoint-evidence guard runs before any provider call:
+                // a lease that disagrees with the saved endpoint is a
+                // permanent conflict, not something reattach may "repair".
+                if (lastLease != null && !lastLease.getEndpoint().equals(originalEndpoint)) {
+                    throw conflict();
+                }
+                // UNKNOWN means the provider lost its process-local attachment,
+                // not that the Worker is gone. Reattach only the exact original
+                // endpoint; never enter provisioning or mint a replacement.
+                if (observation.getOutcome() == RuntimeObservation.Outcome.UNKNOWN
+                        && lastLease != null && supportsReattach(request)) {
+                    observation = reattach(request, seed, handle, originalEndpoint);
+                }
+                if (observation.getOutcome() == RuntimeObservation.Outcome.READY
+                        && originalEndpoint != null && !originalEndpoint.equals(observation.getEndpoint())) {
                     throw conflict();
                 }
                 // UNKNOWN loses readiness evidence, not ownership of the original endpoint.
@@ -274,6 +286,29 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
         body.put("handle", handle.getValue().get("provider"));
         Map<String, Object> response = call(client.observe(Map.copyOf(body)));
         return observation(request, seed, handle, response);
+    }
+
+    private RuntimeObservation reattach(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
+            RuntimeResourceHandle handle, URI endpoint) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("protocolVersion", 1);
+        body.put("provisionRequestId", seed.getProvisionRequestId());
+        body.put("identity", identity(request, seed));
+        body.put("scope", scope(request));
+        body.put("boot", bootDocument(request, seed));
+        body.put("handle", handle.getValue().get("provider"));
+        body.put("endpoint", endpoint.toString());
+        Map<String, Object> response = call(client.reattach(Map.copyOf(body)));
+        return observation(request, seed, handle, response);
+    }
+
+    /**
+     * Whether UNKNOWN may be followed by an explicit provider reattach. Profiles
+     * that have a durable binding opt in; provider-process-local scratch workers
+     * retain their existing fail-closed observation semantics.
+     */
+    protected boolean supportsReattach(RuntimeProvisionRequest request) {
+        return false;
     }
 
     /**
@@ -388,7 +423,8 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
 
     private void validate(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
         if (request == null || seed == null || !kind().equals(request.getProvisionerKind())
-                || !"session".equals(request.getScope().getIsolationClass())) {
+                || !("session".equals(request.getScope().getIsolationClass())
+                        || ExternalWorkspaceProvisioner.isWorkspaceRequest(request))) {
             throw conflict();
         }
         String cwd = request.getScope().getCanonicalCwd();
@@ -402,6 +438,38 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
         if (JsonCodec.encode(bootDocument(request, seed)).length > BOOT_LIMIT) {
             throw conflict();
         }
+    }
+
+    /** Validates an unleased first-start original without adopting a replacement endpoint. */
+    public final void validateTerminalOriginal(RuntimeBindingRecord binding) {
+        if (binding == null || executor.isShutdown()) {
+            throw conflict();
+        }
+        validate(binding.getRequest(), binding.getProvisionSeed());
+        if (binding.getLease() != null
+                && !binding.getProvisionSeed().matches(binding.getLease())) {
+            throw conflict();
+        }
+        validateHandle(binding.getRequest(), binding.getProvisionSeed(),
+                binding.getResourceHandle());
+    }
+
+    /** Exports the original boot only to the trusted local recovery host. */
+    public final Map<String, Object> recoveryProviderRequest(
+            RuntimeBindingRecord binding) {
+        Map<String, Object> boot = validatedSavedBoot(binding);
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("protocolVersion", 1);
+        body.put("provisionRequestId",
+                binding.getProvisionSeed().getProvisionRequestId());
+        body.put("identity",
+                binding.getResourceHandle().getValue().get("identity"));
+        body.put("scope", java.util.Collections.unmodifiableMap(
+                scope(binding.getRequest())));
+        body.put("boot", boot);
+        body.put("handle",
+                binding.getResourceHandle().getValue().get("provider"));
+        return java.util.Collections.unmodifiableMap(body);
     }
 
     /** Validates durable originals without observing, allocating or adopting a placement. */
@@ -459,15 +527,24 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
     private String identity(RuntimeProvisionRequest request, Map<String, Object> originalBoot) {
         Map<String, Object> boot = new LinkedHashMap<>(originalBoot);
         boot.remove("token");
-        return digest(Map.of("version", 1, "providerId", providerId,
-                "isolationKey", request.getIsolationKey(), "boot", boot));
+        Map<String, Object> identity = new LinkedHashMap<>();
+        identity.put("version", 1);
+        identity.put("providerId", providerId);
+        identity.put("isolationKey", request.getIsolationKey());
+        identity.put("boot", boot);
+        return digest(identity);
     }
 
     private static Map<String, Object> scope(RuntimeProvisionRequest request) {
         RuntimeScope scope = request.getScope();
-        return Map.of("tenantId", scope.getTenantId(), "workspaceId", scope.getWorkspaceId(),
-                "workspaceGeneration", scope.getWorkspaceGeneration(), "workspaceCwd", scope.getCanonicalCwd(),
-                "isolationClass", scope.getIsolationClass(), "isolationKey", request.getIsolationKey());
+        Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("tenantId", scope.getTenantId());
+        fields.put("workspaceId", scope.getWorkspaceId());
+        fields.put("workspaceGeneration", scope.getWorkspaceGeneration());
+        fields.put("workspaceCwd", scope.getCanonicalCwd());
+        fields.put("isolationClass", scope.getIsolationClass());
+        fields.put("isolationKey", request.getIsolationKey());
+        return fields;
     }
 
     static Map<String, Object> boot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {

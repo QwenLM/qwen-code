@@ -230,12 +230,18 @@ class ManagedWebShellRenameTest {
 
     private String create(String tenant, boolean activeTurn) throws Exception {
         List<Map<String, String>> input = activeTurn ? List.of(Map.of("type", "text", "text", "hold")) : List.of();
-        JsonNode response = mapper.readTree(mvc.perform(post(WEB_SHELL + "/sessions/create")
+        JsonNode response = mapper.readTree(mvc.perform(post(WEB_SHELL + "/sessions/create").principal(tenantActor(tenant))
                         .header(TENANT, tenant).contentType(MediaType.APPLICATION_JSON)
                         .content(mapper.writeValueAsString(Map.of("idempotencyKey", UUID.randomUUID().toString(),
                                 "agentId", "qwen-code", "title", "original", "input", input))))
                 .andExpect(status().isAccepted()).andReturn().getResponse().getContentAsString());
-        return response.get("sessionId").asText();
+        String id = response.get("sessionId").asText();
+        // Creation requires a trusted actor; these probes read and rename
+        // anonymously, so restore the genuine legacy row-less state.
+        jdbc.update("DELETE FROM ma_session_principal WHERE tenant_id = ? AND session_id = ?", tenant, id);
+        jdbc.update("UPDATE ma_request_receipt SET actor_id = NULL WHERE tenant_id = ? AND session_id = ?"
+                + " AND namespace = 'SESSION_COMMAND' AND operation = 'CREATE_SESSION'", tenant, id);
+        return id;
     }
 
     private ResultActions get(String tenant, String session) throws Exception {
@@ -251,5 +257,24 @@ class ManagedWebShellRenameTest {
 
     private static String tenant() {
         return "tenant-web-rename-" + UUID.randomUUID();
+    }
+
+    private static com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor tenantActor(String tenant) {
+        return new com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor() {
+            @Override
+            public String tenantId() {
+                return tenant;
+            }
+
+            @Override
+            public String actorId() {
+                return "actor-a";
+            }
+
+            @Override
+            public String getName() {
+                return "actor-a";
+            }
+        };
     }
 }

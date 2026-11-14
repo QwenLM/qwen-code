@@ -30,6 +30,7 @@ class ManagedStoreDecompositionTest {
             AgentSessionCommands.class,
             AgentLifecycleOperations.class,
             AgentSessionAdmissions.class,
+            ChildSessionAdmissions.class,
             AgentTurnExecution.class,
             AgentExecutionOperations.class,
             JournalStoreRows.class,
@@ -39,7 +40,8 @@ class ManagedStoreDecompositionTest {
             JournalResourceReads.class,
             JournalResourceWrites.class,
             JournalWriterLifecycle.class,
-            JournalCommit.class);
+            JournalCommit.class,
+            ManagedStoreAssembly.class);
 
     @Test
     void collaboratorsAreImmutableOrdinaryObjectsWithAcyclicDependencies() {
@@ -90,6 +92,14 @@ class ManagedStoreDecompositionTest {
 
     @Test
     void facadesKeepTheExistingEntryAndTransactionPopulation() {
+        // Issue #16605: the seven principal mutation signatures are declared
+        // TWICE on purpose — the bodies stay in ManagedAgentPrincipalEntries
+        // and the facade redeclares them with @Transactional, because an
+        // inherited annotated entry reaches Spring as an annotation-less
+        // bridge and loses its boundary. The population pin therefore
+        // counts each of those seven once more; the permanent witness is
+        // PrincipalEntryTransactionBoundaryTest. The #17006 base sync renamed the
+        // rename entry to settleRenameSync; the principal twin keeps the same shape.
         assertEntries(ManagedAgentStore.class, """
                 findSessionWorktree/2:- findSessionWorktrees/2:- insertSessionCommand/10::REQUIRED:DEFAULT:false
                 insertSessionCommand/11::REQUIRED:DEFAULT:false
@@ -142,6 +152,12 @@ class ManagedStoreDecompositionTest {
                 failTurn/6::REQUIRED:DEFAULT:false failWorktreeInitialTurns/3::REQUIRED:DEFAULT:false failRecoveryBlockedTurn/5::REQUIRED:DEFAULT:false
                 appendPublicEventIfAbsent/7::REQUIRED:DEFAULT:false appendLiveSessionEventIfAbsent/5::REQUIRED:DEFAULT:false findLastVisibleStatusBeforeDelete/2:-
                 requireSession/2:- readBinding/1:- insertSessionCommand/9::REQUIRED:DEFAULT:false
+                insertSessionCommand/10::REQUIRED:DEFAULT:false insertSessionCommand/11::REQUIRED:DEFAULT:false insertSessionCommand/12::REQUIRED:DEFAULT:false
+                insertTurnCommand/8::REQUIRED:DEFAULT:false insertCancelCommand/7::REQUIRED:DEFAULT:false settleRenameSync/7::REQUIRED:DEFAULT:false beginSessionMutation/8::REQUIRED:DEFAULT:false
+                insertSessionCommand/10::REQUIRED:DEFAULT:false insertSessionCommand/11::REQUIRED:DEFAULT:false insertSessionCommand/12::REQUIRED:DEFAULT:false
+                insertTurnCommand/8::REQUIRED:DEFAULT:false insertCancelCommand/7::REQUIRED:DEFAULT:false settleRenameSync/7::REQUIRED:DEFAULT:false beginSessionMutation/8::REQUIRED:DEFAULT:false
+                listSessions/7:- listOwnedSessions/7:- ownsSession/3:- requireSessionOwnership/3:-
+                requireSessionAuthority/3:- requireSessionReadAuthority/3:- requireSessionReadAuthority/3:-
                 """);
         assertEntries(JdbcManagedSessionStore.class, """
                 authorizeLifecycle/5::REQUIRED:DEFAULT:false skipContended/2:- lockBounded/1:-
@@ -165,7 +181,70 @@ class ManagedStoreDecompositionTest {
 
     private static void assertEntries(Class<?> facade, String expected) {
         assertThat(facade.getAnnotation(Qualifier.class).value()).isEqualTo("managedAgentTransactionManager");
-        List<String> actual = Arrays.stream(facade.getDeclaredMethods())
+        // The facade may inherit an entry arm from a package-private
+        // superclass; the population pin covers the whole hierarchy, so a
+        // move between facade and superclass keeps the same contract.
+        List<String> actual = new java.util.ArrayList<>();
+        for (Class<?> type = facade; type != null && type != Object.class; type = type.getSuperclass()) {
+            Arrays.stream(type.getDeclaredMethods())
+                    .filter(method -> !Modifier.isPrivate(method.getModifiers()) && !method.isSynthetic())
+                    .map(method -> {
+                        var tx = method.getAnnotation(Transactional.class);
+                        String attributes = tx == null ? "-" : tx.transactionManager() + ":" + tx.propagation()
+                                + ":" + tx.isolation() + ":" + tx.readOnly();
+                        return method.getName() + "/" + method.getParameterCount() + ":" + attributes;
+                    }).forEach(actual::add);
+        }
+        assertThat(actual).containsExactlyInAnyOrderElementsOf(List.of(expected.trim().split("\\s+")));
+    }
+
+    @Test
+    void principalEntriesLiveInTheFacadeSuperclass() {
+        // Issue #16605: the read arm pure-moved into ManagedAgentReadEntries
+        // to make ratchet headroom for the facade's principal mutation
+        // overrides, so the chain is now facade -> read arm -> principal
+        // arm. Both arms keep the same package-private, non-Spring,
+        // immutable-field shape.
+        Class<?> readArm = ManagedAgentStore.class.getSuperclass();
+        assertThat(readArm).isEqualTo(ManagedAgentReadEntries.class);
+        Class<?> superclass = readArm.getSuperclass();
+        assertThat(superclass).isEqualTo(ManagedAgentPrincipalEntries.class);
+        for (Class<?> arm : List.of(readArm, superclass)) {
+            assertThat(Modifier.isPublic(arm.getModifiers())).isFalse();
+            assertThat(Modifier.isFinal(arm.getModifiers())).isFalse();
+            assertNoSpringComponent(arm);
+            for (var field : arm.getDeclaredFields()) {
+                assertThat(Modifier.isFinal(field.getModifiers())).as(field.toString()).isTrue();
+                assertThat(field.getType()).isIn(AgentSessionAdmissions.class, AgentSessionCommands.class,
+                        AgentSessionQueries.class);
+            }
+        }
+        assertThat(entryPopulation(readArm)).containsExactlyInAnyOrderElementsOf(List.of(
+                "replayCommand/4:-", "findCommand/3:-", "findSession/2:-", "findSessionById/1:-",
+                "listSessions/5:-", "listSessions/6:-", "listSessions/7:-",
+                "findLatestLifecycleOperations/2:-", "findTurn/3:-", "findActiveTurns/2:-",
+                "findLatestTurns/2:-", "findModelContexts/2:-", "modelOptions/0:-",
+                "findModelSelections/2:-", "findTurnModelSelection/3:-",
+                "findApprovalSelections/2:-", "findApprovalOwners/3:-", "findTurnApprovalSelection/3:-"));
+        assertThat(entryPopulation(superclass)).containsExactlyInAnyOrderElementsOf(List.of(
+                "insertSessionCommand/10::REQUIRED:DEFAULT:false",
+                "insertSessionCommand/11::REQUIRED:DEFAULT:false",
+                "insertSessionCommand/12::REQUIRED:DEFAULT:false",
+                "requireSessionOwnership/3:-",
+                "requireSessionAuthority/3:-",
+                "requireSessionReadAuthority/3:-",
+                "requireSessionReadAuthority/3:-",
+                "ownsSession/3:-",
+                "insertTurnCommand/8::REQUIRED:DEFAULT:false",
+                "insertCancelCommand/7::REQUIRED:DEFAULT:false",
+                "settleRenameSync/7::REQUIRED:DEFAULT:false",
+                "beginSessionMutation/8::REQUIRED:DEFAULT:false",
+                "listSessions/7:-",
+                "listOwnedSessions/7:-"));
+    }
+
+    private static List<String> entryPopulation(Class<?> type) {
+        return Arrays.stream(type.getDeclaredMethods())
                 .filter(method -> !Modifier.isPrivate(method.getModifiers()) && !method.isSynthetic())
                 .map(method -> {
                     var tx = method.getAnnotation(Transactional.class);
@@ -173,15 +252,15 @@ class ManagedStoreDecompositionTest {
                             + ":" + tx.isolation() + ":" + tx.readOnly();
                     return method.getName() + "/" + method.getParameterCount() + ":" + attributes;
                 }).toList();
-        assertThat(actual).containsExactlyInAnyOrderElementsOf(List.of(expected.trim().split("\\s+")));
     }
 
     @Test
     void facadeSourcesContainNoBusinessSql() throws Exception {
         Path sources = Path.of("..", "persistence", "src", "main", "java")
                 .resolve(ManagedAgentStore.class.getPackageName().replace('.', '/'));
-        for (Class<?> facade : List.of(ManagedAgentStore.class, JdbcManagedSessionStore.class)) {
-            assertNoBusinessSql(Files.readString(sources.resolve(facade.getSimpleName() + ".java")));
+        for (String name : List.of("ManagedAgentStore", "ManagedAgentPrincipalEntries", "ManagedAgentReadEntries",
+                "ManagedStoreAssembly", "JdbcManagedSessionStore")) {
+            assertNoBusinessSql(Files.readString(sources.resolve(name + ".java")));
         }
     }
 

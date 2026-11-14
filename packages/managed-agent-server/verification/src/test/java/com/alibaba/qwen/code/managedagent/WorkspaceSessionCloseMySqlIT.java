@@ -167,8 +167,9 @@ class WorkspaceSessionCloseMySqlIT {
                 }));
                 responses.set(pool.submit(() -> {
                     started.countDown();
-                    return outcome(() -> transaction(() -> actions.admit(tenant, session, OWNER, ACTOR_DIGEST,
-                            "answer", "answer-digest", action, mapper.createObjectNode(), System.currentTimeMillis())));
+                    return outcome(() -> transaction(() -> actions.admit(tenant, session, null, OWNER,
+                            ACTOR_DIGEST, "answer", "answer-digest", action, mapper.createObjectNode(),
+                            System.currentTimeMillis())));
                 }));
                 awaitBlocked(started, turns.get());
                 assertThrows(TimeoutException.class, () -> responses.get().get(100, TimeUnit.MILLISECONDS));

@@ -7,6 +7,7 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.ManagedMcpManagementCommand;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -39,10 +40,28 @@ public class ManagedMcpManagementService {
     }
 
     public JsonNode get(String tenantId, String actorId, String sessionId) {
-        sessions.requireReadableSession(tenantId, actorId, sessionId);
+        // MCP management serves only Workspace Sessions: the raw
+        // filter-admitted actor never needs a byte-bounded principal (R7-1).
+        return get(tenantId, actorId, null, sessionId);
+    }
+
+    public JsonNode get(SessionPrincipal principal, String sessionId) {
+        return get(principal.tenantId(), principal.userId(), principal,
+                sessionId);
+    }
+
+    private JsonNode get(String tenantId, String actorId,
+            SessionPrincipal principal, String sessionId) {
+        SessionRecord readable = principal == null
+                ? sessions.requireReadableSession(tenantId, actorId, sessionId)
+                : sessions.requireReadableSession(principal, sessionId);
+        if (readable.workspace() == null) {
+            return unsupported(sessionId);
+        }
         SessionRecord session;
         try {
-            session = store.requireMcpManagement(tenantId, actorId, sessionId, null);
+            session = store.requireMcpManagement(tenantId,
+                    actorId, sessionId, null);
         } catch (ManagedAgentException unsupported) {
             if (!"unsupported_feature".equals(unsupported.getCode())) {
                 throw unsupported;
@@ -52,12 +71,31 @@ public class ManagedMcpManagementService {
         if (!harness.supportsMcpManagement() || !harness.supportsLifecycle(session.toolProfile())) {
             return unsupported(sessionId);
         }
-        return invoke(() -> harness.mcpManagement(tenantId, sessionId));
+        return invoke(() -> harness.mcpManagement(tenantId,
+                sessionId));
     }
 
     public JsonNode submit(String tenantId, String actorId, String sessionId, String idempotencyKey,
             ManagedMcpManagementCommand command) {
-        sessions.requireReadableSession(tenantId, actorId, sessionId);
+        return submit(tenantId, actorId, null, sessionId, idempotencyKey,
+                command);
+    }
+
+    public JsonNode submit(SessionPrincipal principal, String sessionId,
+            String idempotencyKey, ManagedMcpManagementCommand command) {
+        return submit(principal.tenantId(), principal.userId(), principal,
+                sessionId, idempotencyKey, command);
+    }
+
+    private JsonNode submit(String tenantId, String actorId,
+            SessionPrincipal principal, String sessionId,
+            String idempotencyKey, ManagedMcpManagementCommand command) {
+        SessionRecord readable = principal == null
+                ? sessions.requireReadableSession(tenantId, actorId, sessionId)
+                : sessions.requireReadableSession(principal, sessionId);
+        if (readable.workspace() == null) {
+            throw unsupportedOperation();
+        }
         ManagedAgentService.validateIdempotencyKey(idempotencyKey);
         if (!ACTIONS.contains(command.action()) || !command.serverId().matches("[A-Za-z0-9._:-]{1,128}")
                 || command.expectedRevision() == null || command.expectedRevision() < 0
@@ -68,12 +106,23 @@ public class ManagedMcpManagementService {
         }
         Map<String, Object> request = new LinkedHashMap<>();
         try {
-            request.put("operationId", UUID.nameUUIDFromBytes(json.writeValueAsBytes(
-                    List.of("managed-mcp-command", tenantId, actorId, sessionId, idempotencyKey))).toString());
+            // A subjectless principal keeps the pre-ownership operation
+            // identity so recorded keys still replay; only an actual subject
+            // joins the identity (the commandKey rule).
+            java.util.List<String> identity = new java.util.ArrayList<>(java.util.List.of(
+                    "managed-mcp-command", tenantId, actorId));
+            if (principal != null && principal.actorPresent()) {
+                identity.add(principal.actorSubjectId());
+            }
+            identity.add(sessionId);
+            identity.add(idempotencyKey);
+            request.put("operationId", UUID.nameUUIDFromBytes(
+                    json.writeValueAsBytes(identity)).toString());
         } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
             throw new IllegalStateException("Cannot encode MCP command identity", error);
         }
-        SessionRecord session = store.requireMcpManagement(tenantId, actorId, sessionId, (String) request.get("operationId"));
+        SessionRecord session = store.requireMcpManagement(tenantId,
+                actorId, sessionId, (String) request.get("operationId"));
         if (!harness.supportsMcpManagement() || !harness.supportsLifecycle(session.toolProfile())) {
             throw new ManagedAgentException(409, "unsupported_feature", "MCP management is unavailable.");
         }
@@ -85,19 +134,38 @@ public class ManagedMcpManagementService {
             request.put("server", Map.of("serverId", command.server().serverId(),
                     "serverRevision", command.server().serverRevision(), "definitionDigest", command.server().definitionDigest()));
         }
-        return invoke(() -> harness.manageMcp(tenantId, sessionId, request));
+        return invoke(() -> harness.manageMcp(tenantId, sessionId,
+                request));
     }
 
     public JsonNode operation(String tenantId, String actorId, String sessionId, String operationId) {
-        sessions.requireReadableSession(tenantId, actorId, sessionId);
+        return operation(tenantId, actorId, null, sessionId, operationId);
+    }
+
+    public JsonNode operation(SessionPrincipal principal, String sessionId,
+            String operationId) {
+        return operation(principal.tenantId(), principal.userId(), principal,
+                sessionId, operationId);
+    }
+
+    private JsonNode operation(String tenantId, String actorId,
+            SessionPrincipal principal, String sessionId, String operationId) {
+        SessionRecord readable = principal == null
+                ? sessions.requireReadableSession(tenantId, actorId, sessionId)
+                : sessions.requireReadableSession(principal, sessionId);
+        if (readable.workspace() == null) {
+            throw unsupportedOperation();
+        }
         if (operationId == null || !operationId.matches("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")) {
             throw new ManagedAgentException(400, "invalid_request", "Invalid MCP operation identity.");
         }
-        SessionRecord session = store.requireMcpManagement(tenantId, actorId, sessionId, null);
+        SessionRecord session = store.requireMcpManagement(tenantId,
+                actorId, sessionId, null);
         if (!harness.supportsMcpManagement() || !harness.supportsLifecycle(session.toolProfile())) {
             throw new ManagedAgentException(409, "unsupported_feature", "MCP management is unavailable.");
         }
-        return invoke(() -> harness.mcpManagementOperation(tenantId, sessionId, operationId));
+        return invoke(() -> harness.mcpManagementOperation(tenantId,
+                sessionId, operationId));
     }
 
     private JsonNode unsupported(String sessionId) {
@@ -105,6 +173,11 @@ public class ManagedMcpManagementService {
         result.putArray("servers");
         result.putArray("availableServers");
         return result;
+    }
+
+    private static ManagedAgentException unsupportedOperation() {
+        return new ManagedAgentException(409, "unsupported_feature",
+                "MCP management is unavailable.");
     }
 
     private JsonNode invoke(Supplier<Map<String, Object>> request) {
