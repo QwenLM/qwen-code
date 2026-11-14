@@ -6,7 +6,7 @@
 
 ## 问题
 
-观测把检测到的转换写进每个 PR watch 文件的 `pending`，但没有任何东西去 drain：不解析接收者、不准入 prompt、不唤醒休眠会话。存储有写入者却没有读取者，因此关注某 PR 的会话在该 PR 的 head、CI、可合并性或状态变化时收不到 daemon 通知。GitHub channel 自身的绑定投递目前仍处理 watch 事件；本增量新增 daemon 侧 drain，供 PR B 切换过去。按主 §7，任何构建都绝不能同时跑两个 poller，因此在 PR B 移除 adapter watch 之前 drain 保持关闭。
+观测把检测到的转换写进每个 PR watch 文件的 `pending`，但没有任何东西去 drain：不解析接收者、不准入 prompt、不唤醒休眠会话。存储有写入者却没有读取者，因此关注某 PR 的会话在该 PR 的 head、CI、可合并性或状态变化时收不到 daemon 通知。GitHub channel 自身的绑定投递目前仍处理 watch 事件；本增量新增 daemon 侧 drain，供 PR B 切换过去。按主 §7，任何构建都绝不能同时跑两个 poller，因此在 PR B 移除适配器的状态检测之前 drain 保持关闭。
 
 ## 现状
 

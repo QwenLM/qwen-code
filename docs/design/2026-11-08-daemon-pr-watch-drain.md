@@ -6,7 +6,7 @@ Status: landed as #16656 (proposed 2026-11-08). This is the increment after [obs
 
 ## Problem
 
-The observation writes detected transitions into each PR watch file's `pending`, but nothing drains them: no recipient is resolved, no prompt is admitted, no dormant session is woken. The store has a writer but no reader, so a session that follows a PR receives no daemon notification when the PR's head, CI, mergeability or state changes. The GitHub channel's own bound delivery still handles watch events today; this increment adds the daemon-side drain that PR B will switch over to. Per master §7 no build may ever run both pollers, so the drain stays off until PR B removes the adapter watch.
+The observation writes detected transitions into each PR watch file's `pending`, but nothing drains them: no recipient is resolved, no prompt is admitted, no dormant session is woken. The store has a writer but no reader, so a session that follows a PR receives no daemon notification when the PR's head, CI, mergeability or state changes. The GitHub channel's own bound delivery still handles watch events today; this increment adds the daemon-side drain that PR B will switch over to. Per master §7 no build may ever run both pollers, so the drain stays off until PR B removes the adapter's state detection.
 
 ## Current state
 
