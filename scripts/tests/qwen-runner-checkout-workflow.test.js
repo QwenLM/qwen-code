@@ -89,6 +89,11 @@ const jobs = [
   // root-owned files.
   ['managed-agent-loop', 'managed-loop'],
   ['web-shell-managed-host', 'build'],
+  // tui-parity was already fleet-routed but only healed ownership: a
+  // leftover sparse index from qwen-triage's non-cone publisher checkout
+  // still broke its checkout (runs 43621213523 and 43621721648 lost the
+  // parity job with no .github/actions/self-hosted-node on disk).
+  ...['parity', 'noflicker'].map((name) => ['tui-parity', name]),
 ];
 
 it.each(jobs)(
