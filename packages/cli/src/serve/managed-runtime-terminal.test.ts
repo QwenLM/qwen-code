@@ -26,14 +26,13 @@ const WORKSPACE_CWD = process.cwd();
 // replay can outlast a flat 15s watchdog even though that pool's suite ceiling
 // is 60s. Keep the fast arm for idle hosts.
 const WAIT_TIMEOUT_MS = slowHostBudgetMs(15_000, 45_000);
-// The heaviest case chains MAX_MANAGED_SESSION_TERMINALS + 2 attaches (a
-// connect wait and an echo wait each) plus the refused connect. One extra
-// window keeps setup outside those waits from racing the ceiling. Size the
-// file ceiling from that chain, on the same host predicate, so vitest never
-// decides first.
+// The heaviest case chains MAX_MANAGED_SESSION_TERMINALS attaches for one
+// Session, one attach for another Session, and one replacement after release
+// (a connect wait and an echo wait each), plus the refused extra attach.
 const MAX_CHAIN_WINDOWS = (MAX_MANAGED_SESSION_TERMINALS + 2) * 2 + 1;
+// One extra window absorbs setup outside those waits, so vitest never decides
+// before a watchdog on a slow host.
 const TEST_TIMEOUT_MS = WAIT_TIMEOUT_MS * (MAX_CHAIN_WINDOWS + 1);
-vi.setConfig({ testTimeout: TEST_TIMEOUT_MS, hookTimeout: TEST_TIMEOUT_MS });
 
 const AUTH_HEADERS = {
   Authorization: 'Bearer test-token',
@@ -165,6 +164,12 @@ async function attachAndEcho(
 }
 
 describe('ManagedRuntimeTerminals', () => {
+  it('sizes the ceiling above the heaviest wait chain', () => {
+    // Deliberately independent of MAX_CHAIN_WINDOWS' own formula: a dropped
+    // window must red here instead of moving the ceiling with it.
+    expect(MAX_CHAIN_WINDOWS).toBe(MAX_MANAGED_SESSION_TERMINALS * 2 + 5);
+  });
+
   it('refuses upgrades without the worker bearer/lease identity', async () => {
     const port = await start();
     await expect(
@@ -250,26 +255,32 @@ describe('ManagedRuntimeTerminals', () => {
     expect(ws.readyState).toBe(WebSocket.OPEN);
   });
 
-  it('caps live terminals per Session and frees the slot on release', async () => {
-    const port = await start();
-    const attached: WebSocket[] = [];
-    for (let i = 0; i < MAX_MANAGED_SESSION_TERMINALS; i += 1) {
-      attached.push(await attachAndEcho(port, `cap-${i}`, 'session-a'));
-    }
-    await expect(connect(port, 'cap-over', 'session-a')).rejects.toMatchObject({
-      status: 429,
-    });
-    // Another Session keeps its own budget within the worker-wide limit.
-    const other = await attachAndEcho(port, 'cap-other', 'session-b');
-    expect(other.readyState).toBe(WebSocket.OPEN);
-    // Releasing one terminal frees the Session's slot.
-    attached[0].send('\x00{"type":"release"}');
-    await new Promise<void>((resolve) =>
-      attached[0].once('close', () => resolve()),
-    );
-    const replacement = await attachAndEcho(port, 'cap-new', 'session-a');
-    expect(replacement.readyState).toBe(WebSocket.OPEN);
-  });
+  it(
+    'caps live terminals per Session and frees the slot on release',
+    { timeout: TEST_TIMEOUT_MS },
+    async () => {
+      const port = await start();
+      const attached: WebSocket[] = [];
+      for (let i = 0; i < MAX_MANAGED_SESSION_TERMINALS; i += 1) {
+        attached.push(await attachAndEcho(port, `cap-${i}`, 'session-a'));
+      }
+      await expect(
+        connect(port, 'cap-over', 'session-a'),
+      ).rejects.toMatchObject({
+        status: 429,
+      });
+      // Another Session keeps its own budget within the worker-wide limit.
+      const other = await attachAndEcho(port, 'cap-other', 'session-b');
+      expect(other.readyState).toBe(WebSocket.OPEN);
+      // Releasing one terminal frees the Session's slot.
+      attached[0].send('\x00{"type":"release"}');
+      await new Promise<void>((resolve) =>
+        attached[0].once('close', () => resolve()),
+      );
+      const replacement = await attachAndEcho(port, 'cap-new', 'session-a');
+      expect(replacement.readyState).toBe(WebSocket.OPEN);
+    },
+  );
 
   it("refuses attaching to another Session's terminal", async () => {
     const port = await start();
@@ -323,18 +334,12 @@ describe('ManagedRuntimeTerminals', () => {
   });
 
   it('replays scrollback on reconnect of the same Session', async () => {
-    // Pins the derivation: the ceiling must cover every window in the
-    // heaviest chain plus headroom, or vitest can kill a slow healthy run
-    // before any watchdog reports.
-    expect(TEST_TIMEOUT_MS).toBeGreaterThan(
-      WAIT_TIMEOUT_MS * MAX_CHAIN_WINDOWS,
-    );
     const port = await start();
     const first = await attachAndEcho(port, 'replay', 'session-a');
     first.terminate();
     // The snapshot replay carries the earlier output without new input. The
-    // server writes it in the same turn as the upgrade response, so the
-    // replay listener must exist before 'open' resolves.
+    // server writes it in the same turn as the upgrade response, so the replay
+    // listener must exist before 'open' resolves.
     const { ws: second, opened } = open(port, 'replay', 'session-a');
     const replayed = waitForOutput(second, 'mwt-echo-ok');
     await Promise.all([opened, replayed]);
