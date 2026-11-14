@@ -13750,21 +13750,27 @@ export function App({
   // place; only the local branch metadata changes.
   const handleCreateWorktreeBranch = useCallback(
     async (name: string) => {
+      const sessionIdAtCall = connection.sessionId;
       const result = await sessionActions.createWorktreeBranch(name);
+      // The user may have switched sessions while the request was in
+      // flight; never apply the response to a different session's state.
+      if (connectionRef.current.sessionId !== sessionIdAtCall) return;
       setSessionWorktree((current) =>
         current ? { ...current, branch: result.worktree.branch } : current,
       );
     },
-    [sessionActions],
+    [sessionActions, connection.sessionId],
   );
   // "Hand off": the daemon moves the session between checkouts; the local
   // worktree association follows the response (null => back on local).
   const handleHandoff = useCallback(
     async (to: 'local' | 'worktree') => {
+      const sessionIdAtCall = connection.sessionId;
       const result = await sessionActions.handoffWorktree(to);
+      if (connectionRef.current.sessionId !== sessionIdAtCall) return;
       setSessionWorktree(result.worktree ?? undefined);
     },
-    [sessionActions],
+    [sessionActions, connection.sessionId],
   );
   // Every modal the shell itself tracks, plus host-registered interaction
   // blocks. View navigation hotkeys gate on this rather than dialogOpen,

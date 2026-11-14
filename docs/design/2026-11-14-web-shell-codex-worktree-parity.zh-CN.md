@@ -161,7 +161,8 @@ branch here」就地填充真实分支名并更新 sidecar 与在线元数据。
 （`worktree_already_branched`）或名字已存在（`branch_already_exists`）时
 拒绝，经 `GitWorktreeService.createWorktreeBranch` 在 worktree 内执行
 `git switch -c <name>`，在 worktree 键控所有权锁下更新 sidecar 与在线
-bridge 元数据（marker 只存所有者 id，无需变更）。会话解析对持久化 id 经
+bridge 元数据。锁内拒绝 superseded sidecar（reset 已把检出移交给替代会话）
+并校验 marker 仍命名本会话；marker 本身无需变更，因为所有者不变。会话解析对持久化 id 经
 transcript 存储归一化，对尚无 transcript 的新建会话回退到 bridge 在线
 summary（用户可以在首条 prompt 前就建分支）。能力标志：
 `session_worktree_branch_v1`。UI 入口是分支选择器弹层（worktree chip 的
@@ -175,7 +176,8 @@ worktree 会话（`gitSessionId` + 拉取到的 `detached` 状态）且 daemon �
 `{ to: 'local' | 'worktree', name?: string }`，保持同一会话 id（Codex 移动
 的是 chat，不是替代会话）。迁移用 bridge 的 `changeSessionCwd` 作用于在线
 会话——它排在在途 prompt 之后、prompt 活跃时拒绝——全程持 worktree 键控
-所有权锁。能力标志：`session_worktree_handoff_v1`。
+所有权锁，并施加与 D5 相同的 superseded-sidecar 与 marker 所有权守卫
+（作用于被离开的 worktree）。能力标志：`session_worktree_handoff_v1`。
 
 - **Worktree → Local**（`to: 'local'`）：本地检出（`sidecar.originalCwd`）
   不干净时拒绝（`local_checkout_dirty`）。先携带工作：命名 worktree 分支在

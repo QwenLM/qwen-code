@@ -293,4 +293,30 @@ describe('POST /session/:id/worktree-handoff', () => {
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('invalid_handoff_target');
   });
+
+  it('refuses handoff to local for a superseded sidecar', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    await fixture.createDetachedWorktree();
+    await writeWorktreeSession(
+      fixture.sessionService.getWorktreeSessionPath(fixture.sessionId),
+      {
+        slug: fixture.slug,
+        worktreePath: fixture.worktreeDir,
+        worktreeBranch: '',
+        originalCwd: fixture.workspaceDir,
+        workspaceCwd: fixture.workspaceDir,
+        originalBranch: 'main',
+        originalHeadCommit: git(fixture.workspaceDir, 'rev-parse', 'HEAD'),
+        supersededBy: randomUUID(),
+      },
+    );
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'local' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('worktree_reset_invalid_state');
+  });
 });

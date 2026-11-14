@@ -115,6 +115,9 @@ function makeFixture() {
         detached: true,
       });
       if (!result.success) throw new Error(result.error);
+      // Production always writes the marker at creation; the route's
+      // ownership guard requires it.
+      await createWorktreeSessionMarkerExclusive(worktreeDir, sessionId);
     },
     async writeSidecar(worktreeBranch: string): Promise<void> {
       await writeWorktreeSession(
@@ -146,9 +149,6 @@ function makeFixture() {
       mkdirSync(path.dirname(transcriptPath), { recursive: true });
       writeFileSync(transcriptPath, `${JSON.stringify(record)}\n`, 'utf8');
     },
-    createMarker(): Promise<unknown> {
-      return createWorktreeSessionMarkerExclusive(worktreeDir, sessionId);
-    },
     readSidecar() {
       return readWorktreeSessionStrict(
         sessionService.getWorktreeSessionPath(sessionId),
@@ -163,7 +163,6 @@ describe('POST /session/:id/worktree-branch', () => {
     await fixture.createDetachedWorktree();
     await fixture.writeSidecar('');
     fixture.writeTranscript();
-    await fixture.createMarker();
 
     const res = await request(fixture.app)
       .post(`/session/${fixture.sessionId}/worktree-branch`)
@@ -271,5 +270,51 @@ describe('POST /session/:id/worktree-branch', () => {
       .send({ name: 'feat/x' });
 
     expect(res.status).toBe(404);
+  });
+
+  it('refuses a superseded sidecar (checkout moved to a replacement)', async () => {
+    const fixture = makeFixture();
+    await fixture.createDetachedWorktree();
+    await writeWorktreeSession(
+      fixture.sessionService.getWorktreeSessionPath(fixture.sessionId),
+      {
+        slug: fixture.slug,
+        worktreePath: fixture.worktreeDir,
+        worktreeBranch: '',
+        originalCwd: fixture.workspaceDir,
+        workspaceCwd: fixture.workspaceDir,
+        originalBranch: 'main',
+        originalHeadCommit: git(fixture.workspaceDir, 'rev-parse', 'HEAD'),
+        supersededBy: randomUUID(),
+      },
+    );
+    fixture.writeTranscript();
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-branch`)
+      .send({ name: 'feat/x' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('worktree_reset_invalid_state');
+  });
+
+  it('refuses when the marker names another session', async () => {
+    const fixture = makeFixture();
+    await fixture.createDetachedWorktree();
+    await fixture.writeSidecar('');
+    fixture.writeTranscript();
+    // Flip the marker to a different owner (reset-crash residue shape).
+    rmSync(path.join(fixture.worktreeDir, '.qwen-session'), { force: true });
+    await createWorktreeSessionMarkerExclusive(
+      fixture.worktreeDir,
+      randomUUID(),
+    );
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-branch`)
+      .send({ name: 'feat/x' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('worktree_reset_invalid_state');
   });
 });

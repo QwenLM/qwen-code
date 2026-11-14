@@ -4898,6 +4898,19 @@ export function registerSessionRoutes(
               });
               return;
             }
+            // A superseded sidecar means a reset moved the checkout to a
+            // replacement session; the marker must still name this session.
+            if (sidecar.supersededBy !== undefined) {
+              throw new WorktreeResetInvalidStateError(storageSessionId);
+            }
+            const branchMarker =
+              await readWorktreeSessionMarkerStrict(realTarget);
+            if (
+              branchMarker.state !== 'valid' ||
+              branchMarker.sessionId !== storageSessionId
+            ) {
+              throw new WorktreeResetInvalidStateError(storageSessionId);
+            }
             const wtService = new GitWorktreeService(workspaceCwd);
             if (await wtService.localBranchExists(name)) {
               res.status(409).json({
@@ -5044,6 +5057,19 @@ export function registerSessionRoutes(
                 throw new WorktreeResetInvalidStateError(storageSessionId);
               }
               const sidecar = lockedRead.session;
+              // A superseded sidecar means a reset moved the checkout to a
+              // replacement session; the marker must still name this session.
+              if (sidecar.supersededBy !== undefined) {
+                throw new WorktreeResetInvalidStateError(storageSessionId);
+              }
+              const handoffMarker =
+                await readWorktreeSessionMarkerStrict(realTarget);
+              if (
+                handoffMarker.state !== 'valid' ||
+                handoffMarker.sessionId !== storageSessionId
+              ) {
+                throw new WorktreeResetInvalidStateError(storageSessionId);
+              }
               let localCwd: string;
               try {
                 localCwd = fs.realpathSync(sidecar.originalCwd);

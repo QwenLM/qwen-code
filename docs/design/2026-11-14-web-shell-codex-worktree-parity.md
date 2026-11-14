@@ -184,8 +184,10 @@ name with the same predicate as branch sessions (shared
 (`worktree_already_branched`) or the name exists (`branch_already_exists`),
 runs `git switch -c <name>` inside the worktree via
 `GitWorktreeService.createWorktreeBranch`, and updates the sidecar and live
-bridge metadata under the worktree-keyed ownership lock (the marker stores
-only the owner id, so it needs no change). Session resolution normalizes
+bridge metadata under the worktree-keyed ownership lock. Under the lock it
+refuses a superseded sidecar (a reset moved the checkout to a replacement)
+and verifies the marker still names this session; the marker itself needs
+no change because the owner stays the same. Session resolution normalizes
 persisted ids via the transcript store and falls back to the live bridge
 summary for freshly created sessions that have no transcript yet (the user
 can branch before the first prompt). Capability:
@@ -202,7 +204,8 @@ One route, `POST /session/:id/worktree-handoff` with
 (Codex moves the chat, not a replacement). Relocation uses the bridge's
 `changeSessionCwd` on the live session — it queues behind in-flight prompts
 and refuses while a prompt is active — under the worktree-keyed ownership
-lock. Capability: `session_worktree_handoff_v1`.
+lock, with the same superseded-sidecar and marker-ownership guards as D5
+(applied to the worktree being left). Capability: `session_worktree_handoff_v1`.
 
 - **Worktree → Local** (`to: 'local'`): refuse unless the local checkout
   (`sidecar.originalCwd`) is clean (`local_checkout_dirty`). Carry the work

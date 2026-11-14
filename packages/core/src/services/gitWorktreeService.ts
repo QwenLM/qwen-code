@@ -1421,7 +1421,7 @@ export class GitWorktreeService {
     },
   ): Promise<void> {
     const { simpleGit } = await loadSimpleGit();
-    const wtGit = simpleGit(worktreePath);
+    const wtGit = simpleGit(worktreePath).env(gitEnv());
     if (dirtyState.stashCommit) {
       try {
         await wtGit.raw(['stash', 'apply', dirtyState.stashCommit]);
@@ -1569,7 +1569,7 @@ export class GitWorktreeService {
         //    (committed + dirty + untracked). This allows us to later diff
         //    only the agent's changes, excluding the pre-existing dirty state.
         const { simpleGit } = await loadSimpleGit();
-        const wtGit = simpleGit(worktree.path);
+        const wtGit = simpleGit(worktree.path).env(gitEnv());
         try {
           await wtGit.add(['--all']);
           await wtGit.commit(BASELINE_COMMIT_MESSAGE, {
