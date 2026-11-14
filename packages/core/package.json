@@ -1,7 +1,7 @@
 {
   "name": "@qwen-code/qwen-code-core",
   "private": true,
-  "version": "0.27.0",
+  "version": "0.27.2",
   "description": "Qwen Code Core",
   "repository": {
     "type": "git",
@@ -113,7 +113,7 @@
     "@jitl/quickjs-singlefile-mjs-release-sync": "0.32.0",
     "@modelcontextprotocol/client": "2.4.0",
     "@modelcontextprotocol/core": "2.4.0",
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/api-logs": "^0.221.0",
     "@opentelemetry/core": "^2.0.1",
@@ -143,10 +143,10 @@
     "diff": "^8.0.3",
     "dotenv": "^17.1.0",
     "fast-levenshtein": "^2.0.6",
-    "fast-uri": "^3.0.6",
+    "fast-uri": "^3.1.9",
     "fdir": "^6.4.6",
     "fzf": "^0.5.2",
-    "glob": "^10.5.0",
+    "glob": "^14.0.6",
     "google-auth-library": "^10.5.0",
     "https-proxy-agent": "^7.0.6",
     "iconv-lite": "^0.6.3",
@@ -154,6 +154,7 @@
     "jsonrepair": "^3.13.0",
     "marked": "^15.0.12",
     "mime": "4.0.7",
+    "minimatch": "^11.0.8",
     "mnemonist": "^0.40.3",
     "openai": "5.11.0",
     "picomatch": "^4.0.1",
@@ -174,7 +175,7 @@
     "ws": "^8.18.0",
     "yaml": "^2.8.1",
     "yauzl": "^2.10.0",
-    "zod": "^3.25.76"
+    "zod": "^4.6.6"
   },
   "optionalDependencies": {
     "@lydell/node-pty": "1.2.0-beta.10",

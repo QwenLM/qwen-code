@@ -93,12 +93,12 @@ import {
   getApiHistoryPromptId,
 } from '@qwen-code/qwen-code-core';
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
-import {
-  runModelRound,
-  runToolBatch,
-  type AgentLoopRound,
-  type AgentLoopStopReason,
+import type {
+  AgentLoopRound,
+  AgentLoopStopReason,
 } from '@qwen-code/qwen-code-core/core/agent-loop.js';
+import { findPlanModeEntryBatchBoundaryIndex } from '@qwen-code/qwen-code-core/core/plan-mode-entry-policy.js';
+import { startSharedLoopRound } from './shared-loop-round.js';
 import type { InteractiveToolCall } from '../../services/interactive-mod-tool-scheduler.js';
 import { createInkToolExecutor } from './ink-tool-executor.js';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
@@ -509,11 +509,15 @@ interface SharedToolBatchHandle {
  */
 interface SharedToolBatch {
   calls: ToolCallRequestInfo[];
-  signal: AbortSignal;
+  batchId: string;
   modelOverride: string | undefined;
   promptId: string | undefined;
   /** Provider call fingerprints: history's, then this turn's. */
   handled: Map<string, string>;
+  responded: Set<string>;
+  releaseReplayReservations: () => void;
+  /** The round's loop call, whose batch waits for this one. */
+  loop: ReturnType<typeof startSharedLoopRound>;
 }
 
 /** A shared tool batch's results, for `handleCompletedTools`. */
@@ -577,27 +581,17 @@ function backgroundSlotsSpent(config: Config): boolean {
 }
 
 /**
- * The settled calls of a shared batch that it counted: the Ink executor
- * leaves cancelled calls to the TUI, which counts them where the current
- * path does.
- */
-function countedCallIds(calls: readonly InteractiveToolCall[]): Set<string> {
-  return new Set(
-    calls
-      .filter(({ status }) => status !== 'cancelled')
-      .map(({ request }) => request.callId),
-  );
-}
-
-/**
- * A model round on the shared agent loop (`experimental.unifiedAgentLoop`):
- * `runModelRound` sends it, collects its tool calls and turns the client's
- * terminal events into a stop reason.
+ * A round on the shared agent loop (`experimental.unifiedAgentLoop`): the
+ * round and its tool batch run in one `runAgentLoop` call, which collects
+ * the round's tool calls and turns the client's terminal events into a stop
+ * reason. `loop` is the call once the processor started it; the caller
+ * closes it, so a processor that leaves without the batch skips it.
  */
 interface SharedModelRound {
   client: LlmClient;
   round: AgentLoopRound;
   signal: AbortSignal;
+  loop?: ReturnType<typeof startSharedLoopRound>;
 }
 
 /** Ends a shared model round from inside its event callback. */
@@ -820,6 +814,7 @@ export const useLlmStream = (
     existingInvocationItemId?: number,
     invocationPromptId?: string,
     isCurrentSubmission?: () => boolean,
+    submissionSignal?: AbortSignal,
   ) => Promise<SlashCommandProcessorResult | false>,
   shellModeActive: boolean,
   getPreferredEditor: () => EditorType | undefined,
@@ -861,6 +856,7 @@ export const useLlmStream = (
     text: string,
     pasteExpansions?: ReadonlyMap<string, string>,
   ) => void,
+  isCommandCancellationBlocked?: () => boolean,
 ) => {
   const [workflowKeywordActive, setWorkflowKeywordActive] = useState(false);
   const workflowConfigRef = useRef(config);
@@ -1401,6 +1397,7 @@ export const useLlmStream = (
   const duplicateProviderToolCallResponseIdsRef = useRef<Set<string>>(
     new Set(),
   );
+  const pendingSharedReplayIdsRef = useRef(new Set<string>());
   const pendingDuplicateToolResponsesRef = useRef<
     PendingDuplicateToolResponses[]
   >([]);
@@ -1488,6 +1485,7 @@ export const useLlmStream = (
       for (const request of Array.isArray(requests) ? requests : [requests]) {
         toolBatchIdByCallIdRef.current.set(request.callId, batchId);
       }
+      return batchId;
     },
     [],
   );
@@ -1752,6 +1750,8 @@ export const useLlmStream = (
     // notice, the loop stop or the composer restore.
     const quiet = quietCancelRef.current;
     quietCancelRef.current = false;
+    // Keep the submission lease until the command's state change settles.
+    if (isCommandCancellationBlocked?.()) return false;
     setWorkflowKeywordActive(false);
     if (turnCancelledRef.current) {
       for (const controller of detachedToolContinuationAbortControllersRef.current) {
@@ -1762,11 +1762,15 @@ export const useLlmStream = (
     }
     // A Mod can end its turn before React renders the turn's admission:
     // the turn and the stream it opened already count.
+    const hasIdleSubmission =
+      streamingState === StreamingState.Idle &&
+      isSubmittingQueryRef.current &&
+      abortControllerRef.current?.signal.aborted === false;
     if (
       quiet
         ? streamingState === StreamingState.Idle &&
           !(modTurnRef.current && activeModelStreamsRef.current > 0)
-        : streamingState !== StreamingState.Responding
+        : streamingState !== StreamingState.Responding && !hasIdleSubmission
     ) {
       return false;
     }
@@ -1910,6 +1914,7 @@ export const useLlmStream = (
     return true;
   }, [
     streamingState,
+    isCommandCancellationBlocked,
     addItem,
     commitItemInOrder,
     commitPendingThought,
@@ -2216,6 +2221,7 @@ export const useLlmStream = (
               undefined,
               submitType === SendMessageType.UserQuery ? prompt_id : undefined,
               isCurrentSubmission,
+              abortSignal,
             )
           : false;
 
@@ -3226,7 +3232,7 @@ export const useLlmStream = (
         0,
       );
       const sharedRound = 'round' in source;
-      // On the shared round, `runModelRound` collects the calls and drops
+      // On the shared round, the loop collects the calls and drops
       // those of an attempt a retry or fallback replaced; the processor's own
       // resets of `toolCallRequests` below matter only on the current path.
       let toolCallRequests: ToolCallRequestInfo[] = [];
@@ -3752,20 +3758,32 @@ export const useLlmStream = (
       dualOutput?.startAssistantMessage();
       try {
         if (sharedRound) {
+          const useEventBus =
+            config.isEventBusAgentLoopEnabled?.('ink') === true;
           debugLogger.debug(
             `[processLlmStreamEvents] model round on the shared agent loop (prompt ${source.round.promptId})`,
           );
-          const { calls, stop } = await runModelRound(
-            source.client,
-            source.round,
-            source.signal,
-            {
-              onModelEvent: (event) => {
-                const ended = handleStreamEvent(event);
-                if (ended) throw new StreamProcessingEnded(ended);
-              },
+          source.loop = startSharedLoopRound(source.client, source.round, {
+            config,
+            signal: source.signal,
+            // The batch's tools run under the turn's signal, as the
+            // scheduler's do.
+            toolSignal: signal,
+            // The TUI records only the results it sends, in its own session.
+            deferRecording: true,
+            useEventBus,
+            onModelEvent: (event) => {
+              const ended = handleStreamEvent(event);
+              if (ended) throw new StreamProcessingEnded(ended);
             },
-          );
+          });
+          const { calls, stop } = await source.loop.model;
+          if (stop === 'cancelled') {
+            const ended = handleStreamEvent({
+              type: ServerLlmEventType.UserCancelled,
+            });
+            if (ended) return ended;
+          }
           toolCallRequests = calls;
           roundStop = stop;
         } else {
@@ -3833,11 +3851,15 @@ export const useLlmStream = (
                 ),
               )
             : false;
+        const pendingReplayIds = pendingSharedReplayIdsRef.current;
+        const responded = duplicateProviderToolCallResponseIdsRef.current;
         const repeatedDuplicateRequest = findRepeatedDuplicateProviderToolCall(
           toolCallRequests,
           (request) => request.providerCallId,
           isReplayOfHandledRequest,
-          duplicateProviderToolCallResponseIdsRef.current,
+          pendingReplayIds.size > 0
+            ? new Set([...responded, ...pendingReplayIds])
+            : responded,
         );
         if (repeatedDuplicateRequest?.providerCallId) {
           debugLogger.debug(
@@ -3892,15 +3914,28 @@ export const useLlmStream = (
               getCachedToolCallFingerprint(request, request.name, request.args),
             );
           }
-          registerToolBatch(executableOnSharedLoop);
+          const batchId = registerToolBatch(executableOnSharedLoop);
+          // Other streams must see these replays before the shared loop
+          // takes the handoff and marks their responses as sent.
+          const replayIds = toolCallRequests.flatMap((request) =>
+            request.providerCallId && isReplayOfHandledRequest(request)
+              ? [request.providerCallId]
+              : [],
+          );
+          for (const id of replayIds) pendingReplayIds.add(id);
           const turn: SharedToolBatchTurn = { left: false };
           const done = runSharedToolBatchRef.current(
             {
               calls: toolCallRequests,
-              signal,
+              batchId,
               modelOverride: modelOverrideRef.current,
               promptId: toolCallRequests[0]?.prompt_id,
               handled: handledToolCallFingerprints,
+              responded,
+              releaseReplayReservations: () => {
+                for (const id of replayIds) pendingReplayIds.delete(id);
+              },
+              loop: (source as SharedModelRound).loop!,
             },
             turn,
           );
@@ -4030,6 +4065,7 @@ export const useLlmStream = (
       registerToolBatch,
       scheduleToolCalls,
       llmClient,
+      config,
       handleChatCompressionEvent,
       handleFinishedEvent,
       handleMaxSessionTurnsEvent,
@@ -4475,7 +4511,8 @@ export const useLlmStream = (
         canUndoLastLoggedUserMessageRef.current = false;
         turnSawContentEventRef.current = false;
         handledToolCallFingerprintsRef.current.clear();
-        duplicateProviderToolCallResponseIdsRef.current.clear();
+        duplicateProviderToolCallResponseIdsRef.current = new Set();
+        pendingSharedReplayIdsRef.current = new Set();
         pendingDuplicateToolResponsesRef.current = [];
         immediateDuplicateToolResponsesRef.current = null;
         if (
@@ -5050,34 +5087,45 @@ export const useLlmStream = (
                   }
                 : {}),
           };
-          const source = config.isUnifiedAgentLoopEnabled?.()
-            ? {
-                client: llmClient,
-                signal: providerSignal,
-                round: {
-                  parts: finalQueryToSend,
-                  promptId: prompt_id!,
-                  options: roundOptions,
-                },
-              }
-            : llmClient.sendMessageStream(
-                finalQueryToSend,
-                providerSignal,
-                prompt_id!,
-                roundOptions,
-              );
+          const sharedSource: SharedModelRound | undefined =
+            config.isUnifiedAgentLoopEnabled?.('ink')
+              ? {
+                  client: llmClient,
+                  signal: providerSignal,
+                  round: {
+                    parts: finalQueryToSend,
+                    promptId: prompt_id!,
+                    options: roundOptions,
+                  },
+                }
+              : undefined;
+          const source =
+            sharedSource ??
+            llmClient.sendMessageStream(
+              finalQueryToSend,
+              providerSignal,
+              prompt_id!,
+              roundOptions,
+            );
           metadata?.onRequestStarted?.();
 
-          const processingResult = await processLlmStreamEvents(
-            source,
-            userMessageTimestamp,
-            processingSignal,
-            submitType,
-            turnAdmission,
-            prompt_id,
-            !allowConcurrentBtwDuringResponse,
-            toolContinuationOwner,
-          );
+          let processingResult: StreamProcessingResult;
+          try {
+            processingResult = await processLlmStreamEvents(
+              source,
+              userMessageTimestamp,
+              processingSignal,
+              submitType,
+              turnAdmission,
+              prompt_id,
+              !allowConcurrentBtwDuringResponse,
+              toolContinuationOwner,
+            );
+          } finally {
+            // The processor handed the batch its scheduler, or left without
+            // it: either way the loop call of a shared round ends.
+            void sharedSource?.loop?.close();
+          }
           if (
             !goalBinding &&
             turnAdmission &&
@@ -7563,6 +7611,9 @@ export const useLlmStream = (
       let owner: SharedToolBatchResults['owner'] | undefined;
       let committedToolGroup: { batchId: string | undefined } | undefined;
       let nextRound: ToolResultRound | undefined;
+      const ranCallIds = new Set<string>();
+      let planModeEntryCallId: string | undefined;
+      let batchEnded = false;
       let finishBatch!: () => void;
       const batchFinished = new Promise<void>((resolve) => {
         finishBatch = resolve;
@@ -7578,7 +7629,20 @@ export const useLlmStream = (
         scheduleToolCalls,
         batch.modelOverride,
         (calls) => {
+          if (batchEnded) return;
           settled = calls;
+          // Plan-mode entry skips its siblings. The fallback must also leave
+          // them uncounted if the loop ends before delivering their results.
+          if (planModeEntryCallId !== undefined) {
+            for (const { request, status } of calls) {
+              if (
+                status !== 'cancelled' &&
+                request.callId !== planModeEntryCallId
+              ) {
+                ranCallIds.add(request.callId);
+              }
+            }
+          }
           // As the scheduler's completion does: keep the turn off Idle
           // while the batch is finalized.
           setSubmissionInFlight(true);
@@ -7618,33 +7682,42 @@ export const useLlmStream = (
         schedulerHold,
       );
       const backgroundLaunchCallIds = new Set<string>();
-      // Replay answers the batch marks as sent but never sends, when it
-      // throws, must not count as answered.
-      const providerKeys = batch.calls.flatMap(({ providerCallId, callId }) =>
-        (providerCallId ?? callId) ? [providerCallId ?? callId] : [],
-      );
+      // Failed or abandoned batches roll back only their own replay answers.
+      const addedReplayIds = new Set<string>();
       const respondedBefore = new Set(
-        providerKeys.filter((key) =>
-          duplicateProviderToolCallResponseIdsRef.current.has(key),
-        ),
+        batch.calls
+          .map(({ providerCallId, callId }) => providerCallId ?? callId)
+          .filter((id) => batch.responded.has(id)),
       );
+      const clearUnsentReplays = () => {
+        for (const id of addedReplayIds) batch.responded.delete(id);
+      };
       let committed = false;
       try {
-        const result = await runToolBatch(batch.calls, {
-          config,
-          client: llmClient,
-          signal: batch.signal,
-          duplicates: {
+        // The batch of the round's loop call runs on this scheduler.
+        const result = await batch.loop
+          .runBatch({
+            executor: {
+              run: (requests, signal, hooks) => {
+                const boundary = findPlanModeEntryBatchBoundaryIndex(
+                  requests.map(({ name }) => name),
+                );
+                if (boundary !== undefined) {
+                  planModeEntryCallId = requests[boundary].callId;
+                }
+                return executor.run(requests, signal, hooks);
+              },
+            },
             handled: batch.handled,
-            responded: duplicateProviderToolCallResponseIdsRef.current,
-          },
-          executor,
-          // Esc keeps the results, which the TUI pairs into history.
-          keepCancelledResults: true,
-          // The TUI records only the results it sends, in its own session.
-          deferRecording: true,
-          host: {
-            onToolResult: ({ request, response, origin }) => {
+            responded: batch.responded,
+            onToolResult: ({ request, response, origin, status }) => {
+              if (origin === 'executed' && status !== 'cancelled') {
+                ranCallIds.add(request.callId);
+              }
+              if (origin === 'replayed' || origin === 'duplicate') {
+                const id = request.providerCallId ?? request.callId;
+                if (id && !respondedBefore.has(id)) addedReplayIds.add(id);
+              }
               if (origin !== 'executed') {
                 dualOutput?.emitToolResult(request, response);
               }
@@ -7663,8 +7736,64 @@ export const useLlmStream = (
                   backgroundSlotsSpent(config))
               );
             },
-          },
-        });
+          })
+          .finally(batch.releaseReplayReservations);
+        if (result.stop === 'cancelled' && !result.responses) {
+          clearUnsentReplays();
+        }
+        if (result.stop === 'cancelled' && settled.length === 0) {
+          let continuationOwner: ToolContinuationOwner | undefined;
+          let goalBinding: GoalTurnBinding | undefined;
+          for (const { callId, goalContext } of batch.calls) {
+            if (getToolBatchId(callId) !== batch.batchId) continue;
+            continuationOwner ??=
+              continuationOwnersByToolCallIdRef.current.get(callId);
+            if (goalContext && !goalBinding) {
+              const binding = goalTurnBindingsRef.current.get(
+                goalContext.turnId,
+              );
+              if (binding && sameGoalPermit(binding.permit, goalContext)) {
+                goalBinding = binding;
+              }
+            }
+            toolBatchIdByCallIdRef.current.delete(callId);
+            interactionOwnersByToolCallIdRef.current.delete(callId);
+            continuationOwnersByToolCallIdRef.current.delete(callId);
+          }
+          // From here on, the scheduler callback belongs to the ended batch.
+          batchEnded = true;
+          const stillOwned = [
+            ...continuationOwnersByToolCallIdRef.current.values(),
+          ];
+          const detached = continuationOwner?.detachedAbortController;
+          if (
+            detached &&
+            !stillOwned.some(
+              (owner) => owner.detachedAbortController === detached,
+            )
+          ) {
+            detachedToolContinuationAbortControllersRef.current.delete(
+              detached,
+            );
+          }
+          const foreground = continuationOwner?.foregroundAbortController;
+          if (
+            foreground &&
+            abortControllerRef.current === foreground &&
+            !stillOwned.some(
+              (owner) => owner.foregroundAbortController === foreground,
+            )
+          ) {
+            abortControllerRef.current = null;
+          }
+          if (goalBinding) {
+            await failClosedGoalTurn(
+              goalBinding,
+              'Goal tool continuation was cancelled',
+              { userCancelled: true },
+            );
+          }
+        }
         if (settled.length === 0 || !owner) return undefined;
         committed = true;
         // Through the ref: the batch may have waited on approvals or long
@@ -7675,7 +7804,7 @@ export const useLlmStream = (
           settled,
           {
             responses: result.responses ?? [],
-            ranCallIds: countedCallIds(settled),
+            ranCallIds,
             promptId: batch.promptId,
             owner,
             backgroundLaunchCallIds,
@@ -7687,21 +7816,15 @@ export const useLlmStream = (
         debugLogger.error('Shared tool batch failed:', error);
         // The scheduler already settled the calls: complete them without
         // the batch's results, as the current path would, so the tool group
-        // is kept and the turn goes on. The batch counted them already.
-        if (!committed) {
-          for (const key of providerKeys) {
-            if (!respondedBefore.has(key)) {
-              duplicateProviderToolCallResponseIdsRef.current.delete(key);
-            }
-          }
-        }
+        // is kept and the turn goes on.
+        if (!committed) clearUnsentReplays();
         if (!committed && settled.length > 0 && owner) {
           try {
             nextRound = await commitCompletedToolBatchRef.current(
               settled,
               {
                 responses: [],
-                ranCallIds: countedCallIds(settled),
+                ranCallIds,
                 promptId: batch.promptId,
                 owner,
                 backgroundLaunchCallIds: new Set(),
@@ -7717,6 +7840,7 @@ export const useLlmStream = (
           }
         }
       } finally {
+        batchEnded = true;
         // A next round keeps the scheduler and the TUI's activity until it
         // is sent.
         if (!nextRound) {
@@ -7753,11 +7877,11 @@ export const useLlmStream = (
       setSubmissionInFlight,
       retainSubmissionActivity,
       config,
-      llmClient,
       dualOutput,
       getToolBatchId,
       addCompletedToolGroup,
       waitForModelStreamsIdle,
+      failClosedGoalTurn,
     ],
   );
 

@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.runtimebroker.persistence;
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONReader;
 import com.alibaba.fastjson2.JSONWriter;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcJournalPacks;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAdmission;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -377,7 +378,7 @@ public final class JdbcToolExecutionRepository
                     }
                     if (continuation != null) {
                         JdbcCsiExecutionAdmission.requireDispatch(
-                                connection, continuation.original(), current);
+                                connection, continuation.original(), current, journalPacks());
                     }
                     ToolExecutionRecord claimed =
                             current.withDispatch(
@@ -557,49 +558,30 @@ public final class JdbcToolExecutionRepository
     @Override
     public ToolExecutionRecord resolveUnknown(ToolExecutionRecord expected,
             Map<String, Object> resolutionResult, Instant resolutionTime) {
-        return resolve(expected, resolutionResult, resolutionTime, true);
+        return JdbcToolExecutionObservations.resolve(dataSource, expected, resolutionResult, resolutionTime, true);
+    }
+
+    @Override
+    public ToolExecutionRecord attachMeasurements(
+            ToolExecutionRecord expected, Map<String, Object> metadata) {
+        return JdbcToolExecutionObservations.attachMeasurements(dataSource, expected, metadata);
     }
 
     @Override
     public ToolExecutionRecord resolveUnsettled(ToolExecutionRecord expected,
             Map<String, Object> resolutionResult, Instant resolutionTime) {
-        return resolve(expected, resolutionResult, resolutionTime, false);
+        return JdbcToolExecutionObservations.resolve(dataSource, expected, resolutionResult, resolutionTime, false);
     }
 
-    private ToolExecutionRecord resolve(ToolExecutionRecord expected,
-            Map<String, Object> resolutionResult, Instant resolutionTime,
-            boolean unknownOnly) {
-        if (expected == null) {
-            throw new IllegalArgumentException("expected is required");
-        }
-        return JdbcRepositorySupport.transaction(
-                dataSource,
-                connection -> {
-                    JdbcCsiActivationAdmission.refuseUnqualifiedWriter(
-                            connection, expected.getBindingId());
-                    ToolExecutionRecord current =
-                            selectByExecutionId(connection, expected.getExecutionCallId(), true);
-                    if (current == null
-                            || !current.sameIdentity(expected)
-                            || current.getVersion() != expected.getVersion()
-                            || !current.needsReconciliation()
-                            || unknownOnly
-                                    && current.getState() != ToolExecutionRecord.State.UNKNOWN) {
-                        return null;
-                    }
-                    ToolExecutionRecord resolved =
-                            current.resolveUnsettled(resolutionResult, resolutionTime)
-                                    .withVersion(current.getVersion() + 1);
-                    updateExecution(connection, resolved);
-                    return resolved;
-                });
+    private JdbcJournalPacks journalPacks() {
+        return csiBindings == null ? null : csiBindings.journalPacks();
     }
 
     private CsiContinuation lockCsiContinuation(Connection connection, ToolExecutionRecord hint)
             throws SQLException {
         var scope =
                 JdbcCsiActivationAdmission.lockForContinuation(
-                        connection, hint.getBindingId(), csiBindings);
+                        connection, hint.getBindingId(), csiBindings, journalPacks());
         if (scope == null) {
             return null;
         }
@@ -622,7 +604,7 @@ public final class JdbcToolExecutionRepository
                     "The private CSI profile requires original native execution evidence.",
                     false);
         } else {
-            JdbcCsiExecutionAdmission.verifyRelated(connection, original);
+            JdbcCsiExecutionAdmission.verifyRelated(connection, original, journalPacks());
         }
         requireCsiCurrentTime(connection, continuation);
         return continuation;
@@ -689,17 +671,18 @@ public final class JdbcToolExecutionRepository
         }
     }
 
-    @Override
-    public List<ToolExecutionRecord> findUnsettled(RuntimeSessionRecord session,
-            String afterExecutionCallId, int limit) {
+    private static String scanCursor(RuntimeSessionRecord session, String afterExecutionCallId, int limit) {
         if (session == null || limit < 1 || limit > 100) {
             throw new IllegalArgumentException("session and limit in [1, 100] are required");
         }
-        String after =
-                afterExecutionCallId == null
-                        ? ""
-                        : JdbcRepositorySupport.valueKey(
-                                BrokerValues.requireId(afterExecutionCallId, "cursor"));
+        return afterExecutionCallId == null ? ""
+                : JdbcRepositorySupport.valueKey(BrokerValues.requireId(afterExecutionCallId, "cursor"));
+    }
+
+    @Override
+    public List<ToolExecutionRecord> findUnsettled(RuntimeSessionRecord session,
+            String afterExecutionCallId, int limit) {
+        String after = scanCursor(session, afterExecutionCallId, limit);
         return JdbcRepositorySupport.read(
                 dataSource,
                 connection -> {
@@ -739,14 +722,7 @@ public final class JdbcToolExecutionRepository
     @Override
     public List<ToolExecutionRecord> findBackgroundProcesses(
             RuntimeSessionRecord session, String afterExecutionCallId, int limit) {
-        if (session == null || limit < 1 || limit > 100) {
-            throw new IllegalArgumentException("session and limit in [1, 100] are required");
-        }
-        String after =
-                afterExecutionCallId == null
-                        ? ""
-                        : JdbcRepositorySupport.valueKey(
-                                BrokerValues.requireId(afterExecutionCallId, "cursor"));
+        String after = scanCursor(session, afterExecutionCallId, limit);
         return JdbcRepositorySupport.read(
                 dataSource,
                 connection -> {
@@ -1041,7 +1017,7 @@ public final class JdbcToolExecutionRepository
         return false;
     }
 
-    private static ToolExecutionRecord selectByExecutionId(
+    static ToolExecutionRecord selectByExecutionId(
             Connection connection, String executionCallId, boolean forUpdate)
             throws SQLException {
         String sql = "SELECT " + EXECUTION_COLUMNS
@@ -1078,7 +1054,7 @@ public final class JdbcToolExecutionRepository
         }
     }
 
-    private static void updateExecution(Connection connection,
+    static void updateExecution(Connection connection,
             ToolExecutionRecord record) throws SQLException {
         String sql = "UPDATE ma_tool_execution SET execution_state = ?, "
                 + "execution_status = ?, result_json = ?, "

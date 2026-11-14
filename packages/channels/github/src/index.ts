@@ -6,8 +6,6 @@ import type { ChannelPlugin } from '@qwen-code/channel-base';
 import {
   GithubChannel,
   validateBoundSessionConfig,
-  DEFAULT_PR_WATCH_LIMIT,
-  MAX_PR_WATCH_LIMIT,
   validateRepoFilterConfig,
   PR_NOTIFICATION_REASONS,
   PR_WATCH_EVENTS,
@@ -22,10 +20,12 @@ import {
  */
 const BOUND_ACTION_DESCRIPTIONS: Record<string, string> = {
   default: 'Fallback template for any event without a more specific key',
-  'watch:ci_failure': 'CI checks turn red on a head commit',
-  'watch:merge_conflict': 'The PR develops a merge conflict',
-  'watch:head_change': 'The PR’s head commit changes',
-  'watch:state_change': 'The PR is merged or closed',
+  'watch:ci_failure': 'Deprecated (use serve.sessionPrWatch): checks turn red',
+  'watch:merge_conflict':
+    'Deprecated (use serve.sessionPrWatch): merge conflict',
+  'watch:head_change': 'Deprecated (use serve.sessionPrWatch): head changes',
+  'watch:state_change':
+    'Deprecated (use serve.sessionPrWatch): merged or closed',
   mention: 'You are @mentioned in a comment',
   review_requested: 'A review is requested from you',
   assign: 'You are assigned to the PR',
@@ -112,7 +112,7 @@ export const plugin: ChannelPlugin = {
         maximum: MAX_POLL_INTERVAL_MS,
         default: '60000',
         description:
-          'How often to poll the notifications API, in ms. Kept between 1 and 86400000 (one day): a smaller positive value is raised to 1. Leave empty for 60000',
+          "How often to poll the notifications API, in ms. Kept between 1 and 86400000 (one day): a smaller positive value is raised to 1. Leave empty for 60000. A steady-state poll is raised to the endpoint's X-Poll-Interval when that is larger, which paces the PR watch too; at the 60000 default the header is also 60s, so nothing changes",
       },
       {
         key: 'groupPolicy',
@@ -170,31 +170,37 @@ export const plugin: ChannelPlugin = {
         default: 'false',
       },
       {
-        key: 'prWatchEvents',
-        label: 'PR Watch Events',
-        kind: 'string-list',
+        key: 'requireBoundWatch',
+        label: 'Require Active Watch For Review/Verify Sessions',
+        kind: 'boolean',
         description:
-          'Optional. State transitions to watch for bound PRs (requires Deliver To PR-Bound Sessions). Leave empty to disable.',
-        // Built from the adapter's exported vocabulary so the UI options can
-        // never drift from the validator/emit path (R2-18).
-        options: PR_WATCH_EVENTS.map((value) => ({ value, label: value })),
+          'Only deliver events to review/verify bound sessions while they hold an active watch on that PR (an /autofix-pr watch or /verify-pr --watch). One-shot /review and /verify-pr sessions stay bound but receive nothing; events with no eligible session retire privately instead of a public reply. Requires Deliver To PR-Bound Sessions. Unknown watch state (detection failure) keeps delivering.',
+        default: 'false',
       },
       {
-        key: 'prWatchLimit',
-        label: 'PR Watch Limit',
-        kind: 'number',
-        exclusiveMinimum: 0,
-        maximum: MAX_PR_WATCH_LIMIT,
-        default: String(DEFAULT_PR_WATCH_LIMIT),
+        key: 'prCommentWatch',
+        label: 'PR Comment Watch',
+        kind: 'boolean',
         description:
-          'Maximum open bound PRs watched per poll (requires Deliver To PR-Bound Sessions and PR Watch Events). Open PRs keep the full budget; merged/closed bindings drain in an additional slice (20% of the limit, at least one) outside it, so they never crowd out open PRs. Each watched PR costs about one pulls.get per poll — at the 60s default that is ~60 requests/hour per PR, so a 5000/hour PAT budget admits ~80 watched PRs (~69 open while a terminal backlog drains at the 1.2x fan-out); an over-budget configuration makes every watch pass abort on rate limits. Raise Poll Interval when raising this. Leave empty for the default.',
+          'Poll conversation and inline review comments on bound PRs and deliver each new one to every bound session that did not post it (including comments by the same GitHub account used by another session/agent). Requires Deliver To PR-Bound Sessions. Enabled by default; set false to disable.',
+        default: 'true',
+      },
+      {
+        key: 'prWatchEvents',
+        label: 'PR Watch Events (Deprecated)',
+        kind: 'string-list',
+        description:
+          'Deprecated. The daemon now detects PR-state transitions: configure serve.sessionPrWatch in the daemon settings. This channel no longer watches bound PRs. For one minor release the key is accepted and read as a per-host alias when that setting is unset, for PRs on this channel’s web host; read only while Deliver To PR-Bound Sessions is on.',
+        // Built from the adapter's exported vocabulary so the UI options can
+        // never drift from the alias vocabulary (R2-18).
+        options: PR_WATCH_EVENTS.map((value) => ({ value, label: value })),
       },
       {
         key: 'boundSessionActions',
         label: 'Bound Session Actions',
         kind: 'record',
         description:
-          'Optional. Instruction templates delivered to PR-bound sessions. Pick an event key below; a role prefix (review:, verify:, fix:) targets that binding role only. Requires Deliver To PR-Bound Sessions. Each role with a matching key gets its own delivery; roles without one skip the event. Variables: %repo%, %pr%, %url%, %title%, %event%, %sender%, %role%; %% for a literal %. Leave empty for the default generic prompt.',
+          'Optional. Instruction templates delivered to PR-bound sessions. Pick an event key below; a role prefix (review:, verify:, fix:) targets that binding role only. Requires Deliver To PR-Bound Sessions. Each role with a matching key gets its own delivery; roles without one skip the event. The watch:* keys are deprecated: configure serve.sessionPrWatch.actions for state transitions. Variables: %repo%, %pr%, %url%, %title%, %event%, %sender%, %role%; %% for a literal %. Leave empty for the default generic prompt.',
         options: BOUND_ACTION_KEY_OPTIONS,
       },
     ],

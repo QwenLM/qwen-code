@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.harness;
 
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.util.List;
@@ -88,6 +89,11 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsPersonalMemory() {
+        return call(delegate::supportsPersonalMemory);
+    }
+
+    @Override
     public boolean supportsUserMessageQueue() {
         return call(delegate::supportsUserMessageQueue);
     }
@@ -134,6 +140,22 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     }
 
     @Override
+    public boolean supportsClientFiles() {
+        return call(delegate::supportsClientFiles);
+    }
+
+    @Override
+    public boolean supportsClientFiles(SessionRecord session) {
+        return call(() -> delegate.supportsClientFiles(session));
+    }
+
+    @Override
+    public Map<String, Object> clientFilesOperation(String tenantId, String sessionId,
+            Map<String, Object> body) {
+        return call(() -> delegate.clientFilesOperation(tenantId, sessionId, body));
+    }
+
+    @Override
     public boolean supportsMcpManagement() {
         return call(delegate::supportsMcpManagement);
     }
@@ -156,6 +178,42 @@ public final class SdkHarnessBoundary implements HarnessConnector {
     @Override
     public boolean supportsSessionExtensions() {
         return call(delegate::supportsSessionExtensions);
+    }
+
+    @Override
+    public boolean supportsPackagePreparation() { return call(delegate::supportsPackagePreparation); }
+
+    @Override
+    public PreparedPackage preparePackage(Map<String, Object> metadata, java.io.InputStream source) {
+        return call(() -> delegate.preparePackage(metadata, source));
+    }
+
+    @Override
+    public Map<String, Object> inspectPackage(Map<String, Object> metadata, java.io.InputStream source) {
+        return call(() -> delegate.inspectPackage(metadata, source));
+    }
+
+    @Override
+    public Map<String, Object> previewPackage(Map<String, Object> metadata, java.io.InputStream source) {
+        return call(() -> delegate.previewPackage(metadata, source));
+    }
+
+    @Override
+    public boolean supportsRuntimeSkillImport() { return call(delegate::supportsRuntimeSkillImport); }
+
+    @Override
+    public Map<String, Object> runtimeSkillCandidates(String tenant, String session) {
+        return call(() -> delegate.runtimeSkillCandidates(tenant, session));
+    }
+
+    @Override
+    public Map<String, Object> runtimeSkillSnapshot(String tenant, String session, Map<String, Object> request) {
+        return call(() -> delegate.runtimeSkillSnapshot(tenant, session, request));
+    }
+
+    @Override
+    public Map<String, Object> runtimeSkillArchive(String tenant, String session, Map<String, Object> request) {
+        return call(() -> delegate.runtimeSkillArchive(tenant, session, request));
     }
 
     @Override

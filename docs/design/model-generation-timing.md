@@ -6,6 +6,8 @@
 
 Implemented for #14722. Web Shell Token Usage and the daemon session stats route gain per-model first-token latency (TTFT), generation time and output speed. The change also fixes two measurement errors in the generation timing that CLI `/stats` already shows. It builds on [Generation timing metrics in `/stats`](2026-07-24-generation-stats.md) and [LLM request timing decomposition](telemetry-llm-request-timing-design.md). It changes when TTFT fires and how the generation window is measured. It also extends the daemon/Web Shell stats schema, which the `/stats` design left unchanged.
 
+[Output speed over the full request](output-speed-full-request.md) (#16714) later revised output speed: it now includes TTFT and counts windows under 100 ms. New fields carry its sums; the fields below keep the meaning described here. The rules below describe this design as implemented for #14722.
+
 ## Problem
 
 1. Token Usage shows each model's request count and average latency: total request time divided by request count, failed requests included. That number cannot tell a slow start from slow generation.

@@ -389,6 +389,8 @@ export default {
     'Open the skills panel (browse, search, toggle, pick).',
   'Move this session to a new working directory':
     'Move this session to a new working directory',
+  'Wait for background agents to finish or stop them in /tasks before changing directories.':
+    'Wait for background agents to finish or stop them in /tasks before changing directories.',
   // SkillsManagerDialog (the panel `/skills` opens)
   'Manage Skills': 'Manage Skills',
   'Skills configuration saved.': 'Skills configuration saved.',
@@ -1430,6 +1432,26 @@ export default {
     'Usage: /forget <memory text to remove>',
   'No managed auto-memory entries matched: {{query}}':
     'No managed auto-memory entries matched: {{query}}',
+  'Bind a GitHub pull request to this session':
+    'Bind a GitHub pull request to this session',
+  'Usage: /pr <number | url>': 'Usage: /pr <number | url>',
+  'No PRs bound to this session.': 'No PRs bound to this session.',
+  'Bound PRs: {{list}}': 'Bound PRs: {{list}}',
+  'Invalid PR reference. Usage: /pr <number | url>':
+    'Invalid PR reference. Usage: /pr <number | url>',
+  'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
+    'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.',
+  'Bound PR #{{number}} to this session: {{url}}':
+    'Bound PR #{{number}} to this session: {{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}':
+    'PR #{{number}} is already bound to this session: {{url}}',
+  'Failed to bind PR #{{number}}.': 'Failed to bind PR #{{number}}.',
+  'Failed to bind PR #{{number}}: {{message}}':
+    'Failed to bind PR #{{number}}: {{message}}',
+  'Could not read the PR bindings for this session.':
+    'Could not read the PR bindings for this session.',
+  'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.':
+    'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.',
   'Consolidate managed auto-memory topic files.':
     'Consolidate managed auto-memory topic files.',
   'Import MCP servers from Claude configs':
@@ -1850,10 +1872,10 @@ export default {
   'Signed in successfully · {{email}}': 'Signed in successfully · {{email}}',
   'Current plan: Qwen {{plan}}. Qwen Code is ready.':
     'Current plan: Qwen {{plan}}. Qwen Code is ready.',
-  'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.':
-    'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.',
-  'Common commands: /usage   /upgrade   /model   /status   /logout':
-    'Common commands: /usage   /upgrade   /model   /status   /logout',
+  'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, /model to switch models, or /effort to change reasoning effort.':
+    'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, /model to switch models, or /effort to change reasoning effort.',
+  'Common commands: /usage   /upgrade   /model   /effort   /status   /logout':
+    'Common commands: /usage   /upgrade   /model   /effort   /status   /logout',
   'Signed in as {{email}} (Qwen {{plan}})':
     'Signed in as {{email}} (Qwen {{plan}})',
   'Qwen {{plan}} is active · usage is included with your plan':
@@ -2142,6 +2164,7 @@ export default {
   Reqs: 'Reqs',
   'Input Tokens': 'Input Tokens',
   'Output Tokens': 'Output Tokens',
+  'Output (incl. Reasoning)': 'Output (incl. Reasoning)',
   'Savings Highlight:': 'Savings Highlight:',
   'of input tokens were served from the cache, reducing costs.':
     'of input tokens were served from the cache, reducing costs.',
@@ -2715,6 +2738,8 @@ export default {
   'Advisor review failed: {{error}}': 'Advisor review failed: {{error}}',
   'No conversation context available for /advisor':
     'No conversation context available for /advisor',
+  'No conversation context available for /btw':
+    'No conversation context available for /btw',
   'Focus too long (max {{max}} chars)': 'Focus too long (max {{max}} chars)',
   'Another operation is in progress, wait for it to complete before running /advisor':
     'Another operation is in progress, wait for it to complete before running /advisor',
@@ -3072,4 +3097,17 @@ export default {
     'Signed out of Qwen. Use /auth to sign in with another account.',
   'Tip: Run /usage to see your plan usage.':
     'Tip: Run /usage to see your plan usage.',
+  'Copied to clipboard': 'Copied to clipboard',
+  'Copy failed': 'Copy failed',
+  '(API error: {{error}})': '(API error: {{error}})',
+  'API error': 'API error',
+  '{{reason}} · retrying in {{seconds}}s · attempt {{attempt}}/{{max}}':
+    '{{reason}} · retrying in {{seconds}}s · attempt {{attempt}}/{{max}}',
+  '←/→ browse earlier answers': '←/→ browse earlier answers',
+  'c copy': 'c copy',
+  'x clear history': 'x clear history',
+  'Tip: Use /btw to ask a quick side question without interrupting the current work':
+    'Tip: Use /btw to ask a quick side question without interrupting the current work',
+  '(The model tried to call {{tool}} instead of answering directly. Try rephrasing or ask in the main conversation.)':
+    '(The model tried to call {{tool}} instead of answering directly. Try rephrasing or ask in the main conversation.)',
 };

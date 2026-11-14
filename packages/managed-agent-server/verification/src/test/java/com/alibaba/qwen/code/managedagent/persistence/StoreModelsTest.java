@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.model.StoreModels.CommandRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import org.junit.jupiter.api.Test;
@@ -56,7 +57,7 @@ class StoreModelsTest {
     // cannot identify a recorder.
     @Test
     void admitsReplayByFollowsTheRecorderStamp() {
-        byte[] recorder = com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor-a");
+        byte[] recorder = ManagedWorkspaceRegistry.actorKey("tenant", "actor-a");
 
         assertThat(command(recorder).admitsReplayBy("actor-a")).isTrue();
         assertThat(command(recorder).admitsReplayBy("actor-b")).isFalse();
@@ -84,7 +85,7 @@ class StoreModelsTest {
                 "digest", "session", "turn", "COMPLETED", null, 1);
         ManagedReceipts.insertCommand(jdbc, "tenant", "SUBMIT_TURN", "stamped",
                 "digest", "session", "turn", "COMPLETED", null,
-                com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor-a"), 1);
+                ManagedWorkspaceRegistry.actorKey("tenant", "actor-a"), 1);
 
         byte[] unattributed = ManagedReceipts.command(jdbc, "tenant",
                 "CANCEL_TURN", "server-keyed", false).actorKey();
@@ -94,7 +95,7 @@ class StoreModelsTest {
         assertThat(unattributed).isNotNull().isEmpty();
         assertThat(command(unattributed).admitsReplayBy("actor-b")).isFalse();
         assertThat(stamped).isEqualTo(
-                com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("tenant", "actor-a"));
+                ManagedWorkspaceRegistry.actorKey("tenant", "actor-a"));
     }
 
     private static CommandRecord command(byte[] actorKey) {
