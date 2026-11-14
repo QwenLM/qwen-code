@@ -432,9 +432,88 @@ describe('ChannelsManagerPage', () => {
     },
   );
 
+  it.each([false, true])(
+    'groups WeCom methods and keeps Callback independent (webhook first: %s)',
+    async (webhookFirst) => {
+      const wecom = channelState.current.catalog.find(
+        (entry) => entry.type === 'wecom',
+      )!;
+      wecom.fields = [
+        { key: 'botId', label: 'Bot ID', kind: 'string', required: true },
+        { key: 'secret', label: 'Bot Secret', kind: 'secret', required: true },
+      ];
+      const webhook = {
+        ...webhookType,
+        type: 'wecom-webhook',
+        displayName: 'WeCom Webhook',
+      };
+      if (webhookFirst) {
+        channelState.current.catalog.unshift(webhook);
+      } else {
+        channelState.current.catalog.push(webhook);
+      }
+      channelState.current.catalog.push({
+        type: 'wecom-callback',
+        displayName: 'WeCom Callback',
+        manageable: true,
+        fields: [
+          { key: 'corpId', label: 'Corp ID', kind: 'string', required: true },
+        ],
+      });
+      channelState.current.channels = {
+        notices: channel('WeCom notices', 'wecom-webhook', 'connected'),
+      };
+      await renderPage();
+      expect(container.textContent).toContain('WeCom notices');
+      expect(container.textContent).toContain('Ready to send');
+      expect(
+        container.querySelectorAll('[data-testid="channel-platform-wecom"]'),
+      ).toHaveLength(1);
+      expect(
+        container.querySelector(
+          '[data-testid="channel-platform-wecom-webhook"]',
+        ),
+      ).toBeNull();
+      const callback = container.querySelector<HTMLButtonElement>(
+        '[data-testid="channel-platform-wecom-callback"]',
+      )!;
+      expect(callback).not.toBeNull();
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="channel-platform-wecom"]',
+          )!
+          .click();
+      });
+      const dialog = document.querySelector('[role="dialog"]')!;
+      expect(dialog.textContent).toContain('Choose a WeCom connection');
+      expect(dialog.textContent).not.toContain('Application bot');
+      expect(dialog.textContent).not.toContain('Callback');
+      const intelligentBot = Array.from(dialog.querySelectorAll('button')).find(
+        (button) => button.textContent?.includes('Intelligent bot'),
+      )!;
+      await act(async () => intelligentBot.click());
+      expect(inputByLabel('Bot ID')).not.toBeNull();
+      expect(inputByLabel('Bot Secret')).not.toBeNull();
+      expect(inputByLabel('Webhook URL')).toBeNull();
+      expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+        'Access control',
+      );
+      await act(async () => {
+        Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
+          .find((button) => button.textContent?.trim() === 'Cancel')!
+          .click();
+      });
+      await act(async () => callback.click());
+      expect(inputByLabel('Corp ID')).not.toBeNull();
+      expect(inputByLabel('Webhook URL')).toBeNull();
+    },
+  );
+
   it.each([
     { type: 'dingtalk', english: 'DingTalk', chinese: '钉钉' },
     { type: 'feishu', english: 'Feishu', chinese: '飞书' },
+    { type: 'wecom', english: 'WeCom', chinese: '企业微信' },
   ])(
     'localizes the open $type chooser when language changes',
     async (platform) => {
@@ -466,6 +545,16 @@ describe('ChannelsManagerPage', () => {
             : `Configure ${platform.english}`,
         );
         expect(document.querySelector('[role="dialog"]')).toBe(dialog);
+        if (platform.type === 'wecom') {
+          expect(dialog.textContent).toContain(
+            language === 'zh-CN' ? '智能机器人' : 'Intelligent bot',
+          );
+          expect(dialog.textContent).toContain(
+            language === 'zh-CN'
+              ? '通过智能机器人接收消息并回复。'
+              : 'Receive messages and reply using an intelligent bot.',
+          );
+        }
         expect(
           document.getElementById(dialog.getAttribute('aria-labelledby')!)
             ?.textContent,

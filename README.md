@@ -164,24 +164,37 @@ By default, the daemon listens on loopback without bearer authentication; any lo
 
 ## Capabilities
 
-If you know Claude Code, you already know Qwen Code — and then some. We've put significant effort into [bringing Qwen Code to feature parity with Claude Code](https://github.com/wenshao/codeagents/blob/main/docs/comparison/qwen-code-improvement-report.md), improving both breadth and reliability across the board.
+Qwen Code ships with a complete agent harness — multi-agent orchestration, persistent memory, and deep extensibility, all built in.
 
-| Feature                                                            | Qwen Code | Claude Code |
-| ------------------------------------------------------------------ | :-------: | :---------: |
-| SubAgents, Agent Teams, Dynamic Workflows                          |     ✓     |      ✓      |
-| Auto-Memory, Auto-Skills, Hooks                                    |     ✓     |      ✓      |
-| Built-in Skills (/review, /batch, /loop, /bugfix…)                 |     ✓     |      ✓      |
-| MCP, Plan Mode, LSP Integration                                    |     ✓     |      ✓      |
-| Auto Mode, Sandbox, Git Worktrees                                  |     ✓     |      ✓      |
-| Computer Use (desktop automation)                                  |     ✓     |      ✓      |
-| IDE Plugins (VS Code / JetBrains / Zed)                            |     ✓     |      ✓      |
-| SDK                                                                |     ✓     |      ✓      |
-| Headless Mode, Session Management                                  |     ✓     |      ✓      |
-| Open-source — model and framework                                  |     ✓     |      —      |
-| Multi-protocol (OpenAI / Anthropic / Gemini / Qwen + any provider) |     ✓     |      —      |
-| Agent Arena (multi-model head-to-head on same task)                |     ✓     |      —      |
-| Daemon Mode — `qwen serve` (multi-client shared agent)             |     ✓     |      —      |
-| IM Channels (Telegram / DingTalk / WeChat / Feishu)                |     ✓     |      —      |
+### Agentic core
+
+- **[SubAgents](https://qwenlm.github.io/qwen-code-docs/en/users/features/sub-agents/)** — delegate focused subtasks to specialized agents with their own context and toolsets, in the foreground or background.
+- **[Agent Teams](https://qwenlm.github.io/qwen-code-docs/en/users/features/multi-agent-coordination/)** _(experimental)_ — a leader coordinates teammates that share a task list and exchange messages, with read-only investigators and an optional single worktree writer.
+- **[Agent Arena](https://qwenlm.github.io/qwen-code-docs/en/users/features/arena/)** _(experimental)_ — run the same task on multiple models in isolated Git worktrees, compare solutions side by side, and merge the winner.
+- **[Dynamic Workflows](https://qwenlm.github.io/qwen-code-docs/en/users/workflow-mode/)** _(opt-in)_ — the model writes JavaScript workflows that orchestrate agents: parallel fan-out, verification passes, and resumable runs.
+- **[Goals](https://qwenlm.github.io/qwen-code-docs/en/users/features/goals/)** — `/goal` keeps the session working across turns until an independent verifier accepts the outcome, within a token budget.
+- **[Scheduled tasks](https://qwenlm.github.io/qwen-code-docs/en/users/features/scheduled-tasks/)** — `/loop` and cron tools re-run prompts on an interval or at a set time.
+
+### Memory, skills, and sessions
+
+- **[Auto-Memory](https://qwenlm.github.io/qwen-code-docs/en/users/features/memory/)** — the agent writes its own notes and recalls them across sessions; your `QWEN.md` and `AGENTS.md` briefings load automatically.
+- **[Skills & Auto-Skills](https://qwenlm.github.io/qwen-code-docs/en/users/features/skills/)** — built-in skills (`/review`, `/batch`, `/bugfix`…) work out of the box; `/learn` distills docs or code into new skills, the agent can generate skills on its own _(opt-in)_, and `/curator` maintains the library.
+- **[Session management](https://qwenlm.github.io/qwen-code-docs/en/users/features/session-overview/)** — resume past conversations with `/resume`, and browse, rename, or archive sessions.
+
+### Extensibility and control
+
+- **[Hooks](https://qwenlm.github.io/qwen-code-docs/en/users/features/hooks/)** — run your own scripts at lifecycle events: before and after tool calls, session start and end, and more.
+- **[MCP](https://qwenlm.github.io/qwen-code-docs/en/users/features/mcp/)** — connect any Model Context Protocol server to add tools, resources, and prompts.
+- **[LSP integration](https://qwenlm.github.io/qwen-code-docs/en/users/features/lsp/)** _(experimental, opt-in)_ — native language-server support: go-to-definition, references, diagnostics, and code actions.
+- **[Computer Use & Browser Use](https://qwenlm.github.io/qwen-code-docs/en/users/features/computer-use/)** — automate desktop applications and the browser through native MCP tools.
+- **[Plan Mode & approval modes](https://qwenlm.github.io/qwen-code-docs/en/users/features/approval-mode/)** — plan read-only before touching files, then choose per-call confirmation, auto-edit, classifier-driven [Auto Mode](https://qwenlm.github.io/qwen-code-docs/en/users/features/auto-mode/), or YOLO.
+- **[Sandbox](https://qwenlm.github.io/qwen-code-docs/en/users/features/sandbox/) & [Git worktrees](https://qwenlm.github.io/qwen-code-docs/en/users/features/worktree/)** — confine tool execution with built-in sandboxing and isolate wide-ranging edits in a temporary worktree.
+
+### Open and multi-platform
+
+- **Open source, inside and out** — the framework and the Qwen models are open source and evolve together.
+- **[Multi-protocol](https://qwenlm.github.io/qwen-code-docs/en/users/configuration/model-providers/)** — OpenAI, Anthropic, Gemini, and Qwen APIs, plus any third-party provider or local model (Ollama / vLLM). Switch at runtime.
+- **Beyond the terminal** — IDE plugins, desktop app, Web UI, IM channels, headless mode, SDKs, and daemon mode. See [How to Use Qwen Code](#how-to-use-qwen-code).
 
 ## Qwen Code Evaluation
 
