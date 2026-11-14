@@ -16,6 +16,7 @@ import {
   type SetStateAction,
 } from 'react';
 import { type DOMElement, measureElement } from 'ink';
+import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 import { App } from './App.js';
 import { AppContext } from './contexts/AppContext.js';
 import { UIStateContext, type UIState } from './contexts/UIStateContext.js';
@@ -2271,6 +2272,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openEffortDialog,
       openOutputStyleDialog,
       quit: (messages: HistoryItem[]) => {
+        prepareFileWatchersForProcessExit();
         try {
           cancelOngoingRequestRef.current();
         } catch (error) {

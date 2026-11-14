@@ -6,7 +6,7 @@
 
 // @vitest-environment jsdom
 
-import { act } from 'react';
+import { act, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
@@ -556,6 +556,80 @@ afterEach(() => {
 });
 
 describe('ChannelEditorDialog', () => {
+  it.each([
+    {
+      language: 'en' as const,
+      nameLabel: 'Instance name',
+      urlLabel: 'Webhook URL',
+      secretLabel: 'Signing secret',
+      description: 'The secret webhook address of your custom bot.',
+      saveLabel: 'Save',
+      hidden: ['Access control', 'Conversation management', 'Pairing'],
+    },
+    {
+      language: 'zh-CN' as const,
+      nameLabel: '实例名称',
+      urlLabel: 'Webhook 地址',
+      secretLabel: '加签密钥',
+      description: '自定义机器人的私密 Webhook 地址。',
+      saveLabel: '保存',
+      hidden: ['访问控制', '会话管理', '配对'],
+    },
+  ])('saves a localized send-only Feishu editor in $language', async (copy) => {
+    const descriptor: DaemonChannelTypeDescriptor = {
+      type: 'feishu-webhook',
+      displayName: 'Feishu Webhook',
+      manageable: true,
+      outboundOnly: true,
+      fields: [
+        {
+          key: 'webhookUrl',
+          label: 'Endpoint (descriptor)',
+          kind: 'secret',
+          required: true,
+          envResolvable: true,
+        },
+        {
+          key: 'signingSecret',
+          label: 'Signature (descriptor)',
+          kind: 'secret',
+          envResolvable: true,
+        },
+      ],
+    };
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    await renderDialog({ descriptor, language: copy.language, onSave });
+    expect(document.body.textContent).toContain(copy.description);
+    expect(document.body.textContent).not.toContain('(descriptor)');
+    for (const hidden of copy.hidden) {
+      expect(
+        document.querySelector('[role="dialog"]')?.textContent,
+      ).not.toContain(hidden);
+    }
+    expect(inputByLabel(copy.urlLabel)?.type).toBe('password');
+    expect(inputByLabel(copy.secretLabel)?.type).toBe('password');
+    await act(async () => {
+      setInputValue(inputByLabel(copy.nameLabel)!, 'feishu-notices');
+      setInputValue(inputByLabel(copy.urlLabel)!, '$FEISHU_WEBHOOK_URL');
+      setInputValue(inputByLabel(copy.secretLabel)!, '$FEISHU_SIGNING_SECRET');
+    });
+    const save = Array.from(document.querySelectorAll('button')).find(
+      (button) => button.textContent?.trim() === copy.saveLabel,
+    )!;
+    await act(async () => save.click());
+    expect(onSave).toHaveBeenCalledWith('feishu-notices', {
+      expectedRevision: 'revision-1',
+      config: { type: 'feishu-webhook' },
+      secrets: {
+        webhookUrl: { operation: 'replace', value: '$FEISHU_WEBHOOK_URL' },
+        signingSecret: {
+          operation: 'replace',
+          value: '$FEISHU_SIGNING_SECRET',
+        },
+      },
+    });
+  });
+
   it('shows the default output mode for an existing unconfigured channel and saves a changed mode', async () => {
     const descriptor: DaemonChannelTypeDescriptor = {
       ...DINGTALK,
@@ -5402,6 +5476,7 @@ describe('QR bind inside the editor', () => {
         qrCodeDataUrl: undefined,
       }),
       cancel: vi.fn(),
+      release: vi.fn().mockResolvedValue(undefined),
     };
     vi.useFakeTimers();
     try {
@@ -5425,6 +5500,98 @@ describe('QR bind inside the editor', () => {
       });
       expect(onReload).toHaveBeenCalled();
       expect(onOpenChange).toHaveBeenCalledWith(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('releases the login when the real dialog closes', async () => {
+    // The panel's release hangs off unmount, so the premise needs exercising:
+    // a host that owns `open`, closed through the dialog's own Cancel button.
+    // If the dialog ever keeps its content mounted on close, this goes red.
+    const qqDescriptor: DaemonChannelTypeDescriptor = {
+      type: 'qq',
+      displayName: 'QQ',
+      manageable: true,
+      supportsQrLogin: true,
+      fields: [
+        { key: 'appID', label: 'App ID', kind: 'string' },
+        { key: 'appSecret', label: 'App Secret', kind: 'secret' },
+      ],
+    };
+    const instance = {
+      name: 'qq-bot',
+      config: { type: 'qq' },
+      secrets: { appSecret: { present: false } },
+      startsWithServe: false,
+      runtime: { state: 'stopped' as const },
+    };
+    const pending = {
+      loginId: 'login-1',
+      channelType: 'qq',
+      channelName: 'qq-bot',
+      status: 'pending' as const,
+      expiresAt: 9_999_999,
+      qrCodeDataUrl: 'data:image/png;base64,AAAA',
+    };
+    const qrLoginActions = {
+      start: vi.fn().mockResolvedValue({ ...pending, attached: false }),
+      state: vi.fn().mockResolvedValue(pending),
+      cancel: vi.fn().mockResolvedValue({ ...pending, status: 'cancelled' }),
+      release: vi.fn().mockResolvedValue(undefined),
+    };
+
+    function Host() {
+      const [open, setOpen] = useState(true);
+      return (
+        <I18nProvider language="en">
+          <ChannelEditorDialog
+            open={open}
+            descriptor={qqDescriptor}
+            instance={instance as never}
+            expectedRevision="revision-1"
+            existingNames={[]}
+            workspaces={WORKSPACES}
+            workspaceCwd="/workspace/main"
+            onWorkspaceChange={vi.fn()}
+            onOpenChange={setOpen}
+            onSave={vi.fn().mockResolvedValue(undefined)}
+            onReload={vi.fn().mockResolvedValue(undefined)}
+            qrLoginActions={qrLoginActions}
+            listPairingRequests={vi.fn().mockResolvedValue({ requests: [] })}
+            approvePairingRequest={vi.fn()}
+            listPairingApprovals={vi.fn().mockResolvedValue({ senderIds: [] })}
+            revokePairingApproval={vi.fn()}
+          />
+        </I18nProvider>
+      );
+    }
+
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        root.render(<Host />);
+      });
+      const scan = [...document.querySelectorAll('button')].find((b) =>
+        b.textContent?.includes('Scan to bind'),
+      );
+      expect(scan).toBeDefined();
+      await act(async () => {
+        scan!.click();
+      });
+      expect(qrLoginActions.cancel).not.toHaveBeenCalled();
+
+      // The footer Cancel is the last button carrying that label; the panel's
+      // own Cancel comes earlier in the tree.
+      const cancels = [...document.querySelectorAll('button')].filter((b) =>
+        b.textContent?.includes('Cancel'),
+      );
+      expect(cancels.length).toBeGreaterThan(0);
+      await act(async () => {
+        cancels[cancels.length - 1]!.click();
+      });
+
+      expect(qrLoginActions.cancel).toHaveBeenCalledWith('login-1');
     } finally {
       vi.useRealTimers();
     }
