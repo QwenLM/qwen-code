@@ -87,6 +87,7 @@ import {
 import { evaluateMediaPolicyToolCall } from '@qwen-code/qwen-code-core/omni/policy/model-access.js';
 
 import { Buffer } from 'node:buffer';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   getStartupContextLength,
@@ -2528,6 +2529,8 @@ const STANDALONE_PERMISSION_PERSISTENCE_POLICY: PermissionPersistencePolicy =
     allowUserPersistence: true,
   });
 
+const commandSnapshotBuildContext = new AsyncLocalStorage<boolean>();
+
 const STANDALONE_WORKTREE_ACTION_ERROR =
   'Standalone sessions cannot change or override their working directory.';
 
@@ -2826,6 +2829,7 @@ export class Session implements SessionContext {
   private activeGoalTurn: AcpGoalTurn | undefined;
   private goalHostUnbind?: () => void;
   private goalRuntimeUnsubscribe?: () => void;
+  private removeSkillChangeListener?: () => void;
   private lastGoalSnapshot?: GoalSnapshotV2;
   private lastGoalPublicationKey?: string;
   // Set only when runtime recovery selected a Goal that initial replay hid.
@@ -3145,6 +3149,12 @@ export class Session implements SessionContext {
     this.#registerBackgroundNotificationCallbacks();
     this.#registerSubSessionSpawner();
     this.#registerCurrentSessionScheduledTaskCreator();
+    this.removeSkillChangeListener = this.config
+      .getSkillManager()
+      ?.addChangeListener(() => {
+        if (this.disposed || commandSnapshotBuildContext.getStore()) return;
+        void this.sendAvailableCommandsUpdate();
+      });
     this.config
       .getWorkflowRunRegistry?.()
       .setApprovalRequestCallback((entry, approval, rawArgs, signal) =>
@@ -5407,6 +5417,8 @@ export class Session implements SessionContext {
     this.goalHostUnbind = undefined;
     this.goalRuntimeUnsubscribe?.();
     this.goalRuntimeUnsubscribe = undefined;
+    this.removeSkillChangeListener?.();
+    this.removeSkillChangeListener = undefined;
     this.notificationAbortController?.abort();
     this.notificationAbortController = null;
     this.notificationProcessing = false;
@@ -15081,7 +15093,9 @@ export class Session implements SessionContext {
     const pending = this.availableCommandsUpdateTail.then(async () => {
       if (this.disposed || this.#isAutomaticWorkHeld()) return;
       const { availableCommands, availableSkills, availableSkillDetails } =
-        await this.buildAvailableCommandsSnapshot();
+        await commandSnapshotBuildContext.run(true, () =>
+          this.buildAvailableCommandsSnapshot(),
+        );
       if (this.disposed || this.#isAutomaticWorkHeld()) return;
       this.config.refreshWorkflowMode?.();
       const update: SessionUpdate = {
