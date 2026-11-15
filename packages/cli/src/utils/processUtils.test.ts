@@ -17,12 +17,19 @@ import {
   superviseInProcess,
 } from './processUtils.js';
 import * as cleanup from './cleanup.js';
+import * as stdio from './stdioHelpers.js';
+import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
+
+vi.mock('@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js', () => ({
+  prepareFileWatchersForProcessExit: vi.fn(),
+}));
 
 describe('processUtils', () => {
   const processExit = vi
     .spyOn(process, 'exit')
     .mockReturnValue(undefined as never);
   const runExitCleanup = vi.spyOn(cleanup, 'runExitCleanup');
+  const prepareWatchers = vi.mocked(prepareFileWatchersForProcessExit);
   const originalSend = process.send;
 
   beforeEach(() => {
@@ -35,8 +42,27 @@ describe('processUtils', () => {
 
   it('should run cleanup and exit with the relaunch code', async () => {
     await relaunchApp();
+    expect(prepareWatchers).toHaveBeenCalledTimes(1);
     expect(runExitCleanup).toHaveBeenCalledTimes(1);
+    expect(prepareWatchers.mock.invocationCallOrder[0]).toBeLessThan(
+      runExitCleanup.mock.invocationCallOrder[0],
+    );
+    expect(runExitCleanup.mock.invocationCallOrder[0]).toBeLessThan(
+      processExit.mock.invocationCallOrder[0],
+    );
     expect(processExit).toHaveBeenCalledWith(RELAUNCH_EXIT_CODE);
+  });
+
+  it('prepares watchers once for each requested relaunch before its cleanup', async () => {
+    await relaunchApp();
+    await relaunchApp();
+    expect(prepareWatchers).toHaveBeenCalledTimes(2);
+    expect(runExitCleanup).toHaveBeenCalledTimes(2);
+    for (const index of [0, 1]) {
+      expect(prepareWatchers.mock.invocationCallOrder[index]).toBeLessThan(
+        runExitCleanup.mock.invocationCallOrder[index],
+      );
+    }
   });
 
   it('should run cleanup and exit with the update relaunch code', async () => {
@@ -110,12 +136,80 @@ describe('processUtils', () => {
 
     it('re-execs this process in place after cleanup', async () => {
       await relaunchApp();
+      expect(prepareWatchers).toHaveBeenCalledTimes(1);
       expect(runExitCleanup).toHaveBeenCalledTimes(1);
+      expect(prepareWatchers.mock.invocationCallOrder[0]).toBeLessThan(
+        runExitCleanup.mock.invocationCallOrder[0],
+      );
+      expect(runExitCleanup.mock.invocationCallOrder[0]).toBeLessThan(
+        execve.mock.invocationCallOrder[0],
+      );
       expect(execve).toHaveBeenCalledWith(process.execPath, [
         process.execPath,
         ...process.execArgv,
         ...process.argv.slice(1),
       ]);
+    });
+
+    it('falls back to exit42 after a failed in-place exec without repeating cleanup', async () => {
+      const errorLine = vi
+        .spyOn(stdio, 'writeStderrLineSafe')
+        .mockImplementation(() => {});
+      execve.mockImplementationOnce(() => {
+        throw new Error('owned exec failure');
+      });
+      try {
+        await expect(relaunchApp()).resolves.toBeUndefined();
+        expect(prepareWatchers).toHaveBeenCalledTimes(1);
+        expect(runExitCleanup).toHaveBeenCalledTimes(1);
+        expect(execve).toHaveBeenCalledTimes(1);
+        expect(execve).toHaveBeenCalledWith(process.execPath, [
+          process.execPath,
+          ...getRelaunchExecArgv(),
+          ...process.argv.slice(1),
+        ]);
+        expect(prepareWatchers.mock.invocationCallOrder[0]).toBeLessThan(
+          runExitCleanup.mock.invocationCallOrder[0],
+        );
+        expect(runExitCleanup.mock.invocationCallOrder[0]).toBeLessThan(
+          execve.mock.invocationCallOrder[0],
+        );
+        expect(errorLine).toHaveBeenCalledExactlyOnceWith(
+          'Failed to restart the CLI in place. Exiting; restart manually if no supervisor is running.',
+        );
+        expect(errorLine.mock.invocationCallOrder[0]).toBeLessThan(
+          processExit.mock.invocationCallOrder[0],
+        );
+        expect(processExit).toHaveBeenCalledExactlyOnceWith(RELAUNCH_EXIT_CODE);
+      } finally {
+        errorLine.mockRestore();
+      }
+    });
+
+    it('falls back to exit42 even when the failed-exec error line cannot be written', async () => {
+      const stderrWrite = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementationOnce(() => {
+          throw new Error('owned stderr failure');
+        });
+      execve.mockImplementationOnce(() => {
+        throw new Error('owned exec failure');
+      });
+      try {
+        await expect(relaunchApp()).resolves.toBeUndefined();
+        expect(prepareWatchers).toHaveBeenCalledTimes(1);
+        expect(runExitCleanup).toHaveBeenCalledTimes(1);
+        expect(execve).toHaveBeenCalledTimes(1);
+        expect(execve).toHaveBeenCalledWith(process.execPath, [
+          process.execPath,
+          ...getRelaunchExecArgv(),
+          ...process.argv.slice(1),
+        ]);
+        expect(stderrWrite).toHaveBeenCalledTimes(1);
+        expect(processExit).toHaveBeenCalledExactlyOnceWith(RELAUNCH_EXIT_CODE);
+      } finally {
+        stderrWrite.mockRestore();
+      }
     });
 
     it('keeps gc the launcher exposed at runtime across the restart', async () => {

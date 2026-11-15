@@ -11,6 +11,7 @@ import path from 'node:path';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { WorktreeSession } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
 import { readWorktreeSession } from '@qwen-code/qwen-code-core/services/worktreeSessionService.js';
+import { closeFileWatcher } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
 
 /**
  * Watches the active session's WorktreeSession sidecar file and returns
@@ -85,7 +86,7 @@ export function useWorktreeSession(config: Config): WorktreeSession | null {
 
     return () => {
       cancelled = true;
-      watcher?.close();
+      void closeFileWatcher(watcher);
     };
   }, [config, sessionId]);
 

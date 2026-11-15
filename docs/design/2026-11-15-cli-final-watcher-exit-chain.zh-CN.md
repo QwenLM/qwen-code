@@ -1,0 +1,39 @@
+# CLI 最终退出 watcher 策略接线
+
+[English](2026-11-15-cli-final-watcher-exit-chain.md) | [简体中文](2026-11-15-cli-final-watcher-exit-chain.zh-CN.md)
+
+## 状态与问题
+
+固定main90be上的有限构建与受影响测试已完成：七个whole共176项以及build/type/full lint/format/bundle通过。公开signal验收仍为部分完成，5通过、1失败。既有真实文件系统失败及native首次提示bug仍开；两项terminal42回退回归已通过。本候选供维护者Draft审查。这是signal、relaunch和worktree sidecar watcher共享最终退出意图的有限接线，不证明退出链已完整覆盖或必定成功。它不修复Bun exec后的启动，也不定位native锁。不包含Trust界面、Source、Width、Skill或诊断日志。
+
+## 既有策略与所有权
+
+既有公开Core prepareFileWatchersForProcessExit在Darwin标记最终进程退出。该状态下closeFileWatcher移除change/all监听，资源留待进程退出回收；其他情况正常close。Core实现、阈值及API不改。标记属于进程全局，直到成功exec或进程退出前均保持sticky。这些调用者意图最终退出，但错误可能阻止终止，所选exec失败terminal42路径已有控制回归覆盖；catch之外的其他错误不因此获得新的终止保证。worktree watcher仍归选中Config/session及既有sidecar目录所有，不新增其他runtime或文件系统fallback。
+
+## 改动与消费者
+
+交互signal共享beginExit在cleanupStarted锁存后、runExitCleanup前仅调用一次prepare。首次未确认SIGINT和忽略的重抛不prepare；确认SIGINT、SIGTERM、SIGHUP仍为130/143/129。raw恢复、重复signal处理及清理顺序不变。handler仍在交互启动安装，既有ACP最终退出prepare不动。
+
+relaunchApp在cleanup前prepare，保留原execve参数，以及未选择execve时的exit42回退。清理后in-place execve抛错时，仅catch该调用，通过既有不抛错stderr helper尽力报告，然后落到exit42。不重试、不spawn supervisor，不声称重启成功；无supervisor时用户必须手动重启。prepare、cleanup及原re-exec参数不变，cleanup错误不在此catch范围。当前main调用者是Ink TrustDialog、FolderTrustDialog、IdeTrustChangeDialog和native folder-trust-gate；不新增native Trust功能。worktree hook将原watcher.close换成既有公开closeFileWatcher，消费者仍为AppContainer和native AppShell。普通unmount及Config/session替换仍关闭watcher，最终进程退出才沿进程全局策略。hook的异步读取撤销、路径、事件和显示值不变。
+
+## 证据与验证
+
+Signal已有Dab RED54840及whole146P验证48753，两个原baseline文件与90be逐字节相同，但不继承通过结果。hook已有真实公开策略控制后的RED89259：普通对照通过、最终退出raw close违反策略。Root现已真实复现原relaunch实现对新增顺序断言失败：prepare预期1、实际0。这取代此前仅静态证据状态，后续受影响验证覆盖所选terminal42实现，但不表示整应用或全部出口验收。
+
+Root已完成当前回退候选的build、type、full零warning lint、format和bundle，七个whole共176项通过。两项新控制案例核单次prepare/cleanup/exec、保留参数、尽力错误报告，以及stderr.write抛错也exit42。既有公开策略测试保留普通/替换watcher关闭和最终退出行为；这些检查不证明native close耗时、全部平台或exec后启动成功。
+
+本回退提案之前的接线候选，Root已完成build、type、格式、六个改动源码/测试文件零warning lint、bundle及六整文件168项通过。独立真实文件系统hook文件仍在原2秒期限内删除/clear断言失败：3通过、1失败、bail后1未执行。受控execve抛错见证通过，确认reject、未调用process.exit、prepared watcher策略仍保持；这是回退前缺口的证据，不是本回退的新验证或批准。没有重试或放宽断言。
+
+当前未加日志的公开signal矩阵为5通过、1失败、0未执行：Node+Ink和Bun+Ink均通过确认SIGINT exit130/signal0及SIGTERM exit143/signal0；Bun+OpenTUI通过SIGTERM exit143/signal0。Native SIGINT在原1秒首次提示期限失败，当时只发一个signal，未发送第二个SIGINT，清理前也无退出。之后helper清理的exit129不是成功。六案均观测0 model HTTP。
+
+独立干净90be基线也在1秒、仅一个SIGINT后实际一次复现该首次提示失败；无第二个signal及清理前退出，之后signal9清理并有grace error。因此症状已存在于未改基线，并非只在本patch出现。这不抹去原候选失败，也不证明时序或根因相同。独立带日志诊断通过不能替代任一未加日志失败。真实文件系统3P/1F/1NOT_RUN结果继续独立保留。
+
+## 边界
+
+不加flag、期限、重试，不改Core、默认或发布。既有2秒/5秒清理上限及首次SIGINT仅警告语义保留。冻结的六个code/test blob已完成受影响验证与独审；本次出版过渡仅更新这两个设计文档。Root须完成文档格式、引用和精确tree/readback守卫后再提交Draft；Draft审查不授予Ready、可发布或整体迁移验收。
+
+本增量未覆盖其他最终退出路径：update relaunch、supervisor断连、确实最终退出的错误helper、fatal-render期限及部分headless/非法调用路径仍需各自检查所有权与失败语义。一些错误分支仅rethrow而不保证进程终止，不能无差别写全局标记。既有ACP最终prepare不是新推断的缺口。不宣称全部出口覆盖或Core全局置信。
+
+## 已选择的exec失败回退（回归已验证）
+
+原控制见证保留为baseline证据：确认在exit42前reject及final策略残留。已实现回退的两项控制回归均通过：exec失败后恰一次terminal42，即使stderr.write抛错，也只prepare、cleanup、exec各一次。关闭输出流可能使报告丢失，但不得阻止退出。这是终止行为，不是UI恢复、重启成功、Bun启动修复或最终验收。Root依据真实70928见证应用最小回退；该见证已证实不应发生的reject/未退出行为。独立expected42探针83181因收集范围与子进程receipt未建立而AUDITOR_NQ，不是RED。两项新增回归均包含在176项受影响验证通过之中；不宣称真实进程重启成功或修复native首提示bug。Draft与维护者审查门槛保留。

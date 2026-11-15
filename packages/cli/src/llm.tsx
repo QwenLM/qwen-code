@@ -393,6 +393,7 @@ function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
     cleanupStarted = true;
     process.on('SIGINT', swallowSignalDuringCleanup);
 
+    prepareFileWatchersForProcessExit();
     void runExitCleanup()
       .catch((error) => {
         debugLogger.error(`Error during ${signal} cleanup:`, error);

@@ -1,0 +1,39 @@
+# CLI final watcher-exit policy wiring
+
+[English](2026-11-15-cli-final-watcher-exit-chain.md) | [简体中文](2026-11-15-cli-final-watcher-exit-chain.zh-CN.md)
+
+## Status and problem
+
+Scoped build and affected-test verification is complete on pinned main90be: seven whole files/176 tests and build/typecheck/full lint/format/bundle passed. Public signal acceptance is partial,5 passed and1 failed. The retained real-filesystem failure and native first-hint bug remain open; the two terminal42 fallback regressions passed. This candidate is for Draft maintainer review. This is scoped wiring for the shared final-exit intent across signals, relaunch and the worktree sidecar watcher; it does not establish a complete or infallible exit chain. It does not repair Bun post-exec startup or identify native locks. No Trust UI, Source, Width, Skill or diagnostic instrumentation is included.
+
+## Existing policy and ownership
+
+The existing public Core prepareFileWatchersForProcessExit marks final process exit on Darwin. Its closeFileWatcher detaches change/all listeners in that state and leaves resource reclamation to process exit; otherwise it closes normally. Core implementation, thresholds and APIs are unchanged. The marker is process-global and sticky until successful exec or process exit. These callers intend final exit, but an error may prevent termination; the selected failed-exec terminal42 path now has controlled regression coverage; other errors outside that catch do not gain a new termination guarantee. Worktree watcher ownership remains selected Config/session and its existing sidecar directory; no alternate runtime/filesystem fallback is added.
+
+## Changes and consumers
+
+The shared interactive signal beginExit calls prepare once after its cleanupStarted latch and before runExitCleanup. First/unconfirmed SIGINT and ignored reraises do not prepare; confirmed SIGINT, SIGTERM and SIGHUP retain130/143/129. Raw-mode restoration, duplicate-signal handling and cleanup order remain unchanged. The handler is installed on interactive startup; existing ACP final-exit preparation stays untouched.
+
+relaunchApp calls prepare before cleanup and retains the original execve arguments and exit42 fallback when execve is not selected. If the in-place execve throws after cleanup, catch only that invocation, report a best-effort error through the existing nonthrowing stderr helper and fall through to exit42. Do not retry, spawn a supervisor or claim a successful restart. Without a supervisor, the user must restart manually. Preparation, cleanup and original re-exec arguments remain unchanged; cleanup failures are outside this catch. Its current main callers are Ink TrustDialog, FolderTrustDialog, IdeTrustChangeDialog and native folder-trust-gate. This change adds no native Trust feature. The worktree hook replaces raw watcher.close with existing public closeFileWatcher; its consumers remain AppContainer and native AppShell. Ordinary unmount and Config/session replacement still close watchers; final process exit uses the process-global policy. The hook's async load cancellation, paths, events and render values are unchanged.
+
+## Evidence and verification
+
+Signal has saved Dab RED54840 then whole146P verification48753; the two original baseline files are byte-identical on90be, but passes do not inherit. The hook has actual public-policy-controlled RED89259: ordinary controls passed and final-exit raw close violated the policy. Root has now reproduced the original relaunch implementation failing the new order assertion: prepare expected1, observed0. This supersedes the earlier static-only evidence statement. The later affected verification below covers the selected terminal42 implementation without implying whole-application or all-exit acceptance.
+
+Root completed build, typecheck, full zero-warning lint, formatting and bundle for the current fallback candidate, with seven whole files/176 passing tests. The two new controlled cases verify a single prepare/cleanup/exec attempt, preserved arguments, best-effort error reporting and exit42 even when stderr.write throws. Existing public-policy tests retain ordinary/replacement watcher close and final-exit behavior. These checks do not prove native close latency, all platforms or successful post-exec startup.
+
+On the preceding wiring candidate before this proposed fallback, Root validation: build, typecheck, formatting, zero-warning lint on the six changed source/test files, bundle, and six whole test files (168 tests) passed. The separate real-filesystem hook file retained its deletion/clear failure at the original 2-second deadline: 3 passed, 1 failed, 1 not run after bail. A controlled execve-throw witness passed by confirming rejection, no process.exit call and the remaining prepared watcher policy. That documents the pre-fallback gap, not verification or approval of this new fallback. No retries or relaxed assertions were used.
+
+The current uninstrumented public signal matrix is5 passed,1 failed,0 not run: Node+Ink and Bun+Ink passed confirmed SIGINT exit130/signal0 and SIGTERM exit143/signal0; Bun+OpenTUI passed SIGTERM exit143/signal0. Native SIGINT failed at the original1-second first-hint deadline after only one signal; no second SIGINT was sent and no pre-cleanup exit occurred. Its later helper-cleanup exit129 is not success. All six cases observed0 model HTTP.
+
+A separate clean90be baseline also reproduced that first-hint failure once at1 second after one SIGINT, with no second signal or pre-cleanup exit, followed by signal9 cleanup and a grace error. The symptom therefore already exists on the unchanged base, rather than appearing only with this patch. This does not erase the original candidate failure or prove identical timing/root cause. A separate instrumented diagnostic pass cannot replace either uninstrumented failure. The real-filesystem3P/1F/1NOT_RUN result remains independent.
+
+## Boundaries
+
+No new flags, timeouts, retries, Core edits, default change or release action. Existing2s/5s cleanup ceilings and warning-only first SIGINT remain. The frozen six code/test blobs have affected verification and independent review; the publication transition changes only these two design documents. Root must finish document formatting/reference checks and exact tree/readback guards before a Draft submission. Draft review does not grant Ready, shipping or full migration acceptance.
+
+Other final-exit routes remain outside this increment: update relaunch, supervisor disconnect, the guaranteed-final error helper, fatal-render timeout, and selected headless/invalid-invocation paths need their own ownership and failure checks. Some error branches rethrow without guaranteed process termination; do not apply the global marker indiscriminately. Existing ACP final preparation is not a newly inferred gap. No all-exit coverage or Core-wide confidence is claimed.
+
+## Selected failed-exec fallback (regressions verified)
+
+The prior controlled witness remains baseline evidence: it confirmed rejection before exit42 and the retained final policy. The implemented fallback has two passing controlled regressions: one terminal42 call after a failed exec, including when stderr.write throws, with one prepare/cleanup/exec attempt. Best-effort reporting may be lost on a closed stream; it must not prevent exit. This is terminal behavior, not UI recovery, restart success, a Bun startup fix or final acceptance. Root applied this minimal fallback from actual witness70928, which proved the unwanted rejection/no-exit behavior. The separate expected42 probe83181 was auditor-not-qualified because collection scope and the child receipt were not established; it is not a RED. Both new regressions passed within the176-test affected verification. They do not claim a successful real-process restart or repair the native first-hint bug. Draft and maintainer review gates remain.
