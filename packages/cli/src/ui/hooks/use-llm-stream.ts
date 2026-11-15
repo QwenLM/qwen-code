@@ -3758,7 +3758,8 @@ export const useLlmStream = (
       dualOutput?.startAssistantMessage();
       try {
         if (sharedRound) {
-          const useEventBus = config.isEventBusAgentLoopEnabled?.() === true;
+          const useEventBus =
+            config.isEventBusAgentLoopEnabled?.('ink') === true;
           debugLogger.debug(
             `[processLlmStreamEvents] model round on the shared agent loop (prompt ${source.round.promptId})`,
           );
@@ -5087,7 +5088,7 @@ export const useLlmStream = (
                 : {}),
           };
           const sharedSource: SharedModelRound | undefined =
-            config.isUnifiedAgentLoopEnabled?.()
+            config.isUnifiedAgentLoopEnabled?.('ink')
               ? {
                   client: llmClient,
                   signal: providerSignal,

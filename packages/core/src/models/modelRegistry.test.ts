@@ -221,6 +221,19 @@ describe('ModelRegistry', () => {
       expect(get(unkeyed?.baseUrl)).toBe(unkeyed);
       expect(get('https://wrong.example.com')).toBeUndefined();
     });
+
+    // A null base URL asks only for the entry declared without one, unlike an
+    // omitted base URL, which takes any entry for the id.
+    it('takes only an entry declared without a base URL when given null', () => {
+      const scoped = openaiRegistry(...directAndProxy());
+      const plain = openaiRegistry({ id: 'gpt-4', name: 'GPT-4 Plain' });
+      const get = (registry: ModelRegistry, baseUrl?: string | null) =>
+        registry.getModel(AuthType.USE_OPENAI, 'gpt-4', baseUrl)?.name;
+
+      expect(get(scoped)).toBeDefined();
+      expect(get(scoped, null)).toBeUndefined();
+      expect(get(plain, null)).toBe('GPT-4 Plain');
+    });
   });
 
   describe('modalities auto-fill', () => {

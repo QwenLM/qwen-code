@@ -156,6 +156,42 @@ describe('web-shell i18n catalog', () => {
     );
   });
 
+  it('localizes the Goals workspace picker label in every catalog that translates the dialog', () => {
+    // The ru catalog translates the whole Goals dialog; leaving the picker
+    // label English would strand one untranslated string mid-surface.
+    const en = getTranslator('en')('goals.workspace');
+    expect(en).toBe('Workspace');
+    expect(getTranslator('zh-CN')('goals.workspace')).not.toBe(en);
+    expect(getTranslator('ru')('goals.workspace')).not.toBe(en);
+    // Compare against the EN string, not the raw key: the translator falls
+    // back to EN for a missing entry, so a raw-key comparison would pass
+    // even if the zh/ru entry were deleted.
+    const enSkipped = getTranslator('en')('goals.workspacesSkipped', {
+      count: 2,
+    });
+    for (const language of ['zh-CN', 'ru'] as const) {
+      expect(
+        getTranslator(language)('goals.workspacesSkipped', { count: 2 }),
+      ).not.toBe(enSkipped);
+    }
+    // The ru noun must agree with the count (1 → singular), not hard-code
+    // the genitive plural for every count.
+    expect(
+      getTranslator('ru')('goals.workspacesSkipped', { count: 1 }),
+    ).toContain('рабочая область');
+    expect(
+      getTranslator('ru')('goals.workspacesSkipped', { count: 5 }),
+    ).toContain('рабочих областей');
+    const enUnavailable = getTranslator('en')(
+      'goals.error.workspaceUnavailable',
+    );
+    for (const language of ['zh-CN', 'ru'] as const) {
+      expect(
+        getTranslator(language)('goals.error.workspaceUnavailable'),
+      ).not.toBe(enUnavailable);
+    }
+  });
+
   it('keeps every scheduled-task delivery translation in both locales', () => {
     const en = getTranslator('en');
     const zh = getTranslator('zh-CN');
@@ -191,7 +227,7 @@ describe('web-shell i18n catalog', () => {
         'channels.editor.field.webhook.signingSecret.description',
       ]) {
         expect(t(key)).not.toBe(key);
-        expect(t(key)).not.toMatch(/DingTalk|钉钉|Feishu|飞书/i);
+        expect(t(key)).not.toMatch(/DingTalk|钉钉|Feishu|飞书|WeCom|企业微信/i);
       }
       for (const key of [
         'channels.method.title',
@@ -217,6 +253,7 @@ describe('web-shell i18n catalog', () => {
   it.each([
     { type: 'dingtalk', english: 'DingTalk', chinese: '钉钉' },
     { type: 'feishu', english: 'Feishu', chinese: '飞书' },
+    { type: 'wecom', english: 'WeCom', chinese: '企业微信' },
   ])('localizes $type in the connection chooser', (platform) => {
     for (const language of ['en', 'zh-CN'] as const) {
       const t = getTranslator(language);
