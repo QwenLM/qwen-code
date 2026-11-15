@@ -2,7 +2,7 @@
 
 [English](2026-11-09-bound-event-prompt-language.md) | [简体中文](2026-11-09-bound-event-prompt-language.zh-CN.md)
 
-Status: proposed (2026-11-09)
+Status: implemented as #16773 (proposed 2026-11-09). The body below describes the change as designed. Two things have moved since: the daemon drain's language is still not threaded (decision 7), and PR B (#17214) removed the channel's state detection, so the watch summaries named below belong to the daemon now.
 
 ## Problem statement
 

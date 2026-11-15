@@ -2,7 +2,7 @@
 
 [English](2026-11-09-bound-event-prompt-language.md) | [简体中文](2026-11-09-bound-event-prompt-language.zh-CN.md)
 
-状态：提案（2026-11-09）
+状态：已实现（#16773；2026-11-09 提案）。下文按当时的设计描述。此后有两处变化：daemon drain 的语言仍未穿线（决策 7），且 PR B（#17214）移除了 channel 的状态检测，因此下文点名的 watch 摘要现在属于 daemon。
 
 ## 问题陈述
 
