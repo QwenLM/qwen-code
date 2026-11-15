@@ -122,9 +122,13 @@ The class runs one case alone with `-Dqwen.fg11a.case=<case>`.
   go through `attachment(…, true)`, which always loads. A Session created
   with no input has never been created on the Harness, so the load answers
   `404 managed_session_not_found` and creating an automation fails with
-  that code. The fixture runs one Turn per Session first. Fixing the
+  that code. The fixture ran one Turn per Session first. Fixing the
   connector also means recording the Harness boot id the way the Turn path
-  does, so it is left out of this test-only slice and reported separately.
+  does, so it was left out of this test-only slice and reported
+  separately (#14548). That fix makes the verbs create a never-attached
+  Session and bind its boot id at Session level, so the warm-up Turn is
+  gone and every case below now defines on a Session that never ran one;
+  the `create-reply` case pins the boot-id binding.
 
 ## Mutation witnesses
 

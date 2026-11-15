@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaRows;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.OperationKind;
@@ -109,11 +110,11 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
         // pinned CSI Session's continuation, which holds its root while it
         // waits for that guard; a deadlock victim here answers
         // tenant_guard_contended like the guard side (#13800 R1-1).
-        return ManagedSessionStore.namedRootDeadlock(() -> {
+        return JdbcManagedSessionStore.namedRootDeadlock(() -> {
             jdbc.update(
                     "INSERT INTO ma_session (tenant_id, session_id, session_kind, tenant_key, session_key, session_scope_key, gmt_create, gmt_modified) VALUES (?, ?, 'CONTROL', ?, ?, ?, ?, ?) ON DUPLICATE KEY UPDATE tenant_key = VALUES(tenant_key), session_key = VALUES(session_key), session_scope_key = VALUES(session_scope_key)",
                     boundedParameters(jdbc, timeoutSeconds, tenant, session, hash(tenant), hash(session),
-                            com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session), time, time));
+                            ManagedSessionStore.sessionScopeKey(tenant, session), time, time));
             return jdbc.query(
                     "SELECT tenant_id, session_id, is_csi_guard FROM ma_session WHERE tenant_id = ? AND"
                             + " session_id = ? FOR UPDATE",
@@ -145,12 +146,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
     }
 
     static Map<String, Object> lockSessionHead(JdbcTemplate jdbc, String tenant, String session) {
-        return lockSessionHead(jdbc, tenant, session, false);
-    }
-
-    private static Map<String, Object> lockSessionHead(
-            JdbcTemplate jdbc, String tenant, String session, boolean legacyMutation) {
-        return lockSessionHead(jdbc, tenant, session, legacyMutation, true);
+        return lockSessionHead(jdbc, tenant, session, false, true);
     }
 
     private static Map<String, Object> lockSessionHead(
@@ -158,8 +154,8 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
         // Bound the root and head waits as well: holding the tenant guard
         // behind one Session's writer must not convoy unrelated Sessions
         // until the database's default lock timeout (#14393 A.2).
-        return ManagedSessionStore.lockBoundedResult(() -> {
-            int timeoutSeconds = ManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS;
+        return JdbcManagedSessionStore.lockBoundedResult(() -> {
+            int timeoutSeconds = JdbcManagedSessionStore.GUARD_ACQUIRE_TIMEOUT_SECONDS;
             if (tenantGuard) {
                 lockTenant(jdbc, tenant, timeoutSeconds);
             }
@@ -198,6 +194,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
     }
 
     static void retire(JdbcTemplate jdbc, String tenant, String session, String operation) {
+        ManagedSideQueryStore.cancelSession(jdbc, tenant, session);
         var existing =
                 jdbc.query(
                         "SELECT retirement_operation_id AS operation_id FROM ma_session WHERE"
@@ -251,7 +248,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                 "UPDATE ma_operation SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", state = 'SUPPRESSED', claim_until = NULL, failure_code ="
                     + " 'session_retired' WHERE scope_key = ? AND tenant_id = ? AND session_id = ?"
                     + " AND operation_kind = 'TOOL_RESULT_PROJECTION' AND state <> 'READY'",
-                ManagedToolResultStore.scope(tenant, session),
+                JdbcManagedToolResultStore.scope(tenant, session),
                 tenant,
                 session);
     }
@@ -267,7 +264,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
 
     static Map<String, Object> lockGenericSession(
             JdbcTemplate jdbc, String tenant, String session) {
-        return lockSessionHead(jdbc, tenant, session, true);
+        return lockSessionHead(jdbc, tenant, session, true, true);
     }
 
     void lockRetainedPublication(String scope, String publication) {
@@ -432,7 +429,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
     }
 
     public final class ReadLease implements com.alibaba.qwen.code.managedagent.contracts.artifact.ArtifactReadLease {
-        private final String id;
+        final String id;
         private final String tenant;
         private final String session;
         private final long generation;
@@ -610,7 +607,7 @@ public final class ToolPublicationRetentionStore implements com.alibaba.qwen.cod
                             jdbc.update(
                                     "INSERT INTO ma_operation (operation_key, session_scope_key, scope_key, operation_kind, operation_id, tenant_id, session_id, workspace_id, target_kind, target_key, publication_id, request_digest, request_json, state, phase, claim_generation, gmt_create, gmt_modified) VALUES (?, ?, ?, 'OBJECT_PUT', ?, ?, ?, ?, 'RESOURCE', ?, ?, ?, ?, 'IN_FLIGHT', 'PUT', 1, ?, ?)",
                                     originalKey,
-                                    com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session),
+                                    ManagedSessionStore.sessionScopeKey(tenant, session),
                                     scope,
                                     id,
                                     tenant,

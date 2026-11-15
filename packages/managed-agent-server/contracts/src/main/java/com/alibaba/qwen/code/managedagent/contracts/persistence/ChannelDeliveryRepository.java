@@ -18,7 +18,9 @@ public interface ChannelDeliveryRepository {
     List<String> DELIVERY_STATES = List.of("planned", "sending", "partial",
             "delivered", "unknown", "rejected", "cancelled");
 
-    /** One outbound delivery. */
+    /** One outbound delivery. {@code segmentCount} is the immutable size of the
+     * channel segment plan; the reconcile gate treats the segment ledger as
+     * complete only when it holds exactly that many rows. */
     public record ChannelDelivery(
             String tenantId,
             String channelInstanceId,
@@ -28,7 +30,8 @@ public interface ChannelDeliveryRepository {
             String state,
             String providerReceipt,
             long createdAt,
-            long updatedAt) {
+            long updatedAt,
+            int segmentCount) {
     }
 
     /** Exclusive page cursor: created time and delivery id of the last row. */

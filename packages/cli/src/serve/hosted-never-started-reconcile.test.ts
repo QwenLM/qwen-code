@@ -6,6 +6,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
+import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -25,6 +26,12 @@ import {
   reconcileNeverStartedChildRuns,
 } from './hosted-never-started-reconcile.js';
 import type { HostedWorkspaceBrokerOptions } from './hosted-workspace-broker.js';
+
+const identity = {
+  protocolVersion: 1,
+  harnessSessionId: 'session',
+  runtimeSessionId: 'turn',
+};
 
 const enablement = vi.hoisted(() => ({ childRun: true }));
 vi.mock(
@@ -98,6 +105,7 @@ const BROKER_OPTIONS: HostedWorkspaceBrokerOptions = {
 };
 
 let root: string | undefined;
+let closeServer: Server | undefined;
 let session: ManagedSession | undefined;
 let key: {
   tenantId: string;
@@ -111,6 +119,10 @@ afterEach(async () => {
   if (root) await rm(root, { recursive: true, force: true });
   root = undefined;
   enablement.childRun = true;
+  closeServer?.closeAllConnections();
+  if (closeServer)
+    await new Promise<void>((resolve) => closeServer!.close(() => resolve()));
+  closeServer = undefined;
 });
 
 beforeEach(() => {
@@ -321,6 +333,51 @@ describe('probeNeverStarted', () => {
       expect(result).toEqual({ proven: false, cause: expectedCause });
       expect(JSON.stringify(result)).not.toContain('secret broker URL');
       expect(JSON.stringify(result)).not.toContain('fetch failed');
+    },
+  );
+
+  // The cases above feed rejectionDetail hand-built errors, so rewording the
+  // Broker's throw sites would keep them green. These drive the real
+  // status() path instead, where the two contract errors are produced by a
+  // mismatched executionCallId and an illegal state rather than by a copy of
+  // their message text.
+  it.each([
+    [
+      { ...identity, executionCallId: 'other', status: { state: 'settled' } },
+      'probe_rejected (identity_changed)',
+    ],
+    [
+      { ...identity, executionCallId: 'shell-1:process', status: {} },
+      'probe_rejected (outcome_unknown)',
+    ],
+  ] as const)(
+    'classifies a contract error raised by the Broker itself',
+    async (body, expectedCause) => {
+      closeServer = createServer((_req, res) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(body));
+      });
+      await new Promise<void>((resolve) =>
+        closeServer!.listen(0, '127.0.0.1', resolve),
+      );
+      const address = closeServer.address();
+      if (!address || typeof address === 'string')
+        throw new Error('No fixture listener');
+      // The module-level registry substitutes FakeBroker, so the real client
+      // has to come from the actual module to exercise the transport.
+      const { HostedWorkspaceBroker: RealBroker } = await vi.importActual<
+        typeof import('./hosted-workspace-broker.js')
+      >('./hosted-workspace-broker.js');
+      const realBroker = new RealBroker(
+        { baseUrl: `http://127.0.0.1:${address.port}`, token: 'test' },
+        { tenantId: 'tenant', workspaceId: 'workspace', sessionId: 'session' },
+        'turn',
+      );
+
+      await expect(probeNeverStarted(realBroker, 'shell-1')).resolves.toEqual({
+        proven: false,
+        cause: expectedCause,
+      });
     },
   );
 });

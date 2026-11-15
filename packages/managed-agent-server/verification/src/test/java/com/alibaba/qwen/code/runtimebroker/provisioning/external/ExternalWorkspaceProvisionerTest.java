@@ -153,6 +153,35 @@ class ExternalWorkspaceProvisionerTest {
     }
 
     @Test
+    void measuredWorkspaceScopeKeepsItsRegisteredStorageBindingAndBootCapability() throws Exception {
+        ExternalWorkspaceProvisioner subject = provisioner(registration(PROVIDER, 3, MOUNT));
+        RuntimeScope scope = scope(WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST);
+        RuntimeProvisionRequest request = subject.createRequest(scope, "isolation-measured");
+        assertTrue(request.isManagedContext());
+        assertEquals(ALIAS, request.getStorageId());
+        assertEquals(scope, request.getScope());
+        RuntimeProvisionSeed seed = seed("measured-boot");
+        RuntimeResourceHandle handle = join(subject.ensureResource(request, seed, null));
+        client.provisionResponse = Map.of("protocolVersion", 1,
+                "handle", handle.getValue().get("provider"), "endpoint", RecordingClient.ENDPOINT);
+        client.observeState = "RUNNING";
+        RuntimeLease lease = join(subject.provision(request, seed));
+
+        Map<String, Object> boot = client.boot();
+        assertEquals("managed-context/1", boot.get("managedContext"));
+        assertEquals(WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST, boot.get("capabilityDigest"));
+        assertEquals(ALIAS, boot.get("storageId"));
+        assertEquals(MOUNT, boot.get("mountRoot"));
+        assertEquals("session", boot.get("isolationClass"));
+        assertEquals(Map.of("kind", "external", "physicalKey", PHYSICAL,
+                "aliasPath", ALIAS_PATH, "mountRoot", MOUNT,
+                "registrationRevision", 3L), boot.get("storage"));
+        assertEquals(seed.getToken(), lease.getToken());
+        assertTrue(subject.isUsable(lease));
+        assertEquals(1, client.provisions.size());
+    }
+
+    @Test
     void aRequestWithoutAStorageBindingIsRefused() {
         // A harness-Session caller that resolved no storage must not have a
         // storage-bound placement invented for it.

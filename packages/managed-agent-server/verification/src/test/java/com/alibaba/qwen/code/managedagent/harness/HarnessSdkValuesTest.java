@@ -39,6 +39,15 @@ class HarnessSdkValuesTest {
         verify(delegate).supportsModelConfiguration();
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void boundaryForwardsPersonalMemoryCapability(boolean supported) {
+        var delegate = mock(HarnessConnector.class);
+        when(delegate.supportsPersonalMemory()).thenReturn(supported);
+        assertThat(new SdkHarnessBoundary(delegate).supportsPersonalMemory()).isEqualTo(supported);
+        verify(delegate).supportsPersonalMemory();
+    }
+
     @Test
     void httpStatusBodyFieldsAndTransportCauseSurviveTheBoundary() throws Exception {
         var cause = new IOException("disconnected");

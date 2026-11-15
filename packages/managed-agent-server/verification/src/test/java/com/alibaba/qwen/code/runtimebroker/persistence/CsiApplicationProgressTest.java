@@ -4,7 +4,7 @@ import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.CsiOwnershipRevision;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
-import com.alibaba.qwen.code.runtimebroker.managedschema.JdbcRuntimeBrokerSchema;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -186,7 +186,7 @@ class CsiApplicationProgressTest {
     private static JdbcDataSource source() throws Exception {
         var source = new JdbcDataSource();
         source.setURL("jdbc:h2:mem:application-" + UUID.randomUUID() + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
-        JdbcRuntimeBrokerSchema.initialize(source);
+        ManagedSchema.initialize(source);
         try (var connection = source.getConnection()) {
             sql(connection, "INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id,"
                     + " storage_kind, registration_state, physical_key, registration_revision, registration_json) VALUES ('"

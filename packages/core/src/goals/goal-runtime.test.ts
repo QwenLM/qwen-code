@@ -8,7 +8,6 @@ import { describe, expect, it, vi } from 'vitest';
 import type { GoalEvidenceRecord } from './goal-evidence.js';
 import { type GoalRecoveryRecord } from './goal-persistence.js';
 import {
-  GOAL_INFEASIBLE_NEXT_STEP,
   GOAL_DEFAULT_TOKEN_BUDGET,
   GOAL_NO_PROGRESS_TURN_LIMIT,
   GOAL_PAUSE_REASON_NO_PROGRESS,
@@ -989,7 +988,7 @@ describe('goal runtime', () => {
     );
   });
 
-  it('accepts an evidenced infeasible blocker on its first turn, with the next step spelled out', async () => {
+  it('accepts an evidenced infeasible blocker on its first turn, keeping the reason as the verifier wrote it', async () => {
     const { journal, host, runtime, verifier, receipt } = await verifiedTurn({
       verifier: accepting('The named branch does not exist'),
       objective: 'Rebase onto the v9 branch',
@@ -1019,7 +1018,30 @@ describe('goal runtime', () => {
     expectCauses(journal, 'create turn_finished verifier_accept blocked');
     expectState(runtime, 'idle', {
       status: 'blocked',
-      lastReason: `The named branch does not exist ${GOAL_INFEASIBLE_NEXT_STEP}`,
+      lastReason: 'The named branch does not exist',
+    });
+    expect(host.started).toHaveLength(1);
+  });
+
+  it('keeps a non-English infeasible reason in one language, with no English suffix', async () => {
+    const { host, runtime, receipt } = await verifiedTurn({
+      verifier: accepting('Заданной ветки не существует'),
+      objective: 'Rebase onto the v9 branch',
+      evidence: (p, cursorId) => {
+        const [cursor, probe] = verifierEvidenceRecords(p, cursorId, 'probe');
+        return [cursor!, asToolResult(probe!, "fatal: branch 'v9' not found")];
+      },
+      proposal: blocked(
+        'Checked the remote: no v9 branch exists, so nothing in scope can rebase onto it.',
+        'infeasible',
+        ['probe'],
+      ),
+    });
+
+    expect(receipt).toEqual({ recorded: true, readyForVerification: true });
+    expectState(runtime, 'idle', {
+      status: 'blocked',
+      lastReason: 'Заданной ветки не существует',
     });
     expect(host.started).toHaveLength(1);
   });

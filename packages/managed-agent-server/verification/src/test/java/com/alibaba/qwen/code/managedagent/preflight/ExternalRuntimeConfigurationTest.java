@@ -144,7 +144,7 @@ class ExternalRuntimeConfigurationTest {
                 .withProperty("QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_REQUEST_TIMEOUT", "7")
                 .withProperty("QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_STARTUP_TIMEOUT", "90");
         var notes = new ArrayList<ManagedAgentPreflight.Check>();
-        ManagedAgentPreflight.loadConfiguration(environment, List.of(), notes);
+        ManagedAgentPreflight.loadDefaults(environment, notes);
         var properties = ManagedAgentPreflight.bind(environment, notes);
         assertTrue(notes.isEmpty(), notes.toString());
         return properties;

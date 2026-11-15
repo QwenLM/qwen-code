@@ -241,8 +241,11 @@ export const QueryOptionsSchema = z
             !!(
               val &&
               typeof val === 'object' &&
+              'name' in val &&
               val.name &&
+              'description' in val &&
               val.description &&
+              'systemPrompt' in val &&
               val.systemPrompt
             ),
           {
@@ -270,18 +273,17 @@ export const QueryOptionsSchema = z
       .optional(),
     extraArgs: z
       .array(z.string().min(1, 'extraArgs items cannot be empty'))
-      .refine(
-        (args) =>
-          !args.some((arg) => RESERVED_CLI_FLAGS.has(arg.split('=')[0] ?? '')),
-        (args) => {
-          const blocked = args.find((arg) =>
-            RESERVED_CLI_FLAGS.has(arg.split('=')[0] ?? ''),
-          );
-          return {
+      .superRefine((args, ctx) => {
+        const blocked = args.find((arg) =>
+          RESERVED_CLI_FLAGS.has(arg.split('=')[0] ?? ''),
+        );
+        if (blocked) {
+          ctx.addIssue({
+            code: 'custom',
             message: `extraArgs cannot contain reserved flag: ${blocked}`,
-          };
-        },
-      )
+          });
+        }
+      })
       .optional(),
     extensions: z
       .array(

@@ -70,7 +70,8 @@ public final class JdbcCsiApplicationRetirement {
     }
 
     public static Authority lock(Connection connection, String tenantId, String sessionId,
-            String bindingId, String retirementId) throws SQLException {
+            String bindingId, String retirementId,
+            com.alibaba.qwen.code.managedagent.persistence.JdbcJournalPacks packs) throws SQLException {
         require(connection != null && !connection.getAutoCommit());
         var original = JdbcCsiFilesRetirementGuard.lockBindingControl(connection, bindingId);
         require(original != null && original.state() == RuntimeBindingRecord.State.DRAINING && original.draining()
@@ -109,25 +110,26 @@ public final class JdbcCsiApplicationRetirement {
                 require(!row.next());
                 var authority = new Authority(connection, original, retirementId, stage, deadline, ceiling,
                         frozen, cut, receipt);
-                requireStageRows(connection, authority);
+                requireStageRows(connection, authority, packs);
                 return authority;
             }
         }
     }
 
-    private static void requireStageRows(Connection connection, Authority authority) throws SQLException {
+    private static void requireStageRows(Connection connection, Authority authority,
+            com.alibaba.qwen.code.managedagent.persistence.JdbcJournalPacks packs) throws SQLException {
         var original = authority.original();
         boolean terminal = authority.stage() == Stage.CUT || authority.stage() == Stage.DRAINED;
         if (terminal) {
-            JdbcCsiActivationAdmission.terminalHistory(connection, authority);
+            JdbcCsiActivationAdmission.terminalHistory(connection, authority, packs);
         } else {
-            JdbcCsiActivationAdmission.lockRetirementPredecessor(connection, authority);
+            JdbcCsiActivationAdmission.lockRetirementPredecessor(connection, authority, packs);
         }
         try (var statement = statement(connection,
                 "SELECT workspace_id, state, activation_phase FROM ma_session_head"
                         + " WHERE head_kind = 'MANAGED_SESSION' AND tenant_key = ? AND harness_key = ? AND tenant_id = ? AND session_id = ? FOR UPDATE")) {
-            statement.setString(1, JdbcRuntimeBindingRepository.harnessDrainKey(original.request().getScope().getTenantId()));
-            statement.setString(2, JdbcRuntimeBindingRepository.harnessDrainKey(original.request().getIsolationKey()));
+            statement.setString(1, RuntimeAdmissionFences.harnessDrainKey(original.request().getScope().getTenantId()));
+            statement.setString(2, RuntimeAdmissionFences.harnessDrainKey(original.request().getIsolationKey()));
             JdbcRepositorySupport.setIdentity(statement, 3, original.request().getScope().getTenantId());
             JdbcRepositorySupport.setIdentity(statement, 4, original.request().getIsolationKey());
             try (var row = statement.executeQuery()) {

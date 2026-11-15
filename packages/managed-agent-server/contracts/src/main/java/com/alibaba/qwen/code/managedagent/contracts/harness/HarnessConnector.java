@@ -48,11 +48,29 @@ public interface HarnessConnector extends AutoCloseable {
 
     public default boolean supportsModelSelection() { return false; }
 
+    public default boolean supportsPersonalMemory() { return false; }
+
     public default boolean supportsModelConfiguration() { return false; }
 
     public default boolean supportsUserMessageQueue() { return false; }
 
     public default boolean supportsContextCompression() { return false; }
+
+    public default boolean supportsSideQueries() { return false; }
+
+    /** Selects an instance without acquiring or changing Session placement. */
+    public default SideQueryTarget prepareSideQuery() {
+        throw new UnsupportedOperationException("Side queries are unavailable");
+    }
+
+    public interface SideQueryTarget extends AutoCloseable {
+        public String instanceId();
+        public String bootId();
+        public Map<String, Object> submit(Map<String, Object> body);
+        public Map<String, Object> status(String queryId, Map<String, Object> claim);
+        public void cancel(String queryId, Map<String, Object> claim);
+        @Override public void close();
+    }
 
     @FunctionalInterface
     public interface ContextCompressionSubmission {
@@ -94,7 +112,56 @@ public interface HarnessConnector extends AutoCloseable {
         throw new UnsupportedOperationException("MCP management is unavailable");
     }
 
+    public default boolean supportsClientFiles() { return false; }
+
+    /**
+     * Session-aware client-files admission: must answer the same question the
+     * register route answers, so the capability is never advertised for a
+     * Session whose registration the Harness would refuse (foregroundOnly or
+     * no tool profile). Defaults to the parameterless capability.
+     */
+    public default boolean supportsClientFiles(StoreModels.SessionRecord session) {
+        return supportsClientFiles();
+    }
+
+    /** Registers or unregisters the Session's client filesystem relay. */
+    public default Map<String, Object> clientFilesOperation(String tenantId, String sessionId, Map<String, Object> body) {
+        throw new UnsupportedOperationException("Client files registration is unavailable");
+    }
+
     public default boolean supportsSessionExtensions() { return false; }
+
+    public default boolean supportsPackagePreparation() { return false; }
+
+    public record PreparedPackage(Map<String, Object> descriptor, java.io.InputStream archive) implements AutoCloseable {
+        @Override public void close() throws java.io.IOException { archive.close(); }
+    }
+
+    public default PreparedPackage preparePackage(Map<String, Object> metadata, java.io.InputStream source) {
+        throw new UnsupportedOperationException("Managed package preparation is unavailable");
+    }
+
+    public default Map<String, Object> inspectPackage(Map<String, Object> metadata, java.io.InputStream source) {
+        throw new UnsupportedOperationException("Managed package inspection is unavailable");
+    }
+
+    public default Map<String, Object> previewPackage(Map<String, Object> metadata, java.io.InputStream source) {
+        throw new UnsupportedOperationException("Managed package preview is unavailable");
+    }
+
+    public default boolean supportsRuntimeSkillImport() { return false; }
+
+    public default Map<String, Object> runtimeSkillCandidates(String tenant, String session) {
+        throw new UnsupportedOperationException("Runtime Skill import is unavailable");
+    }
+
+    public default Map<String, Object> runtimeSkillSnapshot(String tenant, String session, Map<String, Object> request) {
+        throw new UnsupportedOperationException("Runtime Skill import is unavailable");
+    }
+
+    public default Map<String, Object> runtimeSkillArchive(String tenant, String session, Map<String, Object> request) {
+        throw new UnsupportedOperationException("Runtime Skill import is unavailable");
+    }
 
     public default Map<String, Object> applyExtensions(String tenantId, String sessionId, Map<String, Object> command) {
         throw new UnsupportedOperationException("Extension management is unavailable");

@@ -282,6 +282,7 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
   { section: 'model', key: 'catalogRefresh' },
   { section: 'tools', key: 'executionSandbox' },
   { section: 'tools', key: 'workflowsEnabled' },
+  { section: 'tools', key: 'lspEnabled' },
   { section: 'security', key: 'allowPrivateNetworkHooks' },
   // A repository must not switch on the gate that authorizes its own hooks.
   { section: 'security', key: 'folderTrust' },
@@ -290,6 +291,9 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
   { section: 'outboundCorrelation', key: 'allowDynamicHeaderValues' },
   { section: 'serve', key: 'tokenQr' },
   { section: 'serve', key: 'maxSessions' },
+  // A repository must not spend daemon-wide gh budget or inject prompts into
+  // sessions across workspaces; the trust-gated channel alias is its path.
+  { section: 'serve', key: 'sessionPrWatch' },
   { section: 'ui', key: 'allowedApprovalModes' },
 ] as const satisfies ReadonlyArray<{
   readonly section: keyof Settings;

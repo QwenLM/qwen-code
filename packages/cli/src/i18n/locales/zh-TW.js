@@ -360,6 +360,8 @@ export default {
   'Open the skills panel (browse, search, toggle, pick).':
     '開啟技能面板（瀏覽、搜尋、啟停、選擇）。',
   'Move this session to a new working directory': '將此會話移動到新的工作目錄',
+  'Wait for background agents to finish or stop them in /tasks before changing directories.':
+    '請等待背景智能體完成，或在 /tasks 中停止它們後再切換目錄。',
   'Manage Skills': '管理技能',
   'Skills configuration saved.': '技能設定已儲存。',
   'Skills configuration saved, but refresh failed: {{error}}. Restart to ensure the new state is applied.':
@@ -1275,6 +1277,26 @@ export default {
   'Usage: /forget <memory text to remove>': '用法：/forget <要刪除的記憶文本>',
   'No managed auto-memory entries matched: {{query}}':
     '沒有匹配的託管自動記憶條目：{{query}}',
+  'Bind a GitHub pull request to this session':
+    '將 GitHub 提取請求綁定到本會話',
+  'Usage: /pr <number | url>': '用法：/pr <編號 | url>',
+  'No PRs bound to this session.': '本會話尚未綁定 PR。',
+  'Bound PRs: {{list}}': '已綁定 PR：{{list}}',
+  'Invalid PR reference. Usage: /pr <number | url>':
+    '無效的 PR 引用。用法：/pr <編號 | url>',
+  'Could not resolve PR #{{number}} via gh. Pass the full PR URL instead.':
+    '無法透過 gh 解析 PR #{{number}}。請改用完整 PR URL。',
+  'Bound PR #{{number}} to this session: {{url}}':
+    '已將 PR #{{number}} 綁定到本會話：{{url}}',
+  'PR #{{number}} is already bound to this session: {{url}}':
+    'PR #{{number}} 已綁定到本會話：{{url}}',
+  'Failed to bind PR #{{number}}.': '綁定 PR #{{number}} 失敗。',
+  'Failed to bind PR #{{number}}: {{message}}':
+    '綁定 PR #{{number}} 失敗：{{message}}',
+  'Could not read the PR bindings for this session.':
+    '無法讀取本會話的 PR 綁定。',
+  'GitHub CLI (gh) is unavailable or timed out. Pass the full PR URL to bind without it.':
+    'GitHub CLI (gh) 不可用或逾時。請改用完整 PR URL 直接綁定。',
   'Consolidate managed auto-memory topic files.': '整理託管自動記憶主題檔案',
   'Import MCP servers from Claude configs': '從 Claude 設定匯入 MCP 伺服器',
   'Open MCP management dialog': '打開 MCP 管理對話框',
@@ -1845,6 +1867,7 @@ export default {
   'Model Usage': '模型使用情況',
   'Input Tokens': '輸入 token 數',
   'Output Tokens': '輸出 token 數',
+  'Output (incl. Reasoning)': '輸出（含推理）',
   'Savings Highlight:': '節省亮點：',
   'of input tokens were served from the cache, reducing costs.':
     '從緩存載入 token ，降低了成本',
@@ -2192,6 +2215,8 @@ export default {
   'Advisor review failed: {{error}}': '審查失敗：{{error}}',
   'No conversation context available for /advisor':
     '沒有可供 /advisor 使用的對話上下文',
+  'No conversation context available for /btw':
+    '沒有可供 /btw 使用的對話上下文',
   'Focus too long (max {{max}} chars)': '關注點過長（最多 {{max}} 個字元）',
   'Another operation is in progress, wait for it to complete before running /advisor':
     '另一個操作正在進行中，請等待其完成後再執行 /advisor',
@@ -2597,10 +2622,10 @@ export default {
   'Signed in successfully · {{email}}': '登入成功 · {{email}}',
   'Current plan: Qwen {{plan}}. Qwen Code is ready.':
     '目前方案：Qwen {{plan}}，已可使用 Qwen Code',
-  'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, or /model to switch models.':
-    '模型：{{model}}，輸入 /upgrade 升級方案，/usage 查看用量，/model 切換模型。',
-  'Common commands: /usage   /upgrade   /model   /status   /logout':
-    '常用指令：/usage   /upgrade   /model   /status   /logout',
+  'Model: {{model}}. Run /upgrade to upgrade your plan, /usage to view usage, /model to switch models, or /effort to change reasoning effort.':
+    '模型：{{model}}，輸入 /upgrade 升級方案，/usage 查看用量，/model 切換模型，/effort 修改思考強度。',
+  'Common commands: /usage   /upgrade   /model   /effort   /status   /logout':
+    '常用指令：/usage   /upgrade   /model   /effort   /status   /logout',
   'Signed in as {{email}} (Qwen {{plan}})': '已登入 {{email}}（Qwen {{plan}}）',
   'The network request failed or timed out.': '網路請求失敗或逾時。',
   'The service returned an invalid response.': '服務回傳的資料格式無效。',
@@ -2640,4 +2665,17 @@ export default {
   'Signed out of Qwen. Use /auth to sign in with another account.':
     '已登出 Qwen，請使用 /auth 登入其他帳號。',
   'Tip: Run /usage to see your plan usage.': '提示：執行 /usage 查看方案用量。',
+  'Copied to clipboard': '已複製到剪貼簿',
+  'Copy failed': '複製失敗',
+  '(API error: {{error}})': '（API 錯誤：{{error}}）',
+  'API error': 'API 錯誤',
+  '{{reason}} · retrying in {{seconds}}s · attempt {{attempt}}/{{max}}':
+    '{{reason}} · {{seconds}} 秒後重試 · 第 {{attempt}}/{{max}} 次',
+  '←/→ browse earlier answers': '←/→ 瀏覽先前的回答',
+  'c copy': 'c 複製',
+  'x clear history': 'x 清除歷史',
+  'Tip: Use /btw to ask a quick side question without interrupting the current work':
+    '提示：用 /btw 順帶問一個旁路問題，不打斷目前的工作',
+  '(The model tried to call {{tool}} instead of answering directly. Try rephrasing or ask in the main conversation.)':
+    '（模型嘗試呼叫 {{tool}}，而沒有直接回答。請換個問法，或在主對話中提問。）',
 };

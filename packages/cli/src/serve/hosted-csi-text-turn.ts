@@ -116,11 +116,12 @@ export async function runHostedCsiTextTurn(
           parts,
           model,
           identity,
+          diagnostics,
         ) => {
           const message = messageRecord(type, parts, model, identity);
           if (type === 'assistant')
             message.uuid = deltas.takeMessageId() ?? message.uuid;
-          await managed.sink.write(message);
+          await managed.sink.write(message, diagnostics);
           parentUuid = message.uuid;
           return message.uuid;
         };
