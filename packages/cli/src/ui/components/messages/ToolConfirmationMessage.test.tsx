@@ -361,12 +361,11 @@ describe('ToolConfirmationMessage', () => {
     expect(lastFrame() ?? '').not.toContain('command substitution');
   });
 
-  // Regression coverage for issue #17335: the command shown here previously
-  // bypassed the shared `sanitizeTerminalText` pipeline that every other
-  // untrusted render site in this package already uses (see ToolMessage's
-  // own "escapes ANSI/control sequences" test). A command string carrying
-  // terminal control sequences could repaint the screen right in front of
-  // the Allow/Deny choice; it must render inert instead.
+  // The command must always reach the terminal through `sanitizeTerminalText`,
+  // the same pipeline every other untrusted render site in this package uses
+  // (see ToolMessage's own "escapes ANSI/control sequences" test): a command
+  // string carrying terminal control sequences sits right in front of the
+  // Allow/Deny choice and must render inert.
   it('sanitizes terminal control sequences in the displayed command (no raw injection)', () => {
     const confirmationDetails: ToolCallConfirmationDetails = {
       type: 'exec',
@@ -397,10 +396,9 @@ describe('ToolConfirmationMessage', () => {
     expect(frame).not.toContain('\x08');
   });
 
-  // Same issue (#17335), second render site: warnings on an exec
-  // confirmation (e.g. from buildOutsideWorkspaceWarning, which interpolates
-  // a model-controlled directory string) go through the same raw <Text>
-  // path as the command above and need the same sanitization.
+  // Warnings on an exec confirmation (e.g. from buildOutsideWorkspaceWarning,
+  // which interpolates a model-controlled directory string) are untrusted the
+  // same way the command is, so they go through `sanitizeTerminalText` too.
   it('sanitizes terminal control sequences in displayed warnings (no raw injection)', () => {
     const confirmationDetails: ToolCallConfirmationDetails = {
       type: 'exec',
@@ -429,11 +427,10 @@ describe('ToolConfirmationMessage', () => {
     expect(frame).not.toContain('\x08');
   });
 
-  // Same issue (#17335), third render site: rootCommand feeds the question
-  // line itself ("Allow execution of: '{{command}}'?"). getCommandRoot()
-  // just takes the raw command's first token, so a control-byte-prefixed
-  // command reaches this line unsanitized too, right next to the Yes/No
-  // choice the user is about to make.
+  // rootCommand feeds the question line itself ("Allow execution of:
+  // '{{command}}'?"). getCommandRoot() just takes the raw command's first
+  // token, so this is untrusted the same way `command` is, right next to the
+  // Yes/No choice the user is about to make, and needs the same sanitization.
   it('sanitizes terminal control sequences in the question line (rootCommand)', () => {
     const confirmationDetails: ToolCallConfirmationDetails = {
       type: 'exec',
