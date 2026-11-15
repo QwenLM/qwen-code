@@ -123,7 +123,8 @@ vi.mock('../utils/shell-utils.js', async (importOriginal) => {
 
 const mockIsShellCommandReadOnlyAST = vi.hoisted(() => vi.fn());
 const mockExtractCommandRules = vi.hoisted(() => vi.fn());
-vi.mock('../utils/shellAstParser.js', () => ({
+vi.mock('../utils/shellAstParser.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../utils/shellAstParser.js')>()),
   isShellCommandReadOnlyASTInDirectory: mockIsShellCommandReadOnlyAST,
   extractCommandRules: mockExtractCommandRules,
 }));
@@ -137,13 +138,19 @@ import {
   MAX_CONCURRENT_MONITORS,
   MonitorRegistry,
 } from '../services/monitorRegistry.js';
-import type {
-  ToolCallConfirmationDetails,
-  ToolExecuteConfirmationDetails,
-  ToolResult,
+import {
+  ToolConfirmationOutcome,
+  type ToolCallConfirmationDetails,
+  type ToolExecuteConfirmationDetails,
+  type ToolResult,
 } from './tools.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
+import { PermissionManager } from '../permissions/permission-manager.js';
+import {
+  injectPermissionRulesIfMissing,
+  persistPermissionOutcome,
+} from '../core/permission-helpers.js';
 
 type MockChild = ChildProcess & {
   stdout: Readable;
@@ -414,6 +421,81 @@ describe('MonitorTool', () => {
   });
 
   describe('confirmation details', () => {
+    it.each([
+      'git <&- push origin',
+      'git <&- show "*"',
+      'git <&- show "(topic)[1]"',
+      '  git <&- status  ',
+      '\tgit <> /tmp/gate status\t',
+    ])(
+      'persists and reloads a full-command fallback for %s',
+      async (command) => {
+        const fallback = command.replace(/^[ \t]+|[ \t]+$/g, '');
+        mockExtractCommandRules.mockResolvedValueOnce([]);
+        const details = await confirm(command);
+        const saved: string[] = [];
+        const config = {
+          getPermissionsAllow: () => saved,
+          getPermissionsAsk: () => [],
+          getPermissionsDeny: () => [],
+          getProjectRoot: () => '/test/dir',
+          getCwd: () => '/test/dir',
+        };
+        const pm = new PermissionManager(config);
+        pm.initialize();
+        const persist = vi.fn(
+          async (_scope: string, _type: string, rule: string) => {
+            saved.push(rule);
+          },
+        );
+        injectPermissionRulesIfMissing(details, {
+          toolName: 'monitor',
+          command,
+        });
+        await persistPermissionOutcome(
+          ToolConfirmationOutcome.ProceedAlwaysProject,
+          details,
+          persist,
+          pm,
+        );
+
+        expect(persist).toHaveBeenCalledExactlyOnceWith(
+          'project',
+          'allow',
+          `Monitor(${fallback})`,
+        );
+        expect(details.permissionRules).toEqual([`Monitor(${fallback})`]);
+        expect(saved).toEqual([`Monitor(${fallback})`]);
+        expect(await pm.evaluate({ toolName: 'monitor', command })).toBe(
+          'allow',
+        );
+        const reloaded = new PermissionManager(config);
+        reloaded.initialize();
+        expect(await reloaded.evaluate({ toolName: 'monitor', command })).toBe(
+          'allow',
+        );
+        expect(
+          await reloaded.evaluate({
+            toolName: 'monitor',
+            command: 'git reset --hard',
+          }),
+        ).not.toBe('allow');
+        expect(await reloaded.isCommandAllowed(command)).not.toBe('allow');
+        expect(mockSpawn).not.toHaveBeenCalled();
+      },
+    );
+
+    it('keeps non-empty rules while adding a fallback for an unparsed sub-command', async () => {
+      mockExtractCommandRules
+        .mockResolvedValueOnce(['npm run *'])
+        .mockResolvedValueOnce([]);
+      const details = await confirm('npm run watch && git <&- push origin');
+      expect(details.permissionRules).toEqual([
+        'Monitor(npm run *)',
+        'Monitor(git <&- push origin)',
+      ]);
+    });
+
     it('includes command-scoped permission rules for monitor commands', async () => {
       const details = await confirm('tail -f /tmp/app.log');
       expect(details.type).toBe('exec');

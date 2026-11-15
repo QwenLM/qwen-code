@@ -3448,7 +3448,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       const allRules: string[] = [];
       for (const sub of effectiveSubCommands) {
         const rules = await extractCommandRules(sub);
-        allRules.push(...rules);
+        allRules.push(...(rules.length > 0 ? rules : [sub]));
       }
       permissionRules = [...new Set(allRules)].map((rule) => `Bash(${rule})`);
     } catch (e) {

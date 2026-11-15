@@ -15,6 +15,7 @@ import {
   normalizeMcpToolName,
 } from '../utils/tool-name-utils.js';
 import { isNodeError } from '../utils/errors.js';
+import { getShellConfiguration } from '../utils/shell-utils.js';
 
 const debugLogger = createDebugLogger('PERMISSIONS');
 
@@ -1211,10 +1212,23 @@ export function matchesCommandPattern(
   pattern: string,
   command: string,
 ): boolean {
+  // A full-command fallback must remain usable even when shell-quote
+  // reconstructs its operators differently (e.g. <&- or <>).
+  if (pattern === command || pattern === trimCommandPadding(command)) {
+    return true;
+  }
   // This function matches a single pattern against a single simple command.
   // Compound command splitting is handled by the caller (PermissionManager).
-  const normalizedCommand = stripLeadingVariableAssignments(command);
+  return matchesCommandText(pattern, stripLeadingVariableAssignments(command));
+}
 
+function trimCommandPadding(command: string): string {
+  return command.includes('\\')
+    ? command
+    : command.replace(/^[ \t]+|[ \t]+$/g, '');
+}
+
+function matchesCommandText(pattern: string, command: string): boolean {
   // Special case: lone `*` matches any single command
   if (pattern === '*') {
     return true;
@@ -1224,10 +1238,7 @@ export function matchesCommandPattern(
     // No wildcards: prefix matching (backward compat).
     // "git commit" matches "git commit" and "git commit -m test"
     // but NOT "gitcommit".
-    return (
-      normalizedCommand === pattern ||
-      normalizedCommand.startsWith(pattern + ' ')
-    );
+    return command === pattern || command.startsWith(pattern + ' ');
   }
 
   // Build regex from glob pattern with word-boundary semantics.
@@ -1276,10 +1287,69 @@ export function matchesCommandPattern(
   regex += '$';
 
   try {
-    return new RegExp(regex, 's').test(normalizedCommand);
+    return new RegExp(regex, 's').test(command);
   } catch {
-    return normalizedCommand === pattern;
+    return command === pattern;
   }
+}
+
+/**
+ * Additional matching spelling for literal Bash redirects. Never replace the
+ * original command: restrictive rules and virtual file operations need it.
+ * Dynamic, escaped, here-document and compound syntax stay on the raw path.
+ */
+function staticCommandSpellings(
+  command: string,
+): { withRedirections: string; withoutRedirections: string } | undefined {
+  if (!/[<>]/.test(command) || /[\\$\x60(){}#]|[^\x20-\x7e\t]/.test(command)) {
+    return undefined;
+  }
+  const word = /^(?:[^ \t<>&|;"'!]+|'[^']*'|"[^"]*")+/;
+  let rest = trimCommandPadding(command);
+  while (/^![ \t]+/.test(rest)) rest = rest.replace(/^![ \t]+/, '');
+  while (true) {
+    const assignment = word.exec(rest)?.[0];
+    if (!assignment || !ENV_ASSIGNMENT_REGEX.test(assignment)) break;
+    rest = rest.slice(assignment.length).replace(/^[ \t]+/, '');
+  }
+  // Apply the same prefix handling to restrictive rules while preserving
+  // every redirect and target in their matching spelling.
+  const withRedirections = rest.replace(/'[^']*'|"[^"]*"|[ \t]+/g, (part) =>
+    /^[ \t]/.test(part) ? ' ' : part,
+  );
+  const words: string[] = [];
+  let redirected = false;
+  while (rest) {
+    const redirect = /^(?:\d*(?:>>|>\||[<>]&|[<>])|&>>?)/.exec(rest);
+    if (redirect) {
+      const operator = redirect[0];
+      rest = rest.slice(operator.length).replace(/^[ \t]+/, '');
+      const target = word.exec(rest)?.[0];
+      if (
+        !target ||
+        /[*?[\]~]/.test(target) ||
+        (/[<>]&$/.test(operator) && !/^(?:\d+|-)$/.test(target))
+      ) {
+        return undefined;
+      }
+      rest = rest.slice(target.length);
+      redirected = true;
+    } else {
+      const argument = word.exec(rest)?.[0];
+      if (!argument) return undefined;
+      // A quoted command word such as "VAR=1" must not become a skipped
+      // assignment when matchesCommandPattern later removes quotes.
+      if (words.length === 0 && !/^[A-Za-z0-9_./-]+$/.test(argument)) {
+        return undefined;
+      }
+      words.push(argument);
+      rest = rest.slice(argument.length);
+    }
+    rest = rest.replace(/^[ \t]+/, '');
+  }
+  return redirected && words.length > 0
+    ? { withRedirections, withoutRedirections: words.join(' ') }
+    : undefined;
 }
 
 /**
@@ -2126,7 +2196,29 @@ export function matchesRule(
         if (command === undefined) {
           return false;
         }
-        specifierMatched = matchesCommandPattern(rule.specifier, command);
+        specifierMatched =
+          matchesCommandPattern(rule.specifier, command) ||
+          // Restrictive rules must also recognize the original redirect
+          // spelling. Do not add raw glob matching to allow rules: a quoted
+          // wildcard redirect target could otherwise cover a substitution.
+          (restrictive &&
+            (matchesCommandText(rule.specifier, command) ||
+              matchesCommandText(rule.specifier, trimCommandPadding(command))));
+        if (!specifierMatched && getShellConfiguration().shell === 'bash') {
+          const spellings = staticCommandSpellings(command);
+          if (spellings !== undefined) {
+            specifierMatched =
+              (restrictive &&
+                matchesCommandText(
+                  rule.specifier,
+                  spellings.withRedirections,
+                )) ||
+              matchesCommandPattern(
+                rule.specifier,
+                spellings.withoutRedirections,
+              );
+          }
+        }
         break;
       }
 

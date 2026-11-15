@@ -91,6 +91,7 @@ import {
 import { ApprovalMode, type Config } from '../config/config.js';
 import {
   ToolConfirmationOutcome,
+  type ToolExecuteConfirmationDetails,
   type ToolInvocation,
   type ToolResult,
 } from './tools.js';
@@ -111,6 +112,10 @@ import { OUTPUT_UPDATE_INTERVAL_MS, parseNumstat } from './shell.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { assertShellSandboxCwd } from '../sandbox/runtime-shell-policy.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
+import {
+  injectPermissionRulesIfMissing,
+  persistPermissionOutcome,
+} from '../core/permission-helpers.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 
 interface ShellToolParameterJsonSchema {
@@ -6301,6 +6306,9 @@ describe('ShellTool', () => {
         getCwd: () => '/test/dir',
       });
       pm.initialize();
+      expect(
+        await pm.isCommandAllowed('git > /dev/null push origin main'),
+      ).toBe('allow');
       expect(await pm.isCommandAllowed('git push origin other')).toBe('allow');
       expect(await pm.isCommandAllowed('git reset --hard')).not.toBe('allow');
       expect(await pm.isCommandAllowed('git clean -fdx')).not.toBe('allow');
@@ -6323,6 +6331,76 @@ describe('ShellTool', () => {
 
       expect(details.rootCommand).toBe('git');
       expect(details.permissionRules).toEqual(['Bash(git commit *)']);
+    });
+
+    it.each([
+      'git <&- push origin',
+      'git <&- show "*"',
+      'git <&- show "(topic)[1]"',
+      '  git <&- push origin  ',
+      '\tgit <> /tmp/gate status\t',
+    ])(
+      'persists and reloads a full-command fallback for %s',
+      async (command) => {
+        const fallback = command.replace(/^[ \t]+|[ \t]+$/g, '');
+        const details = (await build(command).getConfirmationDetails(
+          new AbortController().signal,
+        )) as ToolExecuteConfirmationDetails;
+        const saved: string[] = [];
+        const config = {
+          getPermissionsAllow: () => saved,
+          getPermissionsAsk: () => [],
+          getPermissionsDeny: () => [],
+          getProjectRoot: () => '/test/dir',
+          getCwd: () => '/test/dir',
+        };
+        const pm = new PermissionManager(config);
+        pm.initialize();
+        const persist = vi.fn(
+          async (_scope: string, _type: string, rule: string) => {
+            saved.push(rule);
+          },
+        );
+        injectPermissionRulesIfMissing(details, {
+          toolName: 'run_shell_command',
+          command,
+        });
+        await persistPermissionOutcome(
+          ToolConfirmationOutcome.ProceedAlwaysProject,
+          details,
+          persist,
+          pm,
+        );
+
+        expect(persist).toHaveBeenCalledExactlyOnceWith(
+          'project',
+          'allow',
+          `Bash(${fallback})`,
+        );
+        expect(details.permissionRules).toEqual([`Bash(${fallback})`]);
+        expect(saved).toEqual([`Bash(${fallback})`]);
+        expect(await pm.isCommandAllowed(command)).toBe('allow');
+        const reloaded = new PermissionManager(config);
+        reloaded.initialize();
+        expect(await reloaded.isCommandAllowed(command)).toBe('allow');
+        expect(await reloaded.isCommandAllowed('git reset --hard')).not.toBe(
+          'allow',
+        );
+        expect(await reloaded.isCommandAllowed('git clean -fdx')).not.toBe(
+          'allow',
+        );
+        expect(mockShellExecutionService).not.toHaveBeenCalled();
+      },
+    );
+
+    it('keeps non-empty rules while adding a fallback for an unparsed sub-command', async () => {
+      const details = await detailsOf(
+        build('npm install && git <&- push origin'),
+      );
+      expect(details.permissionRules).toEqual([
+        'Bash(npm install)',
+        'Bash(git <&- push origin)',
+      ]);
     });
 
     it('should pass the invocation directory to permission-manager command checks', async () => {

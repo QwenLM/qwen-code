@@ -833,6 +833,24 @@ describe('extractCommandRules', () => {
       ['git <<< text push origin', ['git push *']],
       ['>out git push origin main', ['git push *']],
       ['(git push origin) > out', ['git push *']],
+      ['! git > /dev/null push origin main', ['git push *']],
+      [
+        'git status && git > /dev/null push origin main',
+        ['git status', 'git push *'],
+      ],
+      [
+        'git status | git > /dev/null push origin main',
+        ['git status', 'git push *'],
+      ],
+      [
+        'git > /dev/null status && git reset --hard',
+        ['git status', 'git reset *'],
+      ],
+      ['git 0<&3 push origin', ['git push *']],
+      ['git 0< /dev/null push origin main', ['git push *']],
+      ['git > out 0<&3 push origin', ['git push *']],
+      ['git 0 < /dev/null push origin main', ['git *']],
+      ["git '0'< /dev/null push origin main", ['git *']],
     ])('extracts complete arguments from %j', expectRules);
 
     it.each([
