@@ -1684,86 +1684,134 @@ describe('ToolConfirmationMessage', () => {
     });
   });
 
-  it.each([true, false])(
-    'handles a right-click and keys in one stdin chunk (menu items: %s)',
-    async (hasItems) => {
-      const onConfirm = vi.fn().mockResolvedValue(undefined);
-      const onMenuSelect = vi.fn();
-      const onUnderlyingKey = vi.fn();
-      const onMenuChange = vi.fn();
-      const OpenOnRightPress = () => {
-        const { subscribeMouse, unsubscribeMouse } = useKeypressContext();
-        const { menu, openMenu } = useContextMenu();
-        useKeypress(onUnderlyingKey, { isActive: menu === null });
-        useEffect(() => {
-          const handler = () => {
-            openMenu(
-              hasItems
-                ? [
-                    {
-                      id: 'open-link',
-                      label: 'Open Link',
-                      onSelect: onMenuSelect,
-                    },
-                  ]
-                : [],
-              { x: 0, y: 0 },
-            );
-            // AppContainer is outside the provider and relies on this callback.
-            expect(onMenuChange).toHaveBeenLastCalledWith(hasItems);
-          };
-          subscribeMouse(handler);
-          return () => unsubscribeMouse(handler);
-        }, [subscribeMouse, unsubscribeMouse, openMenu]);
-        return null;
-      };
-      const { stdin } = render(
-        withProviders(
-          <ContextMenuProvider onMenuChange={onMenuChange}>
-            <ToolConfirmationMessage
-              confirmationDetails={{
-                type: 'exec',
-                title: 'Confirm Execution',
-                command: 'echo test',
-                rootCommand: 'echo',
-                onConfirm,
-              }}
-              config={mockConfig}
-              availableTerminalHeight={30}
-              contentWidth={80}
-            />
-            <OpenOnRightPress />
-            <ContextMenuOverlay />
-          </ContextMenuProvider>,
-        ),
-      );
-      await act(async () => {});
-      await act(async () => {
-        stdin.write('\x1b[<2;10;5M\x1b[Z\x1b[C\r');
-      });
-      if (hasItems) {
-        expect(onUnderlyingKey).not.toHaveBeenCalled();
-        expect(onConfirm).not.toHaveBeenCalled();
-        expect(onMenuSelect).not.toHaveBeenCalled();
-        // Once rendered, Enter belongs to the menu, then to the dialog again.
-        await act(async () => {
-          stdin.write('\r');
-        });
-        expect(onMenuSelect).toHaveBeenCalledTimes(1);
-        expect(onConfirm).not.toHaveBeenCalled();
-        await act(async () => {
-          stdin.write('\r');
-        });
-      } else {
-        expect(onUnderlyingKey).toHaveBeenCalled();
-      }
-      await vi.waitFor(() =>
-        expect(onConfirm).toHaveBeenCalledWith(
-          ToolConfirmationOutcome.ProceedOnce,
-        ),
-      );
-    },
-  );
+  // Split from a single it.each([true, false]) into two concrete tests
+  // (vitest/no-conditional-expect): each branch had its own, different set
+  // of assertions gated behind `if (hasItems)`, which the lint rule flags
+  // regardless of how the condition is derived. No behavior change, same
+  // setup and assertions per branch, just no runtime branching left in a
+  // single test body.
+  it('handles a right-click and keys in one stdin chunk (menu items: true)', async () => {
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    const onMenuSelect = vi.fn();
+    const onUnderlyingKey = vi.fn();
+    const onMenuChange = vi.fn();
+    const OpenOnRightPress = () => {
+      const { subscribeMouse, unsubscribeMouse } = useKeypressContext();
+      const { menu, openMenu } = useContextMenu();
+      useKeypress(onUnderlyingKey, { isActive: menu === null });
+      useEffect(() => {
+        const handler = () => {
+          openMenu(
+            [
+              {
+                id: 'open-link',
+                label: 'Open Link',
+                onSelect: onMenuSelect,
+              },
+            ],
+            { x: 0, y: 0 },
+          );
+          // AppContainer is outside the provider and relies on this callback.
+          expect(onMenuChange).toHaveBeenLastCalledWith(true);
+        };
+        subscribeMouse(handler);
+        return () => unsubscribeMouse(handler);
+      }, [subscribeMouse, unsubscribeMouse, openMenu]);
+      return null;
+    };
+    const { stdin } = render(
+      withProviders(
+        <ContextMenuProvider onMenuChange={onMenuChange}>
+          <ToolConfirmationMessage
+            confirmationDetails={{
+              type: 'exec',
+              title: 'Confirm Execution',
+              command: 'echo test',
+              rootCommand: 'echo',
+              onConfirm,
+            }}
+            config={mockConfig}
+            availableTerminalHeight={30}
+            contentWidth={80}
+          />
+          <OpenOnRightPress />
+          <ContextMenuOverlay />
+        </ContextMenuProvider>,
+      ),
+    );
+    await act(async () => {});
+    await act(async () => {
+      stdin.write('\x1b[<2;10;5M\x1b[Z\x1b[C\r');
+    });
+    expect(onUnderlyingKey).not.toHaveBeenCalled();
+    expect(onConfirm).not.toHaveBeenCalled();
+    expect(onMenuSelect).not.toHaveBeenCalled();
+    // Once rendered, Enter belongs to the menu, then to the dialog again.
+    await act(async () => {
+      stdin.write('\r');
+    });
+    expect(onMenuSelect).toHaveBeenCalledTimes(1);
+    expect(onConfirm).not.toHaveBeenCalled();
+    await act(async () => {
+      stdin.write('\r');
+    });
+    await vi.waitFor(() =>
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+      ),
+    );
+  });
+
+  it('handles a right-click and keys in one stdin chunk (menu items: false)', async () => {
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    const onUnderlyingKey = vi.fn();
+    const onMenuChange = vi.fn();
+    const OpenOnRightPress = () => {
+      const { subscribeMouse, unsubscribeMouse } = useKeypressContext();
+      const { menu, openMenu } = useContextMenu();
+      useKeypress(onUnderlyingKey, { isActive: menu === null });
+      useEffect(() => {
+        const handler = () => {
+          openMenu([], { x: 0, y: 0 });
+          // AppContainer is outside the provider and relies on this callback.
+          expect(onMenuChange).toHaveBeenLastCalledWith(false);
+        };
+        subscribeMouse(handler);
+        return () => unsubscribeMouse(handler);
+      }, [subscribeMouse, unsubscribeMouse, openMenu]);
+      return null;
+    };
+    const { stdin } = render(
+      withProviders(
+        <ContextMenuProvider onMenuChange={onMenuChange}>
+          <ToolConfirmationMessage
+            confirmationDetails={{
+              type: 'exec',
+              title: 'Confirm Execution',
+              command: 'echo test',
+              rootCommand: 'echo',
+              onConfirm,
+            }}
+            config={mockConfig}
+            availableTerminalHeight={30}
+            contentWidth={80}
+          />
+          <OpenOnRightPress />
+          <ContextMenuOverlay />
+        </ContextMenuProvider>,
+      ),
+    );
+    await act(async () => {});
+    await act(async () => {
+      stdin.write('\x1b[<2;10;5M\x1b[Z\x1b[C\r');
+    });
+    expect(onUnderlyingKey).toHaveBeenCalled();
+    await vi.waitFor(() =>
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+      ),
+    );
+  });
 
   it('does not act on a key aimed at an open context menu', async () => {
     // The teammate tab mounts this dialog while AgentChatContent's
