@@ -407,12 +407,35 @@ describe('system settings path overrides while an administrator file is installe
       target: settingsOverride,
     });
 
+    // The override is honored through the file the gate resolved and
+    // validated: the resolved target is what the settings loader reads.
     expect(
       resolver.getSystemSettingsPath({
         QWEN_CODE_SYSTEM_SETTINGS_PATH: link,
       }),
-    ).toBe(link);
+    ).toBe(settingsOverride);
     expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('fails closed for a link in a user-writable directory even when the target is root-owned', () => {
+    const link = '/user-owned/link.json';
+    entries.set(settingsOverride, { uid: 0, kind: 'file' });
+    entries.set('/override', { uid: 0, kind: 'directory' });
+    entries.set('/user-owned', { uid: 1000, kind: 'directory' });
+    entries.set(link, {
+      uid: 1000,
+      kind: 'symlink',
+      target: settingsOverride,
+    });
+
+    expect(
+      resolver.getSystemSettingsPath({
+        QWEN_CODE_SYSTEM_SETTINGS_PATH: link,
+      }),
+    ).toBe('/etc/qwen-code/settings.json');
+    expect(String(warn.mock.calls[0]?.[0])).toBe(
+      `QWEN_CODE_SYSTEM_SETTINGS_PATH is set to ${JSON.stringify(link)}, which is not a regular root-owned file, so the platform default is used instead.`,
+    );
   });
 
   it('keeps rejecting a link whose target sits in a user-owned directory', () => {

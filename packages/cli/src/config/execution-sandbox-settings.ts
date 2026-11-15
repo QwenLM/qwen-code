@@ -159,18 +159,31 @@ function readOperatorSettingsScopes(): OperatorSettingsScope[] {
   // branch below reads "the platform default does not exist" as "no operator
   // policy" and would run the tools without confinement, while the operator
   // policy the variable names was dropped by the trust gate. Fail loud for a
-  // rejected layer while the platform default is also absent; a genuinely
-  // unconfigured install stays silent, and a present platform file is read
-  // as the system layer either way.
+  // rejected layer that has no file left to read; a genuinely unconfigured
+  // variable points at nothing and stays silent, and a present platform file
+  // is read as that layer either way. Each variable is judged on the layer
+  // it moves: a rejected defaults override must not be excused by a present
+  // settings file, and a typo'd settings variable must not fail an install
+  // where nothing was lost.
   const rejected = ignoredSystemPathOverrides().filter(
     (entry) => entry.reason === 'not-administrator-controlled',
   );
-  if (rejected.length > 0 && !fs.existsSync(systemSettingsPath)) {
-    throw new InvalidExecutionSandboxConfigError(
-      `${rejected[0].name} is set to ${JSON.stringify(
-        rejected[0].configured,
-      )}, which is not administrator-controlled, so it was ignored; the system settings layer is absent, so no operator sandbox policy is in effect. Point the variable at an administrator-controlled file or unset it, and restart.`,
-    );
+  for (const entry of rejected) {
+    const layerPath =
+      entry.name === 'QWEN_CODE_SYSTEM_SETTINGS_PATH'
+        ? systemSettingsPath
+        : getSystemDefaultsPath();
+    if (fs.existsSync(entry.configured) && !fs.existsSync(layerPath)) {
+      throw new InvalidExecutionSandboxConfigError(
+        `${entry.name} is set to ${JSON.stringify(
+          entry.configured,
+        )}, which is not administrator-controlled, so it was ignored; the ${
+          entry.name === 'QWEN_CODE_SYSTEM_SETTINGS_PATH'
+            ? 'system settings'
+            : 'system defaults'
+        } layer is absent, so no operator sandbox policy is in effect. Point the variable at an administrator-controlled file or unset it, and restart.`,
+      );
+    }
   }
   return [getSystemDefaultsPath(), userSettingsPath, systemSettingsPath].map(
     (file) => {

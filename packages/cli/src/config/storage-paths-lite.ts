@@ -209,29 +209,45 @@ export function isInsideWindowsSystemSettingsDir(configured: string): boolean {
 }
 
 /**
- * Whether the file actually read at `candidate` is an administrator file:
- * links are resolved first, because an installed or mounted file may be
- * delivered through one (the Kubernetes harness pool mounts its settings as
- * a link), and the resolved target must be a regular file owned by root in
- * a directory owned by root — both the content and the place it sits are
- * under the administrator's control, so the current user cannot replace or
- * remove either. A target a user can move or replace does not qualify.
+ * The resolved target of the file actually read at `candidate`, while that
+ * target is an administrator file; undefined otherwise. Links are resolved
+ * first, because an installed or mounted file may be delivered through one
+ * (the Kubernetes harness pool mounts its settings as a link), and the
+ * resolved target must be a regular file owned by root in a directory owned
+ * by root — both the content and the place it sits are under the
+ * administrator's control, so the current user cannot replace or remove
+ * either. A target a user can move or replace does not qualify, and neither
+ * does a link sitting in a directory the user writes: such a link can be
+ * repointed at a file the user controls, so the directory that contains the
+ * link is judged too, and must be root-owned as well.
  */
-function isTrustedSystemFile(candidate: string): boolean {
+function trustedSystemFilePath(candidate: string): string | undefined {
   let target: string;
   try {
     target = fs.realpathSync(candidate);
   } catch {
-    return false;
+    return undefined;
   }
   try {
     const stats = fs.statSync(target);
-    if (!stats.isFile() || stats.uid !== 0) return false;
+    if (!stats.isFile() || stats.uid !== 0) return undefined;
     const parent = fs.statSync(path.dirname(target));
-    return parent.isDirectory() && parent.uid === 0;
+    if (!parent.isDirectory() || parent.uid !== 0) return undefined;
+    if (fs.lstatSync(candidate).isSymbolicLink()) {
+      const linkParent = fs.statSync(fs.realpathSync(path.dirname(candidate)));
+      if (!linkParent.isDirectory() || linkParent.uid !== 0) {
+        return undefined;
+      }
+    }
+    return target;
   } catch {
-    return false;
+    return undefined;
   }
+}
+
+/** Whether the file actually read at `candidate` is an administrator file. */
+function isTrustedSystemFile(candidate: string): boolean {
+  return trustedSystemFilePath(candidate) !== undefined;
 }
 
 /**
@@ -453,7 +469,11 @@ export function getSystemSettingsPath(
     configured &&
     isSystemPathOverrideHonored('QWEN_CODE_SYSTEM_SETTINGS_PATH', configured)
   ) {
-    return configured;
+    // The gate validated the file a link resolves to; hand back that file,
+    // so the settings loader reads the very object the gate inspected.
+    return os.platform() === 'win32'
+      ? configured
+      : (trustedSystemFilePath(configured) ?? configured);
   }
   return getPlatformSystemFilePath('settings.json');
 }
@@ -480,7 +500,11 @@ export function getSystemDefaultsPath(
     configured &&
     isSystemPathOverrideHonored('QWEN_CODE_SYSTEM_DEFAULTS_PATH', configured)
   ) {
-    return configured;
+    // The gate validated the file a link resolves to; hand back that file,
+    // so the settings loader reads the very object the gate inspected.
+    return os.platform() === 'win32'
+      ? configured
+      : (trustedSystemFilePath(configured) ?? configured);
   }
   if (configured) {
     return getPlatformSystemFilePath('system-defaults.json');

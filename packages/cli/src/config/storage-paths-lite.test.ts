@@ -569,4 +569,38 @@ describe('system settings overrides are honored only for administrator-controlle
       }
     },
   );
+
+  itOnUnix(
+    'honors a trusted link through its resolved target, and fails closed for a link in a user-writable directory',
+    () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-system-trust-'));
+      const userDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'qwen-system-trust-user-'),
+      );
+      try {
+        if (euid === 0) {
+          const file = path.join(root, 'settings.json');
+          fs.writeFileSync(file, '{}');
+          const link = path.join(root, 'link.json');
+          fs.symlinkSync(file, link);
+          // The honored override resolves to the very file the gate
+          // validated, not the link name the variable carries.
+          expect(
+            getSystemSettingsPath({ QWEN_CODE_SYSTEM_SETTINGS_PATH: link }),
+          ).toBe(fs.realpathSync(link));
+          // A link the user sits in can be repointed: the directory that
+          // contains the link is judged too.
+          fs.chownSync(userDir, 12345, 12345);
+          const userLink = path.join(userDir, 'link.json');
+          fs.symlinkSync(file, userLink);
+          expect(
+            getSystemSettingsPath({ QWEN_CODE_SYSTEM_SETTINGS_PATH: userLink }),
+          ).toBe(getSystemSettingsPath({}));
+        }
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+        fs.rmSync(userDir, { recursive: true, force: true });
+      }
+    },
+  );
 });

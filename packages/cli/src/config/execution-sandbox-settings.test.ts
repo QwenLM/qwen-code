@@ -73,6 +73,10 @@ const normalAndBareMerged = () => [
 beforeEach(() => {
   fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'public-sandbox-policy-'));
   trustedSystemSettingsDirs.add(fixture);
+  // On a host whose temp directory sits behind a symlink (macOS /var), the
+  // trust gate's realpath step sees the resolved spelling: register it too,
+  // so the fixture still reads as administrator-owned there.
+  trustedSystemSettingsDirs.add(fs.realpathSync(fixture));
   workspace = path.join(fixture, 'workspace');
   fs.mkdirSync(workspace);
   user = path.join(fixture, 'global', 'settings.json');
@@ -98,6 +102,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllEnvs();
   trustedSystemSettingsDirs.delete(fixture);
+  trustedSystemSettingsDirs.delete(fs.realpathSync(fixture));
   mockExistingSystemPaths.clear();
   fs.rmSync(fixture, { recursive: true, force: true });
 });
@@ -390,6 +395,29 @@ describe('operator execution sandbox policy', () => {
         // The rejected override is not honored; the present platform file is
         // the system layer instead (an empty stand-in here).
         expect(read().tools?.executionSandbox).toBeUndefined();
+      } finally {
+        fs.rmSync(outside, { recursive: true, force: true });
+      }
+    },
+  );
+
+  itOnUnix(
+    'fails loud when a rejected defaults override is the only available defaults layer',
+    () => {
+      const outside = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'qwen-sandbox-rejected-'),
+      );
+      const rejectedDefaults = path.join(outside, 'defaults.json');
+      write(rejectedDefaults, { tools: { executionSandbox: restricted } });
+      if (euid === 0) fs.chownSync(rejectedDefaults, 12345, 12345);
+      vi.stubEnv('QWEN_CODE_SYSTEM_DEFAULTS_PATH', rejectedDefaults);
+      try {
+        // The settings layer is present and trusted; the defaults layer the
+        // variable names is dropped, and the platform defaults file is
+        // absent: the operator policy is lost, so the load must fail.
+        expect(() => readOperatorSandboxSettings()).toThrow(
+          'system defaults layer is absent',
+        );
       } finally {
         fs.rmSync(outside, { recursive: true, force: true });
       }
