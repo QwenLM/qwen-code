@@ -1,0 +1,632 @@
+{
+  "schemaVersion": 1,
+  "valid": [
+    {
+      "name": "admitted",
+      "record": {
+        "kind": "tool_stage",
+        "toolStageId": "stage-1",
+        "expansionId": "expansion-1",
+        "stepIndex": 0,
+        "toolName": "shell",
+        "inputRef": {
+          "resourceId": "input",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "permissionRef": null,
+        "resultRef": null,
+        "run": {
+          "state": "admitted",
+          "reason": null,
+          "definition": {
+            "definitionId": "shell",
+            "definitionRevision": 1,
+            "definitionDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "executionCallId": "stage-1",
+          "effectId": null,
+          "dispatchId": null,
+          "deliveryId": null,
+          "execution": "intent",
+          "runtime": null,
+          "delivery": null
+        }
+      }
+    },
+    {
+      "name": "dispatched",
+      "record": {
+        "kind": "tool_stage",
+        "toolStageId": "stage-1",
+        "expansionId": "expansion-1",
+        "stepIndex": 0,
+        "toolName": "shell",
+        "inputRef": {
+          "resourceId": "input",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "permissionRef": {
+          "resourceId": "permission",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "resultRef": null,
+        "run": {
+          "state": "running",
+          "reason": null,
+          "definition": {
+            "definitionId": "shell",
+            "definitionRevision": 1,
+            "definitionDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "executionCallId": "stage-1",
+          "effectId": null,
+          "dispatchId": null,
+          "deliveryId": null,
+          "execution": "dispatch_started",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": null
+        }
+      }
+    },
+    {
+      "name": "settled",
+      "record": {
+        "kind": "tool_stage",
+        "toolStageId": "stage-1",
+        "expansionId": "expansion-1",
+        "stepIndex": 0,
+        "toolName": "shell",
+        "inputRef": {
+          "resourceId": "input",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "permissionRef": {
+          "resourceId": "permission",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "resultRef": {
+          "resourceId": "result",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "run": {
+          "state": "settled",
+          "reason": null,
+          "definition": {
+            "definitionId": "shell",
+            "definitionRevision": 1,
+            "definitionDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "executionCallId": "stage-1",
+          "effectId": null,
+          "dispatchId": null,
+          "deliveryId": null,
+          "execution": "settled",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": null
+        }
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "wrong_definition",
+      "record": {
+        "kind": "tool_stage",
+        "toolStageId": "stage-1",
+        "expansionId": "expansion-1",
+        "stepIndex": 0,
+        "toolName": "read_file",
+        "inputRef": {
+          "resourceId": "input",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "permissionRef": null,
+        "resultRef": null,
+        "run": {
+          "state": "admitted",
+          "reason": null,
+          "definition": {
+            "definitionId": "shell",
+            "definitionRevision": 1,
+            "definitionDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "executionCallId": "stage-1",
+          "effectId": null,
+          "dispatchId": null,
+          "deliveryId": null,
+          "execution": "intent",
+          "runtime": null,
+          "delivery": null
+        }
+      }
+    },
+    {
+      "name": "wrong_execution_identity",
+      "record": {
+        "kind": "tool_stage",
+        "toolStageId": "stage-1",
+        "expansionId": "expansion-1",
+        "stepIndex": 0,
+        "toolName": "shell",
+        "inputRef": {
+          "resourceId": "input",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "permissionRef": null,
+        "resultRef": null,
+        "run": {
+          "state": "admitted",
+          "reason": null,
+          "definition": {
+            "definitionId": "shell",
+            "definitionRevision": 1,
+            "definitionDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "executionCallId": "different",
+          "effectId": null,
+          "dispatchId": null,
+          "deliveryId": null,
+          "execution": "intent",
+          "runtime": null,
+          "delivery": null
+        }
+      }
+    },
+    {
+      "name": "unknown_field",
+      "record": {
+        "kind": "tool_stage",
+        "toolStageId": "stage-1",
+        "expansionId": "expansion-1",
+        "stepIndex": 0,
+        "toolName": "shell",
+        "inputRef": {
+          "resourceId": "input",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "permissionRef": null,
+        "resultRef": null,
+        "run": {
+          "state": "admitted",
+          "reason": null,
+          "definition": {
+            "definitionId": "shell",
+            "definitionRevision": 1,
+            "definitionDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "executionCallId": "stage-1",
+          "effectId": null,
+          "dispatchId": null,
+          "deliveryId": null,
+          "execution": "intent",
+          "runtime": null,
+          "delivery": null
+        },
+        "secret": true
+      }
+    },
+    {
+      "name": "negative_step",
+      "record": {
+        "kind": "tool_stage",
+        "toolStageId": "stage-1",
+        "expansionId": "expansion-1",
+        "stepIndex": -1,
+        "toolName": "shell",
+        "inputRef": {
+          "resourceId": "input",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "permissionRef": null,
+        "resultRef": null,
+        "run": {
+          "state": "admitted",
+          "reason": null,
+          "definition": {
+            "definitionId": "shell",
+            "definitionRevision": 1,
+            "definitionDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "executionCallId": "stage-1",
+          "effectId": null,
+          "dispatchId": null,
+          "deliveryId": null,
+          "execution": "intent",
+          "runtime": null,
+          "delivery": null
+        }
+      }
+    }
+  ],
+  "successors": [
+    {
+      "name": "dispatch",
+      "previous": {
+        "kind": "tool_stage",
+        "toolStageId": "stage-1",
+        "expansionId": "expansion-1",
+        "stepIndex": 0,
+        "toolName": "shell",
+        "inputRef": {
+          "resourceId": "input",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "permissionRef": null,
+        "resultRef": null,
+        "run": {
+          "state": "admitted",
+          "reason": null,
+          "definition": {
+            "definitionId": "shell",
+            "definitionRevision": 1,
+            "definitionDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "executionCallId": "stage-1",
+          "effectId": null,
+          "dispatchId": null,
+          "deliveryId": null,
+          "execution": "intent",
+          "runtime": null,
+          "delivery": null
+        }
+      },
+      "next": {
+        "kind": "tool_stage",
+        "toolStageId": "stage-1",
+        "expansionId": "expansion-1",
+        "stepIndex": 0,
+        "toolName": "shell",
+        "inputRef": {
+          "resourceId": "input",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "permissionRef": {
+          "resourceId": "permission",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "resultRef": null,
+        "run": {
+          "state": "running",
+          "reason": null,
+          "definition": {
+            "definitionId": "shell",
+            "definitionRevision": 1,
+            "definitionDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "executionCallId": "stage-1",
+          "effectId": null,
+          "dispatchId": null,
+          "deliveryId": null,
+          "execution": "dispatch_started",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": null
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "result",
+      "previous": {
+        "kind": "tool_stage",
+        "toolStageId": "stage-1",
+        "expansionId": "expansion-1",
+        "stepIndex": 0,
+        "toolName": "shell",
+        "inputRef": {
+          "resourceId": "input",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "permissionRef": {
+          "resourceId": "permission",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "resultRef": null,
+        "run": {
+          "state": "running",
+          "reason": null,
+          "definition": {
+            "definitionId": "shell",
+            "definitionRevision": 1,
+            "definitionDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "executionCallId": "stage-1",
+          "effectId": null,
+          "dispatchId": null,
+          "deliveryId": null,
+          "execution": "dispatch_started",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": null
+        }
+      },
+      "next": {
+        "kind": "tool_stage",
+        "toolStageId": "stage-1",
+        "expansionId": "expansion-1",
+        "stepIndex": 0,
+        "toolName": "shell",
+        "inputRef": {
+          "resourceId": "input",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "permissionRef": {
+          "resourceId": "permission",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "resultRef": {
+          "resourceId": "result",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "run": {
+          "state": "settled",
+          "reason": null,
+          "definition": {
+            "definitionId": "shell",
+            "definitionRevision": 1,
+            "definitionDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "executionCallId": "stage-1",
+          "effectId": null,
+          "dispatchId": null,
+          "deliveryId": null,
+          "execution": "settled",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": null
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "substitute_input",
+      "previous": {
+        "kind": "tool_stage",
+        "toolStageId": "stage-1",
+        "expansionId": "expansion-1",
+        "stepIndex": 0,
+        "toolName": "shell",
+        "inputRef": {
+          "resourceId": "input",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "permissionRef": {
+          "resourceId": "permission",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "resultRef": null,
+        "run": {
+          "state": "running",
+          "reason": null,
+          "definition": {
+            "definitionId": "shell",
+            "definitionRevision": 1,
+            "definitionDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "executionCallId": "stage-1",
+          "effectId": null,
+          "dispatchId": null,
+          "deliveryId": null,
+          "execution": "dispatch_started",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": null
+        }
+      },
+      "next": {
+        "kind": "tool_stage",
+        "toolStageId": "stage-1",
+        "expansionId": "expansion-1",
+        "stepIndex": 0,
+        "toolName": "shell",
+        "inputRef": {
+          "resourceId": "another",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "permissionRef": {
+          "resourceId": "permission",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "resultRef": {
+          "resourceId": "result",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "run": {
+          "state": "settled",
+          "reason": null,
+          "definition": {
+            "definitionId": "shell",
+            "definitionRevision": 1,
+            "definitionDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "executionCallId": "stage-1",
+          "effectId": null,
+          "dispatchId": null,
+          "deliveryId": null,
+          "execution": "settled",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": null
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "replace_permission",
+      "previous": {
+        "kind": "tool_stage",
+        "toolStageId": "stage-1",
+        "expansionId": "expansion-1",
+        "stepIndex": 0,
+        "toolName": "shell",
+        "inputRef": {
+          "resourceId": "input",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "permissionRef": {
+          "resourceId": "permission",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "resultRef": null,
+        "run": {
+          "state": "running",
+          "reason": null,
+          "definition": {
+            "definitionId": "shell",
+            "definitionRevision": 1,
+            "definitionDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "executionCallId": "stage-1",
+          "effectId": null,
+          "dispatchId": null,
+          "deliveryId": null,
+          "execution": "dispatch_started",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": null
+        }
+      },
+      "next": {
+        "kind": "tool_stage",
+        "toolStageId": "stage-1",
+        "expansionId": "expansion-1",
+        "stepIndex": 0,
+        "toolName": "shell",
+        "inputRef": {
+          "resourceId": "input",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "permissionRef": {
+          "resourceId": "another",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "resultRef": {
+          "resourceId": "result",
+          "kind": "managed-test",
+          "schemaVersion": 1,
+          "byteLength": 2,
+          "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "run": {
+          "state": "settled",
+          "reason": null,
+          "definition": {
+            "definitionId": "shell",
+            "definitionRevision": 1,
+            "definitionDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          },
+          "executionCallId": "stage-1",
+          "effectId": null,
+          "dispatchId": null,
+          "deliveryId": null,
+          "execution": "settled",
+          "runtime": {
+            "runtimeBindingId": "binding-1",
+            "generation": "1"
+          },
+          "delivery": null
+        }
+      },
+      "valid": false
+    }
+  ]
+}

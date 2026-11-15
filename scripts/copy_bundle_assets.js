@@ -39,7 +39,6 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { glob } from 'glob';
 import fs from 'node:fs';
-import { copyBrowserUseAssets } from './copy-browser-use-assets.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const defaultRoot = join(__dirname, '..');
@@ -472,6 +471,37 @@ export function copyOpenTuiAssets({
   return copied;
 }
 
+export function copyGeneratedUiAssets({
+  root = defaultRoot,
+  distDir = join(root, 'dist'),
+} = {}) {
+  const sourceDir = join(root, 'integrations', 'generated-ui', 'dist');
+  if (!existsSync(join(sourceDir, '..', 'package.json'))) return;
+  const files = [
+    ['bundled-main.js', 'main.js'],
+    ['app.html', 'app.html'],
+    ['skills/generated-ui/SKILL.md', 'skills/generated-ui/SKILL.md'],
+    ['THIRD_PARTY_NOTICES.txt', 'THIRD_PARTY_NOTICES.txt'],
+  ];
+  for (const [source] of files) {
+    if (
+      !statSync(join(sourceDir, source), { throwIfNoEntry: false })?.isFile()
+    ) {
+      throw new Error(
+        `Generated UI asset not found: ${join(sourceDir, source)}. ` +
+          'Run npm run build --workspace=@qwen-code/generated-ui first.',
+      );
+    }
+  }
+  const targetDir = join(distDir, 'generated-ui');
+  fs.rmSync(targetDir, { recursive: true, force: true });
+  for (const [source, target] of files) {
+    const destination = join(targetDir, target);
+    mkdirSync(dirname(destination), { recursive: true });
+    copyFileSync(join(sourceDir, source), destination);
+  }
+}
+
 export function copyBundleAssets({ root = defaultRoot } = {}) {
   const distDir = join(root, 'dist');
   const coreVendorDir = join(root, 'packages', 'core', 'vendor');
@@ -480,6 +510,8 @@ export function copyBundleAssets({ root = defaultRoot } = {}) {
   if (!existsSync(distDir)) {
     mkdirSync(distDir);
   }
+
+  copyGeneratedUiAssets({ root, distDir });
 
   // Find and copy all .sb files from packages to the root of the dist directory
   const sbFiles = glob.sync('packages/**/*.sb', { cwd: root });
@@ -520,11 +552,9 @@ export function copyBundleAssets({ root = defaultRoot } = {}) {
       skipEntry: (entry, sourcePath) =>
         isBundledSkillTestFile(entry) ||
         entry === 'DESIGN.md' ||
-        sourcePath === join(bundledSkillsDir, 'browser-use', 'runtime'),
+        sourcePath === join(bundledSkillsDir, 'browser-use') ||
+        sourcePath === join(bundledSkillsDir, 'computer-use'),
     });
-    if (existsSync(join(bundledSkillsDir, 'browser-use', 'SKILL.md'))) {
-      copyBrowserUseAssets(root, join(destBundledDir, 'browser-use'));
-    }
     console.log('Copied bundled skills to dist/bundled/');
   } else {
     console.warn(

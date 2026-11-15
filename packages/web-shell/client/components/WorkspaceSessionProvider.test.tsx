@@ -5,6 +5,9 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import type { WebShellProps } from '../App';
+import { ManagedStandaloneApp } from '../ManagedStandaloneApp';
+import { inferStandaloneBasePath } from '../utils/sessionPath';
+import { Dialog, DialogContent, DialogTitle } from './ui/dialog';
 
 const mocks = vi.hoisted(() => ({
   connection: {
@@ -31,8 +34,12 @@ const mocks = vi.hoisted(() => ({
   providerUnmounts: 0,
   providerProps: [] as Array<Record<string, unknown>>,
   appProps: [] as Array<Record<string, unknown>>,
+  appDialogOpen: false,
 }));
 
+vi.mock('../ManagedAgentWebShell', () => ({
+  ManagedAgentWebShell: () => null,
+}));
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DaemonSessionProvider: ({
     children,
@@ -56,7 +63,17 @@ vi.mock('../App', () => ({
   App: (props: Record<string, unknown>) => {
     mocks.appProps.push(props);
     return (
-      <output>{String(props['initialSelectedWorkspaceCwd'] ?? '')}</output>
+      <>
+        <output>{String(props['initialSelectedWorkspaceCwd'] ?? '')}</output>
+        {mocks.appDialogOpen && (
+          <Dialog open>
+            <DialogContent aria-describedby={undefined}>
+              <DialogTitle>Old chat dialog</DialogTitle>
+              <button>Dialog action</button>
+            </DialogContent>
+          </Dialog>
+        )}
+      </>
     );
   },
 }));
@@ -68,6 +85,7 @@ describe('WorkspaceSessionProvider targets', () => {
   let root: Root;
 
   beforeEach(() => {
+    window.history.replaceState(null, '', '/');
     mocks.connection = {
       status: 'connected',
       sessionId: 'session-a',
@@ -96,6 +114,7 @@ describe('WorkspaceSessionProvider targets', () => {
     mocks.providerUnmounts = 0;
     mocks.providerProps = [];
     mocks.appProps = [];
+    mocks.appDialogOpen = false;
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -104,6 +123,8 @@ describe('WorkspaceSessionProvider targets', () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
+    window.history.replaceState(null, '', '/');
+    vi.unstubAllGlobals();
   });
 
   async function renderTarget(
@@ -139,6 +160,37 @@ describe('WorkspaceSessionProvider targets', () => {
     expect(mocks.appProps.at(-1)).toMatchObject({
       initialSelectedWorkspaceCwd: '/work/b',
     });
+  });
+
+  it('removes portals and modal locks while the hidden view keeps its session attached', async () => {
+    mocks.appDialogOpen = true;
+    await renderTarget('session-a', '/work/a');
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(document.body.style.pointerEvents).toBe('none');
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="session-a"
+          workspaceCwd="/work/a"
+          viewHidden
+          webShellProps={{}}
+        />,
+      );
+    });
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.body.style.pointerEvents).not.toBe('none');
+    const loginInput = document.createElement('input');
+    container.appendChild(loginInput);
+    loginInput.focus();
+    expect(document.activeElement).toBe(loginInput);
+    expect(mocks.providerMounts).toBe(1);
+    expect(mocks.providerUnmounts).toBe(0);
+    expect(mocks.providerProps.at(-1)?.sessionId).toBe('session-a');
+    mocks.appDialogOpen = false;
+    await renderTarget('session-a', '/work/a');
+    expect(container.textContent).toBe('/work/a');
+    expect(mocks.providerMounts).toBe(1);
+    expect(mocks.providerUnmounts).toBe(0);
   });
 
   it('waits for the primary workspace before mounting an initial session', async () => {
@@ -453,6 +505,371 @@ describe('WorkspaceSessionProvider targets', () => {
     expect(location.pathname).toBe('/');
     expect(location.search).toBe('');
     expect(mocks.providerProps.at(-1)).toMatchObject({ sessionId: undefined });
+  });
+
+  async function renderManagedShell(extra: { lockWorkspaceCwd?: string } = {}) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        Response.json({
+          mode: 'managed',
+          productScope: 'local:installation-1',
+          agentId: 'qwen-code',
+          enableWorkspaceBinding: true,
+        }),
+      ),
+    );
+    await act(async () =>
+      root.render(
+        <ManagedStandaloneApp daemonToken="browser-token">
+          {(managedAgentProvider) => (
+            <WorkspaceSessionProvider
+              urlNavigation={{
+                basePath: inferStandaloneBasePath(window.location.pathname),
+              }}
+              lockWorkspaceCwd={extra.lockWorkspaceCwd}
+              webShellProps={{ managedAgentProvider }}
+            />
+          )}
+        </ManagedStandaloneApp>,
+      ),
+    );
+  }
+
+  async function renderManagedShellWithoutNavigation(
+    extra: {
+      sessionId?: string;
+      workspaceCwd?: string;
+      lockWorkspaceCwd?: string;
+    } = {},
+  ) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        Response.json({
+          mode: 'managed',
+          productScope: 'local:installation-1',
+          agentId: 'qwen-code',
+          enableWorkspaceBinding: true,
+        }),
+      ),
+    );
+    await act(async () =>
+      root.render(
+        <ManagedStandaloneApp daemonToken="browser-token">
+          {(managedAgentProvider) => (
+            <WorkspaceSessionProvider
+              sessionId={extra.sessionId}
+              workspaceCwd={extra.workspaceCwd}
+              lockWorkspaceCwd={extra.lockWorkspaceCwd}
+              webShellProps={{ managedAgentProvider }}
+            />
+          )}
+        </ManagedStandaloneApp>,
+      ),
+    );
+  }
+
+  it('keeps the workspace refusal for a props-driven host without urlNavigation', async () => {
+    window.history.replaceState(null, '', '/');
+    await renderManagedShellWithoutNavigation({
+      sessionId: 'session-missing',
+      workspaceCwd: '/work/missing',
+    });
+    // This path has no route, so the view is classified by the host target:
+    // an explicit local session target must keep the daemon gate.
+    expect(mocks.providerMounts).toBe(0);
+    expect(container.textContent).toContain('Workspace not found');
+  });
+
+  it('keeps the managed home exempt for a props-driven host without a local target', async () => {
+    window.history.replaceState(null, '', '/');
+    mocks.addWorkspace.mockRejectedValueOnce(
+      new Error('daemon unreachable') as never,
+    );
+    await renderManagedShellWithoutNavigation({
+      lockWorkspaceCwd: '/work/locked',
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // No local target: the host still defaults to the managed home, so the
+    // exemption has to survive the props-path classification.
+    expect(mocks.providerMounts).toBe(1);
+  });
+
+  it('exempts the workspace-error gate for a managed view carrying a standalone context', async () => {
+    window.history.replaceState(null, '', '/?managed=1');
+    mocks.workspace = {
+      ...mocks.workspace,
+      status: 'error',
+      capabilities: undefined,
+    };
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="standalone-a"
+          sessionContext={{ kind: 'standalone' }}
+          webShellProps={{ managedAgentProvider: { canCancel: true } }}
+        />,
+      );
+    });
+
+    // The managed home bypasses the daemon gate: the provider mounts instead
+    // of the workspace-unavailable surface.
+    expect(mocks.providerMounts).toBe(1);
+    expect(mocks.providerProps.at(-1)).toMatchObject({
+      sessionId: 'standalone-a',
+      sessionContext: { kind: 'standalone' },
+    });
+  });
+
+  it('skips the standalone resolution ladder for a managed view', async () => {
+    window.history.replaceState(null, '', '/?managed=1');
+    // Capabilities present but without the standalone feature: the resolver
+    // effect early-returns, so the managed view must render before the
+    // resolution gates instead of stranding on "Resolving session…".
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="standalone-a"
+          sessionContext={{ kind: 'standalone' }}
+          webShellProps={{ managedAgentProvider: { canCancel: true } }}
+        />,
+      );
+    });
+
+    expect(mocks.providerMounts).toBe(1);
+    expect(mocks.getStandaloneSession).not.toHaveBeenCalled();
+    expect(container.textContent).not.toContain('Resolving session');
+  });
+
+  it('skips the resolution ladder for a managed view even when the daemon advertises standalone sessions', async () => {
+    window.history.replaceState(null, '', '/?managed=1');
+    // The capability alone must not start lookups the managed early return
+    // would discard: the resolver effect carries the same managed guard.
+    (mocks.workspace.capabilities as { features: string[] }).features.push(
+      'standalone_sessions_v1',
+    );
+    await act(async () => {
+      root.render(
+        <WorkspaceSessionProvider
+          sessionId="standalone-a"
+          sessionContext={{ kind: 'standalone' }}
+          webShellProps={{ managedAgentProvider: { canCancel: true } }}
+        />,
+      );
+    });
+    expect(mocks.providerMounts).toBe(1);
+    expect(mocks.getStandaloneSession).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    '/session/old-runtime?workspace=missing',
+    '/app/session/old-runtime?workspace=missing',
+    '/session/old-runtime?context=standalone',
+    '/session/old-runtime?context=live',
+  ])(
+    'restores Managed history without a stale Local target from %s',
+    async (path) => {
+      window.history.replaceState(
+        null,
+        '',
+        `${path}&managed=1&managedSession=gateway-session`,
+      );
+      await renderManagedShell();
+      expect(mocks.providerMounts).toBe(1);
+      expect(mocks.providerProps.at(-1)).toMatchObject({
+        sessionId: undefined,
+        sessionContext: undefined,
+        workspaceCwd: undefined,
+      });
+      expect(mocks.appProps.at(-1)?.['managedAgentProvider']).toMatchObject({
+        canCancel: true,
+      });
+      expect(mocks.getStandaloneSession).not.toHaveBeenCalled();
+      expect(window.location.pathname).toBe(
+        path.startsWith('/app/') ? '/app' : '/',
+      );
+      const params = new URLSearchParams(window.location.search);
+      expect(params.get('managed')).toBe('1');
+      expect(params.get('managedSession')).toBe('gateway-session');
+      expect(params.has('workspace')).toBe(false);
+      expect(params.has('context')).toBe(false);
+    },
+  );
+
+  it('restores a Managed settings page without a stale Local history target', async () => {
+    window.history.replaceState(
+      {
+        __qwenWebShellNavigation: {
+          basePath: '',
+          source: `${window.location.origin}/session/old-runtime?workspace=missing`,
+        },
+      },
+      '',
+      '/settings?managed=1&managedSession=gateway-session',
+    );
+    await renderManagedShell();
+    expect(mocks.providerMounts).toBe(1);
+    expect(mocks.providerProps.at(-1)?.['sessionId']).toBeUndefined();
+    expect(window.location.pathname).toBe('/settings');
+    expect(
+      new URLSearchParams(window.location.search).get('managedSession'),
+    ).toBe('gateway-session');
+  });
+
+  it('keeps an explicit Local session target when Managed is also available', async () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/session/session-b?workspace=b&managed=0&managedSession=gateway-session',
+    );
+    await renderManagedShell();
+    expect(mocks.providerProps.at(-1)).toMatchObject({
+      sessionId: 'session-b',
+      workspaceCwd: '/work/b',
+    });
+    expect(mocks.appProps.at(-1)).toMatchObject({
+      initialSelectedWorkspaceCwd: '/work/b',
+      managedAgentProvider: expect.objectContaining({ canCancel: true }),
+    });
+    expect(window.location.pathname).toBe('/session/session-b');
+    expect(new URLSearchParams(window.location.search).get('workspace')).toBe(
+      'b',
+    );
+    expect(new URLSearchParams(window.location.search).get('managed')).toBe(
+      '0',
+    );
+  });
+
+  it('keeps the unavailable workspace refusal for an explicit Local session', async () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/session/session-missing?workspace=missing&managed=0',
+    );
+    await renderManagedShell();
+    expect(mocks.providerMounts).toBe(0);
+    expect(container.textContent).toContain('Workspace not found');
+    expect(window.location.pathname).toBe('/session/session-missing');
+    expect(new URLSearchParams(window.location.search).get('managed')).toBe(
+      '0',
+    );
+  });
+
+  it('keeps the workspace refusal for a local session without managed=0', async () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/session/session-missing?workspace=missing',
+    );
+    await renderManagedShell();
+    // The managed view is not what this URL selects: no `managed=1`, and the
+    // chat route carries an explicit local session target. The daemon gate
+    // must still refuse instead of mounting the shell.
+    expect(mocks.providerMounts).toBe(0);
+    expect(container.textContent).toContain('Workspace not found');
+  });
+
+  it('keeps the lockWorkspaceCwd constraint for a local session without managed=0', async () => {
+    window.history.replaceState(null, '', '/session/session-a?workspace=a');
+    mocks.addWorkspace.mockRejectedValueOnce(
+      new Error('daemon unreachable') as never,
+    );
+    await renderManagedShell({ lockWorkspaceCwd: '/work/locked' });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // The host constraint must still hold for the local session even though a
+    // managed provider is injected: no daemon session provider may mount while
+    // the locked workspace is unresolved or refused.
+    expect(mocks.providerMounts).toBe(0);
+  });
+
+  it('keeps the managed view exempt while it is the selected view', async () => {
+    window.history.replaceState(null, '', '/?managed=1');
+    mocks.addWorkspace.mockRejectedValueOnce(
+      new Error('daemon unreachable') as never,
+    );
+    await renderManagedShell({ lockWorkspaceCwd: '/work/locked' });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // The managed view is explicitly selected, so the daemon workspace lock
+    // must not take the page over.
+    expect(mocks.providerMounts).toBe(1);
+  });
+
+  it('keeps the default managed home exempt without a managed param', async () => {
+    window.history.replaceState(null, '', '/');
+    mocks.addWorkspace.mockRejectedValueOnce(
+      new Error('daemon unreachable') as never,
+    );
+    await renderManagedShell({ lockWorkspaceCwd: '/work/locked' });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // No `managed` param, but a root page defaults to the managed home, so the
+    // exemption must hold; a `managed=1`-only rule would regress this.
+    expect(mocks.providerMounts).toBe(1);
+  });
+
+  it('keeps the managed view exempt when the daemon workspace errors', async () => {
+    window.history.replaceState(null, '', '/?managed=1');
+    mocks.workspace = {
+      status: 'error',
+      capabilities: undefined,
+      error: new Error('daemon down'),
+      refreshCapabilities: vi.fn(async () => undefined),
+    };
+    await renderManagedShell({ lockWorkspaceCwd: '/work/locked' });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // The managed view owns its error surfaces; the daemon's full-page
+    // workspace error must not take it over.
+    expect(mocks.providerMounts).toBe(1);
+    expect(container.textContent).not.toContain(
+      'The workspace service could not be reached.',
+    );
+  });
+
+  it('keeps the managed view exempt while daemon capabilities load', async () => {
+    window.history.replaceState(null, '', '/?managed=1');
+    mocks.workspace = {
+      status: 'connecting',
+      capabilities: undefined,
+      refreshCapabilities: vi.fn(async () => undefined),
+    };
+    await renderManagedShell({ lockWorkspaceCwd: '/work/locked' });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // The capabilities spinner belongs to local sessions; the managed view
+    // mounts immediately instead of waiting on the daemon.
+    expect(mocks.providerMounts).toBe(1);
+    expect(container.querySelector('[role="status"]')).toBeNull();
+  });
+
+  it('renders the local view for a route-less host with a resolvable local target', async () => {
+    window.history.replaceState(null, '', '/');
+    await renderManagedShellWithoutNavigation({
+      sessionId: 'session-a',
+      workspaceCwd: '/work/a',
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // The daemon session provider mounts (gates kept, workspace resolves), and
+    // the app receives the local target — it must not classify the view as the
+    // managed home and cover the local session.
+    expect(mocks.providerMounts).toBe(1);
+    expect(mocks.providerProps.at(-1)).toMatchObject({
+      sessionId: 'session-a',
+      workspaceCwd: '/work/a',
+    });
+    expect(container.textContent).toBe('/work/a');
   });
 
   it('drops an unavailable explicit context for a primary new session', async () => {

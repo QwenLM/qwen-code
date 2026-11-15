@@ -84,6 +84,7 @@ rules:
 
 ignore:
   - 'pnpm-lock.yaml'
+  - 'deploy/kubernetes/chart/templates/'
   - 'thirdparty/'
   - 'third_party/'
   - 'vendor/'

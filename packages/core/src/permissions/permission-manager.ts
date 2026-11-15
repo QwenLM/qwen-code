@@ -8,12 +8,15 @@ import {
   parseRules,
   parseRule,
   matchesRule,
+  hasAmbiguousMcpGrant,
   resolveToolName,
   splitCompoundCommand,
   SHELL_TOOL_NAMES,
   toolMatchesRuleToolName,
+  warnDroppedPermissionRule,
 } from './rule-parser.js';
-import type { PathMatchContext } from './rule-parser.js';
+import type { McpToolIdentity, PathMatchContext } from './rule-parser.js';
+import type { ToolRegistry } from '../tools/tool-registry.js';
 import { extractShellOperationsAcrossCommand } from './shell-semantics.js';
 import type { ShellOperation } from './shell-semantics.js';
 import {
@@ -30,6 +33,7 @@ import {
   isDangerousAllowRule,
 } from './dangerousRules.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { ToolMode } from '../tools/code-mode.js';
 import type {
   PermissionCheckContext,
   PermissionDecision,
@@ -147,7 +151,9 @@ function splitCommandForRules(command: string, toolName: string): string[] {
  * PermissionManager therefore only needs these three getters.
  */
 export interface PermissionManagerConfig {
+  getToolRegistry?(): Pick<ToolRegistry, 'getMcpToolIdentities'>;
   getShellExecutionSandbox?(): unknown;
+  getToolMode?(): ToolMode;
   /** Merged allow-rules (settings + coreTools + allowedTools). */
   getPermissionsAllow(): string[] | undefined;
   /** Merged ask-rules (settings only). */
@@ -161,9 +167,9 @@ export interface PermissionManagerConfig {
   /**
    * Live folder trust. Read on every permission decision for the session
    * allow rules a project skill granted (`trustGated`): those apply only
-   * while the folder is trusted. Absent means trusted.
+   * while the folder is explicitly trusted. Absent denies repository grants.
    */
-  isTrustedFolder?(): boolean;
+  isExplicitlyTrustedFolder?(): boolean;
   /**
    * Returns the current approval mode (plan/default/auto-edit/yolo).
    * Used by `getDefaultMode()` to determine the fallback when no rule matches.
@@ -439,6 +445,20 @@ export class PermissionManager {
     return bashDecision;
   }
 
+  private isMcpAllowAmbiguous(
+    pattern: string,
+    identity: McpToolIdentity | undefined,
+  ): boolean {
+    if (identity === undefined) return false;
+    const registry = this.config.getToolRegistry?.();
+    if (registry === undefined) return false;
+    return hasAmbiguousMcpGrant(
+      pattern,
+      identity,
+      registry.getMcpToolIdentities(),
+    );
+  }
+
   /**
    * Evaluate a single (non-compound) context against all rules.
    *
@@ -453,6 +473,7 @@ export class PermissionManager {
     const {
       toolName,
       toolAliases,
+      mcpIdentity,
       command,
       cwd,
       filePath,
@@ -491,21 +512,28 @@ export class PermissionManager {
         ...this.sessionRules.deny,
         ...this.persistentRules.deny,
       ]) {
-        if (matchesRule(rule, ...matchArgs, 'canonical')) return 'deny';
+        if (matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity, true))
+          return 'deny';
       }
       // Priority 2: ask rules
       for (const rule of [
         ...this.sessionRules.ask,
         ...this.persistentRules.ask,
       ]) {
-        if (matchesRule(rule, ...matchArgs, 'canonical')) return 'ask';
+        if (matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity, true))
+          return 'ask';
       }
       // Priority 3: allow rules
       for (const rule of [
         ...this.activeSessionAllowRules(),
         ...this.persistentRules.allow,
       ]) {
-        if (matchesRule(rule, ...matchArgs)) return 'allow';
+        if (
+          matchesRule(rule, ...matchArgs, undefined, mcpIdentity) &&
+          !this.isMcpAllowAmbiguous(rule.toolName, mcpIdentity)
+        ) {
+          return 'allow';
+        }
       }
       return 'default';
     })();
@@ -761,6 +789,8 @@ export class PermissionManager {
     'web_search',
     'todo_write',
     'save_memory',
+    'manage_memory',
+    'search_memory',
     'lsp',
     'cron_create',
     'cron_list',
@@ -768,6 +798,7 @@ export class PermissionManager {
     'loop_wakeup',
     'create_sub_session',
     'monitor',
+    'autofix_pr',
   ]);
 
   /**
@@ -817,8 +848,18 @@ export class PermissionManager {
    * of the eager model request (#9827) — but it only ever demotes them to
    * `deferred`, so this method still reports them enabled.
    */
-  async isToolEnabled(toolName: string): Promise<boolean> {
-    return (await this.getToolRegistrationStatus(toolName)) !== 'disabled';
+  async isToolEnabled(
+    toolName: string,
+    toolAliases?: readonly string[],
+    mcpIdentity?: { serverName: string; serverToolName: string },
+  ): Promise<boolean> {
+    return (
+      (await this.getToolRegistrationStatus(
+        toolName,
+        toolAliases,
+        mcpIdentity,
+      )) !== 'disabled'
+    );
   }
 
   /**
@@ -925,6 +966,8 @@ export class PermissionManager {
    */
   async getToolRegistrationStatus(
     toolName: string,
+    toolAliases?: readonly string[],
+    mcpIdentity?: { serverName: string; serverToolName: string },
   ): Promise<ToolRegistrationStatus> {
     const canonicalName = resolveToolName(toolName);
 
@@ -932,7 +975,14 @@ export class PermissionManager {
     // from the session regardless of eager-allowlist membership.
     // evaluate({ toolName }) without a command will only match rules that
     // have no specifier, which is the correct registry-level check.
-    const decision = await this.evaluate({ toolName: canonicalName });
+    // `toolAliases` carries the tool's advertised permissionAliases so a
+    // deny written in a legacy MCP spelling still matches; without them the
+    // registered name alone cannot recover an unsafe raw prefix (#10199).
+    const decision = await this.evaluate({
+      toolName: canonicalName,
+      toolAliases,
+      mcpIdentity,
+    });
     if (decision === 'deny') {
       return 'disabled';
     }
@@ -948,6 +998,16 @@ export class PermissionManager {
       !this.eagerToolAllowList.some((eagerName) =>
         toolMatchesRuleToolName(eagerName, canonicalName),
       )
+    ) {
+      return 'deferred';
+    }
+
+    // Review can enable workflow mid-session. Defer its Code Mode description
+    // to keep the cached declaration stable unless an eager list was supplied.
+    if (
+      canonicalName === ToolNames.WORKFLOW &&
+      this.config.getToolMode?.() === ToolMode.CodeModeOnly &&
+      this.eagerToolAllowList === null
     ) {
       return 'deferred';
     }
@@ -975,6 +1035,7 @@ export class PermissionManager {
     const {
       toolName,
       toolAliases,
+      mcpIdentity,
       command,
       cwd,
       filePath,
@@ -1049,7 +1110,7 @@ export class PermissionManager {
     ] as const;
 
     for (const rule of denyRules) {
-      if (matchesRule(rule, ...matchArgs, 'canonical')) {
+      if (matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity, true)) {
         return rule.raw;
       }
     }
@@ -1131,6 +1192,7 @@ export class PermissionManager {
     const {
       toolName,
       toolAliases,
+      mcpIdentity,
       command,
       cwd,
       filePath,
@@ -1226,8 +1288,13 @@ export class PermissionManager {
 
     return (
       restrictiveRules.some((rule) =>
-        matchesRule(rule, ...matchArgs, 'canonical'),
-      ) || allowRules.some((rule) => matchesRule(rule, ...matchArgs))
+        matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity, true),
+      ) ||
+      allowRules.some(
+        (rule) =>
+          matchesRule(rule, ...matchArgs, undefined, mcpIdentity) &&
+          !this.isMcpAllowAmbiguous(rule.toolName, mcpIdentity),
+      )
     );
   }
 
@@ -1245,6 +1312,7 @@ export class PermissionManager {
     const {
       toolName,
       toolAliases,
+      mcpIdentity,
       command,
       cwd,
       filePath,
@@ -1323,7 +1391,7 @@ export class PermissionManager {
     ] as const;
 
     return askRules.some((rule) =>
-      matchesRule(rule, ...matchArgs, 'canonical'),
+      matchesRule(rule, ...matchArgs, 'canonical', mcpIdentity, true),
     );
   }
 
@@ -1341,14 +1409,14 @@ export class PermissionManager {
   /**
    * The session allow rules in force right now: every rule the user granted,
    * plus the repository-granted (`trustGated`) ones only while the folder is
-   * trusted. Trust is re-read on every call — `Config.isTrustedFolder()` is
+   * trusted. Trust is re-read on every call — `Config.isExplicitlyTrustedFolder()` is
    * live under an IDE connection — so a revocation mid-session suspends a
    * project skill's grants at the next decision, and a later grant of trust
    * restores them, the second side of the gate `applySideEffects` enforces
    * on the way in.
    */
   private activeSessionAllowRules(): PermissionRule[] {
-    const trusted = this.config.isTrustedFolder?.() ?? true;
+    const trusted = this.config.isExplicitlyTrustedFolder?.() ?? false;
     return trusted
       ? this.sessionRules.allow
       : this.sessionRules.allow.filter((rule) => !rule.trustGated);
@@ -1374,6 +1442,7 @@ export class PermissionManager {
         debugLogger.warn(
           `Ignoring malformed allow rule (unbalanced parentheses): ${rule.raw}`,
         );
+        warnDroppedPermissionRule(rule.raw, 'allow');
         return;
       }
       // AUTO mode invariant: while dangerous allow rules are stripped,
@@ -1427,6 +1496,7 @@ export class PermissionManager {
         debugLogger.warn(
           `Ignoring malformed deny rule (unbalanced parentheses): ${rule.raw}`,
         );
+        warnDroppedPermissionRule(rule.raw, 'deny');
         return;
       }
       this.sessionRules.deny.push(rule);
@@ -1443,6 +1513,7 @@ export class PermissionManager {
         debugLogger.warn(
           `Ignoring malformed ask rule (unbalanced parentheses): ${rule.raw}`,
         );
+        warnDroppedPermissionRule(rule.raw, 'ask');
         return;
       }
       this.sessionRules.ask.push(rule);
@@ -1468,6 +1539,7 @@ export class PermissionManager {
       debugLogger.warn(
         `Ignoring malformed ${type} rule (unbalanced parentheses): ${rule.raw}`,
       );
+      warnDroppedPermissionRule(rule.raw, type);
       return rule;
     }
     // AUTO mode invariant: see addSessionAllowRule above. A dangerous

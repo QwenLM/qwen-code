@@ -9,6 +9,7 @@ import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -96,22 +97,58 @@ exit 1
 set -euo pipefail
 target=''
 url=''
+attempts=1
+retry_delay=''
+retry_all_errors=false
+connect_timeout=''
+max_time=''
 while [ "$#" -gt 0 ]; do
   if [ "$1" = '-o' ]; then
     shift
     target="$1"
+  elif [ "$1" = '--retry' ]; then
+    shift
+    attempts=$(( $1 + 1 ))
+  elif [ "$1" = '--retry-delay' ]; then
+    shift
+    retry_delay="$1"
+  elif [ "$1" = '--retry-all-errors' ]; then
+    retry_all_errors=true
+  elif [ "$1" = '--connect-timeout' ]; then
+    shift
+    connect_timeout="$1"
+  elif [ "$1" = '--max-time' ]; then
+    shift
+    max_time="$1"
   elif [[ "$1" == https://* ]]; then
     url="$1"
   fi
   shift
 done
 [ "$url" = 'https://assets.example.test/desktop/latest/desktop-latest.json' ]
-case "$OSS_FEED_STATE" in
-  current) printf '%s\n' '{"version":"1.2.3"}' > "$target" ;;
-  different) printf '%s\n' '{"version":"1.2.2"}' > "$target" ;;
-  malformed) printf '%s\n' '{' > "$target" ;;
-  missing) exit 1 ;;
-esac
+[ "$attempts" -eq 3 ]
+[ "$retry_delay" = '2' ]
+[ "$retry_all_errors" = true ]
+[ "$connect_timeout" = '15' ]
+[ "$max_time" = '60' ]
+attempt=0
+while :; do
+  attempt=$(( attempt + 1 ))
+  case "$OSS_FEED_STATE" in
+    current) printf '%s\n' '{"version":"1.2.3"}' > "$target"; exit 0 ;;
+    different) printf '%s\n' '{"version":"1.2.2"}' > "$target"; exit 0 ;;
+    malformed) printf '%s\n' '{' > "$target"; exit 0 ;;
+    missing) exit 1 ;;
+    flaky)
+      if [ "$attempt" -eq 1 ]; then
+        [ "$attempts" -ge 2 ] || exit 1
+        continue
+      fi
+      printf '%s\n' '{"version":"1.2.3"}' > "$target"
+      exit 0
+      ;;
+  esac
+done
 `,
   );
   chmodSync(join(bin, 'gh'), 0o755);
@@ -153,6 +190,67 @@ esac
   }
 }
 
+const feedUpdateStep = releaseYaml.jobs.publish.steps.find(
+  ({ name }) => name === 'Update stable updater feed',
+);
+
+// Replays the feed step against a gh stub that records every call, so the
+// order and arguments of upload/edit/create are checked, not the script text.
+function runFeedUpdate(overrides) {
+  const directory = mkdtempSync(join(tmpdir(), 'desktop-feed-update-'));
+  const bin = join(directory, 'bin');
+  const calls = join(directory, 'calls');
+  mkdirSync(bin);
+  mkdirSync(calls);
+  writeFileSync(
+    join(bin, 'gh'),
+    `#!/usr/bin/env bash
+set -euo pipefail
+count="$(find "$GH_CALLS" -type f | wc -l | tr -d ' ')"
+printf '%s\\0' "$@" > "$GH_CALLS/$count"
+case "$1 $2" in
+  'release view') [ "$FEED_VERSION" != 'missing' ] ;;
+  'release download')
+    while [ "$1" != '--dir' ]; do shift; done
+    printf '{"version":"%s"}\\n' "$FEED_VERSION" > "$2/desktop-latest.json"
+    ;;
+  'release edit') [ "$EDIT_FAILS" != 'true' ] ;;
+esac
+`,
+  );
+  chmodSync(join(bin, 'gh'), 0o755);
+
+  try {
+    const stdout = execFileSync('bash', ['-c', feedUpdateStep.run], {
+      cwd: directory,
+      env: {
+        ...process.env,
+        EDIT_FAILS: 'false',
+        ELECTRON_BRIDGE: 'false',
+        FEED_TAG: 'desktop-latest',
+        GH_CALLS: calls,
+        GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+        PATH: `${bin}:${process.env.PATH}`,
+        RELEASE_TAG: 'desktop-v1.2.3',
+        RELEASE_VERSION: '1.2.3',
+        ...overrides,
+      },
+      encoding: 'utf8',
+      stdio: 'pipe',
+    });
+    return {
+      calls: readdirSync(calls)
+        .sort((left, right) => Number(left) - Number(right))
+        .map((file) =>
+          readFileSync(join(calls, file), 'utf8').split('\0').slice(0, -1),
+        ),
+      stdout,
+    };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 describe('Desktop OSS mirror workflow', () => {
   it('short-circuits only after the stable GitHub and OSS publication is complete', () => {
     const prepare = releaseYaml.jobs.prepare;
@@ -161,6 +259,10 @@ describe('Desktop OSS mirror workflow', () => {
         name === 'Check whether stable release is already published',
     );
     expect(published.id).toBe('published');
+    const stepNames = prepare.steps.map(({ name }) => name);
+    expect(stepNames.indexOf('Resolve version')).toBeLessThan(
+      stepNames.indexOf('Check whether stable release is already published'),
+    );
     expect(published.env).toMatchObject({
       ALIYUN_OSS_PUBLIC_BASE_URL:
         "${{ vars.ALIYUN_OSS_PUBLIC_BASE_URL || 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com' }}",
@@ -169,11 +271,12 @@ describe('Desktop OSS mirror workflow', () => {
       RELEASE_CLOBBER: '${{ inputs.clobber }}',
       RELEASE_DRAFT: '${{ inputs.draft }}',
       RELEASE_DRY_RUN: '${{ inputs.dry_run }}',
-      RELEASE_ELECTRON_BRIDGE: '${{ inputs.electron_bridge }}',
       RELEASE_PRERELEASE: '${{ inputs.prerelease }}',
       RELEASE_TAG: '${{ steps.version.outputs.tag }}',
       RELEASE_VERSION: '${{ steps.version.outputs.version }}',
     });
+    expect(published.env).not.toHaveProperty('RELEASE_ELECTRON_BRIDGE');
+    expect(published.run).not.toContain('$RELEASE_ELECTRON_BRIDGE');
     expect(published.run).toContain(
       '::notice::Desktop $RELEASE_VERSION is already published; skipping build, publish and sync-oss.',
     );
@@ -257,6 +360,11 @@ describe('Desktop OSS mirror workflow', () => {
       { OSS_FEED_STATE: 'malformed' },
       'already_published=false',
     ],
+    [
+      'OSS feed that recovers on retry',
+      { OSS_FEED_STATE: 'flaky' },
+      'already_published=true',
+    ],
     ['dry run', { RELEASE_DRY_RUN: 'true' }, 'already_published=false'],
     ['draft dispatch', { RELEASE_DRAFT: 'true' }, 'already_published=false'],
     [
@@ -270,12 +378,50 @@ describe('Desktop OSS mirror workflow', () => {
       'already_published=false',
     ],
     [
-      'Electron bridge dispatch',
+      'Electron bridge dispatch over a completed release',
       { RELEASE_ELECTRON_BRIDGE: 'true' },
-      'already_published=false',
+      'already_published=true',
     ],
   ])('reports %s conservatively', (_name, overrides, expected) => {
     expect(runAlreadyPublishedProbe(overrides).output).toBe(expected);
+  });
+
+  it.skipIf(!replayable).each([
+    [
+      'GitHub feed lags',
+      { GH_FEED_STATE: 'different' },
+      "the GitHub stable feed is '1.2.2', expected 1.2.3",
+    ],
+    [
+      'release is missing',
+      { RELEASE_STATE: 'missing' },
+      "release 'desktop-v1.2.3' could not be inspected",
+    ],
+    [
+      'release is not stable',
+      { RELEASE_STATE: 'draft' },
+      "release 'desktop-v1.2.3' is not a published stable release",
+    ],
+    [
+      'GitHub feed is missing',
+      { GH_FEED_STATE: 'missing' },
+      "the GitHub stable feed 'desktop-latest' has no readable desktop-latest.json",
+    ],
+    [
+      'OSS mirror lags',
+      { OSS_FEED_STATE: 'different' },
+      "the OSS mirror feed is '1.2.2', expected 1.2.3",
+    ],
+    [
+      'OSS mirror is unreachable',
+      { OSS_FEED_STATE: 'missing' },
+      'the OSS mirror feed could not be downloaded',
+    ],
+  ])('says why %s did not short-circuit', (_name, overrides, reason) => {
+    const { output, stdout } = runAlreadyPublishedProbe(overrides);
+    expect(output).toBe('already_published=false');
+    expect(stdout).toContain('::notice::Already-published check stopped:');
+    expect(stdout).toContain(reason);
   });
 
   it.skipIf(!replayable)('explains a successful short-circuit', () => {
@@ -336,6 +482,38 @@ describe('Desktop OSS mirror workflow', () => {
     expect(prepare).toContain(
       '--base-url "${ALIYUN_OSS_PUBLIC_BASE_URL}/desktop/v${VERSION}"',
     );
+    // Only the re-mirror path may treat a platform as optional; the artifact
+    // path is a fresh build and must fail if a leg did not upload (#12806).
+    expect(prepare).toContain("SOURCE: '${{ steps.release.outputs.source }}'");
+    expect(prepare).toContain(`if [ "$SOURCE" = 'release' ]; then`);
+    expect(prepare).toContain(
+      'for suffix in linux-x64-rpm-fedora44 linux-x64-rpm-rhel10; do',
+    );
+    expect(prepare).toContain(
+      'find . -maxdepth 1 -name "*-${suffix}.rpm" -print -quit',
+    );
+    expect(prepare).toContain(
+      'manifest_args=(--allow-missing-platform linux-aarch64)',
+    );
+    // Pin the containment, not only the pieces: hoisting the tolerant
+    // assignment into the unconditional declaration above the guard leaves
+    // every string above present and the `if` block merely redundant, yet a
+    // SOURCE=artifact fresh build whose arm64 leg failed to upload then
+    // publishes the mirror feed without linux-aarch64 and exits 0 — #12806
+    // again, with this test green.
+    expect(prepare).toContain(
+      'manifest_args=()\n' +
+        `          if [ "$SOURCE" = 'release' ]; then\n` +
+        '            manifest_args=(--allow-missing-platform linux-aarch64)\n' +
+        '          fi',
+    );
+    // Pin the effect, not only the pieces: the declaration and the `if` guard
+    // both survive a refactor that drops the expansion, and an unexpanded array
+    // is not an error under `set -u` — the mirror would then die with
+    // `found 0` on exactly the path this flag exists for.
+    expect(prepare).toMatch(
+      /create-desktop-update-manifest\.mjs[\s\S]*?"\$\{manifest_args\[@\]}"/,
+    );
     expect(prepare).toContain('sha256sum -- * > SHA256SUMS.txt');
 
     const upload = getWorkflowStep(
@@ -369,10 +547,25 @@ describe('Desktop OSS mirror workflow', () => {
 
   it('advances the OSS feed only for the current GitHub stable version', () => {
     const publish = getWorkflowJob(releaseWorkflow, 'publish');
+    // The other side of the strictness split. A fresh build must never be able
+    // to tolerate a missing leg: an operator unblocking a release by adding the
+    // flag here would drop the key from the primary feed while the arm64 asset
+    // still ships — #12806 again, with every test green and no step failing.
+    const generateManifest = getWorkflowStep(
+      publish,
+      'Generate checksums and updater manifest',
+    );
+    expect(generateManifest).toContain('create-desktop-update-manifest.mjs');
+    expect(generateManifest).not.toContain('--allow-missing-platform');
     const updateFeed = getWorkflowStep(publish, 'Update stable updater feed');
     expect(updateFeed).toContain('sort -V');
     expect(updateFeed).toContain(
       'Desktop $RELEASE_VERSION will not replace newer stable feed $current',
+    );
+    // The page notes link to the versioned release; the replay below sets the
+    // tag itself, so only this pin notices the binding going missing.
+    expect(feedUpdateStep.env.RELEASE_TAG).toBe(
+      '${{ needs.prepare.outputs.tag }}',
     );
 
     const sync = getWorkflowJob(syncWorkflow, 'sync');
@@ -403,6 +596,90 @@ describe('Desktop OSS mirror workflow', () => {
       getWorkflowStep(sync, 'Verify latest manifest on Aliyun OSS'),
     ).toContain('if: "${{ steps.latest.outputs.matches == \'true\' }}"');
   });
+
+  const feedPageTitle = 'Qwen Code Desktop latest (v1.2.3)';
+  const feedPageNotes = expect.stringContaining(
+    'https://github.com/QwenLM/qwen-code/releases/tag/desktop-v1.2.3',
+  );
+  const advanceCalls = [
+    ['release', 'view', 'desktop-latest'],
+    [
+      'release',
+      'download',
+      'desktop-latest',
+      '--dir',
+      expect.any(String),
+      '--pattern',
+      'desktop-latest.json',
+    ],
+    [
+      'release',
+      'upload',
+      'desktop-latest',
+      'release-assets/desktop-latest.json',
+      '--clobber',
+    ],
+    [
+      'release',
+      'edit',
+      'desktop-latest',
+      '--title',
+      feedPageTitle,
+      '--notes',
+      feedPageNotes,
+      '--latest=false',
+    ],
+  ];
+
+  it.skipIf(!replayable).each([
+    ['an older feed', '1.2.2'],
+    ['a same-version rerun', '1.2.3'],
+  ])('rewrites the feed page text after advancing %s', (_name, feedVersion) => {
+    expect(runFeedUpdate({ FEED_VERSION: feedVersion }).calls).toEqual(
+      advanceCalls,
+    );
+  });
+
+  it.skipIf(!replayable)(
+    'leaves a newer feed and its page text untouched',
+    () => {
+      const { calls, stdout } = runFeedUpdate({ FEED_VERSION: '1.2.4' });
+      expect(calls).toEqual(advanceCalls.slice(0, 2));
+      expect(stdout).toContain('will not replace newer stable feed 1.2.4');
+    },
+  );
+
+  it.skipIf(!replayable)(
+    'warns instead of failing when only the page text update fails',
+    () => {
+      const { calls, stdout } = runFeedUpdate({
+        EDIT_FAILS: 'true',
+        FEED_VERSION: '1.2.2',
+      });
+      expect(calls).toEqual(advanceCalls);
+      expect(stdout).toContain('::warning::');
+    },
+  );
+
+  it.skipIf(!replayable)(
+    'creates a missing feed with the same page text',
+    () => {
+      expect(runFeedUpdate({ FEED_VERSION: 'missing' }).calls).toEqual([
+        ['release', 'view', 'desktop-latest'],
+        [
+          'release',
+          'create',
+          'desktop-latest',
+          'release-assets/desktop-latest.json',
+          '--title',
+          feedPageTitle,
+          '--notes',
+          feedPageNotes,
+          '--latest=false',
+        ],
+      ]);
+    },
+  );
 
   it('sync workflow validates stable-only releases in the reusable job', () => {
     expect(syncWorkflow).not.toContain('pull_request:');

@@ -5,12 +5,21 @@
  */
 
 import { execFile } from 'node:child_process';
+import {
+  accessSync,
+  constants as fsConstants,
+  existsSync,
+  statSync,
+} from 'node:fs';
+import * as path from 'node:path';
 import { promisify } from 'node:util';
 import { findGitRoot } from './gitUtils.js';
-import { gitEnv } from './git-branches.js';
+import { gitEnv, gitRemoteEnv } from './git-branches.js';
+import { createDebugLogger } from './debugLogger.js';
 import type { SessionPrState } from '../services/session-pr-service.js';
 
 const execFileAsync = promisify(execFile);
+const debugLogger = createDebugLogger('GITHUB_PRS');
 
 const GH_TIMEOUT_MS = 10_000;
 const GH_MAX_BUFFER = 16 * 1024 * 1024;
@@ -18,6 +27,104 @@ const GH_MAX_BUFFER = 16 * 1024 * 1024;
 // and re-truncates to GITHUB_PR_ERROR_MESSAGE_MAX, so a path that straddles the
 // display boundary is still whole here and gets redacted before it is cut.
 const GH_ERROR_RAW_MAX = 4096;
+
+// gh shells out to git for remote operations (the push inside
+// `gh pr create`, remote resolution elsewhere), so it needs the
+// remote-transport keys gitRemoteEnv restores — a plain gitEnv scrub would
+// strip the operator's SSH/askpass configuration from those children.
+export function ghEnv(
+  base?: Readonly<Record<string, string | undefined>>,
+): Record<string, string | undefined> {
+  const source = base ?? process.env;
+  const env = gitRemoteEnv(source);
+  if (env['GH_CONFIG_DIR'] === undefined && source['XDG_CONFIG_HOME']) {
+    env['GH_CONFIG_DIR'] = path.join(source['XDG_CONFIG_HOME'], 'gh');
+  }
+  for (const key of ['GIT_SSL_CAINFO', 'GIT_SSL_CAPATH']) {
+    if (source[key] !== undefined) env[key] = source[key];
+  }
+  return env;
+}
+
+/**
+ * Where gh lives when the process PATH does not carry the user's
+ * package-manager bin directory. A daemon started by launchd (macOS) or a
+ * desktop launcher inherits `/usr/bin:/bin:…`, so a bare `execFile('gh')`
+ * fails with ENOENT even though the user's own shell runs gh fine — and the
+ * failure is silent to every caller (PR binding declines, panels show no
+ * PRs). The home-relative entry follows the child environment's HOME,
+ * because that is the HOME the child runs under.
+ */
+const GH_FALLBACK_BINARIES = [
+  '/opt/homebrew/bin/gh',
+  '/usr/local/bin/gh',
+  '/home/linuxbrew/.linuxbrew/bin/gh',
+];
+
+/**
+ * The gh binary to execute. Returns `'gh'` whenever PATH resolves it, so a
+ * machine without gh keeps the pre-existing ENOENT path and its callers'
+ * `cli_unavailable` handling; only "PATH is missing the package-manager bin
+ * directory" falls back to a known absolute install. The per-user install
+ * leads the fallback order: it is the most specific choice for this user.
+ *
+ * `cwd` is the directory the child runs in (execFile's `cwd`): a relative or
+ * empty PATH entry is resolved against the CHILD's directory, not this
+ * process's — `PATH=bin` names `<cwd>/bin`, and an empty entry names `<cwd>`
+ * itself. Probing them anywhere else reports "PATH cannot resolve gh" for a
+ * wrapper gh the spawn would have run.
+ */
+export function resolveGhBinary(
+  env: Readonly<Record<string, string | undefined>>,
+  cwd: string,
+): string {
+  const source = env;
+  const pathValue = source['PATH'];
+  if (
+    pathValue &&
+    pathValue
+      .split(path.delimiter)
+      .some((dir) =>
+        existsSync(path.join(path.resolve(cwd, dir === '' ? '.' : dir), 'gh')),
+      )
+  ) {
+    return 'gh';
+  }
+  // A relative HOME would make the per-user candidate a relative path that
+  // this probe reads from the spawn directory; skip it rather than turn an
+  // odd env shape into a relative `.local/bin/gh`.
+  const home = source['HOME'];
+  const candidates = [
+    ...(home && path.isAbsolute(home)
+      ? [path.join(home, '.local', 'bin', 'gh')]
+      : []),
+    ...GH_FALLBACK_BINARIES,
+  ];
+  const fallback = candidates.find((candidate) => existsSync(candidate));
+  if (fallback !== undefined) {
+    // Which gh ran is otherwise unobservable: version skew or a wrapper that
+    // pins GH_TOKEN changes behaviour without failing, and the operator's
+    // `gh --version` would describe a different binary.
+    debugLogger.debug('gh not on PATH; using fallback binary', {
+      binary: fallback,
+    });
+    return fallback;
+  }
+  return 'gh';
+}
+
+/**
+ * The resolved gh binary to redact from a client-visible failure: an absolute
+ * install path names the host's HOME, so it must never leave the process. The
+ * bare name carries no layout and needs no field.
+ */
+function fallbackBinaryField(
+  env: Readonly<Record<string, string | undefined>>,
+  gitRoot: string,
+): { binary?: string } {
+  const binary = resolveGhBinary(env, gitRoot);
+  return binary === 'gh' ? {} : { binary };
+}
 
 /** Display cap applied by the route after path sanitization. */
 export const GITHUB_PR_ERROR_MESSAGE_MAX = 512;
@@ -61,10 +168,22 @@ export type FetchGitHubPullRequestsResult =
   | { kind: 'ok'; pullRequests: GitHubPullRequest[] }
   | { kind: 'not_a_repo' }
   | { kind: 'cli_unavailable' }
-  | { kind: 'failed'; message: string; gitRoot: string };
+  | {
+      kind: 'failed';
+      message: string;
+      gitRoot: string;
+      /**
+       * The gh binary this failure ran. Present only when resolution fell back
+       * to an absolute install: that exact value is the one a client body must
+       * never carry (it names the host's HOME), so route layers redact it
+       * before display while the raw message stays available for the log.
+       */
+      binary?: string;
+    };
 
-// Mirrors `gh pr checks`: a cancelled/stale check blocks the merge just like a
-// failure, so it counts as failing rather than pending.
+// A cancelled, timed-out, action-required, startup-failed or stale run counts
+// as failing, not pending: each leaves the head without a passing result.
+// (`gh pr checks` reports cancelled runs in a bucket of their own.)
 const FAILING_CHECK_RUN_CONCLUSIONS = new Set([
   'FAILURE',
   'CANCELLED',
@@ -77,35 +196,68 @@ const FAILING_STATUS_CONTEXT_STATES = new Set(['ERROR', 'FAILURE']);
 
 interface GhCheckRun {
   __typename?: string;
+  name?: string;
+  workflowName?: string;
   status?: string;
   conclusion?: string | null;
 }
 
 interface GhStatusContext {
   __typename?: string;
+  context?: string;
   state?: string;
 }
 
-function aggregateChecks(
-  rollup: ReadonlyArray<GhCheckRun | GhStatusContext> | undefined,
+/** One `statusCheckRollup` entry as `gh … --json` prints it. */
+export type GitHubCheckRollupEntry = GhCheckRun | GhStatusContext;
+
+function isFailingRollupEntry(entry: GitHubCheckRollupEntry): boolean {
+  if (entry.__typename === 'StatusContext') {
+    const state = (entry as GhStatusContext).state?.toUpperCase();
+    return state !== undefined && FAILING_STATUS_CONTEXT_STATES.has(state);
+  }
+  const conclusion = (entry as GhCheckRun).conclusion?.toUpperCase();
+  return (
+    conclusion !== undefined && FAILING_CHECK_RUN_CONCLUSIONS.has(conclusion)
+  );
+}
+
+/**
+ * Reduce a `statusCheckRollup` to one state: any failing entry (a check run
+ * concluded as a failure, cancelled, timed out, action-required, startup
+ * failure or stale; a status context in error or failure) → `failing`; else
+ * any entry without a conclusion or not yet successful → `pending`; else
+ * `passing`, or `none` for an empty rollup. One definition for the PR panel
+ * and the daemon's PR-state watch.
+ *
+ * Every entry counts. A rollup lists every run on the head — each trigger of
+ * a workflow that runs on several events, each run a review starts, earlier
+ * attempts of a re-run job — so a failure a rerun turned green still counts.
+ * `gh … --json statusCheckRollup` exports no app, workflow id or event to
+ * tell attempts of one check from runs of other triggers. The run id in an
+ * Actions check's `detailsUrl` is a URL convention rather than a field, and
+ * other apps' checks and status contexts carry nothing like it; a guess from
+ * names and times could let a skipped or other-trigger run hide a current
+ * failure, so every entry counts.
+ */
+export function aggregateChecks(
+  rollup: readonly GitHubCheckRollupEntry[] | undefined,
 ): GitHubPullRequestChecks {
   if (!Array.isArray(rollup) || rollup.length === 0) return 'none';
   let sawPassing = false;
   let sawPending = false;
   for (const entry of rollup) {
+    if (isFailingRollupEntry(entry)) return 'failing';
     if (entry.__typename === 'StatusContext') {
-      const state = (entry as GhStatusContext).state?.toUpperCase();
-      if (state && FAILING_STATUS_CONTEXT_STATES.has(state)) return 'failing';
-      if (state === 'SUCCESS') sawPassing = true;
-      else sawPending = true;
-    } else {
-      const conclusion = (entry as GhCheckRun).conclusion?.toUpperCase();
-      if (conclusion) {
-        if (FAILING_CHECK_RUN_CONCLUSIONS.has(conclusion)) return 'failing';
+      if ((entry as GhStatusContext).state?.toUpperCase() === 'SUCCESS') {
         sawPassing = true;
       } else {
         sawPending = true;
       }
+    } else if ((entry as GhCheckRun).conclusion) {
+      sawPassing = true;
+    } else {
+      sawPending = true;
     }
   }
   if (sawPending) return 'pending';
@@ -195,6 +347,41 @@ export interface FetchGitHubPullRequestsOptions {
   slim?: boolean;
 }
 
+/**
+ * Run gh in `cwd` with the wrappers' shared conventions (the resolved
+ * binary, the scrubbed env, the buffer cap) and resolve its stdout. A
+ * failure rejects with execFile's error carrying gh's stderr: the callback
+ * error has no stderr of its own (only the promisified form attaches it),
+ * and ghErrorMessage reports gh's diagnostic from it instead of Node's
+ * "Command failed: <argv>" message.
+ */
+function runGh(
+  args: readonly string[],
+  cwd: string,
+  env: Readonly<Record<string, string | undefined>> | undefined,
+  timeoutMs = GH_TIMEOUT_MS,
+): Promise<string> {
+  const childEnv = ghEnv(env);
+  return new Promise((resolve, reject) => {
+    execFile(
+      resolveGhBinary(childEnv, cwd),
+      args,
+      {
+        cwd,
+        timeout: timeoutMs,
+        maxBuffer: GH_MAX_BUFFER,
+        windowsHide: true,
+        encoding: 'utf8',
+        env: childEnv,
+      },
+      (error, stdout, stderr) => {
+        if (error) reject(Object.assign(error, { stderr }));
+        else resolve(stdout);
+      },
+    );
+  });
+}
+
 function runGhPrList(
   gitRoot: string,
   env?: Readonly<Record<string, string | undefined>>,
@@ -204,33 +391,20 @@ function runGhPrList(
     Math.max(options.limit ?? GITHUB_PR_LIST_LIMIT, 1),
     1000,
   );
-  return new Promise((resolve, reject) => {
-    execFile(
-      'gh',
-      [
-        'pr',
-        'list',
-        '--state',
-        options.state ?? 'open',
-        '--limit',
-        String(limit),
-        '--json',
-        options.slim ? GH_PR_LIST_FIELDS_SLIM : GH_PR_LIST_FIELDS,
-      ],
-      {
-        cwd: gitRoot,
-        timeout: GH_TIMEOUT_MS,
-        maxBuffer: GH_MAX_BUFFER,
-        windowsHide: true,
-        encoding: 'utf8',
-        env: gitEnv(env),
-      },
-      (error, stdout) => {
-        if (error) reject(error);
-        else resolve(stdout);
-      },
-    );
-  });
+  return runGh(
+    [
+      'pr',
+      'list',
+      '--state',
+      options.state ?? 'open',
+      '--limit',
+      String(limit),
+      '--json',
+      options.slim ? GH_PR_LIST_FIELDS_SLIM : GH_PR_LIST_FIELDS,
+    ],
+    gitRoot,
+    env,
+  );
 }
 
 /** Shared by the sibling `gh` wrappers (PR issues); stays thin on purpose. */
@@ -239,18 +413,34 @@ export function ghErrorMessage(
   commandLabel = 'gh pr list',
   timeoutMs = GH_TIMEOUT_MS,
 ): string {
+  const failure = error as {
+    killed?: unknown;
+    code?: unknown;
+    signal?: unknown;
+    stderr?: unknown;
+  } | null;
   // A timeout kill carries an empty stderr and a "Command failed: gh pr
   // list …" message; name the timeout instead of dumping the argv.
-  if ((error as { killed?: unknown } | null)?.killed === true) {
+  if (failure?.killed === true) {
     return `${commandLabel} timed out after ${timeoutMs / 1000}s`;
   }
-  const stderr = (error as { stderr?: unknown } | null)?.stderr;
-  const raw =
-    typeof stderr === 'string' && stderr.trim()
-      ? stderr
-      : error instanceof Error
-        ? error.message
-        : String(error);
+  // A string code is Node's own failure (a spawn error, an invalid
+  // argument, an overflowing buffer), whose message says what went wrong;
+  // anything gh wrote is incidental. Otherwise gh's stderr is the diagnostic, and without one
+  // execFile's message is just "Command failed: <argv>" — for a create, the
+  // PR title and body — so name the exit instead.
+  let raw: string;
+  if (typeof failure?.code === 'string') {
+    raw = error instanceof Error ? error.message : String(error);
+  } else if (typeof failure?.stderr === 'string' && failure.stderr.trim()) {
+    raw = failure.stderr;
+  } else if (typeof failure?.code === 'number') {
+    raw = `${commandLabel} exited with code ${failure.code}`;
+  } else if (typeof failure?.signal === 'string' && failure.signal !== '') {
+    raw = `${commandLabel} was killed by ${failure.signal}`;
+  } else {
+    raw = error instanceof Error ? error.message : String(error);
+  }
   return raw.replace(/\s+/g, ' ').trim().slice(0, GH_ERROR_RAW_MAX);
 }
 
@@ -277,13 +467,324 @@ export async function fetchGitHubPullRequests(
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return { kind: 'cli_unavailable' };
     }
-    return { kind: 'failed', message: ghErrorMessage(error), gitRoot };
+    return {
+      kind: 'failed',
+      message: ghErrorMessage(error),
+      gitRoot,
+      ...fallbackBinaryField(ghEnv(env), gitRoot),
+    };
   }
 
   try {
     return { kind: 'ok', pullRequests: parseGhPrList(stdout) };
   } catch (error) {
     return { kind: 'failed', message: ghErrorMessage(error), gitRoot };
+  }
+}
+
+// ── View one PR ────────────────────────────────────────────
+
+const GH_PR_VIEW_FIELDS =
+  'url,title,headRefOid,mergeable,state,statusCheckRollup';
+
+/** Upper bound on the failing check names a view reports. */
+export const GITHUB_PR_VIEW_FAILING_CHECKS_MAX = 20;
+
+export type GitHubPullRequestMergeable = 'mergeable' | 'conflicting';
+
+/** One PR as `gh pr view <url>` reports it, for the daemon's PR-state watch. */
+export interface GitHubPullRequestView {
+  /** The canonical URL `gh` returned (it follows renames and transfers). */
+  url: string;
+  /** Untrusted: the PR author controls it. */
+  title: string;
+  /** `headRefOid`: the PR head commit. */
+  headSha: string;
+  /** Draft PRs are `open`: the watch does not distinguish them. */
+  state: SessionPrState;
+  /** Absent for `UNKNOWN` (GitHub still computing) or any unrecognised value. */
+  mergeable?: GitHubPullRequestMergeable;
+  checks: GitHubPullRequestChecks;
+  /**
+   * Names of the failing rollup entries — `<workflow> / <job>` for a check
+   * run of a workflow, as GitHub labels it without its `(event)` suffix,
+   * else the check-run `name` or the status `context` — in rollup order,
+   * without duplicates, at most {@link GITHUB_PR_VIEW_FAILING_CHECKS_MAX}.
+   * An entry without a name is not listed, so this can be empty while
+   * `checks` is `failing`. The names come from the PR's workflow files or
+   * from whatever posts a check or status to its head, so callers treat them
+   * as untrusted text.
+   */
+  failingChecks: string[];
+}
+
+/**
+ * Why a view failed: refused before any process started (`not_a_pr_url`;
+ * `cwd_missing` for a working directory that does not exist or is not a
+ * directory, `cwd_unusable` for one that cannot be inspected or entered),
+ * `gh` failed or was killed at the timeout (`gh_failed`, `timed_out`), or
+ * its output did not parse (`unparsable`).
+ */
+export type GitHubPullRequestViewFailure =
+  | 'not_a_pr_url'
+  | 'cwd_missing'
+  | 'cwd_unusable'
+  | 'gh_failed'
+  | 'timed_out'
+  | 'unparsable';
+
+export type FetchGitHubPullRequestViewResult =
+  | { kind: 'ok'; view: GitHubPullRequestView }
+  | { kind: 'cli_unavailable' }
+  | {
+      kind: 'failed';
+      reason: GitHubPullRequestViewFailure;
+      message: string;
+      /**
+       * As for {@link FetchGitHubPullRequestsResult}: present only for a
+       * fallback binary.
+       */
+      binary?: string;
+    };
+
+interface GhPrViewEntry {
+  url?: unknown;
+  title?: unknown;
+  headRefOid?: unknown;
+  mergeable?: unknown;
+  state?: unknown;
+  statusCheckRollup?: unknown;
+}
+
+/**
+ * How GitHub labels a rollup entry: `<workflow> / <job>`, a check name or a
+ * status context.
+ */
+function rollupEntryLabel(
+  entry: GhCheckRun | GhStatusContext,
+): string | undefined {
+  if (entry.__typename === 'StatusContext') {
+    const context = (entry as GhStatusContext).context;
+    return typeof context === 'string' && context !== '' ? context : undefined;
+  }
+  const { name, workflowName } = entry as GhCheckRun;
+  if (typeof name !== 'string' || name === '') return undefined;
+  return typeof workflowName === 'string' && workflowName !== ''
+    ? `${workflowName} / ${name}`
+    : name;
+}
+
+function isOptionalString(value: unknown): boolean {
+  return value === undefined || value === null || typeof value === 'string';
+}
+
+/** Exported for tests — the exec wrapper stays thin on purpose. */
+export function parseGhPrView(stdout: string): GitHubPullRequestView {
+  const parsed: unknown = JSON.parse(stdout);
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('unexpected gh output: expected a JSON object');
+  }
+  const entry = parsed as GhPrViewEntry;
+  if (typeof entry.url !== 'string' || entry.url === '') {
+    throw new Error('unexpected gh output: missing url');
+  }
+  if (typeof entry.headRefOid !== 'string' || entry.headRefOid === '') {
+    throw new Error('unexpected gh output: missing headRefOid');
+  }
+  let state: SessionPrState;
+  switch (typeof entry.state === 'string' ? entry.state.toUpperCase() : '') {
+    case 'OPEN':
+      state = 'open';
+      break;
+    case 'MERGED':
+      state = 'merged';
+      break;
+    case 'CLOSED':
+      state = 'closed';
+      break;
+    default:
+      throw new Error('unexpected gh output: unknown state');
+  }
+  // Entries gh would never print — not an object, or a state or conclusion
+  // that is neither a string, null nor absent — are dropped rather than
+  // failing the whole view.
+  const rollup = Array.isArray(entry.statusCheckRollup)
+    ? (entry.statusCheckRollup as Array<GhCheckRun | GhStatusContext>).filter(
+        (item) =>
+          item !== null &&
+          typeof item === 'object' &&
+          isOptionalString((item as GhStatusContext).state) &&
+          isOptionalString((item as GhCheckRun).conclusion),
+      )
+    : undefined;
+  const failingChecks: string[] = [];
+  for (const item of rollup ?? []) {
+    if (failingChecks.length >= GITHUB_PR_VIEW_FAILING_CHECKS_MAX) break;
+    if (!isFailingRollupEntry(item)) continue;
+    const name = rollupEntryLabel(item);
+    if (name !== undefined && !failingChecks.includes(name)) {
+      failingChecks.push(name);
+    }
+  }
+  const view: GitHubPullRequestView = {
+    url: entry.url,
+    title: typeof entry.title === 'string' ? entry.title : '',
+    headSha: entry.headRefOid,
+    state,
+    checks: aggregateChecks(rollup),
+    failingChecks,
+  };
+  // UNKNOWN (still computing) and anything unrecognised map to absent, so a
+  // caller never overwrites a known value with a guess.
+  const mergeable =
+    typeof entry.mergeable === 'string' ? entry.mergeable.toUpperCase() : '';
+  if (mergeable === 'MERGEABLE') view.mergeable = 'mergeable';
+  else if (mergeable === 'CONFLICTING') view.mergeable = 'conflicting';
+  return view;
+}
+
+/**
+ * `/owner/repo/pull/<number>` with GitHub's name characters, optionally
+ * followed by a tab path (`/files`) or a `.diff` / `.patch` suffix — the
+ * spellings the refresh's `pullRequestKey` tolerates, narrowed to the
+ * characters GitHub allows in owner and repository names.
+ */
+const PULL_REQUEST_URL_PATH =
+  /^\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)(?:\/|\.diff$|\.patch$|$)/;
+
+/**
+ * The URL to hand `gh pr view`: `<scheme>//<host>/<owner>/<repo>/pull/<n>`
+ * rebuilt from the parsed input, or undefined when the input is not an
+ * http(s) pull request URL. Rebuilding drops credentials, a query, a
+ * fragment, any tab path or `.diff` / `.patch` suffix and leading zeros of
+ * the number, and anything
+ * outside the accepted spellings — an issue URL, `/PULL/7` or `/pull/0`
+ * (which `gh` would take as a branch name), a percent-encoded name — never
+ * reaches it.
+ */
+export function pullRequestViewUrl(url: string): string | undefined {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return undefined;
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    return undefined;
+  }
+  const match = PULL_REQUEST_URL_PATH.exec(parsed.pathname);
+  const number = match ? Number(match[3]) : Number.NaN;
+  if (!match || !Number.isSafeInteger(number) || number < 1) return undefined;
+  const [, owner, repo] = match;
+  return `${parsed.protocol}//${parsed.host}/${owner}/${repo}/pull/${number}`;
+}
+
+/** Why `cwd` cannot host a `gh pr view`, or undefined when it can. */
+function viewWorkingDirectoryProblem(
+  cwd: string,
+): { reason: 'cwd_missing' | 'cwd_unusable'; message: string } | undefined {
+  let isDirectory: boolean;
+  try {
+    isDirectory = statSync(cwd).isDirectory();
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === 'ENOENT' || code === 'ENOTDIR'
+      ? {
+          reason: 'cwd_missing',
+          message: 'gh pr view working directory does not exist',
+        }
+      : {
+          reason: 'cwd_unusable',
+          message: `gh pr view working directory cannot be inspected (${code ?? 'unknown error'})`,
+        };
+  }
+  if (!isDirectory) {
+    return {
+      reason: 'cwd_missing',
+      message: 'gh pr view working directory is not a directory',
+    };
+  }
+  try {
+    accessSync(cwd, fsConstants.X_OK);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return {
+      reason: 'cwd_unusable',
+      message: `gh pr view working directory cannot be entered (${code ?? 'unknown error'})`,
+    };
+  }
+  return undefined;
+}
+
+function runGhPrView(
+  url: string,
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string> {
+  return runGh(['pr', 'view', url, '--json', GH_PR_VIEW_FIELDS], cwd, env);
+}
+
+/**
+ * View one PR by its web URL with the `gh` CLI. Going by URL, never by
+ * number, makes `gh` resolve the PR's own repository instead of the one the
+ * working directory belongs to, so `cwd` only sets where the child runs; it
+ * must be an existing directory the process can enter (otherwise the view
+ * fails as `cwd_missing` or `cwd_unusable` before any process starts), and
+ * the caller passes a private one,
+ * because `gh` resolution (`resolveGhBinary`) treats relative or empty
+ * `PATH` entries as relative to it. The optional `env` supplies credentials
+ * (`GH_TOKEN`, `GH_CONFIG_DIR`) as for {@link fetchGitHubPullRequests}. An
+ * input that is not a pull request URL is refused before any process starts
+ * ({@link pullRequestViewUrl}). There is no host check: `gh` sends the
+ * credential it holds for whatever host the URL names (for an Enterprise
+ * Server host, `GH_ENTERPRISE_TOKEN`), so callers restrict `url` to the
+ * GitHub hosts they allow before calling.
+ */
+export async function fetchGitHubPullRequestView(
+  url: string,
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<FetchGitHubPullRequestViewResult> {
+  const viewUrl = pullRequestViewUrl(url);
+  if (viewUrl === undefined) {
+    return {
+      kind: 'failed',
+      reason: 'not_a_pr_url',
+      message: 'not a pull request URL',
+    };
+  }
+  // A missing working directory fails the spawn with ENOENT, which would
+  // otherwise read as "gh is not installed", and one that cannot be entered
+  // fails it with EACCES, which would read as a problem with gh.
+  const cwdProblem = viewWorkingDirectoryProblem(cwd);
+  if (cwdProblem !== undefined) {
+    return { kind: 'failed', ...cwdProblem };
+  }
+  let stdout: string;
+  try {
+    stdout = await runGhPrView(viewUrl, cwd, env);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { kind: 'cli_unavailable' };
+    }
+    return {
+      kind: 'failed',
+      reason:
+        (error as { killed?: unknown } | null)?.killed === true
+          ? 'timed_out'
+          : 'gh_failed',
+      message: ghErrorMessage(error, 'gh pr view'),
+      ...fallbackBinaryField(ghEnv(env), cwd),
+    };
+  }
+  try {
+    return { kind: 'ok', view: parseGhPrView(stdout) };
+  } catch (error) {
+    return {
+      kind: 'failed',
+      reason: 'unparsable',
+      message: ghErrorMessage(error, 'gh pr view'),
+    };
   }
 }
 
@@ -300,7 +801,13 @@ export type CreateGitHubPullRequestResult =
   | { kind: 'ok'; url: string; number: number | null }
   | { kind: 'not_a_repo' }
   | { kind: 'cli_unavailable' }
-  | { kind: 'failed'; message: string; gitRoot: string };
+  | {
+      kind: 'failed';
+      message: string;
+      gitRoot: string;
+      /** See {@link FetchGitHubPullRequestsResult} — the fallback gh binary. */
+      binary?: string;
+    };
 
 const GH_CREATE_TIMEOUT_MS = 30_000;
 
@@ -314,24 +821,7 @@ function runGhPrCreate(
   args.push('--body', opts.body ?? '');
   if (opts.base) args.push('--base', opts.base);
   if (opts.head) args.push('--head', opts.head);
-  return new Promise((resolve, reject) => {
-    execFile(
-      'gh',
-      args,
-      {
-        cwd: gitRoot,
-        timeout: GH_CREATE_TIMEOUT_MS,
-        maxBuffer: GH_MAX_BUFFER,
-        windowsHide: true,
-        encoding: 'utf8',
-        env: gitEnv(env),
-      },
-      (error, stdout) => {
-        if (error) reject(error);
-        else resolve(stdout);
-      },
-    );
-  });
+  return runGh(args, gitRoot, env, GH_CREATE_TIMEOUT_MS);
 }
 
 /**
@@ -356,6 +846,7 @@ export async function createGitHubPullRequest(
       kind: 'failed',
       message: ghErrorMessage(error, 'gh pr create', GH_CREATE_TIMEOUT_MS),
       gitRoot,
+      ...fallbackBinaryField(ghEnv(env), gitRoot),
     };
   }
 
@@ -534,9 +1025,10 @@ export function fetchCurrentBranchPullRequest(
   // the repo (clone into the working dir) — so this is an unproven
   // pre-state, not a proved absence; callers decline on `error`.
   if (!gitRoot) return Promise.resolve({ status: 'error' });
+  const childEnv = ghEnv(env);
   return new Promise((resolve) => {
     execFile(
-      'gh',
+      resolveGhBinary(childEnv, gitRoot),
       ['pr', 'view', '--json', 'number,url,state,headRefName'],
       {
         cwd: gitRoot,
@@ -544,7 +1036,7 @@ export function fetchCurrentBranchPullRequest(
         maxBuffer: GH_MAX_BUFFER,
         windowsHide: true,
         encoding: 'utf8',
-        env: gitEnv(env),
+        env: childEnv,
       },
       (error, stdout, stderr) => {
         if (error) {
@@ -584,6 +1076,90 @@ export function fetchCurrentBranchPullRequest(
           );
         } catch {
           resolve({ status: 'error' });
+        }
+      },
+    );
+  });
+}
+
+/**
+ * The outcome of resolving an explicitly named PR for manual binding:
+ * either the gh-resolved snapshot, or a failure with a coarse reason.
+ * `unavailable` (gh binary missing) and `timeout` are environmental — the
+ * caller should name the cause instead of advising a PR-specific remedy;
+ * `failed` covers every other gh failure (auth, rate limit, unknown PR,
+ * unparseable output, a missing session working directory), which gh's
+ * stderr does not reliably distinguish.
+ */
+export type PullRequestReferenceResolution =
+  | { status: 'pr'; number: number; url: string; state: SessionPrState }
+  | { status: 'error'; reason: 'unavailable' | 'timeout' | 'failed' };
+
+/**
+ * Resolves an explicitly named PR (a number or a full PR URL) through gh,
+ * for manual session binding. Unlike {@link fetchCurrentBranchPullRequest}
+ * this is not an attribution gate: the caller already holds user intent
+ * naming the PR, and gh only supplies the canonical url/state. On failure
+ * a caller holding a full URL may still bind that URL without a state and
+ * let the refresh sweep resolve it later.
+ */
+export function fetchPullRequestByReference(
+  cwd: string,
+  reference: string,
+): Promise<PullRequestReferenceResolution> {
+  const childEnv = ghEnv();
+  // A missing cwd spawns the same ENOENT as a missing gh binary; classify
+  // it as 'failed' so 'unavailable' keeps meaning "gh is not installed".
+  // Check the caller-named cwd BEFORE resolving the git root: findGitRoot
+  // only inspects ancestors' .git, so a deleted cwd under a surviving repo
+  // would resolve up to that repo and run gh in a checkout the session never
+  // referenced (a bare number then binds the ancestor repo's PR).
+  if (viewWorkingDirectoryProblem(cwd)) {
+    return Promise.resolve({ status: 'error', reason: 'failed' });
+  }
+  // A URL names its own repo, but a bare number needs the checkout's repo
+  // context; outside a repo gh still runs (and fails) in the given cwd.
+  const runDir = findGitRoot(cwd) ?? cwd;
+  return new Promise((resolve) => {
+    execFile(
+      resolveGhBinary(childEnv, runDir),
+      ['pr', 'view', reference, '--json', 'number,url,state'],
+      {
+        cwd: runDir,
+        timeout: GH_TIMEOUT_MS,
+        maxBuffer: GH_MAX_BUFFER,
+        windowsHide: true,
+        encoding: 'utf8',
+        env: childEnv,
+      },
+      (error, stdout) => {
+        if (error) {
+          const reason =
+            (error as NodeJS.ErrnoException).code === 'ENOENT'
+              ? 'unavailable'
+              : (error as { killed?: unknown }).killed === true
+                ? 'timeout'
+                : 'failed';
+          resolve({ status: 'error', reason });
+          return;
+        }
+        try {
+          const parsed = JSON.parse(stdout) as {
+            number?: number;
+            url?: string;
+            state?: string;
+          };
+          // gh reports OPEN/MERGED/CLOSED; anything else fails closed.
+          const state = parsed.state?.toLowerCase();
+          resolve(
+            typeof parsed.number === 'number' &&
+              typeof parsed.url === 'string' &&
+              (state === 'open' || state === 'merged' || state === 'closed')
+              ? { status: 'pr', number: parsed.number, url: parsed.url, state }
+              : { status: 'error', reason: 'failed' },
+          );
+        } catch {
+          resolve({ status: 'error', reason: 'failed' });
         }
       },
     );
@@ -646,9 +1222,10 @@ export function fetchAttributionRepoKeys(
 ): Promise<AttributionRepoKeys> {
   const gitRoot = findGitRoot(cwd);
   if (!gitRoot) return Promise.resolve({});
+  const childEnv = ghEnv(env);
   return new Promise((resolve) => {
     execFile(
-      'gh',
+      resolveGhBinary(childEnv, gitRoot),
       ['repo', 'view', '--json', 'url,parent'],
       {
         cwd: gitRoot,
@@ -656,7 +1233,7 @@ export function fetchAttributionRepoKeys(
         maxBuffer: GH_MAX_BUFFER,
         windowsHide: true,
         encoding: 'utf8',
-        env: gitEnv(env),
+        env: childEnv,
       },
       (error, stdout) => {
         if (error) {

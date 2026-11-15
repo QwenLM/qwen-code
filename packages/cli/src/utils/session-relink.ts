@@ -112,7 +112,15 @@ export async function maybeRelinkResumeSession(options: {
       ).confirmed === true;
   if (!confirmed) return { status: 'cancelled' };
 
-  await service.relinkSession(lookup.candidate);
+  try {
+    await service.relinkSession(lookup.candidate);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      status: 'blocked',
+      message: `Qwen Code could not safely complete session reattachment: ${detail}`,
+    };
+  }
   return {
     status: 'relinked',
     previousCwd: lookup.candidate.recordedCwd,

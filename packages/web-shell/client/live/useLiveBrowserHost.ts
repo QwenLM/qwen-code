@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { randomUUID } from '../utils/random-uuid.js';
 import {
   useCallback,
   useEffect,
@@ -11,6 +12,7 @@ import {
   useState,
   type RefObject,
 } from 'react';
+import { useDaemonAvailabilityController } from '../daemon/availability-context.js';
 import type { DaemonLiveStatus } from '@qwen-code/sdk';
 import {
   describeMicError,
@@ -194,9 +196,7 @@ function describeShareError(error: unknown): string {
 }
 
 function randomNonce(): string {
-  return typeof crypto.randomUUID === 'function'
-    ? crypto.randomUUID()
-    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return randomUUID();
 }
 
 export function useLiveBrowserHost({
@@ -205,6 +205,7 @@ export function useLiveBrowserHost({
   onStatus,
 }: UseLiveBrowserHostOptions): UseLiveBrowserHostResult {
   const [phase, setPhase] = useState<LiveBrowserHostPhase>('idle');
+  const availability = useDaemonAvailabilityController();
   const [closeReason, setCloseReason] = useState<LiveBrowserHostCloseReason>();
   const [errorMessage, setErrorMessage] = useState<string>();
   const [captureMode, setCaptureMode] = useState<LiveCaptureMode>();
@@ -437,6 +438,17 @@ export function useLiveBrowserHost({
       setCloseReason(undefined);
       setErrorMessage(undefined);
       applyPhase('connecting');
+      try {
+        availability?.assertAvailable();
+      } catch (error) {
+        end(
+          generation,
+          'error',
+          'lost',
+          error instanceof Error ? error.message : String(error),
+        );
+        return;
+      }
 
       if (!navigator.mediaDevices?.getUserMedia) {
         end(
@@ -475,14 +487,24 @@ export function useLiveBrowserHost({
       }
 
       void (async () => {
+        const mic = navigator.mediaDevices.getUserMedia(MICROPHONE_CONSTRAINTS);
         let stream: MediaStream;
         try {
           [stream] = await Promise.all([
-            navigator.mediaDevices.getUserMedia(MICROPHONE_CONSTRAINTS),
+            mic,
             capture.state === 'suspended' ? capture.resume() : undefined,
             playback.state === 'suspended' ? playback.resume() : undefined,
           ]);
         } catch (error) {
+          // A resume leg can reject after the microphone was already granted
+          // but before the stream reached `resourcesRef`. `release()` cannot
+          // stop tracks it never saw, so the abandoned stream must be stopped
+          // here, however late it arrives.
+          void mic.then(
+            (abandoned) =>
+              abandoned.getTracks().forEach((track) => track.stop()),
+            () => undefined,
+          );
           end(generation, 'error', 'microphone', describeMicError(error));
           return;
         }
@@ -567,6 +589,7 @@ export function useLiveBrowserHost({
         // Only now, with a working microphone, take the Host lease.
         const url = new URL(toVoiceWebSocketUrl(baseUrl, LIVE_WEB_HOST_PATH));
         if (options.takeover) url.searchParams.set('takeover', '1');
+        availability?.assertAvailable();
         const ws = new WebSocket(
           url.toString(),
           voiceWebSocketProtocols(token),
@@ -813,6 +836,8 @@ export function useLiveBrowserHost({
         };
 
         ws.onclose = (event: CloseEvent) => {
+          if (isCurrent() && event.code < 4000 && event.code !== 1013)
+            void availability?.check();
           const reason = closeReasonFor(event.code, event.reason);
           end(generation, 'error', reason, event.reason || undefined);
         };
@@ -861,6 +886,7 @@ export function useLiveBrowserHost({
     },
     [
       applyPhase,
+      availability,
       baseUrl,
       end,
       token,
@@ -869,6 +895,26 @@ export function useLiveBrowserHost({
       startScreenFeed,
     ],
   );
+
+  useEffect(() => {
+    const unsubscribe = availability?.subscribe(() => {
+      if (
+        availability.getSnapshot() !== 'available' &&
+        (phaseRef.current === 'connecting' || phaseRef.current === 'connected')
+      ) {
+        end(generationRef.current, 'error', 'lost');
+      }
+    });
+    return () => {
+      unsubscribe?.();
+      if (
+        phaseRef.current === 'connecting' ||
+        phaseRef.current === 'connected'
+      ) {
+        end(generationRef.current, 'idle');
+      }
+    };
+  }, [availability, end]);
 
   useEffect(() => {
     const onPageHide = () => end(generationRef.current, 'idle');

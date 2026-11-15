@@ -2,26 +2,29 @@
 
 Qwen Code provides web search two ways:
 
-1. **Built-in `web_search` tool** — backed by the DashScope Responses API server-side search. On by default at startup for supported ModelStudio and OpenAI-compatible DashScope configurations; no extra provider or MCP setup.
+1. **Built-in `web_search` tool** — backed by the DashScope Responses API server-side search or, for Qwen Subscription sessions, the Qwen MCP search service. Enabled after Plus/Pro subscription sign-in and on by default at startup for supported ModelStudio and OpenAI-compatible DashScope configurations; no extra provider or MCP setup.
 2. **MCP (Model Context Protocol) integrations** — connect any external search service (Tavily, GLM, and others). Use this when your provider cannot back the built-in tool.
 
 ## Built-in `web_search`
 
-The built-in tool issues a self-contained search request to a small auxiliary model with DashScope's server-side `web_search` (and `web_extractor`) tools, and returns the narrated findings plus source URLs.
+For DashScope, the built-in tool issues a self-contained search request to a small auxiliary model with server-side `web_search` (and `web_extractor`) tools, and returns the narrated findings plus source URLs. With [Qwen Account with Subscription](../../users/configuration/auth.md), it uses the Qwen MCP search service and your current login credentials. No separate search API key, auxiliary model, or `mcpServers` configuration is needed. `webExtractor` applies only to DashScope search.
 
 ### When it turns on by itself
 
 If you configured nothing under `tools.webSearch`, the tool registers whenever the model you are running can back the search request with the same credentials:
 
-| How you signed in                                                                                                          | Built-in search                                 |
-| -------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| Alibaba ModelStudio → **Standard API Key**                                                                                 | on                                              |
-| Alibaba ModelStudio → **Token Plan**                                                                                       | on                                              |
-| Alibaba ModelStudio → **Coding Plan**                                                                                      | off — its endpoint is not verified for this API |
-| An OpenAI-compatible `modelProviders` or Custom Provider entry on a recognized DashScope Responses host, with a direct key | on                                              |
-| Third-party providers (OpenRouter, DeepSeek, ModelScope, …), custom endpoints on other hosts, local models                 | off                                             |
+| How you signed in                                                                                                               | Built-in search                                 |
+| ------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| [Qwen Account with Subscription](https://chat.qwen.ai/?memberPlan=qwen_code&entry=qwen_code&paywallScene=cli) — **Plus or Pro** | on                                              |
+| Alibaba ModelStudio → **Standard API Key**                                                                                      | on                                              |
+| Alibaba ModelStudio → **Token Plan**                                                                                            | on                                              |
+| Alibaba ModelStudio → **Coding Plan**                                                                                           | off — its endpoint is not verified for this API |
+| QwenCloud → **Standard API Key**                                                                                                | on                                              |
+| QwenCloud → **Token Plan**                                                                                                      | on                                              |
+| An OpenAI-compatible `modelProviders` or Custom Provider entry on a recognized DashScope Responses host, with a direct key      | on                                              |
+| Third-party providers (OpenRouter, DeepSeek, ModelScope, …), custom endpoints on other hosts, local models                      | off                                             |
 
-Searches bill the same key as your main model. Permission handling follows the active approval mode and rules; in `default` approval mode the first search asks for confirmation. When your provider cannot back the tool, it simply does not appear at startup — no startup warning.
+DashScope searches bill the same key as your main model; subscription searches reuse your Qwen login credentials. Permission handling follows the active approval mode and rules; in `default` approval mode the first search asks for confirmation. When your provider cannot back the tool, it simply does not appear at startup — no startup warning.
 
 To turn it off:
 
@@ -32,6 +35,8 @@ To turn it off:
 or `ENABLE_WEB_SEARCH=false`. Bare mode and safe mode always disable it.
 
 ### Configuring it explicitly
+
+This section configures DashScope search. Subscription search reuses your membership credentials and needs no additional setup. Explicit search settings still take precedence over automatic subscription search.
 
 Point the tool at a ModelStudio Standard/Token Plan or another verified DashScope Responses entry. This is useful when your main model runs on another provider and you also hold a separate supported DashScope key. Coding Plan hosts are excluded from automatic activation because the Responses search tools are not verified there. You can opt in explicitly with `tools.webSearch.model`; if the endpoint does not serve them, the first search fails loudly. Use an MCP search provider if you do not want to rely on that unverified path.
 
@@ -61,6 +66,7 @@ Point the tool at a ModelStudio Standard/Token Plan or another verified DashScop
 | `tools.webSearch.model`         | `WEB_SEARCH_MODEL`           | Search model selector for the explicit path (`modelId` or `authType:modelId`). With `WEB_SEARCH_BASE_URL` it is the plain model id for that endpoint; otherwise it must match a declared DashScope-compatible `modelProviders` entry. The automatic path uses `qwen3.8-flash`.                                                                                                                                                                                                                                                                                                         |
 | `tools.webSearch.webExtractor`  | `WEB_SEARCH_EXTRACTOR`       | Let the search agent open result pages for better-grounded answers (default `true`; billed separately by DashScope).                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `tools.webSearch.timeoutMs`     | `WEB_SEARCH_TIMEOUT_MS`      | Total time budget for one search, in milliseconds (default `120000`, max `600000`; other values fall back to the default). A search that runs out of time returns what arrived as a partial result once at least one search call has completed; if the budget expires before the first search call finishes, the tool reports a timeout error instead, because narration with no executed search is not auditable evidence. A per-tool execution cap (`QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS`) below this budget fires first and discards the partial result; keep it above `timeoutMs`. |
+| `tools.webSearch.allowedHosts`  | `WEB_SEARCH_ALLOWED_HOSTS`   | Extra host suffixes trusted for a search backend you configured explicitly — an exact host, or any subdomain of a listed suffix (comma-separated in the env var). Empty by default, so behaviour is unchanged unless set. Only the `WEB_SEARCH_BASE_URL` backend and the `modelProviders` path consult it; automatic derivation never does, so a custom host is used only where your own configuration names it. The configured host receives the API key. Entries are trimmed and lower-cased, and entries without a dot are ignored.                                                 |
 | `tools.webSearch.maxPerSession` | `WEB_SEARCH_MAX_PER_SESSION` | Maximum `web_search` calls in one session (default `200`, max `10000`; other values fall back to the default). The count is shared with subagents and resets when the session changes (`/clear`, `/resume`, branching). Once it is reached, further searches are skipped and the model is told to continue with what it has gathered.                                                                                                                                                                                                                                                  |
 
 ### Env-only configuration (no settings.json)
@@ -73,6 +79,7 @@ variables — no `modelProviders` entry needed:
 export ENABLE_WEB_SEARCH=true
 export WEB_SEARCH_MODEL=qwen3.8-flash
 export WEB_SEARCH_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+export WEB_SEARCH_ALLOWED_HOSTS=llm-gw.example.com   # only for a gateway host
 export DASHSCOPE_API_KEY=sk-...        # or set WEB_SEARCH_API_KEY instead
 ```
 
@@ -80,15 +87,18 @@ export DASHSCOPE_API_KEY=sk-...        # or set WEB_SEARCH_API_KEY instead
 DashScope-compatible endpoint; when it is set, it takes precedence over
 `modelProviders` resolution and `WEB_SEARCH_MODEL` is used as the plain DashScope
 model id. The API key is read from `WEB_SEARCH_API_KEY` if set, otherwise from
-`DASHSCOPE_API_KEY`. Misconfiguration still surfaces as a startup notice.
+`DASHSCOPE_API_KEY`. If the endpoint is a gateway on your own domain, list that
+host in `WEB_SEARCH_ALLOWED_HOSTS` (or `tools.webSearch.allowedHosts`) — the
+built-in list is otherwise the only thing the check accepts. Misconfiguration
+still surfaces as a startup notice.
 
 Notes:
 
-- The selector must resolve to a DashScope-compatible `modelProviders` entry carrying a direct API key via `envKey`. Your main model can be any provider — only the search side request needs a DashScope entry. Qwen OAuth cannot back the tool.
-- Which providers can activate the tool is decided at startup. Once active, the search backend follows the currently selected model on the next search; switching to an unsupported provider makes that invocation fail, while switching from a session where the tool was absent still requires a restart to register it.
-- Automatic host detection intentionally accepts only known DashScope regional, Token Plan MaaS, and internal Alibaba hosts. Generic `*.alicloudapi.com` gateways and `DASHSCOPE_PROXY_BASE_URL` are excluded because they are not known to forward the Responses search tools.
+- For explicit DashScope search, the selector must resolve to a DashScope-compatible `modelProviders` entry carrying a direct API key via `envKey`. Your main model can be any provider. The legacy free Qwen OAuth provider cannot back this path; Qwen Subscription search uses the separate MCP service described above.
+- Search registration is re-evaluated after successful authentication changes. Signing in to Qwen Subscription enables search in the current session without restarting. Explicit disabling, bare/safe mode, and tool permission rules still apply.
+- Automatic host detection intentionally accepts only known DashScope regional hosts, Model Studio and QwenCloud MaaS hosts (including their `token-plan.` subscription subdomains), and internal Alibaba hosts. Generic `*.alicloudapi.com` gateways, `DASHSCOPE_PROXY_BASE_URL` and any host you only added to `allowedHosts` are excluded from that automatic path, because it runs without your involvement and would otherwise hand your main provider's key to a host nobody declared. For a gateway you do declare, list it in `tools.webSearch.allowedHosts` and point `WEB_SEARCH_BASE_URL` (or a `modelProviders` entry) at it.
 - If enabled explicitly but misconfigured, the tool stays off and a startup notice explains which condition failed. Automatic activation never emits a notice.
-- Searches bill your DashScope key (`usage.x_tools` counts). Auto approval mode (the default) lets the classifier approve searches without prompting; in `default` approval mode the tool asks, and approving with "always allow" persists a standard `WebSearch` permission rule, like other tools.
+- DashScope searches bill your DashScope key (`usage.x_tools` counts). Auto approval mode (the default) lets the classifier approve searches without prompting; in `default` approval mode the tool asks, and approving with "always allow" persists a standard `WebSearch` permission rule, like other tools.
 - There is no client-side model allowlist; a model the Responses endpoint does not serve fails loudly on first use.
 - A search that exceeds its time budget returns what arrived as a partial result once at least one search call has completed; if the budget expires before the first search call finishes, the tool reports a timeout error instead, because narration with no executed search is not auditable evidence. When a search call did complete but the narrated answer never arrived, the result carries at most 6,000 characters of the page text the agent had read, labeled as raw page content.
 - The per-session cap counts `web_search` tool calls, not the searches one call runs internally, and a call that fails still counts because the request was sent. A skipped call is not an error: it tells the model the budget is used and to ask you to raise `tools.webSearch.maxPerSession` if more searches are genuinely needed.
@@ -371,5 +381,151 @@ Replace `${FIRECRAWL_API_KEY}` with your actual API key, or set it as an environ
   }
 }
 ```
+
+---
+
+### SerpApi
+
+The official hosted MCP server by SerpApi, providing real-time structured search results from Google, Baidu, Bing and other search engines through a single tool. Search queries and their parameters are sent to SerpApi.
+
+- **Documentation:** https://serpapi.com/integrations/mcp
+- **Cost:** Paid (free plan available)
+- **Get API Key:** https://serpapi.com/manage-api-key
+- **Best for:** Structured results from a broad choice of search engines
+
+#### Available Tools
+
+- `search` — Web search, optionally returning results as Markdown
+
+#### Setup
+
+**Method 1: CLI command**
+
+```bash
+qwen mcp add serpapi \
+  -t http \
+  "https://mcp.serpapi.com/mcp" \
+  -H "Authorization: Bearer ${SERPAPI_API_KEY}"
+```
+
+**Method 2: `settings.json`**
+
+```json
+{
+  "mcpServers": {
+    "serpapi": {
+      "httpUrl": "https://mcp.serpapi.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${SERPAPI_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+Replace `${SERPAPI_API_KEY}` with your actual API key, or set it as an environment variable. The key is only needed for searches. Without a valid API key, the server still connects and lists its tools, but `search` returns an error.
+
+---
+
+### looot
+
+A hosted MCP server from looot with web search, Google SERP results, news search and web page reading. Search queries and the URLs you ask it to read are sent to looot.
+
+- **Documentation:** https://docs.looot.ai
+- **Cost:** Paid (prepaid balance, no free tier)
+- **Get API Key:** https://looot.ai
+- **Best for:** Web search, Google SERP and news results, and reading a page as text
+
+#### Available Tools
+
+- `web_search` — Web search
+- `google_search_results` — Google SERP results
+- `news_search` — News search
+- `read_web_page` — Read a single page as text
+
+The server also exposes company and email lookups.
+
+#### Setup
+
+**Method 1: CLI command (Remote MCP)**
+
+```bash
+qwen mcp add looot \
+  -t http \
+  "https://api.looot.ai/mcp" \
+  -H "Authorization: Bearer ${LOOOT_API_KEY}"
+```
+
+**Method 2: `settings.json` (Remote MCP)**
+
+```json
+{
+  "mcpServers": {
+    "looot": {
+      "httpUrl": "https://api.looot.ai/mcp",
+      "headers": {
+        "Authorization": "Bearer ${LOOOT_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+Replace `${LOOOT_API_KEY}` with your actual API key, or set it as an environment variable.
+
+---
+
+### You.com
+
+You.com's hosted MCP server. The free profile (`?profile=free`) works without an API key or account and exposes web search and agent/MCP discovery. Search queries are sent to You.com. With an API key, the URLs you ask it to read are also sent to You.com.
+
+- **Documentation:** https://you.com/docs/agents/mcp-server
+- **Cost:** Free profile: 100 searches a day per IP, no API key. An API key gives higher, per-account limits and adds the `you-contents` tool
+- **Get API Key:** Not needed for the free profile. For the keyed server: https://you.com/platform
+- **Best for:** Trying MCP web search with no setup on providers that cannot back the built-in tool (OpenRouter, DeepSeek, local models)
+
+#### Available Tools
+
+- `you-search`: Web search returning ranked results with URLs and snippets
+- `you-discover`: Finds AI agents, MCP servers, and skills (search only, it never installs anything)
+
+With an API key, the server (`https://api.you.com/mcp`, no profile) also offers `you-contents` for reading page content, and `you-balance` for checking your account balance.
+
+#### Setup
+
+**Method 1: CLI command (Remote MCP, no key)**
+
+```bash
+qwen mcp add you -t http "https://api.you.com/mcp?profile=free"
+```
+
+**Method 2: `settings.json` (Remote MCP, no key)**
+
+```json
+{
+  "mcpServers": {
+    "you": {
+      "httpUrl": "https://api.you.com/mcp?profile=free"
+    }
+  }
+}
+```
+
+**Method 3: `settings.json` (Remote MCP, with key)**
+
+```json
+{
+  "mcpServers": {
+    "you": {
+      "httpUrl": "https://api.you.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${YDC_API_KEY}"
+      }
+    }
+  }
+}
+```
+
+Replace `${YDC_API_KEY}` with your actual You.com API key, or set it as an environment variable.
 
 ---

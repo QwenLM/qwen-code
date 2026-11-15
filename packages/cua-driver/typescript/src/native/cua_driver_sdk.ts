@@ -90,6 +90,19 @@ export function currentMacOsPermissionStatus(): MacOsPermissionStatus {
     ));
     }
 
+/**
+ * Host event-loop liveness only; this does not expose desktop state.
+ */
+export function nativeUiNeedsPump(): boolean {
+    return FfiConverterBool.lift(uniffiCaller.rustCall(
+            /*caller:*/ (callStatus) => {
+                return nativeModule().uniffi_cua_driver_sdk_fn_func_native_ui_needs_pump(
+                callStatus);
+            },
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+    ));
+    }
+
 export function openMacOsScreenRecordingSettings(): void /*throws*/ {uniffiCaller.rustCallWithError(
             /*liftError:*/ FfiConverterTypeDriverError.lift.bind(FfiConverterTypeDriverError),
             /*caller:*/ (callStatus) => { nativeModule().uniffi_cua_driver_sdk_fn_func_open_mac_os_screen_recording_settings(
@@ -109,6 +122,20 @@ export function requestMacOsPermissions(): MacOsPermissionStatus {
     })(uniffiCaller.rustCall(
             /*caller:*/ (callStatus) => {
                 return nativeModule().uniffi_cua_driver_sdk_fn_func_request_mac_os_permissions(
+                callStatus);
+            },
+            /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
+    ));
+    }
+
+/**
+ * Constructor-scoped declaration by a host that services the native UI loop.
+ */
+export function setNativeUiHostAvailable(available: boolean): boolean {
+    return FfiConverterBool.lift(uniffiCaller.rustCall(
+            /*caller:*/ (callStatus) => {
+                return nativeModule().uniffi_cua_driver_sdk_fn_func_set_native_ui_host_available(
+        FfiConverterBool.lower(available, nativeModule().rustbuffer_alloc),
                 callStatus);
             },
             /*liftString:*/ FfiConverterString.lift.bind(FfiConverterString),
@@ -6843,11 +6870,17 @@ function uniffiEnsureInitialized() {
     if (nativeModule().uniffi_cua_driver_sdk_checksum_func_current_mac_os_permission_status() !== 22890) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_cua_driver_sdk_checksum_func_current_mac_os_permission_status");
     }
+    if (nativeModule().uniffi_cua_driver_sdk_checksum_func_native_ui_needs_pump() !== 51465) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_cua_driver_sdk_checksum_func_native_ui_needs_pump");
+    }
     if (nativeModule().uniffi_cua_driver_sdk_checksum_func_open_mac_os_screen_recording_settings() !== 6663) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_cua_driver_sdk_checksum_func_open_mac_os_screen_recording_settings");
     }
     if (nativeModule().uniffi_cua_driver_sdk_checksum_func_request_mac_os_permissions() !== 61823) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_cua_driver_sdk_checksum_func_request_mac_os_permissions");
+    }
+    if (nativeModule().uniffi_cua_driver_sdk_checksum_func_set_native_ui_host_available() !== 22416) {
+        throw new UniffiInternalError.ApiChecksumMismatch("uniffi_cua_driver_sdk_checksum_func_set_native_ui_host_available");
     }
     if (nativeModule().uniffi_cua_driver_sdk_checksum_constructor_cuadriver_connect() !== 60859) {
         throw new UniffiInternalError.ApiChecksumMismatch("uniffi_cua_driver_sdk_checksum_constructor_cuadriver_connect");

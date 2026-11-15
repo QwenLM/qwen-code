@@ -359,12 +359,37 @@ export function registerWorkspaceAuthRoutes(
         });
         return;
       }
+      // `validateApiKey` is a function on ProviderConfig, so it never reaches
+      // the wire — a client of this route cannot apply it and the daemon must.
+      // Without this check a key the provider's own entry rejects gets
+      // persisted silently, and the user only finds out at the first call.
+      // Not identical to the CLI/ACP/VS Code copies: those resolve the
+      // endpoint first and validate the resolved URL, while this route
+      // validates the client-supplied `baseUrl` (`''` when omitted). Every
+      // shipped validator keys on the prefix alone, so the two agree today.
+      // Validate the same string the route forwards: the parser returns
+      // `apiKey` raw, so the trim has to happen here rather than downstream.
+      const apiKey = installRequest.apiKey.trim();
+      if (knownProvider.validateApiKey) {
+        const apiKeyError = knownProvider.validateApiKey(
+          apiKey,
+          installRequest.baseUrl ?? '',
+        );
+        if (apiKeyError) {
+          res.status(400).json({
+            error: apiKeyError,
+            code: 'invalid_api_key',
+          });
+          return;
+        }
+      }
       try {
         const assertGenerationOpen = captureGenerationAssertion?.();
         assertGenerationOpen?.();
+        const request = { ...installRequest, apiKey };
         const result = assertGenerationOpen
-          ? await installAuthProvider(installRequest, assertGenerationOpen)
-          : await installAuthProvider(installRequest);
+          ? await installAuthProvider(request, assertGenerationOpen)
+          : await installAuthProvider(request);
         assertGenerationOpen?.();
         let runtimeSync: ServeModelProviderRuntimeSyncResult | undefined;
         if (syncModelProvidersRuntime) {

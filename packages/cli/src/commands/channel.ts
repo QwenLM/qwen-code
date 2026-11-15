@@ -1,3 +1,4 @@
+import { commandMetadata } from './command-metadata.js';
 import type { CommandModule, Argv } from 'yargs';
 import { startCommand } from './channel/start.js';
 import { stopCommand } from './channel/stop.js';
@@ -5,6 +6,7 @@ import { statusCommand } from './channel/status.js';
 import { reloadCommand } from './channel/reload.js';
 import { setCommand } from './channel/set.js';
 import { daemonWorkerCommand } from './channel/daemon-worker.js';
+import { managedEmailCommand } from './channel/managed-email.js';
 import {
   pairingListCommand,
   pairingApproveCommand,
@@ -24,12 +26,12 @@ const pairingCommand: CommandModule = {
 };
 
 export const channelCommand: CommandModule = {
-  command: 'channel',
-  describe: 'Manage messaging channels (Telegram, Discord, etc.)',
+  ...commandMetadata.channel,
   builder: (yargs: Argv) =>
     yargs
       .command(startCommand)
       .command(daemonWorkerCommand)
+      .command(managedEmailCommand)
       .command(stopCommand)
       .command(statusCommand)
       .command(reloadCommand)

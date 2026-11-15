@@ -11,6 +11,7 @@ import type {
   GenerateContentResponse,
   FunctionCall,
   FunctionDeclaration,
+  GenerateContentConfig,
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { FinishReason } from './genai-compat.js';
@@ -24,25 +25,42 @@ import type {
 import { ToolErrorType } from '../tools/tool-error.js';
 import { getResponseText } from '../utils/partUtils.js';
 import { reportError } from '../utils/errorReporting.js';
+import { resolveApiErrorRequestId } from '../utils/errorParsing.js';
+import {
+  subscriptionQuotaFromError,
+  type SubscriptionQuotaDisplay,
+} from '../utils/subscription-quota.js';
 import {
   getErrorMessage,
   getErrorStatus,
   UnauthorizedError,
   toFriendlyError,
 } from '../utils/errors.js';
-import type { LlmChat } from './llm-chat.js';
+import {
+  LlmRequestPreparationError,
+  type LlmChat,
+  type LlmPreparedRequest,
+  type LlmPreparedRequestCallback,
+} from './llm-chat.js';
 import type { RetryInfo } from '../utils/rateLimit.js';
+import type { RetryDiagnostics } from '../utils/retryErrorClassification.js';
 import {
   getThoughtSummary,
+  getThoughtText,
   type ThoughtSummary,
 } from '../utils/thoughtUtils.js';
-import type { LoopType } from '../telemetry/types.js';
+import type { LoopStopDetail, LoopType } from '../telemetry/types.js';
 import type {
   GoalSnapshotV2,
   GoalStateCause,
   GoalTurnPermit,
 } from '../goals/goal-protocol.js';
 import { getProviderToolCallId } from './toolCallIdUtils.js';
+import { toolCallArgumentsWereIncomplete } from './incomplete-tool-call-args.js';
+import {
+  getToolCallPreparations,
+  type ToolCallPreparation,
+} from './tool-call-preparation.js';
 
 const ERROR_REPORT_HISTORY_TAIL_COUNT = 8;
 const ERROR_REPORT_TEXT_PREVIEW_CHARS = 200;
@@ -61,6 +79,7 @@ export interface ServerTool {
 export enum LlmEventType {
   Content = 'content',
   ToolCallRequest = 'tool_call_request',
+  ToolCallPreparation = 'tool_call_preparation',
   ToolCallResponse = 'tool_call_response',
   ToolCallConfirmation = 'tool_call_confirmation',
   UserCancelled = 'user_cancelled',
@@ -89,9 +108,14 @@ export { LlmEventType as GeminiEventType };
 export type ServerLlmRetryEvent = {
   type: LlmEventType.Retry;
   retryInfo?: RetryInfo;
+  /** Allowlisted scalar classification for headless/operator diagnostics.
+   * Present only on retry decisions that otherwise surface no reason. */
+  retryDiagnostics?: RetryDiagnostics;
   /** When true, the retry is a continuation (recovery) rather than a fresh
    *  restart. The UI should keep accumulated text so the continuation appends. */
   isContinuation?: boolean;
+  /** The output-token limit the retry raised to after a truncated attempt. */
+  maxOutputTokensEscalated?: number;
 };
 
 export type ServerLlmModelFallbackEvent = {
@@ -108,11 +132,29 @@ export type ServerLlmModelFallbackEvent = {
 
 export interface StructuredError {
   message: string;
+  subscriptionQuota?: SubscriptionQuotaDisplay;
   status?: number;
+  /**
+   * Provider request id (e.g. the `x-request-id` response header openai-node
+   * stamps onto every APIError), resolved here while the original Error is
+   * still whole. Downstream formatters only ever receive this structured
+   * value, so an id not captured at this point is unrecoverable.
+   */
+  requestId?: string;
 }
 
 export interface LlmErrorEventValue {
   error: StructuredError;
+}
+
+const structuredErrorCauses = new WeakMap<StructuredError, unknown>();
+
+/**
+ * The error a `Turn`'s `Error` event was built from, as the provider threw
+ * it, for a host that reports it the way a direct `LlmChat` send does.
+ */
+export function getStructuredErrorCause(error: StructuredError): unknown {
+  return structuredErrorCauses.get(error);
 }
 
 export interface SessionTokenLimitExceededValue {
@@ -124,6 +166,7 @@ export interface SessionTokenLimitExceededValue {
 export interface LlmFinishedEventValue {
   reason: FinishReason | undefined;
   usageMetadata: GenerateContentResponseUsageMetadata | undefined;
+  finishMessage?: string;
 }
 
 /**
@@ -188,6 +231,13 @@ export interface ToolCallRequestInfo {
   response_id?: string;
   /** Set to true when the LLM response was truncated due to max_tokens. */
   wasOutputTruncated?: boolean;
+  /**
+   * Set to true when this call's arguments arrived unterminated and were
+   * repaired into shape, but the output token limit was *not* what cut them.
+   * The data-loss guard needs this fact; the user-visible wording needs the
+   * distinction. See `incomplete-tool-call-args.ts`.
+   */
+  hadIncompleteArguments?: boolean;
   goalContext?: GoalTurnPermit;
   /**
    * Provenance of this request. Only set by in-process callers; absent on
@@ -223,7 +273,8 @@ export interface ToolCallResponseInfo {
    * Set only when the call was denied because it needed user approval and the
    * session had no way to ask for it (non-interactive mode). Headless front
    * ends use it to suggest an approval mode; every other denial, such as a
-   * hook block or a deny rule, reports its own reason instead.
+   * hook block, a deny rule, or a hook or Mod ask that only a person can
+   * answer, reports its own reason instead.
    */
   approvalRequired?: true;
   visionBridgeNotice?: string;
@@ -310,6 +361,10 @@ export function createDuplicateProviderToolCallResponse(
   const message = duplicateProviderToolCallMessage(providerCallId);
   return createNotStartedToolErrorResponse(request, message);
 }
+
+export const TOOL_LOOP_SKIPPED_METADATA = 'toolLoopSkipped';
+export const TOOL_LOOP_SKIPPED_MESSAGE =
+  'Tool skipped because the model repeated a tool-call id.';
 
 export function createNotStartedToolErrorResponse(
   request: ToolCallRequestInfo,
@@ -404,11 +459,21 @@ export type ServerLlmContentEvent = {
 export type ServerLlmThoughtEvent = {
   type: LlmEventType.Thought;
   value: ThoughtSummary;
+  /** The chunk's thought text as the model sent it. */
+  text?: string;
 };
 
 export type ServerLlmToolCallRequestEvent = {
   type: LlmEventType.ToolCallRequest;
   value: ToolCallRequestInfo;
+  /** The function call the request was built from, as the stream sent it. */
+  functionCall?: FunctionCall;
+};
+
+/** A tool call the model started streaming, before its arguments arrive. */
+export type ServerLlmToolCallPreparationEvent = {
+  type: LlmEventType.ToolCallPreparation;
+  value: ToolCallPreparation;
 };
 
 export type ServerLlmToolCallResponseEvent = {
@@ -540,7 +605,7 @@ export type ServerLlmLoopDetectedEvent = {
   // it so downstream consumers can surface a concrete reason to the user.
   value?: {
     loopType: LoopType;
-  };
+  } & LoopStopDetail;
 };
 
 export type ServerLlmCitationEvent = {
@@ -598,6 +663,7 @@ export type ServerLlmStreamEvent =
   | ServerLlmModelFallbackEvent
   | ServerLlmThoughtEvent
   | ServerLlmToolCallConfirmationEvent
+  | ServerLlmToolCallPreparationEvent
   | ServerLlmToolCallRequestEvent
   | ServerLlmToolCallResponseEvent
   | ServerLlmUserCancelledEvent
@@ -686,6 +752,27 @@ function getDisplayContentParts(
 }
 
 // A turn manages the agentic loop turn within the server context.
+/** Options for one {@link Turn.run} a surface sends on its own `LlmChat`. */
+export interface TurnRunOptions {
+  /** Request fields the round sends, such as its tools. */
+  requestConfig?: Pick<GenerateContentConfig, 'tools' | 'maxOutputTokens'>;
+  /**
+   * Propagate request and stream errors unchanged, including rejections
+   * caused by cancellation. If a stream event arrives with an aborted signal,
+   * the turn yields `UserCancelled`.
+   */
+  throwErrors?: boolean;
+  /** The stream is ready to iterate after send-time preparation. */
+  onStreamReady?: () => void;
+  /** Each chunk's parsed text and metadata, before yielding its events. */
+  onChunk?: (chunk: {
+    text: string;
+    thoughtText: string;
+    responseId?: string;
+    usageMetadata?: GenerateContentResponseUsageMetadata;
+  }) => void;
+}
+
 export class Turn {
   readonly pendingToolCalls: ToolCallRequestInfo[] = [];
   private pendingCitations = new Set<string>();
@@ -697,6 +784,12 @@ export class Turn {
     private readonly chat: LlmChat,
     private readonly prompt_id: string,
     goalContext?: GoalTurnPermit,
+    private readonly promptIdentity?: string,
+    private readonly retractDeliveredOutputOnRetry?: boolean,
+    private readonly onPreparedRequest?: LlmPreparedRequestCallback,
+    private readonly yieldsToolCallPreparations?: boolean,
+    private readonly suppressedHookContext?: string,
+    private readonly onModelRequestDispatched?: () => void,
   ) {
     this.goalContext = goalContext ? { ...goalContext } : undefined;
   }
@@ -705,22 +798,58 @@ export class Turn {
     model: string,
     req: PartListUnion,
     signal: AbortSignal,
+    prepared?: LlmPreparedRequest,
+    runOptions?: TurnRunOptions,
   ): AsyncGenerator<ServerLlmStreamEvent> {
     try {
       // Note: This assumes `sendMessageStream` yields events like
       // { type: StreamEventType.RETRY } or { type: StreamEventType.CHUNK, value: GenerateContentResponse }
-      const responseStream = await this.chat.sendMessageStream(
-        model,
-        {
-          message: req,
-          config: {
-            abortSignal: signal,
-          },
-        },
-        this.prompt_id,
-        this.goalContext,
-      );
+      // Keep the no-options call shape: callers without either flag pass
+      // `undefined`, as before either option existed.
+      const sendOptions =
+        this.promptIdentity !== undefined ||
+        this.retractDeliveredOutputOnRetry === true ||
+        this.onPreparedRequest !== undefined ||
+        this.onModelRequestDispatched !== undefined ||
+        this.suppressedHookContext !== undefined
+          ? {
+              ...(this.onPreparedRequest
+                ? { onPreparedRequest: this.onPreparedRequest }
+                : {}),
+              ...(this.onModelRequestDispatched
+                ? { onModelRequestDispatched: this.onModelRequestDispatched }
+                : {}),
+              ...(this.suppressedHookContext
+                ? { suppressedHookContext: this.suppressedHookContext }
+                : {}),
+              ...(this.promptIdentity ? { promptId: this.promptIdentity } : {}),
+              ...(this.retractDeliveredOutputOnRetry
+                ? { retractDeliveredOutputOnRetry: true }
+                : {}),
+            }
+          : undefined;
+      const responseStream = prepared
+        ? await this.chat.sendPreparedMessageStream(
+            prepared,
+            this.prompt_id,
+            signal,
+            this.onPreparedRequest,
+          )
+        : await this.chat.sendMessageStream(
+            model,
+            {
+              message: req,
+              config: {
+                abortSignal: signal,
+                ...runOptions?.requestConfig,
+              },
+            },
+            this.prompt_id,
+            this.goalContext,
+            sendOptions,
+          );
 
+      runOptions?.onStreamReady?.();
       for await (const streamEvent of responseStream) {
         if (signal?.aborted) {
           yield { type: LlmEventType.UserCancelled };
@@ -736,7 +865,14 @@ export class Turn {
           yield {
             type: LlmEventType.Retry,
             retryInfo: streamEvent.retryInfo,
+            retryDiagnostics: streamEvent.retryDiagnostics,
             isContinuation: streamEvent.isContinuation,
+            ...(streamEvent.maxOutputTokensEscalated !== undefined
+              ? {
+                  maxOutputTokensEscalated:
+                    streamEvent.maxOutputTokensEscalated,
+                }
+              : {}),
           };
           continue; // Skip to the next event in the stream
         }
@@ -781,16 +917,23 @@ export class Turn {
         if (resp.responseId) {
           this.currentResponseId = resp.responseId;
         }
-
-        const thoughtSummary = getThoughtSummary(resp);
+        const thoughtText = getThoughtText(resp);
+        const thoughtSummary = getThoughtSummary(resp, thoughtText);
+        const text = getResponseText(resp) ?? '';
+        runOptions?.onChunk?.({
+          text,
+          thoughtText,
+          responseId: resp.responseId,
+          usageMetadata: resp.usageMetadata,
+        });
         if (thoughtSummary) {
           yield {
             type: LlmEventType.Thought,
             value: thoughtSummary,
+            text: thoughtText,
           };
         }
 
-        const text = getResponseText(resp) ?? '';
         const displayParts = getDisplayContentParts(resp);
         const hasImage = displayParts.some((part) => 'inlineData' in part);
         if (text || hasImage) {
@@ -799,6 +942,15 @@ export class Turn {
             value: text,
             ...(hasImage ? { parts: displayParts } : {}),
           };
+        }
+
+        if (this.yieldsToolCallPreparations) {
+          for (const preparation of getToolCallPreparations(resp)) {
+            yield {
+              type: LlmEventType.ToolCallPreparation,
+              value: preparation,
+            };
+          }
         }
 
         // Handle function calls (requesting tool execution)
@@ -816,6 +968,7 @@ export class Turn {
 
         // Check if response was truncated or stopped for various reasons
         const finishReason = resp.candidates?.[0]?.finishReason;
+        const finishMessage = resp.candidates?.[0]?.finishMessage;
 
         // This is the key change: Only yield 'Finished' if there is a finishReason.
         if (finishReason) {
@@ -841,11 +994,14 @@ export class Turn {
             value: {
               reason: finishReason,
               usageMetadata: resp.usageMetadata,
+              ...(finishMessage ? { finishMessage } : {}),
             },
           };
         }
       }
     } catch (e) {
+      if (e instanceof LlmRequestPreparationError) throw e;
+      if (runOptions?.throwErrors) throw e;
       if (signal.aborted) {
         yield { type: LlmEventType.UserCancelled };
         // Regular cancellation error, fail gracefully.
@@ -853,6 +1009,10 @@ export class Turn {
       }
 
       const originalStatus = getErrorStatus(e);
+      // Resolve against the raw caught error: toFriendlyError() below can
+      // return a different Error that no longer carries the SDK's `.headers`,
+      // and this is the last point where the request id is still reachable.
+      const requestId = resolveApiErrorRequestId(e);
       const error = toFriendlyError(e);
       if (error instanceof UnauthorizedError) {
         throw error;
@@ -880,11 +1040,15 @@ export class Turn {
         'Turn.run-sendMessageStream',
         { contextAlreadySummarized: true },
       );
+      const subscriptionQuota = subscriptionQuotaFromError(e);
       const structuredError: StructuredError = {
         message: getErrorMessage(error),
+        ...(subscriptionQuota ? { subscriptionQuota } : {}),
         status: getErrorStatus(error) ?? originalStatus,
+        ...(requestId ? { requestId } : {}),
       };
       await this.chat.maybeIncludeSchemaDepthContext(structuredError);
+      structuredErrorCauses.set(structuredError, e);
       yield { type: LlmEventType.Error, value: { error: structuredError } };
       return;
     }
@@ -908,13 +1072,20 @@ export class Turn {
       isClientInitiated: false,
       prompt_id: this.prompt_id,
       response_id: this.currentResponseId,
+      ...(toolCallArgumentsWereIncomplete(fnCall)
+        ? { hadIncompleteArguments: true }
+        : {}),
       ...(this.goalContext ? { goalContext: { ...this.goalContext } } : {}),
     };
 
     this.pendingToolCalls.push(toolCallRequest);
 
     // Yield a request for the tool call, not the pending/confirming status
-    return { type: LlmEventType.ToolCallRequest, value: toolCallRequest };
+    return {
+      type: LlmEventType.ToolCallRequest,
+      value: toolCallRequest,
+      functionCall: fnCall,
+    };
   }
 }
 

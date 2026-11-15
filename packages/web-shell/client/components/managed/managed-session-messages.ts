@@ -1,15 +1,87 @@
+import { isTodoWriteToolName } from '../../utils/todos';
 import type { ACPToolCall, Message } from '../../adapters/types';
 import type { ManagedAgentSessionEvent } from './managed-agent-provider';
+import type { ManagedToolResult } from './managed-tool-result-types';
 
+type ManagedEventEpoch = object;
+
+// The token identifies an append chain without retaining any predecessor
+// array. WeakMap entries disappear with the arrays held by session state.
+const managedEventEpochs = new WeakMap<
+  readonly ManagedAgentSessionEvent[],
+  ManagedEventEpoch
+>();
+
+function newManagedEventEpoch(): ManagedEventEpoch {
+  return {};
+}
+
+function carryManagedEventEpoch(
+  current: readonly ManagedAgentSessionEvent[],
+): ManagedEventEpoch {
+  const epoch = managedEventEpochs.get(current);
+  if (epoch !== undefined) {
+    managedEventEpochs.delete(current);
+    return epoch;
+  }
+  return newManagedEventEpoch();
+}
+
+// `current` must already be ascending and deduplicated by id (stream state
+// and transcript pages are); the append path checks only that `incoming`
+// extends it, so a disordered first argument stays disordered.
 export function mergeManagedEvents(
   current: readonly ManagedAgentSessionEvent[],
   incoming: readonly ManagedAgentSessionEvent[],
+  itemPages = false,
 ): ManagedAgentSessionEvent[] {
-  return [
+  // An empty input cannot ride the ascending check: strictlyAscendingIds
+  // loops from index 1, and the fast path dereferences incoming[0].
+  if (incoming.length === 0) {
+    const merged = [...current];
+    managedEventEpochs.set(merged, carryManagedEventEpoch(current));
+    return merged;
+  }
+  if (
+    strictlyAscendingIds(incoming) &&
+    (current.length === 0 || current[current.length - 1]!.id < incoming[0]!.id)
+  ) {
+    const merged = [...current, ...incoming];
+    managedEventEpochs.set(merged, carryManagedEventEpoch(current));
+    return merged;
+  }
+  const encoder = itemPages ? new TextEncoder() : undefined;
+  const merged = [
     ...new Map(
-      [...current, ...incoming].map((event) => [event.id, event]),
+      [...current, ...incoming].map((event) => [
+        itemPages
+          ? `${event.id}:${String(record(event.data)['itemId'] ?? '')}`
+          : event.id,
+        event,
+      ]),
     ).values(),
-  ].sort((a, b) => a.id - b.id);
+  ].sort((a, b) => {
+    const sequence = a.id - b.id;
+    if (sequence || !encoder) return sequence;
+    // SQL orders opaque identities by UTF-8 bytes, rather than locale.
+    const left = encoder.encode(String(record(a.data)['itemId'] ?? ''));
+    const right = encoder.encode(String(record(b.data)['itemId'] ?? ''));
+    for (let index = 0; index < Math.min(left.length, right.length); index++) {
+      const difference = left[index]! - right[index]!;
+      if (difference) return difference;
+    }
+    return left.length - right.length;
+  });
+  managedEventEpochs.set(merged, newManagedEventEpoch());
+  return merged;
+}
+
+function strictlyAscendingIds(
+  events: readonly ManagedAgentSessionEvent[],
+): boolean {
+  for (let index = 1; index < events.length; index++)
+    if (events[index - 1]!.id >= events[index]!.id) return false;
+  return true;
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -18,26 +90,91 @@ function record(value: unknown): Record<string, unknown> {
     : {};
 }
 
-export function managedEventsToMessages(
+function structuredToolOutput(
+  data: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const snapshot = data['todoSnapshot'];
+  if (typeof snapshot !== 'string') return undefined;
+  try {
+    const todos: unknown = JSON.parse(snapshot);
+    return Array.isArray(todos) ? { todos } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function hasTodoSnapshot(value: unknown): boolean {
+  return Array.isArray(record(value)['todos']);
+}
+
+// Only these Turn-bearing types may settle a Turn boundary. Control-plane
+// re-broadcasts (runtime_*, stream_gap, cancelling) must never settle: a
+// stale-Turn runtime_failed landing mid-stream would otherwise split one
+// answer into two bubbles, the first frozen mid-stream.
+const BOUNDARY_SETTLE_TYPES = new Set([
+  'accepted',
+  'assistant_delta',
+  'assistant_thought',
+  'agent_started',
+  'tool_requested',
+  'tool_started',
+  'tool_completed',
+  'tool_result_updated',
+  'completed',
+  'failed',
+  'cancelled',
+]);
+
+interface ManagedMessageProjectionState {
+  messages: Message[];
+  tools: Map<string, ACPToolCall>;
+  // Tools the non-fatal runtime_failed diagnostic failed, keyed to their
+  // Turn, so a later same-Turn cancellation can re-mark them: their status
+  // has already flipped to failed by then, which the terminal-event loop
+  // alone skips. An authoritative result or completion retires the booking.
+  runtimeFailed: Map<ACPToolCall, string>;
+  textMessage: Extract<Message, { role: 'assistant' | 'thinking' }> | undefined;
+  currentTurnId?: string;
+}
+
+function createManagedMessageProjectionState(): ManagedMessageProjectionState {
+  return {
+    messages: [],
+    tools: new Map(),
+    runtimeFailed: new Map(),
+    textMessage: undefined,
+    currentTurnId: undefined,
+  };
+}
+
+function appendManagedEvents(
+  state: ManagedMessageProjectionState,
   events: readonly ManagedAgentSessionEvent[],
   truncatedLabel: string,
-): Message[] {
-  const messages: Message[] = [];
-  const tools = new Map<string, ACPToolCall>();
-  let textMessage:
-    | Extract<Message, { role: 'assistant' | 'thinking' }>
-    | undefined;
-  let currentTurnId: string | undefined;
-  const settle = () => {
+): void {
+  const { messages, tools, runtimeFailed } = state;
+  let { textMessage, currentTurnId } = state;
+  const stopStreaming = () => {
     for (const message of messages) {
       if (message.role === 'assistant' || message.role === 'thinking') {
         message.isStreaming = false;
       }
     }
+  };
+  const settle = () => {
+    stopStreaming();
     textMessage = undefined;
   };
   for (const event of events) {
-    if (event.turnId !== currentTurnId) {
+    // Approval updates carry no Turn and render outside the transcript, so
+    // they must not settle or split the Turn being streamed.
+    if (event.type === 'action_updated' || event.type === 'context_changed')
+      continue;
+    if (
+      BOUNDARY_SETTLE_TYPES.has(event.type) &&
+      event.type !== 'tool_result_updated' &&
+      event.turnId !== currentTurnId
+    ) {
       settle();
       currentTurnId = event.turnId;
     }
@@ -53,6 +190,31 @@ export function managedEventsToMessages(
           ? [{ data: block['data'], mimeType: block['mimeType'] }]
           : [];
       });
+      const files = prompt.flatMap((value: unknown) => {
+        const block = record(value);
+        const resource = record(block['resource']);
+        if (
+          block['type'] !== 'resource' ||
+          typeof resource['uri'] !== 'string' ||
+          !resource['uri'].startsWith('managed-input:///') ||
+          typeof resource['text'] !== 'string' ||
+          typeof resource['mimeType'] !== 'string'
+        )
+          return [];
+        try {
+          return [
+            {
+              name: decodeURIComponent(
+                resource['uri'].slice('managed-input:///'.length),
+              ),
+              text: resource['text'],
+              mimeType: resource['mimeType'],
+            },
+          ];
+        } catch {
+          return [];
+        }
+      });
       messages.push({
         id,
         role: 'user',
@@ -62,6 +224,7 @@ export function managedEventsToMessages(
           .join('\n'),
         timestamp: event.at,
         ...(images.length ? { images } : {}),
+        ...(files.length ? { files } : {}),
       });
       settle();
     } else if (
@@ -82,34 +245,78 @@ export function managedEventsToMessages(
         messages.push(message);
         textMessage = message;
       }
-      if (textMessage) textMessage.content += text;
+      if (textMessage) {
+        textMessage.content += text;
+        // A runtime_failed only stopped the spinner: a Turn that keeps
+        // streaming after it must show as live again.
+        textMessage.isStreaming = true;
+      }
     } else if (event.type === 'agent_started') {
       settle();
     } else if (
       event.type === 'tool_requested' ||
       event.type === 'tool_started' ||
-      event.type === 'tool_completed'
+      event.type === 'tool_completed' ||
+      event.type === 'tool_result_updated'
     ) {
-      settle();
+      if (event.type !== 'tool_result_updated') settle();
       const callId = data['toolCallId'];
-      if (typeof callId !== 'string') continue;
-      const key = `${event.turnId}:${callId}`;
+      const itemId = data['itemId'];
+      if (typeof itemId !== 'string' || !itemId) continue;
+      const key = `${event.turnId}:${itemId}`;
       let tool = tools.get(key);
+      const result = readResult(data['result'], event);
       if (!tool) {
+        if (event.turnId === currentTurnId) settle();
         tool = {
           callId: key,
           toolName:
-            typeof data['toolName'] === 'string' ? data['toolName'] : callId,
+            typeof data['toolName'] === 'string'
+              ? data['toolName']
+              : result
+                ? 'run_shell_command'
+                : itemId,
           status: 'pending',
         };
-        tools.set(key, tool);
-        messages.push({
+        const message: Message = {
           id,
           role: 'tool_group',
           tools: [tool],
           timestamp: event.at,
-        });
+        };
+        let previous = -1;
+        if (event.type === 'tool_result_updated') {
+          for (let index = messages.length - 1; index >= 0; index--) {
+            if (
+              messages[index].id.startsWith(
+                `managed:${event.sessionId}:${event.turnId}:`,
+              )
+            ) {
+              previous = index;
+              break;
+            }
+          }
+        }
+        if (previous >= 0) messages.splice(previous + 1, 0, message);
+        else messages.push(message);
       }
+      tools.set(key, tool);
+      if (typeof callId === 'string') tool.toolCallId = callId;
+      if (Number.isSafeInteger(data['sourceSequence'])) {
+        const revision = Number(data['sourceSequence']);
+        if (
+          isTodoWriteToolName(tool.toolName) &&
+          tool.toolDetailsRevision !== undefined &&
+          revision <= tool.toolDetailsRevision
+        )
+          continue;
+        tool.toolDetailsRevision = revision;
+      }
+      if (typeof data['toolName'] === 'string')
+        tool.toolName = data['toolName'];
+      // The Harness titles each call itself; the approval card shows it as
+      // the description, so keep it instead of dropping it on the floor.
+      if (typeof data['title'] === 'string') tool.title = data['title'];
       if (data['input'] !== undefined) {
         const input =
           typeof data['input'] === 'string' && data['truncated'] === true
@@ -118,29 +325,121 @@ export function managedEventsToMessages(
         tool.args = record(input);
         if (Object.keys(tool.args).length === 0) tool.args = { input };
       }
+      const structuredOutput = isTodoWriteToolName(tool.toolName)
+        ? structuredToolOutput(data)
+        : undefined;
+      if (result) {
+        if (
+          tool.toolResult &&
+          result.projection_revision <= tool.toolResult.projection_revision
+        )
+          continue;
+        tool.toolResult = result;
+        tool.status =
+          result.execution_status === 'success' ? 'completed' : 'failed';
+        tool.wasCancelled = result.execution_status === 'cancelled';
+        if (
+          typeof result.preview?.text === 'string' &&
+          tool.rawOutput === undefined
+        ) {
+          tool.rawOutput =
+            result.preview.text +
+            (result.preview.truncated === true ? `\n${truncatedLabel}` : '');
+        }
+        // An authoritative result stays authoritative: it supersedes the
+        // diagnostic floor, and the booking retires so a later terminal
+        // event can neither move the end nor re-mark the tool.
+        if (runtimeFailed.has(tool)) tool.endTime = event.at;
+        else tool.endTime ??= event.at;
+        runtimeFailed.delete(tool);
+      }
+      if (tool.toolResult) {
+        if (
+          event.type === 'tool_completed' &&
+          typeof data['output'] === 'string'
+        ) {
+          const output =
+            data['output'] +
+            (data['truncated'] === true ? `\n${truncatedLabel}` : '');
+          if (
+            !hasTodoSnapshot(tool.rawOutput) &&
+            (data['truncated'] !== true ||
+              typeof tool.rawOutput !== 'string' ||
+              output.length > tool.rawOutput.length)
+          ) {
+            tool.rawOutput = output;
+          }
+        }
+        if (structuredOutput !== undefined) tool.rawOutput = structuredOutput;
+        continue;
+      }
       if (event.type === 'tool_started') {
         tool.status = 'in_progress';
-        tool.startTime = event.at;
+        tool.startTime ??= event.at;
+        // A resumed tool outgrows the diagnostic's floor: the end is open
+        // again, while the booking survives so the Turn's terminal event
+        // can still re-stamp it.
+        if (runtimeFailed.has(tool)) tool.endTime = undefined;
       }
       if (event.type === 'tool_completed') {
         tool.status = data['failed'] === true ? 'failed' : 'completed';
+        tool.wasCancelled = data['cancelled'] === true;
         tool.endTime = event.at;
-        if (typeof data['output'] === 'string') {
+        runtimeFailed.delete(tool);
+        if (
+          typeof data['output'] === 'string' &&
+          !hasTodoSnapshot(tool.rawOutput)
+        ) {
           tool.rawOutput =
             data['output'] +
             (data['truncated'] === true ? `\n${truncatedLabel}` : '');
         }
+        if (structuredOutput !== undefined) tool.rawOutput = structuredOutput;
       }
     } else if (
       event.type === 'completed' ||
       event.type === 'failed' ||
-      event.type === 'cancelled'
+      event.type === 'cancelled' ||
+      // A runtime failure belongs to exactly one Turn: only for the Turn
+      // being streamed does it settle — otherwise the tail and pending
+      // tools render forever, while a stale-Turn failure must not disturb
+      // the live one.
+      (event.type === 'runtime_failed' && event.turnId === currentTurnId)
     ) {
-      settle();
+      if (event.type === 'completed' && textMessage?.role === 'assistant') {
+        // Snapshot text parts share the Item's creation time; the shared
+        // transcript measures a settled Turn through its final assistant.
+        textMessage.timestamp = event.at;
+      }
+      // environment.failed is a non-fatal diagnostic and the Turn keeps
+      // streaming: dropping the continuation handle would split one answer
+      // into two bubbles, so only stop the spinner (and fail pending tools).
+      if (event.type === 'runtime_failed') stopStreaming();
+      else settle();
       for (const tool of tools.values()) {
+        if (
+          event.type !== 'runtime_failed' &&
+          runtimeFailed.get(tool) === event.turnId
+        ) {
+          if (event.type === 'cancelled' && tool.status === 'failed')
+            tool.wasCancelled = true;
+          // The Turn's terminal event ends a diagnostic-failed tool; a
+          // result-supplied end cannot occur here because the result and
+          // completion paths retire the booking when they land.
+          tool.endTime = event.at;
+        }
         if (tool.status === 'pending' || tool.status === 'in_progress') {
           tool.status = 'failed';
-          tool.endTime = event.at;
+          // The diagnostic's Turn may still run the tool to completion:
+          // the diagnostic only floors the end, which a result, a
+          // completion or the Turn's terminal event otherwise moves.
+          if (event.type === 'runtime_failed') {
+            runtimeFailed.set(tool, event.turnId);
+            tool.endTime = event.at;
+          } else {
+            tool.wasCancelled = event.type === 'cancelled';
+            tool.endTime = event.at;
+          }
         }
       }
       if (event.type === 'failed' && typeof data['message'] === 'string') {
@@ -154,5 +453,88 @@ export function managedEventsToMessages(
       }
     }
   }
-  return messages;
+  state.textMessage = textMessage;
+  state.currentTurnId = currentTurnId;
+}
+
+function snapshotManagedMessages(messages: readonly Message[]): Message[] {
+  return messages.map((message) =>
+    message.role === 'tool_group'
+      ? { ...message, tools: message.tools.map((tool) => ({ ...tool })) }
+      : { ...message },
+  );
+}
+
+export function managedEventsToMessages(
+  events: readonly ManagedAgentSessionEvent[],
+  truncatedLabel: string,
+): Message[] {
+  const state = createManagedMessageProjectionState();
+  appendManagedEvents(state, events, truncatedLabel);
+  return snapshotManagedMessages(state.messages);
+}
+
+export function createManagedMessageProjector(): (
+  events: readonly ManagedAgentSessionEvent[],
+  truncatedLabel: string,
+) => Message[] {
+  let epoch: ManagedEventEpoch | undefined;
+  let processedLength = 0;
+  let label: string | undefined;
+  let state: ManagedMessageProjectionState | undefined;
+  let snapshot: Message[] = [];
+
+  return (events, truncatedLabel) => {
+    const nextEpoch = managedEventEpochs.get(events);
+    const canAppend =
+      state !== undefined &&
+      nextEpoch !== undefined &&
+      nextEpoch === epoch &&
+      events.length >= processedLength &&
+      truncatedLabel === label;
+    if (!canAppend) {
+      state = createManagedMessageProjectionState();
+      appendManagedEvents(state, events, truncatedLabel);
+      epoch = nextEpoch;
+      processedLength = events.length;
+      label = truncatedLabel;
+      snapshot = snapshotManagedMessages(state.messages);
+    } else if (events.length > processedLength) {
+      appendManagedEvents(
+        state!,
+        events.slice(processedLength),
+        truncatedLabel,
+      );
+      processedLength = events.length;
+      snapshot = snapshotManagedMessages(state!.messages);
+    }
+    return snapshot;
+  };
+}
+
+function readResult(
+  value: unknown,
+  event: ManagedAgentSessionEvent,
+): ManagedToolResult | undefined {
+  const result = record(value);
+  if (
+    typeof result['id'] !== 'string' ||
+    result['id'].length === 0 ||
+    result['session_id'] !== event.sessionId ||
+    result['turn_id'] !== event.turnId ||
+    typeof result['item_id'] !== 'string' ||
+    result['item_id'].length === 0 ||
+    result['item_id'] !== record(event.data)['itemId'] ||
+    !Number.isSafeInteger(result['projection_revision']) ||
+    Number(result['projection_revision']) < 1 ||
+    typeof result['execution_status'] !== 'string' ||
+    !['success', 'error', 'cancelled', 'not_started'].includes(
+      result['execution_status'],
+    ) ||
+    typeof result['delivery_status'] !== 'string' ||
+    !['pending', 'committed', 'blocked'].includes(result['delivery_status']) ||
+    !Array.isArray(result['artifacts'])
+  )
+    return undefined;
+  return value as ManagedToolResult;
 }

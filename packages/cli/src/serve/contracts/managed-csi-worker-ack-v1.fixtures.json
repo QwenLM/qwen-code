@@ -1,0 +1,188 @@
+{
+  "contractVersion": 1,
+  "ackPath": "/internal/managed-runtime/csi/v1/acknowledge",
+  "workerAck": "managed-csi-original-worker-ack/1",
+  "boot": {
+    "type": "boot",
+    "version": 3,
+    "managedCsi": "managed-csi/1",
+    "context": {
+      "capabilityDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "epoch": 4,
+      "isolationClass": "workspace",
+      "leaseId": "lease-01",
+      "managedContext": "managed-context/1",
+      "mountRoot": "/runtime/workspaces/workspace-a",
+      "provisionRequestId": "provision-01",
+      "runtimeIncarnation": "boot-01",
+      "runtimeInstanceId": "runtime-01",
+      "storageId": "storage://pvc/workspace-a",
+      "tenantId": "tenant-a",
+      "token": "fixture-token",
+      "type": "boot",
+      "version": 2,
+      "workspaceGeneration": "7",
+      "workspaceId": "workspace-a"
+    },
+    "storage": {
+      "clusterDomain": "cluster-a",
+      "namespace": "runtimes",
+      "pvcUid": "pvc-01",
+      "pvUid": "pv-01",
+      "driver": "diskplugin.csi.alibabacloud.com",
+      "volumeHandle": "opaque-handle",
+      "backendDomain": "ack:account-a:cn-beijing",
+      "diskSerial": "2zehn959sand8iuw2gyd",
+      "physicalKey": "fd253342f447e25d365b3ba1d37f108c06b25cfba254de78c7d830c36029c5cb",
+      "registrationRevision": "1",
+      "reservationId": "12345678-1234-5678-9abc-123456789abc",
+      "reservationRevision": "1"
+    }
+  },
+  "expectedPod": {
+    "uid": "11111111-2222-3333-4444-555555555555",
+    "namespace": "runtimes",
+    "nodeName": "cn-beijing.10.135.59.43"
+  },
+  "input": {
+    "command": "fixture"
+  },
+  "capture": {
+    "tenantId": "tenant-a",
+    "sessionId": "session-a",
+    "turnId": "turn-a",
+    "executionCallId": "execution-a",
+    "bindingGeneration": "9",
+    "capturePolicy": "complete_required"
+  },
+  "request": {
+    "protocolVersion": 1,
+    "managedCsi": "managed-csi/1",
+    "workerAck": "managed-csi-original-worker-ack/1",
+    "retirementId": "550e8400-e29b-41d4-a716-446655440000",
+    "context": {
+      "protocolVersion": 3,
+      "capabilityDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "epoch": 4,
+      "isolationClass": "workspace",
+      "leaseId": "lease-01",
+      "managedContext": "managed-context/1",
+      "mountRoot": "/runtime/workspaces/workspace-a",
+      "provisionRequestId": "provision-01",
+      "runtimeIncarnation": "boot-01",
+      "runtimeInstanceId": "runtime-01",
+      "storageId": "storage://pvc/workspace-a",
+      "tenantId": "tenant-a",
+      "workspaceGeneration": "7",
+      "workspaceId": "workspace-a"
+    },
+    "storage": {
+      "clusterDomain": "cluster-a",
+      "namespace": "runtimes",
+      "pvcUid": "pvc-01",
+      "pvUid": "pv-01",
+      "driver": "diskplugin.csi.alibabacloud.com",
+      "volumeHandle": "opaque-handle",
+      "backendDomain": "ack:account-a:cn-beijing",
+      "diskSerial": "2zehn959sand8iuw2gyd",
+      "physicalKey": "fd253342f447e25d365b3ba1d37f108c06b25cfba254de78c7d830c36029c5cb",
+      "registrationRevision": "1",
+      "reservationId": "12345678-1234-5678-9abc-123456789abc",
+      "reservationRevision": "1"
+    },
+    "pod": {
+      "uid": "11111111-2222-3333-4444-555555555555",
+      "namespace": "runtimes",
+      "nodeName": "cn-beijing.10.135.59.43"
+    },
+    "reference": {
+      "sessionId": "runtime-session-a",
+      "promptId": "runtime-prompt-a",
+      "callId": "call-a",
+      "argsDigest": "e9fcf46c6dfd9a381c25a0da50d7cee27e28e7377abb37322157c9fb98442308"
+    },
+    "acknowledgement": {
+      "executionCallId": "execution-a",
+      "manifest": {
+        "resourceId": "manifest-a",
+        "kind": "managed-tool-result-manifest",
+        "schemaVersion": 1,
+        "byteLength": 1024,
+        "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "deliveryStatus": "committed",
+      "historyRevision": 7
+    }
+  },
+  "response": {
+    "protocolVersion": 1,
+    "managedCsi": "managed-csi/1",
+    "workerAck": "managed-csi-original-worker-ack/1",
+    "retirementId": "550e8400-e29b-41d4-a716-446655440000",
+    "context": {
+      "protocolVersion": 3,
+      "capabilityDigest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "epoch": 4,
+      "isolationClass": "workspace",
+      "leaseId": "lease-01",
+      "managedContext": "managed-context/1",
+      "mountRoot": "/runtime/workspaces/workspace-a",
+      "provisionRequestId": "provision-01",
+      "runtimeIncarnation": "boot-01",
+      "runtimeInstanceId": "runtime-01",
+      "storageId": "storage://pvc/workspace-a",
+      "tenantId": "tenant-a",
+      "workspaceGeneration": "7",
+      "workspaceId": "workspace-a"
+    },
+    "storage": {
+      "clusterDomain": "cluster-a",
+      "namespace": "runtimes",
+      "pvcUid": "pvc-01",
+      "pvUid": "pv-01",
+      "driver": "diskplugin.csi.alibabacloud.com",
+      "volumeHandle": "opaque-handle",
+      "backendDomain": "ack:account-a:cn-beijing",
+      "diskSerial": "2zehn959sand8iuw2gyd",
+      "physicalKey": "fd253342f447e25d365b3ba1d37f108c06b25cfba254de78c7d830c36029c5cb",
+      "registrationRevision": "1",
+      "reservationId": "12345678-1234-5678-9abc-123456789abc",
+      "reservationRevision": "1"
+    },
+    "pod": {
+      "uid": "11111111-2222-3333-4444-555555555555",
+      "namespace": "runtimes",
+      "nodeName": "cn-beijing.10.135.59.43"
+    },
+    "reference": {
+      "sessionId": "runtime-session-a",
+      "promptId": "runtime-prompt-a",
+      "callId": "call-a",
+      "argsDigest": "e9fcf46c6dfd9a381c25a0da50d7cee27e28e7377abb37322157c9fb98442308"
+    },
+    "acknowledgement": {
+      "executionCallId": "execution-a",
+      "manifest": {
+        "resourceId": "manifest-a",
+        "kind": "managed-tool-result-manifest",
+        "schemaVersion": 1,
+        "byteLength": 1024,
+        "digest": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      },
+      "deliveryStatus": "committed",
+      "historyRevision": 7
+    },
+    "state": "ACKNOWLEDGED",
+    "captureIdentity": {
+      "tenantId": "tenant-a",
+      "sessionId": "session-a",
+      "turnId": "turn-a",
+      "executionCallId": "execution-a",
+      "callId": "call-a",
+      "invocationDigest": "e9fcf46c6dfd9a381c25a0da50d7cee27e28e7377abb37322157c9fb98442308",
+      "bindingGeneration": "9",
+      "captureId": "capture-a",
+      "revision": 1
+    }
+  }
+}

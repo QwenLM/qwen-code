@@ -214,6 +214,10 @@ export default defineConfig({
           __dirname,
           '../sdk-typescript/src/daemon/ui/transcript.ts',
         ),
+        '@qwen-code/sdk/daemon/ui': path.resolve(
+          __dirname,
+          '../sdk-typescript/src/daemon/ui/index.ts',
+        ),
         '@qwen-code/sdk/daemon/types': path.resolve(
           __dirname,
           '../sdk-typescript/src/daemon/types.ts',

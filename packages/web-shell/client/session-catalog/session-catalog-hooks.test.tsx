@@ -9,6 +9,7 @@ import type {
   DaemonSessionListPage,
 } from '@qwen-code/sdk/daemon';
 import type { SessionCatalogQuery } from './session-catalog-store';
+import { McpAppGeneratedUiOwnerContext } from '../mcpAppHostContext';
 import {
   SESSION_CATALOG_ERROR_RETRY_MS,
   SESSION_CATALOG_TRAILING_REFRESH_MS,
@@ -186,6 +187,8 @@ describe('session catalog hooks', () => {
     legacy.mockResolvedValue({ sessions: [{ sessionId: 'primary' }] });
     mocks.workspace.actions.deleteSession.mockResolvedValue(true);
     let facade: ReturnType<typeof useWebShellSessions> | undefined;
+    const invalidateDeleted = vi.fn();
+    const captureSessionDeletion = vi.fn(() => invalidateDeleted);
 
     function FacadeProbe() {
       facade = useWebShellSessions({ autoLoad: true });
@@ -193,11 +196,24 @@ describe('session catalog hooks', () => {
     }
 
     await act(async () => {
-      root.render(<FacadeProbe />);
+      root.render(
+        <McpAppGeneratedUiOwnerContext.Provider
+          value={{
+            scopeId: 'primary-scope',
+            workspaceCwd: '/another-workspace',
+            invalidate: vi.fn(),
+            captureSessionDeletion,
+            subscribeInvalidation: () => () => undefined,
+          }}
+        >
+          <FacadeProbe />
+        </McpAppGeneratedUiOwnerContext.Provider>,
+      );
       await Promise.resolve();
       await Promise.resolve();
     });
     expect(legacy).toHaveBeenCalledTimes(1);
+    expect(invalidateDeleted).not.toHaveBeenCalled();
 
     await act(async () => {
       await facade!.deleteSession('primary');
@@ -210,6 +226,68 @@ describe('session catalog hooks', () => {
       mocks.useSessions.mock.results.at(-1)?.value.deleteSession,
     ).not.toHaveBeenCalled();
     expect(legacy).toHaveBeenCalledTimes(2);
+    expect(captureSessionDeletion).toHaveBeenCalledWith('/primary');
+    expect(captureSessionDeletion.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.workspace.actions.deleteSession.mock.invocationCallOrder[0]!,
+    );
+    expect(invalidateDeleted).toHaveBeenCalledExactlyOnceWith(['primary']);
+
+    invalidateDeleted.mockClear();
+    mocks.workspace.actions.deleteSession.mockResolvedValue(false);
+    await act(async () => {
+      await facade!.deleteSession('failed');
+    });
+    expect(invalidateDeleted).not.toHaveBeenCalled();
+
+    mocks.workspace.actions.deleteSessions.mockResolvedValue({
+      removed: ['removed'],
+      notFound: ['missing'],
+      errors: [{ sessionId: 'failed', error: 'busy' }],
+    });
+    await act(async () => {
+      await facade!.deleteSessions(['removed', 'missing', 'failed']);
+    });
+    expect(invalidateDeleted).toHaveBeenCalledExactlyOnceWith([
+      'removed',
+      'missing',
+    ]);
+
+    invalidateDeleted.mockClear();
+    mocks.workspace.actions.deleteSessions.mockRejectedValue(
+      new Error('offline'),
+    );
+    await act(async () => {
+      await expect(facade!.deleteSessions(['failed'])).rejects.toThrow(
+        'offline',
+      );
+    });
+    expect(invalidateDeleted).not.toHaveBeenCalled();
+  });
+
+  it('forwards a page that is stale mid-refresh without an error', async () => {
+    legacy
+      .mockResolvedValueOnce({ sessions: [{ sessionId: 'primary' }] })
+      .mockReturnValueOnce(new Promise(() => {}));
+    let facade: ReturnType<typeof useWebShellSessions> | undefined;
+
+    function FacadeProbe() {
+      facade = useWebShellSessions({ autoLoad: true });
+      return null;
+    }
+
+    await act(async () => {
+      root.render(<FacadeProbe />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(facade!.stale).toBe(false);
+    act(() => {
+      void facade!.reload();
+    });
+    // Retained while the refresh is in flight: not a fresh answer, and not
+    // an error either.
+    expect(facade!.stale).toBe(true);
+    expect(facade!.error).toBeUndefined();
   });
 
   it('keeps the legacy reload contract when a list request fails', async () => {

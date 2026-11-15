@@ -19,6 +19,7 @@ import { EventEmitter } from 'node:events';
 import type { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { mockCompromisedLock } from '../test-utils/mock-compromised-lock.js';
+import * as npmRuntime from './npm-runtime.js';
 
 const temporaryDirectories: string[] = [];
 
@@ -126,6 +127,41 @@ afterEach(() => {
 });
 
 describe('managed npm update', () => {
+  it('installs with the original Node interpreter after a Bun handoff', async () => {
+    const root = makeTemporaryDirectory();
+    const bootstrap = writeBaseInstallation(root);
+    const originalNode = path.join(root, 'node', 'bin', 'node');
+    const nodePath = vi
+      .spyOn(npmRuntime, 'getNpmNodePath')
+      .mockReturnValue(originalNode);
+    const spawnFn = vi.fn(
+      (_command: string, args: readonly string[]): ReturnType<typeof spawn> => {
+        writeInstallation(args[args.indexOf('--prefix') + 1]!, '2.0.0');
+        const child = new EventEmitter();
+        queueMicrotask(() => child.emit('close', 0));
+        return child as ReturnType<typeof spawn>;
+      },
+    );
+    try {
+      await stageManagedNpmUpdate(
+        '2.0.0',
+        bootstrap,
+        path.join(root, 'updates'),
+        spawnFn as unknown as typeof spawn,
+      );
+      expect(spawnFn).toHaveBeenCalledWith(
+        originalNode,
+        expect.arrayContaining([
+          expect.stringMatching(/npm-cli\.js$/),
+          'install',
+        ]),
+        expect.objectContaining({ windowsHide: true }),
+      );
+    } finally {
+      nodePath.mockRestore();
+    }
+  });
+
   it('downloads and validates a staged payload without activating it', async () => {
     const root = makeTemporaryDirectory();
     const bootstrap = writeBaseInstallation(root);

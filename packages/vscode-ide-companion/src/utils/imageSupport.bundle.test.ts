@@ -46,7 +46,16 @@ describe('imageSupport browser bundling', () => {
 
     const output = result.outputFiles[0]?.text ?? '';
 
-    expect(output).not.toContain('@qwen-code/qwen-code-core');
-    expect(output).not.toContain('tokenLimits.js');
+    // A failing not.toContain diffs the ~32 MB bundle and dies with
+    // RangeError: Invalid array length before the assertion can render
+    // (#10695). A boolean presence check keeps the failure readable.
+    expect(
+      output.includes('@qwen-code/qwen-code-core'),
+      'embedded webview bundle embeds @qwen-code/qwen-code-core',
+    ).toBe(false);
+    expect(
+      output.includes('tokenLimits.js'),
+      'embedded webview bundle embeds tokenLimits.js',
+    ).toBe(false);
   });
 });

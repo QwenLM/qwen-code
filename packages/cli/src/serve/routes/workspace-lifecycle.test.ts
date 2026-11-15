@@ -10,6 +10,7 @@ import request from 'supertest';
 import { registerWorkspaceQualifiedLifecycleRoutes } from './workspace-lifecycle.js';
 import {
   createSingleWorkspaceRegistry,
+  createWorkspaceGenerationGuard,
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
 
@@ -70,6 +71,26 @@ describe('workspace-qualified lifecycle routes', () => {
       .send({});
     expect(reloadResponse.status).toBe(200);
     expect(requestTrustReconcile).toHaveBeenCalledOnce();
+  });
+
+  it('does not report successful model reload after its runtime generation closes', async () => {
+    const { runtime } = createTestRuntime();
+    const generationGuard = createWorkspaceGenerationGuard();
+    const reloadModelProviders = vi.fn(async () => {
+      generationGuard.close();
+      return { status: 'applied' as const };
+    });
+    const app = createTestApp({
+      ...runtime,
+      generationGuard,
+      workspaceService: { ...runtime.workspaceService, reloadModelProviders },
+    });
+    const result = await request(app)
+      .post('/workspaces/workspace-id/models/reload')
+      .send({});
+    expect(reloadModelProviders).toHaveBeenCalledOnce();
+    expect(result.status).toBe(500);
+    expect(result.body.error).toContain('generation is no longer active');
   });
 
   it('reload succeeds even when trust reconciliation rejects', async () => {

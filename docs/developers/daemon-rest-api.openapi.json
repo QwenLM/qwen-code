@@ -3390,6 +3390,18 @@
                   "$ref": "#/components/schemas/EventEnvelope"
                 }
               },
+              "lifecycleReplay": {
+                "type": "array",
+                "maxItems": 1024,
+                "description": "Optional bounded metadata-only lifecycle supplement from the live session's in-memory replay window. It may overlap the persisted replay page and does not establish complete history or currently running status.",
+                "items": {
+                  "$ref": "#/components/schemas/EventEnvelope"
+                }
+              },
+              "lifecycleReplayIncomplete": {
+                "type": "boolean",
+                "description": "True when the in-memory lifecycle supplement is unavailable, degraded, or truncated. False does not establish full persisted history coverage."
+              },
               "historyHasMore": {
                 "type": "boolean"
               },

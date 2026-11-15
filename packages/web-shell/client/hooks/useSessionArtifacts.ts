@@ -139,7 +139,7 @@ export function useSessionArtifacts(
   }, [artifactsVersion, refresh]);
 
   const visibleArtifacts =
-    sessionKey && isConnected && supportsArtifacts
+    sessionKey && supportsArtifacts
       ? (artifactsBySessionRef.current.get(sessionKey)?.artifacts ??
         EMPTY_ARTIFACTS)
       : EMPTY_ARTIFACTS;

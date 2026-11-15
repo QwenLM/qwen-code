@@ -34,6 +34,15 @@ const CONTEXT: FixedPolicyConditionContext = {
 const expr = (...parts: unknown[]): FixedPolicyCondition =>
   parts as unknown as FixedPolicyCondition;
 
+const evaluate = (condition: FixedPolicyCondition, context = CONTEXT) =>
+  evaluateFixedPolicyCondition(condition, context);
+const outcomeOf = (condition: FixedPolicyCondition, context = CONTEXT) =>
+  evaluate(condition, context).outcome;
+const unavailable = (...missingFields: string[]) => ({
+  outcome: 'unavailable',
+  missingFields,
+});
+
 describe('evaluateFixedPolicyCondition — comparisons', () => {
   it.each([
     // [operator, right literal, expected outcome] against width=4096
@@ -50,87 +59,62 @@ describe('evaluateFixedPolicyCondition — comparisons', () => {
     ['!=', 4095, 'match'],
     ['!=', 4096, 'no_match'],
   ] as const)('width %s %d → %s', (operator, right, outcome) => {
-    const result = evaluateFixedPolicyCondition(
-      expr(operator, ['field', 'resource.width'], right),
-      CONTEXT,
+    expect(outcomeOf(expr(operator, ['field', 'resource.width'], right))).toBe(
+      outcome,
     );
-    expect(result.outcome).toBe(outcome);
   });
 
   it('compares field to field (the §8.3 keyframe-extraction example)', () => {
-    const result = evaluateFixedPolicyCondition(
+    const result = evaluate(
       expr(
         '>',
         ['field', 'resource.estimatedTokenCount'],
         ['field', 'session.availableContextTokens'],
       ),
-      CONTEXT,
     );
     expect(result).toEqual({ outcome: 'match' });
   });
 
   it('compares literal to literal', () => {
-    expect(evaluateFixedPolicyCondition(expr('<', 2, 3), CONTEXT).outcome).toBe(
-      'match',
-    );
+    expect(outcomeOf(expr('<', 2, 3))).toBe('match');
   });
 
   it('== supports strict string/boolean equality; type mismatch is a determinate no_match', () => {
-    expect(
-      evaluateFixedPolicyCondition(expr('==', 'aac', 'aac'), CONTEXT).outcome,
-    ).toBe('match');
-    expect(
-      evaluateFixedPolicyCondition(expr('==', '3', 3), CONTEXT).outcome,
-    ).toBe('no_match');
+    expect(outcomeOf(expr('==', 'aac', 'aac'))).toBe('match');
+    expect(outcomeOf(expr('==', '3', 3))).toBe('no_match');
     // ...and != is its exact complement, including across types.
-    expect(
-      evaluateFixedPolicyCondition(expr('!=', '3', 3), CONTEXT).outcome,
-    ).toBe('match');
+    expect(outcomeOf(expr('!=', '3', 3))).toBe('match');
   });
 
   it('an absent field is unavailable, never false', () => {
-    const result = evaluateFixedPolicyCondition(
-      expr('>', ['field', 'resource.durationMs'], 0),
-      CONTEXT,
+    expect(evaluate(expr('>', ['field', 'resource.durationMs'], 0))).toEqual(
+      unavailable('resource.durationMs'),
     );
-    expect(result).toEqual({
-      outcome: 'unavailable',
-      missingFields: ['resource.durationMs'],
-    });
   });
 
   it('an unknown field name is unavailable and named', () => {
-    const result = evaluateFixedPolicyCondition(
-      expr('>', ['field', 'resource.doesNotExist'], 0),
-      CONTEXT,
-    );
-    expect(result).toMatchObject({
-      outcome: 'unavailable',
-      missingFields: ['resource.doesNotExist'],
-    });
+    expect(
+      evaluate(expr('>', ['field', 'resource.doesNotExist'], 0)),
+    ).toMatchObject(unavailable('resource.doesNotExist'));
   });
 
   it('both operands missing → both fields recorded', () => {
-    const result = evaluateFixedPolicyCondition(
+    const result = evaluate(
       expr(
         '>',
         ['field', 'resource.bitRate'],
         ['field', 'resource.sampleRateHz'],
       ),
-      CONTEXT,
     );
-    expect(result).toEqual({
-      outcome: 'unavailable',
-      missingFields: ['resource.bitRate', 'resource.sampleRateHz'],
-    });
+    expect(result).toEqual(
+      unavailable('resource.bitRate', 'resource.sampleRateHz'),
+    );
   });
 
   it('ordering over a non-numeric literal is unavailable, not false', () => {
-    const result = evaluateFixedPolicyCondition(
-      expr('>', ['field', 'resource.width'], 'wide'),
-      CONTEXT,
-    );
-    expect(result).toMatchObject({ outcome: 'unavailable' });
+    expect(
+      evaluate(expr('>', ['field', 'resource.width'], 'wide')),
+    ).toMatchObject({ outcome: 'unavailable' });
   });
 });
 
@@ -139,90 +123,57 @@ describe('evaluateFixedPolicyCondition — combinators (strong Kleene)', () => {
   const FALSE = expr('==', 1, 2);
   const UNAVAILABLE = expr('>', ['field', 'resource.durationMs'], 0);
 
-  it('all: every branch true → match', () => {
-    expect(
-      evaluateFixedPolicyCondition(expr('all', TRUE, TRUE), CONTEXT).outcome,
-    ).toBe('match');
-  });
-
-  it('all: a false branch dominates an unavailable sibling', () => {
-    expect(
-      evaluateFixedPolicyCondition(expr('all', UNAVAILABLE, FALSE), CONTEXT)
-        .outcome,
-    ).toBe('no_match');
-  });
-
-  it('all: true + unavailable → unavailable with the missing field', () => {
-    expect(
-      evaluateFixedPolicyCondition(expr('all', TRUE, UNAVAILABLE), CONTEXT),
-    ).toEqual({
-      outcome: 'unavailable',
-      missingFields: ['resource.durationMs'],
-    });
-  });
-
-  it('any: a true branch dominates an unavailable sibling', () => {
-    expect(
-      evaluateFixedPolicyCondition(expr('any', UNAVAILABLE, TRUE), CONTEXT)
-        .outcome,
-    ).toBe('match');
-  });
-
-  it('any: every branch false → no_match', () => {
-    expect(
-      evaluateFixedPolicyCondition(expr('any', FALSE, FALSE), CONTEXT).outcome,
-    ).toBe('no_match');
-  });
-
-  it('any: false + unavailable → unavailable', () => {
-    expect(
-      evaluateFixedPolicyCondition(expr('any', FALSE, UNAVAILABLE), CONTEXT),
-    ).toEqual({
-      outcome: 'unavailable',
-      missingFields: ['resource.durationMs'],
-    });
-  });
-
-  it('!: flips determinate outcomes', () => {
-    expect(evaluateFixedPolicyCondition(expr('!', TRUE), CONTEXT).outcome).toBe(
+  it.each([
+    ['all: every branch true → match', expr('all', TRUE, TRUE), 'match'],
+    [
+      'all: a false branch dominates an unavailable sibling',
+      expr('all', UNAVAILABLE, FALSE),
       'no_match',
-    );
-    expect(
-      evaluateFixedPolicyCondition(expr('!', FALSE), CONTEXT).outcome,
-    ).toBe('match');
+    ],
+    [
+      'any: a true branch dominates an unavailable sibling',
+      expr('any', UNAVAILABLE, TRUE),
+      'match',
+    ],
+    [
+      'any: every branch false → no_match',
+      expr('any', FALSE, FALSE),
+      'no_match',
+    ],
+  ])('%s', (_title, condition, outcome) => {
+    expect(outcomeOf(condition)).toBe(outcome);
   });
 
-  it('!: unavailable passes through — negation must not launder unknowns', () => {
-    expect(
-      evaluateFixedPolicyCondition(expr('!', UNAVAILABLE), CONTEXT),
-    ).toEqual({
-      outcome: 'unavailable',
-      missingFields: ['resource.durationMs'],
-    });
-  });
-
-  it('nests recursively and dedups missing fields', () => {
-    const result = evaluateFixedPolicyCondition(
+  it.each([
+    [
+      'all: true + unavailable → unavailable with the missing field',
+      expr('all', TRUE, UNAVAILABLE),
+    ],
+    ['any: false + unavailable → unavailable', expr('any', FALSE, UNAVAILABLE)],
+    [
+      '!: unavailable passes through — negation must not launder unknowns',
+      expr('!', UNAVAILABLE),
+    ],
+    [
+      'nests recursively and dedups missing fields',
       expr(
         'any',
         expr('all', UNAVAILABLE, TRUE),
         expr('<', ['field', 'resource.durationMs'], 100),
       ),
-      CONTEXT,
-    );
-    expect(result).toEqual({
-      outcome: 'unavailable',
-      missingFields: ['resource.durationMs'],
-    });
+    ],
+  ])('%s', (_title, condition) => {
+    expect(evaluate(condition)).toEqual(unavailable('resource.durationMs'));
+  });
+
+  it('!: flips determinate outcomes', () => {
+    expect(outcomeOf(expr('!', TRUE))).toBe('no_match');
+    expect(outcomeOf(expr('!', FALSE))).toBe('match');
   });
 
   it('vacuous combinators: ["all"] → match, ["any"] → no_match', () => {
-    expect(evaluateFixedPolicyCondition(expr('all'), CONTEXT).outcome).toBe(
-      'match',
-    );
-    expect(evaluateFixedPolicyCondition(expr('any'), CONTEXT).outcome).toBe(
-      'no_match',
-    );
+    expect(outcomeOf(expr('all'))).toBe('match');
+    expect(outcomeOf(expr('any'))).toBe('no_match');
   });
 
   it('never throws on malformed nodes — degrades to unavailable', () => {
@@ -245,11 +196,9 @@ describe('evaluateFixedPolicyCondition — combinators (strong Kleene)', () => {
         right: { value: 1 },
       },
     ]) {
-      const result = evaluateFixedPolicyCondition(
-        bad as unknown as FixedPolicyCondition,
-        CONTEXT,
+      expect(outcomeOf(bad as unknown as FixedPolicyCondition)).toBe(
+        'unavailable',
       );
-      expect(result.outcome).toBe('unavailable');
     }
   });
 });
@@ -338,31 +287,22 @@ describe('validateFixedPolicyCondition', () => {
 });
 
 describe('memory.* namespace (policy design §4.1/4.4)', () => {
+  const NO_TRANSCRIPT = expr('==', ['field', 'memory.hasTranscript'], 0);
+
   it('resolves presence flags from the memory context', () => {
     const withMemory: FixedPolicyConditionContext = {
       ...CONTEXT,
       memory: { hasTranscript: 1, hasOcr: 0 },
     };
     // The §4.1 trigger: "memory 中无完整 ASR 结果" — hasTranscript == 0.
+    expect(outcomeOf(NO_TRANSCRIPT, withMemory)).toBe('no_match');
     expect(
-      evaluateFixedPolicyCondition(
-        expr('==', ['field', 'memory.hasTranscript'], 0),
-        withMemory,
-      ).outcome,
-    ).toBe('no_match');
-    expect(
-      evaluateFixedPolicyCondition(
-        expr('==', ['field', 'memory.hasOcr'], 0),
-        withMemory,
-      ).outcome,
+      outcomeOf(expr('==', ['field', 'memory.hasOcr'], 0), withMemory),
     ).toBe('match');
   });
 
   it('evaluates unavailable when the memory namespace is absent', () => {
-    const result = evaluateFixedPolicyCondition(
-      expr('==', ['field', 'memory.hasTranscript'], 0),
-      CONTEXT,
-    );
+    const result = evaluate(NO_TRANSCRIPT);
     expect(result.outcome).toBe('unavailable');
     expect(result).toMatchObject({ missingFields: ['memory.hasTranscript'] });
   });
@@ -371,25 +311,20 @@ describe('memory.* namespace (policy design §4.1/4.4)', () => {
     // all(false, unavailable) is a determinate false — the missing memory
     // field is not decisive.
     expect(
-      evaluateFixedPolicyCondition(
-        expr(
-          'all',
-          ['<', ['field', 'resource.width'], 100],
-          ['==', ['field', 'memory.hasTranscript'], 0],
-        ),
-        CONTEXT,
-      ).outcome,
+      outcomeOf(
+        expr('all', ['<', ['field', 'resource.width'], 100], NO_TRANSCRIPT),
+      ),
     ).toBe('no_match');
     // all(true, unavailable) stays unavailable.
     expect(
-      evaluateFixedPolicyCondition(
+      outcomeOf(
         expr(
           'all',
           ['>', ['field', 'resource.durationMs'] as unknown[], 0],
-          ['==', ['field', 'memory.hasTranscript'], 0],
+          NO_TRANSCRIPT,
         ),
         { ...CONTEXT, resource: { ...CONTEXT.resource, durationMs: 100 } },
-      ).outcome,
+      ),
     ).toBe('unavailable');
   });
 
@@ -406,33 +341,16 @@ describe('memory.* namespace (policy design §4.1/4.4)', () => {
   });
 
   it('conditionUsesNamespace detects memory references through nesting', () => {
-    expect(
-      conditionUsesNamespace(
-        expr(
-          'all',
-          ['>', ['field', 'resource.durationMs'], 1_800_000],
-          ['any', ['==', ['field', 'memory.hasTranscript'], 0]],
-        ),
-        'memory',
-      ),
-    ).toBe(true);
-    expect(
-      conditionUsesNamespace(
-        expr('>', ['field', 'resource.width'], 2000),
-        'memory',
-      ),
-    ).toBe(false);
-    expect(
-      conditionUsesNamespace(
-        expr('>', ['field', 'resource.width'], 2000),
-        'resource',
-      ),
-    ).toBe(true);
-    expect(
-      conditionUsesNamespace(
-        expr('!', ['==', ['field', 'session.promptTokenCount'], 0]),
-        'session',
-      ),
-    ).toBe(true);
+    const nested = expr(
+      'all',
+      ['>', ['field', 'resource.durationMs'], 1_800_000],
+      ['any', ['==', ['field', 'memory.hasTranscript'], 0]],
+    );
+    const wide = expr('>', ['field', 'resource.width'], 2000);
+    const negated = expr('!', ['==', ['field', 'session.promptTokenCount'], 0]);
+    expect(conditionUsesNamespace(nested, 'memory')).toBe(true);
+    expect(conditionUsesNamespace(wide, 'memory')).toBe(false);
+    expect(conditionUsesNamespace(wide, 'resource')).toBe(true);
+    expect(conditionUsesNamespace(negated, 'session')).toBe(true);
   });
 });

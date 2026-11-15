@@ -154,7 +154,7 @@ async function writeTodosToFile(
 const TODO_DEPENDENCY_CYCLE_ERROR =
   'Todo dependencies must not contain a cycle.';
 
-function validateTodos(value: unknown): string | null {
+export function validateTodos(value: unknown): string | null {
   if (!Array.isArray(value)) {
     return 'Parameter "todos" must be an array.';
   }
@@ -245,6 +245,55 @@ function validateTodos(value: unknown): string | null {
   return null;
 }
 
+export function preserveTodoDependencies(
+  todos: TodoItem[],
+  oldTodos: TodoItem[],
+): TodoItem[] {
+  const oldTodosMap = new Map(oldTodos.map((todo) => [todo.id, todo]));
+  // Not gated on `isSessionWorkflowEnabled()` on purpose, and neither is
+  // the `blockedBy` schema description: dependencies are plan data-model
+  // semantics, not presentation. Gating them on a visualization switch
+  // would make the same `todo_write` call store a different plan
+  // depending on whether anyone is looking at the graph.
+  const hasActivePlan = oldTodos.some((todo) => todo.status !== 'completed');
+  // Preservation only fires when the previous plan still has an
+  // unfinished item and the same id carried a non-empty `blockedBy`
+  // that this call omits; `[]` is not nullish, so it still clears.
+  let preservedAnyBlockedBy = false;
+  let candidateTodos = todos.map((todo) => {
+    // Preserved edges may only reference ids that survive this update:
+    // dropping a dependency target is a valid plan-shrinking edit, and
+    // re-injecting the stale edge would make validateTodos reject the
+    // entire call with 'references unknown dependency' mid-execute.
+    const blockedBy =
+      todo.blockedBy ??
+      (hasActivePlan
+        ? oldTodosMap
+            .get(todo.id)
+            ?.blockedBy?.filter((dependency) =>
+              todos.some((incoming) => incoming.id === dependency),
+            )
+        : undefined);
+    if (blockedBy === undefined) return todo;
+    if (todo.blockedBy === undefined) preservedAnyBlockedBy = true;
+    return { ...todo, blockedBy };
+  });
+  if (preservedAnyBlockedBy) {
+    const preservedValidationError = validateTodos(candidateTodos);
+    if (preservedValidationError === TODO_DEPENDENCY_CYCLE_ERROR) {
+      // A preserved edge that survives the update can close a cycle
+      // with incoming explicit edges when the model reorders or
+      // reverses a dependency chain (flipping chain a<-b<-c re-injects
+      // c.blockedBy=['b'], producing b<->c). The incoming list itself
+      // passed validateToolParams before execute, so fall back to the
+      // edges the caller actually sent instead of failing the entire
+      // call mid-execute on an edge it never sent.
+      candidateTodos = todos;
+    }
+  }
+  return candidateTodos;
+}
+
 function createBlockedTodoResult(
   message: string,
   systemMessage: string,
@@ -314,14 +363,6 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
       const previousPlan = await readTodoPlanFromFile(sessionId);
       const oldTodos = previousPlan.todos;
       const oldTodosMap = new Map(oldTodos.map((todo) => [todo.id, todo]));
-      // Not gated on `isSessionWorkflowEnabled()` on purpose, and neither is
-      // the `blockedBy` schema description: dependencies are plan data-model
-      // semantics, not presentation. Gating them on a visualization switch
-      // would make the same `todo_write` call store a different plan
-      // depending on whether anyone is looking at the graph.
-      const hasActivePlan = oldTodos.some(
-        (todo) => todo.status !== 'completed',
-      );
       let candidateTodos: unknown;
 
       if (modified_by_user && modified_content !== undefined) {
@@ -329,41 +370,7 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
         const data = JSON.parse(modified_content) as Record<string, unknown>;
         candidateTodos = data['todos'];
       } else {
-        // Preservation only fires when the previous plan still has an
-        // unfinished item and the same id carried a non-empty `blockedBy`
-        // that this call omits; `[]` is not nullish, so it still clears.
-        let preservedAnyBlockedBy = false;
-        candidateTodos = todos.map((todo) => {
-          // Preserved edges may only reference ids that survive this update:
-          // dropping a dependency target is a valid plan-shrinking edit, and
-          // re-injecting the stale edge would make validateTodos reject the
-          // entire call with 'references unknown dependency' mid-execute.
-          const blockedBy =
-            todo.blockedBy ??
-            (hasActivePlan
-              ? oldTodosMap
-                  .get(todo.id)
-                  ?.blockedBy?.filter((dependency) =>
-                    todos.some((incoming) => incoming.id === dependency),
-                  )
-              : undefined);
-          if (blockedBy === undefined) return todo;
-          if (todo.blockedBy === undefined) preservedAnyBlockedBy = true;
-          return { ...todo, blockedBy };
-        });
-        if (preservedAnyBlockedBy) {
-          const preservedValidationError = validateTodos(candidateTodos);
-          if (preservedValidationError === TODO_DEPENDENCY_CYCLE_ERROR) {
-            // A preserved edge that survives the update can close a cycle
-            // with incoming explicit edges when the model reorders or
-            // reverses a dependency chain (flipping chain a<-b<-c re-injects
-            // c.blockedBy=['b'], producing b<->c). The incoming list itself
-            // passed validateToolParams before execute, so fall back to the
-            // edges the caller actually sent instead of failing the entire
-            // call mid-execute on an edge it never sent.
-            candidateTodos = todos;
-          }
-        }
+        candidateTodos = preserveTodoDependencies(todos, oldTodos);
       }
 
       const validationError = validateTodos(candidateTodos);

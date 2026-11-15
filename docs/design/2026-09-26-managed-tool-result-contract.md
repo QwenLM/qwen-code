@@ -19,7 +19,7 @@ The facts below are from `main` at `89b057befd`.
 - **Session resources.** `LocalManagedSessionResourceStore` in `packages/core/src/managed-runtime/managed-session-resources.ts` publishes a whole `Buffer` and reads a whole file, and checks length and SHA-256 on read. It has no stream publication and no range read. A resource is referenced by a `DurableRef`: `resourceId`, `kind`, `schemaVersion`, `byteLength` and a bare lowercase hexadecimal SHA-256 `digest`.
 - **Session receipts.** The Managed Session event `tool.receipt` carries `executionCallId`, `toolOutcomeRef`, `resultRef`, `resources` and `historyRevision`.
 - **Tool v2.** `managed-runtime-tool-v2.schema.json` closes a settled `result` to `executionStatus`, `responseParts` and an optional `error`, and caps each response at 1 MiB. The worker replaces a larger result with a small terminal error.
-- **Route gate.** The worker serves every route through `ownedManagedRuntimeRouteGate`, which admits exactly the routes of its boot version, `OWNED_MANAGED_RUNTIME_ROUTES` under boot v1 and `MANAGED_CONTEXT_WORKER_ROUTES` under boot v2 (W0c-1, #12732), and answers any other path with an empty 404 before a handler runs.
+- **Route gate.** The worker serves every route through `ownedManagedRuntimeRouteGate`, which admits exactly the routes of its boot version, `OWNED_MANAGED_RUNTIME_ROUTES` under boot v1 and `MANAGED_CONTEXT_WORKER_ROUTES` under boot v2 (W0c-1, #12732), and answers any other path with an empty 404 before a handler runs. (After this snapshot, the [Broker provider control contract](2026-09-27-broker-provider-control.md) added `MANAGED_RUNTIME_PROVIDER_ROUTE` to the routes both boot versions admit, and this contract's own routes join boot v2's set when a capture or remote publisher is configured.)
 
 ## Goals
 
@@ -75,7 +75,7 @@ A manifest is a Session resource of kind `managed-tool-result-manifest` and sche
 | `sessionId`         | id: the Managed Session, not the Runtime Session                                                         |
 | `turnId`            | id                                                                                                       |
 | `executionCallId`   | id: the `tool.intent` identity that the Session receipt will name                                        |
-| `callId`            | id: the model's call ID                                                                                  |
+| `callId`            | id: original Runtime `reference.callId`; model pairing is separate                                       |
 | `invocationDigest`  | id: the `argsDigest` of the original reference, exactly as the Runtime received it                       |
 | `bindingGeneration` | generation: the Runtime binding generation that ran the call                                             |
 | `captureId`         | token: one per execution capture; segments are keyed under it                                            |
@@ -229,7 +229,7 @@ The last three are store outcomes; O2 gives them HTTP statuses when segments cro
 
 The schema fixes each record's shape and the rules it can state readably, including the scope rules for roles and the status that descriptors imply. It cannot state UTF-8 byte limits, NFC, well-formed UTF-16, unique stream IDs, sums across a list, a bound that depends on another field, or a comparison between two fields or two records; the TypeScript test lists every case on which the schema and the module disagree. An implementation independent of both languages built the cases and computed every digest.
 
-- **TypeScript.** `packages/core/src/managed-runtime/managed-tool-result.ts` validates manifests, pages, page positions, revisions and result envelopes, and holds a reference segment ledger that replays the publication sequences. Nothing imports it until O1b, which keeps the ledger as the in-memory implementation of its segment store interface, as the Broker keeps its in-memory repositories beside the JDBC ones.
+- **TypeScript.** `packages/core/src/managed-runtime/managed-tool-result.ts` validates manifests, pages, page positions, revisions and result envelopes, and holds a reference segment ledger that replays the publication sequences. Nothing imports it until O1b, which keeps the ledger as the in-memory implementation of its segment store interface.
 - **Admission.** A CLI test sends the canonical v3 requests through the shipped route gate, with the route set of each boot version, to handlers that would record a call, and checks that each answers an empty 404 and that no handler ran. It reads the fixtures from core's source tree, as the Java test does, so that one file stays the only copy.
 - **Java.** A conformance test in `runtime-broker` pins the token, kinds, limits, routes, closed key sets and error table, and recomputes every segment, seal and prefix digest from the fixture bytes.
 
@@ -238,7 +238,7 @@ The schema fixes each record's shape and the rules it can state readably, includ
 - `packages/core/src/managed-runtime/contracts/managed-tool-result-v1.schema.json` and `.fixtures.json` (new).
 - `packages/core/src/managed-runtime/managed-tool-result.ts` and its test (new).
 - `packages/cli/src/serve/managed-tool-result-admission.test.ts` (new).
-- `ManagedToolResultConformanceTest` in `packages/sdk-java/runtime-broker` (new), and the module's `README.md` and `QWEN.md`.
+- `ManagedToolResultConformanceTest` in `packages/managed-agent-server` (new), and the module's `README.md` and `QWEN.md`.
 - This design document in both languages (new), and the Tool v2 contract document, whose note on the artifact delivery track now points here.
 
 No worker, route manifest, store, provisioner, transport or CI workflow changes.

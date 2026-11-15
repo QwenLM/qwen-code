@@ -194,6 +194,14 @@ export function useBackgroundTaskView(
     // call to refresh between the two `const` bindings.
     const computeDreamSig = (dreams: readonly MemoryTaskRecord[]): string =>
       dreams.map((t) => `${t.id}:${t.status}:${t.updatedAt}`).join('|');
+    const listVisibleDreams = (): MemoryTaskRecord[] =>
+      memoryManager
+        .listTasksByType('dream')
+        .filter(
+          (task) =>
+            task.projectRoot === projectRoot ||
+            task.metadata?.['scope'] === 'user',
+        );
 
     // refresh accepts a pre-fetched dream snapshot so the memory
     // listener can reuse the same array it computed for its dedup
@@ -223,8 +231,7 @@ export function useBackgroundTaskView(
       // cap the dialog would grow unbounded; with it the user sees all
       // running dreams plus the most recent few terminal results
       // (mirrors MonitorRegistry.MAX_RETAINED_TERMINAL_MONITORS).
-      const allDreams =
-        dreamSnapshot ?? memoryManager.listTasksByType('dream', projectRoot);
+      const allDreams = dreamSnapshot ?? listVisibleDreams();
       const runningDreams = allDreams.filter((t) => t.status === 'running');
       const terminalDreams = allDreams
         .filter(
@@ -312,6 +319,14 @@ export function useBackgroundTaskView(
     agentRegistry.setApprovalChangeCallback(refreshFromRegistry);
     workflowRegistry.setApprovalChangeCallback(refreshFromRegistry);
 
+    // The change callback above only repaints the "needs approval" badge; it
+    // cannot answer a request, and the registry now fails closed without a
+    // real responder. Register the TUI's snapshot refresh as the host
+    // channel: it makes the parked approval part of `entries`, which the
+    // background-tasks dialog renders and settles through
+    // `resolvePendingApproval`.
+    workflowRegistry.setApprovalRequestCallback(refreshFromRegistry);
+
     // Memory listener fires only on dream-task transitions —
     // `subscribe({ taskType: 'dream' })` skips the per-extract notify
     // entirely so we don't pay the per-UserQuery O(n) signature cost
@@ -322,7 +337,7 @@ export function useBackgroundTaskView(
     // same status). The fetched snapshot is forwarded to refresh so
     // both the gate and the rendered dreamEntries come from one read.
     const memoryListener = () => {
-      const dreams = memoryManager.listTasksByType('dream', projectRoot);
+      const dreams = listVisibleDreams();
       const sig = computeDreamSig(dreams);
       if (sig === lastDreamSig) return;
       refresh(dreams);
@@ -338,6 +353,7 @@ export function useBackgroundTaskView(
       workflowRegistry.setStatusChangeCallback(undefined);
       agentRegistry.setApprovalChangeCallback(undefined);
       workflowRegistry.setApprovalChangeCallback(undefined);
+      workflowRegistry.setApprovalRequestCallback(undefined);
       unsubscribeMemory();
     };
   }, [config]);

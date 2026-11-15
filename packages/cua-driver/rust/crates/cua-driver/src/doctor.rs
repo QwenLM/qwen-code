@@ -17,7 +17,7 @@
 //!   telemetry state.
 //! - **Windows**: interactive desktop session detection (Session 0 warning),
 //!   UI Automation COM availability, top-level window enumeration count.
-//! - **Linux**: `DISPLAY` / `WAYLAND_DISPLAY` presence, X11 connection
+//! - **Linux**: `DISPLAY` presence, X11 connection
 //!   reachability, AT-SPI bus availability hint.
 //! - **macOS**: existing legacy-cleanup steps (LaunchAgent plist + update
 //!   script), plus a hint to run `qwen-cua-driver diagnose` for a full
@@ -431,40 +431,16 @@ fn wait_for_child(
 
 #[cfg(target_os = "linux")]
 fn append_platform_probes(report: &mut Report) {
-    // Display server probe. Order matters: Wayland wins when both are set
-    // (XWayland leaves DISPLAY pointing at the X server XWayland exposes,
-    // but the actual session is still Wayland).
     let display = std::env::var("DISPLAY").ok().filter(|v| !v.is_empty());
-    let wayland = std::env::var("WAYLAND_DISPLAY")
-        .ok()
-        .filter(|v| !v.is_empty());
-    match (display.as_deref(), wayland.as_deref()) {
-        (None, None) => report.push(
-            Probe::warn(
-                "display server",
-                "neither DISPLAY nor WAYLAND_DISPLAY set — window-driving tools will fail",
-            )
-            .with_detail(
-                "run from an interactive desktop session (X11 / Wayland with XWayland) or set DISPLAY explicitly.",
-            ),
-        ),
-        (Some(d), None) => report.push(Probe::ok(
+    match display.as_deref() {
+        Some(display) => report.push(Probe::ok(
             "display server",
-            format!("X11 (DISPLAY={d})"),
+            format!("X11 (DISPLAY={display})"),
         )),
-        (None, Some(w)) => report.push(
-            Probe::warn(
-                "display server",
-                format!("Wayland only (WAYLAND_DISPLAY={w}, DISPLAY unset)"),
-            )
-            .with_detail(
-                "X11 tools (list_windows, screenshot) need XWayland — start your session with XWayland enabled.",
-            ),
+        None => report.push(
+            Probe::warn("display server", "only X11 is supported; DISPLAY is unset")
+                .with_detail("Set DISPLAY and XAUTHORITY for an X server, including XWayland."),
         ),
-        (Some(d), Some(w)) => report.push(Probe::ok(
-            "display server",
-            format!("Wayland+XWayland (WAYLAND_DISPLAY={w}, DISPLAY={d})"),
-        )),
     }
 
     // X11 window enumeration probe. An empty result could mean either an

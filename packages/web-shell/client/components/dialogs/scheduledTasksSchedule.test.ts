@@ -267,4 +267,15 @@ describe('describeLastRun', () => {
     );
     expect(label.startsWith('scheduledTasks.lastFired(')).toBe(true);
   });
+  it('reads a gated task’s slot as checked, not run: a quiet gate ran no prompt', () => {
+    const label = describeLastRun(
+      {
+        createdAt: created,
+        lastFiredAt: createdMinute + 60_000,
+        gate: './probe.sh',
+      },
+      t,
+    );
+    expect(label.startsWith('scheduledTasks.lastChecked(')).toBe(true);
+  });
 });

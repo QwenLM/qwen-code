@@ -3,7 +3,7 @@ import type {
   ContentBlock,
   PermissionRequest,
   PermissionOptionKind,
-} from './types';
+} from './types.js';
 
 type PermissionTranscriptBlock = Extract<
   DaemonTranscriptBlock,
@@ -73,7 +73,7 @@ function hasPermissionDiffPreview(
   });
 }
 
-function escapePreviewText(text: string): string {
+export function escapePreviewText(text: string): string {
   return text.replace(/[\u007f-\u009f\u2028\u2029\p{Cf}]/gu, (character) =>
     character
       .split('')

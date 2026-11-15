@@ -9,6 +9,8 @@
 
 import { providerMatchesCredentials } from './provider-config.js';
 import type { ProviderConfig } from './types.js';
+import { qwencloudTokenPlanProvider } from './presets/qwencloud-token-plan.js';
+import { qwencloudStandardProvider } from './presets/qwencloud-standard.js';
 import { codingPlanProvider } from './presets/alibaba-coding-plan.js';
 import { tokenPlanProvider } from './presets/alibaba-token-plan.js';
 import { alibabaStandardProvider } from './presets/alibaba-standard.js';
@@ -25,6 +27,8 @@ import { customProvider } from './presets/custom-provider.js';
 
 // Re-export all providers
 export {
+  qwencloudTokenPlanProvider,
+  qwencloudStandardProvider,
   codingPlanProvider,
   tokenPlanProvider,
   alibabaStandardProvider,
@@ -53,6 +57,8 @@ export {
 // key to the no-AK gate's cleared-env list in .github/workflows/ci.yml and to
 // scripts/tests/no-ak-integration-ci.test.js, or the gate can leak runner creds.
 export const ALL_PROVIDERS: readonly ProviderConfig[] = [
+  qwencloudTokenPlanProvider,
+  qwencloudStandardProvider,
   codingPlanProvider,
   tokenPlanProvider,
   alibabaStandardProvider,
@@ -69,6 +75,9 @@ export const ALL_PROVIDERS: readonly ProviderConfig[] = [
 ];
 
 /** Providers grouped by uiGroup. */
+export const QWENCLOUD_PROVIDERS = ALL_PROVIDERS.filter(
+  (p) => p.uiGroup === 'qwencloud',
+);
 export const ALIBABA_PROVIDERS = ALL_PROVIDERS.filter(
   (p) => p.uiGroup === 'alibaba',
 );

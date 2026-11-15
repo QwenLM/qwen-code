@@ -77,6 +77,27 @@ describe('resume session relinking', () => {
     expect(service.relinkSession).not.toHaveBeenCalled();
   });
 
+  it('reports a relink refusal without throwing a fatal error', async () => {
+    const service = serviceWithLookup({ status: 'candidate', candidate });
+    service.relinkSession.mockRejectedValue(
+      new Error('Session artifact already exists: /workspace/after/session'),
+    );
+
+    await expect(
+      maybeRelinkResumeSession({
+        sessionId: SESSION_ID,
+        cwd: '/workspace/after',
+        interactive: true,
+        service,
+        confirm: vi.fn().mockResolvedValue(true),
+      }),
+    ).resolves.toEqual({
+      status: 'blocked',
+      message:
+        'Qwen Code could not safely complete session reattachment: Session artifact already exists: /workspace/after/session',
+    });
+  });
+
   it('explains how to confirm when invoked non-interactively', async () => {
     const service = serviceWithLookup({ status: 'candidate', candidate });
     const result = await maybeRelinkResumeSession({

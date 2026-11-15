@@ -10,6 +10,7 @@ import { EnhancedErrorHandler } from './errorHandler.js';
 import type { RequestContext } from './types.js';
 import { classifyRetryError } from '../../utils/retryErrorClassification.js';
 import { APIConnectionTimeoutError } from 'openai';
+import { AuthType } from '../../utils/auth-type.js';
 
 const debugLoggerSpy = vi.hoisted(() => ({
   error: vi.fn(),
@@ -60,6 +61,45 @@ describe('EnhancedErrorHandler', () => {
   });
 
   describe('handle method', () => {
+    it('preserves retryable timeout markers for statusless subscription stream errors', () => {
+      const error = Object.assign(new Error('upstream timed out'), {
+        code: 'upstream_timeout',
+        error: { code: 'upstream_timeout', message: 'upstream timed out' },
+      });
+      const handler = new EnhancedErrorHandler(
+        undefined,
+        AuthType.QWEN_SUBSCRIPTION,
+      );
+      try {
+        handler.handle(error, mockContext, mockRequest);
+      } catch (failure) {
+        expect(failure).toMatchObject({ code: 'ETIMEDOUT', cause: error });
+        expect(classifyRetryError(failure).diagnosis).toBe('retryable');
+        return;
+      }
+      expect.fail('Expected timeout error');
+    });
+    it('keeps subscription backend timeout wording and retry fields intact', () => {
+      const error = Object.assign(new Error('503 upstream timeout'), {
+        status: 503,
+        code: 'service_unavailable',
+        error: {
+          message: 'Upstream timeout; please retry later.',
+          retryable: true,
+        },
+      });
+      const handler = new EnhancedErrorHandler(
+        undefined,
+        AuthType.QWEN_SUBSCRIPTION,
+      );
+      expect(() => handler.handle(error, mockContext, mockRequest)).toThrow(
+        'Upstream timeout; please retry later.',
+      );
+      expect(error.message).toBe('Upstream timeout; please retry later.');
+      expect(error.status).toBe(503);
+      expect(error.code).toBe('service_unavailable');
+      expect(error.error.retryable).toBe(true);
+    });
     beforeEach(() => {
       errorHandler = new EnhancedErrorHandler();
     });

@@ -21,26 +21,31 @@ override; narrow desktop windows keep desktop editing.
 Remove the legacy touch action grid and simulated Tab/Esc/left/right keys. Keep add,
 model, approval, dictation, and send controls. Hide the width toggle on touch;
 retain the context-usage control when enabled by the host. Put workspace
-selection and Git controls
-in a separate context row so starting a task in a particular workspace or
-branch remains possible. The row's measured height, two lines when it wraps,
-is added to the composer's height cap, so it does not come out of the
-attachments' room when a soft keyboard shrinks the viewport. The rows stack
-without overlapping touch targets.
+selection and Git controls on the leading side of the editing row, with hide
+keyboard and expand on the trailing side. Long workspace names truncate within
+the available space; multiple context controls may wrap within their group.
+Retain the group's measured height allowance in the composer's height cap, so
+context controls and wrapping host actions do not come out of the attachments'
+room when a soft keyboard shrinks the viewport.
+Context and editing controls must not overlap.
 Preserve host-provided toolbar slots.
 
 Use 44px touch targets and wrap controls on very narrow viewports rather than
-clip them. Keep Plan as an active-state chip. While a turn runs, stop remains
+clip them. Center toolbar icons in their targets and remove extra gaps within
+the mobile toolbar groups, including the context-usage button. Keep Plan as an
+active-state chip. While a turn runs, stop remains
 available alongside send when there is a draft; stopping never clears that
 draft. Voice capture retains its existing reduced toolbar and hides the context and
 editing rows.
 
-Add a small editing row with previous/next input history on the left, expand,
-and, while the textarea is focused, hide keyboard. The history arrows call the
-existing navigation actions directly: up recalls older inputs, down recalls
-newer inputs and then restores the draft saved before browsing. They never
-submit. History search in Add remains available for finding a specific input.
-The row wraps on extra-narrow screens and its history controls are disabled with the
+Add a small editing row with expand and, while the textarea is focused, hide
+keyboard. Its leading slots contain workspace/Git controls when present and
+otherwise stay free unless there is something contextual to
+show: the labelled history button when the host has no Add entry, and the
+Shell toggle. Recall goes through the history search panel, which lists and
+filters past inputs. One-entry-at-a-time stepping is not offered on touch,
+where the plain textarea restore cannot rebuild inline tag chips.
+The row wraps on extra-narrow screens and its controls are disabled with the
 composer. Hide keyboard blurs without returning focus through the composer
 surface click handler. A modal expanded editor edits the same controlled draft,
 preserves its selection when returning, and does not submit when closed. Its
@@ -116,7 +121,7 @@ harness for deterministic UI coverage. Verify local bundled UI when available.
 Record any runtime limitations separately from mocked browser results.
 
 - At phone widths, the old action grid and simulated keyboard keys are absent;
-  labelled history arrows remain in the editing row. Toolbar
+  the editing row keeps only its contextual and editing controls. Toolbar
   actions are reachable with no horizontal overflow. Desktop toolbar behavior
   remains.
 - Desktop Ctrl+R keeps the search field visible and focused in a short window
@@ -136,9 +141,10 @@ Record any runtime limitations separately from mocked browser results.
   actions remain honest, and Plan toggles exactly once.
 - Commands and skills preserve existing drafts and tags; history can be opened,
   selected, or dismissed. Live voice remains accessible.
-- History arrows recall older/newer inputs and restore a multiline draft
-  without submitting. Empty history is inert, and both arrows remain reachable
-  with 44px targets at 390px and 240px widths.
+- History search restores a selected input and the draft focus without
+  submitting. The editing row's always-rendered controls (Expand editor, and
+  Hide keyboard while the textarea is focused) keep a 44px target and stay
+  inside the viewport at 390px and 240px widths.
 - Run focused unit/browser tests, build, typecheck, bundle, and two clean
   self-audit passes plus independent review.
 

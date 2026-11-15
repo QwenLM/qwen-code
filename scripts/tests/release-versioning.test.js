@@ -116,6 +116,15 @@ it.each(['patch', '99.0.0-preview.1'])(
         }
         expect(after.private, path).toBe(before.private);
       }
+      for (const path of [
+        'packages/browser-use/package.json',
+        'packages/cua-driver/typescript/package.json',
+        'packages/node-repl/package.json',
+      ]) {
+        expect(read(path), path).toEqual(
+          JSON.parse(readFileSync(join(root, path), 'utf8')),
+        );
+      }
       expect(read(extensionPath).version).toBe(expected);
       for (const path of ['package.json', 'packages/cli/package.json']) {
         expect(read(path).config.sandboxImageUri).toBe(

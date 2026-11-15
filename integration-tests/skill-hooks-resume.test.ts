@@ -134,7 +134,7 @@ describe('skill hooks survive session resume', () => {
 
       const waitFor = makeWaitFor(rig, () => output);
 
-      const ready = await rig.waitForText('Type your message', 30000);
+      const ready = await rig.waitForText('Type your message');
       expect(ready, `CLI did not start. Output:\n${output}`).toBe(true);
 
       /**
@@ -253,5 +253,7 @@ describe('skill hooks survive session resume', () => {
       existsSync(flagPath),
       'the shell command ran in the resumed session',
     ).toBe(false);
-  }, 240000);
+    // CI: session 1 = 60s startup + 2 x 60s send retries + 60s gate + 60s
+    // exit; session 2 = 240s; 540s + 30s setup slack.
+  }, 570_000);
 });

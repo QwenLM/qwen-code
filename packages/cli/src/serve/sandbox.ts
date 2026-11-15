@@ -22,6 +22,11 @@ import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import { resolveBundleDir } from '@qwen-code/qwen-code-core/utils/bundlePaths.js';
 import { FatalSandboxError } from '@qwen-code/qwen-code-core/utils/errors.js';
 import { isSubpath } from '@qwen-code/qwen-code-core/utils/paths.js';
+import { MODEL_CATALOG_ENV } from '@qwen-code/qwen-code-core/models/model-catalog.js';
+import {
+  MODEL_CATALOG_REFRESH_ENV,
+  MODEL_CATALOG_URL_ENV,
+} from '@qwen-code/qwen-code-core/models/model-catalog-refresh.js';
 import { BWRAP_MIGRATION_MESSAGE } from '../config/execution-sandbox-settings.js';
 import { randomBytes } from 'node:crypto';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
@@ -83,11 +88,22 @@ export function getSandboxPassthroughEnvArgs(
   return [
     'QWEN_DEBUG_LOG_FILE',
     'QWEN_CODE_LEGACY_MCP_BLOCKING',
+    MODEL_CATALOG_ENV,
+    MODEL_CATALOG_REFRESH_ENV,
+    MODEL_CATALOG_URL_ENV,
     SKIP_UPDATE_CHECK_ENV_VAR,
     CUSTOM_SANDBOX_IMAGE_ENV_VAR,
     HOST_UPDATE_RELAUNCH_ENV_VAR,
     QWEN_CODE_SERVE_ENV,
     QWEN_CODE_DESKTOP_ENV,
+    // Workflow enablement is an operator decision; the inner CLI would
+    // otherwise read only the mounted settings and ignore the exported switch.
+    'QWEN_CODE_ENABLE_WORKFLOWS',
+    'QWEN_CODE_DISABLE_WORKFLOWS',
+    // Same precedent for the agent-loop switches: the documented env force
+    // on/off must reach the inner CLI, not be shadowed by the mounted settings.
+    'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',
+    'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP',
   ].flatMap((envVar) =>
     env[envVar] === undefined ? [] : ['--env', `${envVar}=${env[envVar]}`],
   );
@@ -136,10 +152,7 @@ async function shouldUseCurrentUserInSandbox(): Promise<boolean> {
   }
 
   if (os.platform() === 'linux') {
-    const debugEnv = [process.env['DEBUG'], process.env['DEBUG_MODE']].some(
-      (v) => v === 'true' || v === '1',
-    );
-    if (debugEnv) {
+    if (isDebugEnabled() || isTruthyEnvFlag(process.env['DEBUG_MODE'])) {
       // Use stderr so it doesn't clutter normal STDOUT output (e.g. in `--prompt` runs).
       writeStderrLine(
         'INFO: Using current user UID/GID in Linux sandbox. Set SANDBOX_SET_UID_GID=false to disable.',
@@ -149,6 +162,29 @@ async function shouldUseCurrentUserInSandbox(): Promise<boolean> {
   }
 
   return false;
+}
+
+function isTruthyEnvFlag(value: string | undefined): boolean {
+  // Normalize the same way as `SANDBOX_SET_UID_GID` above, so one function
+  // does not answer "is this flag on" two different ways.
+  const normalized = value?.trim().toLowerCase();
+  return normalized === 'true' || normalized === '1';
+}
+
+/**
+ * `DEBUG` only enables sandbox debugging for explicit truthy values.
+ *
+ * qwen-code-action always exports `DEBUG=false` for non-debug runs, so the old
+ * truthiness check treated every CI run as a debug run: the sandbox container
+ * was started as `node --inspect-brk=...`, waited for a debugger that never
+ * attached, and kept host port 9229 bound after the job timed out, which made
+ * every later sandboxed job on that host fail with "port is already allocated".
+ *
+ * `DEBUG_MODE` stays out of this check on purpose: it controls debug logging
+ * elsewhere and must not make an interactive sandbox pause at a breakpoint.
+ */
+function isDebugEnabled(): boolean {
+  return isTruthyEnvFlag(process.env['DEBUG']);
 }
 
 function ports(): string[] {
@@ -209,10 +245,10 @@ function entrypoint(workdir: string, cliArgs: string[]): string[] {
   const quotedCliArgs = cliArgs.slice(2).map((arg) => quote([arg]));
   const cliCmd =
     process.env['NODE_ENV'] === 'development'
-      ? process.env['DEBUG']
+      ? isDebugEnabled()
         ? 'npm run debug --'
         : 'npm rebuild && npm run start --'
-      : process.env['DEBUG']
+      : isDebugEnabled()
         ? `node --inspect-brk=0.0.0.0:${process.env['DEBUG_PORT'] || '9229'} $(which qwen)`
         : 'qwen';
 
@@ -246,9 +282,9 @@ export async function start_sandbox(
     }
     // Log on STDERR so it doesn't clutter the output on STDOUT
     writeStderrLine(`using macos seatbelt (profile: ${profile}) ...`);
-    // if DEBUG is set, convert to --inspect-brk in NODE_OPTIONS
+    // if debugging is explicitly enabled, convert to --inspect-brk in NODE_OPTIONS
     const nodeOptions = [
-      ...(process.env['DEBUG'] ? ['--inspect-brk'] : []),
+      ...(isDebugEnabled() ? ['--inspect-brk'] : []),
       ...nodeArgs,
     ].join(' ');
 
@@ -596,8 +632,8 @@ export async function start_sandbox(
   // expose env-specified ports on the sandbox
   ports().forEach((p) => args.push('--publish', `${p}:${p}`));
 
-  // if DEBUG is set, expose debugging port
-  if (process.env['DEBUG']) {
+  // if debugging is explicitly enabled, expose debugging port
+  if (isDebugEnabled()) {
     const debugPort = process.env['DEBUG_PORT'] || '9229';
     args.push(`--publish`, `${debugPort}:${debugPort}`);
   }
@@ -685,6 +721,25 @@ export async function start_sandbox(
       '--env',
       `QWEN_CODE_MCP_APPROVALS_PATH=${getContainerPath(
         process.env['QWEN_CODE_MCP_APPROVALS_PATH'],
+      )}`,
+    );
+  }
+  if (process.env['QWEN_CODE_HOOK_APPROVALS_PATH']) {
+    args.push(
+      '--env',
+      `QWEN_CODE_HOOK_APPROVALS_PATH=${getContainerPath(
+        process.env['QWEN_CODE_HOOK_APPROVALS_PATH'],
+      )}`,
+    );
+  }
+  // A custom trust store is the folder-trust feature's only authority; the
+  // container cannot see the host path, and its fallback (QWEN_HOME) may not
+  // hold the decision either, so workspace hooks and settings stay withheld.
+  if (process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH']) {
+    args.push(
+      '--env',
+      `QWEN_CODE_TRUSTED_FOLDERS_PATH=${getContainerPath(
+        process.env['QWEN_CODE_TRUSTED_FOLDERS_PATH'],
       )}`,
     );
   }
@@ -868,8 +923,9 @@ export async function start_sandbox(
     const setupUserCommands = [
       // Use -f with groupadd to avoid errors if the group already exists.
       `groupadd -f -g ${gid} ${username}`,
-      // Create user only if it doesn't exist. Use -o for non-unique UID.
-      `id -u ${username} &>/dev/null || useradd -o -u ${uid} -g ${gid} -d ${homeDir} -s /bin/bash ${username}`,
+      // Create user only if it doesn't exist. Use -o for non-unique UID and
+      // -m so the passed-through HOME exists inside the container.
+      `id -u ${username} &>/dev/null || useradd -o -m -u ${uid} -g ${gid} -d ${homeDir} -s /bin/bash ${username}`,
     ].join(' && ');
 
     const originalCommand = finalEntrypoint[2];

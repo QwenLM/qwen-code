@@ -125,6 +125,36 @@ describe('WorkspaceChannelSettingsStore', () => {
             exclusiveMinimum: 0,
           },
           {
+            key: 'boundedSeconds',
+            label: 'Bounded seconds',
+            kind: 'number',
+            exclusiveMinimum: 0,
+            maximum: 10,
+          },
+          {
+            key: 'inclusiveFloor',
+            label: 'Inclusive floor',
+            kind: 'number',
+            minimum: 0,
+            maximum: 10,
+          },
+          {
+            key: 'stricterFloor',
+            label: 'Stricter floor',
+            kind: 'number',
+            exclusiveMinimum: 0,
+            minimum: 5,
+            maximum: 10,
+          },
+          {
+            key: 'stricterExclusiveFloor',
+            label: 'Stricter exclusive floor',
+            kind: 'number',
+            exclusiveMinimum: 5,
+            minimum: 0,
+            maximum: 10,
+          },
+          {
             key: 'mode',
             label: 'Mode',
             kind: 'enum',
@@ -239,6 +269,20 @@ describe('WorkspaceChannelSettingsStore', () => {
       });
     },
   );
+
+  it('keeps an existing multiSession channel savable without a stored scope', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    // The channel was configured with multiSession and no sessionScope: the
+    // parser resolved 'user'. The store must resolve the same value, or every
+    // later save is rejected by the multiSession compatibility check.
+    await store.upsert('non-user-default-management-test', {
+      expectedRevision: store.snapshot().revision,
+      config: { type: 'non-user-default-management-test', multiSession: true },
+    });
+    expect(readStoredChannel('non-user-default-management-test')).toMatchObject(
+      { multiSession: true },
+    );
+  });
 
   it('persists normalized message routes and their default', async () => {
     const store = new WorkspaceChannelSettingsStore(workspace);
@@ -700,17 +744,21 @@ describe('WorkspaceChannelSettingsStore', () => {
       extra: { sessionScope: 'chat_thread' },
       message: 'requires sessionScope "user"',
     },
-    {
-      label: 'a plugin non-user default session scope',
-      type: 'non-user-default-management-test',
-      extra: {},
-      message: 'requires sessionScope "user"',
-    },
+    // A plugin's non-user default is NOT rejected any more: with multiSession
+    // and no explicit scope the resolved scope is 'user' (see
+    // effectiveSessionScope), which the acceptance test below pins. An
+    // explicit non-user scope is still rejected (the row above).
     {
       label: 'channel group history',
       type: 'user-default-management-test',
       extra: { groupHistoryLimit: 1 },
       message: 'cannot use groupHistoryLimit',
+    },
+    {
+      label: 'session rotation',
+      type: 'user-default-management-test',
+      extra: { sessionRotation: { maxTurns: 2 } },
+      message: 'cannot use sessionRotation',
     },
     {
       label: 'per-group history',
@@ -732,6 +780,30 @@ describe('WorkspaceChannelSettingsStore', () => {
       code: 'channel_settings_invalid_config',
       message: expect.stringContaining(message),
     });
+  });
+
+  it('accepts bounded session rotation and rejects malformed bounds', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const saved = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'user-default-management-test',
+        sessionRotation: { maxTurns: 2, maxAgeHours: 24 },
+      },
+    });
+    expect(saved.channels['bot']?.['sessionRotation']).toEqual({
+      maxTurns: 2,
+      maxAgeHours: 24,
+    });
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: saved.revision,
+        config: {
+          type: 'user-default-management-test',
+          sessionRotation: { maxTurns: 0 },
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
   });
 
   it('rejects enabling multiSession while preserving webhook config', async () => {
@@ -1456,6 +1528,49 @@ describe('WorkspaceChannelSettingsStore', () => {
     },
   );
 
+  it('rejects a non-record per-entry group value even when it is unchanged', async () => {
+    // The tolerance above covers the whole `groups` value, not an entry inside
+    // it. A hand-written non-record entry is therefore refused on every save,
+    // so an editor that passes one through cannot promise a no-op — it has to
+    // refuse earlier with a message that names the entry.
+    const groups = {
+      'Acme/Widgets': 'hand-written-garbage',
+      'acme/widgets': { senders: 'open' },
+    };
+    writeWorkspaceSettings(
+      JSON.stringify({
+        $version: 4,
+        channels: {
+          bot: {
+            type: 'management-validation-test',
+            clientId: 'client-id',
+            clientSecret: 'existing-secret',
+            groups,
+          },
+        },
+      }),
+    );
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const before = fs.readFileSync(settingsPath, 'utf8');
+
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: {
+          type: 'management-validation-test',
+          clientId: 'client-id',
+          groups,
+        },
+        secrets: { clientSecret: { operation: 'preserve' } },
+      }),
+    ).rejects.toMatchObject({
+      code: 'channel_settings_invalid_config',
+      message: 'Channel field "groups.Acme/Widgets" is invalid.',
+    });
+
+    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+  });
+
   it('rejects unchanged non-record groups containing an unsafe key', async () => {
     const groups = [JSON.parse('{"__proto__":{"polluted":true}}') as unknown];
     writeWorkspaceSettings(
@@ -1522,6 +1637,126 @@ describe('WorkspaceChannelSettingsStore', () => {
           type: 'management-validation-test',
           clientId: 'updated-id',
           groups: { '*': { requireMention: 'no', dispatchMode: 'steer' } },
+        },
+        secrets: { clientSecret: { operation: 'preserve' } },
+      }),
+    ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+  });
+
+  it('follows a re-cased group key for the unchanged-value tolerance', async () => {
+    // A repository-only editor lower-cases group keys on save. The unchanged
+    // legacy value must keep its tolerance across the case rewrite, mirroring
+    // GroupGate's exact-then-normalized lookup. Only case-folding platforms
+    // (GitHub/GitLab) get this fallback; the real GitLab plugin is used here.
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": {
+    "type": "gitlab",
+    "token": "existing-token",
+    "groupPolicy": "open",
+    "action_prompt_template": { "mentioned": "%project%" },
+    "groups": {
+      "Owner/Repo": { "groupHistoryLimit": "50" }
+    }
+  } }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'gitlab',
+        groupPolicy: 'open',
+        action_prompt_template: { mentioned: '%project%' },
+        groups: { 'owner/repo': { groupHistoryLimit: '50' } },
+      },
+      secrets: { token: { operation: 'preserve' } },
+    });
+    expect(next.channels['bot']).toMatchObject({
+      groups: { 'owner/repo': { groupHistoryLimit: '50' } },
+    });
+
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: next.revision,
+        config: {
+          type: 'gitlab',
+          groupPolicy: 'open',
+          action_prompt_template: { mentioned: '%project%' },
+          groups: { 'owner/repo': { groupHistoryLimit: '60' } },
+        },
+        secrets: { token: { operation: 'preserve' } },
+      }),
+    ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+  });
+
+  it('follows a re-cased group key for the unchanged-value tolerance on github', async () => {
+    // The github arm of the case-folding gate is load-bearing: the editor
+    // lower-cases group keys for every repository-only channel, GitHub
+    // included, so a legacy mixed-case GitHub key relies on this fallback too.
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": {
+    "type": "github",
+    "token": "existing-token",
+    "groupPolicy": "open",
+    "groups": {
+      "Owner/Repo": { "groupHistoryLimit": "50" }
+    }
+  } }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.upsert('bot', {
+      expectedRevision: store.snapshot().revision,
+      config: {
+        type: 'github',
+        groupPolicy: 'open',
+        groups: { 'owner/repo': { groupHistoryLimit: '50' } },
+      },
+      secrets: { token: { operation: 'preserve' } },
+    });
+    expect(next.channels['bot']).toMatchObject({
+      groups: { 'owner/repo': { groupHistoryLimit: '50' } },
+    });
+
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: next.revision,
+        config: {
+          type: 'github',
+          groupPolicy: 'open',
+          groups: { 'owner/repo': { groupHistoryLimit: '60' } },
+        },
+        secrets: { token: { operation: 'preserve' } },
+      }),
+    ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+  });
+
+  it('does not borrow tolerance across case for a non-folding platform', async () => {
+    // Chat platforms treat case-variant group keys as distinct groups (their
+    // normalizeGroupId is identity), so the re-cased-key fallback must not
+    // apply: a legacy value under 'Team-A' cannot be carried onto 'team-a'.
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": {
+    "type": "management-validation-test",
+    "clientId": "client-id",
+    "clientSecret": "existing-secret",
+    "groups": {
+      "Team-A": { "groupHistoryLimit": "50" }
+    }
+  } }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    await expect(
+      store.upsert('bot', {
+        expectedRevision: store.snapshot().revision,
+        config: {
+          type: 'management-validation-test',
+          clientId: 'updated-id',
+          groups: { 'team-a': { groupHistoryLimit: '50' } },
         },
         secrets: { clientSecret: { operation: 'preserve' } },
       }),
@@ -2709,6 +2944,124 @@ describe('WorkspaceChannelSettingsStore', () => {
     });
   });
 
+  it('does not rewrite legacy all startup when deleting an absent name', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "all": { "type": "telegram", "token": "$ALL_TOKEN" } },
+  "serve": { "channels": ["all"] }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const before = fs.readFileSync(settingsPath, 'utf8');
+    const current = store.snapshot();
+
+    await expect(
+      store.remove('missing', { expectedRevision: 'stale' }),
+    ).rejects.toMatchObject({ code: 'channel_settings_conflict' });
+    const next = await store.remove('missing', {
+      expectedRevision: current.revision,
+    });
+
+    expect(next).toEqual(current);
+    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+  });
+
+  it.each([['other'], ['all']])(
+    'removes only the absent channel startup name while preserving %s',
+    async (remaining) => {
+      writeWorkspaceSettings(
+        JSON.stringify({
+          $version: 4,
+          channels: { [remaining]: { type: 'telegram', token: '$TEST_TOKEN' } },
+          serve: { channels: [remaining, 'missing'] },
+        }),
+      );
+      const store = new WorkspaceChannelSettingsStore(workspace);
+      const current = store.snapshot();
+
+      const next = await store.remove('missing', {
+        expectedRevision: current.revision,
+      });
+      const repeated = await store.remove('missing', {
+        expectedRevision: next.revision,
+      });
+
+      expect(next.channels).toEqual(current.channels);
+      expect(next.startupNames).toEqual([remaining]);
+      expect(repeated).toEqual(next);
+      const persisted = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+      expect(persisted.serve.channels).toEqual([remaining]);
+    },
+  );
+
+  it('preserves filtered channel entries when removing an absent channel startup name', async () => {
+    writeWorkspaceSettings(
+      JSON.stringify({
+        $version: 4,
+        channels: {
+          bot: { type: 'telegram', token: '$TEST_TOKEN' },
+          legacy: 'telegram',
+        },
+        serve: { channels: ['bot', 'ghost'] },
+      }),
+    );
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const current = store.snapshot();
+
+    const next = await store.remove('ghost', {
+      expectedRevision: current.revision,
+    });
+
+    expect(next.channels).toEqual(current.channels);
+    expect(next.startupNames).toEqual(['bot']);
+    const persisted = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+    expect(persisted.channels.legacy).toBe('telegram');
+    expect(persisted.serve.channels).toEqual(['bot']);
+  });
+
+  it("removes a stale startup name only from its own scope, leaving another workspace's file untouched", async () => {
+    const otherWorkspace = path.join(testRoot, 'other-workspace');
+    const otherSettingsPath = path.join(
+      otherWorkspace,
+      '.qwen',
+      'settings.json',
+    );
+    fs.mkdirSync(path.dirname(otherSettingsPath), { recursive: true });
+    fs.writeFileSync(
+      otherSettingsPath,
+      JSON.stringify({ $version: 4, serve: { channels: ['ghost'] } }),
+    );
+    writeWorkspaceSettings(
+      JSON.stringify({ $version: 4, serve: { channels: ['ghost'] } }),
+    );
+    const otherBefore = fs.readFileSync(otherSettingsPath, 'utf8');
+    const store = new WorkspaceChannelSettingsStore(workspace);
+
+    const next = await store.remove('ghost', {
+      expectedRevision: store.snapshot().revision,
+    });
+
+    expect(next.startupNames).toEqual([]);
+    expect(readWorkspaceSettings()['serve']).toEqual({ channels: [] });
+    expect(fs.readFileSync(otherSettingsPath, 'utf8')).toBe(otherBefore);
+  });
+
+  it('leaves the settings file byte-identical when deleting a channel that was never persisted', async () => {
+    writeWorkspaceSettings(`{
+  "$version": 4,
+  "channels": { "bot": { "type": "telegram", "token": "$BOT_TOKEN" } },
+  "serve": { "port": 4123 }
+}\n`);
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const before = fs.readFileSync(settingsPath, 'utf8');
+
+    const next = await store.remove('missing', {
+      expectedRevision: store.snapshot().revision,
+    });
+
+    expect(next.startupNames).toEqual([]);
+    expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+  });
+
   it('preserves the all sentinel when removing a legacy all config beside other instances', async () => {
     writeWorkspaceSettings(`{
   "$version": 4,
@@ -3084,6 +3437,351 @@ describe('WorkspaceChannelSettingsStore', () => {
       } finally {
         resetHomeEnvBootstrapForTesting();
       }
+    });
+
+    it('removes a stale startup name from the user scope without touching the workspace file', async () => {
+      // The missing-config branch writes only the resolved scope: with the
+      // workspace collapsed onto the shared user file, the stale startup name
+      // leaves the user file and the unread workspace file stays as it was.
+      const workspaceBefore = fs.readFileSync(settingsPath, 'utf8');
+      const userSettingsPath = useRedirectedUserScope({
+        $version: 4,
+        serve: { channels: ['ghost'] },
+      });
+      try {
+        const store = new WorkspaceChannelSettingsStore(workspace);
+
+        const next = await store.remove('ghost', {
+          expectedRevision: store.snapshot().revision,
+        });
+
+        expect(next.startupNames).toEqual([]);
+        expect(readUserSettings(userSettingsPath).serve?.channels).toEqual([]);
+        expect(fs.readFileSync(settingsPath, 'utf8')).toBe(workspaceBefore);
+      } finally {
+        resetHomeEnvBootstrapForTesting();
+      }
+    });
+  });
+
+  describe('numeric bounds and unchanged stored values', () => {
+    const baseConfig = {
+      type: 'management-validation-test',
+      clientId: 'client-id',
+    };
+
+    it('tolerates re-sending a stored number a newer bound would reject', async () => {
+      // The editor re-sends stored values verbatim on every save. Declaring a
+      // field must not block an unrelated edit to a channel whose stored value
+      // the runtime already tolerates.
+      writeWorkspaceSettings(
+        JSON.stringify({
+          channels: {
+            bounded: {
+              ...baseConfig,
+              clientSecret: '$BOT_TOKEN',
+              backoffSeconds: 0,
+            },
+          },
+        }),
+      );
+      const store = new WorkspaceChannelSettingsStore(workspace);
+
+      const next = await store.upsert('bounded', {
+        expectedRevision: store.snapshot().revision,
+        config: { ...baseConfig, backoffSeconds: 0, retries: 4 } as never,
+        secrets: {},
+      });
+
+      expect(next.channels['bounded']['backoffSeconds']).toBe(0);
+      expect(next.channels['bounded']['retries']).toBe(4);
+    });
+
+    it('tolerates re-sending a stored enum a narrowed option list excludes', async () => {
+      // A channel that narrows its own options (WeChat's group policy offers
+      // only `disabled`) must not strand an unrelated edit for an operator who
+      // configured a wider value in settings.json before the narrowing.
+      writeWorkspaceSettings(
+        JSON.stringify({
+          channels: {
+            bounded: {
+              ...baseConfig,
+              clientSecret: '$BOT_TOKEN',
+              mode: 'legacy',
+            },
+          },
+        }),
+      );
+      const store = new WorkspaceChannelSettingsStore(workspace);
+
+      const next = await store.upsert('bounded', {
+        expectedRevision: store.snapshot().revision,
+        config: { ...baseConfig, mode: 'legacy', retries: 4 } as never,
+        secrets: {},
+      });
+
+      expect(next.channels['bounded']['mode']).toBe('legacy');
+      expect(next.channels['bounded']['retries']).toBe(4);
+    });
+
+    it('still rejects an enum the operator changed to an unlisted value', async () => {
+      const store = new WorkspaceChannelSettingsStore(workspace);
+      await store.upsert('bounded', {
+        expectedRevision: store.snapshot().revision,
+        config: { ...baseConfig, mode: 'safe' } as never,
+        secrets: { clientSecret: { operation: 'replace', value: 'secret' } },
+      });
+
+      await expect(
+        store.upsert('bounded', {
+          expectedRevision: store.snapshot().revision,
+          config: { ...baseConfig, mode: 'legacy' } as never,
+          secrets: {},
+        }),
+      ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+    });
+
+    it('still rejects a non-string enum even when it is unchanged', async () => {
+      writeWorkspaceSettings(
+        JSON.stringify({
+          channels: {
+            bounded: { ...baseConfig, clientSecret: '$BOT_TOKEN', mode: 7 },
+          },
+        }),
+      );
+      const store = new WorkspaceChannelSettingsStore(workspace);
+
+      await expect(
+        store.upsert('bounded', {
+          expectedRevision: store.snapshot().revision,
+          config: { ...baseConfig, mode: 7 } as never,
+          secrets: {},
+        }),
+      ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+    });
+
+    it('still rejects a number the operator changed to an invalid value', async () => {
+      const store = new WorkspaceChannelSettingsStore(workspace);
+      await store.upsert('bounded', {
+        expectedRevision: store.snapshot().revision,
+        config: { ...baseConfig, backoffSeconds: 5 } as never,
+        secrets: { clientSecret: { operation: 'replace', value: 'secret' } },
+      });
+
+      await expect(
+        store.upsert('bounded', {
+          expectedRevision: store.snapshot().revision,
+          config: { ...baseConfig, backoffSeconds: 0 } as never,
+          secrets: {},
+        }),
+      ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+    });
+
+    it('enforces a declared maximum', async () => {
+      const store = new WorkspaceChannelSettingsStore(workspace);
+      const revision = store.snapshot().revision;
+
+      await expect(
+        store.upsert('bounded', {
+          expectedRevision: revision,
+          config: { ...baseConfig, boundedSeconds: 11 } as never,
+          secrets: { clientSecret: { operation: 'replace', value: 'secret' } },
+        }),
+      ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+
+      const next = await store.upsert('bounded', {
+        expectedRevision: store.snapshot().revision,
+        config: { ...baseConfig, boundedSeconds: 10 } as never,
+        secrets: { clientSecret: { operation: 'replace', value: 'secret' } },
+      });
+      expect(next.channels['bounded']['boundedSeconds']).toBe(10);
+    });
+
+    it('enforces a declared inclusive minimum, admitting the bound itself', async () => {
+      // The daemon validates against the descriptor too, not just the editor.
+      // A field that moved from exclusiveMinimum: -1 to minimum: 0 would lose
+      // its floor here if this layer only knew the exclusive bound.
+      const store = new WorkspaceChannelSettingsStore(workspace);
+
+      for (const value of [-0.5, -1]) {
+        await expect(
+          store.upsert('bounded', {
+            expectedRevision: store.snapshot().revision,
+            config: { ...baseConfig, inclusiveFloor: value } as never,
+            secrets: {
+              clientSecret: { operation: 'replace', value: 'secret' },
+            },
+          }),
+        ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+      }
+
+      const next = await store.upsert('bounded', {
+        expectedRevision: store.snapshot().revision,
+        config: { ...baseConfig, inclusiveFloor: 0 } as never,
+        secrets: { clientSecret: { operation: 'replace', value: 'secret' } },
+      });
+      expect(next.channels['bounded']['inclusiveFloor']).toBe(0);
+    });
+
+    it('tolerates re-sending a stored number above a newly declared maximum', async () => {
+      // The minimum half alone would leave an operator storing 300000000
+      // stranded on every unrelated edit once a ceiling is declared, which is
+      // the regression the tolerance exists to prevent.
+      writeWorkspaceSettings(
+        JSON.stringify({
+          channels: {
+            bounded: {
+              ...baseConfig,
+              clientSecret: '$BOT_TOKEN',
+              boundedSeconds: 300,
+            },
+          },
+        }),
+      );
+      const store = new WorkspaceChannelSettingsStore(workspace);
+
+      const next = await store.upsert('bounded', {
+        expectedRevision: store.snapshot().revision,
+        config: { ...baseConfig, boundedSeconds: 300, retries: 4 } as never,
+        secrets: {},
+      });
+
+      expect(next.channels['bounded']['boundedSeconds']).toBe(300);
+      expect(next.channels['bounded']['retries']).toBe(4);
+    });
+
+    it('applies the stricter of two declared lower bounds', async () => {
+      // Both bounds may be declared, and the conjunction is what makes the
+      // stricter one win. An exclusive-wins precedence would keep both keys in
+      // use and start admitting 3 here, on the path that serves hand-edited
+      // settings files and daemon API clients.
+      const store = new WorkspaceChannelSettingsStore(workspace);
+
+      for (const value of [3, 0]) {
+        await expect(
+          store.upsert('bounded', {
+            expectedRevision: store.snapshot().revision,
+            config: { ...baseConfig, stricterFloor: value } as never,
+            secrets: {
+              clientSecret: { operation: 'replace', value: 'secret' },
+            },
+          }),
+        ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+      }
+
+      const next = await store.upsert('bounded', {
+        expectedRevision: store.snapshot().revision,
+        config: { ...baseConfig, stricterFloor: 5 } as never,
+        secrets: { clientSecret: { operation: 'replace', value: 'secret' } },
+      });
+      expect(next.channels['bounded']['stricterFloor']).toBe(5);
+
+      // The mirror shape: an inclusive-wins precedence would survive the case
+      // above and admit 5 here, where the exclusive bound is the stricter one.
+      await expect(
+        store.upsert('bounded', {
+          expectedRevision: store.snapshot().revision,
+          config: { ...baseConfig, stricterExclusiveFloor: 5 } as never,
+          secrets: { clientSecret: { operation: 'replace', value: 'secret' } },
+        }),
+      ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+
+      const mirrored = await store.upsert('bounded', {
+        expectedRevision: store.snapshot().revision,
+        config: { ...baseConfig, stricterExclusiveFloor: 6 } as never,
+        secrets: { clientSecret: { operation: 'replace', value: 'secret' } },
+      });
+      expect(mirrored.channels['bounded']['stricterExclusiveFloor']).toBe(6);
+    });
+
+    it('tolerates re-sending a stored number below a newly declared minimum', async () => {
+      // The forgiveness wraps the whole range, not just the exclusive bound and
+      // the ceiling. Without it an operator whose settings file predates the
+      // floor cannot edit that channel at all — the accept-then-fail mismatch
+      // this change removes, reintroduced on the daemon path.
+      // Descriptor layer only: this fixture plugin declares no validateConfig.
+      // A plugin that re-checks the field still refuses the save — see the
+      // plugin-hook case below.
+      writeWorkspaceSettings(
+        JSON.stringify({
+          channels: {
+            bounded: {
+              ...baseConfig,
+              clientSecret: '$BOT_TOKEN',
+              inclusiveFloor: -0.5,
+            },
+          },
+        }),
+      );
+      const store = new WorkspaceChannelSettingsStore(workspace);
+
+      const next = await store.upsert('bounded', {
+        expectedRevision: store.snapshot().revision,
+        config: { ...baseConfig, inclusiveFloor: -0.5, retries: 4 } as never,
+        secrets: {},
+      });
+      expect(next.channels['bounded']['inclusiveFloor']).toBe(-0.5);
+      expect(next.channels['bounded']['retries']).toBe(4);
+
+      await expect(
+        store.upsert('bounded', {
+          expectedRevision: store.snapshot().revision,
+          config: { ...baseConfig, inclusiveFloor: -0.2 } as never,
+          secrets: {},
+        }),
+      ).rejects.toMatchObject({ code: 'channel_settings_invalid_config' });
+    });
+
+    it('still refuses an unchanged below-floor value the plugin re-checks', async () => {
+      // The forgiveness above is descriptor-layer only. GitHub's validateConfig
+      // refuses a negative reserve unconditionally, so a hand-edited settings
+      // file holding one passes both forgiveness layers and fails at the hook.
+      // The plugin's own message, not the store's, is what proves the seam.
+      registerPlugin({
+        channelType: 'plugin-rechecks-floor',
+        displayName: 'Plugin rechecks floor',
+        management: {
+          fields: [
+            {
+              key: 'reserve',
+              label: 'Reserve',
+              kind: 'number',
+              minimum: 0,
+            },
+            { key: 'note', label: 'Note', kind: 'string' },
+          ],
+          validateConfig: (config: Record<string, unknown>) =>
+            typeof config['reserve'] === 'number' && config['reserve'] < 0
+              ? 'reserve must be a non-negative number.'
+              : undefined,
+        },
+        createChannel() {
+          throw new Error('not used');
+        },
+      } as unknown as ChannelPlugin);
+      writeWorkspaceSettings(
+        JSON.stringify({
+          channels: {
+            rechecked: { type: 'plugin-rechecks-floor', reserve: -0.5 },
+          },
+        }),
+      );
+      const store = new WorkspaceChannelSettingsStore(workspace);
+
+      await expect(
+        store.upsert('rechecked', {
+          expectedRevision: store.snapshot().revision,
+          config: {
+            type: 'plugin-rechecks-floor',
+            reserve: -0.5,
+            note: 'an unrelated edit',
+          } as never,
+          secrets: {},
+        }),
+      ).rejects.toMatchObject({
+        code: 'channel_settings_invalid_config',
+        message: 'reserve must be a non-negative number.',
+      });
     });
   });
 });

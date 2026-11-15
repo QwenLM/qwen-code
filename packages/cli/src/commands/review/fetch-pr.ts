@@ -1139,8 +1139,39 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       writeStdoutLine(
         JSON.stringify({ resumed: false, resumeRefused: outcome.reason }),
       );
+      // The re-review guidance covers the refusals a re-review-after-update
+      // actually reaches: head-moved when an interrupted attempt survived,
+      // no-report when no state exists (a completed round cleaned up, a
+      // first-ever --resume, or an unreadable report — the message does not
+      // guess which), and worktree-gone when the report survived but the
+      // attempt's worktree vanished (review R1-2/R1-3 on #15998). Every arm
+      // carries the anchor condition the other surfaces carry; the
+      // restart-cost sentence is printed where recordRestart actually runs
+      // (after the plan write), never before the fact. Other refusals (dirty
+      // worktree, tampered diff, effort/model mismatch) are interruption-
+      // state problems, not re-review intent, and get no guidance.
+      const reReviewTail =
+        ' This fresh run IS the re-review — at high effort its incremental' +
+        ' check scopes the delta when the recorded anchor survives. After' +
+        ' future updates use a plain `/review <n>` without --resume.';
+      const reReviewGuidance =
+        outcome.reason === 'head-moved'
+          ? ' The PR head moved since the interrupted run (new or rewritten' +
+            ' commits).' +
+            reReviewTail
+          : outcome.reason === 'no-report'
+            ? ' No resumable state was found.' +
+              reReviewTail +
+              ' This refusal costs nothing.'
+            : outcome.reason === 'worktree-gone'
+              ? " The interrupted attempt's worktree is gone while its report" +
+                ' survived — nothing to continue.' +
+                reReviewTail +
+                ' This refusal costs nothing.'
+              : '';
       writeStderrLine(
-        `Cannot resume PR #${prNumber} (${outcome.reason}); starting a fresh review.`,
+        `Cannot resume PR #${prNumber} (${outcome.reason}); starting a fresh review.` +
+          reReviewGuidance,
       );
     }
 
@@ -2276,6 +2307,11 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       recordRestart(
         out,
         `head-moved ${priorFetchedSha?.slice(0, 7) ?? 'unknown'}->${fetchedSha.slice(0, 7)}`,
+      );
+      // The cost is announced only once it is a fact (review R1-3 on
+      // #15998): a fresh path that fails before this point charged nothing.
+      writeStderrLine(
+        "This refusal spent the run's one head-movement restart.",
       );
     }
     writeStdoutLine(`Wrote fetch-pr report to ${out}`);

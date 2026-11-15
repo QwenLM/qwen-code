@@ -40,10 +40,12 @@ interface NavigationState {
   route: WebShellRoute;
   target: NavigationSessionProps;
   revision: number;
+  historyRevision?: number;
 }
 interface NavigationController {
   route: WebShellRoute;
   revision: number;
+  historyRevision?: number;
   openPage: (page: WebShellPage) => void;
   returnToChat: () => void;
   reconcilePage: (page: WebShellPage | undefined) => void;
@@ -182,7 +184,7 @@ export function WebShellNavigationBoundary({
           );
         }
       }
-      const next = {
+      const next: NavigationState = {
         route,
         target,
         revision:
@@ -191,6 +193,9 @@ export function WebShellNavigationBoundary({
             ? 1
             : 0),
       };
+      const historyRevision =
+        mode === 'replay' ? next.revision : current.current.historyRevision;
+      next.historyRevision = historyRevision;
       current.current = next;
       setState(next);
     },
@@ -297,6 +302,7 @@ export function WebShellNavigationBoundary({
         ? {
             route: state.route,
             revision: state.revision,
+            historyRevision: state.historyRevision,
             openPage: (page) => {
               restoringHistory.current = false;
               userSessionNavigation.current = false;
@@ -359,7 +365,14 @@ export function WebShellNavigationBoundary({
             },
           }
         : undefined,
-    [basePath, commit, enabled, state.revision, state.route],
+    [
+      basePath,
+      commit,
+      enabled,
+      state.revision,
+      state.route,
+      state.historyRevision,
+    ],
   );
   return (
     <NavigationContext.Provider value={controller}>

@@ -18,6 +18,36 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { GitWorktreeService } from './gitWorktreeService.js';
 
+async function initRepo(dir: string): Promise<void> {
+  execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+  execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: dir });
+  execFileSync('git', ['config', 'user.name', 't'], { cwd: dir });
+  execFileSync('git', ['config', 'commit.gpgsign', 'false'], { cwd: dir });
+  await fs.writeFile(path.join(dir, 'README.md'), 'hi\n');
+  execFileSync('git', ['add', '.'], { cwd: dir });
+  execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+    cwd: dir,
+  });
+}
+
+/** Creates `<dir>/<file>` holding `body`. */
+async function mkdirWith(dir: string, file: string, body: string) {
+  await fs.mkdir(dir);
+  await fs.writeFile(path.join(dir, file), body);
+}
+
+const exists = (p: string) =>
+  fs
+    .lstat(p)
+    .then(() => true)
+    .catch(() => false);
+
+const isSymlink = (p: string) =>
+  fs
+    .lstat(p)
+    .then((s) => s.isSymbolicLink())
+    .catch(() => false);
+
 describe('GitWorktreeService.createUserWorktree() — symlinkDirectories', () => {
   vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
 
@@ -38,17 +68,7 @@ describe('GitWorktreeService.createUserWorktree() — symlinkDirectories', () =>
     repoParent = await fs.realpath(dir);
     repoRoot = path.join(repoParent, 'repo');
     await fs.mkdir(repoRoot);
-    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repoRoot });
-    execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: repoRoot });
-    execFileSync('git', ['config', 'user.name', 't'], { cwd: repoRoot });
-    execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
-      cwd: repoRoot,
-    });
-    await fs.writeFile(path.join(repoRoot, 'README.md'), 'hi\n');
-    execFileSync('git', ['add', '.'], { cwd: repoRoot });
-    execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
-      cwd: repoRoot,
-    });
+    await initRepo(repoRoot);
   });
 
   afterEach(async () => {
@@ -56,89 +76,65 @@ describe('GitWorktreeService.createUserWorktree() — symlinkDirectories', () =>
     await fs.rm(repoParent, { recursive: true, force: true });
   });
 
+  /** Creates worktree `slug` off main, asserts success, returns the result. */
+  async function create(
+    slug: string,
+    symlinkDirectories: string[],
+    root = repoRoot,
+  ) {
+    const service = new GitWorktreeService(root);
+    const result = await service.createUserWorktree(slug, 'main', {
+      symlinkDirectories,
+    });
+    expect(result.success).toBe(true);
+    return result;
+  }
+
   it('symlinks a configured directory into the new worktree', async () => {
     // Create a fake node_modules in the main repo so there's something
     // to link.
     const nm = path.join(repoRoot, 'node_modules');
-    await fs.mkdir(nm);
-    await fs.writeFile(path.join(nm, 'marker'), 'real');
+    await mkdirWith(nm, 'marker', 'real');
 
-    const service = new GitWorktreeService(repoRoot);
-    const result = await service.createUserWorktree('linked', 'main', {
-      symlinkDirectories: ['node_modules'],
-    });
-    expect(result.success).toBe(true);
+    const result = await create('linked', ['node_modules']);
     expect(result.worktree).toBeDefined();
 
     const dest = path.join(result.worktree!.path, 'node_modules');
-    const linkTarget = await fs.readlink(dest);
-    expect(linkTarget).toBe(nm);
-
+    expect(await fs.readlink(dest)).toBe(nm);
     // Reading through the symlink resolves to the real file.
-    const marker = await fs.readFile(path.join(dest, 'marker'), 'utf8');
-    expect(marker).toBe('real');
+    expect(await fs.readFile(path.join(dest, 'marker'), 'utf8')).toBe('real');
   });
 
   it('silently skips a missing source directory', async () => {
-    const service = new GitWorktreeService(repoRoot);
-    const result = await service.createUserWorktree('missing-source', 'main', {
-      symlinkDirectories: ['does-not-exist'],
-    });
     // Worktree creation still succeeds.
-    expect(result.success).toBe(true);
+    const result = await create('missing-source', ['does-not-exist']);
     expect(result.worktree).toBeDefined();
-
     // Nothing was created at the would-be destination.
     const dest = path.join(result.worktree!.path, 'does-not-exist');
-    const exists = await fs
-      .lstat(dest)
-      .then(() => true)
-      .catch(() => false);
-    expect(exists).toBe(false);
+    expect(await exists(dest)).toBe(false);
   });
 
   it('silently skips an existing destination (no overwrite)', async () => {
-    const nm = path.join(repoRoot, 'node_modules');
-    await fs.mkdir(nm);
-    await fs.writeFile(path.join(nm, 'marker'), 'real');
+    await mkdirWith(path.join(repoRoot, 'node_modules'), 'marker', 'real');
 
+    // `git worktree add` creates the worktree dir, so it cannot be
+    // pre-populated before creation, and a second create at the same slug
+    // fails (the branch exists). In practice this case is reachable only when
+    // a user pre-populates the worktree (e.g. via a custom checkout hook).
+    // Simulate it: create the worktree with no symlinks, hand-place a
+    // node_modules dir under it, then call the private
+    // symlinkConfiguredDirectories directly.
     const service = new GitWorktreeService(repoRoot);
-    // Pre-create the destination inside what will become the worktree.
-    // We can't pre-populate the worktree (it doesn't exist yet), so we
-    // exploit the fact that `git worktree add` creates the dir — we set
-    // the symlinkDirectories to the empty array first to create the
-    // worktree, then drop a file at the dest, then exercise the symlink
-    // path via a second call on a new slug.
-    //
-    // Actually, simpler: just test that on a second create attempt at
-    // the same slug, the create itself fails (because branch exists),
-    // so this case is only reachable in practice if a user pre-populates
-    // the worktree (e.g. via a custom checkout hook). Simulate by
-    // creating the worktree first with no symlinks, then dropping a
-    // marker file, then running the symlink loop manually via a fresh
-    // service instance pointed at a SECOND slug that pre-fills the dest.
-
-    // Pre-create the worktree path so `createUserWorktree` errors out
-    // on its "already exists" guard — this is the wrong shape. Instead,
-    // create the worktree, hand-place a node_modules dir under it (the
-    // tool's pre-populated state), then call symlinkConfiguredDirectories
-    // directly. The method is private but accessible via prototype here
-    // because tests run in the same package.
     const first = await service.createUserWorktree('preexisting', 'main', {
       symlinkDirectories: [],
     });
     expect(first.success).toBe(true);
     const wt = first.worktree!.path;
-    await fs.mkdir(path.join(wt, 'node_modules'));
-    await fs.writeFile(path.join(wt, 'node_modules', 'preexisting'), 'wins');
+    await mkdirWith(path.join(wt, 'node_modules'), 'preexisting', 'wins');
 
-    // Invoke the private symlink loop directly.
-    // Probe the `private symlinkConfiguredDirectories` method directly.
-    // We can't intersect `GitWorktreeService` with a `public` version of
-    // the same name (TypeScript collapses class + redeclared-as-public
-    // intersection to `never`), so describe ONLY the method's shape and
-    // double-cast through `unknown` to bypass the private check at
-    // test-time.
+    // TypeScript collapses the class intersected with a redeclared-as-public
+    // method to `never`, so describe ONLY the method's shape and double-cast
+    // through `unknown` to bypass the private check at test time.
     type SymlinkProbe = {
       symlinkConfiguredDirectories: (
         worktreePath: string,
@@ -156,26 +152,16 @@ describe('GitWorktreeService.createUserWorktree() — symlinkDirectories', () =>
       'utf8',
     );
     expect(marker).toBe('wins');
-
-    // And the directory at `wt/node_modules` is still the original dir,
-    // not a symlink to the main repo's node_modules.
+    // And `wt/node_modules` is still the original dir, not a symlink to the
+    // main repo's node_modules.
     const stat = await fs.lstat(path.join(wt, 'node_modules'));
     expect(stat.isSymbolicLink()).toBe(false);
   });
 
   it('rejects absolute paths', async () => {
-    const service = new GitWorktreeService(repoRoot);
-    const result = await service.createUserWorktree('abs', 'main', {
-      symlinkDirectories: ['/etc'],
-    });
-    expect(result.success).toBe(true);
+    const result = await create('abs', ['/etc']);
     // Nothing at /etc-named inside the worktree.
-    const dest = path.join(result.worktree!.path, 'etc');
-    const exists = await fs
-      .lstat(dest)
-      .then(() => true)
-      .catch(() => false);
-    expect(exists).toBe(false);
+    expect(await exists(path.join(result.worktree!.path, 'etc'))).toBe(false);
   });
 
   it('rejects paths that traverse outside the repo root', async () => {
@@ -188,16 +174,8 @@ describe('GitWorktreeService.createUserWorktree() — symlinkDirectories', () =>
     const siblingDir = path.join(path.dirname(repoRoot), 'qwen-wt-sibling');
 
     try {
-      await fs.mkdir(siblingDir);
-      await fs.writeFile(path.join(siblingDir, 'marker'), 'outside');
-
-      const service = new GitWorktreeService(repoRoot);
-      const result = await service.createUserWorktree('traverse', 'main', {
-        symlinkDirectories: ['../qwen-wt-sibling'],
-      });
-
-      expect(result.success).toBe(true);
-      const dest = path.join(result.worktree!.path, '..', 'qwen-wt-sibling');
+      await mkdirWith(siblingDir, 'marker', 'outside');
+      const result = await create('traverse', ['../qwen-wt-sibling']);
       // No symlink was created inside the worktree directory.
       const stat = await fs
         .lstat(path.join(result.worktree!.path, 'qwen-wt-sibling'))
@@ -206,8 +184,6 @@ describe('GitWorktreeService.createUserWorktree() — symlinkDirectories', () =>
       // Sibling itself is untouched.
       const marker = await fs.readFile(path.join(siblingDir, 'marker'), 'utf8');
       expect(marker).toBe('outside');
-      // The variable `dest` is not used for assertion — silence unused warning.
-      void dest;
     } finally {
       await fs.rm(siblingDir, { recursive: true, force: true });
     }
@@ -217,22 +193,13 @@ describe('GitWorktreeService.createUserWorktree() — symlinkDirectories', () =>
     // `.git` is git-internal; symlinking any of it into the worktree
     // would shadow the worktree's gitlink file and silently break
     // commits / status / diff. Verify the guard fires.
-    const service = new GitWorktreeService(repoRoot);
-    const result = await service.createUserWorktree('reject-git', 'main', {
-      symlinkDirectories: ['.git/hooks'],
-    });
-    expect(result.success).toBe(true);
-
-    const wt = result.worktree!.path;
+    const result = await create('reject-git', ['.git/hooks']);
     // Nothing at <worktree>/.git/hooks beyond what `git worktree add`
     // itself populates — and certainly NOT a symlink that we wrote.
     // The guard rejects pre-mkdir, so no `hooks` entry should exist
     // (the worktree gets its own per-worktree .git file, not directory).
-    const wrote = await fs
-      .lstat(path.join(wt, '.git', 'hooks'))
-      .then((s) => s.isSymbolicLink())
-      .catch(() => false);
-    expect(wrote).toBe(false);
+    const hooks = path.join(result.worktree!.path, '.git', 'hooks');
+    expect(await isSymlink(hooks)).toBe(false);
   });
 
   it('rejects paths inside .qwen (security guard)', async () => {
@@ -243,19 +210,10 @@ describe('GitWorktreeService.createUserWorktree() — symlinkDirectories', () =>
     await fs.mkdir(path.join(repoRoot, '.qwen'), { recursive: true });
     await fs.writeFile(path.join(repoRoot, '.qwen', 'projects'), 'data');
 
-    const service = new GitWorktreeService(repoRoot);
-    const result = await service.createUserWorktree('reject-qwen', 'main', {
-      symlinkDirectories: ['.qwen/projects'],
-    });
-    expect(result.success).toBe(true);
-
-    const wt = result.worktree!.path;
+    const result = await create('reject-qwen', ['.qwen/projects']);
     // No symlink at <worktree>/.qwen/projects.
-    const wrote = await fs
-      .lstat(path.join(wt, '.qwen', 'projects'))
-      .then((s) => s.isSymbolicLink())
-      .catch(() => false);
-    expect(wrote).toBe(false);
+    const dest = path.join(result.worktree!.path, '.qwen', 'projects');
+    expect(await isSymlink(dest)).toBe(false);
   });
 
   it('works when the repo path itself contains a symlink boundary (round-7 self-inflicted regression guard)', async () => {
@@ -270,47 +228,29 @@ describe('GitWorktreeService.createUserWorktree() — symlinkDirectories', () =>
     // shared beforeEach (which realpaths `repoRoot` upfront, masking
     // the bug). We point `GitWorktreeService` at a symlink path so
     // `sourceRepoPath` differs from its canonical realpath.
-
-    const realDirRaw = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-wt-realdir-'),
+    const realDir = await fs.realpath(
+      await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-wt-realdir-')),
     );
-    const realDir = await fs.realpath(realDirRaw);
-    const linkParentRaw = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-wt-linkdir-'),
+    const linkParent = await fs.realpath(
+      await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-wt-linkdir-')),
     );
-    const linkParent = await fs.realpath(linkParentRaw);
     const repoViaSymlink = path.join(linkParent, 'repo-via-symlink');
     await fs.symlink(realDir, repoViaSymlink);
 
     try {
-      execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: realDir });
-      execFileSync('git', ['config', 'user.email', 't@e.com'], {
-        cwd: realDir,
-      });
-      execFileSync('git', ['config', 'user.name', 't'], { cwd: realDir });
-      execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
-        cwd: realDir,
-      });
-      await fs.writeFile(path.join(realDir, 'README.md'), 'hi\n');
-      execFileSync('git', ['add', '.'], { cwd: realDir });
-      execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
-        cwd: realDir,
-      });
-
+      await initRepo(realDir);
       // Create node_modules in the real dir so realpath resolves to a
       // canonical path under realDir, NOT repoViaSymlink.
-      const nm = path.join(realDir, 'node_modules');
-      await fs.mkdir(nm);
-      await fs.writeFile(path.join(nm, 'marker'), 'real');
+      await mkdirWith(path.join(realDir, 'node_modules'), 'marker', 'real');
 
       // Service rooted at the SYMLINK path — that's the production shape
       // since git rev-parse --show-toplevel returns the user-supplied
       // path, not the canonical realpath.
-      const service = new GitWorktreeService(repoViaSymlink);
-      const result = await service.createUserWorktree('symlinkedrepo', 'main', {
-        symlinkDirectories: ['node_modules'],
-      });
-      expect(result.success).toBe(true);
+      const result = await create(
+        'symlinkedrepo',
+        ['node_modules'],
+        repoViaSymlink,
+      );
 
       // The configured entry must have been linked. Pre-fix: realSource
       // = realDir/node_modules, repoRootAbs = repoViaSymlink (lexical) →
@@ -328,8 +268,7 @@ describe('GitWorktreeService.createUserWorktree() — symlinkDirectories', () =>
       expect(marker).toBe('real');
     } finally {
       // Remove via the realpath, not the symlink, so rm-rf clears the
-      // backing directory cleanly. The dangling symlink in linkParent
-      // gets removed when we rm-rf linkParent.
+      // backing directory cleanly; the dangling symlink goes with linkParent.
       await fs.rm(realDir, { recursive: true, force: true });
       await fs.rm(linkParent, { recursive: true, force: true });
     }
@@ -340,52 +279,32 @@ describe('GitWorktreeService.createUserWorktree() — symlinkDirectories', () =>
     // `.git`/`.qwen` blocklist checks DON'T resolve symlinks, so a symlink
     // committed into the source repo HEAD (or set up out-of-band by a
     // malicious post-install script / repo tarball) can chain through to
-    // arbitrary targets. Two flavours covered here:
-    //
-    //   1. `escape-to-git` is an OUT-OF-BAND symlink pointing at .git.
-    //      `fs.stat(<repo>/escape-to-git)` follows the symlink and
-    //      succeeds against the .git directory; without the realpath
-    //      guard, we'd happily create `<wt>/escape-to-git →
-    //      <repo>/escape-to-git → <repo>/.git`, giving any tool inside
-    //      the worktree read/write access to .git/hooks, .git/config,
-    //      etc.
-    //
-    //   2. `escape-to-outside` is an OUT-OF-BAND symlink pointing at a
-    //      sibling dir OUTSIDE the repo. Same bypass shape; targets
-    //      whatever lives at the other end (e.g. /etc, ~/.aws, etc.).
-    //
-    // Both are intentionally set up out-of-band (no `git add`) so we
-    // don't rely on EEXIST-from-checkout masking the issue; the
-    // worktree's dest path is empty when the symlink loop runs, so
-    // without the realpath guard `fs.symlink` would succeed.
+    // arbitrary targets. Two flavours:
+    // 1. `escape-to-git` → .git: `fs.stat` follows it and succeeds, so without
+    //    the realpath guard we'd create `<wt>/escape-to-git → <repo>/.git`,
+    //    giving any tool in the worktree read/write access to .git/hooks,
+    //    .git/config, etc.
+    // 2. `escape-to-outside` → a dir OUTSIDE the repo (e.g. /etc, ~/.aws).
+    // Both are set up out-of-band (no `git add`) so EEXIST-from-checkout
+    // cannot mask the issue: the worktree's dest path is empty when the
+    // symlink loop runs, so without the guard `fs.symlink` would succeed.
     await fs.symlink('.git', path.join(repoRoot, 'escape-to-git'));
 
-    const outsideDir = await fs.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-wt-outside-'),
+    const outsideResolved = await fs.realpath(
+      await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-wt-outside-')),
     );
-    const outsideResolved = await fs.realpath(outsideDir);
     await fs.writeFile(path.join(outsideResolved, 'secret'), 'should-not-leak');
     await fs.symlink(outsideResolved, path.join(repoRoot, 'escape-to-outside'));
 
     try {
-      const service = new GitWorktreeService(repoRoot);
-      const result = await service.createUserWorktree('bypass', 'main', {
-        symlinkDirectories: ['escape-to-git', 'escape-to-outside'],
-      });
-      expect(result.success).toBe(true);
-
-      const wt = result.worktree!.path;
+      const names = ['escape-to-git', 'escape-to-outside'];
+      const wt = (await create('bypass', names)).worktree!.path;
 
       // Neither entry should have produced a symlink we wrote: the
       // realpath check refuses .git-chain and out-of-repo targets.
-      for (const name of ['escape-to-git', 'escape-to-outside']) {
-        const dest = path.join(wt, name);
-        const exists = await fs
-          .lstat(dest)
-          .then(() => true)
-          .catch(() => false);
+      for (const name of names) {
         expect(
-          exists,
+          await exists(path.join(wt, name)),
           `realpath guard must refuse to create <wt>/${name} — committed symlink escape would chain through to a sensitive location`,
         ).toBe(false);
       }
@@ -411,42 +330,20 @@ describe('GitWorktreeService.createUserWorktree() — symlinkDirectories', () =>
     // Provision a real `bar/` source so this test would fail loudly
     // if the syntactic guard were removed (we'd see a symlink at
     // `<worktree>/bar` pointing back to the source).
-    await fs.mkdir(path.join(repoRoot, 'bar'));
-    await fs.writeFile(path.join(repoRoot, 'bar', 'marker'), 'bar');
+    await mkdirWith(path.join(repoRoot, 'bar'), 'marker', 'bar');
 
-    const service = new GitWorktreeService(repoRoot);
-    const result = await service.createUserWorktree('dotdot', 'main', {
-      symlinkDirectories: ['foo/../bar'],
-    });
-    expect(result.success).toBe(true);
-
-    const wt = result.worktree!.path;
+    const wt = (await create('dotdot', ['foo/../bar'])).worktree!.path;
     // Nothing at <worktree>/bar (the resolved name)…
-    const bar = await fs
-      .lstat(path.join(wt, 'bar'))
-      .then(() => true)
-      .catch(() => false);
-    expect(bar).toBe(false);
+    expect(await exists(path.join(wt, 'bar'))).toBe(false);
     // …nor at <worktree>/foo (the raw first segment).
-    const foo = await fs
-      .lstat(path.join(wt, 'foo'))
-      .then(() => true)
-      .catch(() => false);
-    expect(foo).toBe(false);
+    expect(await exists(path.join(wt, 'foo'))).toBe(false);
   });
 
   it('handles multiple entries — some present, some missing', async () => {
-    await fs.mkdir(path.join(repoRoot, 'present-a'));
-    await fs.writeFile(path.join(repoRoot, 'present-a', 'x'), 'a');
-    await fs.mkdir(path.join(repoRoot, 'present-b'));
-    await fs.writeFile(path.join(repoRoot, 'present-b', 'y'), 'b');
+    await mkdirWith(path.join(repoRoot, 'present-a'), 'x', 'a');
+    await mkdirWith(path.join(repoRoot, 'present-b'), 'y', 'b');
 
-    const service = new GitWorktreeService(repoRoot);
-    const result = await service.createUserWorktree('multi', 'main', {
-      symlinkDirectories: ['present-a', 'absent', 'present-b'],
-    });
-    expect(result.success).toBe(true);
-
+    const result = await create('multi', ['present-a', 'absent', 'present-b']);
     const wt = result.worktree!.path;
     expect(await fs.readlink(path.join(wt, 'present-a'))).toBe(
       path.join(repoRoot, 'present-a'),
@@ -455,11 +352,7 @@ describe('GitWorktreeService.createUserWorktree() — symlinkDirectories', () =>
       path.join(repoRoot, 'present-b'),
     );
     // Absent: nothing created.
-    const absent = await fs
-      .lstat(path.join(wt, 'absent'))
-      .then(() => true)
-      .catch(() => false);
-    expect(absent).toBe(false);
+    expect(await exists(path.join(wt, 'absent'))).toBe(false);
   });
 
   // Phase D-3 sanity check: fetchPullRequestRef's error taxonomy. We
@@ -494,10 +387,9 @@ describe('GitWorktreeService.createUserWorktree() — symlinkDirectories', () =>
 
     it('handles "no such ref" when origin is reachable but the PR does not exist', async () => {
       // Set up a bare upstream with only main — no pull/<N>/head refs.
-      const upstream = await fs.mkdtemp(
-        path.join(os.tmpdir(), 'qwen-wt-pr-no-such-ref-'),
+      const upstreamResolved = await fs.realpath(
+        await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-wt-pr-no-such-ref-')),
       );
-      const upstreamResolved = await fs.realpath(upstream);
       execFileSync('git', ['init', '-q', '--bare', '-b', 'main'], {
         cwd: upstreamResolved,
       });
@@ -533,22 +425,14 @@ describe('GitWorktreeService.createUserWorktree() — symlinkDirectories', () =>
 
     const noOpts = await service.createUserWorktree('no-opts', 'main');
     expect(noOpts.success).toBe(true);
-    const noOptsDest = path.join(noOpts.worktree!.path, 'node_modules');
-    const noOptsExists = await fs
-      .lstat(noOptsDest)
-      .then(() => true)
-      .catch(() => false);
-    expect(noOptsExists).toBe(false);
+    const noOptsWt = noOpts.worktree!.path;
+    expect(await exists(path.join(noOptsWt, 'node_modules'))).toBe(false);
 
     const emptyArr = await service.createUserWorktree('empty-arr', 'main', {
       symlinkDirectories: [],
     });
     expect(emptyArr.success).toBe(true);
-    const emptyArrDest = path.join(emptyArr.worktree!.path, 'node_modules');
-    const emptyArrExists = await fs
-      .lstat(emptyArrDest)
-      .then(() => true)
-      .catch(() => false);
-    expect(emptyArrExists).toBe(false);
+    const emptyArrWt = emptyArr.worktree!.path;
+    expect(await exists(path.join(emptyArrWt, 'node_modules'))).toBe(false);
   });
 });

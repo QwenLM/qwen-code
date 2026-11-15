@@ -22,6 +22,7 @@ import {
   writeLiveDiscoveryFile,
 } from '../live/discovery.js';
 import { LIVE_HOST_PROTOCOL_VERSION } from '../live/types.js';
+import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
 
 const recordReadFailure = vi.hoisted(() => ({
   path: undefined as string | undefined,
@@ -928,7 +929,7 @@ try {
     expect((await fs.stat(ownerDirectory)).mode & 0o777).toBe(0o755);
   });
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'treats transient directory inspection failures as retryable',
     async () => {
       const stableBaseDir = await temporaryStableBase();

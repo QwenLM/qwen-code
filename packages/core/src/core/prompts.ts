@@ -270,16 +270,23 @@ export function getCustomSystemPrompt(
  */
 export interface PromptToolSurface {
   declaredTools?: ReadonlySet<string>;
+  agentReachable?: boolean;
   executionSandboxFilesystem?: 'read-only' | 'workspace-write';
+  executionSandboxBackend?: 'bwrap' | 'landlock';
+  executionSandboxNetwork?: 'open' | 'closed';
 }
 
 /**
  * Which tools each gated line of `## Using Your Tools` talks about. A line
- * survives only when every tool it names is declared: a line that named a
- * missing tool would send the model after something it cannot call, which is
- * the defect this gating exists to fix. Lines absent from this table are policy
- * that holds regardless of the tool surface (tool fallback, parallel calls,
- * respecting denials) and are never dropped.
+ * survives only when every tool it names is one the session can call: declared,
+ * or — for Agent alone — reachable through the deferred-tool bridge (see
+ * `gateToolGuidance`). A line that named an uncallable tool would send the
+ * model after something it cannot call, which is the defect this gating exists
+ * to fix. Any other deferred tool is reachable but not declared, so its line
+ * drops; its selection rule travels in the first description line the
+ * deferred-tool reminder shows instead (#12702). Lines absent from this table
+ * are policy that holds regardless of the tool surface (tool fallback, parallel
+ * calls, respecting denials) and are never dropped.
  */
 const TOOL_GUIDANCE_LINE_GATES: ReadonlyArray<{
   prefix: string;
@@ -310,7 +317,16 @@ const TOOL_GUIDANCE_LINE_GATES: ReadonlyArray<{
 const PREFER_DEDICATED_TOOLS_PREFIX = '- **Prefer Dedicated Tools:**';
 
 /**
- * Drops the tool-guidance lines whose tools this session did not declare.
+ * Drops tool-guidance lines whose tools the session cannot call. Agent policy
+ * also survives when Agent is reachable through the deferred-tool bridge.
+ *
+ * Agent is deliberately the only tool with that exception: the delegation and
+ * codebase-search bullets are the policy that sends the model to the bridge to
+ * discover Agent, so dropping them whenever Agent is deferred would turn
+ * deferral into silent removal. Every other deferred tool's line (monitor
+ * included) is still dropped — discovery of those is the startup reminder's
+ * job, and their bullets are usage guidance rather than the policy that drives
+ * their own discovery.
  *
  * Implemented as a line filter rather than a rebuilt template on purpose: with
  * no snapshot the section returns unchanged, so the default prompt cannot drift
@@ -327,7 +343,14 @@ function gateToolGuidance(
     const gate = TOOL_GUIDANCE_LINE_GATES.find((entry) =>
       line.startsWith(entry.prefix),
     );
-    return !gate || gate.tools.every((tool) => declared.has(tool));
+    return (
+      !gate ||
+      gate.tools.every(
+        (tool) =>
+          declared.has(tool) ||
+          (tool === ToolNames.AGENT && surface?.agentReachable === true),
+      )
+    );
   });
   // The "prefer dedicated tools" bullet only introduces its sub-bullets, so it
   // goes when every tool it was going to recommend is gone.
@@ -437,7 +460,8 @@ function getToolGuidanceSection(
   if (codeModeOnly) {
     return `
 ## Using Your Tools
-- **Calling Convention:** Ordinary tools exist only inside '${ToolNames.EXEC}', as \`tools.<name>(args)\`. Every other tool declared to you — ${directControls} — is called directly and is not reachable through \`tools\`.
+- **Calling Convention:** Ordinary tools exist only inside '${ToolNames.EXEC}', as \`tools.<jsName>(args)\`. Every other tool declared to you — ${directControls} — is called directly and is not reachable through \`tools\`.
+- **Tool Discovery:** If a needed tool's signature is absent from '${ToolNames.EXEC}', use the top-level '${ToolNames.TOOL_SEARCH}' when available. Read its returned schema and JavaScript name before calling that tool in a later '${ToolNames.EXEC}' program.
 - **Prefer Dedicated Tools:** Do NOT use \`tools.${ToolNames.SHELL}\` to run commands when a relevant dedicated tool is provided. Dedicated tools make actions easier to review:
   - To read files use \`tools.${ToolNames.READ_FILE}\` instead of cat, head, tail, or sed
   - To edit files use \`tools.${ToolNames.EDIT}\` instead of sed or awk
@@ -445,7 +469,7 @@ function getToolGuidanceSection(
   - To search for files use \`tools.${ToolNames.GLOB}\` instead of find or ls
   - To search the content of files, use \`tools.${ToolNames.GREP}\` instead of grep or rg
   - Reserve \`tools.${ToolNames.SHELL}\` for system commands and terminal operations that require shell execution.
-- **Batch Into One Program:** Put independent calls in a single '${ToolNames.EXEC}' program and await them together with \`Promise.all\`. Sequence calls only when a later one needs a value an earlier one produced. Whatever you need to see must be passed to \`text()\` — a result you only assign is never reported back to you. A denied or failed call aborts the whole program, so keep a call that may be refused out of a batch you would then have to repeat.
+- **Batch Into One Program:** Put independent searches and reads in a single '${ToolNames.EXEC}' program with \`await Promise.allSettled([...])\`. Inspect every result: print fulfilled outputs and rejected reasons with \`String(result.reason)\`. The runtime runs safe calls concurrently within its limit; one rejected promise leaves the other results available. Keep dependent actions, mutations, and approvals sequential. Whatever you need to see must be passed to \`text()\` — a result you only assign is never reported back to you. User cancellation still stops unfinished calls.
 - **Tool Fallback:** If a tool returns empty, unhelpful, or unexpected results, try an alternative tool that can accomplish the same goal before telling the user it cannot be done. Never give up after a single tool failure.
 ${taskManagementToolGuidance}- **File Paths:** Always use absolute paths when referring to files with tools like \`tools.${ToolNames.READ_FILE}\` or \`tools.${ToolNames.WRITE_FILE}\`. Relative paths are not supported.
 - **Background Processes:** Use background execution with \`is_background: true\` for commands that are unlikely to stop on their own, e.g. \`node server.js\`. Do not append a trailing \`&\` when using the shell tool's managed background mode. If unsure, follow the active interaction mode's question guidance.
@@ -457,7 +481,7 @@ ${taskManagementToolGuidance}- **File Paths:** Always use absolute paths when re
   }
   // CodeModeOnly is deliberately not gated above: there the declared surface is
   // `exec` plus a few direct controls, while the tools this section names are
-  // reached as `tools.<name>` inside `exec` and are not declarations at all.
+  // reached as `tools.<jsName>` inside `exec` and are not declarations at all.
   const directGuidance = `
 ## Using Your Tools
 - **Prefer Dedicated Tools:** Do NOT use the '${ToolNames.SHELL}' to run commands when a relevant dedicated tool is provided. Dedicated tools make actions easier to review:
@@ -493,6 +517,7 @@ function buildDefaultBasePrompt(
   todoWriteEnabled = false,
   codeModeOnly = false,
   surface?: PromptToolSurface,
+  identityOverride: string | null = null,
 ): string {
   // A style with `keepCodingInstructions: false` drops exactly the
   // software-engineering workflow section; every other section, including the
@@ -518,7 +543,7 @@ When you create a todo list:
   // variant applies only to the default identity sentence — the override is
   // distributor-owned wording we must not rewrite.
   const coreIdentity =
-    resolveCoreIdentityOverride() ??
+    identityOverride ??
     getDefaultCoreIdentitySentence(interaction.role, Boolean(outputStyle));
 
   const toolGuidance = getToolGuidanceSection(
@@ -532,6 +557,7 @@ ${coreIdentity}
 # Core Mandates
 
 - **UserPromptSubmit Context:** Text inside a \`<qwen:user-prompt-submit-context>\` tag is model context added by a configured \`UserPromptSubmit\` hook, not user input.
+- **Answer From Context First:** For follow-up questions, reuse prior observations when they already answer the question and remain current. Re-check when facts may have changed, the user asks for current or post-change state, or history is insufficient, uncertain, or only a summary lacking the needed evidence. This saves redundant investigation, not verification before claiming a change works.
 - **Conventions:** Never assume file contents. Read relevant code, imports, tests, and configuration before making changes. Follow the project's formatting, naming, typing, structure, and architectural patterns.
 - **Libraries/Frameworks:** Verify a dependency's availability and established usage in project manifests, imports, or neighboring code before using it.
 - **Comments:** Default to none. Add one only when the _why_ cannot be conveyed through naming or code structure — a hidden constraint, a subtle invariant, or a workaround for a specific bug. Do not edit comments that are separate from the code you are changing.
@@ -588,9 +614,16 @@ ${(function () {
   const isGenericSandbox = !!process.env['SANDBOX']; // Check if SANDBOX is set to any non-empty value
 
   if (executionSandboxFilesystem) {
+    if (surface?.executionSandboxBackend === 'landlock') {
+      return `
+# Tool Execution Sandbox (Landlock, partial)
+Shell commands and file mutations run under Landlock filesystem restrictions. The workspace is ${executionSandboxFilesystem === 'workspace-write' ? 'writable' : 'read-only'} for file content and directory changes; writes outside the admitted writable roots are denied. Enforcement is partial: metadata operations such as chmod, chown, extended attributes, and timestamps are not fully confined. Command network policy is ${surface.executionSandboxNetwork ?? 'open'}. Landlock does not create PID or network namespaces; host reads, process visibility, and reachable host services remain outside this boundary.
+A refused pathname write can fail with 'Permission denied' (EACCES), which can also come from ordinary file permissions. Treat EACCES as a possible sandbox refusal: report it to the user and name the refused path. Do NOT work around a refusal by writing somewhere else, escalating privileges, or retrying the same write.
+`;
+    }
     return `
 # Tool Execution Sandbox (bwrap)
-Shell commands and file mutations are confined by a kernel-level sandbox. The host filesystem is mounted READ-ONLY outside the admitted workspace; the workspace is ${executionSandboxFilesystem === 'workspace-write' ? 'writable' : 'read-only'}, and command network access follows the operator policy. A write refused by a read-only mount fails with 'Read-only file system' (EROFS). 'Permission denied' (EACCES) can instead come from ordinary file permissions. Host reads and pathname Unix sockets remain accessible.
+Shell commands and file mutations are confined by a kernel-level sandbox. The host filesystem is mounted READ-ONLY outside the admitted workspace; the workspace is ${executionSandboxFilesystem === 'workspace-write' ? 'writable' : 'read-only'}, and ${surface?.executionSandboxNetwork ? `command network policy is ${surface.executionSandboxNetwork}` : 'command network access follows the operator policy'}. ${surface?.executionSandboxNetwork === 'closed' ? 'Closed networking prevents new ordinary IP connections, not access through existing caller-provided standard streams. ' : ''}A write refused by a read-only mount fails with 'Read-only file system' (EROFS). 'Permission denied' (EACCES) can instead come from ordinary file permissions. Host reads and pathname Unix sockets remain accessible.
 When a write fails with EROFS, report it to the user and name the refused path. Do NOT work around a refusal by writing somewhere else, escalating privileges, or retrying the same write.
 `;
   } else if (isSandboxExec) {
@@ -686,6 +719,31 @@ export function resolveMainSessionOutputStyle(config: {
   return resolveEffectiveOutputStyle(style, resolveInteractionMode(config));
 }
 
+export interface CoreSystemPromptSource {
+  systemMdPath: string;
+  systemPrompt?: string;
+  identity: string | null;
+}
+
+export function loadCoreSystemPromptSource(): CoreSystemPromptSource {
+  const systemMdEnabled = isSystemMdActive();
+  const resolution = resolvePathFromEnv(process.env['QWEN_SYSTEM_MD']);
+  const systemMdPath =
+    systemMdEnabled && !resolution.isSwitch && resolution.value
+      ? resolution.value
+      : path.resolve(path.join(QWEN_DIR, 'system.md'));
+  if (systemMdEnabled && !fs.existsSync(systemMdPath)) {
+    throw new Error(`missing system prompt file '${systemMdPath}'`);
+  }
+  return {
+    systemMdPath,
+    ...(systemMdEnabled
+      ? { systemPrompt: fs.readFileSync(systemMdPath, 'utf8') }
+      : {}),
+    identity: systemMdEnabled ? null : resolveCoreIdentityOverride(),
+  };
+}
+
 /**
  * Builds the stable base system prompt (identity, mandates, tool guidance).
  *
@@ -715,33 +773,18 @@ export function getCoreSystemPrompt(
   // Trailing options object rather than an eighth positional parameter: this
   // function is re-exported from the package root and its arity is asserted by
   // callers' tests (#12032).
-  options?: PromptToolSurface,
+  options?: PromptToolSurface & { source?: CoreSystemPromptSource },
 ): string {
+  const source = options?.source;
   const effectiveOutputStyle = resolveEffectiveOutputStyle(
     outputStyle,
     interactionMode,
   );
   // if QWEN_SYSTEM_MD is set (and not 0|false), override system prompt from file
   // default path is .qwen/system.md (project-level), can be overridden via QWEN_SYSTEM_MD
-  const systemMdEnabled = isSystemMdActive();
-  let systemMdPath = path.resolve(path.join(QWEN_DIR, 'system.md'));
-
-  if (systemMdEnabled) {
-    // Resolve the environment variable to get either a path or a switch value.
-    const systemMdResolution = resolvePathFromEnv(
-      process.env['QWEN_SYSTEM_MD'],
-    );
-
-    // We update systemMdPath to this new custom path.
-    if (!systemMdResolution.isSwitch && systemMdResolution.value) {
-      systemMdPath = systemMdResolution.value;
-    }
-
-    // require file to exist when override is enabled
-    if (!fs.existsSync(systemMdPath)) {
-      throw new Error(`missing system prompt file '${systemMdPath}'`);
-    }
-  }
+  const promptSource = source ?? loadCoreSystemPromptSource();
+  const systemMdEnabled = promptSource.systemPrompt !== undefined;
+  const systemMdPath = promptSource.systemMdPath;
 
   const interaction = getInteractionModePrompt(interactionMode);
   // A QWEN_SYSTEM_MD override replaces the base prompt verbatim and is
@@ -755,7 +798,7 @@ export function getCoreSystemPrompt(
   // default-prompt branch and are ignored whenever `QWEN_SYSTEM_MD` is in
   // effect (including empty-file clear).
   const basePrompt = systemMdEnabled
-    ? fs.readFileSync(systemMdPath, 'utf8')
+    ? promptSource.systemPrompt!
     : buildDefaultBasePrompt(
         interaction,
         model,
@@ -763,6 +806,7 @@ export function getCoreSystemPrompt(
         todoWriteEnabled,
         codeModeOnly,
         options,
+        promptSource.identity,
       );
 
   // if QWEN_WRITE_SYSTEM_MD is set (and not 0|false), write base system prompt to file
@@ -772,7 +816,11 @@ export function getCoreSystemPrompt(
 
   // Check if the feature is enabled. This proceeds only if the environment
   // variable is set and is not explicitly '0' or 'false'.
-  if (writeSystemMdResolution.value && !writeSystemMdResolution.isDisabled) {
+  if (
+    !source &&
+    writeSystemMdResolution.value &&
+    !writeSystemMdResolution.isDisabled
+  ) {
     const writePath = writeSystemMdResolution.isSwitch
       ? systemMdPath
       : writeSystemMdResolution.value;
@@ -792,6 +840,7 @@ export function getCoreSystemPrompt(
             todoWriteEnabled,
             codeModeOnly,
             options,
+            promptSource.identity,
           ),
     );
   }
@@ -836,12 +885,6 @@ export interface SystemPromptLayers {
   /** Context layer: caller-supplied append prompt (e.g. --append-system-prompt). */
   appendPrompt?: string;
   /**
-   * Context layer: repo snapshot (branch + recent commits), computed once
-   * per session. Joined without a `---` separator — it carries its own
-   * heading.
-   */
-  gitStatus?: string | null;
-  /**
    * Volatile layer: the managed auto-memory section, rewritten in-session on
    * every memory save. Always last, so a save invalidates the shortest
    * possible cached prompt prefix.
@@ -855,7 +898,6 @@ export function assembleSystemPrompt(layers: SystemPromptLayers): string {
     buildSystemPromptSuffix(layers.mediaGuidance ?? undefined) +
     buildSystemPromptSuffix(layers.contextFiles) +
     buildSystemPromptSuffix(layers.appendPrompt) +
-    (layers.gitStatus ? `\n\n${layers.gitStatus}` : '') +
     buildSystemPromptSuffix(layers.autoMemory)
   );
 }
@@ -1035,14 +1077,18 @@ model: [tool_call: ${ToolNames.EXEC} with source: await tools.${ToolNames.SHELL}
 user: Refactor the auth logic in src/auth.py to use the requests library instead of urllib.
 model: I'll inspect the source, tests, and dependencies. Independent reads go in one program.
 [tool_call: ${ToolNames.EXEC} with source:
-const [tests, requirements, source] = await Promise.all([
+const results = await Promise.allSettled([
   tools.${ToolNames.GLOB}({ pattern: 'tests/test_auth.py' }),
   tools.${ToolNames.READ_FILE}({ file_path: '/path/to/requirements.txt' }),
   tools.${ToolNames.READ_FILE}({ file_path: '/path/to/src/auth.py' }),
 ]);
-text(tests.output);
-text(requirements.output);
-text(source.output);
+for (const [index, result] of results.entries()) {
+  if (result.status === 'fulfilled') {
+    text({ index, output: result.value.output });
+  } else {
+    text({ index, error: String(result.reason) });
+  }
+}
 ]
 (After finding /path/to/tests/test_auth.py)
 [tool_call: ${ToolNames.EXEC} with source: text((await tools.${ToolNames.READ_FILE}({ file_path: '/path/to/tests/test_auth.py' })).output);]
@@ -1061,19 +1107,22 @@ Refactored the auth logic; the linter and tests passed.
 <example>
 user: Write tests for someFile.ts
 model:
-I'll read the source and an existing test together to follow project conventions.
+I'll read the source and an existing test, and check whether the target test file exists.
 [tool_call: ${ToolNames.EXEC} with source:
-const [source, existing] = await Promise.all([
+const results = await Promise.allSettled([
   tools.${ToolNames.READ_FILE}({ file_path: '/path/to/someFile.ts' }),
   tools.${ToolNames.READ_FILE}({ file_path: '/path/to/existingTest.test.ts' }),
+  tools.${ToolNames.READ_FILE}({ file_path: '/path/to/someFile.test.ts' }),
 ]);
-text(source.output);
-text(existing.output);
+for (const [index, result] of results.entries()) {
+  if (result.status === 'fulfilled') {
+    text({ index, output: result.value.output });
+  } else {
+    text({ index, error: String(result.reason) });
+  }
+}
 ]
-(After reviewing both)
-Now I'll check whether the intended test file already exists. A failed call aborts the whole program, so this probe stays on its own.
-[tool_call: ${ToolNames.EXEC} with source: text((await tools.${ToolNames.READ_FILE}({ file_path: '/path/to/someFile.test.ts' })).output);]
-(After ${ToolNames.READ_FILE} reports that /path/to/someFile.test.ts does not exist)
+(After reviewing the successful reads and confirming that /path/to/someFile.test.ts does not exist)
 [tool_call: ${ToolNames.EXEC} with source: await tools.${ToolNames.WRITE_FILE}({ file_path: '/path/to/someFile.test.ts', content: '(test code content)' });]
 (After confirming the project's test command)
 [tool_call: ${ToolNames.EXEC} with source:

@@ -9,6 +9,20 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+const availabilityMock = vi.hoisted(() => ({
+  controller: undefined as
+    | {
+        getSnapshot: () => string;
+        subscribe: () => () => void;
+        check: () => Promise<void>;
+        waitUntilAvailable: (signal: AbortSignal) => Promise<void>;
+      }
+    | undefined,
+}));
+vi.mock('../daemon/availability-context', () => ({
+  useDaemonAvailabilityController: () => availabilityMock.controller,
+}));
+
 import type { LocalFilesWindowLike } from './capabilities.js';
 import type { DirectoryHandleStore } from './directory-handle-store.js';
 import type {
@@ -246,6 +260,7 @@ afterEach(() => {
   }
   activeRoot = undefined;
   activeContainer = undefined;
+  availabilityMock.controller = undefined;
 });
 
 describe('useLocalFilesBridge context gating', () => {
@@ -299,6 +314,46 @@ describe('useLocalFilesBridge context gating', () => {
 });
 
 describe('useLocalFilesBridge connect', () => {
+  it('passes provider availability before registry registration and rebinds when credentials replace it', async () => {
+    const wait = vi.fn(
+      (signal: AbortSignal) =>
+        new Promise<void>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), {
+            once: true,
+          });
+        }),
+    );
+    availabilityMock.controller = {
+      getSnapshot: () => 'unavailable',
+      subscribe: () => () => {},
+      check: async () => {},
+      waitUntilAvailable: wait,
+    };
+    const handle = fakeHandle('ai_coding', { query: 'granted' });
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(async () => handle),
+      store: fakeStore(),
+    });
+    await h.flush();
+    await act(async () => {
+      await h.get().connect();
+    });
+    await h.flush();
+    expect(wait).toHaveBeenCalledOnce();
+    expect(h.sockets).toHaveLength(0);
+    availabilityMock.controller = {
+      getSnapshot: () => 'available',
+      subscribe: () => () => {},
+      check: async () => {},
+      waitUntilAvailable: async () => {},
+    };
+    h.rerender({ token: 'new-credentials' });
+    await h.flush();
+    expect(h.sockets).toHaveLength(1);
+  });
+
   it('picks, persists, and registers against the session', async () => {
     const handle = fakeHandle('ai_coding', { query: 'granted' });
     const pick = vi.fn(async () => handle);

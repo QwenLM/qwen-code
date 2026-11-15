@@ -178,6 +178,7 @@ function CommitRow({
   entry,
   workspaceCwd,
   gitCwd,
+  gitSessionId,
   now,
   graph,
   graphWidth,
@@ -185,6 +186,7 @@ function CommitRow({
   entry: DaemonGitLogEntry;
   workspaceCwd: string;
   gitCwd?: string;
+  gitSessionId?: string;
   now: number;
   graph?: CommitGraphRow;
   graphWidth: number;
@@ -221,7 +223,7 @@ function CommitRow({
       setError(false);
       client
         .workspaceByCwd(workspaceCwd)
-        .workspaceGitCommitDetail(entry.sha, gitCwd)
+        .workspaceGitCommitDetail(entry.sha, gitCwd, gitSessionId)
         .then((result) => {
           if (cancelledRef.current) return;
           setDetail(result);
@@ -345,10 +347,12 @@ function CommitRow({
 export function GitLogContent({
   workspaceCwd,
   gitCwd,
+  gitSessionId,
   onSubtitleChange,
 }: {
   workspaceCwd: string;
   gitCwd?: string;
+  gitSessionId?: string;
   onSubtitleChange?: (subtitle: string | undefined) => void;
 }) {
   const { client } = useWorkspace();
@@ -383,8 +387,9 @@ export function GitLogContent({
         .workspaceGitLog(PAGE_SIZE, skip, gitCwd, undefined, {
           all: allBranches,
           search: query || undefined,
+          sessionId: gitSessionId,
         }),
-    [client, workspaceCwd, gitCwd, allBranches, query],
+    [client, workspaceCwd, gitCwd, allBranches, query, gitSessionId],
   );
 
   useEffect(() => {
@@ -481,6 +486,7 @@ export function GitLogContent({
               entry={entry}
               workspaceCwd={workspaceCwd}
               gitCwd={gitCwd}
+              gitSessionId={gitSessionId}
               now={now}
               graph={graph?.[index]}
               graphWidth={graphWidth}

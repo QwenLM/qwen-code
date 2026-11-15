@@ -61,6 +61,9 @@ specified in the B2a follow-up,
 [Paired engine owner selection and typed rejections](./2026-09-26-paired-engine-owner-selection.md).
 Host wiring and the selection rules for new sessions are specified in the B2d
 design, [Paired engine host wiring](./2026-09-26-paired-engine-host-wiring.md).
+The [ordinary-host Managed engine](./2026-09-27-ordinary-host-managed-engine.md)
+design settles the relationship: a Managed session is a Managed Session log
+whose first transaction records the owner and then the header.
 
 ### Channels and admission
 
@@ -99,9 +102,12 @@ merely because a malformed response returned its ID.
 
 Quarantine recovery follows the #12737 decision and is specified in
 [paired engine per-engine operations](./2026-09-26-paired-engine-per-engine-operations.md)
-(B2c). A quarantined channel admits no new prompt, background turn or side
-request, closes its settled sessions, retires once it drains, and is terminated
-at a drain deadline measured once from the start of the quarantine. Admission,
+(B2c). A quarantined channel admits no new prompt, message from another
+session or side request. Until its termination begins it admits background
+notification turns, which report work that already exists, except on a
+session that a tightening workspace change has fenced. It closes its settled
+sessions, retires once it drains, and is terminated at a drain deadline
+measured once from the start of the quarantine. Admission,
 IDs and owners stay held until the channel's exit is observed, and the engine
 stays closed to fresh sessions until the child's process tree is released.
 
@@ -165,8 +171,12 @@ branch/side-task requests reject before mutating history.
 | Session routing     | `session-control-plane.ts`, `BridgeClient` callbacks                                       |
 | Verification        | Collocated Bridge/lifecycle tests and isolated process test script                         |
 
-Existing daemon, Channels and embedded constructors remain on the single-factory
-path. There are no new daemon routes. Workspace control is workspace scoped;
+Every constructor stays on the single-factory path unless paired engines are
+enabled: `qwen serve --experimental-paired-engines` pairs the daemon's ordinary
+workspace runtimes, and an embedder that sets the same serve option pairs the
+serve app's default Bridge
+([paired engine host wiring](./2026-09-26-paired-engine-host-wiring.md)). There
+are no new daemon routes. Workspace control is workspace scoped;
 all session operations belong to the live session owner. A missing or failed
 Managed owner must never resolve through a Legacy or primary-runtime fallback.
 
@@ -193,5 +203,5 @@ factory/connection calls and pending teardown, not only final session counts.
 The owner persistence dependency and production host receipt implementation
 remain the integration questions posted in #12380; the Bridge seam is usable
 for contract tests while those are resolved. The B2a follow-up implements the
-Legacy receipt and the restore selector; host wiring is designed in B2d and
-remains unimplemented.
+Legacy receipt and the restore selector; B2d wires paired engines into ordinary
+hosts behind an experimental opt-in, with no Managed engine registered yet.

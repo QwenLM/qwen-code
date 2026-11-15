@@ -15,6 +15,52 @@ describe('normalizeSessionData', () => {
     getToolRegistry: vi.fn().mockReturnValue(undefined),
   } as unknown as Config;
 
+  it('normalizes outer results without inventing calls for internal evidence', () => {
+    const records: ChatRecord[] = [
+      { id: 'outer', name: 'exec', provenance: 'execution_output' as const },
+      {
+        id: 'nested-read',
+        name: 'read_file',
+        provenance: 'tool_result' as const,
+        subtype: 'code_mode_tool_result' as const,
+      },
+      {
+        id: 'nested-goal',
+        name: 'get_goal',
+        provenance: 'goal_runtime' as const,
+        subtype: 'code_mode_tool_result' as const,
+      },
+      {
+        id: 'direct-goal',
+        name: 'get_goal',
+        provenance: 'goal_runtime' as const,
+      },
+    ].map(({ id, name, provenance, ...options }) => ({
+      uuid: id,
+      parentUuid: null,
+      sessionId: 'session-1',
+      timestamp: '2026-08-16T00:00:00.000Z',
+      cwd: '/workspace',
+      version: 'test',
+      type: 'tool_result',
+      provenance,
+      ...options,
+      message: {
+        role: 'user',
+        parts: [{ functionResponse: { id, name, response: { output: id } } }],
+      },
+      toolCallResult: { callId: id, resultDisplay: id },
+    }));
+    const normalized = normalizeSessionData(
+      { sessionId: 'session-1', startTime: records[0].timestamp, messages: [] },
+      records,
+      config,
+    );
+    expect(
+      normalized.messages.map((message) => message.toolCall?.toolCallId),
+    ).toEqual(['outer', 'direct-goal']);
+  });
+
   it.each(['thought-first', 'thought-last'])(
     'attaches assistant usage to the answer after collection (%s)',
     async (order) => {

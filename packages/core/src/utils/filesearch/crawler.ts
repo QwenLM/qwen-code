@@ -594,7 +594,10 @@ function runCommand(
       flushRemainder();
 
       const ok = code === 0;
-      if (!ok && !options?.silentOnFailure) {
+      // `!settled` skips a failure the `error` handler already reported: when a
+      // spawn fails, libuv surfaces UV_ENOENT as the close code (-2 on Linux),
+      // so without this the same single failure is logged twice (#14537).
+      if (!ok && !options?.silentOnFailure && !settled) {
         logCommandProblem('command failed', command, args, {
           code,
           stderr: stderrBuf,
@@ -1351,6 +1354,10 @@ async function crawlWithRipgrep(
   const rgResult = await commandRunner('rg', rgArgs, crawlDirectory, 20_000, {
     collectLines: false,
     onLine: processRgFile,
+    // An optional-capability probe: its failure is already narrated by the
+    // "falling back to fdir (ripgrep unavailable)" warn below, so the raw
+    // spawn diagnostics would only be noise (#14537).
+    silentOnFailure: true,
   });
 
   if (!rgResult.success) {

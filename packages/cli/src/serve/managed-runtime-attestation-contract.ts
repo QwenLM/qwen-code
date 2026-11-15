@@ -50,6 +50,15 @@ export const OWNED_MANAGED_RUNTIME_ROUTES = Object.freeze([
     responseBodyLimitBytes: MANAGED_RUNTIME_TOOL_RESULT_BODY_LIMIT_BYTES,
     cacheControl: 'no-store',
   }),
+  Object.freeze({
+    key: 'acknowledge',
+    method: 'POST',
+    path: '/internal/managed-runtime/v2/acknowledge',
+    protocolVersion: 2,
+    requestBodyLimitBytes: MANAGED_RUNTIME_ATTESTATION_BODY_LIMIT_BYTES,
+    responseBodyLimitBytes: MANAGED_RUNTIME_TOOL_RESULT_BODY_LIMIT_BYTES,
+    cacheControl: 'no-store',
+  }),
 ] as const);
 
 export type OwnedManagedRuntimeRoute =
@@ -222,6 +231,27 @@ export function authorizeManagedRuntime(
   };
 }
 
+/**
+ * The response header in which a v2 tool route names the worker's
+ * incarnation. No request carries the incarnation, so a process that took
+ * the port of a worker that exited cannot answer as that worker.
+ */
+export const MANAGED_RUNTIME_INCARNATION_HEADER =
+  'X-Qwen-Managed-Runtime-Incarnation';
+
+/** Names the worker's incarnation on every answer to an authorized request. */
+export function nameManagedRuntimeIncarnation(
+  identity: Pick<ManagedRuntimeAttestationIdentity, 'runtimeIncarnation'>,
+): RequestHandler {
+  return (_req, res, next): void => {
+    res.setHeader(
+      MANAGED_RUNTIME_INCARNATION_HEADER,
+      identity.runtimeIncarnation,
+    );
+    next();
+  };
+}
+
 function handleAttestation(
   identity: ManagedRuntimeAttestationIdentity,
   responseJson: string,
@@ -333,7 +363,15 @@ export function isOwnedManagedRuntimeRoute(
   url: string | undefined,
   routes: readonly DeclaredManagedRuntimeRoute[],
 ): boolean {
-  return routes.some((route) => method === route.method && url === route.path);
+  return routes.some((route) => {
+    if (method !== route.method || !url) return false;
+    if (url === route.path) return true;
+    if (!route.path.endsWith('/:digest')) return false;
+    const prefix = route.path.slice(0, -':digest'.length);
+    return (
+      url.startsWith(prefix) && /^[0-9a-f]{64}$/u.test(url.slice(prefix.length))
+    );
+  });
 }
 
 /** Admits exactly the declared routes, by default those of boot v1. */

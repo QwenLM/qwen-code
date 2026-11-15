@@ -38,10 +38,10 @@ function inspectTodoRequests(requests: Array<Record<string, unknown>>) {
   const toolResult = requests
     .flatMap(
       (request) =>
-        ((request?.['messages'] ?? []) as Array<{
+        (request?.['messages'] ?? []) as Array<{
           role?: string;
           content?: unknown;
-        }>) ?? [],
+        }>,
     )
     .filter(({ role }) => role === 'tool')
     .map(({ content }) => JSON.stringify(content))

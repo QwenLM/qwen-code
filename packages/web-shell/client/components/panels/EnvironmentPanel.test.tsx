@@ -998,8 +998,21 @@ describe('EnvironmentPanel', () => {
           storage: 'workspace',
           source: 'tool',
           status: 'available',
-          title: 'report.md',
+          title: 'Quarterly report',
           workspacePath: 'reports/report.md',
+          retention: 'restorable',
+          clientRetained: false,
+          createdAt: '2026-08-26T00:00:00.000Z',
+          updatedAt: '2026-08-26T00:00:00.000Z',
+        },
+        {
+          id: 'artifact-2',
+          kind: 'link',
+          storage: 'external_url',
+          source: 'tool',
+          status: 'available',
+          title: 'Table details',
+          url: 'https://example.com/orders',
           retention: 'restorable',
           clientRetained: false,
           createdAt: '2026-08-26T00:00:00.000Z',
@@ -1011,9 +1024,16 @@ describe('EnvironmentPanel', () => {
 
     expect(view.textContent).toContain('Artifacts');
     expect(view.textContent).toContain('report.md');
+    expect(view.textContent).not.toContain('Quarterly report');
+    expect(view.textContent).toContain('Table details');
     const row = Array.from(view.querySelectorAll('button')).find((button) =>
       button.textContent?.includes('report.md'),
     );
+    expect(row?.getAttribute('title')).toBe('report.md');
+    const linkRow = Array.from(view.querySelectorAll('button')).find((button) =>
+      button.textContent?.includes('Table details'),
+    );
+    expect(linkRow?.getAttribute('title')).toBe('Table details');
     act(() => row?.click());
     expect(onOpenArtifact).toHaveBeenCalledWith('artifact-1');
   });

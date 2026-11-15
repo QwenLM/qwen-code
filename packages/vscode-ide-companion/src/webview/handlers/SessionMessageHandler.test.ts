@@ -145,66 +145,75 @@ describe('SessionMessageHandler', () => {
     });
   });
 
-  it('sends inline file contents to ACP without exposing them in the user display', async () => {
-    mockProcessImageAttachments.mockImplementation(
-      async (promptText: string) => ({
-        formattedText: promptText,
-        displayText: promptText,
-        savedImageCount: 0,
-        promptImages: [],
-      }),
-    );
-    const agentManager = {
-      isConnected: true,
-      currentSessionId: 'session-1',
-      sendMessage: vi.fn().mockResolvedValue(undefined),
-    };
-    const conversationStore = {
-      createConversation: vi.fn().mockResolvedValue({ id: 'conversation-1' }),
-      getConversation: vi.fn().mockResolvedValue(null),
-      addMessage: vi.fn(),
-      renameConversationId: vi.fn().mockResolvedValue(true),
-    };
-    const sendToWebView = vi.fn();
-    const handler = new SessionMessageHandler(
-      agentManager as never,
-      conversationStore as never,
-      null,
-      sendToWebView,
-    );
+  it.each(['sendMessage', 'editMessage'])(
+    'keeps original %s provenance before expanding inline files',
+    async (type) => {
+      mockProcessImageAttachments.mockImplementation(
+        async (promptText: string) => ({
+          formattedText: promptText,
+          displayText: promptText,
+          savedImageCount: 0,
+          promptImages: [],
+        }),
+      );
+      const agentManager = {
+        isConnected: true,
+        currentSessionId: 'session-1',
+        sendMessage: vi.fn().mockResolvedValue(undefined),
+      };
+      const conversationStore = {
+        createConversation: vi.fn().mockResolvedValue({ id: 'conversation-1' }),
+        getConversation: vi.fn().mockResolvedValue(null),
+        addMessage: vi.fn(),
+        renameConversationId: vi.fn().mockResolvedValue(true),
+      };
+      const sendToWebView = vi.fn();
+      const handler = new SessionMessageHandler(
+        agentManager as never,
+        conversationStore as never,
+        null,
+        sendToWebView,
+      );
 
-    await handler.handle({
-      type: 'sendMessage',
-      data: {
-        text: 'Please inspect this file',
-        inlineFiles: [
+      await handler.handle({
+        type,
+        data: {
+          text: 'Please inspect this file',
+          inlineFiles: [
+            {
+              name: 'notes&<.md',
+              mediaType: 'text/markdown',
+              text: '# private contents',
+            },
+          ],
+        },
+      });
+
+      expect(agentManager.sendMessage).toHaveBeenCalledWith(
+        [
           {
-            name: 'notes&<.md',
-            mediaType: 'text/markdown',
-            text: '# private contents',
+            type: 'text',
+            text: 'Please inspect this file\n\n<attached_file name="notes&amp;&lt;.md" media_type="text/markdown">\n# private contents\n</attached_file>',
           },
         ],
-      },
-    });
-
-    expect(agentManager.sendMessage).toHaveBeenCalledWith([
-      {
-        type: 'text',
-        text: 'Please inspect this file\n\n<attached_file name="notes&amp;&lt;.md" media_type="text/markdown">\n# private contents\n</attached_file>',
-      },
-    ]);
-    expect(conversationStore.addMessage).toHaveBeenCalledWith(
-      'conversation-1',
-      expect.objectContaining({
-        role: 'user',
-        content: 'Please inspect this file',
-      }),
-    );
-    expect(sendToWebView).toHaveBeenCalledWith({
-      type: 'sessionTitleUpdated',
-      data: { sessionId: 'conversation-1', title: 'Please inspect this file' },
-    });
-  });
+        { submittedPrompt: 'Please inspect this file' },
+      );
+      expect(conversationStore.addMessage).toHaveBeenCalledWith(
+        'conversation-1',
+        expect.objectContaining({
+          role: 'user',
+          content: 'Please inspect this file',
+        }),
+      );
+      expect(sendToWebView).toHaveBeenCalledWith({
+        type: 'sessionTitleUpdated',
+        data: {
+          sessionId: 'conversation-1',
+          title: 'Please inspect this file',
+        },
+      });
+    },
+  );
 
   it('sends inline files when the user text is empty', async () => {
     mockProcessImageAttachments.mockImplementation(
@@ -242,12 +251,15 @@ describe('SessionMessageHandler', () => {
       },
     });
 
-    expect(agentManager.sendMessage).toHaveBeenCalledWith([
-      {
-        type: 'text',
-        text: '<attached_file name="empty.txt" media_type="text/plain">\n\n</attached_file>',
-      },
-    ]);
+    expect(agentManager.sendMessage).toHaveBeenCalledWith(
+      [
+        {
+          type: 'text',
+          text: '<attached_file name="empty.txt" media_type="text/plain">\n\n</attached_file>',
+        },
+      ],
+      { submittedPrompt: '' },
+    );
     expect(conversationStore.addMessage).toHaveBeenCalledWith(
       'conversation-1',
       expect.objectContaining({ role: 'user', content: '' }),
@@ -357,18 +369,21 @@ describe('SessionMessageHandler', () => {
       },
     });
 
-    expect(agentManager.sendMessage).toHaveBeenCalledWith([
-      {
-        type: 'text',
-        text: '这是什么内容\n\n@/tmp/clipboard/clipboard-123.png',
-      },
-      {
-        type: 'resource_link',
-        name: 'clipboard-123.png',
-        mimeType: 'image/png',
-        uri: pathToFileURL('/tmp/clipboard/clipboard-123.png').href,
-      },
-    ]);
+    expect(agentManager.sendMessage).toHaveBeenCalledWith(
+      [
+        {
+          type: 'text',
+          text: '这是什么内容\n\n@/tmp/clipboard/clipboard-123.png',
+        },
+        {
+          type: 'resource_link',
+          name: 'clipboard-123.png',
+          mimeType: 'image/png',
+          uri: pathToFileURL('/tmp/clipboard/clipboard-123.png').href,
+        },
+      ],
+      { submittedPrompt: '这是什么内容' },
+    );
   });
 
   it('echoes the user prompt into the ACP transcript as a user_message_chunk', async () => {
@@ -695,18 +710,21 @@ describe('SessionMessageHandler', () => {
       },
     });
 
-    expect(agentManager.sendMessage).toHaveBeenCalledWith([
-      {
-        type: 'text',
-        text: '/workspace/screen shot.png\n/workspace/notes.md\n\ndescribe it',
-      },
-      {
-        type: 'resource_link',
-        name: 'screen shot.png',
-        mimeType: 'image/png',
-        uri: pathToFileURL('/workspace/screen shot.png').href,
-      },
-    ]);
+    expect(agentManager.sendMessage).toHaveBeenCalledWith(
+      [
+        {
+          type: 'text',
+          text: '/workspace/screen shot.png\n/workspace/notes.md\n\ndescribe it',
+        },
+        {
+          type: 'resource_link',
+          name: 'screen shot.png',
+          mimeType: 'image/png',
+          uri: pathToFileURL('/workspace/screen shot.png').href,
+        },
+      ],
+      { submittedPrompt: 'describe it' },
+    );
   });
 
   it('does not switch to a colliding ACP session id when rename fails', async () => {

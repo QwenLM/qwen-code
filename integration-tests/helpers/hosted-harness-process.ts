@@ -10,6 +10,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { HOSTED_HOME_PREFIX } from '../scratch-dir.js';
+import { LISTENING_LINE_RE, stopDaemon } from './daemon-process.js';
 
 export const HOSTED_TOKEN = 'hosted-process-fixture-token';
 export const HOSTED_DIGEST = `sha256:${'a'.repeat(64)}`;
@@ -35,15 +36,20 @@ export class HostedHarnessProcess {
   bootId = '';
   output = '';
   child?: ChildProcess;
-  private exited?: Promise<void>;
   private spawnError?: Error;
 
   async start(
     modelUrl: string,
     options: {
       hostname?: string;
+      /** A pinned port instead of the ephemeral default — the FG10
+       * fixture pins it so the in-JVM Spring can name the Harness in its
+       * boot-time harness.base-url. */
+      port?: number;
       startupTimeout?: number;
       args?: string[];
+      extraArgs?: string[];
+      env?: Record<string, string>;
     } = {},
   ) {
     await access(HOSTED_CLI).catch(() => {
@@ -93,13 +99,14 @@ export class HostedHarnessProcess {
           '--hostname',
           options.hostname ?? '127.0.0.1',
           '--port',
-          '0',
+          String(options.port ?? 0),
           '--token',
           HOSTED_TOKEN,
           '--hosted-harness-capability-digest',
           HOSTED_DIGEST,
           '--workspace',
           this.root,
+          ...(options.extraArgs ?? []),
         ],
         {
           cwd: this.root,
@@ -109,6 +116,7 @@ export class HostedHarnessProcess {
             HOME: this.root,
             USERPROFILE: this.root,
             QWEN_HOME: config,
+            QWEN_CODE_MODELS_DEV_REFRESH: 'off',
             QWEN_CODE_SYSTEM_SETTINGS_PATH: path.join(
               this.root,
               'system-settings.json',
@@ -124,6 +132,7 @@ export class HostedHarnessProcess {
             QWEN_MODEL: 'hosted-fixture',
             QWEN_SANDBOX: 'false',
             NO_COLOR: '1',
+            ...options.env,
           },
         },
       );
@@ -132,22 +141,16 @@ export class HostedHarnessProcess {
       };
       this.child.stdout!.on('data', append);
       this.child.stderr!.on('data', append);
-      this.exited = new Promise<void>((resolve) => {
-        this.child!.once('error', (error) => {
-          this.spawnError = error;
-          resolve();
-        });
-        this.child!.once('close', () => resolve());
+      this.child.once('error', (error) => {
+        this.spawnError = error;
       });
       await waitUntil(() => {
         if (this.spawnError) throw this.spawnError;
         if (this.child!.exitCode !== null || this.child!.signalCode !== null)
           throw new Error(`Hosted CLI exited: ${this.output}`);
-        const match = this.output.match(
-          /qwen serve listening on (http:\/\/127\.0\.0\.1:\d+)/,
-        );
-        if (match) this.baseUrl = match[1];
-        return !!match;
+        const port = this.output.match(LISTENING_LINE_RE)?.groups?.['port'];
+        if (port) this.baseUrl = `http://127.0.0.1:${port}`;
+        return !!port;
       }, options.startupTimeout);
       await waitUntil(async () => {
         const capabilities = await this.request('/capabilities');
@@ -186,19 +189,7 @@ export class HostedHarnessProcess {
   }
 
   async close() {
-    if (
-      this.child &&
-      this.child.exitCode === null &&
-      this.child.signalCode === null
-    ) {
-      this.child.kill('SIGTERM');
-      const timer = setTimeout(() => this.child?.kill('SIGKILL'), 3_000);
-      try {
-        await this.exited;
-      } finally {
-        clearTimeout(timer);
-      }
-    }
+    if (this.child) await stopDaemon(this.child);
     if (this.root)
       await rm(this.root, {
         recursive: true,

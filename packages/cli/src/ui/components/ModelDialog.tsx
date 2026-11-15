@@ -5,6 +5,8 @@
  */
 
 import type React from 'react';
+import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
+import { subscriptionErrorMessage } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
 import process from 'node:process';
 import { useCallback, useContext, useMemo, useRef, useState } from 'react';
 import { Box, Text } from 'ink';
@@ -31,7 +33,14 @@ import { ConfigContext } from '../contexts/ConfigContext.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import { switchPrimaryModel } from '../models/primary-model-switch.js';
 import { t } from '../../i18n/index.js';
+import { publicProviderBaseUrl } from '../../utils/acpModelUtils.js';
+import {
+  filterModelEntriesForDisplay,
+  sortModelEntriesForDisplay,
+} from '../../utils/model-display-order.js';
+import { useSubscriptionSignedIn } from '../hooks/use-subscription-command-visibility.js';
 import {
   formatUnsupportedVoiceModelMessage,
   isSelectableVoiceModel,
@@ -94,30 +103,28 @@ function parseModelSelectionKey(key: string): {
 }
 
 /**
- * Encode a dialog selection key into the `authType:modelId` form persisted for
- * the fast/vision auxiliary models (baseUrl discarded), so duplicate model ids
- * across providers stay unambiguous. Handles the three selection-key shapes:
+ * Encode a dialog selection key into the `authType:modelId[\0baseUrl]` form
+ * persisted for the fast/vision auxiliary models. The baseUrl is kept when
+ * the row carries one so same-id endpoints under a single authType stay
+ * unambiguous — the registry keys entries by id+baseUrl and otherwise falls
+ * back to a first-match scan that can bind another provider's key (#12760).
+ * Handles the three selection-key shapes:
  * `authType::modelId[\0baseUrl]`, `$runtime|authType|modelId`, and a bare id.
  */
 export function encodeAuxModelSelector(selected: string): string {
   if (selected.includes('::')) {
     const parsed = parseModelSelectionKey(selected);
-    return `${parsed.authType}:${parsed.modelId}`;
+    const selector = `${parsed.authType}:${parsed.modelId}`;
+    // The suffix is persisted registry-exact: it is the routing key every
+    // consumer compares with `===`. Egress surfaces scrub it on the way out
+    // through `aux-model-selector.ts`.
+    return parsed.baseUrl ? `${selector}\0${parsed.baseUrl}` : selector;
   }
   if (selected.startsWith('$runtime|')) {
     const parts = selected.split('|');
     return parts[1] && parts[2] ? `${parts[1]}:${parts[2]}` : selected;
   }
   return selected;
-}
-
-function encodeVisionModelSelector(selected: string): string {
-  if (!selected.includes('::')) {
-    return encodeAuxModelSelector(selected);
-  }
-  const parsed = parseModelSelectionKey(selected);
-  const selector = `${parsed.authType}:${parsed.modelId}`;
-  return parsed.baseUrl ? `${selector}\0${parsed.baseUrl}` : selector;
 }
 
 interface ModelDialogProps {
@@ -169,6 +176,32 @@ function resolvePersistScope(
   if (persistScope === 'workspace') return SettingScope.Workspace;
   if (persistScope === 'user') return SettingScope.User;
   return getPersistScopeForModelSelection(settings);
+}
+
+/**
+ * Workspace settings are shareable (`<project>/.qwen/settings.json` gets
+ * committed), so only a provably public endpoint may be persisted there;
+ * otherwise drop just the `\0baseUrl` disambiguator, matching the policy in
+ * serve/routes/workspace-models.ts. `publicProviderBaseUrl` is the fail-closed
+ * of the two URL predicates — it also rejects query/hash secrets — and a kept
+ * URL stays byte-identical, which `Config.pinnedAuxEndpoint` requires. User
+ * scope is never rewritten. Parity: ui/opentui/dialog-data.ts.
+ */
+function shareableAuxSelector(selector: string, scope: SettingScope): string {
+  if (scope !== SettingScope.Workspace) return selector;
+  const sep = selector.indexOf('\0');
+  if (sep === -1) return selector;
+  const endpoint = selector.slice(sep + 1);
+  return publicProviderBaseUrl(endpoint) === endpoint
+    ? selector
+    : selector.slice(0, sep);
+}
+
+/** Disclose that the disambiguator stayed out of the shared settings file. */
+function endpointNotSavedNote(selector: string, persisted: string): string {
+  return selector === persisted
+    ? ''
+    : t(' (endpoint not saved: project settings are shared)');
 }
 
 function persistModelSelection(
@@ -258,13 +291,15 @@ function handleModelSwitchSuccess({
   const feedbackItem = {
     type: 'info' as const,
     text:
-      `authType: ${effectiveAuthType ?? `(${t('none')})`}` +
-      `\n` +
-      `Using ${isRuntime ? 'runtime ' : ''}model: ${effectiveModelId}${scopeSuffix}` +
-      `\n` +
-      `Base URL: ${baseUrl}` +
-      `\n` +
-      `API key: ${maskedKey}`,
+      effectiveAuthType === AuthType.QWEN_SUBSCRIPTION
+        ? t('Model: {{model}}', { model: effectiveModelId }) + scopeSuffix
+        : `authType: ${effectiveAuthType ?? `(${t('none')})`}` +
+          `\n` +
+          `Using ${isRuntime ? 'runtime ' : ''}model: ${effectiveModelId}${scopeSuffix}` +
+          `\n` +
+          `Base URL: ${baseUrl}` +
+          `\n` +
+          `API key: ${maskedKey}`,
   };
   uiState?.historyManager.addItem(feedbackItem, Date.now());
   config.getChatRecordingService?.()?.recordSlashCommand({
@@ -312,6 +347,7 @@ export function ModelDialog({
   const config = useContext(ConfigContext);
   const uiState = useContext(UIStateContext);
   const settings = useSettings();
+  const subscriptionSignedIn = useSubscriptionSignedIn();
 
   // Local error state for displaying errors within the dialog
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -350,7 +386,7 @@ export function ModelDialog({
               isAdvisorModelEligible(m, allowAdvisorFastOnly)),
         );
     const registryModels = allModels.filter((m) => {
-      const imageModelSelector = encodeVisionModelSelector(
+      const imageModelSelector = encodeAuxModelSelector(
         buildModelSelectionKey(m.authType, m.id, m.baseUrl),
       );
       const advisorModelSelector = `${m.authType}:${m.id}\0${m.registryBaseUrl ?? ''}`;
@@ -392,6 +428,7 @@ export function ModelDialog({
     // Fixed order: qwen-oauth first, then others in a stable order
     const authTypeOrder: AuthType[] = [
       AuthType.QWEN_OAUTH,
+      AuthType.QWEN_SUBSCRIPTION,
       AuthType.USE_OPENAI,
       AuthType.USE_OPENAI_RESPONSES,
       AuthType.USE_ANTHROPIC,
@@ -430,15 +467,28 @@ export function ModelDialog({
       }
     }
 
-    return result;
+    const visibleEntries = filterModelEntriesForDisplay(
+      result,
+      subscriptionSignedIn,
+    );
+    return isFastModelMode ||
+      isAdvisorModelMode ||
+      isVoiceModelMode ||
+      isVisionModelMode ||
+      isCompactionModelMode ||
+      isImageModelMode
+      ? visibleEntries
+      : sortModelEntriesForDisplay(visibleEntries);
   }, [
     authType,
+    subscriptionSignedIn,
     config,
     isFastModelMode,
     isAdvisorModelMode,
     isImageModelMode,
     isVoiceModelMode,
     isVisionModelMode,
+    isCompactionModelMode,
   ]);
 
   const MODEL_OPTIONS = useMemo(() => {
@@ -623,18 +673,39 @@ export function ModelDialog({
   // regardless of which provider that turns out to be — otherwise the
   // dialog would default to the current auth's first row and Enter would
   // silently overwrite the user's fast-model setting.
-  const preferredFastModelEntry =
-    isFastModelMode && parsedFastModelSetting
-      ? parsedFastModelSetting.authType
+  // The picker can persist `authType:id\0<baseUrl>` (#12760); honour that
+  // endpoint when re-highlighting, otherwise reopening the dialog and pressing
+  // Enter re-pins the first same-id provider. Read it off the raw setting —
+  // `resolveModelId` strips the suffix by design. When no row carries the
+  // pinned endpoint (a project declaring its own `modelProviders` replaces the
+  // user's), keep the same-id highlight documented above rather than falling
+  // through to the current auth's first row, which Enter would overwrite.
+  const findPreferredAuxEntry = (
+    setting: { authType?: AuthType; modelId: string } | undefined,
+    persisted: string | undefined,
+  ) => {
+    if (!setting) return undefined;
+    const ownsId = ({
+      authType: entryAuthType,
+      model,
+    }: (typeof availableModelEntries)[number]) =>
+      (!setting.authType || entryAuthType === setting.authType) &&
+      model.id === setting.modelId;
+    // Trim before slicing: Config.pinnedAuxEndpoint and the sibling parse
+    // paths trim first, so a whitespace-padded setting must highlight the
+    // same row the runtime routes to.
+    const endpoint = persisted?.trim().split('\0')[1];
+    return (
+      (endpoint
         ? availableModelEntries.find(
-            ({ authType: t2, model }) =>
-              t2 === parsedFastModelSetting.authType &&
-              model.id === parsedFastModelSetting.modelId,
+            (entry) => ownsId(entry) && entry.model.baseUrl === endpoint,
           )
-        : availableModelEntries.find(
-            ({ model }) => model.id === parsedFastModelSetting.modelId,
-          )
-      : undefined;
+        : undefined) ?? availableModelEntries.find(ownsId)
+    );
+  };
+  const preferredFastModelEntry = isFastModelMode
+    ? findPreferredAuxEntry(parsedFastModelSetting, fastModelSetting)
+    : undefined;
   const advisorEndpointIndex = advisorModelSetting?.indexOf('\0') ?? -1;
   const advisorRegistryBaseUrl =
     advisorEndpointIndex < 0
@@ -658,43 +729,17 @@ export function ModelDialog({
           ({ model }) => model.id === voiceModelSetting,
         )
       : undefined;
-  // Like fast mode, the vision setting may persist as a bare id (cross-provider)
-  // or an authType:modelId selector — highlight whichever row owns it.
-  const matchesVisionModelBaseUrl = (model: CoreAvailableModel): boolean =>
-    !parsedVisionModelValue?.baseUrl ||
-    model.baseUrl === parsedVisionModelValue.baseUrl;
-  const preferredVisionModelEntry =
-    isVisionModelMode && parsedVisionModelSetting
-      ? parsedVisionModelSetting.authType
-        ? availableModelEntries.find(
-            ({ authType: t2, model }) =>
-              t2 === parsedVisionModelSetting.authType &&
-              model.id === parsedVisionModelSetting.modelId &&
-              matchesVisionModelBaseUrl(model),
-          )
-        : availableModelEntries.find(
-            ({ model }) =>
-              model.id === parsedVisionModelSetting.modelId &&
-              matchesVisionModelBaseUrl(model),
-          )
-      : undefined;
-  const preferredImageModelEntry =
-    isImageModelMode && parsedImageModelSetting
-      ? parsedImageModelSetting.authType
-        ? availableModelEntries.find(
-            ({ authType: t2, model }) =>
-              t2 === parsedImageModelSetting.authType &&
-              model.id === parsedImageModelSetting.modelId &&
-              (!parsedImageModelValue?.baseUrl ||
-                model.baseUrl === parsedImageModelValue.baseUrl),
-          )
-        : availableModelEntries.find(
-            ({ model }) =>
-              model.id === parsedImageModelSetting.modelId &&
-              (!parsedImageModelValue?.baseUrl ||
-                model.baseUrl === parsedImageModelValue.baseUrl),
-          )
-      : undefined;
+  // Like fast mode, the vision/image settings may persist as a bare id
+  // (cross-provider) or an `authType:modelId\0baseUrl` selector — highlight
+  // whichever row owns it, keeping the same-id fallback when the pinned
+  // endpoint matches no configured row (otherwise Enter silently re-pins an
+  // unrelated row).
+  const preferredVisionModelEntry = isVisionModelMode
+    ? findPreferredAuxEntry(parsedVisionModelSetting, visionModelSetting)
+    : undefined;
+  const preferredImageModelEntry = isImageModelMode
+    ? findPreferredAuxEntry(parsedImageModelSetting, imageModelSetting)
+    : undefined;
   const parsedCompactionSetting = useMemo(() => {
     if (!isCompactionModelMode) return undefined;
     const raw = settings?.merged?.compactionModel?.trim();
@@ -705,18 +750,12 @@ export function ModelDialog({
       return undefined;
     }
   }, [settings?.merged?.compactionModel, isCompactionModelMode]);
-  const preferredCompactionModelEntry =
-    isCompactionModelMode && parsedCompactionSetting
-      ? parsedCompactionSetting.authType
-        ? availableModelEntries.find(
-            ({ authType: t2, model }) =>
-              t2 === parsedCompactionSetting.authType &&
-              model.id === parsedCompactionSetting.modelId,
-          )
-        : availableModelEntries.find(
-            ({ model }) => model.id === parsedCompactionSetting.modelId,
-          )
-      : undefined;
+  const preferredCompactionModelEntry = isCompactionModelMode
+    ? findPreferredAuxEntry(
+        parsedCompactionSetting,
+        settings?.merged?.compactionModel as string | undefined,
+      )
+    : undefined;
   const preferredKey = activeRuntimeSnapshot
     ? activeRuntimeSnapshot.id
     : isAdvisorModelMode && !advisorModelSetting
@@ -900,7 +939,13 @@ export function ModelDialog({
         }
 
         hydrateApiKeyEnvFromSettings(settings, selectedEntry.model.envKey);
-        const advisorSelector = encodeAuxModelSelector(selected);
+        // encodeAuxModelSelector already keeps the row's baseUrl as the
+        // endpoint disambiguator; strip it here because advisorModel appends
+        // the registry baseUrl itself below.
+        const advisorSelector = encodeAuxModelSelector(selected).split(
+          '\0',
+          1,
+        )[0];
         const advisorModel = selectedEntry.isRuntime
           ? advisorSelector
           : `${advisorSelector}\0${selectedEntry.model.registryBaseUrl ?? ''}`;
@@ -971,12 +1016,16 @@ export function ModelDialog({
 
       hydrateApiKeyEnvFromSettings(settings, selectedEntry?.model.envKey);
 
-      // Fast model mode: save authType:modelId so duplicate model ids across
-      // providers remain unambiguous. baseUrl is intentionally discarded.
+      // Fast model mode: save authType:modelId (plus the baseUrl endpoint
+      // disambiguator when the row carries one) so duplicate model ids
+      // across providers bind the selected provider's credentials.
       if (isFastModelMode) {
         const fastModel = encodeAuxModelSelector(selected);
         const scope = resolvePersistScope(settings, persistScope);
-        settings.setValue(scope, 'fastModel', fastModel);
+        // The shareable workspace file only ever receives a provably public
+        // endpoint; this session's in-memory pin keeps the picked row.
+        const persistedFastModel = shareableAuxSelector(fastModel, scope);
+        settings.setValue(scope, 'fastModel', persistedFastModel);
         // Sync the runtime Config so forked agents pick up the change immediately.
         config?.setFastModel(fastModel);
         const scopeSuffix =
@@ -987,7 +1036,7 @@ export function ModelDialog({
               : '';
         reportAuxiliaryModelSelection({
           type: 'success',
-          text: `${t('Fast Model')}: ${fastModel}${scopeSuffix}`,
+          text: `${t('Fast Model')}: ${persistedFastModel.split('\0')[0]}${scopeSuffix}${endpointNotSavedNote(fastModel, persistedFastModel)}`,
         });
         onClose();
         return;
@@ -996,7 +1045,7 @@ export function ModelDialog({
       // Vision model mode: keep the selected row's baseUrl when present so
       // same-provider OpenAI-compatible endpoints with the same id stay distinct.
       if (isVisionModelMode) {
-        const visionModel = encodeVisionModelSelector(selected);
+        const visionModel = encodeAuxModelSelector(selected);
         const visionModelDisplay =
           parseVisionModelSetting(visionModel)?.selector ?? visionModel;
         // Pinning the primary itself is ignored by the bridge at runtime, so
@@ -1045,7 +1094,11 @@ export function ModelDialog({
         }
         const compactionModelId = encodeAuxModelSelector(selected);
         const scope = resolvePersistScope(settings, persistScope);
-        settings.setValue(scope, 'compactionModel', compactionModelId);
+        const persistedCompactionModel = shareableAuxSelector(
+          compactionModelId,
+          scope,
+        );
+        settings.setValue(scope, 'compactionModel', persistedCompactionModel);
         // Sync runtime Config so the compression service picks it up immediately.
         config.setCompactionModel(compactionModelId);
         const scopeSuffix =
@@ -1056,7 +1109,7 @@ export function ModelDialog({
               : '';
         reportAuxiliaryModelSelection({
           type: 'success',
-          text: `${t('Compaction Model')}: ${compactionModelId}${scopeSuffix}`,
+          text: `${t('Compaction Model')}: ${persistedCompactionModel.split('\0')[0]}${scopeSuffix}${endpointNotSavedNote(compactionModelId, persistedCompactionModel)}`,
         });
         onClose();
         return;
@@ -1067,7 +1120,7 @@ export function ModelDialog({
           setErrorMessage(t('Selected image model is unavailable.'));
           return;
         }
-        const imageModel = encodeVisionModelSelector(selected);
+        const imageModel = encodeAuxModelSelector(selected);
         const imageModelDisplay =
           parseVisionModelSetting(imageModel)?.selector ?? imageModel;
         if (!config.resolveImageGenerationModel(imageModel)) {
@@ -1158,13 +1211,19 @@ export function ModelDialog({
 
         selectionInFlightRef.current = true;
         try {
-          await config.switchModel(selectedAuthType, modelId, {
-            ...(selectedAuthType !== authType &&
-            selectedAuthType === AuthType.QWEN_OAUTH
-              ? { requireCachedCredentials: true }
-              : {}),
-            baseUrl: selectedBaseUrl,
-          });
+          await switchPrimaryModel(
+            config,
+            settings,
+            selectedAuthType,
+            modelId,
+            {
+              ...(selectedAuthType !== authType &&
+              selectedAuthType === AuthType.QWEN_OAUTH
+                ? { requireCachedCredentials: true }
+                : {}),
+              baseUrl: selectedBaseUrl,
+            },
+          );
           selectionCommittedRef.current = true;
         } finally {
           selectionInFlightRef.current = false;
@@ -1181,6 +1240,10 @@ export function ModelDialog({
         effectiveAuthType = after?.authType ?? selectedAuthType ?? authType;
         effectiveModelId = after?.model ?? modelId;
       } catch (e) {
+        if (e instanceof SubscriptionOAuthError) {
+          setErrorMessage(t(subscriptionErrorMessage(e)));
+          return;
+        }
         const baseErrorMessage = e instanceof Error ? e.message : String(e);
         // Use parsed modelId for display to avoid showing raw selection key
         // (which contains invisible \0 separator between modelId and baseUrl)

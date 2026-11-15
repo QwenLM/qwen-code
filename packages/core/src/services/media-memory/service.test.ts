@@ -16,6 +16,7 @@ import {
 import { truncateUtf8 } from './service.js';
 import { MEDIA_MEMORY_FILE_NAME } from './store.js';
 import type { MediaMemorySnapshot } from './types.js';
+import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
 
 let root: string;
 let clock: number;
@@ -42,9 +43,7 @@ afterEach(async () => {
   await fs.rm(root, { recursive: true, force: true });
 });
 
-const canDropPermissions =
-  process.platform !== 'win32' &&
-  (typeof process.getuid !== 'function' || process.getuid() !== 0);
+const canDropPermissions = arePermissionBitsEnforced();
 
 async function readSnapshot(): Promise<MediaMemorySnapshot> {
   const raw = await fs.readFile(

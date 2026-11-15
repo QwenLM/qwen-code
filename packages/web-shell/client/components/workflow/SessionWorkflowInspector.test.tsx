@@ -3,6 +3,7 @@
 import { act } from 'react';
 import { createRoot } from 'react-dom/client';
 import { describe, expect, it, vi } from 'vitest';
+import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import { I18nProvider } from '../../i18n';
 import { SessionWorkflowInspector } from './SessionWorkflowInspector';
@@ -457,6 +458,59 @@ describe('SessionWorkflowInspector', () => {
     expect(
       container.querySelector('[data-testid="workflow-activity-show-all"]'),
     ).toBeNull();
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('shows a workspace deliverable by filename and keeps a link title', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SessionWorkflowInspector
+            todos={[
+              {
+                id: 'prepare',
+                content: 'Prepare inputs',
+                status: 'completed',
+              },
+            ]}
+            tools={[]}
+            tasks={[]}
+            artifacts={
+              [
+                {
+                  id: 'pptx',
+                  kind: 'document',
+                  status: 'available',
+                  title: 'artifact_test 节点创建报告 PPT',
+                  workspacePath: 'artifact_test_节点创建报告.pptx',
+                },
+                {
+                  id: 'link',
+                  kind: 'link',
+                  status: 'available',
+                  title: 'Table details',
+                },
+              ] as DaemonSessionArtifact[]
+            }
+            onSelectedTodoIdChange={vi.fn()}
+            onExpandGraph={vi.fn()}
+            onOpenSubagent={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(container.textContent).toContain('artifact_test_节点创建报告.pptx');
+    expect(container.textContent).not.toContain(
+      'artifact_test 节点创建报告 PPT',
+    );
+    expect(container.textContent).toContain('Table details');
 
     act(() => root.unmount());
     container.remove();

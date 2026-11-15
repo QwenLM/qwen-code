@@ -142,22 +142,23 @@ describe('updateBeforeRelaunch', () => {
   });
 
   it('surfaces the real error when a standalone update throws', async () => {
+    const pendingSwapMessage =
+      'A previous update left a pending swap at /qwen.new. ' +
+      'If no qwen-update.bat process is running, remove the pending swap and .qwen-update.lock, then try again.';
     getInstallationInfo.mockReturnValue({
       isStandalone: true,
       standaloneDir: '/qwen',
     });
-    performStandaloneUpdate.mockRejectedValue(
-      new Error(
-        'A previous update left a pending swap at /qwen.new. ' +
-          'If no qwen-update.bat process is running, remove the pending swap and .qwen-update.lock, then try again.',
-      ),
-    );
+    performStandaloneUpdate.mockRejectedValue(new Error(pendingSwapMessage));
 
     await expect(updateBeforeRelaunch(settings, '/repo', true)).resolves.toBe(
       true,
     );
+    // Full rendered literal, not stringContaining: a catch that printed
+    // error.message alone would still contain the pending-swap text while
+    // dropping the remediation half this message exists to carry.
     expect(writeStderrLine).toHaveBeenCalledWith(
-      expect.stringContaining('A previous update left a pending swap'),
+      `Automatic update failed: ${pendingSwapMessage}. Re-run the installer to update manually.`,
     );
   });
 
@@ -168,7 +169,7 @@ describe('updateBeforeRelaunch', () => {
       true,
     );
     expect(writeStderrLine).toHaveBeenCalledWith(
-      expect.stringContaining('registry boom'),
+      'Automatic update failed: registry boom. Re-run the installer to update manually.',
     );
   });
 });

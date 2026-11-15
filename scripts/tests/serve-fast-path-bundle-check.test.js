@@ -542,6 +542,40 @@ describe('ACP import boundary check', () => {
     expect(findAcpImportBoundaryOffenders(metafile)).toEqual([]);
   });
 
+  it('reports a statically imported Google auth library', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/acp-agent.js': output({
+        inputs: ['packages/cli/src/acp-integration/acpAgent.ts'],
+        imports: [staticImport('dist/chunks/google-auth.js')],
+      }),
+      'dist/chunks/google-auth.js': output({
+        bytes: 250_446,
+        inputs: ['node_modules/google-auth-library/build/src/index.js'],
+      }),
+    });
+
+    expect(findAcpImportBoundaryOffenders(metafile)).toEqual([
+      expect.objectContaining({
+        label: 'Google auth library',
+        matchedInput: 'node_modules/google-auth-library/build/src/index.js',
+      }),
+    ]);
+  });
+
+  it('allows the Google auth library behind dynamic imports', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/acp-agent.js': output({
+        inputs: ['packages/cli/src/acp-integration/acpAgent.ts'],
+        imports: [dynamicImport('dist/chunks/google-auth.js')],
+      }),
+      'dist/chunks/google-auth.js': output({
+        inputs: ['node_modules/google-auth-library/build/src/index.js'],
+      }),
+    });
+
+    expect(findAcpImportBoundaryOffenders(metafile)).toEqual([]);
+  });
+
   it('reports first-use dependency packages reached through static imports', () => {
     const metafile = makeMetafile({
       'dist/chunks/acp-agent.js': output({

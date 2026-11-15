@@ -111,18 +111,6 @@
   margin-bottom: 12px;
 }
 
-/* Tree guide under the folder icon, in the spirit of file-explorer indent
-   guides; hovered/selected rows paint over it with their own background. */
-.sessions::before {
-  content: '';
-  position: absolute;
-  top: 2px;
-  bottom: 10px;
-  left: 15px;
-  width: 1px;
-  background: color-mix(in srgb, var(--sidebar-foreground) 14%, transparent);
-}
-
 .empty {
   padding: 4px 8px 4px 26px;
   font-size: 12px;

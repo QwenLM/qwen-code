@@ -89,6 +89,43 @@ describe('resolveEnvVars', () => {
 });
 
 describe('parseChannelConfig', () => {
+  it('accepts independent session rotation bounds', async () => {
+    const config = await parseChannelConfig('bot', {
+      type: 'bare',
+      sessionRotation: { maxTurns: 200, maxAgeHours: 24 },
+    });
+    expect(config.sessionRotation).toEqual({ maxTurns: 200, maxAgeHours: 24 });
+    expect(
+      (await parseChannelConfig('bot', { type: 'bare' })).sessionRotation,
+    ).toBeUndefined();
+  });
+
+  it.each([
+    null,
+    [],
+    {},
+    { maxTurns: 0 },
+    { maxTurns: 1.5 },
+    { maxAgeHours: -1 },
+    { maxAgeHours: Infinity },
+    { maxTurns: 1, unknown: 2 },
+  ])('rejects invalid session rotation %j', async (sessionRotation) => {
+    await expect(
+      parseChannelConfig('bot', { type: 'bare', sessionRotation }),
+    ).rejects.toThrow('sessionRotation');
+  });
+
+  it('rejects rotation with named tasks', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        sessionScope: 'user',
+        multiSession: true,
+        sessionRotation: { maxTurns: 2 },
+      }),
+    ).rejects.toThrow('cannot use sessionRotation');
+  });
+
   it('normalizes message routes and resolves the default route', async () => {
     const config = await parseChannelConfig('bot', {
       type: 'bare',
@@ -533,6 +570,53 @@ describe('parseChannelConfig', () => {
       sessionScope: 'user',
     });
     expect(result.sessionScope).toBe('user');
+  });
+
+  it('resolves an unconfigured scope to user when multiSession is enabled', async () => {
+    // github's defaultSessionScope is 'chat_thread'; multiSession requires
+    // per-sender sessions, so the exemption must win before the compatibility
+    // check (otherwise this config throws).
+    const result = await parseChannelConfig('bot', {
+      type: 'github',
+      token: 'ghp_test',
+      multiSession: true,
+    });
+    expect(result.multiSession).toBe(true);
+    expect(result.sessionScope).toBe('user');
+  });
+
+  it('validates purgeLegacySessions like the other optional booleans', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'github',
+      token: 'ghp_test',
+      purgeLegacySessions: true,
+    });
+    expect(result['purgeLegacySessions']).toBe(true);
+    // A stringified "true" must not silently leave the QQ purge off.
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'github',
+        token: 'ghp_test',
+        purgeLegacySessions: 'true',
+      }),
+    ).rejects.toThrow(/purgeLegacySessions.*must be a boolean/);
+  });
+
+  it('validates forwardBotMessages like the other optional booleans', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'github',
+      token: 'ghp_test',
+      forwardBotMessages: true,
+    });
+    expect(result['forwardBotMessages']).toBe(true);
+    // A stringified "true" must not silently leave bot forwarding off.
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'github',
+        token: 'ghp_test',
+        forwardBotMessages: 'true',
+      }),
+    ).rejects.toThrow(/forwardBotMessages.*must be a boolean/);
   });
 
   it('parses owner-scoped named sessions only for user scope', async () => {

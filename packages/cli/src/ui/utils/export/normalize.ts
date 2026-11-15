@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { isInternalCodeModeToolResult } from '@qwen-code/qwen-code-core/transcriptRecords';
 import { isShellResultDisplay } from '@qwen-code/qwen-code-core/shellResult';
 import type { Part } from '@google/genai';
 import {
@@ -54,7 +55,8 @@ export function normalizeSessionData(
 
   // Merge tool result information into tool call messages
   for (const record of originalRecords) {
-    if (record.type !== 'tool_result') continue;
+    if (record.type !== 'tool_result' || isInternalCodeModeToolResult(record))
+      continue;
 
     const toolCallMessage = buildToolCallMessageFromResult(record, config);
     if (!toolCallMessage?.toolCall) continue;

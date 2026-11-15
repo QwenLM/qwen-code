@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import {
   confirmDaemonTarget,
   getAllowedDaemonOrigin,
@@ -5,12 +6,14 @@ import {
   navigateToDaemon,
   persistDaemonToken,
 } from './daemon';
+import { forgetWorkspaceHost } from './workspace-hosts';
 
 const STORAGE_KEY = 'qwen-remote-connections';
 const ADD_FLOW_PARAM = 'addRemoteConnection';
 const ADD_RETURN_URL_KEY = 'qwen-remote-connection-return';
 const SETTINGS_PARAM = 'settings';
 const CONNECTIONS_SETTINGS = 'Connections';
+export const REMOTE_CONNECTIONS_CHANGE_EVENT = STORAGE_KEY;
 
 export function formatOriginHost(origin: string): string {
   try {
@@ -23,6 +26,7 @@ export function formatOriginHost(origin: string): string {
 function storeRemoteConnections(origins: string[]): void {
   try {
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(origins));
+    window.dispatchEvent(new Event(REMOTE_CONNECTIONS_CHANGE_EVENT));
   } catch {
     // A connection remains usable in the current tab when persistence fails.
   }
@@ -63,6 +67,24 @@ export function forgetRemoteConnection(origin: string): string[] {
   );
   storeRemoteConnections(connections);
   persistDaemonToken('', origin);
+  // Its saved workspace identities must go too: fan-out groups union both
+  // catalogs, so clearing only this one keeps the host listed.
+  forgetWorkspaceHost(origin);
+  return connections;
+}
+
+/** Saved connection origins, kept in sync with catalog updates. */
+export function useRemoteConnections(): string[] {
+  const [connections, setConnections] = useState(readRemoteConnections);
+  useEffect(() => {
+    const update = () => setConnections(readRemoteConnections());
+    window.addEventListener(REMOTE_CONNECTIONS_CHANGE_EVENT, update);
+    window.addEventListener('storage', update);
+    return () => {
+      window.removeEventListener(REMOTE_CONNECTIONS_CHANGE_EVENT, update);
+      window.removeEventListener('storage', update);
+    };
+  }, []);
   return connections;
 }
 

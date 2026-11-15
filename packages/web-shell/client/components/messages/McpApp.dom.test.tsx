@@ -4,9 +4,15 @@ import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import {
   McpAppHostContext,
+  McpAppGeneratedUiContext,
+  type McpAppGeneratedUi,
+  McpAppMessagesContext,
+  McpAppModelContextContext,
   McpAppSessionContext,
   McpAppToolsContext,
 } from '../../mcpAppHostContext';
+import { useMcpAppMessages } from '../../hooks/useMcpAppMessages';
+import { I18nProvider } from '../../i18n';
 import { ThemeProvider, WebShellThemeId } from '../../themeContext';
 import type { McpAppDisplay } from './McpApp';
 
@@ -15,6 +21,14 @@ const appBridgeMocks = vi.hoisted(() => ({
   last: null as {
     onsandboxready?: () => void;
     oninitialized?: () => void;
+    onsizechange?: (params: { height?: number; width?: number }) => void;
+    onupdatemodelcontext?: (params: {
+      content?: Array<{ type: string; text?: string }>;
+    }) => Promise<unknown>;
+    onmessage?: (
+      params: { role: string; content: Array<Record<string, unknown>> },
+      extra: { signal: AbortSignal },
+    ) => Promise<unknown>;
     oncalltool?: (
       params: {
         name: string;
@@ -29,6 +43,7 @@ const appBridgeMocks = vi.hoisted(() => ({
     ) => Promise<unknown>;
   } | null,
   lastCapabilities: undefined as unknown,
+  lastOptions: undefined as unknown,
   setHostContext: vi.fn(),
   connect: vi.fn(() => Promise.resolve()),
   close: vi.fn(() => Promise.resolve()),
@@ -48,8 +63,14 @@ vi.mock('@modelcontextprotocol/ext-apps/app-bridge', () => ({
     sendToolInput = appBridgeMocks.sendToolInput;
     sendToolResult = appBridgeMocks.sendToolResult;
     teardownResource = appBridgeMocks.teardownResource;
-    constructor(_app: unknown, _info: unknown, capabilities?: unknown) {
+    constructor(
+      _app: unknown,
+      _info: unknown,
+      capabilities?: unknown,
+      options?: unknown,
+    ) {
       appBridgeMocks.constructed += 1;
+      appBridgeMocks.lastOptions = options;
       appBridgeMocks.last = this;
       appBridgeMocks.lastCapabilities = capabilities;
     }
@@ -121,7 +142,261 @@ function renderApp(
   };
 }
 
+// A review that ended before dispatch reports why nothing was sent.
+const notSent = (phase: 'cancelled' | 'expired') => ({
+  isError: true,
+  _meta: { 'qwen-code/message-review': phase },
+});
+
 describe('McpApp host lifetime', () => {
+  it('advertises messages only for the bound transcript session', () => {
+    const requestMessage = vi.fn().mockResolvedValue({});
+    const { rerender } = renderApp(appDisplay());
+    const wrap = (sessionId: string) => (
+      <McpAppMessagesContext.Provider
+        value={{ sessionId: 'live', requestMessage }}
+      >
+        <McpAppSessionContext.Provider value={sessionId}>
+          <McpApp display={appDisplay()} />
+        </McpAppSessionContext.Provider>
+      </McpAppMessagesContext.Provider>
+    );
+    rerender(wrap('live'));
+    expect(appBridgeMocks.lastCapabilities).toMatchObject({
+      message: { text: {} },
+    });
+    expect(appBridgeMocks.last?.onmessage).toBeTypeOf('function');
+    rerender(wrap('historical'));
+    expect(appBridgeMocks.lastCapabilities).not.toHaveProperty('message');
+    expect(appBridgeMocks.last?.onmessage).toBeUndefined();
+  });
+
+  it('validates the role, single text block and UTF-8 byte limit before review', async () => {
+    const requestMessage = vi.fn().mockResolvedValue({});
+    const { rerender } = renderApp(appDisplay());
+    rerender(
+      <McpAppMessagesContext.Provider
+        value={{ sessionId: 's', requestMessage }}
+      >
+        <McpAppSessionContext.Provider value="s">
+          <McpApp display={appDisplay()} />
+        </McpAppSessionContext.Provider>
+      </McpAppMessagesContext.Provider>,
+    );
+    const invoke = appBridgeMocks.last!.onmessage!;
+    for (const params of [
+      { role: 'assistant', content: [{ type: 'text', text: 'no' }] },
+      { role: 'system', content: [{ type: 'text', text: 'no' }] },
+      { role: 'user', content: [] },
+      { role: 'user', content: [{ type: 'text', text: '   ' }] },
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'a' },
+          { type: 'text', text: 'b' },
+        ],
+      },
+      {
+        role: 'user',
+        content: [{ type: 'image', data: 'x', mimeType: 'image/png' }],
+      },
+      {
+        role: 'user',
+        content: [{ type: 'resource', resource: { uri: 'file:///a' } }],
+      },
+      { role: 'user', content: [{ type: 'text', text: '界'.repeat(5462) }] },
+    ]) {
+      expect(
+        await invoke(params, { signal: new AbortController().signal }),
+      ).toEqual({ isError: true });
+    }
+    expect(requestMessage).not.toHaveBeenCalled();
+    const text = '界'.repeat(5461) + 'a';
+    expect(
+      await invoke(
+        { role: 'user', content: [{ type: 'text', text }] },
+        { signal: new AbortController().signal },
+      ),
+    ).toEqual({});
+    expect(requestMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        serverName: 'demo',
+        resourceUri: 'ui://demo/app',
+        text,
+      }),
+    );
+    expect(requestMessage.mock.calls[0][0]).not.toHaveProperty(
+      'requiredFeature',
+    );
+  });
+
+  it('releases settled message requests and aborts pending ones on resource replacement', async () => {
+    let settle!: (result: object) => void;
+    const requestMessage = vi.fn(
+      (_request: { signal: AbortSignal }) =>
+        new Promise<object>((resolve) => {
+          settle = resolve;
+        }),
+    );
+    const { rerender } = renderApp(appDisplay());
+    const wrap = (resourceUri: string) => (
+      <McpAppMessagesContext.Provider
+        value={{ sessionId: 's', requestMessage }}
+      >
+        <McpAppSessionContext.Provider value="s">
+          <McpApp display={appDisplay({ resourceUri })} />
+        </McpAppSessionContext.Provider>
+      </McpAppMessagesContext.Provider>
+    );
+    rerender(wrap('ui://demo/app'));
+    const oldBridge = appBridgeMocks.last!;
+    const invoke = oldBridge.onmessage!;
+    const params = {
+      role: 'user',
+      content: [{ type: 'text', text: 'review me' }],
+    };
+    const first = invoke(params, { signal: new AbortController().signal });
+    expect(
+      await invoke(params, { signal: new AbortController().signal }),
+    ).toEqual({ isError: true });
+    expect(requestMessage).toHaveBeenCalledTimes(1);
+    rerender(wrap('ui://demo/replacement'));
+    expect(requestMessage.mock.calls[0][0].signal.aborted).toBe(true);
+    expect(oldBridge.onmessage).toBeUndefined();
+    expect(
+      await invoke(params, { signal: new AbortController().signal }),
+    ).toEqual({ isError: true });
+    settle({ isError: true });
+    await first;
+    const second = appBridgeMocks.last!.onmessage!(params, {
+      signal: new AbortController().signal,
+    });
+    settle({});
+    expect(await second).toEqual({});
+    const third = appBridgeMocks.last!.onmessage!(params, {
+      signal: new AbortController().signal,
+    });
+    expect(requestMessage).toHaveBeenCalledTimes(3);
+    settle({ isError: true });
+    await third;
+  });
+
+  it.each(['client recovery', 'transport reconnect'])(
+    'preserves the iframe and tool calls across %s while invalidating old reviews',
+    async (change) => {
+      let finishTool!: (result: { content: [] }) => void;
+      const callTool = vi.fn(
+        (_request: unknown, _signal: AbortSignal) =>
+          new Promise<{ content: [] }>((resolve) => {
+            finishTool = resolve;
+          }),
+      );
+      const submit = vi.fn().mockResolvedValue(undefined);
+      const captureOwner = () => ({ isCurrent: () => true });
+      function BoundApp({ clientId = 'client-a', enabled = true }) {
+        const { context } = useMcpAppMessages({
+          sessionId: 's',
+          clientId,
+          enabled,
+          captureOwner,
+          submit,
+        });
+        return (
+          <McpAppMessagesContext.Provider value={context}>
+            <McpAppToolsContext.Provider value={{ sessionId: 's', callTool }}>
+              <McpAppSessionContext.Provider value="s">
+                <McpApp display={appDisplay()} />
+              </McpAppSessionContext.Provider>
+            </McpAppToolsContext.Provider>
+          </McpAppMessagesContext.Provider>
+        );
+      }
+      const { container, rerender } = renderApp(appDisplay());
+      await act(async () => rerender(<BoundApp />));
+      const bridge = appBridgeMocks.last!;
+      const iframe = container.querySelector('iframe');
+      const src = iframe!.src;
+      const constructed = appBridgeMocks.constructed;
+      const params = {
+        role: 'user',
+        content: [{ type: 'text', text: 'review' }],
+      };
+      let pendingMessage!: Promise<unknown>;
+      let pendingTool!: Promise<unknown>;
+      await act(async () => {
+        pendingMessage = bridge.onmessage!(params, {
+          signal: new AbortController().signal,
+        });
+        pendingTool = bridge.oncalltool!(
+          { name: 'query' },
+          { signal: new AbortController().signal },
+        );
+      });
+      await act(async () =>
+        rerender(
+          <BoundApp
+            clientId={change === 'client recovery' ? 'client-b' : 'client-a'}
+            enabled={change !== 'transport reconnect'}
+          />,
+        ),
+      );
+      expect(await pendingMessage).toEqual(notSent('cancelled'));
+      expect(appBridgeMocks.last).toBe(bridge);
+      expect(appBridgeMocks.constructed).toBe(constructed);
+      expect(container.querySelector('iframe')).toBe(iframe);
+      expect(iframe!.src).toBe(src);
+      expect(callTool.mock.calls[0][1].aborted).toBe(false);
+      await act(async () => rerender(<BoundApp clientId="client-b" />));
+      expect(appBridgeMocks.last).toBe(bridge);
+      let fresh!: Promise<unknown>;
+      await act(async () => {
+        fresh = bridge.onmessage!(params, {
+          signal: new AbortController().signal,
+        });
+      });
+      await act(async () =>
+        rerender(<BoundApp clientId="client-b" enabled={false} />),
+      );
+      expect(await fresh).toEqual(notSent('cancelled'));
+      expect(submit).not.toHaveBeenCalled();
+      finishTool({ content: [] });
+      await pendingTool;
+    },
+  );
+
+  it('propagates RPC cancellation and revokes messages on failed initialization', async () => {
+    appBridgeMocks.sendToolInput.mockRejectedValueOnce(
+      new Error('handoff failed'),
+    );
+    let signal: AbortSignal | undefined;
+    const requestMessage = vi.fn((request: { signal: AbortSignal }) => {
+      signal = request.signal;
+      return Promise.resolve({ isError: true });
+    });
+    const { rerender } = renderApp(appDisplay());
+    rerender(
+      <McpAppMessagesContext.Provider
+        value={{ sessionId: 's', requestMessage }}
+      >
+        <McpAppSessionContext.Provider value="s">
+          <McpApp display={appDisplay()} />
+        </McpAppSessionContext.Provider>
+      </McpAppMessagesContext.Provider>,
+    );
+    const bridge = appBridgeMocks.last!;
+    const caller = new AbortController();
+    await bridge.onmessage!(
+      { role: 'user', content: [{ type: 'text', text: 'review' }] },
+      { signal: caller.signal },
+    );
+    caller.abort();
+    expect(signal?.aborted).toBe(true);
+    await act(async () => {
+      bridge.oninitialized?.();
+    });
+    expect(bridge.onmessage).toBeUndefined();
+  });
+
   it.each([
     'sendSandboxResourceReady',
     'sendToolInput',
@@ -281,6 +556,138 @@ describe('McpApp host lifetime', () => {
     expect(appBridgeMocks.setHostContext).toHaveBeenCalledWith(
       expect.objectContaining({ theme: WebShellThemeId.Light }),
     );
+  });
+
+  it('sends the Web Shell language and pushes language changes', async () => {
+    const display = appDisplay();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const wrap = (language: 'zh-CN' | 'en') => (
+      <I18nProvider language={language}>
+        <McpAppHostContext.Provider value="http://127.0.0.1:4170">
+          <ThemeProvider value={WebShellThemeId.Dark}>
+            <McpApp display={display} />
+          </ThemeProvider>
+        </McpAppHostContext.Provider>
+      </I18nProvider>
+    );
+
+    act(() => root.render(wrap('zh-CN')));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(appBridgeMocks.lastOptions).toMatchObject({
+      hostContext: { locale: 'zh-CN' },
+    });
+
+    act(() => root.render(wrap('en')));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(appBridgeMocks.constructed).toBe(1);
+    expect(appBridgeMocks.setHostContext).toHaveBeenLastCalledWith(
+      expect.objectContaining({ locale: 'en' }),
+    );
+  });
+
+  it('passes theme-specific style variables resolved from Web Shell tokens', async () => {
+    const display = appDisplay();
+    // jsdom does not inherit custom properties, so declare them on the card.
+    const tokens = document.createElement('style');
+    tokens.textContent =
+      '[data-testid="mcp-app"] { --background: rgb(10, 10, 10); ' +
+      '--foreground: rgb(250, 250, 250); --muted-foreground: rgb(161, 161, 161); ' +
+      '--secondary-foreground: rgb(116, 116, 118); }';
+    document.head.appendChild(tokens);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const wrap = (
+      theme: (typeof WebShellThemeId)[keyof typeof WebShellThemeId],
+    ) => (
+      <McpAppHostContext.Provider value="http://127.0.0.1:4170">
+        <ThemeProvider value={theme}>
+          <McpApp display={display} />
+        </ThemeProvider>
+      </McpAppHostContext.Provider>
+    );
+
+    act(() => root.render(wrap(WebShellThemeId.Dark)));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(appBridgeMocks.lastOptions).toMatchObject({
+      hostContext: {
+        theme: WebShellThemeId.Dark,
+        styles: {
+          variables: expect.objectContaining({
+            '--color-background-primary': 'rgb(10, 10, 10)',
+            '--color-text-primary': 'rgb(250, 250, 250)',
+            '--color-text-secondary': 'rgb(161, 161, 161)',
+          }),
+        },
+      },
+    });
+
+    act(() => root.render(wrap(WebShellThemeId.Light)));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(appBridgeMocks.setHostContext).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        theme: WebShellThemeId.Light,
+        styles: {
+          variables: expect.objectContaining({
+            '--color-text-secondary': 'rgb(116, 116, 118)',
+          }),
+        },
+      }),
+    );
+    tokens.remove();
+  });
+
+  it('ignores a size reported while the App had no width', async () => {
+    const { container } = renderApp(appDisplay({ html: '<main>Ready</main>' }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const iframe = container.querySelector('iframe')!;
+    await act(async () => {
+      appBridgeMocks.last?.onsizechange?.({ height: 300, width: 600 });
+    });
+    expect(iframe.style.height).toBe('300px');
+    await act(async () => {
+      appBridgeMocks.last?.onsizechange?.({ height: 3656, width: 0 });
+    });
+    expect(iframe.style.height).toBe('300px');
+    await act(async () => {
+      appBridgeMocks.last?.onsizechange?.({ height: 3000, width: 600 });
+    });
+    // Other MCP Apps keep the generic cap.
+    expect(iframe.style.height).toBe('960px');
+  });
+
+  it('keeps the frame out of sight until the App initializes', async () => {
+    const { container } = renderApp(appDisplay({ html: '<main>Ready</main>' }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const iframe = container.querySelector('iframe')!;
+    // A sandbox origin that is not reachable yet must not show its error page.
+    expect(iframe.style.visibility).toBe('hidden');
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(
+      'mcpApp.loading',
+    );
+    await act(async () => {
+      appBridgeMocks.last?.onsandboxready?.();
+      appBridgeMocks.last?.oninitialized?.();
+      await Promise.resolve();
+    });
+    expect(iframe.style.visibility).toBe('');
+    expect(container.querySelector('[role="status"]')).toBeNull();
   });
 
   it('sends the sandbox resource after AppBridge reports ready', async () => {
@@ -860,5 +1267,267 @@ describe('McpApp server tool bridge', () => {
     expect(signal.aborted).toBe(true);
     expect(appBridgeMocks.lastCapabilities).toEqual({ sandbox: {} });
     expect(appBridgeMocks.last?.oncalltool).toBeUndefined();
+  });
+});
+
+describe('built-in Generated UI admission', () => {
+  const display = appDisplay({
+    serverName: 'generated-ui',
+    resourceUri: 'ui://qwen-code-generated-ui/view-v1.html',
+    requiredFeature: 'generated-ui',
+    fallbackText: 'Saved calculation summary',
+  });
+
+  it.each([
+    undefined,
+    { sessionId: 'other', status: { version: 1, enabled: true } },
+    { sessionId: 'owner', status: { version: 1, enabled: false } },
+    { sessionId: 'owner', status: { version: 2, enabled: true } },
+    { sessionId: 'owner', status: { version: 1, enabled: 'true' } },
+  ])(
+    'does not create an App bridge or iframe without an enabled owner: %j',
+    (value) => {
+      const { container, rerender } = renderApp(display);
+      rerender(
+        <McpAppGeneratedUiContext.Provider
+          value={value as McpAppGeneratedUi | undefined}
+        >
+          <McpAppSessionContext.Provider value="owner">
+            <McpApp display={display} />
+          </McpAppSessionContext.Provider>
+        </McpAppGeneratedUiContext.Provider>,
+      );
+      expect(container.textContent).toContain('Saved calculation summary');
+      expect(container.querySelector('iframe')).toBeNull();
+      expect(appBridgeMocks.constructed).toBe(0);
+    },
+  );
+
+  it('mounts only with its owner and tears down before falling back on detach', async () => {
+    const { container, rerender } = renderApp(display);
+    const render = (sessionId: string) => (
+      <McpAppGeneratedUiContext.Provider
+        value={{ sessionId: 'owner', status: { version: 1, enabled: true } }}
+      >
+        <McpAppSessionContext.Provider value={sessionId}>
+          <McpApp display={display} />
+        </McpAppSessionContext.Provider>
+      </McpAppGeneratedUiContext.Provider>
+    );
+    rerender(render('owner'));
+    expect(container.querySelector('iframe')).not.toBeNull();
+    expect(appBridgeMocks.constructed).toBe(1);
+    rerender(render('other'));
+    expect(container.querySelector('iframe')).toBeNull();
+    expect(appBridgeMocks.constructed).toBe(1);
+    await vi.waitFor(() => expect(appBridgeMocks.close).toHaveBeenCalledOnce());
+  });
+
+  it.each([
+    { requiredFeature: undefined },
+    { resourceUri: 'ui://unrelated/app' },
+  ] as Partial<McpAppDisplay>[])(
+    'restricts either built-in identity independently: %j',
+    (override) => {
+      const { container } = renderApp({ ...display, ...override });
+      expect(container.querySelector('iframe')).toBeNull();
+      expect(appBridgeMocks.constructed).toBe(0);
+    },
+  );
+
+  it('shows the saved title and summary instead of the structured result text', () => {
+    const { container } = renderApp({
+      ...display,
+      fallbackText:
+        '{"schemaVersion":1,"documentId":"g1_abc","title":"Bill","summary":"Each pays 154."}\nBill\nEach pays 154.',
+      toolResult: {
+        content: [{ type: 'text', text: 'Bill\nEach pays 154.' }],
+        structuredContent: {
+          schemaVersion: 1,
+          documentId: 'g1_abc',
+          title: 'Bill',
+          summary: 'Each pays 154.',
+        },
+      },
+    });
+    expect(container.textContent).toContain('Bill');
+    expect(container.textContent).toContain('Each pays 154.');
+    expect(container.textContent).not.toContain('schemaVersion');
+    expect(container.textContent).toContain('mcpApp.generatedUi.unavailable');
+  });
+
+  it('lets the built-in card grow past the generic App height cap', async () => {
+    const { rerender } = renderApp(display);
+    rerender(
+      <McpAppGeneratedUiContext.Provider
+        value={{ sessionId: 'owner', status: { version: 1, enabled: true } }}
+      >
+        <McpAppSessionContext.Provider value="owner">
+          <McpApp display={display} />
+        </McpAppSessionContext.Provider>
+      </McpAppGeneratedUiContext.Provider>,
+    );
+    expect(appBridgeMocks.lastOptions).toMatchObject({
+      hostContext: { containerDimensions: { maxHeight: 4000 } },
+    });
+  });
+
+  it('labels the built-in card as an interactive view without MCP plumbing', () => {
+    const { container, rerender } = renderApp(display);
+    rerender(
+      <McpAppGeneratedUiContext.Provider
+        value={{ sessionId: 'owner', status: { version: 1, enabled: true } }}
+      >
+        <McpAppSessionContext.Provider value="owner">
+          <McpApp display={display} />
+        </McpAppSessionContext.Provider>
+      </McpAppGeneratedUiContext.Provider>,
+    );
+    // This suite renders without an I18nProvider, so keys stand in for text.
+    expect(container.querySelector('iframe')?.title).toBe(
+      'mcpApp.generatedUi.title',
+    );
+    expect(container.textContent).not.toContain('MCP App');
+  });
+
+  it('marks its messages as coming from the bundled server', async () => {
+    const requestMessage = vi.fn().mockResolvedValue({});
+    const { rerender } = renderApp(display);
+    rerender(
+      <McpAppGeneratedUiContext.Provider
+        value={{ sessionId: 'owner', status: { version: 1, enabled: true } }}
+      >
+        <McpAppMessagesContext.Provider
+          value={{ sessionId: 'owner', requestMessage }}
+        >
+          <McpAppSessionContext.Provider value="owner">
+            <McpApp display={display} />
+          </McpAppSessionContext.Provider>
+        </McpAppMessagesContext.Provider>
+      </McpAppGeneratedUiContext.Provider>,
+    );
+    await appBridgeMocks.last!.onmessage!(
+      { role: 'user', content: [{ type: 'text', text: 'Continue' }] },
+      { signal: new AbortController().signal },
+    );
+    expect(requestMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ requiredFeature: 'generated-ui' }),
+    );
+  });
+
+  it('keeps the MCP framing for a server that only claims the bundled resource', () => {
+    const claimed = { ...display, serverName: 'third-party' };
+    delete claimed.requiredFeature;
+    const { container, rerender } = renderApp(claimed);
+    rerender(
+      <McpAppGeneratedUiContext.Provider
+        value={{ sessionId: 'owner', status: { version: 1, enabled: true } }}
+      >
+        <McpAppSessionContext.Provider value="owner">
+          <McpApp display={claimed} />
+        </McpAppSessionContext.Provider>
+      </McpAppGeneratedUiContext.Provider>,
+    );
+    expect(container.querySelector('iframe')?.title).toBe(
+      'third-party MCP App',
+    );
+    expect(container.textContent).toContain('MCP App');
+    expect(container.textContent).toContain('third-party');
+    expect(appBridgeMocks.lastOptions).toMatchObject({
+      hostContext: { containerDimensions: { maxHeight: 960 } },
+    });
+  });
+
+  it('attaches the card values to the owning session composer', async () => {
+    const attach = vi.fn();
+    const requestMessage = vi.fn().mockResolvedValue({});
+    const card = {
+      ...display,
+      toolResult: {
+        content: [{ type: 'text', text: 'Bill' }],
+        structuredContent: {
+          schemaVersion: 1,
+          documentId: 'g1_doc',
+          title: 'Bill',
+          summary: 'Each pays 154.',
+        },
+      },
+    };
+    const { rerender } = renderApp(card);
+    const wrap = (contextSession: string) => (
+      <McpAppGeneratedUiContext.Provider
+        value={{ sessionId: 'owner', status: { version: 1, enabled: true } }}
+      >
+        <McpAppSessionContext.Provider value="owner">
+          <McpAppMessagesContext.Provider
+            value={{ sessionId: 'owner', requestMessage }}
+          >
+            <McpAppModelContextContext.Provider
+              value={{ sessionId: contextSession, attach }}
+            >
+              <McpApp display={card} />
+            </McpAppModelContextContext.Provider>
+          </McpAppMessagesContext.Provider>
+        </McpAppSessionContext.Provider>
+      </McpAppGeneratedUiContext.Provider>
+    );
+    rerender(wrap('owner'));
+    expect(appBridgeMocks.lastCapabilities).toMatchObject({
+      updateModelContext: { text: {} },
+    });
+    const update = appBridgeMocks.last!.onupdatemodelcontext!;
+    await act(async () => {
+      await update({ content: [{ type: 'text', text: 'people: 7' }] });
+    });
+    expect(attach).toHaveBeenCalledWith({
+      id: 'generated-ui:g1_doc',
+      title: 'Bill',
+      text: 'people: 7',
+    });
+    attach.mockClear();
+    await act(async () => {
+      await update({ content: [{ type: 'text', text: 'x'.repeat(17000) }] });
+    });
+    expect(attach).not.toHaveBeenCalled();
+    // A composer that now belongs to another session never receives it.
+    rerender(wrap('other'));
+    await act(async () => {
+      await appBridgeMocks.last!.onupdatemodelcontext!({
+        content: [{ type: 'text', text: 'people: 8' }],
+      });
+    });
+    expect(attach).not.toHaveBeenCalled();
+  });
+
+  it('does not offer model context to other MCP Apps', () => {
+    const { rerender } = renderApp(appDisplay());
+    rerender(
+      <McpAppMessagesContext.Provider
+        value={{ sessionId: 'live', requestMessage: vi.fn() }}
+      >
+        <McpAppSessionContext.Provider value="live">
+          <McpAppModelContextContext.Provider
+            value={{ sessionId: 'live', attach: vi.fn() }}
+          >
+            <McpApp display={appDisplay()} />
+          </McpAppModelContextContext.Provider>
+        </McpAppSessionContext.Provider>
+      </McpAppMessagesContext.Provider>,
+    );
+    expect(appBridgeMocks.lastCapabilities).not.toHaveProperty(
+      'updateModelContext',
+    );
+    expect(appBridgeMocks.last?.onupdatemodelcontext).toBeUndefined();
+  });
+
+  it('retains manually installed legacy Generated UI behavior', () => {
+    const { container } = renderApp(
+      appDisplay({
+        serverName: 'generated-ui',
+        resourceUri: 'ui://generated-ui/view-v1.html',
+      }),
+    );
+    expect(container.querySelector('iframe')).not.toBeNull();
+    expect(appBridgeMocks.constructed).toBe(1);
   });
 });

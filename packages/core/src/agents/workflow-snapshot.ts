@@ -41,6 +41,11 @@ import {
   isWorkflowSizeWarning,
   type WorkflowSizeWarning,
 } from './runtime/workflow-size.js';
+import {
+  buildWorkflowResultPreview,
+  isWorkflowResultPreview,
+  type WorkflowResultPreview,
+} from './workflow-result-preview.js';
 
 const debugLogger = createDebugLogger('WORKFLOW_SNAPSHOT');
 
@@ -77,6 +82,8 @@ export interface WorkflowSnapshot {
   runId: string;
   /** Tool call that launched the run. Absent on legacy snapshots. */
   toolUseId?: string;
+  /** Chat that owns the dispatch transcripts, including project-wide history. */
+  parentSessionId?: string;
   /** Human-readable fallback when a workflow has no exported meta block. */
   description?: string;
   /** Saved workflow definition name. Absent for inline and legacy runs. */
@@ -124,6 +131,12 @@ export interface WorkflowSnapshot {
   startTime: number;
   endTime?: number;
   result?: unknown;
+  /**
+   * How a completed run's result read when it settled. `result` is plain
+   * JSON and loses Error, Map, Set, and cyclic values; this does not. Absent
+   * on runs that did not complete and on older snapshots.
+   */
+  resultPreview?: WorkflowResultPreview;
   error?: string;
 }
 
@@ -140,6 +153,7 @@ export function toSnapshot(task: WorkflowTask): WorkflowSnapshot {
       : {}),
     ...(task.workflowCallsTruncated ? { workflowCallsTruncated: true } : {}),
     ...(task.toolUseId ? { toolUseId: task.toolUseId } : {}),
+    ...(task.parentSessionId ? { parentSessionId: task.parentSessionId } : {}),
     description: task.description,
     ...(task.workflowName ? { workflowName: task.workflowName } : {}),
     sourceRunId: task.sourceRunId,
@@ -167,6 +181,9 @@ export function toSnapshot(task: WorkflowTask): WorkflowSnapshot {
     startTime: task.startTime,
     endTime: task.endTime,
     result: safeResult(task.result),
+    ...(task.status === 'completed'
+      ? { resultPreview: buildWorkflowResultPreview(task.result) }
+      : {}),
     error: task.error,
   };
 }
@@ -578,6 +595,7 @@ function isWorkflowSnapshot(value: unknown): value is WorkflowSnapshot {
     typeof value['runId'] === 'string' &&
     value['runId'].length > 0 &&
     isOptionalString(value['toolUseId']) &&
+    isOptionalString(value['parentSessionId']) &&
     isOptionalString(value['description']) &&
     isOptionalString(value['workflowName']) &&
     isOptionalString(value['sourceRunId']) &&
@@ -618,6 +636,8 @@ function isWorkflowSnapshot(value: unknown): value is WorkflowSnapshot {
     isStringArray(value['recentLogs']) &&
     isFiniteNumber(value['startTime']) &&
     (value['endTime'] === undefined || isFiniteNumber(value['endTime'])) &&
+    (value['resultPreview'] === undefined ||
+      isWorkflowResultPreview(value['resultPreview'])) &&
     isOptionalString(value['error'])
   );
 }
@@ -658,7 +678,29 @@ async function pruneSnapshots(config: Config, dir: string): Promise<void> {
   // Before the retention check, not after it: a project under the cap would
   // otherwise keep every temp file a crash ever left in this directory.
   await sweepSnapshotTempFiles(dir, entries);
-  const files = entries.filter((f) => f.endsWith('.json'));
+  const candidates = entries.filter((f) => f.endsWith('.json'));
+  if (candidates.length <= MAX_RETAINED_SNAPSHOTS) return;
+  // Only well-formed snapshots count toward the cap. `listWorkflowSnapshots`
+  // filters `.json` too, but then skips whatever `isWorkflowSnapshot` rejects,
+  // so a malformed file never reaches the user's history. Counting it here
+  // would push the project over the cap and evict a real run in its place —
+  // oldest-mtime-first, so the newest malformed file survives while a
+  // legitimate snapshot is silently lost. Such a file is left on disk: prune
+  // is best-effort and only ever removes what this module wrote.
+  const settled = await Promise.all(
+    candidates.map(async (f) => {
+      try {
+        const parsed: unknown = JSON.parse(
+          await fs.readFile(`${dir}/${f}`, 'utf8'),
+        );
+        return isWorkflowSnapshot(parsed) ? f : undefined;
+      } catch (e) {
+        debugLogger.warn(`prune skipped unreadable snapshot ${f}: ${e}`);
+        return undefined;
+      }
+    }),
+  );
+  const files = settled.filter((f): f is string => f !== undefined);
   if (files.length <= MAX_RETAINED_SNAPSHOTS) return;
   // Sort by mtime ascending (oldest first) and unlink the overflow.
   const stats = await Promise.all(

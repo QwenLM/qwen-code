@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFile } from 'node:fs/promises';
 import type {
   Content,
   GenerateContentConfig,
@@ -14,6 +13,10 @@ import type {
 import type { Config } from '../config/config.js';
 import { DEFAULT_QWEN_MODEL } from './default-qwen-model.js';
 import { SchemaValidator } from './schemaValidator.js';
+import {
+  formatOutputLanguageInstruction,
+  readOutputLanguagePreference,
+} from './side-query-output-language.js';
 
 export interface SideQueryJsonOptions<TResponse> {
   contents: Content[];
@@ -34,7 +37,12 @@ export interface SideQueryJsonOptions<TResponse> {
    * Caller-supplied generation config. `thinkingConfig.includeThoughts`
    * defaults to `false` for all side queries; pass
    * `thinkingConfig: { includeThoughts: true }` here if reasoning output is
-   * required.
+   * required. Omitting `maxOutputTokens` gets a best-effort budget from
+   * `BaseLlmClient` against the target's resolved context window (#13208);
+   * when no window is declared or configured and the id is in neither the
+   * catalog nor the curated tables, that term falls back to a fabricated
+   * 200 000 (`DEFAULT_TOKEN_LIMIT`) and does not bind. A value supplied here
+   * is sent as given, so budget it against the receiving model yourself.
    */
   config?: Omit<
     GenerateContentConfig,
@@ -49,6 +57,7 @@ export interface SideQueryJsonOptions<TResponse> {
    * pass `1` to avoid burning attempts on failures the user will never see.
    */
   maxAttempts?: number;
+  boundedRetries?: boolean;
   /**
    * Skip appending the user's `output-language.md` rule. Defaults to false so
    * new user-visible side queries honor the preference automatically.
@@ -81,7 +90,12 @@ export interface SideQueryTextOptions {
    * Caller-supplied generation config. `thinkingConfig.includeThoughts`
    * defaults to `false` for all side queries; pass
    * `thinkingConfig: { includeThoughts: true }` here if reasoning output is
-   * required.
+   * required. Omitting `maxOutputTokens` gets a best-effort budget from
+   * `BaseLlmClient` against the target's resolved context window (#13208);
+   * when no window is declared or configured and the id is in neither the
+   * catalog nor the curated tables, that term falls back to a fabricated
+   * 200 000 (`DEFAULT_TOKEN_LIMIT`) and does not bind. A value supplied here
+   * is sent as given, so budget it against the receiving model yourself.
    */
   config?: Omit<
     GenerateContentConfig,
@@ -147,26 +161,6 @@ function applyThinkingDefault(
   };
 }
 
-async function getOutputLanguageInstruction(
-  config: Config,
-): Promise<string | undefined> {
-  const outputLanguageFilePath = config.getOutputLanguageFilePath?.();
-  if (!outputLanguageFilePath) return undefined;
-
-  try {
-    const preference = (await readFile(outputLanguageFilePath, 'utf8')).trim();
-    if (!preference) return undefined;
-
-    return [
-      'Follow the user-visible output language preference below for this side query.',
-      'This preference overrides any earlier language-selection rule in this system instruction.',
-      preference,
-    ].join('\n\n');
-  } catch {
-    return undefined;
-  }
-}
-
 function appendSystemInstruction(
   systemInstruction: string | Part | Part[] | Content | undefined,
   outputLanguageInstruction: string | undefined,
@@ -216,12 +210,12 @@ export async function runSideQuery<TResponse>(
   const model = resolveDefaultModel(config, options.model);
   const promptId = options.promptId ?? buildDefaultPromptId(options.purpose);
   const requestConfig = applyThinkingDefault(options.config);
-  const outputLanguageInstruction = options.skipOutputLanguagePreference
+  const outputLanguagePreference = options.skipOutputLanguagePreference
     ? undefined
-    : await getOutputLanguageInstruction(config);
+    : await readOutputLanguagePreference(config.getOutputLanguageFilePath?.());
   const systemInstruction = appendSystemInstruction(
     options.systemInstruction,
-    outputLanguageInstruction,
+    formatOutputLanguageInstruction(outputLanguagePreference),
   );
 
   if (isJsonOptions(options)) {
@@ -233,6 +227,9 @@ export async function runSideQuery<TResponse>(
       systemInstruction,
       promptId,
       config: requestConfig,
+      ...(options.boundedRetries !== undefined && {
+        boundedRetries: options.boundedRetries,
+      }),
       ...(options.maxAttempts !== undefined && {
         maxAttempts: options.maxAttempts,
       }),

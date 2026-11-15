@@ -24,19 +24,24 @@ interface FallbackCopy {
 // This surface renders OUTSIDE the in-app I18nProvider (the boundary wraps the
 // whole App, which owns that provider), so it cannot call useI18n. It carries
 // its own minimal copy instead of pulling the full translation table.
+const EN_COPY: FallbackCopy = {
+  title: 'Something went wrong',
+  body: 'An unexpected error occurred and this content could not be displayed.',
+  retry: 'Try again',
+  reload: 'Reload page',
+};
+
 const COPY: Record<WebShellLanguage, FallbackCopy> = {
-  en: {
-    title: 'Something went wrong',
-    body: 'An unexpected error occurred and this content could not be displayed.',
-    retry: 'Try again',
-    reload: 'Reload page',
-  },
+  en: EN_COPY,
   'zh-CN': {
     title: '出了点问题',
     body: '发生意外错误，无法显示此内容。',
     retry: '重试',
     reload: '重新加载',
   },
+  // Not translated yet — same partial-catalog policy as the ru table in
+  // i18n.tsx (#13391): ru reuses the EN copy.
+  ru: EN_COPY,
 };
 
 // The boundary wraps the whole App, so this surface renders when the themed

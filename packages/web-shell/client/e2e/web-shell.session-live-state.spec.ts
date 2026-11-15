@@ -50,7 +50,7 @@ test('uses live-state instead of polling the full session catalog @smoke', async
     .toBeGreaterThan(settledLiveStateRequests);
   expect(fullCatalogRequests()).toBe(settledCatalogRequests);
 
-  await page.getByRole('tab', { name: 'Channels' }).click();
+  await page.getByRole('button', { name: 'Channels', exact: true }).click();
   await expect.poll(fullCatalogRequests).toBe(settledCatalogRequests + 1);
   const requestsAfterSourceChange = fullCatalogRequests();
   const liveRequestsAfterSourceChange = liveStateRequests();

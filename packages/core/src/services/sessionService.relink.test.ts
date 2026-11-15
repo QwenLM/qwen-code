@@ -54,6 +54,15 @@ describe('SessionService project relinking', () => {
         timestamp: '2026-09-24T00:00:01.000Z',
         message: { role: 'model', parts: [{ text: 'done' }] },
       },
+      {
+        sessionId: SESSION_ID,
+        uuid: 'third',
+        parentUuid: 'second',
+        type: 'assistant',
+        cwd: path.join(root, 'unrelated-project'),
+        timestamp: '2026-09-24T00:00:02.000Z',
+        message: { role: 'model', parts: [{ text: 'external path' }] },
+      },
     ];
     fs.writeFileSync(
       transcriptPath,
@@ -140,6 +149,9 @@ describe('SessionService project relinking', () => {
     });
     expect(migratedRecords[1]['cwd']).toBe(
       path.join(fixture.newCwd, 'packages', 'app'),
+    );
+    expect(migratedRecords[2]['cwd']).toBe(
+      path.join(fixture.root, 'unrelated-project'),
     );
     expect(
       JSON.parse(
@@ -285,6 +297,83 @@ describe('SessionService project relinking', () => {
     await expect(
       fixture.service.findRelinkCandidate(SESSION_ID),
     ).resolves.toMatchObject({ status: 'blocked', reason: 'active_writer' });
+  });
+
+  it('treats a runtime writer from another host as active', async () => {
+    const fixture = makeFixture();
+    fs.writeFileSync(
+      path.join(fixture.oldChatsDir, `${SESSION_ID}.runtime.json`),
+      JSON.stringify({
+        schema_version: 1,
+        pid: 2147483647,
+        session_id: SESSION_ID,
+        work_dir: fixture.oldCwd,
+        hostname: 'another-host.example',
+        started_at: 1,
+        qwen_version: null,
+      }),
+    );
+    fs.rmSync(fixture.oldCwd, { recursive: true });
+
+    await expect(
+      fixture.service.findRelinkCandidate(SESSION_ID),
+    ).resolves.toMatchObject({ status: 'blocked', reason: 'active_writer' });
+  });
+
+  it('refuses a hard-linked transcript', async () => {
+    const fixture = makeFixture();
+    fs.linkSync(fixture.transcriptPath, `${fixture.transcriptPath}.link`);
+    fs.rmSync(fixture.oldCwd, { recursive: true });
+
+    await expect(
+      fixture.service.findRelinkCandidate(SESSION_ID),
+    ).resolves.toMatchObject({ status: 'blocked', reason: 'scan_incomplete' });
+  });
+
+  it('refuses a transcript containing another session ID', async () => {
+    const fixture = makeFixture();
+    fs.appendFileSync(
+      fixture.transcriptPath,
+      `${JSON.stringify({
+        sessionId: '22222222-2222-4222-8222-222222222222',
+        uuid: 'foreign',
+        parentUuid: 'third',
+        type: 'assistant',
+        cwd: fixture.oldCwd,
+        timestamp: '2026-09-24T00:00:03.000Z',
+        message: { role: 'model', parts: [{ text: 'foreign session' }] },
+      })}\n`,
+    );
+    fs.rmSync(fixture.oldCwd, { recursive: true });
+
+    await expect(
+      fixture.service.findRelinkCandidate(SESSION_ID),
+    ).resolves.toMatchObject({
+      status: 'blocked',
+      reason: 'invalid_transcript',
+    });
+  });
+
+  it('refuses a transcript stored under a different project directory', async () => {
+    const fixture = makeFixture();
+    const wrongStorage = new Storage(
+      path.join(fixture.root, 'different-project'),
+      fixture.runtimeBaseDir,
+    );
+    const wrongChatsDir = path.join(wrongStorage.getProjectDir(), 'chats');
+    fs.mkdirSync(wrongChatsDir, { recursive: true });
+    fs.renameSync(
+      fixture.transcriptPath,
+      path.join(wrongChatsDir, `${SESSION_ID}.jsonl`),
+    );
+    fs.rmSync(fixture.oldCwd, { recursive: true });
+
+    await expect(
+      fixture.service.findRelinkCandidate(SESSION_ID),
+    ).resolves.toMatchObject({
+      status: 'blocked',
+      reason: 'invalid_transcript',
+    });
   });
 
   it('leaves managed sessions with their session authority', async () => {

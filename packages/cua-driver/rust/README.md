@@ -11,7 +11,7 @@ implementations, testkit, and helper crates.
 | `cua-driver-core` | Shared protocol, tool models, config, and CDP helpers |
 | `platform-macos` | macOS AX, capture, input, browser, and daemon support |
 | `platform-windows` | Windows UIA, capture, input, overlay, and diagnostics |
-| `platform-linux` | Linux AT-SPI, X11/Wayland, capture, and input support |
+| `platform-linux` | Linux AT-SPI, X11, capture, and input support |
 | `cua-driver-testkit` | Test-only helpers for spawning the daemon and parsing responses |
 | `cua-driver-uia` | Windows UIAccess worker |
 | `cursor-overlay` | Cross-platform semantic cursor renderer and bounded compiled-theme loader |

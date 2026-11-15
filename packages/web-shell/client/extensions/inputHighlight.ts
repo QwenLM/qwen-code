@@ -8,6 +8,7 @@ import type { DecorationSet, ViewUpdate } from '@codemirror/view';
 import { RangeSetBuilder } from '@codemirror/state';
 import type { CommandInfo } from '../adapters/types';
 import { getSlashCommandArgumentHint } from '../completions/slashCompletion';
+import type { SkillInfo } from '../completions/slashCompletion';
 import type { WebShellLanguage } from '../i18n';
 
 const slashDeco = Decoration.mark({ class: 'cm-input-slash' });
@@ -39,6 +40,7 @@ export function buildInputHighlightDecorations(
   view: EditorView,
   getCommands: () => CommandInfo[],
   getLanguage: () => WebShellLanguage,
+  getSkills: () => readonly SkillInfo[] = () => [],
 ): DecorationSet {
   const builder = new RangeSetBuilder<Decoration>();
   const doc = view.state.doc;
@@ -46,6 +48,7 @@ export function buildInputHighlightDecorations(
   let lastProcessedLine = 0;
   let commands: CommandInfo[] | null = null;
   let language: WebShellLanguage | null = null;
+  let skillNames: ReadonlySet<string> | null = null;
 
   for (const visibleRange of view.visibleRanges) {
     const firstLine = doc.lineAt(visibleRange.from).number;
@@ -64,10 +67,14 @@ export function buildInputHighlightDecorations(
         ranges.push({ from: offset, to: offset + slashEnd, deco: slashDeco });
         commands ??= getCommands();
         language ??= getLanguage();
+        skillNames ??= new Set(
+          getSkills().map((skill) => skill.name.toLowerCase()),
+        );
         const argumentHint = getSlashCommandArgumentHint(
           text,
           commands,
           language,
+          skillNames,
         );
         if (argumentHint) {
           const prefix = text.endsWith(' ') ? '' : ' ';
@@ -116,6 +123,7 @@ export function buildInputHighlightDecorations(
 export function inputHighlight(
   getCommands: () => CommandInfo[] = () => [],
   getLanguage: () => WebShellLanguage = () => 'en',
+  getSkills: () => readonly SkillInfo[] = () => [],
 ) {
   return ViewPlugin.fromClass(
     class {
@@ -125,6 +133,7 @@ export function inputHighlight(
           view,
           getCommands,
           getLanguage,
+          getSkills,
         );
       }
       update(update: ViewUpdate) {
@@ -133,6 +142,7 @@ export function inputHighlight(
             update.view,
             getCommands,
             getLanguage,
+            getSkills,
           );
         }
       }

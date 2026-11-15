@@ -70,10 +70,14 @@ if (!skipBuild) {
     cwd: sourceRoot,
     stdio: 'inherit',
   });
-  execFileSync(process.execPath, [npm, 'run', 'prepare:package'], {
-    cwd: sourceRoot,
-    stdio: 'inherit',
-  });
+  execFileSync(
+    process.execPath,
+    [npm, 'run', 'prepare:package', '--', '--host-runtime'],
+    {
+      cwd: sourceRoot,
+      stdio: 'inherit',
+    },
+  );
 }
 
 const distDir = path.join(sourceRoot, 'dist');
@@ -82,6 +86,10 @@ for (const required of [
   'cli-entry.js',
   'web-shell/index.html',
   'web-shell/assets',
+  'generated-ui/main.js',
+  'generated-ui/app.html',
+  'generated-ui/skills/generated-ui/SKILL.md',
+  'generated-ui/THIRD_PARTY_NOTICES.txt',
 ]) {
   const candidate = path.join(distDir, required);
   if (!fs.existsSync(candidate)) {
@@ -94,6 +102,20 @@ try {
   fs.writeFileSync(path.join(packageRoot, '.gitkeep'), '');
   fs.mkdirSync(binDir, { recursive: true });
   copyDirectory(distDir, libDir);
+  // --skip-build can reuse an npm-prepared dist with all POSIX architectures.
+  // Desktop dependency scans must only encounter the selected target's library.
+  const opentuiScope = path.join(libDir, 'opentui-assets', '@opentui');
+  const nativePackage = `core-${target}`;
+  if (fs.existsSync(opentuiScope)) {
+    for (const entry of fs.readdirSync(opentuiScope)) {
+      if (entry.startsWith('core-') && entry !== nativePackage) {
+        fs.rmSync(path.join(opentuiScope, entry), {
+          recursive: true,
+          force: true,
+        });
+      }
+    }
+  }
   stageNodePty(target);
   await installNodeRuntime(nodeDir, target);
   writeLaunchers(target);

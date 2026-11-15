@@ -51,11 +51,11 @@ function parseSelectorPayload(options: SelectorOptions): SelectorPayload {
   ) as SelectorPayload;
 }
 
-/** Stand in for `runSideQuery` the way production behaves: the parsed model
- * response is run through the caller's `validate` closure and its message
- * is THROWN (sideQuery.ts). Mocks that only read `options.contents` and
- * return a selection never touch `validate`, so a broken membership/budget
- * check would go unnoticed even though it rejects every real selection. */
+/** Stand in for `runSideQuery` as production behaves (sideQuery.ts): the
+ * parsed response goes through the caller's `validate` and its message is
+ * THROWN. Mocks that just return a selection never touch `validate`, so a
+ * broken membership/budget check that rejects every real selection would
+ * go unnoticed. */
 function mockSelector(
   respond: (payload: SelectorPayload) => { entryIds: unknown[] },
 ): void {
@@ -152,12 +152,46 @@ describe('omni memory sideQuery selector', () => {
     return recordAndBindFileRef(path.join(tmpDir, 'pic.png'));
   }
 
+  const extract = (parts: Parameters<typeof extractRequestResourceIds>[1]) =>
+    extractRequestResourceIds(sideQueryConfig(), parts);
+  const handlePart = (resourceId: string, name = 'pic.png') => ({
+    text: formatResourceHandleText(name, resourceId),
+  });
+
+  /** Runs passive recall over `requestParts` with the sideQuery config. */
+  const run = (
+    requestParts: Parameters<typeof runOmniMemorySideQuery>[0]['requestParts'],
+    extra: Partial<Parameters<typeof runOmniMemorySideQuery>[0]> = {},
+  ) =>
+    runOmniMemorySideQuery({
+      config: sideQueryConfig(),
+      requestParts,
+      ...extra,
+    });
+
+  /** Answers every selector call with an empty pick; returns a getter for
+   * the options of the last call, read after the run (see the capture note
+   * in 'materializes the selector picks'). */
+  function captureSelector(): () => SelectorOptions {
+    let seen: SelectorOptions | undefined;
+    runSideQueryMock.mockImplementation((async (
+      _config: unknown,
+      options: SelectorOptions,
+    ) => {
+      seen = options;
+      return { entryIds: [] };
+    }) as never);
+    return () => seen!;
+  }
+  const requestOf = (options: SelectorOptions) =>
+    parseSelectorPayload(options).request;
+
   describe('extractRequestResourceIds', () => {
     it('collects issued handles from annotation lines, deduplicated', async () => {
       const resourceId = await recordAndBind();
       const parts = [
         'plain user text',
-        { text: formatResourceHandleText('pic.png', resourceId) },
+        handlePart(resourceId),
         {
           text:
             'context\n' +
@@ -165,16 +199,13 @@ describe('omni memory sideQuery selector', () => {
             '\nmore',
         },
       ];
-      expect(extractRequestResourceIds(sideQueryConfig(), parts)).toEqual([
-        resourceId,
-      ]);
+      expect(extract(parts)).toEqual([resourceId]);
     });
 
     it('ignores handles this session never issued', () => {
-      const parts = [
-        { text: formatResourceHandleText('ghost.png', 'media-7-abcdef01') },
-      ];
-      expect(extractRequestResourceIds(sideQueryConfig(), parts)).toEqual([]);
+      expect(extract([handlePart('media-7-abcdef01', 'ghost.png')])).toEqual(
+        [],
+      );
     });
 
     it('recovers the handle from a path-form annotation via resolveByFileRef', async () => {
@@ -186,16 +217,14 @@ describe('omni memory sideQuery selector', () => {
         'plain user text',
         { text: formatResourcePathText(path.join(tmpDir, 'pic.png')) },
       ];
-      expect(extractRequestResourceIds(sideQueryConfig(), parts)).toEqual([
-        resourceId,
-      ]);
+      expect(extract(parts)).toEqual([resourceId]);
     });
 
     it('ignores a path-form annotation for a file this session never bound', () => {
       const parts = [
         { text: formatResourcePathText(path.join(tmpDir, 'never-seen.png')) },
       ];
-      expect(extractRequestResourceIds(sideQueryConfig(), parts)).toEqual([]);
+      expect(extract(parts)).toEqual([]);
     });
 
     it('resolves a path-form annotation whose filename ends in whitespace', async () => {
@@ -205,8 +234,7 @@ describe('omni memory sideQuery selector', () => {
       // silently dropped from passive recall.
       const fileRef = path.join(tmpDir, 'pic.png ');
       const resourceId = await recordAndBindFileRef(fileRef);
-      const parts = [{ text: formatResourcePathText(fileRef) }];
-      expect(extractRequestResourceIds(sideQueryConfig(), parts)).toEqual([
+      expect(extract([{ text: formatResourcePathText(fileRef) }])).toEqual([
         resourceId,
       ]);
     });
@@ -216,8 +244,7 @@ describe('omni memory sideQuery selector', () => {
       // is never a handle boundary; the verbatim path resolves to its binding.
       const fileRef = path.join(tmpDir, 'clip：media-3-9f2cabcd');
       const resourceId = await recordAndBindFileRef(fileRef);
-      const parts = [{ text: formatResourcePathText(fileRef) }];
-      expect(extractRequestResourceIds(sideQueryConfig(), parts)).toEqual([
+      expect(extract([{ text: formatResourcePathText(fileRef) }])).toEqual([
         resourceId,
       ]);
     });
@@ -226,14 +253,8 @@ describe('omni memory sideQuery selector', () => {
       // Annotations can be flattened into a larger part with indentation;
       // leading whitespace is line formatting, not part of the path.
       const resourceId = await recordAndBind();
-      const parts = [
-        {
-          text: `context\n   ${formatResourcePathText(
-            path.join(tmpDir, 'pic.png'),
-          )}\nmore`,
-        },
-      ];
-      expect(extractRequestResourceIds(sideQueryConfig(), parts)).toEqual([
+      const annotation = formatResourcePathText(path.join(tmpDir, 'pic.png'));
+      expect(extract([{ text: `context\n   ${annotation}\nmore` }])).toEqual([
         resourceId,
       ]);
     });
@@ -246,9 +267,7 @@ describe('omni memory sideQuery selector', () => {
       const resourceId = await recordAndBind(); // fileRef = <tmp>/pic.png
       const annotation = formatResourcePathText(path.join(tmpDir, 'pic.png'));
       const parts = [{ text: `context\n   ${annotation}   \nmore` }];
-      expect(extractRequestResourceIds(sideQueryConfig(), parts)).toEqual([
-        resourceId,
-      ]);
+      expect(extract(parts)).toEqual([resourceId]);
     });
 
     it('resolves a path to the LATEST version bound at that locator', async () => {
@@ -260,8 +279,7 @@ describe('omni memory sideQuery selector', () => {
       const first = await recordAndBindFileRef(fileRef, 'a'.repeat(64));
       const second = await recordAndBindFileRef(fileRef, 'b'.repeat(64));
       expect(second).not.toBe(first);
-      const parts = [{ text: formatResourcePathText(fileRef) }];
-      expect(extractRequestResourceIds(sideQueryConfig(), parts)).toEqual([
+      expect(extract([{ text: formatResourcePathText(fileRef) }])).toEqual([
         second,
       ]);
     });
@@ -270,21 +288,15 @@ describe('omni memory sideQuery selector', () => {
   describe('runOmniMemorySideQuery', () => {
     it('is a no-op in active mode (D10 mutual exclusion)', async () => {
       const resourceId = await recordAndBind();
-      const outcome = await runOmniMemorySideQuery({
+      const outcome = await run([handlePart(resourceId)], {
         config: sideQueryConfig('active'),
-        requestParts: [
-          { text: formatResourceHandleText('pic.png', resourceId) },
-        ],
       });
       expect(outcome).toBeNull();
       expect(runSideQueryMock).not.toHaveBeenCalled();
     });
 
     it('is a no-op when the request carries no handles', async () => {
-      const outcome = await runOmniMemorySideQuery({
-        config: sideQueryConfig(),
-        requestParts: ['just text'],
-      });
+      const outcome = await run(['just text']);
       expect(outcome).toBeNull();
       expect(runSideQueryMock).not.toHaveBeenCalled();
     });
@@ -301,13 +313,10 @@ describe('omni memory sideQuery selector', () => {
         return { entryIds: [payload.candidates[0]!.entryId] };
       });
 
-      const outcome = await runOmniMemorySideQuery({
-        config: sideQueryConfig(),
-        requestParts: [
-          'what size is this image?',
-          { text: formatResourceHandleText('pic.png', resourceId) },
-        ],
-      });
+      const outcome = await run([
+        'what size is this image?',
+        handlePart(resourceId),
+      ]);
 
       expect(seenPayload?.request).toContain('what size is this image');
       // Selector-visible manifest: summaries only, no paths.
@@ -323,35 +332,22 @@ describe('omni memory sideQuery selector', () => {
 
     it('shows the selector the question even when IDE context is merged in', async () => {
       const resourceId = await recordAndBind();
-      let seenRequest = '';
-      runSideQueryMock.mockImplementation((async (
-        _config: unknown,
-        options: { contents: Content[] },
-      ) => {
-        const payload = JSON.parse(
-          (options.contents[0]!.parts![0] as { text: string }).text,
-        );
-        seenRequest = payload.request;
-        return { entryIds: [] };
-      }) as never);
+      const selectorOptions = captureSelector();
 
-      // Exactly how client.ts builds the parts in IDE mode: wrapIdeContext
-      // output is PREPENDED INTO the user's own text part, before the
-      // passive-recall pass runs — so the question lives in a part that
-      // STARTS with <system-reminder>. Dropping such parts wholesale would
-      // make the selector pick relevance-blind.
-      await runOmniMemorySideQuery({
-        config: sideQueryConfig(),
-        requestParts: [
-          {
-            text:
-              '<system-reminder>\nActive file: /x/y.ts\n</system-reminder>' +
-              'what size is this image?',
-          },
-          { text: formatResourceHandleText('pic.png', resourceId) },
-        ],
-      });
+      // Exactly how client.ts builds IDE-mode parts: wrapIdeContext output is
+      // PREPENDED INTO the user's own text part before passive recall runs, so
+      // the question lives in a part that STARTS with <system-reminder>.
+      // Dropping such parts wholesale would make the selector relevance-blind.
+      await run([
+        {
+          text:
+            '<system-reminder>\nActive file: /x/y.ts\n</system-reminder>' +
+            'what size is this image?',
+        },
+        handlePart(resourceId),
+      ]);
 
+      const seenRequest = requestOf(selectorOptions());
       expect(seenRequest).toContain('what size is this image?');
       // The reminder itself is stripped, not forwarded.
       expect(seenRequest).not.toContain('system-reminder');
@@ -365,26 +361,14 @@ describe('omni memory sideQuery selector', () => {
       // 接收原始媒体、大文本或本地路径". The path form put it into the selector call.
       const fileRef = path.join(tmpDir, 'pic.png');
       await recordAndBindFileRef(fileRef);
-      let seenRequest = '';
-      runSideQueryMock.mockImplementation((async (
-        _config: unknown,
-        options: { contents: Content[] },
-      ) => {
-        const payload = JSON.parse(
-          (options.contents[0]!.parts![0] as { text: string }).text,
-        );
-        seenRequest = payload.request;
-        return { entryIds: [] };
-      }) as never);
+      const selectorOptions = captureSelector();
 
-      await runOmniMemorySideQuery({
-        config: sideQueryConfig(),
-        requestParts: [
-          { text: 'what is in this picture?' },
-          { text: formatResourcePathText(fileRef) },
-        ],
-      });
+      await run([
+        { text: 'what is in this picture?' },
+        { text: formatResourcePathText(fileRef) },
+      ]);
 
+      const seenRequest = requestOf(selectorOptions());
       expect(seenRequest).toContain('what is in this picture?');
       expect(seenRequest).not.toContain(fileRef);
       expect(seenRequest).not.toContain(tmpDir);
@@ -392,31 +376,19 @@ describe('omni memory sideQuery selector', () => {
 
     it('keeps marker-prefixed PROSE in the selector request (parse-gated strip)', async () => {
       // R3-8: stripResourceAnnotationLines must drop only lines that PARSE as
-      // a real annotation, not every line opening with a marker. A user's note
-      // `【媒体资源】清单…` (marker prefix, but no `：<handle>` payload) is
-      // their question — the old prefix-only strip deleted it, so the selector
-      // judged relevance from a truncated question. The parse gate keeps it.
+      // a real annotation. A user's note `【媒体资源】清单…` (marker prefix, no
+      // `：<handle>` payload) is their question; the old prefix-only strip
+      // deleted it, truncating what the selector judged relevance from.
       const resourceId = await recordAndBind();
-      let seenRequest = '';
-      runSideQueryMock.mockImplementation((async (
-        _config: unknown,
-        options: { contents: Content[] },
-      ) => {
-        seenRequest = JSON.parse(
-          (options.contents[0]!.parts![0] as { text: string }).text,
-        ).request;
-        return { entryIds: [] };
-      }) as never);
+      const selectorOptions = captureSelector();
 
-      await runOmniMemorySideQuery({
-        config: sideQueryConfig(),
-        requestParts: [
-          { text: '【媒体资源】清单 和 【媒体路径】清单 是我的笔记' },
-          { text: formatResourceHandleText('pic.png', resourceId) },
-        ],
-      });
+      await run([
+        { text: '【媒体资源】清单 和 【媒体路径】清单 是我的笔记' },
+        handlePart(resourceId),
+      ]);
 
       // The prose survives; the genuine handle annotation is stripped.
+      const seenRequest = requestOf(selectorOptions());
       expect(seenRequest).toContain('【媒体资源】清单');
       expect(seenRequest).toContain('【媒体路径】清单');
       expect(seenRequest).not.toContain(resourceId);
@@ -425,46 +397,28 @@ describe('omni memory sideQuery selector', () => {
     it('degrades to an empty recall with a reason when the selector fails', async () => {
       const resourceId = await recordAndBind();
       runSideQueryMock.mockRejectedValue(new Error('boom'));
-
-      const outcome = await runOmniMemorySideQuery({
-        config: sideQueryConfig(),
-        requestParts: [
-          { text: formatResourceHandleText('pic.png', resourceId) },
-        ],
-      });
-
-      expect(outcome).toMatchObject({
+      expect(await run([handlePart(resourceId)])).toMatchObject({
         result: null,
         reason: expect.stringContaining('selector_failed'),
       });
     });
 
     it('rejects a selection the candidate manifest does not authorize', async () => {
-      // The `validate` closure is the only thing standing between the
-      // selector and an arbitrary entryId: a wrong verdict either lets a
-      // forged/cross-root id through to materialization, or (inverted)
-      // rejects every legitimate selection — and with the default
-      // `maxAttempts: 1` that turns every passive recall into
-      // `selector_failed`, silently killing the whole feature.
+      // The `validate` closure is the only thing between the selector and an
+      // arbitrary entryId: a wrong verdict either lets a forged/cross-root id
+      // through to materialization, or (inverted) rejects every legitimate
+      // selection, which with the default `maxAttempts: 1` turns every passive
+      // recall into `selector_failed`, silently killing the whole feature.
       const resourceId = await recordAndBind();
-      let validate: SelectorOptions['validate'];
-      let manifestEntryId = '';
-      runSideQueryMock.mockImplementation((async (
-        _config: unknown,
-        options: SelectorOptions,
-      ) => {
-        validate = options.validate;
-        manifestEntryId = parseSelectorPayload(options).candidates[0]!.entryId;
-        return { entryIds: [] };
-      }) as never);
+      const selectorOptions = captureSelector();
 
-      await runOmniMemorySideQuery({
+      await run([handlePart(resourceId)], {
         config: sideQueryConfig('sideQuery', { maxSelectedEntries: 1 }),
-        requestParts: [
-          { text: formatResourceHandleText('pic.png', resourceId) },
-        ],
       });
 
+      const validate = selectorOptions().validate;
+      const manifestEntryId =
+        parseSelectorPayload(selectorOptions()).candidates[0]!.entryId;
       expect(validate).toBeDefined();
       expect(validate!({ entryIds: [manifestEntryId] })).toBeNull();
       expect(validate!({ entryIds: ['media-entry-forged'] })).toContain(
@@ -484,12 +438,7 @@ describe('omni memory sideQuery selector', () => {
       const resourceId = await recordAndBind();
       mockSelector(() => ({ entryIds: ['media-entry-forged'] }));
 
-      const outcome = await runOmniMemorySideQuery({
-        config: sideQueryConfig(),
-        requestParts: [
-          { text: formatResourceHandleText('pic.png', resourceId) },
-        ],
-      });
+      const outcome = await run([handlePart(resourceId)]);
 
       // Whole-selection rejection, surfaced through the same degradation
       // path as a generation failure — never a partial materialization.
@@ -502,37 +451,23 @@ describe('omni memory sideQuery selector', () => {
 
     it('caps the request text handed to the selector', async () => {
       // The selector is a bounded pre-flight call on the critical path of
-      // every request carrying media: an unbounded request text (a pasted
-      // log, a huge diff) would put the main request's latency and cost at
-      // the mercy of whatever the user happened to paste.
+      // every media request: an unbounded request text (a pasted log, a huge
+      // diff) would put the main request's latency and cost at its mercy.
       const resourceId = await recordAndBind();
       const longQuestion = 'q'.repeat(5000);
-      let seenRequest = '';
-      runSideQueryMock.mockImplementation((async (
-        _config: unknown,
-        options: SelectorOptions,
-      ) => {
-        seenRequest = parseSelectorPayload(options).request;
-        return { entryIds: [] };
-      }) as never);
+      const selectorOptions = captureSelector();
 
-      await runOmniMemorySideQuery({
-        config: sideQueryConfig(),
-        requestParts: [
-          longQuestion,
-          { text: formatResourceHandleText('pic.png', resourceId) },
-        ],
-      });
+      await run([longQuestion, handlePart(resourceId)]);
 
+      const seenRequest = requestOf(selectorOptions());
       expect(seenRequest).toHaveLength(4000);
       expect(seenRequest).toBe(longQuestion.slice(0, 4000));
     });
 
     it('cancels the selector when the caller aborts', async () => {
-      // A Ctrl-C landing inside the selector window must reach the selector
-      // call: composed out of the request signal, the interrupted main
-      // request would sit through the whole sideQuery.timeoutMs waiting for
-      // a selection nobody will use.
+      // A Ctrl-C inside the selector window must reach the selector call:
+      // composed out of the request signal, the interrupted main request would
+      // sit through the whole sideQuery.timeoutMs for an unused selection.
       const resourceId = await recordAndBind();
       const controller = new AbortController();
       let seenSignal: AbortSignal | undefined;
@@ -545,11 +480,7 @@ describe('omni memory sideQuery selector', () => {
         throw new Error('aborted');
       }) as never);
 
-      const outcome = await runOmniMemorySideQuery({
-        config: sideQueryConfig(),
-        requestParts: [
-          { text: formatResourceHandleText('pic.png', resourceId) },
-        ],
+      const outcome = await run([handlePart(resourceId)], {
         signal: controller.signal,
       });
 
@@ -571,11 +502,8 @@ describe('omni memory sideQuery selector', () => {
         });
       }) as never);
 
-      const outcome = await runOmniMemorySideQuery({
+      const outcome = await run([handlePart(resourceId)], {
         config: sideQueryConfig('sideQuery', { timeoutMs: 5 }),
-        requestParts: [
-          { text: formatResourceHandleText('pic.png', resourceId) },
-        ],
       });
 
       expect(outcome).toMatchObject({
@@ -589,38 +517,19 @@ describe('omni memory sideQuery selector', () => {
       // synthetic id, detaching this pre-flight call's cost and failures
       // from the request that caused them.
       const resourceId = await recordAndBind();
-      let seenPromptId: string | undefined;
-      runSideQueryMock.mockImplementation((async (
-        _config: unknown,
-        options: SelectorOptions,
-      ) => {
-        seenPromptId = options.promptId;
-        return { entryIds: [] };
-      }) as never);
+      const selectorOptions = captureSelector();
 
-      await runOmniMemorySideQuery({
-        config: sideQueryConfig(),
-        requestParts: [
-          { text: formatResourceHandleText('pic.png', resourceId) },
-        ],
+      await run([handlePart(resourceId)], {
         promptId: 'session-abc########3',
       });
 
-      expect(seenPromptId).toBe('session-abc########3');
+      expect(selectorOptions().promptId).toBe('session-abc########3');
     });
 
     it('treats an empty selection as nothing to inject', async () => {
       const resourceId = await recordAndBind();
       runSideQueryMock.mockResolvedValue({ entryIds: [] } as never);
-
-      const outcome = await runOmniMemorySideQuery({
-        config: sideQueryConfig(),
-        requestParts: [
-          { text: formatResourceHandleText('pic.png', resourceId) },
-        ],
-      });
-
-      expect(outcome).toMatchObject({
+      expect(await run([handlePart(resourceId)])).toMatchObject({
         result: null,
         reason: 'selector_selected_nothing',
       });
@@ -636,12 +545,7 @@ describe('omni memory sideQuery selector', () => {
         mediaType: 'image',
       }).resourceId;
 
-      const outcome = await runOmniMemorySideQuery({
-        config: sideQueryConfig(),
-        requestParts: [
-          { text: formatResourceHandleText('ghost.png', resourceId) },
-        ],
-      });
+      const outcome = await run([handlePart(resourceId, 'ghost.png')]);
 
       expect(outcome).toMatchObject({ result: null, reason: 'no_candidates' });
       expect(runSideQueryMock).not.toHaveBeenCalled();

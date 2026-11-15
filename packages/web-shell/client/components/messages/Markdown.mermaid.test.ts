@@ -5,6 +5,7 @@ import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
+import { getSelectedReplyContent } from '../../utils/selectionClipboard';
 
 const mermaidMock = vi.hoisted(() => ({
   initialize: vi.fn(),
@@ -322,5 +323,38 @@ describe('Markdown mermaid zoom', () => {
 
     expect(stage.style.width).toBe('400px');
     expect(viewport.style.height).toBe('232px');
+  });
+});
+
+describe('Markdown Mermaid selection copying', () => {
+  it.each(['code', 'error'])(
+    'preserves the mermaid language in %s view',
+    async (viewMode) => {
+      if (viewMode === 'error')
+        mermaidMock.render.mockRejectedValueOnce(new Error('invalid diagram'));
+      const view = mountMermaid('interactive');
+      await startMermaidRender();
+      if (viewMode === 'code') {
+        const button = [...view.container.querySelectorAll('button')].find(
+          (button) => button.textContent === 'mermaid.viewCode',
+        )!;
+        act(() => button.click());
+      }
+      expect(view.container.querySelector('pre')).not.toBeNull();
+      const range = document.createRange();
+      range.selectNodeContents(view.container);
+      expect(getSelectedReplyContent(view.container, range)).toEqual({
+        text: 'graph TD\nA --> B',
+        markdown: '```mermaid\ngraph TD\nA --> B\n```',
+      });
+    },
+  );
+  it('marks the rendered pan surface separately from projection exclusion', async () => {
+    const view = mountMermaid('interactive');
+    await startMermaidRender();
+    const viewport =
+      view.container.querySelector('svg')!.parentElement!.parentElement!;
+    expect(viewport.hasAttribute('data-selection-copy-ignore')).toBe(true);
+    expect(viewport.hasAttribute('data-selection-copy-gesture')).toBe(true);
   });
 });

@@ -86,23 +86,25 @@ describe('smoke transcript tool uses', () => {
   it('collects REPL cells invoked directly and through the deferred-tool bridge', () => {
     expect(
       collectSuccessfulNodeReplCalls([
-        toolUse('a', 'mcp__node-repl__node_repl', { code: 'direct' }),
+        toolUse('a', 'mcp__node-repl__js', { code: 'direct' }),
         toolUse('b', 'tool_call', {
-          name: 'mcp__node-repl__node_repl',
+          name: 'mcp__node-repl__js',
           arguments: { code: 'bridged' },
         }),
         toolUse('c', 'tool_call', {
-          name: 'mcp__node-repl__node_repl',
+          name: 'mcp__node-repl__js',
           arguments: { code: 'failed' },
         }),
         toolUse('d', 'tool_call', {
-          name: 'mcp__node-repl__node_repl_reset',
+          name: 'mcp__node-repl__js_reset',
           arguments: { code: 'other tool' },
         }),
         toolResult('a', 'out-a'),
         toolResult('b', 'out-b'),
         toolResult('c', 'out-c', true),
         toolResult('d', 'out-d'),
+        toolUse('legacy', 'mcp__node-repl__node_repl', { code: 'retired' }),
+        toolResult('legacy', 'old-output'),
       ]),
     ).toEqual([
       { code: 'direct', output: 'out-a' },
@@ -128,12 +130,12 @@ describe('smoke transcript tool uses', () => {
     ],
     [
       'an ordinary REPL cell',
-      toolUse('t', 'mcp__node-repl__node_repl', { code: '1' }),
+      toolUse('t', 'mcp__node-repl__js', { code: '1' }),
       false,
     ],
     [
       'a bridged call to another tool',
-      toolUse('t', 'tool_call', { name: 'mcp__node-repl__node_repl_reset' }),
+      toolUse('t', 'tool_call', { name: 'mcp__node-repl__js_reset' }),
       false,
     ],
   ])(

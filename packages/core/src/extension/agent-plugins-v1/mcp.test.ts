@@ -14,6 +14,9 @@ import {
   validateAgentPluginStdioRuntimePaths,
 } from './mcp.js';
 
+const http = (url: string) => ({ type: 'streamable-http', url });
+const loadedHttp = (httpUrl: string) => ({ httpUrl, agentPluginV1: true });
+
 describe('Agent Plugins v1 MCP', () => {
   let pluginRoot: string;
   let pluginDataRoot: string;
@@ -34,6 +37,25 @@ describe('Agent Plugins v1 MCP', () => {
     fs.rmSync(path.dirname(pluginDataRoot), { recursive: true, force: true });
   });
 
+  function writeMcp(
+    mcpServers: Record<string, unknown>,
+    { file = path.join(pluginRoot, 'mcp.json'), extra = {} } = {},
+  ): void {
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        $schema: AGENT_PLUGIN_MCP_SCHEMA,
+        mcpServers,
+        ...extra,
+      }),
+    );
+  }
+
+  const load = (
+    options?: { createDataDir?: boolean },
+    dataRoot = pluginDataRoot,
+  ) => loadAgentPluginMcpServers(pluginRoot, dataRoot, options);
+
   it('maps valid stdio and Streamable HTTP entries independently', async () => {
     const resolvedPluginRoot = fs.realpathSync.native(pluginRoot);
     const resolvedDataRoot = path.join(
@@ -49,8 +71,7 @@ describe('Agent Plugins v1 MCP', () => {
         cwd: '${PLUGIN_ROOT}/work',
       },
       remote: {
-        type: 'streamable-http',
-        url: 'https://example.com/mcp',
+        ...http('https://example.com/mcp'),
         headers: {
           'X-Plugin': 'portable',
           Authorization: 'removed',
@@ -61,11 +82,7 @@ describe('Agent Plugins v1 MCP', () => {
       invalid: { type: 'stdio', command: '../escape' },
     });
 
-    const servers = await loadAgentPluginMcpServers(
-      pluginRoot,
-      pluginDataRoot,
-      { createDataDir: true },
-    );
+    const servers = await load({ createDataDir: true });
 
     expect(Object.keys(servers)).toEqual(['local', 'remote']);
     expect(servers['local']).toMatchObject({
@@ -96,11 +113,7 @@ describe('Agent Plugins v1 MCP', () => {
       },
     });
 
-    const server = (
-      await loadAgentPluginMcpServers(pluginRoot, pluginDataRoot, {
-        createDataDir: true,
-      })
-    )['local'];
+    const server = (await load({ createDataDir: true }))['local'];
 
     expect(server).toBeDefined();
     expect(fs.statSync(server!.cwd!).isDirectory()).toBe(true);
@@ -108,40 +121,23 @@ describe('Agent Plugins v1 MCP', () => {
   });
 
   it('disables all MCP on a top-level error', async () => {
-    fs.writeFileSync(
-      path.join(pluginRoot, 'mcp.json'),
-      JSON.stringify({
-        $schema: AGENT_PLUGIN_MCP_SCHEMA,
-        mcpServers: {},
-        unknown: true,
-      }),
-    );
-    expect(await loadAgentPluginMcpServers(pluginRoot, pluginDataRoot)).toEqual(
-      {},
-    );
+    writeMcp({}, { extra: { unknown: true } });
+    expect(await load()).toEqual({});
   });
 
   it('rejects unsafe HTTP endpoints and reserved environment variables', async () => {
     writeMcp({
-      insecure: { type: 'streamable-http', url: 'http://example.com/mcp' },
+      insecure: http('http://example.com/mcp'),
       reserved: {
         type: 'stdio',
         command: 'node',
         env: { PLUGIN_ROOT: 'override' },
       },
-      loopback: {
-        type: 'streamable-http',
-        url: 'http://127.0.0.1:3000/mcp',
-      },
+      loopback: http('http://127.0.0.1:3000/mcp'),
     });
-    expect(await loadAgentPluginMcpServers(pluginRoot, pluginDataRoot)).toEqual(
-      {
-        loopback: {
-          httpUrl: 'http://127.0.0.1:3000/mcp',
-          agentPluginV1: true,
-        },
-      },
-    );
+    expect(await load()).toEqual({
+      loopback: loadedHttp('http://127.0.0.1:3000/mcp'),
+    });
   });
 
   it('expands variables once and isolates escaping package paths', async () => {
@@ -167,10 +163,7 @@ describe('Agent Plugins v1 MCP', () => {
       badCwd: { type: 'stdio', command: 'node', cwd: './../escape' },
     });
 
-    const servers = await loadAgentPluginMcpServers(
-      pluginRoot,
-      literalDataRoot,
-    );
+    const servers = await load(undefined, literalDataRoot);
 
     expect(Object.keys(servers)).toEqual(['singlePass']);
     expect(servers['singlePass']?.args).toEqual([resolvedLiteralDataRoot]);
@@ -188,60 +181,32 @@ describe('Agent Plugins v1 MCP', () => {
     fs.writeFileSync(fileParent, 'not a directory');
     writeMcp({
       local: { type: 'stdio', command: 'node' },
-      remote: {
-        type: 'streamable-http',
-        url: 'https://example.com/mcp',
-      },
+      remote: http('https://example.com/mcp'),
     });
 
     expect(
-      await loadAgentPluginMcpServers(
-        pluginRoot,
-        path.join(fileParent, 'data'),
-        { createDataDir: true },
-      ),
-    ).toEqual({
-      remote: {
-        httpUrl: 'https://example.com/mcp',
-        agentPluginV1: true,
-      },
-    });
+      await load({ createDataDir: true }, path.join(fileParent, 'data')),
+    ).toEqual({ remote: loadedHttp('https://example.com/mcp') });
   });
 
   it('validates remote URL and headers per entry', async () => {
     writeMcp({
-      credentials: {
-        type: 'streamable-http',
-        url: 'https://user@example.com/mcp',
-      },
-      fragment: {
-        type: 'streamable-http',
-        url: 'https://example.com/mcp#fragment',
-      },
+      credentials: http('https://user@example.com/mcp'),
+      fragment: http('https://example.com/mcp#fragment'),
       duplicateHeader: {
-        type: 'streamable-http',
-        url: 'https://example.com/mcp',
+        ...http('https://example.com/mcp'),
         headers: { 'X-Test': 'one', 'x-test': 'two' },
       },
       invalidHeader: {
-        type: 'streamable-http',
-        url: 'https://example.com/mcp',
+        ...http('https://example.com/mcp'),
         headers: { 'X-Test': 'bad\nvalue' },
       },
-      ipv6Loopback: {
-        type: 'streamable-http',
-        url: 'http://[::1]:3000/mcp',
-      },
+      ipv6Loopback: http('http://[::1]:3000/mcp'),
     });
 
-    expect(await loadAgentPluginMcpServers(pluginRoot, pluginDataRoot)).toEqual(
-      {
-        ipv6Loopback: {
-          httpUrl: 'http://[::1]:3000/mcp',
-          agentPluginV1: true,
-        },
-      },
-    );
+    expect(await load()).toEqual({
+      ipv6Loopback: loadedHttp('http://[::1]:3000/mcp'),
+    });
   });
 
   it('retains valid prototype-named servers and headers as own fields', async () => {
@@ -252,16 +217,12 @@ describe('Agent Plugins v1 MCP', () => {
     });
     const entries: Record<string, unknown> = {};
     Object.defineProperty(entries, '__proto__', {
-      value: {
-        type: 'streamable-http',
-        url: 'https://example.com/mcp',
-        headers,
-      },
+      value: { ...http('https://example.com/mcp'), headers },
       enumerable: true,
     });
     writeMcp(entries);
 
-    const servers = await loadAgentPluginMcpServers(pluginRoot, pluginDataRoot);
+    const servers = await load();
 
     expect(Object.hasOwn(servers, '__proto__')).toBe(true);
     expect(
@@ -273,20 +234,10 @@ describe('Agent Plugins v1 MCP', () => {
     'loads an mcp.json symlink contained in the plugin',
     async () => {
       const inside = path.join(pluginRoot, 'inside-mcp.json');
-      fs.writeFileSync(
-        inside,
-        JSON.stringify({
-          $schema: AGENT_PLUGIN_MCP_SCHEMA,
-          mcpServers: {
-            local: { type: 'stdio', command: 'node' },
-          },
-        }),
-      );
+      writeMcp({ local: { type: 'stdio', command: 'node' } }, { file: inside });
       fs.symlinkSync(inside, path.join(pluginRoot, 'mcp.json'));
 
-      expect(
-        await loadAgentPluginMcpServers(pluginRoot, pluginDataRoot),
-      ).toMatchObject({
+      expect(await load()).toMatchObject({
         local: { command: 'node', agentPluginV1: true },
       });
     },
@@ -296,17 +247,9 @@ describe('Agent Plugins v1 MCP', () => {
     'disables MCP when mcp.json is a symlink escape',
     async () => {
       const outside = `${pluginRoot}-outside-mcp.json`;
-      fs.writeFileSync(
-        outside,
-        JSON.stringify({
-          $schema: AGENT_PLUGIN_MCP_SCHEMA,
-          mcpServers: {},
-        }),
-      );
+      writeMcp({}, { file: outside });
       fs.symlinkSync(outside, path.join(pluginRoot, 'mcp.json'));
-      expect(
-        await loadAgentPluginMcpServers(pluginRoot, pluginDataRoot),
-      ).toEqual({});
+      expect(await load()).toEqual({});
       fs.rmSync(outside, { force: true });
     },
   );
@@ -321,11 +264,7 @@ describe('Agent Plugins v1 MCP', () => {
           cwd: '${PLUGIN_ROOT}/work',
         },
       });
-      const server = (
-        await loadAgentPluginMcpServers(pluginRoot, pluginDataRoot, {
-          createDataDir: true,
-        })
-      )['local'];
+      const server = (await load({ createDataDir: true }))['local'];
       expect(server).toBeDefined();
       expect(() => validateAgentPluginStdioRuntimePaths(server!)).not.toThrow();
 
@@ -340,11 +279,4 @@ describe('Agent Plugins v1 MCP', () => {
       fs.rmSync(outside, { force: true });
     },
   );
-
-  function writeMcp(mcpServers: Record<string, unknown>): void {
-    fs.writeFileSync(
-      path.join(pluginRoot, 'mcp.json'),
-      JSON.stringify({ $schema: AGENT_PLUGIN_MCP_SCHEMA, mcpServers }),
-    );
-  }
 });

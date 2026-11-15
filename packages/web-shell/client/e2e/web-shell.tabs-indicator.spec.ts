@@ -18,7 +18,7 @@ async function openSidebarWithSourceSwitch(page: Page, baseURL: string) {
     },
   });
   await installMockDaemon(page, scenario, { baseURL });
-  await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
+  await page.goto('/e2e/navigation-rail-harness.html?single');
   await expect(
     page.locator('[data-web-shell-root]:not([data-web-shell-gate])'),
   ).toBeVisible();

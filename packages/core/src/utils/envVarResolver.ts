@@ -6,6 +6,14 @@
 
 import { isInternalSecretEnvVar } from './sanitize-child-env.js';
 
+export interface ResolveEnvVarsOptions {
+  /**
+   * Whether a variable that `customEnv` does not define is taken from
+   * `process.env`. Defaults to true.
+   */
+  readonly processEnvFallback?: boolean;
+}
+
 /**
  * Resolves environment variables in a string.
  * Replaces $VAR_NAME and ${VAR_NAME} with their corresponding environment variable values.
@@ -21,6 +29,8 @@ import { isInternalSecretEnvVar } from './sanitize-child-env.js';
  * expansion, including bare, braced, and case-insensitive spellings.
  *
  * @param value - The string that may contain environment variable placeholders
+ * @param customEnv - Variables consulted before `process.env`
+ * @param options - Whether `process.env` is consulted at all
  * @returns The string with environment variables resolved
  *
  * @example
@@ -31,6 +41,7 @@ import { isInternalSecretEnvVar } from './sanitize-child-env.js';
 export function resolveEnvVarsInString(
   value: string,
   customEnv?: Record<string, string>,
+  options: ResolveEnvVarsOptions = {},
 ): string {
   const envVarRegex = /\$(?:(\w+)|{([^}]+)})/g; // Find $VAR_NAME or ${VAR_NAME}
   return value.replace(envVarRegex, (match, varName1, varName2) => {
@@ -46,7 +57,12 @@ export function resolveEnvVarsInString(
     if (customEnv && typeof customEnv[varName] === 'string') {
       return customEnv[varName];
     }
-    if (process && process.env && typeof process.env[varName] === 'string') {
+    if (
+      options.processEnvFallback !== false &&
+      process &&
+      process.env &&
+      typeof process.env[varName] === 'string'
+    ) {
       return process.env[varName]!;
     }
     return match;
@@ -75,8 +91,9 @@ export function resolveEnvVarsInString(
 export function resolveEnvVarsInObject<T>(
   obj: T,
   customEnv?: Record<string, string>,
+  options: ResolveEnvVarsOptions = {},
 ): T {
-  return resolveEnvVarsInObjectInternal(obj, new WeakSet(), customEnv);
+  return resolveEnvVarsInObjectInternal(obj, new WeakSet(), customEnv, options);
 }
 
 /**
@@ -89,7 +106,8 @@ export function resolveEnvVarsInObject<T>(
 function resolveEnvVarsInObjectInternal<T>(
   obj: T,
   visited: WeakSet<object>,
-  customEnv?: Record<string, string>,
+  customEnv: Record<string, string> | undefined,
+  options: ResolveEnvVarsOptions,
 ): T {
   if (
     obj === null ||
@@ -101,7 +119,7 @@ function resolveEnvVarsInObjectInternal<T>(
   }
 
   if (typeof obj === 'string') {
-    return resolveEnvVarsInString(obj, customEnv) as unknown as T;
+    return resolveEnvVarsInString(obj, customEnv, options) as unknown as T;
   }
 
   if (Array.isArray(obj)) {
@@ -113,7 +131,7 @@ function resolveEnvVarsInObjectInternal<T>(
 
     visited.add(obj);
     const result = obj.map((item) =>
-      resolveEnvVarsInObjectInternal(item, visited, customEnv),
+      resolveEnvVarsInObjectInternal(item, visited, customEnv, options),
     ) as unknown as T;
     visited.delete(obj);
     return result;
@@ -134,6 +152,7 @@ function resolveEnvVarsInObjectInternal<T>(
           newObj[key],
           visited,
           customEnv,
+          options,
         );
       }
     }

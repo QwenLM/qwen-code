@@ -5,19 +5,13 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { isSlowTestHost } from '../test-utils/slow-test-host.js';
 
-/**
- * Tests for the module-level `sessionEnvClaimed` and `modelEnvClaimed`
- * guards in Config.
- *
- * The guards ensure that only the first Config instance in a process sets
- * `process.env['QWEN_CODE_SESSION_ID']` / `process.env['QWEN_CODE_MODEL']`,
- * preventing throwaway instances (e.g. telemetry-only) from overwriting the
- * real session's values.
- *
- * We use `vi.isolateModules` to get a fresh module scope (resetting the
- * module-level flags) for each test.
- */
+// Tests for Config's module-level `sessionEnvClaimed` / `modelEnvClaimed`
+// guards: only the first Config in a process sets QWEN_CODE_SESSION_ID /
+// QWEN_CODE_MODEL, so throwaway instances (e.g. telemetry-only) cannot
+// overwrite the real session's values. Each test gets a fresh module scope,
+// resetting the module-level flags.
 
 // Shared mocks needed by Config constructor
 vi.mock('node:fs');
@@ -112,19 +106,21 @@ const baseParams: ConfigParameters = {
 // flag resets). That cold transform+evaluate runs several seconds and, under
 // a contended CI runner, crosses the 5s default — a flaky timeout, not a hang.
 // The reset is load-bearing for what these tests check, so give them headroom.
-vi.setConfig({ testTimeout: 30_000, hookTimeout: 30_000 });
+const timeoutMs = isSlowTestHost() ? 60_000 : 30_000;
+vi.setConfig({ testTimeout: timeoutMs, hookTimeout: timeoutMs });
 
-let originalEnv: string | undefined;
-let originalModelEnv: string | undefined;
-let originalIdentityEnv: string | undefined;
+const ENV_KEYS = [
+  'QWEN_CODE_SESSION_ID',
+  'QWEN_CODE_MODEL',
+  'QWEN_CODE_MODEL_IDENTITY',
+] as const;
+const originalEnv: Record<string, string | undefined> = {};
 
 beforeEach(() => {
-  originalEnv = process.env['QWEN_CODE_SESSION_ID'];
-  delete process.env['QWEN_CODE_SESSION_ID'];
-  originalModelEnv = process.env['QWEN_CODE_MODEL'];
-  delete process.env['QWEN_CODE_MODEL'];
-  originalIdentityEnv = process.env['QWEN_CODE_MODEL_IDENTITY'];
-  delete process.env['QWEN_CODE_MODEL_IDENTITY'];
+  for (const key of ENV_KEYS) {
+    originalEnv[key] = process.env[key];
+    delete process.env[key];
+  }
 
   (fs.existsSync as Mock).mockReturnValue(true);
   (fs.readdirSync as Mock).mockReturnValue([]);
@@ -141,23 +137,46 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  if (originalEnv !== undefined) {
-    process.env['QWEN_CODE_SESSION_ID'] = originalEnv;
-  } else {
-    delete process.env['QWEN_CODE_SESSION_ID'];
-  }
-  if (originalModelEnv !== undefined) {
-    process.env['QWEN_CODE_MODEL'] = originalModelEnv;
-  } else {
-    delete process.env['QWEN_CODE_MODEL'];
-  }
-  if (originalIdentityEnv !== undefined) {
-    process.env['QWEN_CODE_MODEL_IDENTITY'] = originalIdentityEnv;
-  } else {
-    delete process.env['QWEN_CODE_MODEL_IDENTITY'];
+  for (const key of ENV_KEYS) {
+    if (originalEnv[key] !== undefined) {
+      process.env[key] = originalEnv[key];
+    } else {
+      delete process.env[key];
+    }
   }
   vi.resetModules();
 });
+
+const PROVIDER_A = 'https://provider-a.example/v1';
+
+/**
+ * Loads Config and the mocked contentGenerator from the same cold module
+ * graph, so the re-mocks below are what refreshAuth actually calls.
+ */
+async function loadWithAuth() {
+  const { Config } = await import('./config.js');
+  const { resolveContentGeneratorConfigWithSources, AuthType } = await import(
+    '../core/contentGenerator.js'
+  );
+  /** The next refreshAuth resolves `model`, at `baseUrl` when given. */
+  const resolveAuthTo = (model: string, baseUrl?: string) =>
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+      config: (baseUrl === undefined
+        ? { model, apiKey: 'k' }
+        : { model, apiKey: 'k', baseUrl }) as ContentGeneratorConfig,
+      sources: {},
+    });
+  const refreshAuth = (config: InstanceType<typeof Config>) =>
+    config.refreshAuth(AuthType.USE_GEMINI);
+  /** resolveAuthTo, then a new Config whose auth is refreshed once. */
+  async function authedConfig(model: string, baseUrl?: string) {
+    resolveAuthTo(model, baseUrl);
+    const config = new Config({ ...baseParams });
+    await refreshAuth(config);
+    return config;
+  }
+  return { Config, resolveAuthTo, refreshAuth, authedConfig };
+}
 
 describe('Config sessionEnvClaimed guard', () => {
   it('first Config sets process.env QWEN_CODE_SESSION_ID to its sessionId', async () => {
@@ -198,6 +217,45 @@ describe('Config sessionEnvClaimed guard', () => {
     expect(process.env['QWEN_CODE_SESSION_ID']).toBe('new-session-uuid-123');
     expect(process.env['QWEN_CODE_SESSION_ID']).not.toBe(originalSessionId);
   });
+
+  it('startNewSession forgets the autofix-pr watches the sessions confirmed, so a resumed one asks again', async () => {
+    const { Config } = await import('./config.js');
+    const grants = await import('../tools/autofix-pr-grants.js');
+    const config = new Config({ ...baseParams });
+    const first = config.getSessionId();
+    const watch = {
+      pr: 7,
+      repo: 'o/r',
+      host: null,
+      targetDir: '/repo',
+      preparedAt: null,
+      worktree: '/w',
+      authorCanPush: true,
+    };
+    grants.recordConfirmedWatch(first, watch);
+    // `/resume` of a session left earlier comes back under its old id.
+    grants.recordConfirmedWatch('resumed-session', watch);
+    config.startNewSession('resumed-session');
+    expect(grants.confirmedWatch(first, 7)).toBeUndefined();
+    expect(grants.confirmedWatch('resumed-session', 7)).toBeUndefined();
+  });
+
+  it('shutdown forgets them too, so a daemon that loads the session again asks again', async () => {
+    const { Config } = await import('./config.js');
+    const grants = await import('../tools/autofix-pr-grants.js');
+    const config = new Config({ ...baseParams, sessionId: 'daemon-session' });
+    grants.recordConfirmedWatch('daemon-session', {
+      pr: 7,
+      repo: 'o/r',
+      host: null,
+      targetDir: '/repo',
+      preparedAt: null,
+      worktree: '/w',
+      authorCanPush: true,
+    });
+    await config.shutdown({ shutdownTelemetry: false });
+    expect(grants.confirmedWatch('daemon-session', 7)).toBeUndefined();
+  });
 });
 
 describe('Config modelEnvClaimed guard', () => {
@@ -233,26 +291,15 @@ describe('Config modelEnvClaimed guard', () => {
   });
 
   it('republishes on refreshAuth when the resolved model changes', async () => {
-    const { Config } = await import('./config.js');
-    // Import from the same (mocked) module instance the cold config.js import
-    // above binds to, so the re-mock below is what refreshAuth actually calls.
-    const { resolveContentGeneratorConfigWithSources, AuthType } = await import(
-      '../core/contentGenerator.js'
-    );
+    const { Config, resolveAuthTo, refreshAuth } = await loadWithAuth();
     const config = new Config({ ...baseParams });
     expect(process.env['QWEN_CODE_MODEL']).toBe('test-model');
 
     // Auth flows call refreshAuth directly — no model-change listener fires —
     // and the resolved model can differ from the pre-auth one; the slot must
     // follow it so subprocesses report the model that is actually active.
-    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
-      config: {
-        model: 'auth-resolved-model',
-        apiKey: 'k',
-      } as ContentGeneratorConfig,
-      sources: {},
-    });
-    await config.refreshAuth(AuthType.USE_GEMINI);
+    resolveAuthTo('auth-resolved-model');
+    await refreshAuth(config);
 
     expect(process.env['QWEN_CODE_MODEL']).toBe('auth-resolved-model');
   });
@@ -297,20 +344,8 @@ describe('Config modelEnvClaimed guard', () => {
 
 describe('Config provider-qualified model identity', () => {
   it('publishes `<model>@<digest>` beside the bare model', async () => {
-    const { Config } = await import('./config.js');
-    const { resolveContentGeneratorConfigWithSources, AuthType } = await import(
-      '../core/contentGenerator.js'
-    );
-    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
-      config: {
-        model: 'qualified-model',
-        apiKey: 'k',
-        baseUrl: 'https://provider-a.example/v1',
-      } as ContentGeneratorConfig,
-      sources: {},
-    });
-    const config = new Config({ ...baseParams });
-    await config.refreshAuth(AuthType.USE_GEMINI);
+    const { authedConfig } = await loadWithAuth();
+    await authedConfig('qualified-model', PROVIDER_A);
 
     expect(process.env['QWEN_CODE_MODEL']).toBe('qualified-model');
     expect(process.env['QWEN_CODE_MODEL_IDENTITY']).toMatch(
@@ -335,32 +370,15 @@ describe('Config provider-qualified model identity', () => {
     // done against provider A\u2019s `qwen3-coder-plus` certify a range for
     // provider B\u2019s. Same model name, different base URL, different
     // identity.
-    const { Config } = await import('./config.js');
-    const { resolveContentGeneratorConfigWithSources, AuthType } = await import(
-      '../core/contentGenerator.js'
-    );
+    const { Config, resolveAuthTo, refreshAuth } = await loadWithAuth();
     const config = new Config({ ...baseParams });
 
-    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
-      config: {
-        model: 'same-model',
-        apiKey: 'k',
-        baseUrl: 'https://provider-a.example/v1',
-      } as ContentGeneratorConfig,
-      sources: {},
-    });
-    await config.refreshAuth(AuthType.USE_GEMINI);
+    resolveAuthTo('same-model', PROVIDER_A);
+    await refreshAuth(config);
     const a = process.env['QWEN_CODE_MODEL_IDENTITY'];
 
-    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
-      config: {
-        model: 'same-model',
-        apiKey: 'k',
-        baseUrl: 'https://provider-b.example/v1',
-      } as ContentGeneratorConfig,
-      sources: {},
-    });
-    await config.refreshAuth(AuthType.USE_GEMINI);
+    resolveAuthTo('same-model', 'https://provider-b.example/v1');
+    await refreshAuth(config);
     const b = process.env['QWEN_CODE_MODEL_IDENTITY'];
 
     expect(process.env['QWEN_CODE_MODEL']).toBe('same-model');
@@ -370,22 +388,10 @@ describe('Config provider-qualified model identity', () => {
   });
 
   it('is stable for one configuration \u2014 the gate must not drift per boot', async () => {
-    const { Config } = await import('./config.js');
-    const { resolveContentGeneratorConfigWithSources, AuthType } = await import(
-      '../core/contentGenerator.js'
-    );
-    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
-      config: {
-        model: 'steady-model',
-        apiKey: 'k',
-        baseUrl: 'https://provider-a.example/v1',
-      } as ContentGeneratorConfig,
-      sources: {},
-    });
-    const config = new Config({ ...baseParams });
-    await config.refreshAuth(AuthType.USE_GEMINI);
+    const { refreshAuth, authedConfig } = await loadWithAuth();
+    const config = await authedConfig('steady-model', PROVIDER_A);
     const first = process.env['QWEN_CODE_MODEL_IDENTITY'];
-    await config.refreshAuth(AuthType.USE_GEMINI);
+    await refreshAuth(config);
 
     expect(process.env['QWEN_CODE_MODEL_IDENTITY']).toBe(first);
   });
@@ -439,20 +445,8 @@ describe('Config provider-qualified model identity', () => {
 
 describe('Config.getModelRouteIdentity (#9454 route key)', () => {
   it('returns an identical identity across repeated calls for one configuration', async () => {
-    const { Config } = await import('./config.js');
-    const { resolveContentGeneratorConfigWithSources, AuthType } = await import(
-      '../core/contentGenerator.js'
-    );
-    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
-      config: {
-        model: 'steady-model',
-        apiKey: 'k',
-        baseUrl: 'https://provider-a.example/v1',
-      } as ContentGeneratorConfig,
-      sources: {},
-    });
-    const config = new Config({ ...baseParams });
-    await config.refreshAuth(AuthType.USE_GEMINI);
+    const { authedConfig } = await loadWithAuth();
+    const config = await authedConfig('steady-model', PROVIDER_A);
 
     // Route-scoped caches (e.g. LlmChat token counts) compare these
     // strings for equality — the value must not drift between calls.
@@ -463,36 +457,22 @@ describe('Config.getModelRouteIdentity (#9454 route key)', () => {
   });
 
   it('keeps the `model@<sha-prefix>` digest shape for explicit route queries', async () => {
-    const { Config } = await import('./config.js');
-    const { resolveContentGeneratorConfigWithSources, AuthType } = await import(
-      '../core/contentGenerator.js'
-    );
-    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
-      config: {
-        model: 'active-model',
-        apiKey: 'k',
-        baseUrl: 'https://provider-a.example/v1',
-      } as ContentGeneratorConfig,
-      sources: {},
-    });
-    const config = new Config({ ...baseParams });
-    await config.refreshAuth(AuthType.USE_GEMINI);
+    const { authedConfig } = await loadWithAuth();
+    const config = await authedConfig('active-model', PROVIDER_A);
 
     // The readable model id stays the prefix; the discriminator is exactly
     // eight hex characters, stable for one (auth type, endpoint) pair.
-    const explicit = config.getModelRouteIdentity('route-model', {
-      model: 'route-model',
-      authType: 'openai',
-      baseUrl: 'https://route.example/v1',
-    } as ContentGeneratorConfig);
-    expect(explicit).toMatch(/^route-model@[0-9a-f]{8}$/);
-    expect(
-      config.getModelRouteIdentity('route-model', {
+    const routeConfig = () =>
+      ({
         model: 'route-model',
         authType: 'openai',
         baseUrl: 'https://route.example/v1',
-      } as ContentGeneratorConfig),
-    ).toBe(explicit);
+      }) as ContentGeneratorConfig;
+    const explicit = config.getModelRouteIdentity('route-model', routeConfig());
+    expect(explicit).toMatch(/^route-model@[0-9a-f]{8}$/);
+    expect(config.getModelRouteIdentity('route-model', routeConfig())).toBe(
+      explicit,
+    );
   });
 
   it('does not mix the registry base URL into a non-active model identity', async () => {
@@ -501,21 +481,10 @@ describe('Config.getModelRouteIdentity (#9454 route key)', () => {
     // with its own configuration must not pick that fallback up — hashing
     // the registry endpoint into another model's identity would invalidate
     // its route-scoped state on unrelated registry changes.
-    const { Config } = await import('./config.js');
-    const { resolveContentGeneratorConfigWithSources, AuthType } = await import(
-      '../core/contentGenerator.js'
-    );
-    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
-      config: {
-        model: 'active-model',
-        apiKey: 'k',
-        // No baseUrl of its own: the active model falls back to the
-        // registry base URL below.
-      } as ContentGeneratorConfig,
-      sources: {},
-    });
-    const config = new Config({ ...baseParams });
-    await config.refreshAuth(AuthType.USE_GEMINI);
+    const { authedConfig } = await loadWithAuth();
+    // No baseUrl of its own: the active model falls back to the registry
+    // base URL below.
+    const config = await authedConfig('active-model');
     const registrySpy = vi.spyOn(config, 'getCurrentModelRegistryBaseUrl');
 
     const foreignGeneratorConfig = {

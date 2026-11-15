@@ -7,6 +7,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { DaemonLiveMuteUpdate, DaemonLiveStatus } from '@qwen-code/sdk';
 import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
+import {
+  useDaemonAvailability,
+  useDaemonAvailabilityController,
+} from '../daemon/availability-context.js';
+import { isDaemonUnavailableError } from '../daemon/availability.js';
+import { useI18n } from '../i18n';
 import { useSessionCatalogController } from '../session-catalog/session-catalog-hooks';
 import {
   useLiveBrowserHost,
@@ -50,6 +56,11 @@ function unavailableStatus(message: string): DaemonLiveStatus {
 
 export function useLiveVoice(): UseLiveVoiceResult {
   const workspace = useWorkspace();
+  const availability = useDaemonAvailability();
+  const availabilityController = useDaemonAvailabilityController();
+  const { t } = useI18n();
+  const translateRef = useRef(t);
+  translateRef.current = t;
   const sessionCatalog = useSessionCatalogController(workspace.client);
   const features = workspace.capabilities?.features ?? [];
   const nativeSupported = features.includes(LIVE_NATIVE_FEATURE);
@@ -83,7 +94,12 @@ export function useLiveVoice(): UseLiveVoiceResult {
   }, []);
 
   const refresh = useCallback(async (): Promise<void> => {
-    if (!supported) return;
+    if (
+      !supported ||
+      (availabilityController &&
+        availabilityController.getSnapshot() !== 'available')
+    )
+      return;
     // A mutation in flight delivers its own status; polling now would race it.
     if (mutationRef.current !== undefined) return;
     // Dedupe on the in-flight request itself. The poll generation cannot key
@@ -104,7 +120,11 @@ export function useLiveVoice(): UseLiveVoiceResult {
         if (mountedRef.current && pollGenerationRef.current === generation) {
           setStatus(
             unavailableStatus(
-              error instanceof Error ? error.message : String(error),
+              isDaemonUnavailableError(error)
+                ? translateRef.current('daemon.connection.unavailable')
+                : error instanceof Error
+                  ? error.message
+                  : String(error),
             ),
           );
         }
@@ -120,7 +140,7 @@ export function useLiveVoice(): UseLiveVoiceResult {
     const request = run();
     requestRef.current = request;
     return await request;
-  }, [supported, workspace.client]);
+  }, [supported, workspace.client, availabilityController]);
 
   useEffect(() => {
     if (
@@ -138,6 +158,19 @@ export function useLiveVoice(): UseLiveVoiceResult {
     setStatus(undefined);
     setLoading(false);
     setMutating(false);
+  }, [supported, workspace.client]);
+
+  useEffect(() => {
+    if (availability !== 'available') {
+      pollGenerationRef.current += 1;
+      requestRef.current = undefined;
+      setLoading(false);
+      // A torn-down call must stop advertising itself: nothing else clears a
+      // published 'listening' presence while the outage keeps every poll
+      // parked, and the sidebar would keep offering a call that is gone.
+      setLivePresence(workspace.client, undefined);
+      return;
+    }
     if (!supported) return undefined;
     void refresh();
     const timer = window.setInterval(() => {
@@ -153,7 +186,7 @@ export function useLiveVoice(): UseLiveVoiceResult {
       document.removeEventListener('visibilitychange', onVisible);
       window.removeEventListener('focus', onVisible);
     };
-  }, [refresh, supported, workspace.client]);
+  }, [availability, refresh, supported, workspace.client]);
 
   const mutate = useCallback(
     async (operation: () => Promise<DaemonLiveStatus>): Promise<void> => {
@@ -180,7 +213,11 @@ export function useLiveVoice(): UseLiveVoiceResult {
         ) {
           setStatus(
             unavailableStatus(
-              error instanceof Error ? error.message : String(error),
+              isDaemonUnavailableError(error)
+                ? translateRef.current('daemon.connection.unavailable')
+                : error instanceof Error
+                  ? error.message
+                  : String(error),
             ),
           );
         }
@@ -301,7 +338,16 @@ export function useLiveVoice(): UseLiveVoiceResult {
     nativeSupported,
     browserSupported,
     browserHost,
-    status,
+    status:
+      availability === 'available'
+        ? status
+        : unavailableStatus(
+            t(
+              availability === 'auth-required'
+                ? 'daemon.connection.authRequired'
+                : 'daemon.connection.unavailable',
+            ),
+          ),
     loading,
     mutating,
     refresh,

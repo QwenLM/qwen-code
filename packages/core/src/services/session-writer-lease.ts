@@ -335,6 +335,8 @@ export interface AcquireSessionWriterLeaseOptions {
   lockSchema?: {
     readonly schemaVersion: 3;
     readonly formatVersion: number;
+    /** Local snapshot readers promote a certified seal before replacement. */
+    readonly resumeFormatVersion?: number;
   };
   onOwnershipAcquired?: (lease: SessionWriterLease) => void;
 }
@@ -533,10 +535,7 @@ function isLockRecord(value: unknown): value is SessionWriterLockRecord {
       typeof record['sealed_at'] === 'string' &&
       Number.isFinite(Date.parse(record['sealed_at'])) &&
       isSealedTranscriptProof(record['transcript']) &&
-      Number.isSafeInteger(record['last_commit_sequence']) &&
-      (record['last_commit_sequence'] as number) >= 0 &&
-      typeof record['committed_prefix_hash'] === 'string' &&
-      /^[0-9a-f]{64}$/.test(record['committed_prefix_hash'])
+      isValidCommitProof(record)
     );
   }
   return false;
@@ -1254,6 +1253,21 @@ async function restoreMovedLock(
   await fs.unlink(movedPath).catch(() => {});
 }
 
+async function syncSnapshotLockDirectory(
+  lockPath: string,
+  raw: string,
+): Promise<void> {
+  const record = parseLockRecord(raw);
+  if (!record || !isManagedLockRecord(record) || record.format_version < 2)
+    return;
+  const directory = await openDurableLockDirectory(path.dirname(lockPath));
+  try {
+    await syncDurableLockDirectory(directory);
+  } finally {
+    await directory.handle.close();
+  }
+}
+
 async function installLockRecord(
   lockPath: string,
   record: SessionWriterLockRecord,
@@ -1269,10 +1283,14 @@ async function installLockRecord(
     handle = undefined;
     try {
       await fs.link(temporaryPath, lockPath);
+      await syncSnapshotLockDirectory(lockPath, recordRaw);
       return true;
     } catch (error) {
       const { state } = await inspectExactRecord(lockPath, recordRaw);
-      if (state === 'exact') return true;
+      if (state === 'exact') {
+        await syncSnapshotLockDirectory(lockPath, recordRaw);
+        return true;
+      }
       if (
         state === 'other' ||
         (error as NodeJS.ErrnoException).code === 'EEXIST'
@@ -1514,6 +1532,7 @@ async function linkClaimedPrimary(
     await assertExactTransitionClaim(claimPath, claimRaw);
     try {
       await fs.link(sourcePath, lockPath);
+      await syncSnapshotLockDirectory(lockPath, sourceRaw);
       return;
     } catch (error) {
       const { state } = await inspectClaimedPrimary(
@@ -1521,7 +1540,10 @@ async function linkClaimedPrimary(
         sourceRaw,
         sessionId,
       );
-      if (state === 'source') return;
+      if (state === 'source') {
+        await syncSnapshotLockDirectory(lockPath, sourceRaw);
+        return;
+      }
       if (state === 'candidate') {
         // A schema-v2 acquirer can pass its first claim check immediately
         // before this transition creates the claim. It must remove its primary
@@ -1716,6 +1738,7 @@ export class SessionWriterLease {
   private readonly claimPath: string;
   private readonly managedFormatVersion: number | undefined;
   private takenOverCommitProof: SessionWriterCommitProof | undefined;
+  private replacementFailure: Error | undefined;
 
   private constructor(
     private readonly lockPath: string,
@@ -1747,6 +1770,10 @@ export class SessionWriterLease {
    * advancing the session; absent when the lease did not take over a Managed
    * seal.
    */
+  get managedJournalFormatVersion(): number | undefined {
+    return this.managedFormatVersion;
+  }
+
   get takeoverCommitProof(): SessionWriterCommitProof | undefined {
     return this.takenOverCommitProof;
   }
@@ -1916,7 +1943,20 @@ export class SessionWriterLease {
     const processStartIdentity = await readProcessStartIdentity(process.pid);
     const pidNamespaceId = readPidNamespaceId();
     const lockSchema = normalizedOptions.lockSchema;
-    const lockRecord: ActiveLockRecord = {
+    if (
+      lockSchema !== undefined &&
+      (!isManagedFormatVersion(lockSchema.formatVersion) ||
+        (lockSchema.resumeFormatVersion !== undefined &&
+          (!isManagedFormatVersion(lockSchema.resumeFormatVersion) ||
+            lockSchema.resumeFormatVersion < lockSchema.formatVersion)))
+    ) {
+      throw new SessionWriterUnavailableError({
+        cause: new Error(
+          `Managed lock schema formatVersion ${lockSchema.formatVersion} is not a supported log format`,
+        ),
+      });
+    }
+    let lockRecord: ActiveLockRecord = {
       ...(lockSchema === undefined
         ? { schema_version: LOCK_SCHEMA_VERSION }
         : {
@@ -1969,12 +2009,35 @@ export class SessionWriterLease {
         if (normalizedOptions.takeoverPolicy !== 'certified') {
           throw new SessionWriterConflictError();
         }
-        return SessionWriterLease.takeOverSealed(
-          lockPath,
-          state,
-          lockRecord,
-          normalizedOptions,
+        const resumeFormat = lockSchema?.resumeFormatVersion;
+        if (
+          resumeFormat !== undefined &&
+          isManagedLockRecord(state.record) &&
+          isManagedLockRecord(lockRecord)
+        ) {
+          lockRecord = { ...lockRecord, format_version: resumeFormat };
+        }
+        return SessionWriterLease.takeOverSealed(lockPath, state, lockRecord, {
+          ...normalizedOptions,
+          ...(resumeFormat === undefined
+            ? {}
+            : {
+                lockSchema: { schemaVersion: 3, formatVersion: resumeFormat },
+              }),
+        });
+      }
+      if (
+        isManagedLockRecord(state.record) &&
+        isManagedLockRecord(lockRecord) &&
+        lockSchema?.resumeFormatVersion !== undefined &&
+        state.record.format_version <= lockSchema.resumeFormatVersion
+      ) {
+        const formatVersion = Math.max(
+          lockRecord.format_version,
+          state.record.format_version,
         );
+        lockRecord = { ...lockRecord, format_version: formatVersion };
+        normalizedOptions.lockSchema = { schemaVersion: 3, formatVersion };
       }
       // A Managed lock may only be continued by a writer that speaks its
       // schema: reclaiming or taking it over with a baseline writer would
@@ -1986,6 +2049,21 @@ export class SessionWriterLease {
         throw new SessionWriterUnavailableError({
           cause: new Error(
             'Session writer lock uses a schema this acquire cannot continue',
+          ),
+        });
+      }
+      // The format barrier is two-directional here as it is for a sealed
+      // takeover: reclaiming a stale active lock from a newer format would
+      // rewrite the durable record at this binary's lower format and append
+      // records the newer binary's reader then refuses.
+      if (
+        isManagedLockRecord(state.record) &&
+        normalizedOptions.lockSchema !== undefined &&
+        normalizedOptions.lockSchema.formatVersion < state.record.format_version
+      ) {
+        throw new SessionWriterUnavailableError({
+          cause: new Error(
+            `Stale session writer lock format ${state.record.format_version} is newer than this binary's format ${normalizedOptions.lockSchema.formatVersion}`,
           ),
         });
       }
@@ -2004,6 +2082,40 @@ export class SessionWriterLease {
       let primaryInstalled = false;
       let staleMoved = false;
       const stalePath = `${lockPath}.stale.${process.pid}.${randomUUID()}`;
+      if (isManagedLockRecord(lockRecord) && lockRecord.format_version >= 2) {
+        const claimRaw = JSON.stringify(lockRecord);
+        if (!(await installLockRecord(claimPath, lockRecord))) {
+          throw new SessionWriterUnavailableError();
+        }
+        const current = await SessionWriterLease.inspectExistingLock(
+          lockPath,
+          normalizedOptions.sessionId,
+        );
+        if (current.kind !== 'stale' || current.raw !== state.raw) {
+          throw new SessionWriterUnavailableError();
+        }
+        await transitionExactPrimary(
+          lockPath,
+          current.raw,
+          claimPath,
+          claimRaw,
+          stalePath,
+          normalizedOptions.sessionId,
+          claimPath,
+          claimRaw,
+        );
+        const lease = await SessionWriterLease.finishAcquisition(
+          lockPath,
+          lockRecord,
+          normalizedOptions,
+        );
+        await releaseTransitionClaim(claimPath, claimRaw);
+        await removeExactRecord(stalePath, current.raw).catch(() => undefined);
+        await removeOwnedLock(reclaimPath, lockRecord.owner_id).catch(
+          () => undefined,
+        );
+        return lease;
+      }
       try {
         await assertPathMissing(claimPath);
         const currentState = await SessionWriterLease.inspectExistingLock(
@@ -2085,6 +2197,21 @@ export class SessionWriterLease {
       throw new SessionWriterUnavailableError({
         cause: new Error(
           'Sealed session writer lock uses a schema this acquire cannot continue',
+        ),
+      });
+    }
+    // The barrier is two-directional: an older binary must not adopt a seal
+    // from a newer format and downgrade the record (the newer binary would
+    // then fail reading its own log and an aborted takeover deletes the
+    // lock entirely). A newer acquirer continues an older seal fine.
+    if (
+      isManagedLockRecord(observed.record) &&
+      options.lockSchema !== undefined &&
+      options.lockSchema.formatVersion < observed.record.format_version
+    ) {
+      throw new SessionWriterUnavailableError({
+        cause: new Error(
+          `Sealed session writer lock format ${observed.record.format_version} is newer than this binary's format ${options.lockSchema.formatVersion}`,
         ),
       });
     }
@@ -2256,6 +2383,7 @@ export class SessionWriterLease {
       }
       return lease;
     } catch (error) {
+      if ((lease.managedFormatVersion ?? 0) >= 2) throw error;
       let releaseError: unknown;
       for (let attempt = 0; attempt < 2; attempt++) {
         if (attempt === 1) lease.releaseRetryable = false;
@@ -2493,6 +2621,122 @@ export class SessionWriterLease {
 
   appendJsonLine(value: unknown): Promise<void> {
     return this.runExclusive(() => this.appendJsonLineOnce(value));
+  }
+
+  readTranscript(): Promise<string> {
+    return this.runExclusive(async () => {
+      await this.assertOwnedAndUnchangedOnce();
+      const handle = await openTranscriptForRead(
+        this.transcriptPath,
+        this.expectedTranscriptState,
+      );
+      if (!handle) return '';
+      try {
+        const text = await handle.readFile('utf8');
+        await this.assertOwnedAndUnchangedOnce();
+        if (
+          createHash('sha256').update(text).digest('hex') !==
+          this.expectedTranscriptHasher!.copy().digest('hex')
+        ) {
+          throw new SessionTranscriptChangedError();
+        }
+        return text;
+      } finally {
+        await handle.close();
+      }
+    });
+  }
+
+  replaceTranscript(text: string, expectedSha256: string): Promise<void> {
+    return this.runExclusive(() =>
+      this.replaceTranscriptOnce(text, expectedSha256, false),
+    );
+  }
+
+  replaceManagedTranscript(
+    text: string,
+    expectedSha256: string,
+    verify: () => void,
+  ): Promise<void> {
+    return this.runExclusive(() =>
+      this.replaceTranscriptOnce(text, expectedSha256, true, verify),
+    );
+  }
+
+  private async replaceTranscriptOnce(
+    text: string,
+    expectedSha256: string,
+    managed: boolean,
+    verify?: () => void,
+  ): Promise<void> {
+    await this.assertOwnedAndUnchangedOnce();
+    if (
+      (managed
+        ? this.managedFormatVersion !== 2
+        : this.managedFormatVersion !== undefined) ||
+      this.expectedTranscriptHasher!.copy().digest('hex') !== expectedSha256
+    ) {
+      throw new SessionTranscriptChangedError();
+    }
+    const directoryPath = path.dirname(this.transcriptPath);
+    await fs.mkdir(directoryPath, { recursive: true, mode: 0o700 });
+    const directory = await openDurableLockDirectory(directoryPath);
+    const temporaryPath = path.join(
+      directoryPath,
+      `.${randomUUID()}.jsonl.tmp`,
+    );
+    let temporary: fs.FileHandle | undefined;
+    let replaced = false;
+    let replacementAttempted = false;
+    try {
+      temporary = await fs.open(temporaryPath, 'wx', 0o600);
+      const mode = this.expectedTranscriptState?.exists
+        ? this.expectedTranscriptState.fingerprint.mode
+        : undefined;
+      if (mode !== undefined) await temporary.chmod(mode & 0o777);
+      await temporary.writeFile(text, 'utf8');
+      await temporary.sync();
+      const replacementState = transcriptStateFromStat(await temporary.stat());
+      await temporary.close();
+      temporary = undefined;
+      await syncDurableLockDirectory(directory);
+      await this.assertOwnedAndUnchangedOnce();
+      replacementAttempted = true;
+      await fs.rename(temporaryPath, this.transcriptPath);
+      replaced = true;
+      await syncDurableLockDirectory(directory);
+      const snapshot = await captureTranscriptSnapshot(
+        this.transcriptPath,
+        replacementState,
+        () => this.released,
+      );
+      const expectedHash = createHash('sha256').update(text).digest('hex');
+      if (snapshot.hasher.copy().digest('hex') !== expectedHash) {
+        throw new SessionTranscriptChangedError();
+      }
+      await this.readOwnedLock();
+      this.expectedTranscriptState = snapshot.state;
+      this.expectedTranscriptHasher = snapshot.hasher;
+      verify?.();
+      if (managed) await this.assertOwnedAndUnchangedOnce();
+    } catch (error) {
+      if (managed && replacementAttempted) {
+        this.replacementFailure =
+          error instanceof Error ? error : new Error(String(error));
+      }
+      if (error instanceof SessionWriterError) throw error;
+      if (!replaced) {
+        await this.assertOwnedAndUnchangedOnce();
+        throw error;
+      }
+      throw new SessionWriterUnavailableError({
+        cause: error instanceof Error ? error : undefined,
+      });
+    } finally {
+      await temporary?.close().catch(() => undefined);
+      await fs.unlink(temporaryPath).catch(() => undefined);
+      await directory.handle.close().catch(() => undefined);
+    }
   }
 
   /**
@@ -2793,6 +3037,15 @@ export class SessionWriterLease {
 
   release(): Promise<void> {
     if (this.terminalOperation === 'seal') return this.terminalPromise!;
+    if ((this.managedFormatVersion ?? 0) >= 2 && !this.released) {
+      return Promise.reject(
+        new SessionWriterUnavailableError({
+          cause: new Error(
+            'A snapshot writer must preserve its seal or active fence.',
+          ),
+        }),
+      );
+    }
     this.terminalOperation = 'release';
     if (this.terminalPromise) return this.terminalPromise;
     const terminal = this.runExclusive(() => this.releaseOnce()).catch(
@@ -2820,10 +3073,29 @@ export class SessionWriterLease {
   sealForHandoff(commitProof?: SessionWriterCommitProof): Promise<void> {
     if (this.terminalOperation === 'release') return this.release();
     this.terminalOperation = 'seal';
-    this.terminalPromise ??= this.runExclusive(() =>
+    if (this.terminalPromise) return this.terminalPromise;
+    const terminal = this.runExclusive(() =>
       this.sealForHandoffOnce(commitProof),
-    );
-    return this.terminalPromise;
+    ).catch((error: unknown) => {
+      // A retryable seal failure must not be memoized forever: a later
+      // close() retries the seal rather than replaying the rejection
+      // (review round 14, R14-4). A rolled-back seal left the writer
+      // unsealed (released === false), so the retry re-runs it. The
+      // terminal operation resets with it, or a later release() would
+      // read a cleared promise as a seal in flight.
+      if (
+        this.releaseRetryable &&
+        !this.released &&
+        !(error instanceof SessionWriterLostError) &&
+        this.terminalPromise === terminal
+      ) {
+        this.terminalPromise = undefined;
+        this.terminalOperation = undefined;
+      }
+      throw error;
+    });
+    this.terminalPromise = terminal;
+    return terminal;
   }
 
   get isReleased(): boolean {
@@ -2835,7 +3107,15 @@ export class SessionWriterLease {
   }
 
   private runExclusive<T>(operation: () => Promise<T>): Promise<T> {
-    const pending = this.operationTail.then(operation, operation);
+    const checked = () => {
+      if (this.replacementFailure) {
+        throw new SessionWriterUnavailableError({
+          cause: this.replacementFailure,
+        });
+      }
+      return operation();
+    };
+    const pending = this.operationTail.then(checked, checked);
     this.operationTail = pending.then(
       () => undefined,
       () => undefined,

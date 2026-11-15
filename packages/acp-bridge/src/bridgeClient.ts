@@ -23,6 +23,7 @@ import { RequestError } from '@agentclientprotocol/sdk';
 import {
   APPROVAL_MODES,
   isValidCronTaskRoutingId,
+  MAX_CRON_GATE_CHARS,
   MAX_CRON_TASK_ROUTING_ID_LENGTH,
   SESSION_PR_URL_MAX_LENGTH,
 } from '@qwen-code/qwen-code-core';
@@ -47,6 +48,7 @@ import {
 } from './bridgeTypes.js';
 import type {
   BackgroundNotificationTurn,
+  BridgeSessionState,
   BridgeWorkspaceGenerationNotificationEvent,
   BridgeGenerationNotificationEvent,
   BridgePendingInteraction,
@@ -54,6 +56,12 @@ import type {
   PendingPromptEntry,
 } from './bridgeTypes.js';
 import { SERVE_CONTROL_EXT_METHODS } from './status.js';
+import {
+  isWorkflowAncestorTrustResponse,
+  parseWorkflowAncestorTrustRequest,
+  WORKFLOW_ANCESTOR_TRUST_METHOD,
+  type WorkflowAncestorTrustHandler,
+} from './workflow-ancestor-trust.js';
 import { isValidExternalToolGuardDenialReason } from './externalToolGuard.js';
 import type {
   ChannelDeliveryErrorCode,
@@ -415,6 +423,7 @@ function artifactPayloadFields(
     sizeBytes: artifact['sizeBytes'] as number | undefined,
     metadata: artifact['metadata'] as SessionArtifactInput['metadata'],
     retention: artifact['retention'] as SessionArtifactInput['retention'],
+    updateOnly: artifact['updateOnly'] as boolean | undefined,
   };
 }
 
@@ -679,7 +688,8 @@ function sliceLineRange(
  *
  * Only the fields declared on this narrowed interface cross the boundary:
  * `sessionId`, `events`,
- * `pendingPermissionIds`, `pendingInteractions`, `activePromptId`,
+ * `clientIds`, `suspendedWorkflowApprovalRefs`, `pendingPermissionIds`,
+ * `pendingInteractions`, `activePromptId`,
  * `activePromptOriginatorClientId`. New fields
  * BridgeClient grows must be added here too (and the factory's
  * `SessionEntry` is required to provide them — TS enforces the
@@ -693,6 +703,7 @@ export interface BridgeClientSessionEntry {
   sourceType?: string;
   sourceId?: string;
   events: EventBus;
+  restoreState?: BridgeSessionState;
   artifacts: SessionArtifactStore;
   artifactWorkspaceReady: boolean;
   prepareArtifactWorkspace?: () => Promise<void>;
@@ -701,6 +712,8 @@ export interface BridgeClientSessionEntry {
   deferredArtifactInputCount: number;
   attachments: SessionAttachmentStore;
   recordingDegraded: boolean;
+  clientIds: ReadonlyMap<string, number>;
+  suspendedWorkflowApprovalRefs?: ReadonlyMap<string, ReadonlySet<symbol>>;
   pendingPermissionIds: Set<string>;
   /** Pollable pending human interactions, keyed by permission request id. */
   pendingInteractions: Map<string, BridgePendingInteraction>;
@@ -751,12 +764,27 @@ export interface BridgeClientSessionEntry {
    * change that tightened permissions: permission requests are refused.
    */
   workspaceChangeFence?: number;
+  closing?: boolean;
+  cwdChangeEpoch?: number;
 }
 
 export interface BridgeClientDeferredArtifactBatch {
   artifacts: SessionArtifactInput[];
   options?: Parameters<SessionArtifactStore['upsertMany']>[1];
   turn: Pick<BridgeEvent, 'promptId' | 'originatorClientId'>;
+}
+
+export function hasAvailableWorkflowApprovalClient(
+  entry: Pick<
+    BridgeClientSessionEntry,
+    'clientIds' | 'suspendedWorkflowApprovalRefs'
+  >,
+  clientId: string,
+): boolean {
+  return (
+    (entry.clientIds.get(clientId) ?? 0) >
+    (entry.suspendedWorkflowApprovalRefs?.get(clientId)?.size ?? 0)
+  );
 }
 
 interface PreparedSessionUpdateFrames {
@@ -787,6 +815,40 @@ function ownsActivePrompt(
     entry.backgroundTurn?.turnId === promptId ||
     (entry.promptActive === true && entry.activePromptId === promptId)
   );
+}
+
+/**
+ * Puts the messages a failed drain took back where they were, ahead of
+ * anything queued while it was out.
+ */
+function requeueMidTurnMessages(
+  queue: MidTurnQueueEntry[],
+  queuedBefore: readonly MidTurnQueueEntry[],
+  drained: readonly MidTurnQueueEntry[],
+): void {
+  const restored = new Set([...drained, ...queue]);
+  const earlier = new Set(queuedBefore);
+  queue.splice(
+    0,
+    queue.length,
+    ...queuedBefore.filter((message) => restored.has(message)),
+    ...queue.filter((message) => !earlier.has(message)),
+  );
+}
+
+/** Removes and returns the queued messages that are not queue-only, in order. */
+function takeUserMidTurnMessages(
+  queue: MidTurnQueueEntry[],
+): MidTurnQueueEntry[] {
+  const taken = queue.filter((message) => !message.queueOnly);
+  if (taken.length > 0) {
+    queue.splice(
+      0,
+      queue.length,
+      ...queue.filter((message) => message.queueOnly),
+    );
+  }
+  return taken;
 }
 
 /**
@@ -837,7 +899,7 @@ export class BridgeClient implements Client {
      */
     private readonly mediator: Pick<
       PermissionMediator,
-      'request' | 'cancelForPrompt'
+      'policy' | 'request' | 'cancelForPrompt' | 'cancelWorkflowApproval'
     >,
     /**
      * Bd1yh: wall-clock ms before `requestPermission` resolves as cancelled
@@ -874,6 +936,7 @@ export class BridgeClient implements Client {
       entry: BridgeClientSessionEntry,
       modelId: string,
       originatorClientId: string | undefined,
+      subscriptionSignedOut?: boolean,
     ) => void,
     /**
      * §2.3 / A2 callback: centralised `approval_mode_changed` publish.
@@ -977,6 +1040,11 @@ export class BridgeClient implements Client {
     ) => Promise<boolean>,
     /** Invoked after the child reports that it started a Goal turn. */
     private readonly onGoalTurnStart?: (sessionId: string) => void,
+    private readonly onWorkflowAncestorTrust?: WorkflowAncestorTrustHandler,
+    private readonly onLastUserPromptRecorded?: (
+      entry: BridgeClientSessionEntry,
+      timestamp: string | undefined,
+    ) => Promise<void>,
   ) {}
 
   async requestPermission(
@@ -987,15 +1055,6 @@ export class BridgeClient implements Client {
       return { outcome: { outcome: 'cancelled' } };
     }
 
-    const explicitBackgroundTurn = parseBackgroundNotificationTurn(
-      params._meta?.['backgroundTurn'],
-    );
-    if (
-      explicitBackgroundTurn &&
-      entry.backgroundTurn?.turnId !== explicitBackgroundTurn.turnId
-    ) {
-      return { outcome: { outcome: 'cancelled' } };
-    }
     const appCallId =
       typeof params._meta?.['mcpAppCallId'] === 'string'
         ? params._meta['mcpAppCallId']
@@ -1005,20 +1064,62 @@ export class BridgeClient implements Client {
       : undefined;
     if (
       appCallId &&
-      (!appClientId || appCallId !== params.toolCall.toolCallId)
+      (!appClientId || appCallId !== params.toolCall?.toolCallId)
     ) {
       return { outcome: { outcome: 'cancelled' } };
     }
-    const backgroundTurn = appClientId
+    const backgroundWorkflowApproval =
+      !appClientId &&
+      params.toolCall?._meta?.['workflowApproval'] === true &&
+      params.toolCall._meta?.['backgroundWorkflowApproval'] === true;
+    const explicitBackgroundTurn = backgroundWorkflowApproval
       ? undefined
-      : (explicitBackgroundTurn ??
-        (entry.promptActive ? undefined : entry.backgroundTurn));
-    const permissionPromptId = appClientId
-      ? undefined
-      : (backgroundTurn?.turnId ?? entry.activePromptId);
-    const permissionOriginator =
+      : parseBackgroundNotificationTurn(params._meta?.['backgroundTurn']);
+    if (
+      explicitBackgroundTurn &&
+      entry.backgroundTurn?.turnId !== explicitBackgroundTurn.turnId
+    ) {
+      return { outcome: { outcome: 'cancelled' } };
+    }
+    const usesPrompt = !appClientId && !backgroundWorkflowApproval;
+    const backgroundTurn = usesPrompt
+      ? (explicitBackgroundTurn ??
+        (entry.promptActive ? undefined : entry.backgroundTurn))
+      : undefined;
+    const permissionPromptId = usesPrompt
+      ? (backgroundTurn?.turnId ?? entry.activePromptId)
+      : undefined;
+    let permissionOriginator =
       appClientId ??
-      (backgroundTurn ? undefined : entry.activePromptOriginatorClientId);
+      (usesPrompt && !backgroundTurn
+        ? entry.activePromptOriginatorClientId
+        : undefined);
+    const workflowOriginatorClientId =
+      params._meta?.['workflowOriginatorClientId'];
+    if (
+      backgroundWorkflowApproval &&
+      typeof workflowOriginatorClientId === 'string'
+    ) {
+      if (
+        this.mediator.policy === 'designated' &&
+        !hasAvailableWorkflowApprovalClient(entry, workflowOriginatorClientId)
+      ) {
+        // No permission_request is published for this one, so leave a line
+        // that tells it apart from an agent-side cancel. The client id comes
+        // from request meta: quote it rather than print it raw.
+        writeStderrLine(
+          `qwen serve: session ${entry.sessionId} cancelled a background ` +
+            `workflow approval: its launching client ` +
+            `${JSON.stringify(workflowOriginatorClientId.slice(0, 64))} ` +
+            `is not connected.`,
+        );
+        return resolutionToAcpResponse({
+          kind: 'cancelled',
+          reason: 'agent_cancelled',
+        });
+      }
+      permissionOriginator = workflowOriginatorClientId;
+    }
     // Reserve model permission capacity within the existing session cap.
     if (
       appClientId &&
@@ -1083,10 +1184,7 @@ export class BridgeClient implements Client {
     });
     if (!published) return { outcome: { outcome: 'cancelled' } };
 
-    // Cap-index add happens AFTER publish-success so a publish-fail
-    // path doesn't need to roll back. The mediator's
-    // `forgetSession` is the only thing that drains this index (via
-    // the bridge's `cancelPendingForSession`).
+    // Index only published requests and remove them when the mediator settles.
     let interaction: BridgePendingInteraction | undefined;
     try {
       interaction = pendingInteractionFromRequest(requestId, {
@@ -1108,6 +1206,9 @@ export class BridgeClient implements Client {
         requestId,
         sessionId: entry.sessionId,
         promptId: appClientId ? appCallId : permissionPromptId,
+        ...(backgroundWorkflowApproval
+          ? { workflowApprovalToolCallId: params.toolCall.toolCallId }
+          : {}),
         originatorClientId: permissionOriginator,
         allowedOptionIds,
         issuedAtMs: Date.now(),
@@ -1140,6 +1241,21 @@ export class BridgeClient implements Client {
     const events =
       entry?.events ?? this.resolvePendingRestoreEvents(params.sessionId);
     if (!events) return;
+    if (
+      entry?.restoreState &&
+      params.update.sessionUpdate === 'config_option_update'
+    ) {
+      entry.restoreState.configOptions = params.update.configOptions;
+    }
+    const update = params.update;
+    if (
+      entry &&
+      update.sessionUpdate === 'tool_call_update' &&
+      update._meta?.['backgroundWorkflowApproval'] === true &&
+      (update.status === 'completed' || update.status === 'failed')
+    ) {
+      this.mediator.cancelWorkflowApproval(entry.sessionId, update.toolCallId);
+    }
     const prepared = this.prepareSessionUpdateFrames(params, entry);
     for (const frame of prepared.frames) {
       events.publish(frame);
@@ -1171,22 +1287,43 @@ export class BridgeClient implements Client {
     entry?: BridgeClientSessionEntry,
   ): PreparedSessionUpdateFrames {
     const executionMeta = params.update._meta;
-    const taskCompleted =
-      executionMeta?.['source'] === 'background_task_completed';
-    const backgroundTurn = parseBackgroundNotificationTurn(
-      executionMeta?.['backgroundTurn'],
-    );
-    const promptId = taskCompleted
+    const backgroundWorkflowApproval =
+      executionMeta?.['backgroundWorkflowApproval'] === true;
+    const outsideTurn =
+      executionMeta?.['source'] === 'background_task_completed' ||
+      backgroundWorkflowApproval;
+    const backgroundTurn = backgroundWorkflowApproval
       ? undefined
-      : (backgroundTurn?.turnId ?? entry?.activePromptId);
-    const turn = {
-      ...(promptId ? { promptId } : {}),
-      ...(!taskCompleted &&
-      !backgroundTurn &&
+      : parseBackgroundNotificationTurn(executionMeta?.['backgroundTurn']);
+    const toolPromptId = executionMeta?.['promptId'];
+    const explicitToolPromptId =
+      params.update.sessionUpdate === 'tool_call_update' &&
+      typeof toolPromptId === 'string' &&
+      toolPromptId.length > 0
+        ? toolPromptId
+        : undefined;
+    const promptId = outsideTurn
+      ? undefined
+      : (backgroundTurn?.turnId ??
+        explicitToolPromptId ??
+        entry?.activePromptId);
+    const toolOriginator = executionMeta?.['originatorClientId'];
+    const activeOriginator =
       (entry?.promptActive || !entry?.backgroundTurn) &&
       entry?.activePromptOriginatorClientId
-        ? { originatorClientId: entry.activePromptOriginatorClientId }
-        : {}),
+        ? entry.activePromptOriginatorClientId
+        : undefined;
+    const toolOriginatorClientId =
+      typeof toolOriginator === 'string' ? toolOriginator : undefined;
+    const originatorClientId =
+      outsideTurn || backgroundTurn
+        ? undefined
+        : explicitToolPromptId
+          ? toolOriginatorClientId
+          : activeOriginator;
+    const turn = {
+      ...(promptId ? { promptId } : {}),
+      ...(originatorClientId ? { originatorClientId } : {}),
     };
     const frames: Array<Omit<BridgeEvent, 'id' | 'v'>> = [];
     // A2UI-over-MCP: tool_call_update results from an A2UI UI server carry
@@ -1483,6 +1620,9 @@ export class BridgeClient implements Client {
     method: string,
     params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
+    if (method === WORKFLOW_ANCESTOR_TRUST_METHOD) {
+      return this.handleWorkflowAncestorTrust(params);
+    }
     if (method === '_qwencode/start_turn') {
       const sessionId = params['sessionId'];
       const turn = parseBackgroundNotificationTurn(params);
@@ -1596,7 +1736,13 @@ export class BridgeClient implements Client {
     // The child knows which execution is draining during a prompt handoff.
     // Capture ownership before attachment I/O can yield to the next turn.
     const promptId = requestedPromptId ?? currentTurnMetadata(entry).promptId;
-    const drained = entry.midTurnMessageQueue.splice(0);
+    const queuedBefore = [...entry.midTurnMessageQueue];
+    // A send-now drain takes only the user's own messages: queue-only steering
+    // keeps its tool-boundary delivery and the settle path its caller drives.
+    const drained =
+      params['userInputOnly'] === true
+        ? takeUserMidTurnMessages(entry.midTurnMessageQueue)
+        : entry.midTurnMessageQueue.splice(0);
     if (drained.length > 0) {
       // Claim the ids before media I/O yields so retries and removals cannot
       // observe a drained message as neither queued nor settled.
@@ -1623,6 +1769,7 @@ export class BridgeClient implements Client {
       messageId: string;
       displayText: string;
       content: ContentBlock[];
+      _meta?: Record<string, unknown>;
       attachmentReferences?: SessionAttachmentReference[];
     }> = [];
     try {
@@ -1686,7 +1833,7 @@ export class BridgeClient implements Client {
       const ring = entry.settledMidTurnMessageIds;
       const kept = ring.filter((id) => !requeued.has(id));
       ring.splice(0, ring.length, ...kept);
-      entry.midTurnMessageQueue.unshift(...drained);
+      requeueMidTurnMessages(entry.midTurnMessageQueue, queuedBefore, drained);
       writeStderrLine(
         `[mid-turn] session=${JSON.stringify(entry.sessionId)} drain failed, requeued ${drained.length} message(s): ${JSON.stringify(error instanceof Error ? error.message : String(error))}`,
       );
@@ -1750,6 +1897,7 @@ export class BridgeClient implements Client {
     const toolCallId = params['toolCallId'];
     const toolName = params['toolName'];
     const args = params['arguments'];
+    const permissionChecked = params['permissionChecked'];
     if (
       typeof sessionId !== 'string' ||
       sessionId.length === 0 ||
@@ -1759,7 +1907,9 @@ export class BridgeClient implements Client {
       toolCallId.length === 0 ||
       typeof toolName !== 'string' ||
       toolName.length === 0 ||
-      !isRecord(args)
+      !isRecord(args) ||
+      (permissionChecked !== undefined &&
+        typeof permissionChecked !== 'boolean')
     ) {
       throw RequestError.invalidParams(
         undefined,
@@ -1791,6 +1941,7 @@ export class BridgeClient implements Client {
       toolCallId,
       toolName,
       arguments: args,
+      ...(permissionChecked === true ? { permissionChecked: true } : {}),
       effectiveCwd: entry.effectiveCwd,
       // Forwarded verbatim and explicitly untrusted: the host policy decides
       // whether it can establish this scope from state it owns.
@@ -1810,6 +1961,71 @@ export class BridgeClient implements Client {
       );
     }
     return normalizeExternalToolGuardResult(decision);
+  }
+
+  private async handleWorkflowAncestorTrust(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (!this.onWorkflowAncestorTrust) {
+      throw RequestError.methodNotFound(WORKFLOW_ANCESTOR_TRUST_METHOD);
+    }
+    const request = parseWorkflowAncestorTrustRequest(params);
+    if (!request) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invalid workflow ancestor trust request',
+      );
+    }
+    const { sessionId, canonicalTargetDir, ancestorDirs } = request;
+    const count = ancestorDirs.length;
+    const denied = () => ({ v: 1, trusted: Array<boolean>(count).fill(false) });
+    if (count === 0) return { v: 1, trusted: [] };
+    if (!this.ownsSession(sessionId)) return denied();
+    const entry = this.resolveEntry(sessionId);
+    if (!entry || entry.sessionId !== sessionId) return denied();
+    const { effectiveCwd, workspaceCwd } = entry;
+    const cwdChangeEpoch = entry.cwdChangeEpoch ?? 0;
+    const isCurrent = () =>
+      this.ownsSession(sessionId) &&
+      this.resolveEntry(sessionId) === entry &&
+      entry.sessionId === sessionId &&
+      entry.effectiveCwd === effectiveCwd &&
+      entry.workspaceCwd === workspaceCwd &&
+      cwdChangeEpoch % 2 === 0 &&
+      (entry.cwdChangeEpoch ?? 0) === cwdChangeEpoch &&
+      !entry.closing &&
+      entry.workspaceChangeFence === undefined;
+    if (!isCurrent()) return denied();
+    try {
+      if (
+        (await fs.realpath(effectiveCwd)) !== canonicalTargetDir ||
+        !isCurrent()
+      )
+        return denied();
+      const decision = await this.onWorkflowAncestorTrust({
+        sessionId,
+        workspaceCwd,
+        effectiveCwd,
+        canonicalTargetDir,
+        ancestorDirs,
+      });
+      const response: unknown = { v: 1, trusted: decision?.trusted };
+      if (
+        !isWorkflowAncestorTrustResponse(response, count) ||
+        typeof decision.isCurrent !== 'function'
+      )
+        return denied();
+      const decisions = [...response.trusted];
+      if (
+        (await fs.realpath(effectiveCwd)) !== canonicalTargetDir ||
+        !isCurrent() ||
+        decision.isCurrent() !== true
+      )
+        return denied();
+      return { v: 1, trusted: decisions };
+    } catch {
+      return denied();
+    }
   }
 
   private handleTodoStopGuardContinuationClaim(
@@ -2246,6 +2462,20 @@ export class BridgeClient implements Client {
         '`recurring` must be a boolean',
       );
     }
+    // Shape only: the daemon route validates the command itself with the
+    // same rule `cron_create` applies.
+    const gate = params['gate'];
+    if (
+      gate !== undefined &&
+      (typeof gate !== 'string' ||
+        gate.trim().length === 0 ||
+        gate.length > MAX_CRON_GATE_CHARS)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        `\`gate\` must be a non-empty string within the ${MAX_CRON_GATE_CHARS}-character limit`,
+      );
+    }
 
     const entry = this.resolveEntry(callerSessionId);
     if (
@@ -2275,6 +2505,7 @@ export class BridgeClient implements Client {
       cron,
       prompt,
       recurring,
+      ...(gate !== undefined ? { gate } : {}),
       assertCallerPromptActive: () => {
         const currentEntry = this.resolveEntry(callerSessionId);
         if (
@@ -2301,7 +2532,11 @@ export class BridgeClient implements Client {
         'Scheduled-task host returned an invalid result',
       );
     }
-    return { id: result.id, cron: result.cron };
+    return {
+      id: result.id,
+      cron: result.cron,
+      ...(result.gate !== undefined ? { gate: result.gate } : {}),
+    };
   }
 
   private async handleLiveScreenContextCapture(
@@ -2417,6 +2652,7 @@ export class BridgeClient implements Client {
    * `qwen/notify/session/pr-binding` (shell-detected `gh pr create`
    * bindings — catalog mark only, the child persists the sidecar), and
    * `_qwencode/end_turn` (background-notification and goal turns), and
+   * `qwen/notify/session/mcp-changed`,
    * `qwen/notify/session/mcp-budget-event` — each translated into a
    * session-scoped SSE frame. Unknown methods are dropped silently for
    * forward-compat.
@@ -2430,6 +2666,17 @@ export class BridgeClient implements Client {
       typeof notificationSessionId === 'string' &&
       this.abandonedRestoreIds.has(notificationSessionId)
     ) {
+      return;
+    }
+    if (method === 'qwen/notify/session/mcp-changed') {
+      const sessionId = params['sessionId'];
+      if (typeof sessionId !== 'string' || !this.ownsSession(sessionId)) return;
+      const entry = this.resolveEntry(sessionId);
+      if (!entry) return;
+      entry.events.publish({
+        type: 'settings_changed',
+        data: { key: 'mcp' },
+      });
       return;
     }
     if (method === 'qwen/notify/session/sources-changed') {
@@ -2575,6 +2822,10 @@ export class BridgeClient implements Client {
         });
         return;
       }
+      if (record['type'] === 'reset') {
+        this.onGenerationEvent?.(sessionId, { type: 'reset', requestId });
+        return;
+      }
       if (record['type'] === 'delta') {
         const seq = record['seq'];
         const text = record['text'];
@@ -2659,6 +2910,27 @@ export class BridgeClient implements Client {
     }
     if (method === 'qwen/notify/session/mode-update') {
       this.handleInSessionModeUpdate(params);
+      return;
+    }
+    if (method === 'qwen/notify/session/last-user-prompt') {
+      const sessionId = params['sessionId'];
+      const timestamp = params['timestamp'];
+      if (
+        params['v'] !== 1 ||
+        typeof sessionId !== 'string' ||
+        (timestamp !== null &&
+          (typeof timestamp !== 'string' ||
+            !Number.isFinite(Date.parse(timestamp)) ||
+            new Date(timestamp).toISOString() !== timestamp))
+      )
+        return;
+      const entry = this.resolveEntry(sessionId);
+      if (!entry || !this.ownsSession(sessionId)) return;
+      try {
+        await this.onLastUserPromptRecorded?.(entry, timestamp ?? undefined);
+      } finally {
+        this.onSessionCatalogChanged?.();
+      }
       return;
     }
     if (method === 'qwen/notify/session/title-update') {
@@ -3048,6 +3320,7 @@ export class BridgeClient implements Client {
         entry,
         currentModelId,
         entry.activePromptOriginatorClientId,
+        params['subscriptionSignedOut'] === true,
       );
     } else {
       // `EventBus.publish` never throws (closed bus → undefined no-op); per
@@ -3055,7 +3328,13 @@ export class BridgeClient implements Client {
       entry.events.publish({
         type: 'model_switched',
         ...currentTurnMetadata(entry),
-        data: { sessionId, modelId: currentModelId },
+        data: {
+          sessionId,
+          modelId: currentModelId,
+          ...(params['subscriptionSignedOut'] === true
+            ? { subscriptionSignedOut: true }
+            : {}),
+        },
       });
     }
     writeStderrLine(

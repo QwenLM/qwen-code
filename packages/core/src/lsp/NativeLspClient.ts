@@ -86,6 +86,10 @@ export class NativeLspClient implements LspClient {
     return this.service.reinitialize();
   }
 
+  stop(): Promise<void> {
+    return this.service.stop();
+  }
+
   /**
    * Search for symbols across the workspace.
    *

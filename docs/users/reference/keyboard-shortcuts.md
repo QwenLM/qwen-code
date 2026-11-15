@@ -138,7 +138,7 @@ A **plain single click** on an http(s) OSC 8 hyperlink in the viewport opens it 
 
 Inside tmux, some terminals translate trackpad or wheel gestures into plain `Up Arrow` and `Down Arrow` sequences before qwen-code sees them. Those bytes are identical to real arrow-key presses, so qwen-code cannot tell whether you meant to scroll the viewport or navigate prompt history.
 
-If trackpad scrolling changes the prompt history in tmux, make sure `ui.useTerminalBuffer` is enabled; then use `Shift+Up` / `Shift+Down`, or the mouse wheel when tmux forwards wheel events to the app (requires `ui.mouseTracking`). If you prefer host scrollback, adjust your tmux mouse bindings for wheel events.
+If trackpad scrolling changes the prompt history in tmux, make sure `ui.useTerminalBuffer` is enabled; then use `Shift+Up` / `Shift+Down`, or the mouse wheel when tmux forwards wheel events to the app (requires `ui.mouseTracking`). If you would rather have plain `Up Arrow` / `Down Arrow` scroll the viewport while the composer is empty, set `ui.arrowKeysScrollTranscript` to `true` — input history then moves to `Ctrl+P` / `Ctrl+N` from an empty composer. If you prefer host scrollback, adjust your tmux mouse bindings for wheel events.
 
 ## IDE Integration
 

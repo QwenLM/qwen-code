@@ -1,0 +1,19 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+import { defineConfig } from 'vitest/config';
+
+export default defineConfig({
+  test: {
+    include: ['src/**/*.test.{ts,tsx}'],
+    reporters: ['default', 'junit'],
+    outputFile: {
+      junit: 'junit.xml',
+    },
+    testTimeout: process.env['RUNNER_NAME']?.startsWith('ecs-qwen-')
+      ? 60_000
+      : undefined,
+  },
+});

@@ -18,6 +18,7 @@ import {
   parsePeerAuthLine,
   parsePeerFrame,
   PEER_FRAME_VERSION,
+  type PeerFrame,
 } from './peer-frames.js';
 
 function line(value: unknown): string {
@@ -32,6 +33,14 @@ const validUser = {
   message: { role: 'user', content: 'hello' },
 };
 
+/** Parses `validUser` with `over` spread on top. */
+const parseUser = (over: Record<string, unknown>) =>
+  parsePeerFrame(line({ ...validUser, ...over }));
+
+/** Encodes `frame`, then parses the line back. */
+const roundTrip = (frame: PeerFrame) =>
+  parsePeerFrame(encodePeerFrame(frame).trimEnd());
+
 describe('parsePeerFrame — user frames', () => {
   it('parses a minimal valid frame', () => {
     const frame = parsePeerFrame(line(validUser));
@@ -44,67 +53,51 @@ describe('parsePeerFrame — user frames', () => {
   });
 
   it('carries from, fromName and fromMode through', () => {
-    const frame = parsePeerFrame(
-      line({
-        ...validUser,
-        from: '/run/user/1000/qwen-socks/9.sock',
-        fromName: 'app-ab',
-        fromMode: 'bypass',
-      }),
-    );
-    expect(frame).toMatchObject({
+    const sender = {
       from: '/run/user/1000/qwen-socks/9.sock',
       fromName: 'app-ab',
       fromMode: 'bypass',
-    });
+    };
+    expect(parseUser(sender)).toMatchObject(sender);
   });
 
   it('carries the recipient session id through', () => {
-    expect(
-      parsePeerFrame(line({ ...validUser, toSessionId: 'sess-9' })),
-    ).toMatchObject({ toSessionId: 'sess-9' });
+    expect(parseUser({ toSessionId: 'sess-9' })).toMatchObject({
+      toSessionId: 'sess-9',
+    });
   });
 
   it('delivers a message whose reply token is too large to retain', () => {
     // The token only routes the receipt, and the bound is applied where
-    // the token is held (`peer-drop-reports.ts`). Refusing the frame here
-    // would lose an ordinary message over a field that says nothing about
-    // it.
-    const frame = parsePeerFrame(
-      line({
-        ...validUser,
-        replyToken: 'x'.repeat(MAX_RETAINED_REPLY_TOKEN_CHARS + 1),
-      }),
-    );
+    // it is held (`peer-drop-reports.ts`). Refusing the frame here would
+    // lose an ordinary message over a field that says nothing about it.
+    const frame = parseUser({
+      replyToken: 'x'.repeat(MAX_RETAINED_REPLY_TOKEN_CHARS + 1),
+    });
     expect(frame).not.toBeNull();
     expect(frame && 'message' in frame && frame.message.content).toBe('hello');
   });
 
   it('treats a non-string toSessionId as unaddressed', () => {
-    const frame = parsePeerFrame(line({ ...validUser, toSessionId: 7 }));
+    const frame = parseUser({ toSessionId: 7 });
     expect(frame).not.toBeNull();
     expect(frame && 'toSessionId' in frame).toBe(false);
   });
 
   it('drops an unrecognized fromMode rather than trusting it', () => {
-    const frame = parsePeerFrame(line({ ...validUser, fromMode: 'root' }));
+    const frame = parseUser({ fromMode: 'root' });
     expect(frame).not.toBeNull();
     expect(frame && 'fromMode' in frame).toBe(false);
   });
 
   it('defaults an unknown priority to next', () => {
-    expect(
-      parsePeerFrame(line({ ...validUser, priority: 'urgent' })),
-    ).toMatchObject({ priority: 'next' });
-    expect(
-      parsePeerFrame(line({ ...validUser, priority: undefined })),
-    ).toMatchObject({ priority: 'next' });
+    for (const priority of ['urgent', undefined]) {
+      expect(parseUser({ priority })).toMatchObject({ priority: 'next' });
+    }
   });
 
   it('keeps an explicit now priority', () => {
-    expect(
-      parsePeerFrame(line({ ...validUser, priority: 'now' })),
-    ).toMatchObject({ priority: 'now' });
+    expect(parseUser({ priority: 'now' })).toMatchObject({ priority: 'now' });
   });
 
   it.each([
@@ -117,23 +110,17 @@ describe('parsePeerFrame — user frames', () => {
   });
 
   it.each([
-    ['a missing msgId', { ...validUser, msgId: undefined }],
-    ['an empty msgId', { ...validUser, msgId: '' }],
-    ['a non-string msgId', { ...validUser, msgId: 7 }],
-    ['a missing message', { ...validUser, message: undefined }],
-    [
-      'a non-user role',
-      { ...validUser, message: { role: 'system', content: 'x' } },
-    ],
-    ['empty content', { ...validUser, message: { role: 'user', content: '' } }],
-    [
-      'non-string content',
-      { ...validUser, message: { role: 'user', content: 5 } },
-    ],
-    ['an unknown type', { ...validUser, type: 'shell' }],
-    ['a missing msgV', { ...validUser, msgV: undefined }],
+    ['a missing msgId', { msgId: undefined }],
+    ['an empty msgId', { msgId: '' }],
+    ['a non-string msgId', { msgId: 7 }],
+    ['a missing message', { message: undefined }],
+    ['a non-user role', { message: { role: 'system', content: 'x' } }],
+    ['empty content', { message: { role: 'user', content: '' } }],
+    ['non-string content', { message: { role: 'user', content: 5 } }],
+    ['an unknown type', { type: 'shell' }],
+    ['a missing msgV', { msgV: undefined }],
   ])('rejects a frame with %s', (_label, input) => {
-    expect(parsePeerFrame(line(input))).toBeNull();
+    expect(parseUser(input)).toBeNull();
   });
 
   // /peers tokenizes user input on whitespace and prints dash-stripped
@@ -142,57 +129,41 @@ describe('parsePeerFrame — user frames', () => {
   // a benign-plus-malicious pair forces an `accept all` that releases the
   // malicious entry unreviewed.
   it.each([
-    ['a leading-whitespace msgId', { ...validUser, msgId: ' urgent' }],
-    ['an NBSP-prefixed msgId', { ...validUser, msgId: '\u00a0urgent' }],
-    [
-      'an internal-whitespace msgId',
-      { ...validUser, msgId: 'task0001 benign update' },
-    ],
-    ['a trailing-whitespace msgId', { ...validUser, msgId: 'abc ' }],
-    ['a dash-only msgId', { ...validUser, msgId: '---' }],
-    ['an overlong msgId', { ...validUser, msgId: 'a'.repeat(65) }],
-    [
-      'a msgId outside the handle charset',
-      { ...validUser, msgId: 'task/0001' },
-    ],
+    ['a leading-whitespace msgId', { msgId: ' urgent' }],
+    ['an NBSP-prefixed msgId', { msgId: '\u00a0urgent' }],
+    ['an internal-whitespace msgId', { msgId: 'task0001 benign update' }],
+    ['a trailing-whitespace msgId', { msgId: 'abc ' }],
+    ['a dash-only msgId', { msgId: '---' }],
+    ['an overlong msgId', { msgId: 'a'.repeat(65) }],
+    ['a msgId outside the handle charset', { msgId: 'task/0001' }],
   ])('rejects %s so every held id stays typeable', (_label, input) => {
-    expect(parsePeerFrame(line(input))).toBeNull();
+    expect(parseUser(input)).toBeNull();
   });
 
   // `all` is the /peers bulk keyword, intercepted before any id
   // resolution: a held message wearing that handle could never be decided
   // individually, and acting on it would decide every held message.
   it.each([
-    ['the exact bulk keyword', { ...validUser, msgId: 'all' }],
-    ['a dash-spelled bulk keyword', { ...validUser, msgId: 'a-l-l' }],
-    ['an upper-case bulk keyword', { ...validUser, msgId: 'ALL' }],
+    ['the exact bulk keyword', { msgId: 'all' }],
+    ['a dash-spelled bulk keyword', { msgId: 'a-l-l' }],
+    ['an upper-case bulk keyword', { msgId: 'ALL' }],
   ])('rejects %s so it cannot alias /peers all', (_label, input) => {
-    expect(parsePeerFrame(line(input))).toBeNull();
+    expect(parseUser(input)).toBeNull();
   });
 
   it('still admits ids that merely contain the keyword', () => {
-    expect(
-      parsePeerFrame(line({ ...validUser, msgId: 'all-nodes-restart-001' })),
-    ).not.toBeNull();
+    expect(parseUser({ msgId: 'all-nodes-restart-001' })).not.toBeNull();
   });
 
   it('accepts the id shape legitimate senders produce', () => {
     const frame = buildUserFrame({ content: 'hi' });
-    expect(parsePeerFrame(encodePeerFrame(frame).trimEnd())).toMatchObject({
-      msgId: frame.msgId,
-    });
-    expect(
-      parsePeerFrame(line({ ...validUser, msgId: 'Task-0001' })),
-    ).not.toBeNull();
-    expect(
-      parsePeerFrame(line({ ...validUser, msgId: 'a'.repeat(64) })),
-    ).not.toBeNull();
+    expect(roundTrip(frame)).toMatchObject({ msgId: frame.msgId });
+    expect(parseUser({ msgId: 'Task-0001' })).not.toBeNull();
+    expect(parseUser({ msgId: 'a'.repeat(64) })).not.toBeNull();
   });
 
   it('rejects a frame from a newer protocol rather than guessing', () => {
-    expect(
-      parsePeerFrame(line({ ...validUser, msgV: PEER_FRAME_VERSION + 1 })),
-    ).toBeNull();
+    expect(parseUser({ msgV: PEER_FRAME_VERSION + 1 })).toBeNull();
   });
 });
 
@@ -258,7 +229,7 @@ describe('round trip', () => {
   it('round-trips the recipient session id', () => {
     const frame = buildUserFrame({ content: 'hi', toSessionId: 'sess-9' });
     expect(frame.toSessionId).toBe('sess-9');
-    expect(parsePeerFrame(encodePeerFrame(frame).trimEnd())).toEqual(frame);
+    expect(roundTrip(frame)).toEqual(frame);
   });
 
   it('omits the recipient key rather than writing undefined', () => {
@@ -267,7 +238,7 @@ describe('round trip', () => {
 
   it('round-trips the reply token, and omits its key when absent', () => {
     const frame = buildUserFrame({ content: 'hi', replyToken: 'tok' });
-    expect(parsePeerFrame(encodePeerFrame(frame).trimEnd())).toEqual(frame);
+    expect(roundTrip(frame)).toEqual(frame);
     expect('replyToken' in buildUserFrame({ content: 'hi' })).toBe(false);
   });
 
@@ -345,22 +316,32 @@ describe('auth lines', () => {
   it('rejects everything that is not exactly an auth line', () => {
     expect(parsePeerAuthLine('not json')).toBeNull();
     expect(parsePeerAuthLine(line({ ...validUser }))).toBeNull();
-    expect(parsePeerAuthLine(line({ msgV: 1, type: 'auth' }))).toBeNull();
+    const parseAuth = (over: Record<string, unknown>) =>
+      parsePeerAuthLine(line({ msgV: 1, type: 'auth', ...over }));
+    expect(parseAuth({})).toBeNull();
+    expect(parseAuth({ token: '' })).toBeNull();
+    expect(parseAuth({ token: 42 })).toBeNull();
     expect(
-      parsePeerAuthLine(line({ msgV: 1, type: 'auth', token: '' })),
-    ).toBeNull();
-    expect(
-      parsePeerAuthLine(line({ msgV: 1, type: 'auth', token: 42 })),
-    ).toBeNull();
-    expect(
-      parsePeerAuthLine(
-        line({ msgV: PEER_FRAME_VERSION + 1, type: 'auth', token: 'tok' }),
-      ),
+      parseAuth({ msgV: PEER_FRAME_VERSION + 1, token: 'tok' }),
     ).toBeNull();
   });
 });
 
 describe('dropped receipts', () => {
+  const tooMany = Array.from(
+    { length: MAX_DROPPED_MSG_IDS + 20 },
+    (_, index) => `id${index}`,
+  );
+
+  type StatusFields = Parameters<typeof buildDeliveryStatusFrame>[0];
+  /** A `dropped` receipt for `orig-1`, with `fields` on top. */
+  const buildDropped = (fields: Partial<StatusFields> = {}) =>
+    buildDeliveryStatusFrame({
+      status: 'dropped',
+      origMsgId: 'orig-1',
+      ...fields,
+    });
+
   function parseControl(over: Record<string, unknown>) {
     return parsePeerFrame(
       JSON.stringify({
@@ -376,15 +357,11 @@ describe('dropped receipts', () => {
   }
 
   it('parses a drop with its reason and the ids it folds in', () => {
-    const parsed = parseControl({
-      dropReason: 'rate-limited',
-      droppedMsgIds: ['b2', 'c3'],
-    });
-    expect(parsed).toMatchObject({
+    const folded = { dropReason: 'rate-limited', droppedMsgIds: ['b2', 'c3'] };
+    expect(parseControl(folded)).toMatchObject({
       status: 'dropped',
       origMsgId: 'orig-1',
-      dropReason: 'rate-limited',
-      droppedMsgIds: ['b2', 'c3'],
+      ...folded,
     });
   });
 
@@ -418,11 +395,7 @@ describe('dropped receipts', () => {
   });
 
   it('caps how many ids one receipt can settle', () => {
-    const many = Array.from(
-      { length: MAX_DROPPED_MSG_IDS + 20 },
-      (_, index) => `id${index}`,
-    );
-    const parsed = parseControl({ droppedMsgIds: many });
+    const parsed = parseControl({ droppedMsgIds: tooMany });
     expect((parsed as { droppedMsgIds?: string[] }).droppedMsgIds).toHaveLength(
       MAX_DROPPED_MSG_IDS,
     );
@@ -442,72 +415,50 @@ describe('dropped receipts', () => {
   });
 
   it('writes the two fields only when they are given', () => {
-    const bare = buildDeliveryStatusFrame({
-      status: 'dropped',
-      origMsgId: 'orig-1',
-    });
+    const bare = buildDropped();
     expect(bare).not.toHaveProperty('dropReason');
     expect(bare).not.toHaveProperty('droppedMsgIds');
 
-    const full = buildDeliveryStatusFrame({
-      status: 'dropped',
-      origMsgId: 'orig-1',
+    const given: Partial<StatusFields> = {
       dropReason: 'queue-full',
       droppedMsgIds: ['b2'],
-    });
-    expect(full).toMatchObject({
-      dropReason: 'queue-full',
-      droppedMsgIds: ['b2'],
-    });
+    };
+    expect(buildDropped(given)).toMatchObject(given);
   });
 
   it('leaves an empty list off the wire', () => {
-    const frame = buildDeliveryStatusFrame({
-      status: 'dropped',
-      origMsgId: 'orig-1',
-      droppedMsgIds: [],
-    });
+    const frame = buildDropped({ droppedMsgIds: [] });
     expect(frame).not.toHaveProperty('droppedMsgIds');
   });
 
   it('round-trips a folded receipt', () => {
-    const built = buildDeliveryStatusFrame({
-      status: 'dropped',
-      origMsgId: 'orig-1',
+    const built = buildDropped({
       from: '/tmp/a.sock',
       dropReason: 'duplicate',
       droppedMsgIds: ['b2', 'c3'],
     });
-    expect(parsePeerFrame(encodePeerFrame(built).trim())).toEqual(built);
+    expect(roundTrip(built)).toEqual(built);
   });
 
   it('caps the ids the builder puts on the wire, and round-trips them', () => {
     // The parser's cap and the builder's are separate lines; only a
     // round trip pins them to the same ceiling.
-    const many = Array.from(
-      { length: MAX_DROPPED_MSG_IDS + 20 },
-      (_, index) => `id${index}`,
-    );
-    const built = buildDeliveryStatusFrame({
-      status: 'dropped',
-      origMsgId: 'orig-1',
+    const built = buildDropped({
       dropReason: 'rate-limited',
-      droppedMsgIds: many,
+      droppedMsgIds: tooMany,
     });
     expect(built.droppedMsgIds).toHaveLength(MAX_DROPPED_MSG_IDS);
-    expect(parsePeerFrame(encodePeerFrame(built).trim())).toEqual(built);
+    expect(roundTrip(built)).toEqual(built);
   });
 
   it('explains each reason to the sending session', () => {
-    expect(describeDropReason('rate-limited')).toBe(
-      'you sent faster than that session accepts',
-    );
-    expect(describeDropReason('duplicate')).toBe(
-      'it repeated your previous message',
-    );
-    expect(describeDropReason('queue-full')).toBe(
-      'its queue of undelivered peer messages was full',
-    );
+    for (const [reason, text] of [
+      ['rate-limited', 'you sent faster than that session accepts'],
+      ['duplicate', 'it repeated your previous message'],
+      ['queue-full', 'its queue of undelivered peer messages was full'],
+    ] as const) {
+      expect(describeDropReason(reason)).toBe(text);
+    }
   });
 
   it('tells a sender not to re-send', () => {

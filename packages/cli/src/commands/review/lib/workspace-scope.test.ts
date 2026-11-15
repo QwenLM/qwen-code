@@ -429,6 +429,9 @@ describe('resolveTestScope', () => {
     ]);
     expect(scope.caveat).toContain('fans out');
     expect(scope.caveat).toContain('did not run');
+    // `rootTestFansOut` holds for pnpm's `-r` as well, and a caveat naming
+    // `--workspaces` would quote a flag such a repo does not contain.
+    expect(scope.caveat).not.toContain('--workspaces');
   });
 
   it('does not count a fan-out root in the half-cap denominator', () => {

@@ -314,6 +314,12 @@ interface TrustedDaemonToolGuardRequest
 
 const UNVERIFIABLE_SCOPE_DENIAL_PREFIX =
   'Daemon shell guard could not establish the execution directory of this call: ';
+// The refusal names the boundary it enforced: a caller that retries elsewhere,
+// or hands the command to a fresh session, only moves the same denial. It
+// speaks about the directory, not the caller: a session whose own effective
+// directory moved outside the tracked one is refused the same way.
+const UNVERIFIABLE_SCOPE_DENIAL_HINT =
+  ' (a command runs only inside the session working directory or a worktree that session owns)';
 
 interface GuardToken {
   readonly text: string;
@@ -357,7 +363,11 @@ function envUnsetRemovesFunction(name: string, state: PrefixState): boolean {
 
 type GuardDenial = { allowed: false; reason: string };
 
-function sanitizeDenialPath(value: string, prefix: string): string {
+function sanitizeDenialPath(
+  value: string,
+  prefix: string,
+  suffix = '',
+): string {
   // Mirror containsUnsafeExternalToolGuardControlCharacter: control
   // characters would convert a clean denial into an invalid guard result.
   const stripped = [...value]
@@ -371,7 +381,8 @@ function sanitizeDenialPath(value: string, prefix: string): string {
       );
     })
     .join('');
-  const budget = EXTERNAL_TOOL_GUARD_MAX_DENIAL_REASON_CHARS - prefix.length;
+  const budget =
+    EXTERNAL_TOOL_GUARD_MAX_DENIAL_REASON_CHARS - prefix.length - suffix.length;
   if (stripped.length <= budget) return stripped;
   return `${stripped.slice(0, Math.max(1, budget - 1))}…`;
 }
@@ -380,10 +391,10 @@ function denyDynamicRelocation(): GuardDenial {
   return { allowed: false, reason: DYNAMIC_RELOCATION_DENIAL };
 }
 
-function denyTarget(prefix: string, target: string): GuardDenial {
+function denyTarget(prefix: string, target: string, suffix = ''): GuardDenial {
   return {
     allowed: false,
-    reason: `${prefix}${sanitizeDenialPath(target, prefix)}`,
+    reason: `${prefix}${sanitizeDenialPath(target, prefix, suffix)}${suffix}`,
   };
 }
 
@@ -3301,6 +3312,7 @@ async function evaluateBuiltInGuard(
           return denyTarget(
             UNVERIFIABLE_SCOPE_DENIAL_PREFIX,
             canonicalReported,
+            UNVERIFIABLE_SCOPE_DENIAL_HINT,
           );
         }
         if (
@@ -3315,10 +3327,27 @@ async function evaluateBuiltInGuard(
         GitWorktreeService.getWorktreesDir(request.sessionId),
       );
       if (!isWithinRoot(canonicalReported, ownedWorktrees)) {
-        return denyTarget(UNVERIFIABLE_SCOPE_DENIAL_PREFIX, canonicalReported);
+        return denyTarget(
+          UNVERIFIABLE_SCOPE_DENIAL_PREFIX,
+          canonicalReported,
+          UNVERIFIABLE_SCOPE_DENIAL_HINT,
+        );
       }
       canonicalEffectiveCwd = canonicalReported;
     }
+  }
+
+  // Normal tool permission already admitted this call, so the session's own
+  // directory needs no second containment check: whoever admitted it saw the
+  // command. Keep the fallback check for speculative calls that never run
+  // that flow, and for a sub-agent pinned to its own worktree — the boundary
+  // established above is what keeps it out of its siblings and the parent
+  // checkout, and nothing in the permission flow re-establishes it.
+  if (
+    request.permissionChecked === true &&
+    canonicalEffectiveCwd === sessionCwd
+  ) {
+    return { allowed: true };
   }
 
   // A model-supplied `directory` becomes the containment basis, so it must

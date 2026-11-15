@@ -204,6 +204,13 @@ export interface EffortOverride {
   field: 'enable_thinking' | 'reasoning_effort' | 'thinking_budget';
 }
 
+export interface WorkflowModeState {
+  requested: boolean;
+  available: boolean;
+  effective: boolean;
+  reason?: string;
+}
+
 export interface EffortStatus {
   applied: boolean;
   override: EffortOverride | null;
@@ -433,9 +440,10 @@ export interface QueryOptions {
    * refresh (resume, MCP discovery, the first plan-mode entry in a
    * session, a subagent definition change) re-declares.
    * These bridge and warning rules describe direct tool mode. CodeModeOnly
-   * hides both bridge tools, includes callable deferred tools' full schemas
-   * in exec, and skips deferred reminders and this warning; tools.eager does
-   * not make those nested tools unreachable or reduce their schema tokens.
+   * discovers deferred schemas through top-level tool_search and invokes them
+   * through exec. It skips deferred preload and startup catalogs; tools.eager
+   * also reduces the initial exec description. When search is unavailable in
+   * the current scope, exec includes all allowed tool signatures.
    * Tools already deferred by default remain
    * on demand even when listed; `tools.visible` surfaces one at startup. The
    * allowlist does not affect MCP tools, the `--json-schema`
@@ -504,9 +512,11 @@ export interface QueryOptions {
    *   tool-set refresh (resume, MCP discovery, the first plan-mode
    *   entry in a session, a subagent definition change) re-declares (#9827).
    *   These bridge and warning rules describe direct tool mode. CodeModeOnly
-   *   hides both bridge tools, includes callable deferred tools' full schemas
-   *   in exec, and skips deferred reminders and this warning; tools.eager does
-   *   not make those nested tools unreachable or reduce their schema tokens.
+   *   discovers deferred schemas through top-level tool_search and invokes
+   *   them through exec. It skips deferred preload and startup catalogs;
+   *   tools.eager also reduces the initial exec description. When search is
+   *   unavailable in the current scope, exec includes all allowed tool
+   *   signatures.
    *
    * **Pattern matching:**
    * - Tool name: `'write_file'`
@@ -558,6 +568,9 @@ export interface QueryOptions {
    * Use {@link Query.setEffort} to change the tier at runtime.
    */
   effort?: EffortTier;
+
+  /** Initial durable session choice. Omit to keep the restored value. */
+  workflowMode?: boolean;
 
   /**
    * Include partial messages in the response stream.

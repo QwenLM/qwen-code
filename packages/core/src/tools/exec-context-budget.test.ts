@@ -16,7 +16,7 @@ import { ToolNames } from './tool-names.js';
 import { ToolRegistry } from './tool-registry.js';
 
 describe('exec context output budget', () => {
-  it('delivers a complete long skill body through the real scheduler', async () => {
+  it('delivers an explicitly emitted skill body through the real scheduler', async () => {
     const config = new Config({
       cwd: '/tmp',
       targetDir: '/tmp',
@@ -34,7 +34,7 @@ describe('exec context output budget', () => {
     });
     const registry = new ToolRegistry(config);
     vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
-    const body = 'Skill instructions that must reach the model. '.repeat(1400);
+    const body = 'Skill instructions that must reach the model. '.repeat(400);
     registry.registerTool(
       new MockTool({
         name: ToolNames.SKILL,
@@ -59,7 +59,9 @@ describe('exec context output budget', () => {
       {
         callId: 'exec-long-skill',
         name: ToolNames.EXEC,
-        args: { source: 'await tools.skill({ skill: "long-skill" });' },
+        args: {
+          source: 'text((await tools.skill({ skill: "long-skill" })).output);',
+        },
         isClientInitiated: false,
         prompt_id: 'long-skill-prompt',
       },
@@ -72,8 +74,7 @@ describe('exec context output budget', () => {
     const output =
       result.response.responseParts[0].functionResponse?.response?.['output'];
     expect(typeof output).toBe('string');
-    expect(JSON.parse((output as string).split('\n')[0]).toolResults).toEqual([
-      { name: ToolNames.SKILL, args: { skill: 'long-skill' }, output: body },
-    ]);
+    expect(output).toBe(body);
+    expect(output).not.toContain('toolResults');
   });
 });

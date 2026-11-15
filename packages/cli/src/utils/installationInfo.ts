@@ -5,10 +5,12 @@
  */
 
 import { createDebugLogger, isGitRepository } from '@qwen-code/qwen-code-core';
+import type { JsRuntime } from '@qwen-code/qwen-code-core/utils/runtime-info.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as childProcess from 'node:child_process';
 import { promisify } from 'node:util';
+import { getNpmNodePath } from './npm-runtime.js';
 
 export enum PackageManager {
   NPM = 'npm',
@@ -24,7 +26,7 @@ export enum PackageManager {
 }
 
 export function getNpmCliPath(
-  nodePath = process.execPath,
+  nodePath = getNpmNodePath(),
   platform = process.platform,
 ): string {
   if (platform === 'win32') {
@@ -75,6 +77,12 @@ const STANDALONE_UNIX_INSTALLER =
   'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh';
 const STANDALONE_WINDOWS_INSTALLER =
   'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.ps1';
+// Both the detector message and the formatter's split read this one constant.
+// The sentence must stay byte-identical to the i18n catalogue key in
+// locales/*.js; the trailing space separates the interpolated command and is
+// trimmed from the line handed to t().
+const STANDALONE_UPDATE_PREFIX =
+  'Standalone install detected. Please rerun the standalone installer to update: ';
 
 function getStandaloneInstallerUrl(): string {
   return process.platform === 'win32'
@@ -129,6 +137,13 @@ function formatUpdateMessage(
     return [
       'Update requires sudo. Please run:',
       `  ${message.slice(sudoPrefix.length)}`,
+    ];
+  }
+
+  if (message.startsWith(STANDALONE_UPDATE_PREFIX)) {
+    return [
+      STANDALONE_UPDATE_PREFIX.trimEnd(),
+      ` ${message.slice(STANDALONE_UPDATE_PREFIX.length)}`,
     ];
   }
 
@@ -400,7 +415,7 @@ function getStandaloneInstallInfo(
     standaloneDir: installDir,
     updateMessage: isAutoUpdateEnabled
       ? 'Standalone install detected. Attempting to automatically update now...'
-      : `Standalone install detected. Please rerun the standalone installer to update: ${updateCommand}`,
+      : `${STANDALONE_UPDATE_PREFIX}${updateCommand}`,
   };
 }
 
@@ -423,6 +438,7 @@ function isStandaloneInstallDir(installDir: string): boolean {
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as {
       name?: unknown;
       target?: unknown;
+      runtime?: unknown;
     };
     // Manifest format is produced by writeManifest in create-standalone-package.js.
     if (
@@ -433,25 +449,82 @@ function isStandaloneInstallDir(installDir: string): boolean {
       return false;
     }
 
-    const qwenBin =
-      process.platform === 'win32'
-        ? path.join(installDir, 'bin', 'qwen.cmd')
-        : path.join(installDir, 'bin', 'qwen');
-    const nodeBin =
-      process.platform === 'win32'
-        ? path.join(installDir, 'node', 'node.exe')
-        : path.join(installDir, 'node', 'bin', 'node');
-
+    const runtime: JsRuntime = manifest.runtime === 'bun' ? 'bun' : 'node';
+    // Installs from before the v0.18.1 entry-point floor only have the
+    // installer's launcher; later archives ship the entry point plus the
+    // bundled runtime.
     return (
-      fs.existsSync(qwenBin) &&
-      fs.existsSync(nodeBin) &&
-      isStandaloneRuntimeFile(qwenBin) &&
-      isStandaloneRuntimeFile(nodeBin)
+      hasStandaloneLauncherLayout(installDir, manifest.target, runtime) ||
+      hasStandaloneArchiveLayout(installDir, manifest.target, runtime)
     );
   } catch (err) {
     debugLogger.error('Standalone detection failed:', installDir, err);
     return false;
   }
+}
+
+/**
+ * Resolves the launcher, bundled-runtime and entry-point paths of a standalone
+ * installation for the given target and runtime flavor. The layout is produced
+ * by scripts/create-standalone-package.js (writeShims and the runtime
+ * installer); keep this in sync when that layout changes.
+ */
+export function standaloneRuntimePaths(
+  installDir: string,
+  target: string,
+  runtime: JsRuntime,
+): { launcher: string; interpreter: string; entryPoint: string } {
+  const isWindowsTarget = target.startsWith('win');
+  return {
+    launcher: isWindowsTarget
+      ? path.join(installDir, 'bin', 'qwen.cmd')
+      : path.join(installDir, 'bin', 'qwen'),
+    interpreter: isWindowsTarget
+      ? path.join(installDir, runtime, `${runtime}.exe`)
+      : path.join(installDir, runtime, 'bin', runtime),
+    entryPoint: path.join(installDir, 'lib', 'cli-entry.js'),
+  };
+}
+
+function hasStandaloneLauncherLayout(
+  installDir: string,
+  target: string,
+  runtime: JsRuntime,
+): boolean {
+  const { launcher, interpreter } = standaloneRuntimePaths(
+    installDir,
+    target,
+    runtime,
+  );
+  return (
+    fs.existsSync(launcher) &&
+    fs.existsSync(interpreter) &&
+    isStandaloneRuntimeFile(launcher) &&
+    isStandaloneRuntimeFile(interpreter)
+  );
+}
+
+/**
+ * Checks the archive contract shared by the update gate and installation
+ * detection: the CLI entry point plus the bundled runtime. The installer's
+ * launcher is optional because the update gate accepts repacked archives that
+ * ship only the entry point the launcher would exec.
+ */
+export function hasStandaloneArchiveLayout(
+  installDir: string,
+  target: string,
+  runtime: JsRuntime,
+): boolean {
+  const { entryPoint, interpreter } = standaloneRuntimePaths(
+    installDir,
+    target,
+    runtime,
+  );
+  return (
+    fs.existsSync(entryPoint) &&
+    fs.existsSync(interpreter) &&
+    isStandaloneRuntimeFile(interpreter)
+  );
 }
 
 function isStandaloneTargetForCurrentPlatform(target: string): boolean {

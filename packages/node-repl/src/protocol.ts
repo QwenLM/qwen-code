@@ -22,6 +22,7 @@ export interface NodeReplModuleRoot {
 
 export interface InitMessage {
   type: 'init';
+  preloadCua?: boolean;
   generation: number;
   cwd: string;
   homeDir: string;

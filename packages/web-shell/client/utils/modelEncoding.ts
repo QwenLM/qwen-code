@@ -31,3 +31,42 @@ export function decodeVisionModelForPicker(storedValue: string): string {
   }
   return selector;
 }
+
+export function resolveFastModelForPicker(
+  storedValue: string,
+  models: readonly {
+    id: string;
+    baseModelId?: string;
+    authType?: string;
+    baseUrl?: string;
+  }[],
+): string {
+  const [selector, baseUrl] = storedValue.split('\0');
+  const normalizeUrl = (url: string) => {
+    try {
+      const parsed = new URL(url);
+      parsed.username = '';
+      parsed.password = '';
+      parsed.search = '';
+      parsed.hash = '';
+      return parsed.href;
+    } catch {
+      return url;
+    }
+  };
+  const matches = models.filter((model) => {
+    const bareId = model.baseModelId ?? extractBareModelId(model.id);
+    const qualified = model.authType
+      ? `${model.authType}:${bareId}`
+      : encodeVisionModelForSetting(model.id);
+    return (
+      (selector === qualified ||
+        selector === bareId ||
+        selector === model.id) &&
+      (!baseUrl ||
+        (model.baseUrl &&
+          normalizeUrl(baseUrl) === normalizeUrl(model.baseUrl)))
+    );
+  });
+  return matches.length === 1 ? matches[0]!.id : storedValue;
+}

@@ -12,6 +12,8 @@ export interface ToolInvocationGuardContext {
   toolName: string;
   args: Readonly<Record<string, unknown>>;
   signal: AbortSignal;
+  /** Runtime permission flow admitted this call; absent for speculation. */
+  permissionChecked?: boolean;
   /**
    * Runtime-owned managed invocation identity. Ordinary CLI/SDK calls may not
    * have one; a host that requires it must fail closed when it is absent.

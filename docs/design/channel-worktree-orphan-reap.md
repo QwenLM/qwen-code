@@ -1,5 +1,7 @@
 # Orphan-reap worktree cleanup (#11024 item 1)
 
+[English](channel-worktree-orphan-reap.md) | [简体中文](channel-worktree-orphan-reap.zh-CN.md)
+
 ## Status
 
 Implemented and verified (2026-09-07). Two real-daemon A/B rounds: the
@@ -115,9 +117,25 @@ Classification (before record deletion, under the worktree lock):
    equivalent, same allowed-roots derivation as the create route).
 6. Cross-session sharing: a scan of the sidecar dir's `*.worktree.json`
    must find no **other** session's sidecar naming the same (canonical)
-   worktree path. A tombstone predecessor (`supersededBy` naming
-   exactly the session being deleted) legitimately names the same
-   checkout — it is evidence of the transfer, not sharing.
+   worktree path. A tombstone — a sidecar carrying `supersededBy`, left by
+   a session that handed the checkout on in a reset — legitimately names
+   the same checkout: it is evidence of the transfer, not sharing. It
+   cannot own the checkout while the marker (rule 4), read under the
+   ownership lock every reset also takes, names the session being
+   deleted. The link itself is not followed: each reset rewrites only the
+   pair it transfers between, so after several resets older tombstones
+   name sessions that may since have been deleted or archived. When the
+   only tombstone is the direct predecessor (`supersededBy` naming the
+   session being deleted), it is discounted regardless: the bridge may
+   have reopened it at the workspace root since (scheduled-task
+   keepalive, ACP load), and refusing would then leak the checkout for
+   good, so a direct predecessor whose own sever did not finish is not
+   protected here. When older tombstones name the checkout too, they are
+   discounted only once no session naming it is still on the bridge —
+   neither a tombstone in this dir nor any session in the other archive
+   state's dir — because a reset whose sever did not finish leaves its
+   superseded session running, possibly with background work in the
+   checkout.
 
 Execution (after confirmed deletion, still under the worktree lock):
 
@@ -126,18 +144,23 @@ Execution (after confirmed deletion, still under the worktree lock):
    create route's `if (removed)` gate.
 8. Re-verify the marker (unchanged, still naming the deleted session) —
    closes the out-of-band window classification can't see.
-9. Full `git status --porcelain` inside the checkout must be empty —
-   **untracked files included**, so an agent-written file that was
-   never committed counts as work and preserves the checkout. This is
+9. The shared `worktreeHasWork` predicate
+   (`packages/core/src/services/gitWorktreeService.ts`) must report no
+   work: a full `git status --porcelain` walk with **untracked files
+   included**, and git-ignored ones too, so an agent-written file that
+   was never committed counts as work and preserves the checkout. This is
    the deliberate choice behind the safety contract's "any doubt
    preserves": tracked and committed work was already protected, and
-   extending the gate to untracked files costs one `git status` walk
-   per delete while closing the "silently destroyed draft" hole the
-   tracked-only variant left open. The daemon's own marker file
-   (`.qwen-session`, git-excluded in production) is the one exemption.
-   Read errors fail closed to "has work". The bridge session was
-   closed before the record deletion, so no in-daemon writer can dirty
-   the checkout afterwards.
+   extending the gate to untracked files costs one `git status` walk per
+   delete while closing the "silently destroyed draft" hole the
+   tracked-only variant left open. That predicate is also the enumeration
+   of record for the exemptions (disposable build output, symlinks, and
+   the daemon's own `.qwen-session` marker when git lists it as untracked
+   or ignored), so this doc deliberately does not restate them: the CLI
+   startup sweep and this reaper both call it and cannot drift apart.
+   Read errors fail closed to "has work". The bridge session was closed
+   before the record deletion, so no in-daemon writer can dirty the
+   checkout afterwards.
 10. `removeUserWorktree(slug, { deleteBranch: true })` — never
     `forceDeleteBranch`. Log the `branchPreserved` outcome so "checkout
     removed, branch kept for unmerged commits" is distinguishable from

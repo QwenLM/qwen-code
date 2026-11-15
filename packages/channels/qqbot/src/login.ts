@@ -5,11 +5,41 @@
  * handshake, then returns the obtained credentials.
  */
 
-import { qrConnect } from '@tencent-connect/qqbot-connector';
+import { qrConnect, startQrConnect } from '@tencent-connect/qqbot-connector';
+import type { ChannelQrLoginHandlers } from '@qwen-code/channel-base';
 
 export interface QQCredentials {
   appId: string;
   appSecret: string;
+}
+
+/**
+ * Drive the same handshake without touching the console, so a browser can
+ * render the QR payload. The connector keeps the bind key in its own closure
+ * and decrypts the secret here, so `appSecret` never reaches the client.
+ */
+export function startQrLogin(
+  handlers: ChannelQrLoginHandlers,
+  signal: AbortSignal,
+): () => void {
+  return startQrConnect(
+    {
+      onSuccess: (credentials) => {
+        const creds = credentials[0];
+        if (!creds?.appId || !creds?.appSecret) {
+          handlers.onFailure(
+            new Error('QR login failed: no credentials returned'),
+          );
+          return;
+        }
+        handlers.onSuccess({ appID: creds.appId, appSecret: creds.appSecret });
+      },
+      onFailure: (error) => handlers.onFailure(error),
+      onQrDisplayed: (url) => handlers.onQrCode(url),
+      onQrExpired: () => handlers.onExpired(),
+    },
+    { displayQrCodeToConsole: false, signal, source: 'qwen-code' },
+  );
 }
 
 /**

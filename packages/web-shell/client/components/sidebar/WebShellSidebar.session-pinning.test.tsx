@@ -1,99 +1,46 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import * as React from 'react';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import {
   clickSidebarElement as click,
+  createSidebarMocks,
+  DAEMON_APPROVAL_MODES,
   flushSidebar,
   installSidebarDomShims,
   makeSidebarSession as makeSession,
-  resolveWebShellSessions,
+  useResolvedWebShellSessions,
+  sidebarSessionPage,
+  useSidebarSessionCatalogQuery,
 } from '../../test/sidebarHarness';
 
-const { connection, workspace, workspaceActions, active, pinned, archived } =
-  vi.hoisted(() => {
-    const makeSessions = () => {
-      const state = {
-        sessions: [] as DaemonSessionSummary[],
-        loading: false,
-        error: null as Error | null,
-        data: [] as DaemonSessionSummary[] | undefined,
-        reload: vi.fn().mockResolvedValue(undefined),
-        deleteSession: vi.fn().mockResolvedValue(true),
-        archiveSession: vi.fn().mockResolvedValue(true),
-        unarchiveSession: vi.fn().mockResolvedValue(true),
-        exportSession: vi.fn(),
-      };
-      state.data = state.sessions;
-      return state;
-    };
-    return {
-      connection: {
-        status: 'connected',
-        sessionId: null as string | null,
-        workspaceCwd: '/tmp/project',
-        capabilities: undefined as
-          | { qwenCodeVersion: string; features: string[] }
-          | undefined,
-      },
-      workspace: {
-        capabilities: undefined as
-          | { qwenCodeVersion: string; features: string[] }
-          | undefined,
-        client: {
-          // Default no content-search hits; search tests override per test.
-          searchWorkspaceSessions: vi.fn().mockResolvedValue({ results: [] }),
-          workspaceByCwd: vi.fn(() => ({
-            listWorkspaceSessions: vi.fn().mockResolvedValue([]),
-            listSessionGroups: vi.fn().mockResolvedValue({
-              groups: [],
-              colorOptions: [
-                'red',
-                'orange',
-                'yellow',
-                'green',
-                'blue',
-                'purple',
-              ],
-            }),
-          })),
-        },
-        refreshCapabilities: vi.fn(),
-      },
-      workspaceActions: {
-        addWorkspace: vi.fn(),
-        removeWorkspace: vi.fn(),
-        listSessionGroups: vi.fn().mockResolvedValue({
-          groups: [],
-          colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
-        }),
-        createSessionGroup: vi.fn(),
-        updateSessionGroup: vi.fn(),
-        deleteSessionGroup: vi.fn(),
-        updateSessionOrganization: vi.fn(),
-      },
-      active: makeSessions(),
-      pinned: makeSessions(),
-      archived: makeSessions(),
-    };
-  });
-const refreshSessionCatalogQueries = vi.hoisted(() => vi.fn());
-const useSessionCatalogQueries = vi.hoisted(() => vi.fn(() => []));
-const loadSession = vi.hoisted(() => vi.fn());
+const mocks = createSidebarMocks({
+  colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+  searchWorkspaceSessions: true,
+  connection: { capabilities: undefined },
+});
+const {
+  connection,
+  workspace,
+  workspaceActions,
+  active,
+  pinned,
+  archived,
+  refreshSessionCatalogQueries,
+  useSessionCatalogQueries,
+  loadSession,
+} = mocks;
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
-  useConnection: () => connection,
-  useActions: () => ({ renameSession: vi.fn() }),
-  useWorkspace: () => workspace,
-  useWorkspaceActions: () => workspaceActions,
-  useChannels: () => ({ data: undefined, catalog: [], channels: {} }),
-  useSessions: (options?: { archiveState?: string; group?: string }) => {
-    if (options?.archiveState === 'archived') return archived;
-    if (options?.group === 'pinned') return pinned;
-    return active;
-  },
+  DAEMON_APPROVAL_MODES,
+  useConnection: () => mocks.connection,
+  useActions: () => mocks.actions,
+  useWorkspace: () => mocks.workspace,
+  useWorkspaceActions: () => mocks.workspaceActions,
+  useChannels: () => mocks.channels,
+  useSessions: (options?: { archiveState?: string; group?: string }) =>
+    sidebarSessionPage(mocks, options),
 }));
 
 vi.mock('../../session-catalog/session-catalog-hooks', () => ({
@@ -101,24 +48,7 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => ({
     enabled?: boolean;
     archiveState?: string;
     group?: string;
-  }) => {
-    const state =
-      options?.archiveState === 'archived'
-        ? archived
-        : options?.group === 'pinned'
-          ? pinned
-          : active;
-    const catalogQuery = {
-      routeKind: 'legacy',
-      workspaceCwd: connection.workspaceCwd,
-      options,
-    };
-    return resolveWebShellSessions(
-      state,
-      options?.enabled !== false,
-      catalogQuery,
-    );
-  },
+  }) => useResolvedWebShellSessions(mocks, options),
   useSessionCatalogController: () => ({
     refreshQueries: refreshSessionCatalogQueries,
     invalidateWorkspace: vi.fn(),
@@ -173,30 +103,10 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => ({
   }),
   useSessionCatalogPolling: () => undefined,
   useSessionCatalogQuery: (
-    client: typeof workspace.client,
+    client: typeof mocks.workspace.client,
     query: { workspaceCwd: string; options?: Record<string, unknown> },
     options: { autoLoad?: boolean; enabled?: boolean },
-  ) => {
-    const [snapshot, setSnapshot] = React.useState({
-      sessions: [] as DaemonSessionSummary[],
-      loading: false,
-      error: undefined as Error | undefined,
-    });
-    const reload = React.useCallback(async () => {
-      const sessions = await client
-        .workspaceByCwd(query.workspaceCwd)
-        .listWorkspaceSessions(query.options);
-      setSnapshot({ sessions, loading: false, error: undefined });
-      return { sessions };
-    }, [client, query.options, query.workspaceCwd]);
-    React.useEffect(() => {
-      if (options.enabled === false || !options.autoLoad) return;
-      void reload().catch((error: Error) => {
-        setSnapshot((current) => ({ ...current, loading: false, error }));
-      });
-    }, [options.autoLoad, options.enabled, reload]);
-    return { ...snapshot, reload };
-  },
+  ) => useSidebarSessionCatalogQuery(client, query, options),
   useSessionCatalogQueries,
 }));
 
@@ -214,7 +124,12 @@ let root: Root;
 let container: HTMLDivElement;
 
 function renderSidebar(
-  props: { onError?: (error: unknown, message?: string) => void } = {},
+  props: {
+    onError?: (error: unknown, message?: string) => void;
+    sessionActions?: React.ComponentProps<
+      typeof WebShellSidebar
+    >['sessionActions'];
+  } = {},
 ): void {
   const onError = props.onError ?? (() => {});
   act(() => {
@@ -232,6 +147,7 @@ function renderSidebar(
           onNewSession={() => false}
           onLoadSession={loadSession}
           onError={onError}
+          sessionActions={props.sessionActions}
         />
       </I18nProvider>,
     );
@@ -308,6 +224,118 @@ afterEach(() => {
 });
 
 describe('WebShellSidebar session pinning (issue #9465)', () => {
+  it('carries the selected question sort into secondary archive queries', async () => {
+    connection.capabilities = {
+      ...organizationCapabilities,
+      features: [
+        ...organizationCapabilities.features,
+        'session_last_user_prompt_sort',
+        'workspace_qualified_rest_core',
+      ],
+    };
+    workspace.capabilities = {
+      ...connection.capabilities,
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+        { id: 'secondary', cwd: '/tmp/other', primary: false, trusted: true },
+      ],
+    };
+    renderSidebar();
+    await flushSidebar();
+    const archiveQuery = () =>
+      useSessionCatalogQueries.mock.calls
+        .flatMap((call) => call[1])
+        .filter(
+          (query) =>
+            query.workspaceCwd === '/tmp/other' &&
+            query.options.archiveState === 'archived',
+        )
+        .at(-1);
+    expect(archiveQuery()?.options.sortBy).toBe('updatedAt');
+    await act(async () =>
+      click(
+        container.querySelector<HTMLElement>(
+          'button[aria-label="Sort sessions"]',
+        )!,
+        true,
+      ),
+    );
+    const choice = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+    ).find((item) => item.textContent === 'Last question');
+    expect(choice).toBeDefined();
+    await act(async () => click(choice!));
+    await flushSidebar();
+    expect(archiveQuery()?.options.sortBy).toBe('lastUserPromptAt');
+  });
+
+  it('does not restore cleared activity unread when the legacy catalog catches up', async () => {
+    const running = makeSession('background', {
+      displayName: 'Background result',
+      hasActivePrompt: true,
+      updatedAt: new Date().toISOString(),
+    });
+    const completed = { ...running, hasActivePrompt: false };
+    const catalog = (session: DaemonSessionSummary) => {
+      useSessionCatalogQueries.mockReturnValue([
+        { loading: false, stale: false, page: { sessions: [session] } },
+      ]);
+    };
+    active.sessions = [running];
+    active.data = active.sessions;
+    catalog(running);
+    renderSidebar();
+    await flushSidebar();
+    await act(async () => {
+      click(
+        container.querySelector<HTMLButtonElement>(
+          'button[aria-label="View activity"]',
+        )!,
+      );
+    });
+    await flushSidebar();
+    catalog(completed);
+    renderSidebar();
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).not.toBeNull();
+    await act(async () => {
+      container
+        .querySelector('button[aria-label="Activity options"]')!
+        .dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+        );
+    });
+    const markRead = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ].find((item) => item.textContent === 'Mark all as read');
+    expect(markRead).toBeDefined();
+    await act(async () => click(markRead!));
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).toBeNull();
+    active.sessions = [completed];
+    active.data = active.sessions;
+    renderSidebar();
+    await flushSidebar();
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).toBeNull();
+    await act(async () => {
+      click(
+        container.querySelector<HTMLButtonElement>(
+          'button[aria-label="Close activity view"]',
+        )!,
+      );
+    });
+    expect(
+      container.querySelector('[data-web-shell-session-completed-unread]'),
+    ).toBeNull();
+    expect(workspaceActions.updateSessionOrganization).not.toHaveBeenCalled();
+  });
+
   it('orders the pinned section by pin time, not last activity', async () => {
     // The daemon returns the pinned page sorted by activity (updatedAt
     // descending): "recent" was active most recently but was pinned AFTER
@@ -952,7 +980,7 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
     });
   }
 
-  it('keeps the group section visible when search only matches pinned members', async () => {
+  it('finds pinned members in the dialog without changing sidebar groups', async () => {
     mockDesignGroupCatalog();
     const member = makeSession('pinned-member', {
       displayName: 'Pinned member',
@@ -979,7 +1007,7 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
       searchButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     await flushSidebar();
-    const searchInput = container.querySelector<HTMLInputElement>(
+    const searchInput = document.querySelector<HTMLInputElement>(
       'input[aria-label="Search sessions"]',
     );
     expect(searchInput).not.toBeNull();
@@ -993,9 +1021,12 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
     });
     await flushSidebar();
 
-    // The only match is pinned, so the pinned-filtered flat list is empty;
-    // the body must still render the group section holding that member
-    // instead of the empty-state notice.
+    expect(document.querySelector('[role="listbox"]')?.textContent).toContain(
+      'Pinned member',
+    );
+    expect(
+      document.querySelector('[role="listbox"]')?.textContent,
+    ).not.toContain('Plain session');
     const group = container.querySelector<HTMLElement>(
       'section[aria-label="Design"]',
     );
@@ -1134,7 +1165,7 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
     // One pinned member plus five unpinned: the bucket exceeds the preview
     // limit (5), so the pinned row must keep its catalog position (pinned
     // sorts first) instead of being appended after every unpinned member,
-    // which would hide it behind "Show all".
+    // which would hide it behind the expand button.
     const unpinnedMembers = [1, 2, 3, 4, 5].map((index) =>
       makeSession(`unpinned-${index}`, {
         displayName: `Unpinned ${index}`,
@@ -1159,12 +1190,12 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
     ).map((node) => node.textContent ?? '');
     expect(rows).toHaveLength(5);
     expect(rows[0]).toBe('Pinned member');
-    expect(group?.textContent).toContain('Show all');
+    expect(group?.textContent).toContain('Show 1 more');
 
     workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
   });
 
-  it('drops a pinned member from its group when search only matches unpinned members', async () => {
+  it('filters dialog results without removing pinned members from sidebar groups', async () => {
     mockDesignGroupCatalog();
     const pinnedMember = makeSession('pinned-member', {
       displayName: 'Pinned member',
@@ -1194,7 +1225,7 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
       searchButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     await flushSidebar();
-    const searchInput = container.querySelector<HTMLInputElement>(
+    const searchInput = document.querySelector<HTMLInputElement>(
       'input[aria-label="Search sessions"]',
     );
     expect(searchInput).not.toBeNull();
@@ -1208,16 +1239,19 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
     });
     await flushSidebar();
 
-    // The query matches only the unpinned member: the grouped bucket must
-    // read the search-filtered list, so the pinned member leaves the group
-    // instead of lingering as a stale row with a stale count.
+    expect(document.querySelector('[role="listbox"]')?.textContent).toContain(
+      'Active member',
+    );
+    expect(
+      document.querySelector('[role="listbox"]')?.textContent,
+    ).not.toContain('Pinned member');
     const group = container.querySelector<HTMLElement>(
       'section[aria-label="Design"]',
     );
     expect(group).not.toBeNull();
-    expect(group?.textContent).toContain('\u00b7 1');
+    expect(group?.textContent).toContain('\u00b7 2');
     expect(group?.textContent).toContain('Active member');
-    expect(group?.textContent ?? '').not.toContain('Pinned member');
+    expect(group?.textContent).toContain('Pinned member');
 
     workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
   });
@@ -1593,8 +1627,8 @@ describe('WebShellSidebar content-search ghosts', () => {
 
   function sessionRowCount(displayName: string): number {
     return Array.from(
-      container.querySelectorAll('[data-web-shell-session-title]'),
-    ).filter((node) => node.textContent?.startsWith(displayName)).length;
+      document.querySelectorAll('[role="listbox"] [role="option"]'),
+    ).filter((node) => node.textContent?.includes(displayName)).length;
   }
 
   async function typeSearchQuery(text: string): Promise<void> {
@@ -1606,7 +1640,7 @@ describe('WebShellSidebar content-search ghosts', () => {
       searchButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     await flushSidebar();
-    const searchInput = container.querySelector<HTMLInputElement>(
+    const searchInput = document.querySelector<HTMLInputElement>(
       'input[aria-label="Search sessions"]',
     );
     expect(searchInput).not.toBeNull();
@@ -1625,7 +1659,7 @@ describe('WebShellSidebar content-search ghosts', () => {
     await flushSidebar();
   }
 
-  it('renders a pinned ghost hit with its snippet in the flat list', async () => {
+  it('renders a pinned ghost hit with its snippet in the search dialog', async () => {
     connection.capabilities = { qwenCodeVersion: '1.2.3', features: [] };
     workspace.capabilities = connection.capabilities;
     workspace.client.searchWorkspaceSessions.mockResolvedValue({
@@ -1641,13 +1675,14 @@ describe('WebShellSidebar content-search ghosts', () => {
     await flushSidebar();
     await typeSearchQuery('qdrant');
 
-    // R2-2: the ghost is pinned, but no Pinned-section source carries it,
-    // so the pinned-row filters must not make it vanish (R3-2).
     expect(sessionRowCount('Ghost pinned')).toBe(1);
-    expect(container.textContent).toContain('qdrant excerpt');
+    expect(document.querySelector('[role="listbox"]')?.textContent).toContain(
+      'qdrant excerpt',
+    );
+    expect(container.textContent).not.toContain('Ghost pinned');
   });
 
-  it('renders a pinned ghost hit in the Ungrouped section when organization is enabled', async () => {
+  it('finds a pinned ghost with organization enabled without injecting it into sidebar groups', async () => {
     mockDesignGroupCatalog();
     // The group section must survive the query filter for the sectioned
     // renderer to exist at all (empty sections are hidden while searching),
@@ -1676,8 +1711,10 @@ describe('WebShellSidebar content-search ghosts', () => {
       'section[aria-label="Ungrouped"]',
     );
     expect(ungrouped).not.toBeNull();
-    expect(ungrouped?.textContent).toContain('Ghost pinned');
-    expect(ungrouped?.textContent).toContain('qdrant excerpt');
+    expect(ungrouped?.textContent).not.toContain('Ghost pinned');
+    expect(document.querySelector('[role="listbox"]')?.textContent).toContain(
+      'qdrant excerpt',
+    );
     expect(sessionRowCount('Ghost pinned')).toBe(1);
 
     workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
@@ -1705,8 +1742,7 @@ describe('WebShellSidebar content-search ghosts', () => {
       pinnedListTitles().some((title) => title.startsWith('Ghost pinned')),
     ).toBe(true);
 
-    // Inverse arm: the pinned page settles WITHOUT the session — the ghost
-    // exemption keeps it visible, exactly once, in the main list.
+    // A sidebar catalog refresh must not duplicate or drop the search hit.
     pinned.sessions = [];
     pinned.data = pinned.sessions;
     renderSidebar();
@@ -1715,7 +1751,7 @@ describe('WebShellSidebar content-search ghosts', () => {
     expect(sessionRowCount('Ghost pinned')).toBe(1);
   });
 
-  it('mounts the rename form for a pinned ghost row in the org section renderer', async () => {
+  it('opens a pinned ghost result without exposing sidebar editing actions', async () => {
     mockDesignGroupCatalog();
     // The group section must survive the query filter for the sectioned
     // renderer to exist at all (empty sections are hidden while searching),
@@ -1743,26 +1779,261 @@ describe('WebShellSidebar content-search ghosts', () => {
     await flushSidebar();
     await typeSearchQuery('qdrant');
 
-    const ungrouped = container.querySelector<HTMLElement>(
-      'section[aria-label="Ungrouped"]',
-    );
-    expect(ungrouped).not.toBeNull();
     const ghostRow = Array.from(
-      ungrouped!.querySelectorAll<HTMLElement>('[role="button"]'),
+      document.querySelectorAll<HTMLElement>(
+        '[role="listbox"] [role="option"]',
+      ),
     ).find((element) => element.textContent?.includes('Ghost pinned'));
     expect(ghostRow).not.toBeUndefined();
+    expect(ghostRow!.querySelector('button, input')).toBeNull();
     act(() => {
-      ghostRow!.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+      ghostRow!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     await flushSidebar();
 
-    // R4-2: the ghost never renders in the Pinned section, so the section
-    // renderer's renameFormDisabled must not suppress the form here.
-    expect(
-      container.querySelectorAll('input[aria-label="Rename: Ghost pinned"]')
-        .length,
-    ).toBe(1);
+    expect(document.querySelector('[data-slot="dialog-content"]')).toBeNull();
 
     workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
+  });
+});
+
+describe('WebShellSidebar PR badge rows', () => {
+  function metaSlotFor(displayName: string): HTMLElement {
+    const title = Array.from(
+      container.querySelectorAll('[data-web-shell-session-title]'),
+    ).find((node) => node.textContent === displayName);
+    const slot = title
+      ?.closest('[role="button"]')
+      ?.querySelector<HTMLElement>('[class*="sessionMetaSlot"]');
+    if (!slot) throw new Error(`No meta slot found for ${displayName}`);
+    return slot;
+  }
+
+  it('keeps the hover actions width reserved on rows that show a PR badge', async () => {
+    active.sessions = [
+      makeSession('with-pr', {
+        displayName: 'With PR',
+        prs: [{ number: 14990, url: 'https://github.com/o/r/pull/14990' }],
+      }),
+      makeSession('unsafe-pr', {
+        displayName: 'Unsafe PR',
+        prs: [{ number: 1, url: 'javascript:alert(1)' }],
+      }),
+      makeSession('plain', { displayName: 'Plain session' }),
+    ];
+    active.data = active.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    // Revealing Pin + More on hover must not slide the badge under the
+    // pointer, so the slot already holds both buttons' width at rest.
+    const withPr = metaSlotFor('With PR');
+    expect(withPr.className).toMatch(/sessionMetaSlotReserved/);
+    expect(withPr.style.getPropertyValue('--session-actions-width')).toBe(
+      '52px',
+    );
+    // A filtered binding renders no badge, so there is nothing to hold still.
+    expect(metaSlotFor('Unsafe PR').className).not.toMatch(
+      /sessionMetaSlotReserved/,
+    );
+    expect(metaSlotFor('Plain session').className).not.toMatch(
+      /sessionMetaSlotReserved/,
+    );
+  });
+
+  it('reserves nothing on a row without actions', async () => {
+    active.sessions = [
+      makeSession('with-pr', {
+        displayName: 'With PR',
+        prs: [{ number: 14990, url: 'https://github.com/o/r/pull/14990' }],
+      }),
+    ];
+    active.data = active.sessions;
+
+    renderSidebar({ sessionActions: { items: [] } });
+    await flushSidebar();
+
+    // Unset, the variable falls back to the stylesheet's 78px and the row
+    // grows on hover for buttons it never shows.
+    expect(
+      metaSlotFor('With PR').style.getPropertyValue('--session-actions-width'),
+    ).toBe('0px');
+  });
+});
+
+describe('WebShellSidebar session tree', () => {
+  const flatCapabilities = { qwenCodeVersion: '1.2.3', features: [] };
+
+  function primeDerived() {
+    connection.capabilities = flatCapabilities;
+    workspace.capabilities = flatCapabilities;
+    active.sessions = [
+      makeSession('parent', { displayName: 'Parent session' }),
+      makeSession('child', {
+        displayName: 'Derived session',
+        parentSessionId: 'parent',
+      }),
+    ];
+    active.data = active.sessions;
+  }
+
+  function toggleOf(sessionTitle: string): HTMLElement | null {
+    const row = [
+      ...container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ].find((candidate) => candidate.textContent?.includes(sessionTitle));
+    return (
+      row?.querySelector<HTMLElement>('[class*="sessionTreeToggle"]') ?? null
+    );
+  }
+
+  it('collapses a derived session under its parent in the main list', async () => {
+    primeDerived();
+    renderSidebar();
+    await flushSidebar();
+
+    expect(container.textContent).toContain('Parent session');
+    expect(container.textContent).not.toContain('Derived session');
+    const toggle = toggleOf('Parent session');
+    expect(toggle).not.toBeNull();
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false');
+    expect(toggle?.getAttribute('aria-label')).toBe('1 sub-session');
+  });
+
+  it('expands the derived session and persists the toggle', async () => {
+    primeDerived();
+    renderSidebar();
+    await flushSidebar();
+
+    act(() => click(toggleOf('Parent session')!));
+    await flushSidebar();
+
+    expect(container.textContent).toContain('Derived session');
+    const childRow = [
+      ...container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ].find((candidate) => candidate.textContent?.includes('Derived session'));
+    expect(childRow?.getAttribute('data-session-tree-depth')).toBe('1');
+    expect(
+      window.localStorage.getItem(
+        'qwen.web-shell.sidebar.session-tree-expanded:primary:/tmp/project',
+      ),
+    ).toContain('parent');
+  });
+
+  it('nests a derived session inside its group section', async () => {
+    workspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [
+        {
+          id: 'design-group',
+          name: 'Design',
+          color: 'blue',
+          order: 0,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    });
+    active.sessions = [
+      makeSession('group-parent', {
+        displayName: 'Group parent',
+        groupId: 'design-group',
+      }),
+      makeSession('group-child', {
+        displayName: 'Group child',
+        groupId: 'design-group',
+        parentSessionId: 'group-parent',
+      }),
+    ];
+    active.data = active.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    const group = container.querySelector<HTMLElement>(
+      'section[aria-label="Design"]',
+    );
+    expect(group).not.toBeNull();
+    expect(group?.textContent).toContain('Group parent');
+    expect(group?.textContent).not.toContain('Group child');
+    expect(
+      group
+        ?.querySelector('[class*="sessionTreeToggle"]')
+        ?.getAttribute('aria-expanded'),
+    ).toBe('false');
+
+    act(() =>
+      click(group!.querySelector<HTMLElement>('[class*="sessionTreeToggle"]')!),
+    );
+    await flushSidebar();
+
+    expect(
+      container.querySelector('section[aria-label="Design"]')?.textContent,
+    ).toContain('Group child');
+  });
+
+  it('keeps an unarchived child reachable after its parent is archived', async () => {
+    // Archiving only the parent removes it from the active page; the child is
+    // still active and must stay reachable from the sidebar.
+    active.sessions = [
+      makeSession('orphaned-child', {
+        displayName: 'Archived parent child',
+        parentSessionId: 'archived-parent',
+      }),
+    ];
+    active.data = active.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    expect(container.textContent).toContain('Archived parent child');
+    const row = [
+      ...container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ].find((candidate) =>
+      candidate.textContent?.includes('Archived parent child'),
+    );
+    expect(row?.getAttribute('data-session-tree-depth')).toBe('0');
+  });
+
+  it('does not open the session when Enter is pressed on the chevron', async () => {
+    primeDerived();
+    renderSidebar();
+    await flushSidebar();
+
+    const toggle = toggleOf('Parent session')!;
+    act(() => {
+      toggle.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+    });
+    await flushSidebar();
+
+    expect(loadSession).not.toHaveBeenCalled();
+  });
+
+  it('keeps the child flat when its parent is pinned into the Pinned section', async () => {
+    connection.capabilities = flatCapabilities;
+    workspace.capabilities = flatCapabilities;
+    const pinnedParent = makeSession('pinned-parent', {
+      displayName: 'Pinned parent',
+      isPinned: true,
+    });
+    // The daemon's all-sessions page keeps a pinned row in place (isPinned),
+    // while the project list lifts it into the Pinned section.
+    active.sessions = [
+      pinnedParent,
+      makeSession('child', {
+        displayName: 'Derived session',
+        parentSessionId: 'pinned-parent',
+      }),
+    ];
+    active.data = active.sessions;
+    pinned.sessions = [pinnedParent];
+    pinned.data = pinned.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    expect(container.textContent).toContain('Derived session');
   });
 });

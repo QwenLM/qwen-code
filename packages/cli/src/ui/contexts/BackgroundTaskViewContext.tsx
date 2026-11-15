@@ -17,6 +17,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
@@ -50,6 +51,13 @@ export interface BackgroundTaskViewState {
   /** Convenience boolean: `dialogMode !== 'closed'`. */
   dialogOpen: boolean;
   /**
+   * True when the approval auto-surface effect opened the dialog and the
+   * user has not navigated explicitly yet. Keypress dispatch is a
+   * broadcast, so the dialog disarms its destructive list keys until a
+   * navigation key acknowledges the auto-open (#16432).
+   */
+  autoOpened: boolean;
+  /**
    * True when the footer pill owns keyboard focus (highlighted, awaiting
    * Enter to open the dialog). Mirrors the Arena tab-bar focus pattern.
    */
@@ -80,6 +88,8 @@ export interface BackgroundTaskViewActions {
    */
   toggleSelectedWorkflowPause(): boolean | null;
   enterDetailFromPanel(): void;
+  /** Clear the auto-open disarm after the first explicit navigation. */
+  acknowledgeAutoOpen(): void;
   setPillFocused(focused: boolean): void;
   setLivePanelFocused(focused: boolean): void;
   setLivePanelSelectedIndex(index: number): void;
@@ -101,6 +111,7 @@ const DEFAULT_STATE: BackgroundTaskViewState = {
   selectedIndex: 0,
   dialogMode: 'closed',
   dialogOpen: false,
+  autoOpened: false,
   pillFocused: false,
   livePanelFocused: false,
   livePanelSelectedIndex: 0,
@@ -117,6 +128,7 @@ const DEFAULT_ACTIONS: BackgroundTaskViewActions = {
   enterDetail: noop,
   exitDetail: noop,
   enterDetailFromPanel: noop,
+  acknowledgeAutoOpen: noop,
   cancelSelected: noop,
   resumeSelected: async () => {},
   toggleSelectedWorkflowPause: () => null,
@@ -151,6 +163,7 @@ export function BackgroundTaskViewProvider({
 
   const [rawSelectedIndex, setRawSelectedIndex] = useState(0);
   const [dialogMode, setDialogMode] = useState<BackgroundDialogMode>('closed');
+  const [autoOpened, setAutoOpened] = useState(false);
   const [pillFocused, setPillFocused] = useState(false);
   const [livePanelFocused, setLivePanelFocusedRaw] = useState(false);
   const [livePanelSelectedIndex, setLivePanelSelectedIndex] = useState(0);
@@ -174,6 +187,60 @@ export function BackgroundTaskViewProvider({
     if (livePanelFocused && !hasAgentEntries) setLivePanelFocusedRaw(false);
   }, [livePanelFocused, hasAgentEntries]);
 
+  // A workflow approval can only be answered from the detail view, and the
+  // registry rejects the call outright when no host answers it. Surface a
+  // parked approval once per approvalId so a blocked workflow shows up as a
+  // selected row instead of only a footer badge. Only the queue head is
+  // latchable: it is the one approval the detail view renders, so latching
+  // an approval parked behind it would mark it surfaced without ever
+  // displaying it, and it would never prompt once it becomes head (#16432).
+  // The latch stays a set because each entry has its own head. Auto-open
+  // lands in list mode, never detail: detail arms the tool confirmation with
+  // focus, and a stray Enter aimed at the composer the dialog just unmounted
+  // would approve the background command (#16432 R1-2). Entering detail
+  // stays an explicit user navigation.
+  const surfacedApprovalIdsRef = useRef<Set<string>>(new Set());
+  // Parked queue-head ids at the moment the user closed the dialog. Without
+  // this, the close itself re-runs the effect, which finds the next entry
+  // that still holds a parked approval and re-opens in the same frame — with
+  // two parked workflows Escape looks broken and re-arms the disarm. A
+  // genuinely new approval changes the snapshot and surfaces normally.
+  const parkedHeadIds = entries
+    .map((entry) =>
+      entry.kind === 'workflow' && entry.pendingApprovals[0]
+        ? entry.pendingApprovals[0].approvalId
+        : '',
+    )
+    .join('|');
+  const closedParkedHeadIdsRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (dialogMode !== 'closed') return;
+    if (closedParkedHeadIdsRef.current !== null) {
+      if (closedParkedHeadIdsRef.current === parkedHeadIds) return;
+      closedParkedHeadIdsRef.current = null;
+    }
+    const index = entries.findIndex(
+      (entry) =>
+        entry.kind === 'workflow' &&
+        !!entry.pendingApprovals[0] &&
+        !surfacedApprovalIdsRef.current.has(
+          entry.pendingApprovals[0].approvalId,
+        ),
+    );
+    const entry = entries[index];
+    if (entry?.kind !== 'workflow') return;
+    const approval = entry.pendingApprovals[0];
+    if (!approval) return;
+    surfacedApprovalIdsRef.current.add(approval.approvalId);
+    setRawSelectedIndex(index);
+    // Same invariant `openDialog` establishes: dialog open ⇒ pill unfocused.
+    // The pill subscribes on `pillFocused` alone, so leaving it focused lets
+    // its Enter run `openDialog()` and clear the disarm (#16432 R3-2).
+    setPillFocused(false);
+    setAutoOpened(true);
+    setDialogMode('list');
+  }, [entries, dialogMode, parkedHeadIds]);
+
   // rawSelectedIndex can fall out of range when entries shrink; clamp on read.
   const selectedIndex =
     entries.length === 0
@@ -194,12 +261,25 @@ export function BackgroundTaskViewProvider({
   }, [entries.length, selectedIndex]);
 
   const openDialog = useCallback(() => {
+    setAutoOpened(false);
     setDialogMode('list');
     setPillFocused(false);
   }, []);
 
   const closeDialog = useCallback(() => {
+    // A dismissal before the acknowledgment would consume the latch with the
+    // approval never seen: the dialog closes, the effect skips the latched
+    // head forever and the run falls back to the badge-only hang this PR
+    // removes. Swallow it like the other composer-aimed keys; Ctrl+C reaches
+    // here through `closeAnyOpenDialog` too (#16432 R3-1).
+    if (autoOpened) return;
+    closedParkedHeadIdsRef.current = parkedHeadIds;
+    setAutoOpened(false);
     setDialogMode('closed');
+  }, [autoOpened, parkedHeadIds]);
+
+  const acknowledgeAutoOpen = useCallback(() => {
+    setAutoOpened(false);
   }, []);
 
   const enterDetail = useCallback(() => {
@@ -324,6 +404,7 @@ export function BackgroundTaskViewProvider({
       selectedIndex,
       dialogMode,
       dialogOpen,
+      autoOpened,
       pillFocused,
       livePanelFocused,
       livePanelSelectedIndex,
@@ -333,6 +414,7 @@ export function BackgroundTaskViewProvider({
       selectedIndex,
       dialogMode,
       dialogOpen,
+      autoOpened,
       pillFocused,
       livePanelFocused,
       livePanelSelectedIndex,
@@ -348,6 +430,7 @@ export function BackgroundTaskViewProvider({
       enterDetail,
       enterDetailFromPanel,
       exitDetail,
+      acknowledgeAutoOpen,
       cancelSelected,
       resumeSelected,
       toggleSelectedWorkflowPause,
@@ -364,6 +447,7 @@ export function BackgroundTaskViewProvider({
       enterDetail,
       enterDetailFromPanel,
       exitDetail,
+      acknowledgeAutoOpen,
       cancelSelected,
       resumeSelected,
       toggleSelectedWorkflowPause,

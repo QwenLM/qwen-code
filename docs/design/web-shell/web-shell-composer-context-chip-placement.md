@@ -35,7 +35,7 @@ session, so it sat among controls that act on the current one.
 - Once the session exists, the chat header reports the session's workspace as a
   single leading icon, naming the folder on hover and offering no click
   behavior.
-- That header icon is always present in the main chat header: the same folder
+- That header icon is always present in the session chat header: the same folder
   glyph whether or not a workspace exists, with the tooltip carrying the
   difference.
 
@@ -45,8 +45,9 @@ session, so it sat among controls that act on the current one.
   `composerToolbarActions`, and no item is added to the `header.items`
   customization contract. The parent visibility check is aligned with the existing
   standalone selector callback requirement solely to prevent an empty row.
-- No new daemon route, protocol field, or persistence. The icon is derived from
-  workspace state the shell already holds.
+- No new daemon route or protocol field. The icon is derived from workspace
+  state the shell already holds; draft panels reuse the existing persisted tab
+  format.
 - No change to the split-pane composer or its workspace chip, where the chip's
   job is telling panes apart. The shared workspace menu now prefers opening
   above its trigger in all placements, including embedded hosts.
@@ -75,7 +76,11 @@ defaulting to `toolbar`.
   toolbar, because the chat header owns the workspace.
 
 `App` passes `below` while the chat is empty (`isChatEmptyState`) and `header`
-otherwise, so exactly one surface reports the workspace at a time.
+otherwise. A reduced built-in header may also render in the empty state when a
+workspace is resolved and the host enables the right-panel entry, Local Control,
+or multi-host location. It omits session-scoped controls. Its workspace icon is
+hidden only when the composer actually shows its workspace selector, including
+the host toolbar filter; otherwise the icon remains as the workspace indicator.
 
 `ChatContextHeader` gains `workspaceName` / `workspacePath` and renders a
 leading `role="img"` folder icon before its content. Hovering it opens the
@@ -84,16 +89,17 @@ workspace name and its full path, because an icon-only trigger cannot name the
 workspace by itself; the accessible name is `workspace.paneLabel`. The
 no-workspace state keeps the same glyph and only swaps the tooltip and the
 accessible name for `sidebar.noWorkspace`: the icon is the one place that always
-answers "which workspace is this session in?", so it stays put. The icon is not
+answers "which workspace is this session in?" in a session. In the reduced
+empty-state header it defers to a visible composer workspace selector. The icon is not
 a button, so it adds no action to the header. It matches the title color and
 shows a rounded accent background on hover; keyboard triggering is not supported.
 
 ## Design decisions
 
 - **The switch follows the empty state, not the message count.** The header
-  renders only when the chat is not empty, so keying both surfaces on the same
-  flag is what keeps the workspace from being reported twice.
-- **The header icon is unconditional; the composer chips are not.** A host that
+  keeps session controls out of the empty state. The reduced empty-state header
+  hides its workspace icon only when the composer selector is visible.
+- **The session header icon is unconditional; the composer chips are not.** A host that
   enables the `workspace` composer action gets the whole treatment, but the
   icon no longer needs a second workspace or a creation capability: reporting
   the workspace is useful with one registered workspace, where switchability
@@ -104,6 +110,25 @@ shows a rounded accent background on hover; keyboard triggering is not supported
 - **Hosts that render their own header keep it.** `renderChatHeader` already
   receives `workspaceCwd`, so such a host owns this indicator too and no icon
   is injected into its header.
+
+## New-task panel lifecycle
+
+The reduced header exposes only host-configured `files`, `terminal`, and
+`webPreview` entries. Their workspace and the draft storage key follow the
+composer selection. A missing workspace keeps the panel toggle unavailable;
+session-scoped entries remain hidden until a session exists.
+
+Draft panel state uses `draft\0<cwd>` in the existing panel storage map.
+Drafts and sessions each retain the latest 20 entries, so browsing workspaces
+cannot evict session panel state. Reloading or switching away restores each
+workspace's own draft. Only the first prompt's allocation consumes that draft;
+ordinary session selection never does. The allocation marker expires at the
+next key transition even if no draft is adopted.
+
+Adoption preserves open tabs, their stored order, panel width, and fullscreen.
+Tabs deferred while a capability is unavailable migrate too and hydrate when
+the capability arrives, without requiring a session switch. Custom header hosts
+keep their empty page headerless and are never called without a session.
 
 ## Constraints
 
@@ -119,8 +144,9 @@ shows a rounded accent background on hover; keyboard triggering is not supported
 
 - With a single workspace and no creation capability the composer still hides
   the workspace selector, while the header shows the workspace icon — the
-  surfaces can differ in whether the _control_ appears even though both report
-  the same workspace.
+  reduced empty-state header must retain the icon in this case, including when
+  the host hides the composer workspace action. Otherwise neither surface
+  reports the selected workspace.
 - The header icon also appears in shells with no workspace concept at all
   (standalone, Live), reporting `sidebar.noWorkspace`, which is a new visual
   element in those shells.
@@ -132,14 +158,22 @@ shows a rounded accent background on hover; keyboard triggering is not supported
   toolbar), keeps git in the toolbar for `header`, and omits the row when
   neither chip is available. `ChatContextHeader` reports the workspace
   name/path, falls back to the name for the tooltip, reports the
-  missing-workspace state, and adds no button.
+  missing-workspace state, and adds no button. Empty-state header tests cover
+  selector visibility, host toolbar filtering, single-workspace fallback,
+  unresolved workspaces, and omission of session-scoped actions.
+- Panel regression tests cover workspace isolation, allocation-marker expiry,
+  draft quotas, adoption geometry, and deferred tab order/hydration. Browser E2E
+  verifies the preview entry with a stable selector and captures the actual UI
+  against a mock daemon; this does not verify a real Git backend.
 - Typecheck, lint, formatting, and the existing `App`, `ChatEditor`, and
   `ChatContextHeader` suites.
 
 ## Acceptance criteria
 
-- In a new chat the workspace and git chips appear directly under the composer
-  box and are absent from the toolbar.
+- In a new chat the available workspace and git chips appear directly under the
+  composer box and are absent from the toolbar. A configured reduced header
+  exposes workspace actions only after the workspace resolves, and keeps the
+  workspace icon when no composer workspace selector is visible.
 - In a session the header shows a single folder icon that names the workspace
   on hover, and the composer has no workspace control.
 - A session without a workspace keeps the same folder icon in the same place,

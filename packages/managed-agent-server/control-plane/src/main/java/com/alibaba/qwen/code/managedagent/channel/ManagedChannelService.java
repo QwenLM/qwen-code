@@ -1,0 +1,1170 @@
+package com.alibaba.qwen.code.managedagent.channel;
+
+import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.ChannelInstanceView;
+import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.ClaimResponse;
+import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.ClaimedDelivery;
+import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.ClaimedSegment;
+import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.DeliveryView;
+import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.InboundAdmission;
+import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.InboundEventRequest;
+import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.ReceiptRequest;
+import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.RegisterChannelRequest;
+import com.alibaba.qwen.code.managedagent.contracts.channel.ChannelAdapterModels.ResendResponse;
+import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelDeliveryRepository;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelDeliveryRepository.ChannelDelivery;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelDeliveryRepository.DeliveryCursor;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelDeliveryRepository.DeliveryPage;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelRouteRepository;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelRouteRepository.ChannelRoute;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelSegmentRepository;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ChannelSegmentRepository.SegmentLedger;
+import com.alibaba.qwen.code.managedagent.contracts.session.HarnessConflictCodes;
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure;
+import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicChannel;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicChannelDelivery;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicChannelDeliverySegment;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicChannelRoute;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicList;
+import com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore;
+import com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore.ChannelBinding;
+import com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore.ChannelClaim;
+import com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore.ChannelInstance;
+import com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore.InstanceCursor;
+import com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore.InstancePage;
+import com.alibaba.qwen.code.managedagent.repository.ChannelInstanceStore.PendingDelivery;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
+import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
+import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.commons.codec.digest.DigestUtils;
+import org.apache.commons.lang3.StringUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Service;
+
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.function.Supplier;
+
+/**
+ * H5b/H5c: the control plane's channel service. Inbound: dedupes a
+ * platform event on its four-part identity (the V47 route row), resolves
+ * or creates the route's Session, and asks the Harness to admit the input
+ * (route revision + input + wake in one journal transaction); the V47 row
+ * turns admitted only after the Harness answered, so every crash window
+ * replays to the committed admission. Outbound: the adapter pulls claims,
+ * each step is a record revision the Harness commits first and the V47
+ * ledger follows; a claim that outlives its lease settles unknown and is
+ * never resent; an explicit resend opens a new chain. Public reads serve
+ * the three channel resources over the committed rows.
+ */
+@Service
+public class ManagedChannelService {
+    private static final Logger LOG = LoggerFactory.getLogger(
+            ManagedChannelService.class);
+    static final String INPUT_PREFIX = "chin-";
+    static final String ROUTE_PREFIX = "chrt-";
+    static final String CREATION_PREFIX = "chcr-";
+    private static final int MAX_CLAIM_SESSIONS = 64;
+    private static final int RECONCILE_LIMIT = 50;
+    private static final String SEPARATOR = "\u0000";
+
+    private final ChannelInstanceStore instances;
+    private final ChannelRouteRepository routes;
+    private final ChannelDeliveryRepository deliveries;
+    private final ChannelSegmentRepository segments;
+    private final ManagedAgentService sessions;
+    private final ManagedWorkspaceRegistry workspaces;
+    private final HarnessConnector harness;
+    private final ObjectMapper mapper;
+    private final Duration claimLease;
+    private final Supplier<Long> clock;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public ManagedChannelService(ChannelInstanceStore instances,
+            ChannelRouteRepository routes, ChannelDeliveryRepository deliveries,
+            ChannelSegmentRepository segments, ManagedAgentService sessions,
+            ManagedWorkspaceRegistry workspaces, HarnessConnector harness,
+            @Qualifier("managedAgentObjectMapper") ObjectMapper mapper, ManagedAgentSettings properties) {
+        this(instances, routes, deliveries, segments, sessions, workspaces,
+                harness, mapper, properties.getChannels().getClaimLease(),
+                System::currentTimeMillis);
+    }
+
+    ManagedChannelService(ChannelInstanceStore instances,
+            ChannelRouteRepository routes,
+            ChannelDeliveryRepository deliveries, ChannelSegmentRepository segments,
+            ManagedAgentService sessions,
+            ManagedWorkspaceRegistry workspaces, HarnessConnector harness,
+            ObjectMapper mapper, Duration claimLease, Supplier<Long> clock) {
+        this.instances = instances;
+        this.routes = routes;
+        this.deliveries = deliveries;
+        this.segments = segments;
+        this.sessions = sessions;
+        this.workspaces = workspaces;
+        this.harness = harness;
+        this.mapper = mapper;
+        this.claimLease = claimLease;
+        this.clock = clock;
+    }
+
+    // --- trusted adapter surface ---
+
+    public ChannelInstanceView register(String tenantId, String channelId,
+            RegisterChannelRequest request) {
+        requireChannelId(channelId);
+        String policyJson;
+        try {
+            policyJson = mapper.writeValueAsString(request.policy());
+        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+            throw new ManagedAgentException(400, "invalid_request",
+                    "The channel policy is not serializable.");
+        }
+        String cwd = request.cwdRelative() == null
+                || request.cwdRelative().isBlank() ? "."
+                : request.cwdRelative();
+        // The selection validates the identifiers the way creation will.
+        try {
+            new WorkspaceSelection(request.workspaceId(), cwd);
+        } catch (IllegalArgumentException error) {
+            throw new ManagedAgentException(400, "invalid_request",
+                    "The Workspace selection is invalid.");
+        }
+        ChannelInstance stored;
+        try {
+            stored = instances.register(new ChannelInstance(tenantId,
+                    channelId, request.platform(), request.accountId(),
+                    request.accountGeneration(), "connected",
+                    request.actorId(), request.workspaceId(), cwd,
+                    policyJson, 0, 0));
+        } catch (IllegalStateException error) {
+            throw new ManagedAgentException(409, error.getMessage(),
+                    "The channel registration conflicts with the stored"
+                            + " connection.");
+        }
+        return view(stored);
+    }
+
+    public ChannelInstanceView disconnect(String tenantId,
+            String channelId) {
+        requireInstance(tenantId, channelId);
+        return view(instances.setState(tenantId, channelId, "disconnected")
+                .orElseThrow());
+    }
+
+    public InboundAdmission submitInbound(String tenantId, String channelId,
+            InboundEventRequest event) {
+        ChannelInstance instance = requireInstance(tenantId, channelId);
+        if (!"connected".equals(instance.state())) {
+            throw new ManagedAgentException(409,
+                    "channel_disconnected",
+                    "The channel is not connected.");
+        }
+        if (event.accountGeneration() != instance.accountGeneration()) {
+            throw new ManagedAgentException(409,
+                    event.accountGeneration() < instance.accountGeneration()
+                            ? "channel_generation_stale"
+                            : "channel_generation_unregistered",
+                    "The event's account generation is not the registered"
+                            + " one.");
+        }
+        forbidSeparator(event.platformEventId(), "platformEventId");
+        String kind = event.scope().kind();
+        String senderId = event.scope().senderId();
+        String chatId = event.scope().chatId();
+        String threadId = event.scope().threadId();
+        String routeId = routeId(channelId, instance.accountId(), kind,
+                senderId, chatId, threadId);
+        String routeKey = ChannelRouteRepository.routeKey(tenantId, channelId,
+                event.accountGeneration(), event.platformEventId(),
+                event.semanticRevision());
+        String inputId = INPUT_PREFIX + routeKey;
+        ChannelBinding binding = instances.findBinding(tenantId, channelId,
+                routeId).orElseGet(() -> bindRoute(tenantId, instance,
+                        routeId, event, kind, senderId, chatId, threadId));
+        ChannelRoute row = routes.findOrCreate(new ChannelRoute(tenantId,
+                routeKey, channelId, event.accountGeneration(),
+                event.platformEventId(), event.semanticRevision(),
+                binding.sessionId(), event.senderId(), event.chatId(),
+                event.threadId(), "staged", null,
+                attachmentDigests(event), 0, 0));
+        if ("admitted".equals(row.state())) {
+            // Redelivery of an admitted event: the original admission,
+            // nothing new in the journal. The Harness answers the committed
+            // revision when it can; the row alone answers when it cannot.
+            try {
+                Map<String, Object> replay = harness.runChannelOperation(
+                        tenantId, binding.sessionId(), submitBody(instance,
+                                event, inputId, kind, senderId, chatId,
+                                threadId));
+                return admission(replay, inputId, binding.sessionId(),
+                        routeId);
+            } catch (RuntimeException error) {
+                return new InboundAdmission(row.inputId(), row.inputId(),
+                        binding.sessionId(), routeId, 0, true);
+            }
+        }
+        Map<String, Object> result;
+        try {
+            result = harness.runChannelOperation(tenantId,
+                    binding.sessionId(), submitBody(instance, event, inputId,
+                            kind, senderId, chatId, threadId));
+        } catch (HarnessFailure error) {
+            throw translate(error);
+        }
+        if (routes.admit(tenantId, routeKey, inputId) == null) {
+            throw new ManagedAgentException(409,
+                    "channel_route_conflict",
+                    "The ingress row was admitted with another input.");
+        }
+        return admission(result, inputId, binding.sessionId(), routeId);
+    }
+
+    public ClaimResponse claimDeliveries(String tenantId, String channelId,
+            int limit) {
+        ChannelInstance instance = requireInstance(tenantId, channelId);
+        if (!"connected".equals(instance.state())) {
+            throw new ManagedAgentException(409,
+                    "channel_disconnected",
+                    "The channel is not connected.");
+        }
+        List<ClaimedDelivery> claimed = new ArrayList<>();
+        // The discovery query, not a window of the newest bindings, is what
+        // makes every owed delivery reachable however old its thread is.
+        for (String sessionId : instances.listSessionsWithPendingDeliveries(
+                tenantId, channelId, MAX_CLAIM_SESSIONS)) {
+            if (claimed.size() >= limit) {
+                break;
+            }
+            for (PendingDelivery pending : instances.findPendingDeliveries(
+                    tenantId, sessionId, limit - claimed.size())) {
+                try {
+                    claimed.add(claimOne(tenantId, channelId, pending));
+                } catch (RuntimeException error) {
+                    LOG.warn("channel claim failed tenant={} channel={}"
+                            + " delivery={} failure={}", tenantId,
+                            channelId, pending.deliveryId(),
+                            error.getMessage());
+                }
+            }
+        }
+        return new ClaimResponse(claimed);
+    }
+
+    public DeliveryView receipt(String tenantId, String channelId,
+            String deliveryId, ReceiptRequest request) {
+        requireInstance(tenantId, channelId);
+        ChannelClaim claim = requireClaim(tenantId, channelId, deliveryId);
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("operationId", UUID.randomUUID().toString());
+        body.put("deliveryId", deliveryId);
+        String providerReceipt = null;
+        if ("accepted".equals(request.outcome())) {
+            if (request.ordinal() == null
+                    || request.providerMessageId() == null
+                    || request.providerMessageId().isBlank()) {
+                throw new ManagedAgentException(400,
+                        "invalid_request",
+                        "An accepted receipt names its segment ordinal and"
+                                + " provider message id.");
+            }
+            body.put("kind", "segment_receipt");
+            body.put("ordinal", request.ordinal());
+            body.put("providerMessageId", request.providerMessageId());
+            body.put("acceptedAt", request.acceptedAt() == null ? clock.get()
+                    : request.acceptedAt());
+            providerReceipt = request.providerMessageId();
+        } else {
+            body.put("kind", "settle_delivery");
+            body.put("outcome", request.outcome());
+        }
+        Map<String, Object> result;
+        try {
+            result = harness.runChannelOperation(tenantId, claim.sessionId(),
+                    body);
+        } catch (HarnessFailure error) {
+            throw translate(error);
+        }
+        String state = deliveryState(result);
+        // Persist the segment receipt before the delivery line can reach a
+        // terminal state: the reconciler skips terminal deliveries, so a
+        // receipt written after stepLedger closed the delivery would leave a
+        // gap no recovery entry can reach.
+        if ("accepted".equals(request.outcome())) {
+            boolean stored = segments.receipt(tenantId, channelId, deliveryId,
+                    request.ordinal(), request.providerMessageId());
+            // A false is either a benign replay (the row already holds a
+            // receipt) or a row that was never planned — a delivery claimed
+            // before the segment ledger existed. Only the missing row needs
+            // convergence: plan it from the committed record and retry, so the
+            // receipt is durable before the line closes.
+            if (!stored && segments.list(tenantId, channelId, deliveryId).stream()
+                    .noneMatch(segment -> segment.ordinal() == request.ordinal())) {
+                instances.findDeliveryRecord(tenantId, claim.sessionId(), deliveryId)
+                        .ifPresent(record -> {
+                            String json = instances.readResource(tenantId,
+                                    claim.sessionId(), record.recordResourceId());
+                            if (json != null) {
+                                planSegments(tenantId, channelId, deliveryId,
+                                        readJson(json, "channel delivery record"));
+                            }
+                        });
+                segments.receipt(tenantId, channelId, deliveryId,
+                        request.ordinal(), request.providerMessageId());
+            }
+        }
+        ChannelDelivery row = stepLedger(tenantId, channelId, deliveryId,
+                state, providerReceipt);
+        return view(row, claim.sessionId());
+    }
+
+    public ResendResponse resend(String tenantId, String channelId,
+            String deliveryId) {
+        requireInstance(tenantId, channelId);
+        ChannelClaim claim = requireClaim(tenantId, channelId, deliveryId);
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("operationId", UUID.randomUUID().toString());
+        body.put("kind", "resend_delivery");
+        body.put("deliveryId", deliveryId);
+        Map<String, Object> result;
+        try {
+            result = harness.runChannelOperation(tenantId, claim.sessionId(),
+                    body);
+        } catch (HarnessFailure error) {
+            throw translate(error);
+        }
+        Map<?, ?> delivery = (Map<?, ?>) result.get("delivery");
+        String resentId = String.valueOf(delivery.get("deliveryId"));
+        List<?> resentSegments = (List<?>) delivery.get("segments");
+        Map<?, ?> first = (Map<?, ?>) resentSegments.getFirst();
+        // Reject a resent id that already names a different first segment
+        // before planning, so a refused resend leaves no orphan segment rows
+        // under the existing delivery's key.
+        deliveries.find(tenantId, channelId, resentId).ifPresent(existing -> {
+            if (!existing.segmentId().equals(String.valueOf(first.get("segmentId")))
+                    || existing.ordinal() != ((Number) first.get("ordinal")).intValue()) {
+                // A matching-chain replay converges by design, so reaching
+                // here is a real Harness/ledger divergence. Name the
+                // identities only — never the request body (see
+                // ApiExceptionHandler.logInternalRefusal). Both ordinals are
+                // logged: an ordinal-only divergence keeps the segment ids
+                // identical, so the ids alone would not say what diverged.
+                LOG.warn("channel resend identity conflict tenant={}"
+                        + " channel={} delivery={} resent={} storedSegment={}"
+                        + " storedOrdinal={} resentSegment={} resentOrdinal={}",
+                        tenantId, channelId, deliveryId, resentId,
+                        existing.segmentId(), existing.ordinal(),
+                        String.valueOf(first.get("segmentId")),
+                        ((Number) first.get("ordinal")).intValue());
+                throw new ManagedAgentException(409, "channel_delivery_conflict",
+                        "The resent delivery id already names a different stored chain.");
+            }
+        });
+        // The new chain carries only the segments proven unsent, so none of
+        // them holds a receipt yet. Plan them before the delivery row is
+        // visible, so a public read never sees an empty segments array.
+        List<SegmentLedger> plan = new ArrayList<>();
+        for (Object entry : resentSegments) {
+            Map<?, ?> segment = (Map<?, ?>) entry;
+            plan.add(new SegmentLedger(String.valueOf(segment.get("segmentId")),
+                    ((Number) segment.get("ordinal")).intValue(), null));
+        }
+        // The first-segment guard above only proves the chain's head matches.
+        // A stored chain that shares segment 0 but diverges later would slip
+        // through it, and INSERT IGNORE (unique on (delivery_key, segment_id),
+        // not on ordinal) would splice the divergent segment in beside the old
+        // one — a mixed chain with two rows at one ordinal. Compare the full
+        // (segmentId, ordinal) chain before planning so any divergence is
+        // refused rather than spliced (review 5853133846). A stored chain that
+        // is only a PREFIX of the plan is a valid transient — plan() inserts
+        // row by row and the claim sweep may have materialized segment 0
+        // already — so it converges instead of conflicting (review 5855558143).
+        List<SegmentLedger> stored = segments.list(tenantId, channelId, resentId);
+        int divergence = stored.isEmpty() ? -1 : firstChainDivergence(stored, plan);
+        if (divergence >= 0) {
+            SegmentLedger storedSegment = divergence < stored.size()
+                    ? stored.get(divergence) : null;
+            SegmentLedger resentSegment = divergence < plan.size()
+                    ? plan.get(divergence) : null;
+            // Name the diverging position and both segment identities — the
+            // counts alone are equal in an equal-length divergence and say
+            // nothing. Identities only, never the request body.
+            LOG.warn("channel resend chain conflict tenant={} channel={}"
+                    + " delivery={} resent={} position={}"
+                    + " storedSegment={} storedOrdinal={}"
+                    + " resentSegment={} resentOrdinal={}",
+                    tenantId, channelId, deliveryId, resentId, divergence,
+                    storedSegment == null ? null : storedSegment.segmentId(),
+                    storedSegment == null ? null : storedSegment.ordinal(),
+                    resentSegment == null ? null : resentSegment.segmentId(),
+                    resentSegment == null ? null : resentSegment.ordinal());
+            throw new ManagedAgentException(409, "channel_delivery_conflict",
+                    "The resent delivery id already names a different stored chain.");
+        }
+        segments.plan(tenantId, channelId, resentId, plan);
+        ChannelDelivery row = deliveries.findOrCreate(new ChannelDelivery(
+                tenantId, channelId, resentId,
+                String.valueOf(first.get("segmentId")),
+                ((Number) first.get("ordinal")).intValue(), "planned", null,
+                0, 0, plan.size()));
+        instances.claim(tenantId, channelId, resentId, claim.sessionId());
+        return new ResendResponse(resentId, deliveryId, true,
+                view(row, claim.sessionId()));
+    }
+
+    /** The first position where the stored chain and the resent plan disagree,
+     * or -1 when the stored chain is a compatible prefix of the plan — equal,
+     * or shorter with every stored segment matching (a partly materialized
+     * chain the plan will complete). Both are ordered by ordinal; receipts are
+     * ignored — a replayed resend carries none while the stored chain may
+     * already hold some. A stored chain longer than the plan diverges at the
+     * plan's end, so the caller never indexes past the plan. */
+    private static int firstChainDivergence(List<SegmentLedger> stored,
+            List<SegmentLedger> resent) {
+        if (stored.size() > resent.size()) {
+            return resent.size();
+        }
+        for (int index = 0; index < stored.size(); index++) {
+            SegmentLedger left = stored.get(index);
+            SegmentLedger right = resent.get(index);
+            if (left.ordinal() != right.ordinal()
+                    || !left.segmentId().equals(right.segmentId())) {
+                return index;
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * A claim that outlived its lease without a receipt: the adapter may
+     * have died after sending, so the outcome is unknown — recorded, never
+     * resent (reference design section 14, item 5). Before anything is
+     * settled, each expired claim's ledger converges with whatever the
+     * committed record already reached while a commit answer was being
+     * lost, so a delivered delivery is never requested unknown and a
+     * committed claim is never invisible to both recovery entry points.
+     */
+    @Scheduled(scheduler = "managedAgentScheduler", fixedDelayString =
+            "${qwen.managed-agent.channels.scan-delay:30s}")
+    public void reconcile() {
+        long before = clock.get() - claimLease.toMillis();
+        for (ChannelClaim claim : instances.findExpiredClaims(before,
+                RECONCILE_LIMIT)) {
+            try {
+                reconcileClaim(claim);
+            } catch (RuntimeException error) {
+                LOG.warn("channel claim reconcile failed tenant={} channel={}"
+                        + " delivery={} failure={}", claim.tenantId(),
+                        claim.channelId(), claim.deliveryId(),
+                        error.getMessage());
+            }
+        }
+    }
+
+    private void reconcileClaim(ChannelClaim claim) {
+        if (!instances.reserveReconciliation(claim)) {
+            return;
+        }
+        String tenantId = claim.tenantId();
+        String channelId = claim.channelId();
+        String deliveryId = claim.deliveryId();
+        // Converge the ledger with the committed record first: a receipt
+        // the answer was lost for still landed, and a claim_delivery commit
+        // the ledger never saw still moved the record to sending. When the
+        // ledger already holds the entire immutable plan with every segment
+        // receipted, converge it from its own receipts and skip the LONGTEXT
+        // read + parse + re-plan every sweep would otherwise pay (#16818 A). A
+        // truncated plan — even one whose present rows are all receipted, under
+        // a record of any state — keeps the read so planSegments heals the
+        // missing tail (R5-1). The delivery row is loaded once and threaded
+        // through; whenever a step occurs its returned row is adopted so the
+        // state acted on below stays fresh without a second delivery-row
+        // SELECT.
+        Optional<ChannelDelivery> ledger = deliveries.find(tenantId,
+                channelId, deliveryId);
+        Optional<ChannelDelivery> converged = convergeFullyReceiptedFromLedger(
+                ledger, tenantId, claim.sessionId(), channelId, deliveryId,
+                claim.claimGeneration());
+        if (converged.isPresent()) {
+            ledger = converged;
+        } else {
+            var record = instances.findDeliveryRecord(tenantId,
+                    claim.sessionId(), deliveryId);
+            if (record.isPresent()) {
+                String json = instances.readResource(tenantId,
+                        claim.sessionId(), record.get().recordResourceId());
+                JsonNode tree = json == null ? null
+                        : readJson(json, "channel delivery record");
+                if (tree != null) {
+                    planSegments(tenantId, channelId, deliveryId, tree);
+                }
+                String state = record.get().deliveryState();
+                if (!"planned".equals(state)) {
+                    ledger = Optional.of(stepLedger(tenantId, channelId,
+                            deliveryId, state,
+                            "delivered".equals(state) && tree != null
+                                    ? lastSegmentReceipt(tree) : null,
+                            claim.claimGeneration()));
+                }
+            }
+        }
+        if (ledger.isPresent() && "planned".equals(ledger.get().state())) {
+            // The claim row committed but the claimed-delivery commit never
+            // landed, and the lease already lapsed — the failed claim is
+            // durable enough to settle. Returning here would keep the row
+            // at the sweep's head forever and starve every later claim
+            // behind the oldest 50 (R8 P2).
+            stepLedger(tenantId, channelId, deliveryId, "unknown", null, claim.claimGeneration());
+            return;
+        }
+        if (ledger.isEmpty() || !"sending".equals(ledger.get().state())) {
+            // Nothing provably in flight here: a terminal row needs no
+            // recovery.
+            return;
+        }
+        if (!"ACTIVE".equals(instances.sessionStatus(tenantId,
+                claim.sessionId()))) {
+            // No writer is left to revise the record: the ledger, the
+            // public read model, records the unknown outcome.
+            stepLedger(tenantId, channelId, deliveryId, "unknown", null, claim.claimGeneration());
+            return;
+        }
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("operationId", ChannelInstanceStore.reconciliationOperationId(claim));
+        body.put("kind", "settle_delivery");
+        body.put("deliveryId", deliveryId);
+        body.put("outcome", "unknown");
+        Map<String, Object> result = harness.runChannelOperation(tenantId,
+                claim.sessionId(), body);
+        stepLedger(tenantId, channelId, deliveryId, deliveryState(result),
+                null, claim.claimGeneration());
+    }
+
+    /**
+     * When the ledger holds the entire immutable segment plan with every
+     * segment receipted, the record body has nothing left to converge: close a
+     * lagging line from the ledger's own receipts and return the fresh row so
+     * the caller skips the LONGTEXT read. This is the crash window where the
+     * last receipt landed but the ledger's step to delivered failed. The
+     * completeness proof is load-bearing (R5-1): plan is not transactional, so
+     * an interrupted write can leave a receipted PREFIX — under a record of any
+     * state, including delivered — and the rows the ledger happens to hold are
+     * not proof the plan is whole. The plan's size is immutable and persisted
+     * with the delivery, so only a ledger holding exactly that many rows may
+     * skip; a short ledger keeps the read, whose planSegments heals the missing
+     * tail instead of closing the line on a truncated chain. A missing ledger
+     * row or any null receipt also returns empty. The caller passes the row it
+     * already loaded; the only extra lookup on the skip path is the record's
+     * state (a point query, not its LONGTEXT body). A terminal refusal
+     * (rejected or cancelled) keeps the read so the ledger mirrors the record
+     * instead of overriding it from the receipts. Convergence stays ahead of
+     * the settle path.
+     */
+    private Optional<ChannelDelivery> convergeFullyReceiptedFromLedger(
+            Optional<ChannelDelivery> ledger, String tenantId, String sessionId,
+            String channelId, String deliveryId, Long claimGeneration) {
+        if (ledger.isEmpty()) {
+            return Optional.empty();
+        }
+        List<SegmentLedger> ledgerSegments = segments.list(tenantId, channelId,
+                deliveryId);
+        if (ledgerSegments.isEmpty() || ledgerSegments.stream()
+                .anyMatch(segment -> segment.providerReceipt() == null)) {
+            return Optional.empty();
+        }
+        if (ledgerSegments.size() != ledger.get().segmentCount()) {
+            return Optional.empty();
+        }
+        if (!"delivered".equals(ledger.get().state())) {
+            // The record still owns a terminal refusal: a rejection or
+            // cancellation that committed after the last receipt but before
+            // the ledger step must not be overwritten from the receipts. Only
+            // the record's state is looked up here; its body stays unread.
+            var record = instances.findDeliveryRecord(tenantId, sessionId,
+                    deliveryId);
+            if (record.isPresent()
+                    && ("rejected".equals(record.get().deliveryState())
+                            || "cancelled".equals(
+                                    record.get().deliveryState()))) {
+                return Optional.empty();
+            }
+            return Optional.of(stepLedger(tenantId, channelId, deliveryId,
+                    "delivered", ledgerSegments.getLast().providerReceipt(),
+                    claimGeneration));
+        }
+        return ledger;
+    }
+
+    /** The last provider receipt the committed record holds, when any. */
+    private static String lastSegmentReceipt(JsonNode tree) {
+        String receipt = null;
+        for (JsonNode segment : tree.path("segments")) {
+            String candidate = segmentReceipt(segment);
+            if (candidate != null) {
+                receipt = candidate;
+            }
+        }
+        return receipt;
+    }
+
+    // --- public reads ---
+
+    public PublicList<PublicChannel> listChannels(String tenantId,
+            String actorId, String cursor, int limit) {
+        requireLimit(limit);
+        InstanceCursor decoded = null;
+        if (cursor != null && !cursor.isEmpty()) {
+            String[] parts = decodeCursor(cursor, "Channel cursor is invalid.");
+            decoded = new InstanceCursor(Long.parseLong(parts[0]), parts[1]);
+        }
+        InstancePage page = instances.listInstances(tenantId, decoded, limit);
+        List<PublicChannel> data = new ArrayList<>();
+        for (ChannelInstance instance : page.instances()) {
+            if (!workspaces.canRead(tenantId, actorId,
+                    instance.workspaceId())) {
+                continue;
+            }
+            List<ChannelRoute> newest = routes.listByChannel(tenantId,
+                    instance.channelId(), null, 100).routes();
+            List<PublicChannelRoute> oldestFirst = new ArrayList<>();
+            for (int index = newest.size() - 1; index >= 0; index--) {
+                oldestFirst.add(publicRoute(newest.get(index)));
+            }
+            data.add(new PublicChannel(instance.channelId(), "agent.channel",
+                    instance.platform(), instance.accountGeneration(),
+                    instance.state(), oldestFirst, instance.createdAt()));
+        }
+        String next = null;
+        if (page.hasMore() && !page.instances().isEmpty()) {
+            ChannelInstance last = page.instances().getLast();
+            next = encodeCursor(last.createdAt(), last.channelId());
+        }
+        return new PublicList<>("list", data, page.hasMore(), next);
+    }
+
+    public PublicList<PublicChannelDelivery> listDeliveries(String tenantId,
+            String actorId, String channelId, String cursor, int limit) {
+        requireLimit(limit);
+        requireReadableInstance(tenantId, actorId, channelId);
+        DeliveryCursor decoded = null;
+        if (cursor != null && !cursor.isEmpty()) {
+            String[] parts = decodeCursor(cursor,
+                    "Delivery cursor is invalid.");
+            decoded = new DeliveryCursor(Long.parseLong(parts[0]), parts[1]);
+        }
+        DeliveryPage page = deliveries.listByChannel(tenantId, channelId,
+                decoded, limit);
+        Map<String, List<SegmentLedger>> segmentsByDelivery = segments
+                .listByDelivery(tenantId, channelId, page.deliveries().stream()
+                        .map(ChannelDelivery::deliveryId).toList());
+        List<PublicChannelDelivery> data = page.deliveries().stream()
+                .map(row -> publicDelivery(row, segmentsByDelivery.getOrDefault(
+                        row.deliveryId(), List.of())))
+                .toList();
+        String next = null;
+        if (page.hasMore() && !page.deliveries().isEmpty()) {
+            ChannelDelivery last = page.deliveries().getLast();
+            next = encodeCursor(last.createdAt(), last.deliveryId());
+        }
+        return new PublicList<>("list", data, page.hasMore(), next);
+    }
+
+    public PublicChannelDelivery getDelivery(String tenantId, String actorId,
+            String channelId, String deliveryId) {
+        requireReadableInstance(tenantId, actorId, channelId);
+        return deliveries.find(tenantId, channelId, deliveryId)
+                .map(row -> publicDelivery(row,
+                        segments.list(tenantId, channelId, deliveryId)))
+                .orElseThrow(() -> new ManagedAgentException(404,
+                        "delivery_not_found", "The delivery was not found."));
+    }
+
+    // --- helpers ---
+
+    private ChannelBinding bindRoute(String tenantId,
+            ChannelInstance instance, String routeId,
+            InboundEventRequest event, String kind, String senderId,
+            String chatId, String threadId) {
+        // The route's Session: created as the connection's owning actor
+        // under its registered Workspace selection, idempotent by the
+        // route's own key, so a lost answer replays — never a second
+        // Session (decision 4). The create route refuses C0 control
+        // characters and DEL in a title, and the producer chain sanitizes
+        // only [\r\n\0], so a TAB in a subject, in the senderId the
+        // title falls back to, or in the registered platform name would
+        // refuse the route's Session: fold them to spaces here, keeping
+        // the senderId fallback for a subject that folds to blank.
+        String subject = event.subject() == null ? null
+                : event.subject().replaceAll("[\\p{Cntrl}]", " ");
+        String title = instance.platform().replaceAll("[\\p{Cntrl}]", " ")
+                + ": "
+                + (subject == null || subject.isBlank()
+                        ? event.senderId().replaceAll("[\\p{Cntrl}]", " ")
+                        : subject);
+        title = StringUtils.truncate(title, 256);
+        CommandAdmission created = sessions.createWorkspaceSession(tenantId,
+                instance.actorId(), creationKey(tenantId,
+                        instance.channelId(), routeId), "qwen-code", null,
+                title, null, List.of(), new WorkspaceSelection(
+                        instance.workspaceId(), instance.cwdRelative()));
+        return instances.bind(new ChannelBinding(tenantId,
+                instance.channelId(), routeId, created.sessionId(), kind,
+                senderId, chatId, threadId, 0));
+    }
+
+    private ClaimedDelivery claimOne(String tenantId, String channelId,
+            PendingDelivery pending) {
+        JsonNode record = readJson(instances.readResource(tenantId, pending.sessionId(),
+                pending.recordResourceId()), "channel delivery record");
+        JsonNode firstSegment = null;
+        JsonNode firstUnsent = null;
+        for (JsonNode segment : record.required("segments")) {
+            if (firstSegment == null) {
+                firstSegment = segment;
+            }
+            if (segment.get("receipt").isNull()) {
+                firstUnsent = segment;
+                break;
+            }
+        }
+        if (firstUnsent == null) {
+            throw new IllegalStateException("delivery has no unsent segment");
+        }
+        String firstSegmentId = firstSegment.required("segmentId").asText();
+        int firstOrdinal = firstSegment.required("ordinal").asInt();
+        // Identity pre-check before planning: a pending record whose first
+        // segment differs from a stored delivery row is a conflicting chain;
+        // refuse it before any segment row is written, so no orphan rows
+        // persist under the key for the public projection to publish. Settle
+        // the record here as well: this pre-check fires before the full-chain
+        // block below, so without its own retirement the refused record would
+        // stay planned and be re-imported on every sweep (verify-pr F1).
+        Optional<ChannelDelivery> stored = deliveries.find(tenantId, channelId,
+                pending.deliveryId());
+        if (stored.isPresent() && (!stored.get().segmentId().equals(firstSegmentId)
+                || stored.get().ordinal() != firstOrdinal)) {
+            settleConflictingChain(tenantId, pending);
+            throw new IllegalStateException(
+                    "delivery id already belongs to another segment");
+        }
+        // The head check only proves the chain's head matches. A stored chain
+        // that diverges at a later segment would be spliced by planSegments
+        // (INSERT IGNORE, unique on segment_id, not ordinal). Guard the full
+        // chain at the import site too: a resend refusal alone is not durable,
+        // because the funnel already committed this record as planned and the
+        // sweep discovers pending work from the journal, not from claim rows.
+        // Settle the record so it leaves the pending set instead of being
+        // re-imported on every sweep (review R7-1).
+        List<SegmentLedger> storedChain = segments.list(tenantId, channelId,
+                pending.deliveryId());
+        if (!storedChain.isEmpty()
+                && firstChainDivergence(storedChain, recordPlan(record)) >= 0) {
+            settleConflictingChain(tenantId, pending);
+            throw new IllegalStateException(
+                    "delivery id already belongs to another chain");
+        }
+        planSegments(tenantId, channelId, pending.deliveryId(), record);
+        // The delivery-level identity is the record's first segment, stable
+        // across a resumed partial: naming the first unsent segment here
+        // would make findOrCreate reject the row the first claim wrote. The
+        // plan's size is persisted so the reconcile gate can prove the ledger
+        // complete rather than trusting the rows it happens to hold (R5-1).
+        ChannelDelivery ledger = deliveries.findOrCreate(new ChannelDelivery(
+                tenantId, channelId, pending.deliveryId(),
+                firstSegmentId, firstOrdinal, "planned", null,
+                0, 0, record.required("segments").size()));
+        Optional<ChannelClaim> existing = instances.findClaim(tenantId,
+                channelId, pending.deliveryId());
+        ChannelClaim observed = existing.isEmpty()
+                ? instances.claim(tenantId, channelId, pending.deliveryId(), pending.sessionId())
+                : instances.touchClaim(tenantId, channelId, pending.deliveryId());
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("operationId", UUID.randomUUID().toString());
+        body.put("kind", "claim_delivery");
+        body.put("deliveryId", pending.deliveryId());
+        Map<String, Object> result = harness.runChannelOperation(tenantId,
+                pending.sessionId(), body);
+        stepLedger(tenantId, channelId, pending.deliveryId(), "sending",
+                null, observed.claimGeneration());
+        Map<?, ?> delivery = (Map<?, ?>) result.get("delivery");
+        Map<?, ?> reply = (Map<?, ?>) result.get("reply");
+        List<ClaimedSegment> claimedSegments = new ArrayList<>();
+        for (Object entry : (List<?>) result.get("segments")) {
+            Map<?, ?> segment = (Map<?, ?>) entry;
+            claimedSegments.add(new ClaimedSegment(
+                    ((Number) segment.get("ordinal")).intValue(),
+                    String.valueOf(segment.get("segmentId")),
+                    String.valueOf(segment.get("text"))));
+        }
+        return new ClaimedDelivery(pending.deliveryId(), pending.sessionId(),
+                String.valueOf(delivery.get("routeId")),
+                ((Number) delivery.get("routeRevision")).longValue(),
+                String.valueOf(delivery.get("state")),
+                String.valueOf(reply.get("text")),
+                mapper.valueToTree(reply.get("replyContext")), claimedSegments);
+    }
+
+    /**
+     * Plans every segment of the record into the segment ledger, carrying any
+     * receipt the record already holds (a resumed partial). Idempotent: a
+     * re-claim never overwrites a stored receipt. This is also the reconciler's
+     * convergence step: the write-once backfill lands any receipt whose answer
+     * was lost, leaving an already-stored receipt intact.
+     */
+    private void planSegments(String tenantId, String channelId,
+            String deliveryId, JsonNode record) {
+        segments.plan(tenantId, channelId, deliveryId, recordPlan(record));
+    }
+
+    /** The (segmentId, ordinal, receipt) plan a delivery record names. */
+    private static List<SegmentLedger> recordPlan(JsonNode record) {
+        List<SegmentLedger> plan = new ArrayList<>();
+        for (JsonNode segment : record.required("segments")) {
+            plan.add(new SegmentLedger(
+                    segment.required("segmentId").asText(),
+                    segment.required("ordinal").asInt(),
+                    segmentReceipt(segment)));
+        }
+        return plan;
+    }
+
+    /** Retires a pending record whose chain conflicts with the stored one, so
+     * the claim sweep stops re-importing it. The journal record's state is the
+     * Harness's to move, and the delivery line admits no planned/partial ->
+     * rejected step: a planned chain that never dispatched cancels, a partial
+     * one settles unknown (no provider refusal a never-dispatched chain never
+     * received). Both leave the pending set the sweep selects from. */
+    private void settleConflictingChain(String tenantId, PendingDelivery pending) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("operationId", UUID.randomUUID().toString());
+        body.put("deliveryId", pending.deliveryId());
+        if ("partial".equals(pending.deliveryState())) {
+            body.put("kind", "settle_delivery");
+            body.put("outcome", "unknown");
+        } else {
+            body.put("kind", "cancel_delivery");
+        }
+        try {
+            harness.runChannelOperation(tenantId, pending.sessionId(), body);
+        } catch (HarnessFailure error) {
+            throw translate(error);
+        }
+    }
+
+    /** The provider message id a record segment's receipt holds, when any. */
+    private static String segmentReceipt(JsonNode segment) {
+        JsonNode receipt = segment.path("receipt");
+        if (!receipt.isObject()) {
+            return null;
+        }
+        JsonNode providerMessageId = receipt.path("providerMessageId");
+        return providerMessageId.isTextual() ? providerMessageId.asText() : null;
+    }
+
+    /**
+     * Moves the ledger to the state the record reached, one legal step at a
+     * time; a row already there is this step's replay.
+     */
+    private ChannelDelivery stepLedger(String tenantId, String channelId,
+            String deliveryId, String state, String providerReceipt) {
+        return stepLedger(tenantId, channelId, deliveryId, state, providerReceipt, null);
+    }
+
+    private ChannelDelivery stepLedger(String tenantId, String channelId,
+            String deliveryId, String state, String providerReceipt, Long claimGeneration) {
+        ChannelDelivery current = deliveries.find(tenantId, channelId,
+                deliveryId).orElseThrow(() -> new ManagedAgentException(
+                        404, "delivery_not_found",
+                        "The delivery was not found."));
+        if (state.equals(current.state())) {
+            return current;
+        }
+        if (!ChannelDeliveryRepository.isLegalStep(current.state(), state)) {
+            // The record moved through a step the ledger never saw (a
+            // partial resumed to sending before its receipt): take it.
+            if (ChannelDeliveryRepository.isLegalStep(current.state(),
+                    "sending") && ChannelDeliveryRepository.isLegalStep(
+                            "sending", state)) {
+                transitionLedger(tenantId, channelId, deliveryId,
+                        current.state(), "sending", null, claimGeneration);
+                current = deliveries.find(tenantId, channelId, deliveryId)
+                        .orElseThrow();
+            } else {
+                return current;
+            }
+        }
+        ChannelDelivery moved = transitionLedger(tenantId, channelId,
+                deliveryId, current.state(), state, providerReceipt, claimGeneration);
+        return moved != null ? moved
+                : deliveries.find(tenantId, channelId, deliveryId)
+                        .orElseThrow();
+    }
+
+    private ChannelDelivery transitionLedger(String tenantId, String channelId, String deliveryId,
+            String previous, String next, String receipt, Long generation) {
+        return generation == null
+                ? deliveries.transition(tenantId, channelId, deliveryId, previous, next, receipt)
+                : deliveries.transition(tenantId, channelId, deliveryId, previous, next, receipt, generation);
+    }
+
+    private Map<String, Object> submitBody(ChannelInstance instance,
+            InboundEventRequest event, String inputId, String kind,
+            String senderId, String chatId, String threadId) {
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("operationId", UUID.randomUUID().toString());
+        body.put("kind", "submit_input");
+        body.put("inputId", inputId);
+        body.put("channelInstanceId", instance.channelId());
+        body.put("accountId", instance.accountId());
+        body.put("accountGeneration", event.accountGeneration());
+        body.put("platformEventId", event.platformEventId());
+        body.put("semanticRevision", event.semanticRevision());
+        Map<String, Object> scope = new LinkedHashMap<>();
+        scope.put("kind", kind);
+        scope.put("senderId", senderId);
+        scope.put("chatId", chatId);
+        scope.put("threadId", threadId);
+        body.put("scope", scope);
+        body.put("policy", readJson(instance.policyJson(), "channel policy"));
+        body.put("senderId", event.senderId());
+        body.put("chatId", event.chatId());
+        body.put("threadId", event.threadId());
+        body.put("subject", event.subject());
+        body.put("text", event.text());
+        List<Map<String, Object>> attachments = new ArrayList<>();
+        if (event.attachments() != null) {
+            for (var attachment : event.attachments()) {
+                Map<String, Object> entry = new LinkedHashMap<>();
+                entry.put("fileName", attachment.fileName());
+                entry.put("mimeType", attachment.mimeType());
+                entry.put("bytesBase64", attachment.bytesBase64());
+                attachments.add(entry);
+            }
+        }
+        body.put("attachments", attachments);
+        body.put("replyContext", event.replyContext() == null ? null
+                : mapper.convertValue(event.replyContext(), Object.class));
+        return body;
+    }
+
+    private static InboundAdmission admission(Map<String, Object> result,
+            String inputId, String sessionId, String routeId) {
+        return new InboundAdmission(inputId,
+                String.valueOf(result.getOrDefault("turnId", inputId)),
+                sessionId, routeId,
+                ((Number) result.getOrDefault("routeRevision", 0L))
+                        .longValue(),
+                Boolean.TRUE.equals(result.get("replayed")));
+    }
+
+    private static String deliveryState(Map<String, Object> result) {
+        Map<?, ?> delivery = (Map<?, ?>) result.get("delivery");
+        return String.valueOf(delivery.get("state"));
+    }
+
+    private List<String> attachmentDigests(InboundEventRequest event) {
+        List<String> digests = new ArrayList<>();
+        if (event.attachments() == null) {
+            return digests;
+        }
+        for (var attachment : event.attachments()) {
+            byte[] bytes;
+            try {
+                bytes = Base64.getDecoder().decode(attachment.bytesBase64());
+            } catch (IllegalArgumentException error) {
+                throw new ManagedAgentException(400,
+                        "invalid_request",
+                        "An attachment is not base64.");
+            }
+            digests.add("sha256:" + DigestUtils.sha256Hex(bytes));
+        }
+        return digests;
+    }
+
+    private ChannelInstance requireInstance(String tenantId,
+            String channelId) {
+        requireChannelId(channelId);
+        return instances.findInstance(tenantId, channelId).orElseThrow(() ->
+                new ManagedAgentException(404, "channel_not_found",
+                        "The channel was not found."));
+    }
+
+    private ChannelInstance requireReadableInstance(String tenantId,
+            String actorId, String channelId) {
+        ChannelInstance instance = requireInstance(tenantId, channelId);
+        if (!workspaces.canRead(tenantId, actorId, instance.workspaceId())) {
+            throw new ManagedAgentException(404, "channel_not_found",
+                    "The channel was not found.");
+        }
+        return instance;
+    }
+
+    private ChannelClaim requireClaim(String tenantId, String channelId,
+            String deliveryId) {
+        return instances.findClaim(tenantId, channelId, deliveryId)
+                .orElseThrow(() -> new ManagedAgentException(404,
+                        "delivery_not_found", "The delivery was not found."));
+    }
+
+    private static void requireChannelId(String channelId) {
+        if (channelId == null
+                || !channelId.matches("[A-Za-z0-9._:@+-]{1,128}")) {
+            throw new ManagedAgentException(400, "invalid_request",
+                    "The channel id is invalid.");
+        }
+    }
+
+    private static void requireLimit(int limit) {
+        if (limit < 1 || limit > 100) {
+            throw new ManagedAgentException(400, "invalid_limit",
+                    "Limit must be between 1 and 100.");
+        }
+    }
+
+    private static void forbidSeparator(String value, String name) {
+        if (value.contains(SEPARATOR)) {
+            throw new ManagedAgentException(400, "invalid_request",
+                    name + " must not contain NUL.");
+        }
+    }
+
+    private static ManagedAgentException translate(HarnessFailure error) {
+        if (!(error instanceof HarnessHttpFailure http)) {
+            // A generation clash or dropped connection is transient for the
+            // adapter: the same retryable envelope an HTTP refusal takes.
+            return new ManagedAgentException(503,
+                    "channel_operation_failed",
+                    "The Hosted Harness failed the channel operation.");
+        }
+        String code = http.getErrorCode();
+        if (code == null) {
+            code = HarnessConflictCodes.bodyCode(http.getResponseBody());
+        }
+        if (code == null) {
+            code = "channel_operation_failed";
+        }
+        // A 400 is a deterministic verdict, not a server failure: the
+        // adapter's permanent-refusal branch can only recognize it when
+        // the classification survives the hop — never widen it to 503.
+        // The Harness's self-healing 409s (a dead predecessor's writer
+        // lease, a busy or briefly unavailable Workspace, a closing
+        // Session) are the opposite: the adapter drops every 409, so they
+        // cross as the retryable 503.
+        int status = http.getStatusCode() == 409
+                ? (HarnessConflictCodes.isTransient(code)
+                        ? 503 : 409)
+                : http.getStatusCode() == 400 ? 400
+                        : 503;
+        return new ManagedAgentException(status, code,
+                "The Hosted Harness refused the channel operation.");
+    }
+
+    private JsonNode readJson(String text, String context) {
+        if (text == null) {
+            throw new IllegalStateException(context + " is not readable");
+        }
+        try {
+            return mapper.readTree(text);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+            throw new IllegalStateException(context + " is not JSON", error);
+        }
+    }
+
+    private static ChannelInstanceView view(ChannelInstance instance) {
+        return new ChannelInstanceView(instance.channelId(),
+                instance.platform(), instance.accountId(),
+                instance.accountGeneration(), instance.state(),
+                instance.workspaceId(), instance.cwdRelative(),
+                instance.createdAt(), instance.updatedAt());
+    }
+
+    private static DeliveryView view(ChannelDelivery row, String sessionId) {
+        return new DeliveryView(row.deliveryId(), sessionId, row.state(),
+                row.providerReceipt(), row.createdAt(), row.updatedAt());
+    }
+
+    private static PublicChannelRoute publicRoute(ChannelRoute route) {
+        return new PublicChannelRoute(route.platformEventId(),
+                route.accountGeneration(), route.semanticRevision(),
+                route.senderId(), route.chatId(), route.threadId(),
+                route.sessionId(), route.state(), route.inputId(),
+                route.stagedAttachmentRefs(), route.createdAt());
+    }
+
+    private static PublicChannelDelivery publicDelivery(
+            ChannelDelivery row, List<SegmentLedger> segmentLedger) {
+        List<PublicChannelDeliverySegment> segments = segmentLedger.stream()
+                .map(segment -> new PublicChannelDeliverySegment(
+                        segment.segmentId(), segment.ordinal(),
+                        segment.providerReceipt()))
+                .toList();
+        return new PublicChannelDelivery(row.deliveryId(),
+                "agent.channel.delivery", row.channelInstanceId(),
+                row.segmentId(), row.ordinal(), row.state(),
+                row.providerReceipt(), segments, row.createdAt(),
+                row.updatedAt());
+    }
+
+    private static String encodeCursor(long createdAt, String id) {
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(
+                (createdAt + ":" + id).getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String[] decodeCursor(String cursor, String message) {
+        try {
+            String decoded = new String(Base64.getUrlDecoder().decode(cursor),
+                    StandardCharsets.UTF_8);
+            int separator = decoded.indexOf(':');
+            if (separator <= 0 || separator == decoded.length() - 1) {
+                throw new IllegalArgumentException();
+            }
+            Long.parseLong(decoded.substring(0, separator));
+            return new String[] {decoded.substring(0, separator),
+                    decoded.substring(separator + 1)};
+        } catch (IllegalArgumentException error) {
+            throw new ManagedAgentException(400, "invalid_cursor",
+                    message);
+        }
+    }
+
+    /** The route chain identity, exactly as the Harness derives it. */
+    static String routeId(String channelId, String accountId, String kind,
+            String senderId, String chatId, String threadId) {
+        return ROUTE_PREFIX + DigestUtils.sha256Hex(String.join(
+                SEPARATOR, channelId, accountId, kind,
+                senderId == null ? "" : senderId,
+                chatId == null ? "" : chatId,
+                threadId == null ? "" : threadId)
+                .getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** The Session creation key of a route: the Idempotency-Key it replays by. */
+    static String creationKey(String tenantId, String channelId,
+            String routeId) {
+        return CREATION_PREFIX + DigestUtils.sha256Hex(String.join(
+                SEPARATOR, tenantId, channelId, routeId)
+                .getBytes(StandardCharsets.UTF_8));
+    }
+
+    /** For tests: the ledger row as stored. */
+    Optional<ChannelDelivery> ledger(String tenantId, String channelId,
+            String deliveryId) {
+        return deliveries.find(tenantId, channelId, deliveryId);
+    }
+}

@@ -113,6 +113,7 @@ export interface ClientMcpServerProvider {
       message: JSONRPCMessage,
     ) => Promise<JSONRPCMessage>,
     scope?: ClientMcpServerScope,
+    onSessionClosed?: () => void,
   ): Promise<{ toolCount: number }>;
   /**
    * Remove a previously-registered client-hosted MCP server. Idempotent. The
@@ -126,7 +127,16 @@ export interface ClientMcpServerProvider {
 }
 
 /** A minimal sink for pushing frames down the owning WS. */
-export type WsFrameSender = (frame: McpMessageFrame) => void;
+export type WsFrameSender = (
+  frame:
+    | McpMessageFrame
+    | {
+        type: 'mcp_error';
+        server: string;
+        code: string;
+        message: string;
+      },
+) => void;
 
 /** Outcome of handling one inbound client-MCP frame (for the WS reply). */
 export type ClientMcpHandleResult =
@@ -269,6 +279,17 @@ export class ClientMcpWsConnection {
         server,
         this.registrar.sendSdkMcpMessage,
         scope,
+        () => {
+          if (this.disposed || this.serverScopes.get(server) !== scope) return;
+          void this.handleUnregister(server);
+          this.sendFrame({
+            type: 'mcp_error',
+            server,
+            code: 'session_closed',
+            message:
+              'The approved session ended. Connect again to approve a new session.',
+          });
+        },
       );
       // The WS may have closed (dispose() ran) while we awaited the provider
       // round-trip. dispose() snapshots its server set before this register
@@ -286,6 +307,9 @@ export class ClientMcpWsConnection {
           code: 'closed',
           message: 'connection disposed during register',
         };
+      }
+      if (!this.registrar.hasServer(server)) {
+        throw new Error('session ended during registration');
       }
       this.registerAttemptIds.delete(server);
       return { kind: 'registered', server, toolCount };

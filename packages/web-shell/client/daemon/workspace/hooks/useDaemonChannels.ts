@@ -13,6 +13,7 @@ import type {
 import { useDaemonWorkspace } from '../DaemonWorkspaceProvider.js';
 import type {
   DaemonChannelPairingActions,
+  DaemonChannelQrLoginActions,
   DaemonChannelsResource,
   DaemonResourceOptions,
 } from '../types.js';
@@ -24,6 +25,13 @@ interface WorkspaceChannelsResource extends DaemonChannelsResource {
 
 interface DaemonChannelsOptions extends DaemonResourceOptions {
   workspaceCwd?: string;
+  /**
+   * This tab's daemon-registered client id. QR-login routes use it to attribute
+   * a login to the tab that created it, so a peer tab neither reattaches nor
+   * cancels it. Omitted when no session is attached, which keeps the previous
+   * id-less behaviour rather than sending an id the daemon would reject.
+   */
+  clientId?: string;
 }
 
 export function useDaemonChannels(options: DaemonChannelsOptions = {}) {
@@ -32,7 +40,11 @@ export function useDaemonChannels(options: DaemonChannelsOptions = {}) {
     client,
     workspaceCwd: providerWorkspaceCwd,
   } = useDaemonWorkspace();
-  const { workspaceCwd: requestedWorkspaceCwd, ...resourceOptions } = options;
+  const {
+    workspaceCwd: requestedWorkspaceCwd,
+    clientId,
+    ...resourceOptions
+  } = options;
   const workspaceCwd = requestedWorkspaceCwd ?? providerWorkspaceCwd;
   const usesProviderWorkspace = workspaceCwd === providerWorkspaceCwd;
   const workspaceClient = useMemo(
@@ -171,6 +183,45 @@ export function useDaemonChannels(options: DaemonChannelsOptions = {}) {
     [actions.channelPairing, workspaceClient],
   );
 
+  const qrLogin = useMemo<DaemonChannelQrLoginActions>(() => {
+    const attributed = (explicit?: string) => explicit ?? clientId;
+    return workspaceClient
+      ? {
+          start: (name, cid) =>
+            workspaceClient.startWorkspaceChannelQrLogin(name, {
+              clientId: attributed(cid),
+            }),
+          state: (loginId, cid) =>
+            workspaceClient.workspaceChannelQrLogin(loginId, {
+              clientId: attributed(cid),
+            }),
+          cancel: (loginId, cid) =>
+            workspaceClient.cancelWorkspaceChannelQrLogin(loginId, {
+              clientId: attributed(cid),
+            }),
+          release: (loginId, cid) =>
+            actions.channelQrLogin.release(
+              loginId,
+              attributed(cid),
+              workspaceCwd,
+            ),
+        }
+      : {
+          start: (name, cid) =>
+            actions.channelQrLogin.start(name, attributed(cid)),
+          state: (loginId, cid) =>
+            actions.channelQrLogin.state(loginId, attributed(cid)),
+          cancel: (loginId, cid) =>
+            actions.channelQrLogin.cancel(loginId, attributed(cid)),
+          release: (loginId, cid) =>
+            actions.channelQrLogin.release(
+              loginId,
+              attributed(cid),
+              workspaceCwd,
+            ),
+        };
+  }, [actions.channelQrLogin, workspaceClient, clientId, workspaceCwd]);
+
   return {
     data: current
       ? { catalog: current.catalog, snapshot: current.snapshot }
@@ -188,5 +239,6 @@ export function useDaemonChannels(options: DaemonChannelsOptions = {}) {
     stop,
     restart,
     pairing,
+    qrLogin,
   };
 }

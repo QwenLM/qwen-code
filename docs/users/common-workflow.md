@@ -371,7 +371,7 @@ Use arrow keys to navigate and press Enter to select a conversation. Press Esc t
 qwen --resume 123e4567-e89b-12d3-a456-426614174000
 ```
 
-If the current project directory was renamed or moved, an explicit session ID lets Qwen Code look for that session under the old project path. When exactly one safe match is found and the old directory no longer exists, Qwen Code shows the old and new paths and asks whether to reattach the session. It never overwrites an existing session, moves a session with an active writer, or chooses between duplicate IDs. This recovery prompt is interactive; `--continue`, the conversation picker, title lookup, and headless commands remain scoped to the current project.
+If the current project directory was renamed or moved, an explicit session ID lets Qwen Code perform a bounded scan of up to 5,000 Qwen-managed local project storage directories for that exact session. When exactly one safe match is found and its recorded project directory no longer exists, Qwen Code shows the old and new paths and asks whether to reattach the session. It never overwrites an existing session, moves a session with an active writer, or chooses between duplicate IDs. This recovery prompt is interactive; `--continue`, the conversation picker, title lookup, and headless commands remain scoped to the current project.
 
 > [!tip]
 >
@@ -582,6 +582,25 @@ what are the limitations of Qwen Code?
 > - Ask specific questions to get detailed answers
 > - Qwen Code can explain complex features like MCP integration, enterprise configurations, and advanced workflows
 
+## Reuse saved workflows in a monorepo
+
+With [`tools.workflowsEnabled`](./configuration/settings.md) enabled, a local terminal, headless, or direct ACP session can use saved workflows from trusted parent directories in the same Git repository. For example, when you start Qwen Code in `repo/packages/app`, a workflow named `review` is selected in this order:
+
+```text
+repo/packages/app/.qwen/workflows/review.js
+repo/packages/.qwen/workflows/review.js
+repo/.qwen/workflows/review.js
+~/.qwen/workflows/review.js
+```
+
+The nearest definition wins. Parent discovery stops at the closest Git root, including a worktree or submodule root. A directory outside a Git repository keeps its own project and user workflows. Extension workflows retain their qualified names, such as `gcp:review`.
+
+Folder trust follows the operator's settings; workspace settings cannot enable or disable this ancestor check. When folder trust is enabled, the current target and each parent must be trusted by the saved folder-trust rules. Trusting only the current directory does not grant access to its parents; an unknown or denied parent stops the search toward the root. IDE trust alone does not grant parent access. Changes to the folder-trust file take effect on the next discovery or script lookup, so a previously listed command cannot use its cached path to read a parent whose trust was revoked. Refresh the command list or start a new session to see added or removed commands. When folder trust is disabled, local sessions allow parent discovery within the Git boundary. On POSIX systems, this disabled mode still excludes parents whose directory, `.qwen`, or workflow directory is writable by everyone. Windows permission bits do not describe ACLs, so this POSIX permission check does not apply there.
+
+Parent workflows still require the usual workflow approval, which identifies the selected script. Content changes invalidate approvals pinned to the script's digest. Running a parent's workflow keeps the session's working directory, and saving to project scope writes to the current session's `.qwen/workflows/` directory.
+
+Daemon-managed ACP children, Web Shell, hosted sessions, and restricted sessions do not opt into parent discovery. Parent directories and their workflow files must be ordinary directories and files; symbolic links cannot grant access to a parent workflow.
+
 ## Enforce evidence-based conclusions
 
 When Qwen Code does high-stakes work — code review, incident troubleshooting, audits, or investigating production data — a confident but wrong conclusion costs more than no conclusion at all. You can encode your team's verification policy in QWEN.md (see [Memory](./features/memory.md)) so it applies to every session, without changing anyone's defaults.
@@ -613,3 +632,7 @@ See [Where to create QWEN.md](./features/memory.md#where-to-create-qwenmd) for w
 > - Keep the rules specific and actionable: "back every claim with a query result" works better than "be careful".
 > - Keep the policy short — QWEN.md is followed more reliably when it is concise (see [Memory](./features/memory.md)).
 > - Adapt the rules to your stack: name the actual query tools, dashboards, or log commands your team treats as authoritative sources.
+
+## Suggest a workflow for one human turn
+
+Use `ultracode` or the existing `workflow` keyword in a supported human submission to suggest the Workflow tool for that turn. See [workflow intent](workflow-intent.md) ([简体中文](workflow-intent.zh-CN.md)) for entry points, SDK opt-in, and settings.

@@ -28,6 +28,7 @@ import type {
   BridgeSpawnRequest,
   BridgeRestoreSessionRequest,
 } from './bridgeTypes.js';
+import type { WorkflowAncestorTrustHandler } from './workflow-ancestor-trust.js';
 
 export type BridgeExecutionEngine = SessionExecutionEngine;
 // The ACP host writes this receipt and the Bridge checks it: one definition.
@@ -144,6 +145,8 @@ export interface ExternalToolGuardPrepareRequest {
   readonly toolCallId: string;
   readonly toolName: string;
   readonly arguments: Readonly<Record<string, unknown>>;
+  /** Child-runtime provenance, not a model argument or an OS credential. */
+  readonly permissionChecked?: boolean;
   /** Daemon-owned current session working directory. */
   readonly effectiveCwd?: string;
   /**
@@ -348,6 +351,12 @@ export interface BridgeOptions {
    * `ringSize × average-event-size` held until the session ends.
    */
   eventRingSize?: number;
+  /**
+   * Per-session retained SSE ring byte cap, including the latest full commands
+   * snapshot. Defaults to 8 MiB. Must be a positive safe integer up to 256 MiB;
+   * there is no unlimited sentinel.
+   */
+  eventRingMaxBytes?: number;
   /**
    * Per-session cap, in serialized bytes, for the in-memory compacted replay
    * snapshot returned by `session/load` late attach. This bounds daemon heap
@@ -704,6 +713,10 @@ export interface BridgeOptions {
   /** Handles one child-initiated Channel delivery attempt. The bridge
    * authenticates the session and publishes the sanitized result event. */
   onChannelDelivery?: ChannelDeliveryHandler;
+  /** Resolves ancestor workflow trust from the owning daemon runtime. */
+  onWorkflowAncestorTrust?: WorkflowAncestorTrustHandler;
+  /** Live owner authorization, read immediately before forwarding a prompt. */
+  isWorkflowModeWriteAllowed?: (sessionId: string) => boolean;
 }
 
 /**
@@ -786,12 +799,17 @@ export interface CurrentSessionScheduledTaskCreateInfo {
   cron: string;
   prompt: string;
   recurring: boolean;
+  /** Shell command run at each fire outside the model (a scheduled-task gate). */
+  gate?: string;
   assertCallerPromptActive: () => void;
 }
 
 export interface CurrentSessionScheduledTaskCreateResult {
   id: string;
   cron: string;
+  /** The gate stored with the task, or null for none: echoed so the child can
+   * tell a daemon that dropped a requested gate. */
+  gate?: string | null;
 }
 
 export type CurrentSessionScheduledTaskCreateHandler = (

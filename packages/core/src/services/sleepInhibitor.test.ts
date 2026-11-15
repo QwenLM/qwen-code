@@ -10,17 +10,25 @@ import { describe, expect, it, vi } from 'vitest';
 import { acquireSleepInhibitor, SleepInhibitor } from './sleepInhibitor.js';
 import { PassThrough } from 'node:stream';
 
-function createChild(pid: number | undefined = 4242): ChildProcess {
+interface Faults {
+  /** Every `spawn` call throws this. */
+  spawnError?: Error;
+  /** The inhibitor child's `kill()` throws this. */
+  killError?: Error;
+  /** A failed spawn (e.g. ENOENT) leaves the child without a pid. */
+  pidless?: boolean;
+}
+
+function createChild({ killError, pidless }: Faults): ChildProcess {
   const child = new EventEmitter() as ChildProcess;
   let killed = false;
   Object.defineProperty(child, 'killed', {
     get: () => killed,
   });
-  // A real successful spawn has a numeric pid synchronously; a failed spawn
-  // (e.g. ENOENT) leaves it undefined. Tests pass `undefined` to model that.
   // `pid` is readonly on ChildProcess, so define it rather than assign.
-  Object.defineProperty(child, 'pid', { value: pid });
+  Object.defineProperty(child, 'pid', { value: pidless ? undefined : 4242 });
   child.kill = vi.fn(() => {
+    if (killError) throw killError;
     killed = true;
     return true;
   });
@@ -57,6 +65,7 @@ function createHarness(
   platform: NodeJS.Platform = 'linux',
   env: NodeJS.ProcessEnv = {},
   noAskPasswordSupported: boolean | null = true,
+  faults: Faults = {},
 ) {
   const children: ChildProcess[] = [];
   const helpOutput = noAskPasswordSupported
@@ -64,13 +73,14 @@ function createHarness(
     : 'systemd-inhibit [OPTIONS...] COMMAND ...\n\n  --what=WHAT          Operations to inhibit\n';
   const spawn = vi.fn(
     (command: string, args: string[], _options?: SpawnOptions) => {
+      if (faults.spawnError) throw faults.spawnError;
       if (command === 'systemd-inhibit' && args[0] === '--help') {
         if (noAskPasswordSupported === null) {
           return createErrorChild();
         }
         return createHelpChild(helpOutput);
       }
-      const child = createChild();
+      const child = createChild(faults);
       children.push(child);
       return child;
     },
@@ -196,31 +206,22 @@ describe('SleepInhibitor', () => {
     handle.release();
   });
 
-  it('uses caffeinate on macOS', () => {
-    const { inhibitor, spawn } = createHarness('darwin');
-
-    const handle = inhibitor.acquire();
-
-    expect(spawn).toHaveBeenCalledWith(
-      'caffeinate',
-      ['-is'],
-      expect.any(Object),
-    );
-    handle.release();
-  });
-
-  it('uses a PowerShell SetThreadExecutionState helper on Windows', () => {
-    const { inhibitor, spawn } = createHarness('win32');
-
-    const handle = inhibitor.acquire();
-
-    expect(spawn).toHaveBeenCalledWith(
+  it.each([
+    ['uses caffeinate on macOS', 'darwin', 'caffeinate', ['-is']],
+    [
+      'uses a PowerShell SetThreadExecutionState helper on Windows',
+      'win32',
       'powershell.exe',
       expect.arrayContaining([
         expect.stringContaining('SetThreadExecutionState'),
       ]),
-      expect.any(Object),
-    );
+    ],
+  ] as const)('%s', (_title, platform, command, args) => {
+    const { inhibitor, spawn } = createHarness(platform);
+
+    const handle = inhibitor.acquire();
+
+    expect(spawn).toHaveBeenCalledWith(command, args, expect.any(Object));
     handle.release();
   });
 
@@ -237,15 +238,8 @@ describe('SleepInhibitor', () => {
   });
 
   it('fails open when spawning throws', () => {
-    const spawn = vi.fn(() => {
-      throw new Error('missing command');
-    });
-    const logger = { debug: vi.fn(), warn: vi.fn() };
-    const inhibitor = new SleepInhibitor({
-      platform: 'linux',
-      env: {},
-      spawn,
-      logger,
+    const { inhibitor, logger } = createHarness('linux', {}, true, {
+      spawnError: new Error('missing command'),
     });
 
     const handle = inhibitor.acquire();
@@ -324,26 +318,8 @@ describe('SleepInhibitor', () => {
   });
 
   it('does not propagate when child.kill() throws during release', async () => {
-    const children: ChildProcess[] = [];
-    const spawn = vi.fn((command: string, args: string[]) => {
-      if (command === 'systemd-inhibit' && args[0] === '--help') {
-        return createHelpChild('--no-ask-password');
-      }
-      const child = new EventEmitter() as ChildProcess;
-      Object.defineProperty(child, 'killed', { get: () => false });
-      Object.defineProperty(child, 'pid', { value: 4242 });
-      child.kill = vi.fn(() => {
-        throw new Error('ESRCH');
-      });
-      children.push(child);
-      return child;
-    });
-    const logger = { debug: vi.fn(), warn: vi.fn() };
-    const inhibitor = new SleepInhibitor({
-      platform: 'linux',
-      env: {},
-      spawn,
-      logger,
+    const { children, inhibitor, logger } = createHarness('linux', {}, true, {
+      killError: new Error('ESRCH'),
     });
 
     const handle = inhibitor.acquire();
@@ -356,31 +332,12 @@ describe('SleepInhibitor', () => {
   });
 
   it('does not kill a child whose spawn failed (no pid)', async () => {
-    // Mimics the container sandbox: `systemd-inhibit` is absent, so the spawn
-    // rejects with ENOENT on the next tick and the child never gets a pid. If
-    // `stop()` (here via the synchronous release before the error event fires)
-    // called `kill()` on this pidless child, the kill would target the
-    // caller's own process group and deliver SIGTERM to this process, aborting
-    // the run. Releasing must therefore be a no-op for a pidless child.
-    const children: ChildProcess[] = [];
-    const spawn = vi.fn((command: string, args: string[]) => {
-      if (command === 'systemd-inhibit' && args[0] === '--help') {
-        return createErrorChild();
-      }
-      const child = new EventEmitter() as ChildProcess;
-      Object.defineProperty(child, 'killed', { get: () => false });
-      // Pidless child: spawn returned but the process never started (ENOENT).
-      Object.defineProperty(child, 'pid', { value: undefined });
-      child.kill = vi.fn(() => true);
-      children.push(child);
-      return child;
-    });
-    const logger = { debug: vi.fn(), warn: vi.fn() };
-    const inhibitor = new SleepInhibitor({
-      platform: 'linux',
-      env: {},
-      spawn,
-      logger,
+    // Mimics the container sandbox: `systemd-inhibit` is absent, so spawn fails
+    // with ENOENT on the next tick and the child never gets a pid. `kill()` on a
+    // pidless child (here via the synchronous release before the error event)
+    // would SIGTERM the caller's own process group and abort the run.
+    const { children, inhibitor, spawn } = createHarness('linux', {}, null, {
+      pidless: true,
     });
 
     const handle = inhibitor.acquire('executing tool');
