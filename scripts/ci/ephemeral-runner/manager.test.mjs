@@ -1771,7 +1771,7 @@ test('stop interrupts Docker observation backoff without starting another wait c
   const f = await fixture(t);
   let now = 0;
   let waits = 0;
-  let observationFailed = false;
+  let observationFailures = 0;
   let stoppedAt;
   let signal;
   let manager;
@@ -1796,7 +1796,7 @@ test('stop interrupts Docker observation backoff without starting another wait c
       waits > 0 &&
       stoppedAt === undefined
     ) {
-      observationFailed = true;
+      observationFailures += 1;
       return Promise.reject(new Error('Docker disconnected'));
     }
     if (program === 'docker' && args[0] === 'rm')
@@ -1811,7 +1811,7 @@ test('stop interrupts Docker observation backoff without starting another wait c
     command,
     sleep: async (ms) => {
       sleeps.push(ms);
-      if (observationFailed && stoppedAt === undefined) {
+      if (observationFailures >= 2 && stoppedAt === undefined) {
         stoppedAt = now;
         manager.stop();
       }
@@ -1831,7 +1831,89 @@ test('stop interrupts Docker observation backoff without starting another wait c
     'backoff must use interruptible slices',
   );
   assert.equal(signal.aborted, true);
-  assert.equal(waits, 1, 'shutdown must not start another wait client');
+  assert.equal(observationFailures, 2);
+  assert.equal(waits, 2, 'shutdown must not start another wait client');
+});
+
+test('failed Docker observations keep a cadence through a positive drain window', async (t) => {
+  const f = await fixture(t);
+  f.config.drainTimeoutSeconds = 60;
+  f.config.shutdownGraceSeconds = 30;
+  let now = 0;
+  let observationFailed = false;
+  let stoppedAt;
+  let removedAt;
+  let signal;
+  let manager;
+  const attempts = [];
+  t.mock.method(Date, 'now', () => now);
+  t.mock.method(Math, 'random', () => 0.999999);
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'wait') {
+      attempts.push(now);
+      assert.ok(attempts.length < 200, 'Docker observation loop must yield');
+      signal = options.signal;
+      return Promise.reject(new Error('Docker disconnected'));
+    }
+    if (
+      program === 'docker' &&
+      args[0] === 'inspect' &&
+      args.includes('{{json .State}}')
+    )
+      return Promise.reject(new Error('Docker disconnected'));
+    if (
+      program === 'docker' &&
+      args[0] === 'ps' &&
+      attempts.length > 0 &&
+      !signal.aborted
+    ) {
+      observationFailed = true;
+      return Promise.reject(new Error('Docker disconnected'));
+    }
+    if (program === 'docker' && args[0] === 'top')
+      return Promise.resolve('Runner.Worker\n');
+    if (program === 'docker' && args[0] === 'rm') {
+      assert.notEqual(stoppedAt, undefined);
+      assert.ok(
+        now >= stoppedAt + 90_000,
+        'retain the busy runner until the deadline',
+      );
+      removedAt = now;
+    }
+    return f.command(program, args, options);
+  };
+  manager = createManager(f.config, {
+    command,
+    sleep: async (ms) => {
+      if (observationFailed && stoppedAt === undefined) {
+        stoppedAt = now;
+        manager.stop();
+      }
+      if (now === stoppedAt + 5000) manager.stop();
+      now += ms;
+      assert.ok(now < 200_000, 'the drain deadline must expire');
+    },
+  });
+  await manager.cycle(1);
+  const gaps = attempts.slice(1).map((at, index) => at - attempts[index]);
+  t.diagnostic(
+    JSON.stringify({ attempts: attempts.length, stoppedAt, removedAt, gaps }),
+  );
+  assert.notEqual(stoppedAt, undefined);
+  assert.ok(
+    attempts.length > 2,
+    'the test must retry observations while draining',
+  );
+  assert.ok(
+    gaps.every((ms) => ms >= 1000),
+    'draining must retain a poll cadence',
+  );
+  assert.equal(
+    removedAt,
+    stoppedAt + 90_000,
+    'repeated stop must not extend the deadline',
+  );
+  assert.equal(signal.aborted, true);
 });
 
 test('starts through a symlink and reports invalid configuration', async (t) => {
