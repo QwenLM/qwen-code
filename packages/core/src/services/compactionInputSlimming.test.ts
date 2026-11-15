@@ -235,6 +235,43 @@ describe('compactionInputSlimming', () => {
       ).toBe(expected);
     });
 
+    it('derives the budget from image resolution when the header parses (#17315)', () => {
+      // Minimal PNG header declaring 1920×1080: the patch-grid formula
+      // charges ceil(1920*1080/2048) = 1013 tokens instead of the flat 1600.
+      const b = new Uint8Array(33);
+      b.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+      b[8] = 0;
+      b[9] = 0;
+      b[10] = 0;
+      b[11] = 13;
+      b.set([0x49, 0x48, 0x44, 0x52], 12);
+      b[16] = 0;
+      b[17] = 0;
+      b[18] = 0x07;
+      b[19] = 0x80; // width 1920
+      b[20] = 0;
+      b[21] = 0;
+      b[22] = 0x04;
+      b[23] = 0x38; // height 1080
+      const data = Buffer.from(b).toString('base64');
+      expect(
+        estimatePartChars(
+          { inlineData: { mimeType: 'image/png', data } },
+          1600,
+        ),
+      ).toBe(1013 * 4);
+    });
+
+    it('keeps the flat budget for non-image inline binary kinds', () => {
+      const pdf = Buffer.from('not a pdf header at all').toString('base64');
+      expect(
+        estimatePartChars(
+          { inlineData: { mimeType: 'application/pdf', data: pdf } },
+          1600,
+        ),
+      ).toBe(1600 * 4);
+    });
+
     it('uses fixed budget for fileData', () => {
       expect(
         estimatePartChars(

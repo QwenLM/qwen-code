@@ -7,7 +7,9 @@
 import type { Content, Part } from '@google/genai';
 import type { ChatCompressionSettings } from '../config/config.js';
 import type { InputModalities } from '../core/contentGenerator.js';
+import { VISUAL_PIXELS_PER_TOKEN } from '../omni/estimation.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { parseImageDimensions } from '../utils/image-dimensions.js';
 
 /**
  * Prepares `historyToCompress` for the side-query summary model by
@@ -212,7 +214,10 @@ export function estimatePartChars(
   imageTokenEstimate: number,
 ): number {
   if (part.inlineData || part.fileData) {
-    return imageTokenEstimate * TOKEN_TO_CHAR_RATIO;
+    return (
+      estimateInlineImageTokenChars(part, imageTokenEstimate) *
+      TOKEN_TO_CHAR_RATIO
+    );
   }
   if (typeof part.text === 'string') {
     return part.text.length;
@@ -257,6 +262,36 @@ export function estimatePartChars(
 export function getFunctionResponseParts(part: Part): Part[] | undefined {
   const fr = part.functionResponse as { parts?: unknown } | undefined;
   return Array.isArray(fr?.parts) ? (fr.parts as Part[]) : undefined;
+}
+
+/**
+ * Resolution-derived token estimate for an inline image (#17315): when the
+ * base64 payload carries a parseable image header, charge the patch-grid
+ * formula the omni pipeline already uses (pixels / VISUAL_PIXELS_PER_TOKEN)
+ * so a small screenshot and a 4K diagram stop costing the same flat 1600.
+ * Anything unparseable — other binary kinds, fileData without bytes —
+ * keeps the configured flat estimate.
+ */
+function estimateInlineImageTokenChars(
+  part: Part,
+  fallbackTokenEstimate: number,
+): number {
+  const inline = part.inlineData;
+  if (!inline?.data || !inline.mimeType?.startsWith('image/')) {
+    return fallbackTokenEstimate;
+  }
+  try {
+    const buffer = Buffer.from(inline.data, 'base64');
+    const dimensions = parseImageDimensions(
+      new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength),
+    );
+    if (!dimensions) return fallbackTokenEstimate;
+    return Math.ceil(
+      (dimensions.width * dimensions.height) / VISUAL_PIXELS_PER_TOKEN,
+    );
+  } catch {
+    return fallbackTokenEstimate;
+  }
 }
 
 export function estimateContentChars(
