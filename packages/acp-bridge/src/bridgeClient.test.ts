@@ -5562,6 +5562,22 @@ describe('background execution ownership', () => {
     );
     expect(prepared.frames[0]).toMatchObject({ promptId: 'notification-1' });
     expect(prepared.frames[0].originatorClientId).toBeUndefined();
+    const deferredTool = client.prepareSessionUpdateFrames(
+      {
+        sessionId: 'session',
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'old-tool',
+          status: 'completed',
+          _meta: { promptId: 'old-user', originatorClientId: 'old-client' },
+        },
+      },
+      entry as never,
+    );
+    expect(deferredTool.frames[0]).toMatchObject({
+      promptId: 'old-user',
+      originatorClientId: 'old-client',
+    });
     const completed = client.prepareSessionUpdateFrames(
       {
         sessionId: 'session',

@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/generated-ui",
-  "version": "0.27.2",
+  "version": "0.27.3",
   "private": true,
   "description": "Bounded locally interactive HTML and JavaScript views over MCP Apps",
   "repository": {
@@ -32,10 +32,10 @@
     "@jitl/quickjs-singlefile-browser-release-sync": "0.32.0",
     "@jitl/quickjs-singlefile-mjs-release-sync": "0.32.0",
     "@modelcontextprotocol/ext-apps": "^1.7.5",
-    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@noble/hashes": "1.8.0",
     "@types/node": "^22.0.0",
-    "dompurify": "3.4.14",
+    "dompurify": "3.4.17",
     "esbuild": "^0.25.0",
     "jsdom": "^26.1.0",
     "quickjs-emscripten-core": "0.32.0",
