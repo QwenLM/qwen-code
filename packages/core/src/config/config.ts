@@ -13890,6 +13890,18 @@ export class Config {
       const { ListAgentsTool } = await import('../tools/list-agents.js');
       return new ListAgentsTool(this);
     });
+    await registerLazy(ToolNames.GET_CONTEXT_REMAINING, async () => {
+      const { GetContextRemainingTool } = await import(
+        '../tools/get-context-remaining.js'
+      );
+      return new GetContextRemainingTool(this);
+    });
+    await registerLazy(ToolNames.REQUEST_COMPACTION, async () => {
+      const { RequestCompactionTool } = await import(
+        '../tools/request-compaction.js'
+      );
+      return new RequestCompactionTool(this);
+    });
     await registerLazy(ToolNames.TASK_STOP, async () => {
       const { TaskStopTool } = await import('../tools/task-stop.js');
       return new TaskStopTool(this);

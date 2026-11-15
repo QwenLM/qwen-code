@@ -279,7 +279,7 @@ export function isBelowCompactionWarn(
   );
 }
 
-export type CompactTrigger = 'manual' | 'auto';
+export type CompactTrigger = 'manual' | 'auto' | 'model_requested';
 
 /**
  * Per-text-payload character cap applied to the compaction side-query when
@@ -539,7 +539,9 @@ export class ChatCompressionService {
       ? 'payload_overflow'
       : compactTrigger === 'manual'
         ? 'manual'
-        : 'token_limit';
+        : compactTrigger === 'model_requested'
+          ? 'model_requested'
+          : 'token_limit';
     const chatCompressionSettings = config.getChatCompression();
     const slimmingConfig = resolveSlimmingConfig(chatCompressionSettings);
     const tuning = resolveCompactionTuning(chatCompressionSettings);

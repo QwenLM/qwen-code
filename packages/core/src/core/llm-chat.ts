@@ -2543,6 +2543,48 @@ export class LlmChat {
   private lastCachedContentTokenCount = 0;
 
   /**
+   * A model-requested compaction, set by the `request_compaction` tool while
+   * a turn is executing. The pre-send threshold ladder in
+   * `sendMessageStream` consumes and clears it: history must not be replaced
+   * while the requesting turn is still appending results, so the flag rides
+   * until the next model round boundary (#17313).
+   */
+  private modelCompactionRequested = false;
+
+  /**
+   * The live context-usage numbers behind `get_context_remaining`: the last
+   * prompt count the route reported (or the local estimate when the route
+   * has not reported yet), the previous response's output count, and the
+   * window those are measured against. Read-only; the fields themselves
+   * stay private so the send path keeps owning them (#17313).
+   */
+  getContextUsageSnapshot(): {
+    promptTokens: number;
+    promptTokensIsEstimated: boolean;
+    outputTokens: number;
+    contextWindowTokens: number;
+  } {
+    return {
+      promptTokens: this.lastPromptTokenCount,
+      promptTokensIsEstimated: this.lastPromptTokenCountIsEstimated,
+      outputTokens: this.lastOutputTokenCount,
+      contextWindowTokens:
+        this.config.getContentGeneratorConfig()?.contextWindowSize ??
+        DEFAULT_TOKEN_LIMIT,
+    };
+  }
+
+  /** Marks a model-requested compaction for the next model-round boundary. */
+  requestModelCompaction(): void {
+    this.modelCompactionRequested = true;
+  }
+
+  /** Whether a model-requested compaction is pending (test/inspection use). */
+  isModelCompactionRequested(): boolean {
+    return this.modelCompactionRequested;
+  }
+
+  /**
    * Route identity (model + auth type + endpoint; see
    * Config.getModelRouteIdentity) of the content generator that produced
    * the counts above. API-reported sizes are wire-specific: one route's
@@ -4056,7 +4098,18 @@ export class LlmChat {
 
         // Compression derives prompt ids before the user content is pushed.
         markApiHistoryPrompt(userContent, options?.promptId);
-        if (exactRoute || (isHardTier && !shouldForceFromHard)) {
+        // A model-requested compaction (the `request_compaction` tool) rides
+        // until this boundary: the requesting turn's results were still
+        // appending when the flag was set, so history could not be replaced
+        // mid-turn. Consume it here — it forces compression regardless of
+        // the threshold ladder, exactly like a hard-rescue but with its own
+        // trigger so hooks and the UI notice can say why (#17313).
+        const modelRequestedCompaction = this.modelCompactionRequested;
+        this.modelCompactionRequested = false;
+        if (
+          !modelRequestedCompaction &&
+          (exactRoute || (isHardTier && !shouldForceFromHard))
+        ) {
           compressionInfo = {
             originalTokenCount: effectiveTokens,
             newTokenCount: effectiveTokens,
@@ -4065,7 +4118,7 @@ export class LlmChat {
         } else {
           compressionInfo = await this.tryCompress(
             prompt_id,
-            shouldForceFromHard,
+            shouldForceFromHard || modelRequestedCompaction,
             params.config?.abortSignal,
             {
               pendingUserMessage: userContent,
@@ -4078,7 +4131,11 @@ export class LlmChat {
               // compactTrigger explicitly as 'auto' so PostCompact hooks are
               // classified correctly while the pending user message preserves
               // any active tool-call / response pairing.
-              trigger: shouldForceFromHard ? 'auto' : undefined,
+              trigger: modelRequestedCompaction
+                ? 'model_requested'
+                : shouldForceFromHard
+                  ? 'auto'
+                  : undefined,
             },
           );
         }

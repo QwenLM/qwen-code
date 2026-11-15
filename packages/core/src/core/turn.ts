@@ -557,7 +557,8 @@ export type CompactionTriggerReason =
   | 'token_limit'
   | 'image_overflow'
   | 'payload_overflow'
-  | 'manual';
+  | 'manual'
+  | 'model_requested';
 
 export interface ChatCompressionInfo {
   originalTokenCount: number;
