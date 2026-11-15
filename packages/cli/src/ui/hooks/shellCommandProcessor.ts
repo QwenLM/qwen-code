@@ -306,8 +306,18 @@ export const useShellCommandProcessor = (
               let finalStatus = ToolCallStatus.Success;
 
               if (result.error) {
-                finalStatus = ToolCallStatus.Error;
-                finalOutput = `${result.error.message}\n${finalOutput}`;
+                finalStatus = result.aborted
+                  ? ToolCallStatus.Canceled
+                  : ToolCallStatus.Error;
+                const cancellationPrefix = result.aborted
+                  ? 'Command was cancelled.\n'
+                  : '';
+                const statusPrefix = isSignalTermination(result.signal)
+                  ? `Command terminated by signal: ${result.signal}.\n`
+                  : result.exitCode !== null
+                    ? `Exit code: ${result.exitCode}.\n`
+                    : '';
+                finalOutput = `${cancellationPrefix}${statusPrefix}${result.error.message}\n${finalOutput}`;
               } else if (result.aborted) {
                 finalStatus = ToolCallStatus.Canceled;
                 finalOutput = `Command was cancelled.\n${finalOutput}`;

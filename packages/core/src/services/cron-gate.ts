@@ -311,12 +311,17 @@ export function createCronGateRunner(
     if (result.stdoutHeldAfterExit && pid !== undefined) {
       stopLeftovers(pid);
     }
-    if (result.error) return failed(`could not start: ${result.error.message}`);
-    if (binary.signal.aborted) return failed('printed binary output');
-    if (timeout.aborted) {
-      return failed(`timed out after ${timeoutMs / 1000} s`);
+    if (result.error && !result.aborted) {
+      return failed(`could not start: ${result.error.message}`);
     }
-    if (result.aborted) return failed('was cancelled');
+    const diagnostic = result.error ? `: ${result.error.message}` : '';
+    if (binary.signal.aborted) {
+      return failed(`printed binary output${diagnostic}`);
+    }
+    if (timeout.aborted) {
+      return failed(`timed out after ${timeoutMs / 1000} s${diagnostic}`);
+    }
+    if (result.aborted) return failed(`was cancelled${diagnostic}`);
     if (result.exitCode !== 0) {
       return failed(
         result.exitCode === null
