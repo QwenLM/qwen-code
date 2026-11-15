@@ -11,16 +11,21 @@ import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 
 const seams = vi.hoisted(() => ({
   watch: vi.fn(),
-  mkdir: vi.fn(),
+  watchFile: vi.fn(),
+  unwatchFile: vi.fn(),
   read: vi.fn(),
 }));
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
-  return { ...actual, default: { ...actual, watch: seams.watch } };
-});
-vi.mock('node:fs/promises', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:fs/promises')>();
-  return { ...actual, default: { ...actual, mkdir: seams.mkdir } };
+  return {
+    ...actual,
+    default: {
+      ...actual,
+      watch: seams.watch,
+      watchFile: seams.watchFile,
+      unwatchFile: seams.unwatchFile,
+    },
+  };
 });
 vi.mock('@qwen-code/qwen-code-core/services/worktreeSessionService.js', () => ({
   readWorktreeSession: seams.read,
@@ -32,7 +37,8 @@ let dispose: (() => void) | undefined;
 beforeEach(() => {
   vi.resetModules();
   seams.watch.mockReset();
-  seams.mkdir.mockReset().mockResolvedValue(undefined);
+  seams.watchFile.mockReset();
+  seams.unwatchFile.mockReset();
   seams.read.mockReset().mockResolvedValue(null);
   Object.defineProperty(process, 'platform', { value: 'darwin' });
 });
@@ -74,39 +80,50 @@ async function mount() {
   return { view, act };
 }
 
-describe('worktree watcher final-exit policy', () => {
-  it('closes an ordinary unmount even when no worktree sidecar exists', async () => {
-    const handle = watcher();
-    seams.watch.mockReturnValue(handle);
+describe('worktree stat subscription cleanup', () => {
+  it('unsubscribes an ordinary unmount even when no sidecar exists', async () => {
     const { view } = await mount();
-    expect(seams.watch).toHaveBeenCalledOnce();
+    expect(seams.watchFile).toHaveBeenCalledExactlyOnceWith(
+      '/owned/chats/first.worktree.json',
+      { persistent: false, interval: 500 },
+      expect.any(Function),
+    );
     expect(view.result.current).toBeNull();
+    const listener = seams.watchFile.mock.calls[0][2];
     view.unmount();
     dispose = undefined;
-    expect(handle.close).toHaveBeenCalledOnce();
+    expect(seams.unwatchFile).toHaveBeenCalledExactlyOnceWith(
+      '/owned/chats/first.worktree.json',
+      listener,
+    );
+    expect(seams.watch).not.toHaveBeenCalled();
   });
 
-  it('closes the old watcher on owner/session replacement and the new one on unmount', async () => {
-    const first = watcher();
-    const second = watcher();
-    seams.watch.mockReturnValueOnce(first).mockReturnValueOnce(second);
+  it('unsubscribes the old owner and leaves the successor until its unmount', async () => {
     const { view, act } = await mount();
+    const firstListener = seams.watchFile.mock.calls[0][2];
     view.rerender({ owner: config('second') });
     await act(async () => {
       await Promise.resolve();
     });
-    expect(first.close).toHaveBeenCalledOnce();
-    expect(seams.watch).toHaveBeenCalledTimes(2);
-    expect(second.close).not.toHaveBeenCalled();
+    expect(seams.unwatchFile).toHaveBeenCalledExactlyOnceWith(
+      '/owned/chats/first.worktree.json',
+      firstListener,
+    );
+    expect(seams.watchFile).toHaveBeenCalledTimes(2);
+    const secondListener = seams.watchFile.mock.calls[1][2];
     view.unmount();
     dispose = undefined;
-    expect(second.close).toHaveBeenCalledOnce();
+    expect(seams.unwatchFile).toHaveBeenLastCalledWith(
+      '/owned/chats/second.worktree.json',
+      secondListener,
+    );
+    expect(seams.watch).not.toHaveBeenCalled();
   });
 
-  it('honors the public final-exit policy instead of entering native close on unmount', async () => {
-    const handle = watcher();
-    seams.watch.mockReturnValue(handle);
+  it('unsubscribes on final exit without creating a native FSWatcher', async () => {
     const { view } = await mount();
+    const listener = seams.watchFile.mock.calls[0][2];
     const { closeFileWatcher, prepareFileWatchersForProcessExit } =
       await import('@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js');
     const control = watcher();
@@ -120,6 +137,10 @@ describe('worktree watcher final-exit policy', () => {
 
     view.unmount();
     dispose = undefined;
-    expect(handle.close).not.toHaveBeenCalled();
+    expect(seams.unwatchFile).toHaveBeenCalledExactlyOnceWith(
+      '/owned/chats/first.worktree.json',
+      listener,
+    );
+    expect(seams.watch).not.toHaveBeenCalled();
   });
 });

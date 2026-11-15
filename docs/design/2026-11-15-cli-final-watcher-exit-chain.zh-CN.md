@@ -2,9 +2,21 @@
 
 [English](2026-11-15-cli-final-watcher-exit-chain.md) | [简体中文](2026-11-15-cli-final-watcher-exit-chain.zh-CN.md)
 
+## 已验证独立Common/POLL checkpoint——2026-11-16
+
+固定main88e3上的独立12路径候选现已通过七normal阶段及七CLI whole/181项，包含原2秒oracle下全部六个真实文件系统case；build/type/完整零warning lint/format/bundle通过。已测树8ed483a558fa7b7d04d5cbce4b7d1791170d271b，source-bundle entry9aa3e3ef3544c47e007a2785894eb5b6f1180efa9ee8915ed116c3d715aac222，共1,455文件。
+short-fit公开流程通过Node+Ink、Bun+Ink、strict Bun+OpenTUI，helper前3次自然退出0及18个已关闭loopback model请求。每次都在一物理行完整显示87-cell ASCII删除命令、默认焦点Yes且恰一次CR，两次当前footer变化均满足原2秒期限。这只授予声明的sidecar流程，不授予长命令换行、所有signal路径或Trust重启行为。
+本四文档checkpoint仅记录验证结果；八个已测源码/测试与编译bundle保持不变，出版记录包含文档格式、双语引用与精确源码对应核验。下文保留旧checkpoint（含当时pending/Trust组合文字），不描述本12路径范围。既有signal5P1F/clean-main Native首次提示失败及另案Bun+Ink Trust重启失败仍开；旧filesystem失败与新polling通过分层保留。仅更新现有Draft17334，CI/Ready/维护者审查与平台/稳定性资格独立。
+
+## Common/POLL逻辑候选提案——2026-11-16
+
+计划仅更新既有Draft17334，在固定main88e3上合并Common退出/重启接线与worktree sidecar精确文件轮询，共12路径；不含原生Trust、Stats、exec确认或CI路由改动，尚无独立12路径产物验收。下文旧MAIN39组合状态与结果仅作为历史；其中Trust组合/Trust CI描述不属于本逻辑候选。保留这些记录及原失败，不把39路径结果继承为12路径资格。仍需新owned候选、normal检查及有限sidecar验收；既定exec失败terminal42/手动重启政策不变。
+
 ## 状态与问题
 
-固定main90be上的有限构建与受影响测试已完成：七个whole共176项以及build/type/full lint/format/bundle通过。公开signal验收仍为部分完成，5通过、1失败。既有真实文件系统失败及native首次提示bug仍开；两项terminal42回退回归已通过。本候选供维护者Draft审查。这是signal、relaunch和worktree sidecar watcher共享最终退出意图的有限接线，不证明退出链已完整覆盖或必定成功。它不修复Bun exec后的启动，也不定位native锁。不包含Trust界面、Source、Width、Skill或诊断日志。
+当前组合基于main04bb3c64473eb6f2c980434e6e612a180c65055f，尚未验证。它合并本已发布退出接线与已解决冲突的原生Trust路由；共享relaunch保留cleanup前prepare、安全terminal42报告及全部回归案例。无supervisor时exec失败仍需手动重启，不是自动恢复。保留当前main的CI checkout重建和全部既有案例，仅增量接入Trust。新build/type、受影响测试、几何及完整三profile Trust重启均待执行。后续sidecar轮询改动还需单独通过原真实文件系统及live刷新验证。下述历史结果不授予本组合产物资格。
+
+固定main90be上的有限构建与受影响测试已完成：七个whole共176项以及build/type/full lint/format/bundle通过。公开signal验收仍为部分完成，5通过、1失败。既有真实文件系统失败及native首次提示bug仍开；两项terminal42回退回归已通过。本候选供维护者Draft审查。这是signal、relaunch和worktree sidecar watcher共享最终退出意图的有限接线，不证明退出链已完整覆盖或必定成功。它不修复Bun exec后的启动，也不定位native锁。原独立退出增量不包含Trust界面、Source、Width、Skill或诊断日志。
 
 ## 既有策略与所有权
 
@@ -14,7 +26,7 @@
 
 交互signal共享beginExit在cleanupStarted锁存后、runExitCleanup前仅调用一次prepare。首次未确认SIGINT和忽略的重抛不prepare；确认SIGINT、SIGTERM、SIGHUP仍为130/143/129。raw恢复、重复signal处理及清理顺序不变。handler仍在交互启动安装，既有ACP最终退出prepare不动。
 
-relaunchApp在cleanup前prepare，保留原execve参数，以及未选择execve时的exit42回退。清理后in-place execve抛错时，仅catch该调用，通过既有不抛错stderr helper尽力报告，然后落到exit42。不重试、不spawn supervisor，不声称重启成功；无supervisor时用户必须手动重启。prepare、cleanup及原re-exec参数不变，cleanup错误不在此catch范围。当前main调用者是Ink TrustDialog、FolderTrustDialog、IdeTrustChangeDialog和native folder-trust-gate；不新增native Trust功能。worktree hook将原watcher.close换成既有公开closeFileWatcher，消费者仍为AppContainer和native AppShell。普通unmount及Config/session替换仍关闭watcher，最终进程退出才沿进程全局策略。hook的异步读取撤销、路径、事件和显示值不变。
+relaunchApp在cleanup前prepare，保留原execve参数，以及未选择execve时的exit42回退。清理后in-place execve抛错时，仅catch该调用，通过既有不抛错stderr helper尽力报告，然后落到exit42。不重试、不spawn supervisor，不声称重启成功；无supervisor时用户必须手动重启。prepare、cleanup及原re-exec参数不变，cleanup错误不在此catch范围。当前main调用者是Ink TrustDialog、FolderTrustDialog、IdeTrustChangeDialog和native folder-trust-gate；原独立退出增量不新增native Trust功能；当前组合还包含另份设计所述Trust路由。原独立worktree hook增量将watcher.close换成公开closeFileWatcher。当前新组合改用精确文件stat轮询及listener专属unwatchFile，详见[sidecar轮询](2026-11-15-worktree-sidecar-polling.zh-CN.md)；本hook不再创建目录FSWatcher。消费者仍为AppContainer和native AppShell。signal/relaunch准备政策及下述历史验证不变，但不能授予新订阅实现资格。
 
 ## 证据与验证
 
@@ -30,7 +42,7 @@ Root已完成当前回退候选的build、type、full零warning lint、format和
 
 ## 边界
 
-不加flag、期限、重试，不改Core、默认或发布。既有2秒/5秒清理上限及首次SIGINT仅警告语义保留。冻结的六个code/test blob已完成受影响验证与独审；本次出版过渡仅更新这两个设计文档。Root须完成文档格式、引用和精确tree/readback守卫后再提交Draft；Draft审查不授予Ready、可发布或整体迁移验收。
+不加flag、期限、重试，不改Core、默认或发布。既有2秒/5秒清理上限及首次SIGINT仅警告语义保留。此前独立的六个code/test blob已完成受影响验证与独审；其出版过渡仅更新那两个设计文档。Root须完成文档格式、引用和精确tree/readback守卫后再提交Draft；Draft审查不授予Ready、可发布或整体迁移验收。
 
 本增量未覆盖其他最终退出路径：update relaunch、supervisor断连、确实最终退出的错误helper、fatal-render期限及部分headless/非法调用路径仍需各自检查所有权与失败语义。一些错误分支仅rethrow而不保证进程终止，不能无差别写全局标记。既有ACP最终prepare不是新推断的缺口。不宣称全部出口覆盖或Core全局置信。
 
