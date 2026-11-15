@@ -285,6 +285,14 @@ const state = vi.hoisted(() => ({
     { mode: 'default' | 'auto-edit' | 'yolo'; revision: number }
   >(),
   approvalQueries: [] as string[],
+  automationCreates: [] as Array<{
+    definition: Record<string, unknown>;
+    idempotencyKey: string;
+  }>,
+  automationRetires: [] as Array<{
+    automationId: string;
+    idempotencyKey: string;
+  }>,
   model: vi.fn(
     async (_input: {
       signal: AbortSignal;
@@ -465,6 +473,47 @@ vi.mock(
             committedSequence: request.commitProof.lastCommitSequence,
           };
         },
+        automationsCreate: async (
+          definition: Record<string, unknown>,
+          idempotencyKey: string,
+        ) => {
+          state.automationCreates.push({ definition, idempotencyKey });
+          return {
+            automation: {
+              id: 'asch_cron_1',
+              sessionId: options.sessionKey.sessionId,
+              cron: definition['cron'],
+              timezone: definition['timezone'] ?? 'UTC',
+              goal: definition['goal'] ?? null,
+              state: 'live',
+              enabled: true,
+            },
+            replayed: false,
+          };
+        },
+        automationsList: async () => ({
+          data: [],
+          hasMore: false,
+          nextCursor: null,
+        }),
+        automationsRetire: async (
+          automationId: string,
+          idempotencyKey: string,
+        ) => {
+          state.automationRetires.push({ automationId, idempotencyKey });
+          return {
+            automation: {
+              id: automationId,
+              sessionId: options.sessionKey.sessionId,
+              cron: '*/5 * * * *',
+              timezone: 'UTC',
+              goal: null,
+              state: 'retired',
+              enabled: true,
+            },
+            replayed: false,
+          };
+        },
       };
     },
   }),
@@ -574,6 +623,8 @@ beforeEach(({ task }) => {
   ).mockResolvedValue();
   state.approvalSelections.clear();
   state.approvalQueries.length = 0;
+  state.automationCreates.length = 0;
+  state.automationRetires.length = 0;
   state.modelConfig.mockReset();
   state.memory.mockReset();
   vi.spyOn(
@@ -9087,6 +9138,152 @@ describe('Hosted Harness no-tool session', () => {
         approvalSelection: { mode: 'yolo', revision: 1 },
       })
       .expect(202);
+  });
+
+  it('a shell/4 prompt turn creates its cron schedule through the wired store channel', async () => {
+    mockBrokerBroker();
+    state.model.mockReset();
+    state.model.mockImplementation(async (input) => {
+      // The production construction of HostedCronSession is the load path's
+      // `session.crons` assignment; deleting it turns this drive into the
+      // "Cron schedules are unavailable" refusal with an empty recorder.
+      input.setLoopClassifier?.(async () => ({
+        allowed: true,
+        reason: null,
+      }));
+      const call = {
+        name: 'cron_create',
+        callId: 'call-cron-wired',
+        args: {
+          cron: '*/5 * * * *',
+          prompt: '/loop watch CI',
+          recurring: true,
+        },
+        isClientInitiated: false,
+        prompt_id: input.promptId ?? '',
+      };
+      const responses = await input.toolTurn!.execute(
+        [call],
+        [
+          {
+            functionCall: { id: call.callId, name: call.name, args: call.args },
+          },
+        ],
+        'stub-model',
+        input.signal,
+      );
+      expect(responses[0].functionResponse?.response?.['executionStatus']).toBe(
+        'success',
+      );
+      return { text: 'scheduled', model: 'stub-model' };
+    });
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-shell/4',
+    });
+    expect(created.status).toBe(200);
+    const prompt = [{ type: 'text', text: 'schedule the watch' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', created.body.clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(
+      async () => {
+        expect(state.automationCreates).toHaveLength(1);
+      },
+      { timeout: settleTimeoutMs() },
+    );
+    const created0 = state.automationCreates[0]!;
+    expect(created0.definition['cron']).toBe('*/5 * * * *');
+    expect(created0.definition['prompt']).toBe('/loop watch CI');
+    expect(created0.definition['session_mode']).toBe('persistent');
+    expect(created0.idempotencyKey).toMatch(/^loop:[0-9a-f]{64}:create$/u);
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: settleTimeoutMs() },
+    );
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+  });
+
+  it('cron_create without an active classifier is refused, not admitted unreviewed', async () => {
+    mockBrokerBroker();
+    state.model.mockReset();
+    let seen: Record<string, unknown> | undefined;
+    state.model.mockImplementation(async (input) => {
+      // No setLoopClassifier: the arm-time review has no active classifier.
+      const call = {
+        name: 'cron_create',
+        callId: 'call-cron-unclassified',
+        args: {
+          cron: '*/5 * * * *',
+          prompt: '/loop watch CI',
+          recurring: true,
+        },
+        isClientInitiated: false,
+        prompt_id: input.promptId ?? '',
+      };
+      const responses = await input.toolTurn!.execute(
+        [call],
+        [
+          {
+            functionCall: { id: call.callId, name: call.name, args: call.args },
+          },
+        ],
+        'stub-model',
+        input.signal,
+      );
+      seen = responses[0].functionResponse?.response as Record<string, unknown>;
+      return { text: 'refused', model: 'stub-model' };
+    });
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+      toolProfile: 'hosted-workspace-shell/4',
+    });
+    expect(created.status).toBe(200);
+    const prompt = [{ type: 'text', text: 'schedule the watch' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', created.body.clientId)
+      .send({
+        prompt,
+        promptId: PROMPT_ID,
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(
+      async () => {
+        expect(seen).toBeDefined();
+      },
+      { timeout: settleTimeoutMs() },
+    );
+    expect(seen!['error']).toContain(
+      'No active permission classifier for cron arming.',
+    );
+    expect(state.automationCreates).toHaveLength(0);
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', created.body.clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: settleTimeoutMs() },
+    );
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
   });
 
   it('delivers a due loop wakeup through the wake pump as an ordinary turn', async () => {
