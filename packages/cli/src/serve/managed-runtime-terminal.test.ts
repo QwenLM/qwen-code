@@ -234,15 +234,26 @@ describe('ManagedRuntimeTerminals', () => {
     sockets.push(ws);
     await new Promise<void>((resolve, reject) => {
       let refused = false;
+      // Bounded like the other watchdogs so the file-wide ceiling is never
+      // the first report for this wait.
+      const timer = setTimeout(
+        () => reject(new Error('unknown upgrade path timed out')),
+        WAIT_TIMEOUT_MS,
+      );
       ws.once('unexpected-response', (_req, res) => {
+        clearTimeout(timer);
         expect(res.statusCode).toBe(404);
         refused = true;
         resolve();
       });
-      ws.once('open', () => reject(new Error('unknown path upgraded')));
+      ws.once('open', () => {
+        clearTimeout(timer);
+        reject(new Error('unknown path upgraded'));
+      });
       // A client error only settles the test once the 404 refusal was asserted;
       // an error alone would otherwise pass without verifying the refusal.
       ws.once('error', () => {
+        clearTimeout(timer);
         if (refused) resolve();
         else reject(new Error('upgrade failed without a 404 refusal'));
       });
