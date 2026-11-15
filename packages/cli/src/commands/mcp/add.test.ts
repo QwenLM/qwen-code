@@ -7,6 +7,7 @@
 import yargs from 'yargs';
 import type { Argv } from 'yargs';
 import { addCommand } from './add.js';
+import { runCliEntry } from '../../cli.js';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import type { Mock } from 'vitest';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -255,6 +256,39 @@ describe('mcp add command', () => {
         Promise.resolve().then(() => parser.parseAsync(args)),
       ).rejects.toThrow(error);
 
+      expect(mockSetValue).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    {
+      args: ['add', 'test-server'],
+      error: 'Not enough non-option arguments',
+    },
+    {
+      args: ['add', 'test-server', 'npx', '--transport', 'invalid'],
+      error: 'Invalid values',
+    },
+    {
+      args: ['--debug', 'add', 'test-server', 'docker', '--trust-all', 'image'],
+      error: 'Unknown arguments',
+    },
+  ])(
+    'reports add validation through the real MCP entry point ($args)',
+    async ({ args, error }) => {
+      await expect(runCliEntry(['mcp', ...args])).rejects.toMatchObject({
+        name: 'AlreadyReportedError',
+        message: expect.stringContaining(error),
+        exitCode: 1,
+      });
+
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining(error),
+      );
+      expect(mockWriteStdoutLine.mock.calls.flat().join('\n')).toContain(
+        'Usage: qwen mcp add',
+      );
+      expect(mockedLoadSettings).not.toHaveBeenCalled();
       expect(mockSetValue).not.toHaveBeenCalled();
     },
   );

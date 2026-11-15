@@ -8,6 +8,7 @@
 import type { CommandModule } from 'yargs';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { AlreadyReportedError } from '../../utils/errors.js';
 import type {
   MCPServerConfig,
   MCPOAuthConfig,
@@ -223,8 +224,13 @@ export const addCommand: CommandModule = {
       .strict(false)
       .strictOptions()
       .strictCommands(false)
-      // A returning parent failure handler must not allow a settings write.
-      .fail(false)
+      // Throw after reporting so a parent failure handler cannot allow a write.
+      .fail((message, error, parser) => {
+        const failure = message || error?.message || 'Unknown argument error';
+        writeStderrLine(failure);
+        parser.showHelp(writeStdoutLine);
+        throw new AlreadyReportedError(failure);
+      })
       .positional('name', {
         describe: 'Name of the server',
         type: 'string',
