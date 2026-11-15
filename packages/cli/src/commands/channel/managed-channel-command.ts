@@ -31,7 +31,7 @@ export interface ManagedChannelArgs {
 
 /** The lifecycle surface every managed adapter exposes to the command. */
 export interface ManagedChannelRuntime {
-  readonly generation: number;
+  readonly generation: number | undefined;
   connect(): Promise<void>;
   disconnect(): Promise<void>;
 }
