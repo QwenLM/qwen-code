@@ -547,6 +547,13 @@ Once discovered, MCP tools are available to the Qwen model like built-in tools. 
 
 ## Status Monitoring and Troubleshooting
 
+HTTP MCP transports reject redirects to a different origin (scheme, host, or
+port) to avoid forwarding credentials to another endpoint. If the connection
+reports that a redirect was not followed, configure the final MCP endpoint
+directly and verify that it is trusted before supplying credentials. Ordinary
+MCP connections can follow same-origin redirects. Credentialed Agent Plugin
+connections refuse redirects even within the same origin.
+
 ### Connection States
 
 The MCP integration tracks several states:
@@ -710,10 +717,13 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 
-const server = new McpServer({
-  name: 'prompt-server',
-  version: '1.0.0',
-});
+const server = new McpServer(
+  {
+    name: 'prompt-server',
+    version: '1.0.0',
+  },
+  { maxToolInputElements: 100_000 },
+);
 
 server.registerPrompt(
   'poem-writer',

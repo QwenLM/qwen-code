@@ -164,6 +164,7 @@ import { registerStandaloneSessionRoutes } from './routes/standalone-sessions.js
 import {
   createRequestedSessionIdAdmission,
   requestedSessionIdPersistenceExists,
+  type RequestedSessionIdAdmission,
 } from './session-id-admission.js';
 import { sessionAttachmentsRoots } from './session-attachments-root.js';
 import {
@@ -3656,6 +3657,15 @@ export function createServeApp(
     workspaceRegistry,
     archiveCoordinator,
     requestedSessionIdAdmission,
+    // Late-bound: the refresh timer is started before this app exists, so the
+    // serve root installs the hook on locals and it is read per restore.
+    onSessionRestored: ({ workspaceCwd, sessionId }) => {
+      (
+        app.locals as {
+          prWatchDrainNow?: (cwd: string, sessionId?: string) => void;
+        }
+      ).prWatchDrainNow?.(workspaceCwd, sessionId);
+    },
     mutate,
     sendBridgeError,
     daemonLog,
@@ -3679,6 +3689,27 @@ export function createServeApp(
         }
       : {}),
   });
+  // The PR watch's in-process wake shares this instance with the routes: a
+  // second tracker would not see these reservations and could restore over one.
+  (
+    app.locals as {
+      requestedSessionIdAdmission?: RequestedSessionIdAdmission;
+    }
+  ).requestedSessionIdAdmission = requestedSessionIdAdmission;
+  // Same reason: a live-conversation restore throws without this, so the wake
+  // would report every session in such a workspace unavailable.
+  if (liveConversationWorkspaceForRoutes) {
+    (
+      app.locals as {
+        materializeLiveConversationDirectory?: (
+          sessionId: string,
+        ) => Promise<string>;
+      }
+    ).materializeLiveConversationDirectory = (sessionId: string) =>
+      liveConversationWorkspaceForRoutes.materializeConversationDirectory(
+        sessionId,
+      );
+  }
 
   if (standaloneSessionService) {
     registerStandaloneSessionRoutes(app, {
