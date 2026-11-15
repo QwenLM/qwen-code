@@ -7680,8 +7680,12 @@ export class Session implements SessionContext {
                     },
                   },
                   maxRounds: 1,
+                  // Bound the transport to the same predicate as the shared
+                  // round so a kernel-ineligible session's blocked turn stays
+                  // procedural, matching the path the marker and /about report.
                   useEventBus:
-                    this.config.isEventBusAgentLoopEnabled?.('acp') === true,
+                    this.config.isEventBusAgentLoopEnabled?.('acp') === true &&
+                    sharedToolBatch,
                   host: {
                     onModelEvent: async (event) => {
                       if (event.type === LlmEventType.UserPromptSubmitBlocked) {

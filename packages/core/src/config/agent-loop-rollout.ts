@@ -152,10 +152,12 @@ export type AgentLoopPath = 'legacy' | 'shared' | 'kernel';
 const entryLogger = createDebugLogger('LOOP');
 
 /**
- * Records the loop path a surface resolved to at its loop entry (once per
- * turn), including the legacy path, which otherwise logs nothing. The
- * wording is deliberately distinct from the shared-loop round/batch markers
- * the parity suites count, so this line cannot inflate their counts.
+ * Records the loop path a surface resolved to at its loop entry, including
+ * the legacy path, which otherwise logs nothing. Most surfaces log once per
+ * turn; ink and opentui read the switch per model round, so they log per
+ * round. The wording is deliberately distinct from the shared-loop
+ * round/batch markers the parity suites count, so this line cannot inflate
+ * their counts.
  */
 export function logAgentLoopEntry(
   config: { getAgentLoopPath?: (surface: AgentLoopSurface) => AgentLoopPath },

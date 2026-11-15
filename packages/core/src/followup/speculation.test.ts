@@ -139,6 +139,14 @@ describe('startSpeculation', () => {
     await expect(startSpeculation(cacheless, 'read a.ts')).rejects.toThrow(
       'CacheSafeParams not available for speculation',
     );
+    // The third early return: a parent signal already aborted at entry resolves
+    // to an aborted state without running a round, so it must not log either.
+    forkedAgentMocks.getCacheSafeParams.mockReturnValueOnce(
+      {} as CacheSafeParams,
+    );
+    await expect(
+      startSpeculation(cacheless, 'read a.ts', AbortSignal.abort()),
+    ).resolves.toMatchObject({ status: 'aborted' });
     expect(entrySpy).not.toHaveBeenCalled();
     entrySpy.mockRestore();
   });

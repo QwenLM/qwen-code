@@ -7551,12 +7551,16 @@ describe('Server Config (config.ts)', () => {
       });
 
       it('is kernel when both switches are on', () => {
-        expect(
-          makeConfig({
-            unifiedAgentLoopEnabled: true,
-            eventBusAgentLoopEnabled: true,
-          }).getAgentLoopPath('acp'),
-        ).toBe('kernel');
+        const config = makeConfig({
+          unifiedAgentLoopEnabled: true,
+          eventBusAgentLoopEnabled: true,
+        });
+        // Every surface except speculation can enter the kernel; pin the arm
+        // for ink, opentui and agent-core too, not just acp.
+        for (const surface of AGENT_LOOP_SURFACES) {
+          if (surface === 'speculation') continue;
+          expect(config.getAgentLoopPath(surface)).toBe('kernel');
+        }
       });
 
       it('stays legacy when only the kernel switch is on', () => {
