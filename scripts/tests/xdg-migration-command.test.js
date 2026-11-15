@@ -6,12 +6,14 @@
 
 import { spawnSync } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -81,11 +83,14 @@ describe.skipIf(process.platform === 'win32')(
 
     it('moves ~/.qwen into the XDG directory and marks it', () => {
       expect(marker).toBeTruthy();
+      chmodSync(join(home, '.qwen'), 0o755);
       expect(migrate().status).toBe(0);
       expect(existsSync(join(home, '.qwen'))).toBe(false);
       const xdgDir = join(home, '.config', 'qwen');
       expect(existsSync(join(xdgDir, 'oauth_creds.json'))).toBe(true);
       expect(existsSync(join(xdgDir, marker))).toBe(true);
+      // Owner-only, as a first run creates it.
+      expect(statSync(xdgDir).mode & 0o777).toBe(0o700);
     });
 
     it('moves ~/.qwen into an absolute XDG_CONFIG_HOME', () => {
