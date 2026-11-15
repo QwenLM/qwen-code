@@ -57,6 +57,18 @@ describe('markdown-utilities', () => {
       expect(findLastSafeSplitPoint(content)).toBe(content.length);
     });
 
+    it.each([
+      ['~~~~~', '~~~'],
+      ['``````', '```'],
+      ['~~~~', '~~~'],
+    ])('should not let a shorter %s run close a %s block', (opening, inner) => {
+      // CommonMark only closes a fence with a run at least as long as the
+      // opener. Treating the shorter inner line as a close marks the blank
+      // line after it as outside the block and splits mid-block.
+      const content = `${opening}\ncode\n${inner}\n\nmore code\n${opening}After`;
+      expect(findLastSafeSplitPoint(content)).toBe(content.length);
+    });
+
     it('should correctly identify the last \n\n even if it is followed by text not in a code block', () => {
       const content =
         'First part.\n\nSecond part.\n\nThird part, then some more text.';
