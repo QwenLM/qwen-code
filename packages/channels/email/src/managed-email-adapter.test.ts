@@ -385,6 +385,43 @@ describe('managed email inbound', () => {
     await adapter.disconnect();
   });
 
+  it('stops persisting after the state lock is compromised (#17173 R6/R7 parity)', async () => {
+    const adapter = make();
+    await adapter.connect();
+    const store = (
+      adapter as unknown as { store: { save: (s: unknown) => void } }
+    ).store;
+    const saveSpy = vi.spyOn(store, 'save');
+    // Park the tick inside submitInbound so its post-answer persist lands after
+    // the compromise — the in-flight tick, not a shutdown drain, is the writer
+    // the ownership guard must silence.
+    let releaseSubmit!: () => void;
+    const submitGate = new Promise<void>((resolve) => {
+      releaseSubmit = resolve;
+    });
+    let submitEntered!: () => void;
+    const enteredSubmit = new Promise<void>((resolve) => {
+      submitEntered = resolve;
+    });
+    const originalSubmit = plane.submitInbound.bind(plane);
+    plane.submitInbound = async (event) => {
+      submitEntered();
+      await submitGate;
+      return originalSubmit(event);
+    };
+    append(raw('m1', 'hello'));
+    const ticking = adapter.tick();
+    // The email tick polls the mailbox before it submits; wait until it is
+    // actually parked inside submitInbound, not merely started.
+    await enteredSubmit;
+    saveSpy.mockClear();
+    lockCompromised!(); // a second owner won the mailbox mid-tick
+    releaseSubmit();
+    await ticking;
+    expect(saveSpy).not.toHaveBeenCalled();
+    await adapter.disconnect();
+  });
+
   it('re-drives a failed re-register on the next poll, never skipping new mail', async () => {
     const adapter = make();
     await adapter.connect();
