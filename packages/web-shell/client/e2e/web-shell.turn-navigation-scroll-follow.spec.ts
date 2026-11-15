@@ -175,6 +175,32 @@ test('global turn navigation follows transcript scrolling @smoke', async ({
   // the responsive row sits on its 440 px floor with 32 px gutters. Scrolling
   // there must not corrupt its window — widening brings the marker back.
   await page.setViewportSize({ width: 860, height: 900 });
+  // The row width transitions over 320 ms; waiting for the 440 px floor keeps
+  // the gutter check on the settled layout rather than a mid-transition frame.
+  await expect
+    .poll(
+      () =>
+        page.evaluate(() => {
+          const railElement = document.querySelector(
+            '[data-global-turn-navigation]',
+          );
+          const viewport = railElement?.closest('[data-history-viewport]');
+          const row = viewport?.querySelector('[data-web-shell-message-row]');
+          if (!viewport || !row) return false;
+          const viewportRect = viewport.getBoundingClientRect();
+          const rowRect = row.getBoundingClientRect();
+          return (
+            Math.abs(rowRect.width - 440) < 0.5 &&
+            rowRect.left - viewportRect.left < 56 &&
+            viewportRect.right - rowRect.right < 56
+          );
+        }),
+      {
+        message:
+          'expected 860 px to keep the row on its 440 px floor with gutters under the 56 px rail threshold',
+      },
+    )
+    .toBe(true);
   await expect(rail).toBeHidden();
   await scrollTranscriptTo(page, 0.5);
   await expect.poll(() => ariaOrdinal(page)).toBeNull();
