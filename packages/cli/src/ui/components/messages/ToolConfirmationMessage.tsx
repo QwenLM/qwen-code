@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useState } from 'react';
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -13,6 +13,13 @@ import { Box, Text } from 'ink';
 import wrapAnsi from 'wrap-ansi';
 import { DiffRenderer } from './DiffRenderer.js';
 import { RenderInline } from '../../utils/InlineMarkdownRenderer.js';
+import {
+  MD_LINK_CAPTURE,
+  MD_LINK_PATTERN,
+  labelMayDeceive,
+  shouldWrapMarkdownLink,
+  supportsHyperlinks,
+} from '../../utils/osc8.js';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type {
@@ -28,6 +35,7 @@ import { isEditorAvailable } from '@qwen-code/qwen-code-core/utils/editor.js';
 import type { RadioSelectItem } from '../shared/RadioButtonSelect.js';
 import { RadioButtonSelect } from '../shared/RadioButtonSelect.js';
 import { MaxSizedBox, MINIMUM_MAX_HEIGHT } from '../shared/MaxSizedBox.js';
+import { useOverflowActions } from '../../contexts/OverflowContext.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { useContextMenu } from '../../context-menu/ContextMenuContext.js';
 import { useLaunchEditor } from '../../hooks/useLaunchEditor.js';
@@ -40,6 +48,64 @@ import { AskUserQuestionDialog } from './AskUserQuestionDialog.js';
 // multi-line command can't dominate the screen. MaxSizedBox renders
 // a "... N more lines" footer past this cap.
 const COMPACT_BODY_MAX_LINES = 5;
+
+// A "… N hidden …" footer costs one terminal row, so every budget that clips
+// content pays for it up front or the clip lands outside the cap unannounced.
+const MARKER_ROW = 1;
+
+const MD_LINK_GLOBAL_PATTERN = new RegExp(MD_LINK_PATTERN, 'g');
+
+/**
+ * The text RenderInline will actually put on screen. Sizing and announcing a
+ * clipped prose body from the Markdown source instead counts the markup the
+ * renderer strips, which drops prose that fits and invents hidden rows for
+ * prose that never overflowed. Only constructs the renderer always strips are
+ * removed, so a mis-measure errs long; the cap itself is enforced by the box,
+ * never by this number.
+ */
+function visibleInlineProse(text: string) {
+  const canHyperlink = supportsHyperlinks();
+  const links = text.replace(MD_LINK_GLOBAL_PATTERN, (link) => {
+    const parts = link.match(MD_LINK_CAPTURE);
+    if (!parts) return link;
+    const label = parts[1] ?? '';
+    const url = parts[2] ?? '';
+    if (
+      !shouldWrapMarkdownLink(url, canHyperlink) ||
+      labelMayDeceive(label, url)
+    ) {
+      return `${label} (${url})`;
+    }
+    return label || url;
+  });
+  return links
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/~~(.+?)~~/g, '$1')
+    .replace(/<u>(.+?)<\/u>/g, '$1')
+    .replace(/`([^`]+)`/g, '$1');
+}
+
+/**
+ * Marker for content this component clipped by hand rather than through
+ * MaxSizedBox. Registering the overflow is what makes the global
+ * "Press ctrl-s to show more lines" hint appear, so a clipped destination
+ * list or inline-Markdown body is always revealable, not just announced.
+ */
+const OverflowNotice: React.FC<{ message: string }> = ({ message }) => {
+  const id = useId();
+  const actions = useOverflowActions();
+  useEffect(() => {
+    if (!actions) return;
+    actions.addOverflowingId(id);
+    return () => actions.removeOverflowingId(id);
+  }, [actions, id]);
+
+  return (
+    <Text color={theme.text.secondary} wrap="truncate">
+      {message}
+    </Text>
+  );
+};
 
 export interface ToolConfirmationMessageProps {
   confirmationDetails: ToolCallConfirmationDetails;
@@ -204,6 +270,24 @@ export const ToolConfirmationMessage: React.FC<
   // Body content is now the DiffRenderer, passing filename to it
   // The bordered box is removed from here and handled within DiffRenderer
 
+  // The ceiling a body branch sizes against, read once, before the auto-mode
+  // "switch to default" option is spliced into `options` and before the
+  // auto-mode banner is folded into the body. The outer cap reuses this number
+  // instead of calling availableBodyContentHeight() again afterwards, when the
+  // spliced option and the banner would each be charged twice.
+  let bodyBudget: number | undefined;
+
+  function compactClamp(height: number | undefined) {
+    return compactMode
+      ? Math.min(height ?? COMPACT_BODY_MAX_LINES, COMPACT_BODY_MAX_LINES)
+      : height;
+  }
+
+  function wrappedRows(text: string, width: number) {
+    return wrapAnsi(text, width, { trim: false, hard: true }).split('\n')
+      .length;
+  }
+
   function availableBodyContentHeight() {
     if (options.length === 0) {
       // This should not happen in practice as options are always added before this is called.
@@ -225,12 +309,6 @@ export const ToolConfirmationMessage: React.FC<
     const HEIGHT_OPTIONS = compactMode
       ? 2 + (offersSwitchToDefault ? 1 : 0) + (hidesAlwaysAllow ? 0 : 1)
       : options.length + (offersSwitchToDefault ? 1 : 0);
-    const AUTO_MODE_FALLBACK_HEIGHT = autoModeFallback
-      ? wrapAnsi(`⚠ ${autoModeFallback.message}`, warningContentWidth, {
-          trim: false,
-          hard: true,
-        }).split('\n').length + 1
-      : 0;
 
     const surroundingElementsHeight =
       PADDING_OUTER_Y +
@@ -238,7 +316,7 @@ export const ToolConfirmationMessage: React.FC<
       HEIGHT_QUESTION +
       MARGIN_QUESTION_BOTTOM +
       HEIGHT_OPTIONS +
-      AUTO_MODE_FALLBACK_HEIGHT;
+      autoModeFallbackHeight;
     return Math.max(availableTerminalHeight - surroundingElementsHeight, 1);
   }
 
@@ -249,18 +327,20 @@ export const ToolConfirmationMessage: React.FC<
     1,
   );
 
+  // Measured once: every body budget reserves this much room for the auto-mode
+  // banner, and the outer cap adds it back because the banner is prepended to
+  // the body content after those budgets were taken.
+  const autoModeFallbackHeight = autoModeFallback
+    ? wrappedRows(`⚠ ${autoModeFallback.message}`, warningContentWidth) + 1
+    : 0;
+
   function warningsHeight(warnings: string[]): number {
     if (warnings.length === 0) return 0;
-    const wrappedRows = warnings.reduce(
-      (sum, warning) =>
-        sum +
-        wrapAnsi(`⚠ ${warning}`, warningContentWidth, {
-          trim: false,
-          hard: true,
-        }).split('\n').length,
+    const wrappedRowCount = warnings.reduce(
+      (sum, warning) => sum + wrappedRows(`⚠ ${warning}`, warningContentWidth),
       0,
     );
-    return wrappedRows + 1;
+    return wrappedRowCount + 1;
   }
 
   if (confirmationDetails.type === 'edit') {
@@ -314,13 +394,8 @@ export const ToolConfirmationMessage: React.FC<
     });
 
     const warnings = confirmationDetails.warnings ?? [];
-    let bodyHeight = availableBodyContentHeight();
-    if (compactMode) {
-      bodyHeight = Math.min(
-        bodyHeight ?? COMPACT_BODY_MAX_LINES,
-        COMPACT_BODY_MAX_LINES,
-      );
-    }
+    bodyBudget = compactClamp(availableBodyContentHeight());
+    const bodyHeight = bodyBudget;
 
     const constrainWarnings =
       warnings.length > 0 &&
@@ -458,15 +533,10 @@ export const ToolConfirmationMessage: React.FC<
     const warningsCount = warnings.length;
     const reservedWarningsHeight = warningsHeight(warnings);
 
-    let bodyContentHeight = availableBodyContentHeight();
+    bodyBudget = compactClamp(availableBodyContentHeight());
+    let bodyContentHeight = bodyBudget;
     if (bodyContentHeight !== undefined) {
       bodyContentHeight -= 2; // Account for padding;
-    }
-    if (compactMode) {
-      bodyContentHeight = Math.min(
-        bodyContentHeight ?? COMPACT_BODY_MAX_LINES,
-        COMPACT_BODY_MAX_LINES,
-      );
     }
     // Subtract the warnings footprint last so it applies in both the
     // normal-height and compact-cap paths. Floor at 1 so a long warning
@@ -534,40 +604,61 @@ export const ToolConfirmationMessage: React.FC<
       value: ToolConfirmationOutcome.Cancel,
     });
 
+    bodyBudget = compactClamp(availableBodyContentHeight());
     // Reserve one row for the "o open full plan" hint below the plan body.
-    const rawPlanHeight = compactMode
-      ? Math.min(
-          availableBodyContentHeight() ?? COMPACT_BODY_MAX_LINES,
-          COMPACT_BODY_MAX_LINES,
-        )
-      : availableBodyContentHeight();
     const planHeight =
-      rawPlanHeight === undefined ? undefined : Math.max(rawPlanHeight - 1, 1);
+      bodyBudget === undefined ? undefined : Math.max(bodyBudget - 1, 1);
+    // The plan view floors its ceiling at MINIMUM_MAX_HEIGHT and spends one of
+    // those rows on its own truncation cue, so below that it renders nothing.
+    const planDropped =
+      planHeight !== undefined && planHeight < MINIMUM_MAX_HEIGHT;
     bodyContent = (
-      <Box flexDirection="column" paddingX={1} marginLeft={1}>
-        <MarkdownDisplay
-          text={planProps.plan}
-          isPending={false}
-          availableTerminalHeight={planHeight}
-          contentWidth={contentWidth}
-          // Live pending items render inside MainContent's maxHeight +
-          // overflow="hidden" wrapper, and Ink clips the BOTTOM. Without a
-          // height-aware pre-slice, a long plan silently loses its tail
-          // (including the option buttons below). Opt into the same pre-slice
-          // the streaming path uses so the body respects the viewport budget.
-          // See #6867.
-          enforceHeightBudget
-        />
+      <Box
+        flexDirection="column"
+        paddingX={1}
+        marginLeft={1}
+        flexShrink={0}
+        maxHeight={bodyBudget}
+        overflow="hidden"
+      >
+        {planDropped ? null : (
+          <MarkdownDisplay
+            text={planProps.plan}
+            isPending={false}
+            availableTerminalHeight={planHeight}
+            contentWidth={contentWidth}
+            // Live pending items render inside MainContent's maxHeight +
+            // overflow="hidden" wrapper, and Ink clips the BOTTOM. Without a
+            // height-aware pre-slice, a long plan silently loses its tail
+            // (including the option buttons below). Opt into the same pre-slice
+            // the streaming path uses so the body respects the viewport budget.
+            // See #6867.
+            enforceHeightBudget
+          />
+        )}
         {/* The plan can be height-truncated above, and the user is about to
             approve it — always offer a way to read the WHOLE thing. See #7001. */}
         {planViewError ? (
-          <Text color={theme.status.error} wrap="truncate">
-            {planViewError}
-          </Text>
+          <Box flexShrink={0}>
+            <Text color={theme.status.error} wrap="truncate">
+              {planViewError}
+            </Text>
+          </Box>
         ) : (
-          <Text color={theme.text.secondary} wrap="truncate">
-            {t('o open full plan in editor')}
-          </Text>
+          <Box flexShrink={0}>
+            <Text color={theme.text.secondary} wrap="truncate">
+              {t('o open full plan in editor')}
+            </Text>
+          </Box>
+        )}
+        {/* Last so the row a one-row budget clips away is this announcement and
+            not the hint above it. Registering the overflow is what makes
+            ctrl-s, which lifts the budget and restores the whole plan, offer
+            itself. */}
+        {planDropped && (
+          <Box flexShrink={0}>
+            <OverflowNotice message={t('... plan hidden ...')} />
+          </Box>
         )}
       </Box>
     );
@@ -614,36 +705,173 @@ export const ToolConfirmationMessage: React.FC<
       key: 'No, suggest changes (esc)',
     });
 
+    bodyBudget = compactClamp(availableBodyContentHeight());
+    const urlList = displayUrls ? (infoProps.urls ?? []) : [];
+    // What the destination block costs besides the destinations themselves: a
+    // blank row above the list, then the "URLs to fetch:" label.
+    const URL_MARGIN_ROW = 1;
+    const URL_LABEL_ROW = 1;
+    // Measured from the source, not from the rendered link: every inline
+    // Markdown construct RenderInline strips adds characters, so this never
+    // counts a row short and cannot let the block grow past the cap.
+    const urlRowHeights =
+      bodyBudget === undefined
+        ? []
+        : urlList.map((url) => wrappedRows(` - ${url}`, warningContentWidth));
+    const totalUrlRows = urlRowHeights.reduce((sum, rows) => sum + rows, 0);
+    const takeWholeUrls = (room: number) => {
+      let count = 0;
+      let rows = 0;
+      while (
+        count < urlRowHeights.length &&
+        rows + (urlRowHeights[count] ?? 0) <= room
+      ) {
+        rows += urlRowHeights[count] ?? 0;
+        count++;
+      }
+      return { count, rows };
+    };
+    let urlFixedRows = 0;
+    let urlLimit = 0;
+    let urlRows = 0;
+    let urlFooterRows = 0;
+    if (urlList.length > 0) {
+      if (bodyBudget === undefined) {
+        urlFixedRows = URL_MARGIN_ROW + URL_LABEL_ROW;
+        urlLimit = urlList.length;
+        urlRows = totalUrlRows;
+      } else {
+        // The destinations are what the user is being asked to authorise, so
+        // they are costed before the prose that only describes the request.
+        // The block's own chrome is what gets handed back when the budget is
+        // tight: a label with no destination under it answers nothing, so the
+        // blank row goes before the label and the label before the first host.
+        // The footer is only charged once something is actually hidden, and the
+        // whole block disappears only when not even one whole host fits — at
+        // that point a fragment of a URL tells the user less than the prose.
+        for (const chrome of [
+          URL_MARGIN_ROW + URL_LABEL_ROW,
+          URL_LABEL_ROW,
+          0,
+        ]) {
+          if (chrome + totalUrlRows <= bodyBudget) {
+            urlFixedRows = chrome;
+            urlLimit = urlList.length;
+            urlRows = totalUrlRows;
+            break;
+          }
+          const taken = takeWholeUrls(bodyBudget - chrome - MARKER_ROW);
+          if (taken.count > 0) {
+            urlFixedRows = chrome;
+            urlLimit = taken.count;
+            urlRows = taken.rows;
+            urlFooterRows = taken.count < urlList.length ? MARKER_ROW : 0;
+            break;
+          }
+        }
+      }
+    }
+    const hiddenUrlCount = urlList.length - urlLimit;
+    const proseRows =
+      bodyBudget === undefined
+        ? 0
+        : wrappedRows(
+            infoProps.renderPromptAsPlainText
+              ? infoProps.prompt
+              : visibleInlineProse(infoProps.prompt),
+            warningContentWidth,
+          );
+    let proseBudget =
+      bodyBudget === undefined
+        ? undefined
+        : Math.max(bodyBudget - urlFixedRows - urlRows - urlFooterRows, 0);
+    // MaxSizedBox spends a row on its own footer, so it cannot show a line in a
+    // one-row budget; the pinned inline box can. A prose block that already
+    // fits renders no footer, so the floor never applies to it.
+    const proseFloor = infoProps.renderPromptAsPlainText
+      ? MINIMUM_MAX_HEIGHT
+      : 1;
+    const proseSkipped =
+      proseBudget !== undefined &&
+      proseRows > proseBudget &&
+      proseBudget < proseFloor;
+    let hiddenProseRows = 0;
+    if (
+      !proseSkipped &&
+      proseBudget !== undefined &&
+      proseRows > proseBudget &&
+      !infoProps.renderPromptAsPlainText
+    ) {
+      // Ink clips the pinned inline-Markdown box, so what disappeared is
+      // measured from the text it renders instead of being counted by the
+      // clipper.
+      hiddenProseRows = proseRows - Math.max(proseBudget - MARKER_ROW, 0);
+      proseBudget = Math.max(proseBudget - MARKER_ROW, 0);
+    } else if (proseSkipped && (proseBudget ?? 0) >= MARKER_ROW) {
+      // The prose is dropped whole rather than clipped, and the row it vacates
+      // pays for the announcement. When not even that row is left, the
+      // destinations keep it: they are what is being authorised.
+      hiddenProseRows = proseRows;
+    }
+
     bodyContent = (
       <Box flexDirection="column" paddingX={1} marginLeft={1}>
         {infoProps.renderPromptAsPlainText ? (
-          <MaxSizedBox
-            maxHeight={availableBodyContentHeight()}
-            maxWidth={warningContentWidth}
-            overflowDirection="bottom"
+          proseSkipped ? null : (
+            <MaxSizedBox
+              maxHeight={proseBudget}
+              maxWidth={warningContentWidth}
+              overflowDirection="bottom"
+            >
+              {infoProps.prompt.split('\n').map((line, index) => (
+                <Box key={index}>
+                  <Text color={theme.text.link} wrap="wrap">
+                    {line}
+                  </Text>
+                </Box>
+              ))}
+            </MaxSizedBox>
+          )
+        ) : proseSkipped ? null : (
+          <Box flexShrink={0} maxHeight={proseBudget} overflow="hidden">
+            <Text color={theme.text.link}>
+              <RenderInline
+                text={infoProps.prompt}
+                textColor={theme.text.link}
+              />
+            </Text>
+          </Box>
+        )}
+        {hiddenProseRows > 0 && (
+          <OverflowNotice
+            message={`... last ${hiddenProseRows} line${
+              hiddenProseRows === 1 ? '' : 's'
+            } hidden ...`}
+          />
+        )}
+        {urlLimit > 0 && (
+          <Box
+            flexDirection="column"
+            marginTop={urlFixedRows > URL_LABEL_ROW ? URL_MARGIN_ROW : 0}
           >
-            {infoProps.prompt.split('\n').map((line, index) => (
-              <Box key={index}>
-                <Text color={theme.text.link} wrap="wrap">
-                  {line}
+            {urlFixedRows >= URL_LABEL_ROW && (
+              <Text color={theme.text.primary}>{t('URLs to fetch:')}</Text>
+            )}
+            {urlList.slice(0, urlLimit).map((url, index) => (
+              <Box key={`${url}-${index}`} flexShrink={0}>
+                <Text wrap="wrap">
+                  {' '}
+                  - <RenderInline text={url} />
                 </Text>
               </Box>
             ))}
-          </MaxSizedBox>
-        ) : (
-          <Text color={theme.text.link}>
-            <RenderInline text={infoProps.prompt} textColor={theme.text.link} />
-          </Text>
-        )}
-        {displayUrls && infoProps.urls && infoProps.urls.length > 0 && (
-          <Box flexDirection="column" marginTop={1}>
-            <Text color={theme.text.primary}>{t('URLs to fetch:')}</Text>
-            {infoProps.urls.map((url) => (
-              <Text key={url}>
-                {' '}
-                - <RenderInline text={url} />
-              </Text>
-            ))}
+            {hiddenUrlCount > 0 && (
+              <OverflowNotice
+                message={`... ${hiddenUrlCount} more URL${
+                  hiddenUrlCount === 1 ? '' : 's'
+                } hidden ...`}
+              />
+            )}
           </Box>
         )}
       </Box>
@@ -661,17 +889,6 @@ export const ToolConfirmationMessage: React.FC<
   } else {
     // mcp tool confirmation
     const mcpProps = confirmationDetails as ToolMcpConfirmationDetails;
-
-    bodyContent = (
-      <Box flexDirection="column" paddingX={1} marginLeft={1}>
-        <Text color={theme.text.link}>
-          {t('MCP Server: {{server}}', { server: mcpProps.serverName })}
-        </Text>
-        <Text color={theme.text.link}>
-          {t('Tool: {{tool}}', { tool: mcpProps.toolName })}
-        </Text>
-      </Box>
-    );
 
     question = t(
       'Allow execution of MCP tool "{{tool}}" from server "{{server}}"?',
@@ -713,6 +930,42 @@ export const ToolConfirmationMessage: React.FC<
       value: ToolConfirmationOutcome.Cancel,
       key: 'No, suggest changes (esc)',
     });
+
+    // Sized after the options exist because availableBodyContentHeight()
+    // charges the option list.
+    bodyBudget = compactClamp(availableBodyContentHeight());
+    bodyContent = (
+      <Box flexDirection="column" paddingX={1} marginLeft={1}>
+        {bodyBudget !== undefined && bodyBudget < MINIMUM_MAX_HEIGHT ? (
+          // MaxSizedBox floors its ceiling at MINIMUM_MAX_HEIGHT and spends one
+          // of those rows on its footer, so under a one-row budget it renders
+          // more than the cap and the outer clip takes the footer away. Pin the
+          // row that names the tool being authorised instead.
+          <Box flexShrink={0} maxHeight={bodyBudget} overflow="hidden">
+            <Text color={theme.text.link} wrap="wrap">
+              {t('Tool: {{tool}}', { tool: mcpProps.toolName })}
+            </Text>
+          </Box>
+        ) : (
+          <MaxSizedBox
+            maxHeight={bodyBudget}
+            maxWidth={warningContentWidth}
+            overflowDirection="bottom"
+          >
+            <Box>
+              <Text color={theme.text.link} wrap="wrap">
+                {t('MCP Server: {{server}}', { server: mcpProps.serverName })}
+              </Text>
+            </Box>
+            <Box>
+              <Text color={theme.text.link} wrap="wrap">
+                {t('Tool: {{tool}}', { tool: mcpProps.toolName })}
+              </Text>
+            </Box>
+          </MaxSizedBox>
+        )}
+      </Box>
+    );
   }
 
   if (offersSwitchToDefault) {
@@ -804,13 +1057,22 @@ export const ToolConfirmationMessage: React.FC<
     <Box flexDirection="column" padding={outerPadding} width={outerWidth}>
       {/* The cap also covers bodies that do not cap themselves (inline-Markdown
           info prompts, long MCP labels). Ink clips the bottom, so an uncapped
-          body pushes the question line and the options out of the viewport. */}
+          body pushes the question line and the options out of the viewport.
+          Reuse the budget the body branch already sized against instead of
+          recomputing it: at this point `options` already contains the spliced
+          auto-mode "switch to default" row and the banner has been folded into
+          bodyContent, so a second availableBodyContentHeight() would charge
+          both of them twice and cut the body below what it was sized for. */}
       <Box
         flexGrow={1}
         flexShrink={1}
         overflow="hidden"
         marginBottom={sectionMargin}
-        maxHeight={availableBodyContentHeight()}
+        maxHeight={
+          bodyBudget === undefined
+            ? undefined
+            : bodyBudget + autoModeFallbackHeight
+        }
       >
         {bodyContent}
       </Box>
