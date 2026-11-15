@@ -5102,6 +5102,12 @@ export function registerSessionRoutes(
             );
             const releaseOwnership =
               await acquireWorktreeOwnershipOp(realTarget);
+            // The reset-pending fence is a non-refcounted set: only clear it
+            // in the finally if THIS request armed it. A refusal that exits
+            // before arming (superseded sidecar, marker mismatch, ...) must
+            // not release a fence another operation (e.g. a refused reset)
+            // is still holding.
+            let barrierArmed = false;
             try {
               const lockedRead = await readWorktreeSessionStrict(sidecarPath);
               if (lockedRead.state !== 'valid') {
@@ -5138,6 +5144,7 @@ export function registerSessionRoutes(
                 );
               }
               runtime.bridge.setSessionResetPending(storageSessionId);
+              barrierArmed = true;
               let localCwd: string;
               try {
                 localCwd = fs.realpathSync(sidecar.originalCwd);
@@ -5471,7 +5478,9 @@ export function registerSessionRoutes(
                 currentCwd: relocatedCwd,
               });
             } finally {
-              runtime.bridge.clearSessionResetPending?.(storageSessionId);
+              if (barrierArmed) {
+                runtime.bridge.clearSessionResetPending?.(storageSessionId);
+              }
               releaseOwnership();
             }
             return;
@@ -5487,6 +5496,11 @@ export function registerSessionRoutes(
             throw new WorktreeResetInvalidStateError(storageSessionId);
           }
           const releaseOwnership = await acquireWorktreeOwnershipOp(sourceCwd);
+          // Only clear the reset-pending fence in the finally if THIS
+          // request armed it (the set is non-refcounted); the "already has a
+          // managed worktree" 409 exits before arming and must not release a
+          // fence a concurrent transfer is holding.
+          let barrierArmed = false;
           try {
             // Decide inside the ownership lock, mirroring the to=local and
             // worktree-branch siblings: a pre-read outside it let two
@@ -5518,6 +5532,7 @@ export function registerSessionRoutes(
               throw new Error('Bridge does not support handoff serialization');
             }
             runtime.bridge.setSessionResetPending(storageSessionId);
+            barrierArmed = true;
             const wtBusySummary =
               runtime.bridge.getSessionSummary(storageSessionId);
             if (
@@ -5675,7 +5690,9 @@ export function registerSessionRoutes(
               throw error;
             }
           } finally {
-            runtime.bridge.clearSessionResetPending?.(storageSessionId);
+            if (barrierArmed) {
+              runtime.bridge.clearSessionResetPending?.(storageSessionId);
+            }
             releaseOwnership();
           }
         }),

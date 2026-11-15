@@ -263,6 +263,15 @@ function makeFixture(
     setEffectiveCwd(cwd: string) {
       effectiveCwd = cwd;
     },
+    // Simulate a fence armed by ANOTHER operation (e.g. a refused reset):
+    // added to the set without a 'set' call from this request, so the test
+    // can assert a refusing handoff never clears it.
+    seedResetPending(id: string) {
+      resetPending.add(id);
+    },
+    isResetPending(id: string) {
+      return resetPending.has(id);
+    },
     async createDetachedWorktree(): Promise<void> {
       const result = await service.createUserWorktree(slug, 'main', {
         detached: true,
@@ -357,6 +366,10 @@ describe('POST /session/:id/worktree-handoff', () => {
     const fixture = makeFixture();
     fixture.writeTranscript();
     await fixture.createDetachedWorktree();
+    // A concurrent transfer may hold this session's fence; the "already has
+    // a managed worktree" 409 exits before arming, so it must not release a
+    // fence this request never armed (R8-1).
+    fixture.seedResetPending(fixture.sessionId);
 
     const res = await request(fixture.app)
       .post(`/session/${fixture.sessionId}/worktree-handoff`)
@@ -364,6 +377,11 @@ describe('POST /session/:id/worktree-handoff', () => {
 
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('worktree_handoff_unsupported');
+    expect(fixture.resetPendingCalls).not.toContainEqual([
+      'clear',
+      fixture.sessionId,
+    ]);
+    expect(fixture.isResetPending(fixture.sessionId)).toBe(true);
   });
 
   it('hands a worktree session back to local, carrying commits and dirty state', async () => {
@@ -473,6 +491,11 @@ describe('POST /session/:id/worktree-handoff', () => {
         supersededBy: randomUUID(),
       },
     );
+    // A refused reset deliberately leaves this fence armed to stop the
+    // superseded session writing into the replacement's checkout. This
+    // handoff refuses BEFORE arming its own fence, so it must not release
+    // the one the reset is holding (R8-1).
+    fixture.seedResetPending(fixture.sessionId);
 
     const res = await request(fixture.app)
       .post(`/session/${fixture.sessionId}/worktree-handoff`)
@@ -480,6 +503,11 @@ describe('POST /session/:id/worktree-handoff', () => {
 
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('worktree_reset_invalid_state');
+    expect(fixture.resetPendingCalls).not.toContainEqual([
+      'clear',
+      fixture.sessionId,
+    ]);
+    expect(fixture.isResetPending(fixture.sessionId)).toBe(true);
   });
 
   it('hands a pristine-repo session back to local with an auto branch', async () => {

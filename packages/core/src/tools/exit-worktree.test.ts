@@ -355,6 +355,53 @@ describe('ExitWorktreeTool', () => {
       await expect(fs.access(wtPath)).resolves.toBeUndefined();
     });
 
+    it('removes a worktree switched to a user branch whose commits survive (R8-2)', async () => {
+      // A named creation owns the slug ref; the agent then switches to a
+      // user branch and commits there. Removal deletes the directory and
+      // the slug ref (still at base, merged) — never feat/x — so it must
+      // not refuse on feat/x's unmerged commits.
+      const service = new GitWorktreeService(repoRoot);
+      const base = execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      }).trim();
+      const created = await service.createUserWorktree('switched', 'main');
+      expect(created.success).toBe(true);
+      const wtPath = created.worktree!.path;
+      await writeWorktreeSessionMarker(wtPath, 'session-creator');
+      await writeWorktreeSession(
+        new SessionService(repoRoot).getWorktreeSessionPath('session-creator'),
+        {
+          slug: 'switched',
+          worktreePath: wtPath,
+          worktreeBranch: worktreeBranchForSlug('switched'),
+          originalCwd: repoRoot,
+          originalBranch: 'main',
+          originalHeadCommit: base,
+          worktreeBase: base,
+        },
+      );
+      execFileSync('git', ['switch', '-c', 'feat/x'], { cwd: wtPath });
+      await fs.writeFile(path.join(wtPath, 'new.txt'), 'work\n');
+      execFileSync('git', ['add', '.'], { cwd: wtPath });
+      execFileSync('git', ['commit', '-q', '-m', 'work', '--no-verify'], {
+        cwd: wtPath,
+      });
+      const result = await exitWith(
+        {
+          getTargetDir: () => repoRoot,
+          getSessionId: () => 'session-creator',
+          getSessionService: () => new SessionService(repoRoot),
+        } as unknown as Config,
+        { name: 'switched', action: 'remove', discard_changes: true },
+      );
+      expect(result.error).toBeUndefined();
+      await expect(fs.access(wtPath)).rejects.toBeDefined();
+      const branches = listBranches(repoRoot);
+      expect(branches).toContain('feat/x');
+      expect(branches).not.toContain(worktreeBranchForSlug('switched'));
+    });
+
     it('judges unmerged commits against worktreeBase, not originalHeadCommit (R5-4)', async () => {
       // The branch-route shape: a detached worktree created at a sibling
       // checkout's HEAD records originalHeadCommit = repo top HEAD. With

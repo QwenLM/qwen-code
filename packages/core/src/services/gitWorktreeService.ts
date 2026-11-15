@@ -4278,11 +4278,15 @@ export class GitWorktreeService {
     const branchName = worktreeBranchForSlug(slug);
     try {
       const git = await this.getGit();
-      // Judge by the checkout's own HEAD and its actual branch: a session
-      // worktree branched in place ("Create branch here") sits on a user
-      // name, never on worktree-<slug>, so a slug-ref probe would fail
-      // and fail-closed forever. When the checkout is unreadable (already
-      // removed, etc.), fall back to the slug ref below.
+      // Judge whether REMOVAL would lose commits. Removal deletes the
+      // checkout directory and (when owned) the slug-derived ref
+      // worktree-<slug> — never a user branch the checkout was switched to
+      // ("Create branch here", `git switch -c`). So the ref to exclude from
+      // the reachability test is the slug ref, not the checkout's current
+      // branch: a checkout sitting on feat/x keeps feat/x after removal,
+      // and feat/x covering the tip means nothing is lost. When the
+      // checkout is unreadable (already removed, etc.), fall back to the
+      // slug ref below.
       let ownRef: string | null = null;
       let tipSha = '';
       try {
@@ -4290,9 +4294,11 @@ export class GitWorktreeService {
         const wtGit = simpleGit(this.getUserWorktreePath(slug)).env(gitEnv());
         const abbrev = (await wtGit.revparse(['--abbrev-ref', 'HEAD'])).trim();
         tipSha = (await wtGit.revparse(['HEAD'])).trim();
-        if (abbrev !== 'HEAD') {
-          ownRef = `refs/heads/${abbrev}`;
-        } else if (baseCommit && tipSha) {
+        // The creation-base shortcut applies to EVERY shape: a checkout
+        // still at (or behind) its creation base added no commits, even
+        // when the base is unreachable from any branch (a tag checkout, or
+        // a branch since moved/deleted).
+        if (baseCommit && tipSha) {
           if (tipSha === baseCommit) return false;
           const count = (
             await wtGit
@@ -4300,6 +4306,9 @@ export class GitWorktreeService {
               .catch(() => '')
           ).trim();
           if (count === '0') return false;
+        }
+        if (abbrev !== 'HEAD') {
+          ownRef = `refs/heads/${branchName}`;
         }
       } catch {
         // Fall through to the branch-ref probe.
@@ -4310,9 +4319,9 @@ export class GitWorktreeService {
       }
       if (!tipSha) return true;
       // List every local branch and remote-tracking ref whose tip is at
-      // or above the worktree's tip. If anything other than the worktree's
-      // own ref appears, the commits are covered. A detached HEAD has no
-      // own ref to exclude.
+      // or above the worktree's tip. If anything other than the slug ref
+      // removal may delete appears, the commits are covered. A detached
+      // HEAD has no own ref to exclude.
       const refs = (
         await git.raw([
           'for-each-ref',

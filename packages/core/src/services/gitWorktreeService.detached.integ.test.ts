@@ -240,6 +240,38 @@ describe('GitWorktreeService — detached managed worktrees', () => {
     await expect(fs.lstat(worktree.path)).rejects.toThrow();
   });
 
+  it('hasUnmergedWorktreeCommits judges a branched detached checkout by the slug ref (R8-2)', async () => {
+    // A commit B reachable only from a tag (main reset back below), so the
+    // reachability test alone would misread it as unmerged work.
+    const base = git(repoRoot, 'rev-parse', 'HEAD');
+    await fs.writeFile(path.join(repoRoot, 'tagged.txt'), 'b\n');
+    git(repoRoot, 'add', 'tagged.txt');
+    git(repoRoot, 'commit', '-qm', 'B', '--no-verify');
+    const bCommit = git(repoRoot, 'rev-parse', 'HEAD');
+    git(repoRoot, 'tag', 'v1');
+    git(repoRoot, 'reset', '--hard', base);
+    // Detached creation at B, then "Create branch here" -> feat/x at B.
+    const created = await service.createUserWorktree('sess-tag', bCommit, {
+      detached: true,
+    });
+    expect(created.success).toBe(true);
+    const wt = created.worktree!.path;
+    await service.createWorktreeBranch(wt, 'feat/x');
+    // Zero commits at the creation base: the creation-base shortcut applies
+    // to the named shape too, so removal loses nothing.
+    expect(await service.hasUnmergedWorktreeCommits('sess-tag', bCommit)).toBe(
+      false,
+    );
+    // A commit on feat/x survives removal — removal deletes the slug ref
+    // (still at B), never feat/x — so removal still loses nothing.
+    await fs.writeFile(path.join(wt, 'work.txt'), 'work\n');
+    git(wt, 'add', 'work.txt');
+    git(wt, 'commit', '-qm', 'agent work', '--no-verify');
+    expect(await service.hasUnmergedWorktreeCommits('sess-tag', bCommit)).toBe(
+      false,
+    );
+  });
+
   it('removeUserWorktree force delete opts out of the detached protection', async () => {
     const worktree = await createDetached('sess-force');
     await fs.writeFile(path.join(worktree.path, 'work.txt'), 'work\n');
@@ -288,18 +320,20 @@ describe('GitWorktreeService — detached managed worktrees', () => {
     );
   });
 
-  it('hasUnmergedWorktreeCommits judges an in-place-branched worktree by its HEAD', async () => {
+  it('hasUnmergedWorktreeCommits does not block removal for commits on a surviving user branch (R8-2)', async () => {
     const worktree = await createDetached('sess-branched');
     await service.createWorktreeBranch(worktree.path, 'feat/from-detached');
     await fs.writeFile(path.join(worktree.path, 'work.txt'), 'work\n');
     git(worktree.path, 'add', 'work.txt');
     git(worktree.path, 'commit', '-qm', 'agent work', '--no-verify');
-    // Unique commit: unmerged.
+    // The unique commit lives on feat/from-detached, a user branch removal
+    // never deletes (the detached creation never owned the slug ref). The
+    // commit survives the directory removal, so removal loses nothing —
+    // the probe must not fail-closed on the checkout's current branch.
     expect(await service.hasUnmergedWorktreeCommits('sess-branched')).toBe(
-      true,
+      false,
     );
-    // Merge it into main: the slug ref never existed, but the probe must
-    // now see the commit as covered (previously fail-closed forever).
+    // Merging into main keeps it covered.
     const tip = git(worktree.path, 'rev-parse', 'HEAD');
     git(repoRoot, 'merge', '-q', '--no-edit', tip);
     expect(await service.hasUnmergedWorktreeCommits('sess-branched')).toBe(
