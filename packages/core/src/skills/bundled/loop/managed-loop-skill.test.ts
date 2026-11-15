@@ -228,6 +228,19 @@ describe('managed loop skill parity', () => {
     );
   });
 
+  it('rejects a non-expanding sentinel in every profile, including wakeup', () => {
+    const mutated = body.replace(
+      '# /loop — run a prompt repeatedly',
+      '# /loop — run a prompt repeatedly\n\n<<autonomous-loop>>',
+    );
+    expect(mutated).not.toBe(body);
+    for (const profile of ['union', 'cron', 'wakeup'] as const) {
+      expect(() =>
+        buildManagedLoopSkill(profile, mutated, description),
+      ).toThrow(/non-expanding sentinel/);
+    }
+  });
+
   it('throws when the loop.md fallback sentence drifts (fail-closed cut)', () => {
     const mutated = body.replace(
       'is absent at fire time',

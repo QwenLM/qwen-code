@@ -409,13 +409,13 @@ export function buildManagedLoopSkill(
       'Managed loop body still claims the workspace project file.',
     );
   }
-  // Cron fires expand no sentinel at all; the union may keep only the
-  // wakeup-expanded -dynamic forms.
+  // Cron fires expand no sentinel at all; the union and wakeup bodies may keep
+  // only the wakeup-expanded -dynamic forms.
   const sentinel =
     profile === 'cron' ? /<<[^>]+>>/ : /<<loop\.md>>|<<autonomous-loop>>/;
-  if (profile !== 'wakeup' && sentinel.test(body)) {
+  if (sentinel.test(body)) {
     throw new Error(
-      'Managed cron path still teaches a non-expanding sentinel.',
+      `Managed ${profile} loop body teaches a non-expanding sentinel.`,
     );
   }
   return { description, body };

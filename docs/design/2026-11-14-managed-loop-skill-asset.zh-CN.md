@@ -82,7 +82,7 @@ skill 发布有两个生产者、一个消费者；Harness 只是消费者。
 
 - `packages/core/src/managed-runtime/contracts/` — 三个生成的 managed loop JSON sidecar（description + body；union / cron-only / wakeup-only）加一份逐字 bundled-body 参考（用于识别 Web Shell 导入），拷贝到 Java。
 - `packages/core/src/skills/bundled/loop/managed-loop-skill.ts` — `buildManagedLoopSkill(profile, bundledBody, frontmatterDescription)` 生成器（措辞替换 + 章节选择）；同址一致性测试把生成 sidecar 绑回 `SKILL.md` 并在每个 profile 间钉住共享 steward 段（不改 `SKILL.md` 本身）。`regenerate-managed-loop-assets.ts` 是提交的再生成入口。
-- `packages/managed-agent-server/persistence/.../ManagedLoopSkill.java` — 纯 profile-到-sidecar 选择器（带缓存）、`mergeInto`（仅覆盖 bundled + 能力门 + 容量跳过时保留 caller loop）与子会话 `childCatalog`（按 definition 来源重选）；读 classpath sidecar，不做字符串组合。
+- `packages/managed-agent-server/persistence/.../ManagedLoopSkill.java` — 纯 profile-到-sidecar 选择器（带缓存）、`mergeInto`（仅覆盖 bundled + 能力门 + 容量跳过时丢弃 bundled 导入）与子会话 `childCatalog`（按 definition 来源重选）；读 classpath sidecar，不做字符串组合。
 - `packages/managed-agent-server/persistence/.../AgentSessionAdmissions.java` — 合并 pinned definition 的 skills（携带于 `AgentPin`，在 `resolveAgentPin` 解析一次）、调用 `mergeInto`（复用其已校验目录）、仅在 effective 目录非空且有 caller 贡献或注入了变体时写行，并在保存子会话目录前按父 definition 来源重选继承的 loop（空的解析结果不写行）。
 - `packages/managed-agent-server/contracts/.../SessionCreationCommand.java` 与 `control-plane/.../ManagedAgentService.java` — 从协商的 Harness 传入 `sessionSkillsSupported` 能力标志。
 - `packages/managed-agent-server/contracts/pom.xml` — 把生成 sidecar 拷贝到 Java classpath。
@@ -102,12 +102,12 @@ skill 发布有两个生产者、一个消费者；Harness 只是消费者。
 - **单一来源漂移。** 两个提交 body（本地 + managed）可能分叉。缓解：D3 的一致性测试从 bundled 源派生 managed 资产。
 - **幂等交互。** 在请求 digest 之后注入不得改变重放结果。缓解：重放测试断言相同快照。
 - **caller 导入的本地 `loop`。** Web Shell 原样提交 bundled `loop`，故服务端变体替换它（D5）；测试钉住替换。仅替换 bundled 导入：用户自定义的 caller `loop` 在任何 profile 上保留；无 creator 的 profile 上仅丢弃 bundled 导入，故不会发布点名未声明工具的 body。
-- **目录容量。** 变体放不进 published 256 条 / 2 MiB 上限时跳过注入（而非拒绝），并保留 caller 的 bundled loop 而非丢失；单测钉住 256 条时的跳过与保留。
+- **目录容量。** 变体放不进 published 256 条 / 2 MiB 上限时跳过注入（而非拒绝）；bundled caller 导入保持丢弃，使创建在容量内成功而非被拒绝。测试钉住 256 条时的跳过，以及准入接受所得目录（去掉变体后本身已超容的目录仍被拒绝）。
 - **snapshot 子会话。** snapshot 子会话为只读；服务端 loop 变体在 save 前被丢弃（它点名 READ 缺失的 creator），definition 自带的 loop 原样继承。来源取自父会话 pinned definition，而非 body 文本，故 sidecar 重生成后仍正确。
 
 ## 验证计划
 
-- 准入矩阵：shell/3、files/4、team-lead/2、shell/4 各收到一个变体，其 body 恰好点名该 profile 声明的 creator；READ 与无 creator profile 不得到（caller 导入的 `loop` 被剥离）。
+- 准入矩阵：携带 creator 的 definition 收到一个变体，其 body 恰好点名该 profile 声明的 creator（在 files/4 上实测，它是可定义选择的 profile；选择器与一致性测试覆盖 shell/3、team-lead/2、shell/4）。READ 与无 creator profile 不得到服务端变体：仅逐字 bundled `loop` 导入被替换（携带 creator）或丢弃（无 creator）；用户自写的 `loop` 被保留。
 - 空 caller-skills：pinned 到携带 creator profile 且无 caller skills 的 definition 仍收到变体。（内置 `qwen-code` agent 解析为 shell/1 或 files/1，正确地不得到。）
 - 门无关性：Session Skills 能力关闭时不写服务端行，保持创建期行为。
 - 重放：重驱动的创建注入相同变体、复现相同 receipt digest。

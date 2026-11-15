@@ -252,7 +252,7 @@ later snapshot read would reject.
   the committed regeneration entry point.
 - `packages/managed-agent-server/persistence/.../ManagedLoopSkill.java` — the
   pure profile-to-sidecar selector (memoized), `mergeInto` (bundled-only override
-  - capability gate + capacity skip that keeps the caller loop), and
+  - capability gate + capacity skip that drops the bundled import), and
     `childCatalog` (definition-provenance re-selection for children); reads the
     classpath sidecars, no string composition.
 - `packages/managed-agent-server/persistence/.../AgentSessionAdmissions.java` —
@@ -304,8 +304,10 @@ later snapshot read would reject.
   on every profile, and on a creator-less profile only the bundled import is
   dropped, so no body naming undeclared tools is published.
 - **Catalog capacity.** The injection is skipped (not refused) when the variant
-  cannot fit the published 256-entry / 2 MiB cap, and the caller's bundled loop is
-  kept rather than lost; unit tests pin the skip at 256 entries and the keep.
+  cannot fit the published 256-entry / 2 MiB cap; the bundled caller import stays
+  dropped so the creation succeeds within capacity rather than being refused.
+  Tests pin the skip at 256 entries and that the admission accepts the resulting
+  catalog (a catalog already over capacity without the variant is still refused).
 - **Snapshot children.** A snapshot child is read-only; the server loop variant is
   dropped before save (it names creators READ lacks) while a definition-authored
   loop inherits unchanged. Provenance comes from the parent's pinned definition,
@@ -313,9 +315,12 @@ later snapshot read would reject.
 
 ## Validation plan
 
-- Admission matrix: each of shell/3, files/4, team-lead/2, shell/4 receives a
-  variant whose body names exactly the creators that profile declares; READ and
-  a no-creator profile receive none (a caller-imported `loop` is stripped).
+- Admission matrix: a creator-bearing definition receives a variant whose body
+  names exactly the creators that profile declares (exercised at files/4, the
+  definition-selectable profile; the selector and parity tests cover shell/3,
+  team-lead/2 and shell/4). READ and a no-creator profile receive no server
+  variant: only the verbatim bundled `loop` import is replaced (creator-bearing)
+  or dropped (creator-less); a user-authored `loop` is preserved.
 - Empty-caller-skills: a definition pinned to a creator-bearing profile with no
   caller skills still receives the variant. (The built-in `qwen-code` agent
   resolves to shell/1 or files/1 and correctly receives none.)

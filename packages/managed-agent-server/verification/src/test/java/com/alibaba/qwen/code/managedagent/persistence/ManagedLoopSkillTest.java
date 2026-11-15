@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.catalog.AgentDefinitionExtensions;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -182,9 +183,11 @@ class ManagedLoopSkillTest {
     }
 
     @Test
-    void overCapacitySkipKeepsTheCallersBundledLoop() throws Exception {
+    void overCapacitySkipDropsTheBundledLoopSoTheCreationStillSucceeds() throws Exception {
         // A definition skill plus a full caller catalog puts the merged catalog over
-        // the entry cap once the variant is added; the skip must keep the caller loop.
+        // the entry cap once the variant is added. The skip must leave the bundled
+        // import dropped, not restore it: restoring would push merged back over the
+        // cap and the admission validation below would refuse the creation.
         var defSkill = Map.<String, Object>of("name", "def", "description", "d", "body", "b");
         var caller = new java.util.ArrayList<Map<String, Object>>();
         for (int i = 0; i < 255; i++) {
@@ -194,7 +197,12 @@ class ManagedLoopSkillTest {
         var merged = new java.util.ArrayList<>(java.util.List.of(defSkill));
         var injected = ManagedLoopSkill.mergeInto(merged, caller, WorkspaceToolProfiles.FILES_V4, true);
         assertThat(injected).isNull();
-        assertThat(merged).extracting(s -> s.get("name")).contains("loop");
+        assertThat(merged).hasSize(256);
+        assertThat(merged).extracting(s -> s.get("name")).doesNotContain("loop");
+        // The admission validates the merged catalog when no variant was injected;
+        // it must accept the within-cap catalog rather than refuse the creation.
+        var validated = AgentDefinitionExtensions.sessionSkills(merged);
+        assertThat(validated).hasSize(256);
     }
 
     @Test

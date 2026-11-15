@@ -106,9 +106,11 @@ final class ManagedLoopSkill {
      * caller import is dropped so a creator-less Session never publishes a body
      * naming tools it lacks. The injection is gated on the negotiated Session
      * Skills capability and on the catalog capacity: if the variant cannot fit
-     * within the published 256-entry / 2 MiB limits it is skipped and the caller's
-     * bundled loop is kept, rather than refusing the creation or losing a skill.
-     * Kept here so the admission class does not grow.
+     * within the published 256-entry / 2 MiB limits it is skipped and the bundled
+     * caller import stays dropped, so the creation succeeds within capacity
+     * rather than being refused (a catalog already over capacity without the
+     * variant is still refused by the admission validation). Kept here so the
+     * admission class does not grow.
      */
     static List<Map<String, Object>> mergeInto(List<Map<String, Object>> merged,
             List<Map<String, Object>> callerSkills, String profile,
@@ -150,11 +152,11 @@ final class ManagedLoopSkill {
         try {
             validated = AgentDefinitionExtensions.sessionSkills(candidate);
         } catch (ManagedAgentException overCapacity) {
-            // Skip the injection but keep the caller's bundled loop: the catalog
-            // must not lose a skill just because the variant could not fit.
-            if (callerLoop != null) {
-                merged.add(callerLoop);
-            }
+            // Skip the injection and leave the bundled import dropped: restoring
+            // it would push the catalog back over capacity and the admission
+            // validation would refuse the creation. The bundled import is the
+            // server's to manage (a creator-less profile drops it too), so the
+            // creation succeeds within capacity instead of losing every skill.
             return null;
         }
         merged.add(loop);

@@ -511,6 +511,33 @@ class ManagedSessionCreationSkillsTest {
         }
     }
 
+    @Test
+    void overCapacityCreationDropsTheBundledLoopAndStillSucceeds() throws Exception {
+        Object target = org.springframework.test.util.AopTestUtils.getUltimateTargetObject(store);
+        Object previousProfiles = com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "definitionToolProfiles");
+        com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles",
+                List.of("hosted-workspace-files/4"));
+        try {
+            // A definition skill plus a full caller catalog (255 + the bundled loop)
+            // puts the merged catalog over the entry cap once the variant is added.
+            // The creation must still succeed: the bundled import is dropped rather
+            // than restored, leaving a within-cap catalog the admission accepts.
+            var defSkill = Map.<String, Object>of("name", "default", "description", "Default", "body", "DEFAULT");
+            String agent = defineProfile("hosted-workspace-files/4", "over-cap-agent", List.of(defSkill));
+            var caller = new java.util.ArrayList<Map<String, Object>>();
+            for (int i = 0; i < 255; i++) {
+                caller.add(Map.of("name", "s" + i, "description", "d", "body", "b"));
+            }
+            caller.add(Map.<String, Object>of("name", "loop", "description", "Local", "body", bundledLoopBody()));
+            String session = create(request(agent, caller), "over-cap", false).get("id").asText();
+            var catalog = snapshots.snapshot(tenant, session);
+            assertThat(catalog).hasSize(256);
+            assertThat(catalog).extracting(s -> s.get("name")).doesNotContain("loop");
+        } finally {
+            com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles", previousProfiles);
+        }
+    }
+
     private static String loopBody(List<Map<String, Object>> catalog) {
         return (String) catalog.stream().filter(s -> "loop".equals(s.get("name")))
                 .findFirst().orElseThrow().get("body");
