@@ -19,6 +19,7 @@ import {
   _setParserFailedForTesting,
 } from './shellAstParser.js';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
+import { matchesRule, parseRule } from '../permissions/rule-parser.js';
 
 // One expect per command, in order.
 async function expectRules(command: string, rules: string[]) {
@@ -793,6 +794,59 @@ describe('classifyShellCommandSafety', () => {
 // =========================================================================
 
 describe('extractCommandRules', () => {
+  describe('arguments after redirections', () => {
+    it.each(['>', '>>', '&>', '2>', '<'])(
+      'keeps the same git push rule across %s',
+      async (redirect) => {
+        const rules = await extractCommandRules(
+          `git ${redirect} /dev/null push origin main`,
+        );
+        expect(rules).toEqual(
+          await extractCommandRules('git push origin main'),
+        );
+        expect(rules).toEqual(['git push *']);
+        const rule = parseRule(`Bash(${rules[0]})`);
+        expect(
+          matchesRule(rule, 'run_shell_command', 'git push origin other'),
+        ).toBe(true);
+        expect(matchesRule(rule, 'run_shell_command', 'git reset --hard')).toBe(
+          false,
+        );
+        expect(matchesRule(rule, 'run_shell_command', 'git clean -fdx')).toBe(
+          false,
+        );
+      },
+    );
+
+    it.each<[string, string[]]>([
+      ['git branch > out.txt -D main', ['git branch *']],
+      ['npm > /dev/null install express', ['npm install *']],
+      ['docker > /dev/null compose up -d', ['docker compose up *']],
+      ['git > out push > err origin', ['git push *']],
+      ['git > out push 2>&1 origin main', ['git push *']],
+      ['cat <<EOF foo\nx\nEOF', ['cat *']],
+      ['git <<EOF > out push origin\nx\nEOF', ['git push *']],
+      ['git <<EOF push origin\nx\nEOF', ['git push *']],
+      ['git > out', ['git']],
+      ['git >&-', ['git']],
+      ['git <&-', ['git']],
+      ['git <<< text push origin', ['git push *']],
+      ['>out git push origin main', ['git push *']],
+      ['(git push origin) > out', ['git push *']],
+    ])('extracts complete arguments from %j', expectRules);
+
+    it.each([
+      'git <&- push origin',
+      'git >&- push origin',
+      'git <<EOF push > out origin\nx\nEOF',
+    ])(
+      'offers no rule when a redirect contains a parse error: %j',
+      async (command) => {
+        expect(await extractCommandRules(command)).toEqual([]);
+      },
+    );
+  });
+
   describe('simple commands', () => {
     it.each<[string, string, string[]]>([
       [

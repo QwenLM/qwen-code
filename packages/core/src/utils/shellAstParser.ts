@@ -1249,6 +1249,47 @@ async function isShellCommandReadOnlyInternal(
 // Public API: extractCommandRules
 // ---------------------------------------------------------------------------
 
+/** Words after a redirection belong to its command, not to the target. */
+function getRedirectRuleArguments(redirect: SyntaxNode): SyntaxNode[] | null {
+  if (redirect.hasError) return null;
+  if (redirect.type === 'file_redirect') {
+    const operator = redirect.children.find(
+      (child) => child.type !== 'file_descriptor',
+    );
+    if (!operator) return null;
+    // Descriptor-close operators consume no target word; every other file
+    // redirection consumes exactly one.
+    const ownWords = ['<&-', '>&-'].includes(operator.type) ? 0 : 1;
+    const destinations = redirect.childrenForFieldName('destination');
+    return destinations.length < ownWords ? null : destinations.slice(ownWords);
+  }
+  // A here-string's input stays in its redirect node; trailing arguments
+  // are already fields on the command itself.
+  if (redirect.type === 'herestring_redirect') return [];
+  if (redirect.type !== 'heredoc_redirect') return null;
+
+  const args: SyntaxNode[] = [];
+  for (let index = 0; index < redirect.childCount; index++) {
+    const child = redirect.child(index)!;
+    if (redirect.fieldNameForChild(index) === 'argument') {
+      args.push(child);
+    } else if (child.type.endsWith('_redirect')) {
+      const nested = getRedirectRuleArguments(child);
+      if (!nested) return null;
+      args.push(...nested);
+    } else if (
+      child.isNamed &&
+      !/^(?:heredoc_(?:start|body|end)|file_descriptor|comment)$/.test(
+        child.type,
+      )
+    ) {
+      // A pipeline/list inside the heredoc line is not one simple command.
+      return null;
+    }
+  }
+  return args;
+}
+
 /**
  * Extract a simple command's root + subcommand from a `command` AST node.
  *
@@ -1257,11 +1298,25 @@ async function isShellCommandReadOnlyInternal(
  *   - root + `*` if no known subcommand but has args
  *   - root only if the command has no args at all
  */
-function extractRuleFromCommand(commandNode: SyntaxNode): string | null {
+function extractRuleFromCommand(
+  commandNode: SyntaxNode,
+  redirects: SyntaxNode[] = [],
+): string | null {
   const rootName = getCommandName(commandNode);
-  if (!rootName) return null;
+  if (!rootName || commandNode.hasError) return null;
 
   const argNodes = getArgumentNodes(commandNode);
+  for (const redirect of [
+    ...commandNode.namedChildren.filter((child) =>
+      child.type.endsWith('_redirect'),
+    ),
+    ...redirects,
+  ]) {
+    const trailing = getRedirectRuleArguments(redirect);
+    if (!trailing) return null;
+    argNodes.push(...trailing);
+  }
+  argNodes.sort((left, right) => left.startIndex - right.startIndex);
   const argTexts = argNodes.map((n) => n.text);
 
   // Skip leading flags to find potential subcommand
@@ -1332,7 +1387,14 @@ function extractRulesFromStatement(node: SyntaxNode): string[] {
     }
 
     case 'redirected_statement': {
-      const body = node.namedChildren[0];
+      const body = node.childForFieldName('body');
+      if (body?.type === 'command') {
+        const rule = extractRuleFromCommand(
+          body,
+          node.childrenForFieldName('redirect'),
+        );
+        return rule ? [rule] : [];
+      }
       return body ? extractRulesFromStatement(body) : [];
     }
 

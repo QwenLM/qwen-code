@@ -6287,6 +6287,25 @@ describe('ShellTool', () => {
       expect(details.permissionRules).toEqual(['Bash(npm run *)']);
     });
 
+    it('keeps a redirected git push confirmation scoped to the push subcommand', async () => {
+      const invocation = build('git > /dev/null push origin main');
+      expect(await invocation.getDefaultPermission()).toBe('ask');
+      const details = await detailsOf(invocation);
+      expect(details.permissionRules).toEqual(['Bash(git push *)']);
+
+      const pm = new PermissionManager({
+        getPermissionsAllow: () => details.permissionRules,
+        getPermissionsAsk: () => [],
+        getPermissionsDeny: () => [],
+        getProjectRoot: () => '/test/dir',
+        getCwd: () => '/test/dir',
+      });
+      pm.initialize();
+      expect(await pm.isCommandAllowed('git push origin other')).toBe('allow');
+      expect(await pm.isCommandAllowed('git reset --hard')).not.toBe('allow');
+      expect(await pm.isCommandAllowed('git clean -fdx')).not.toBe('allow');
+    });
+
     it('should exclude already-allowed sub-commands from confirmation details in compound commands', async () => {
       const pm = new PermissionManager({
         getPermissionsAllow: () => ['Bash(git add *)'],

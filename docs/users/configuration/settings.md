@@ -540,6 +540,8 @@ Some rule names automatically cover multiple tools:
 | `"WebFetch(api.example.com)"` | Fetch from `api.example.com` and all its subdomains            |
 | `"mcp__puppeteer"`            | All tools from the puppeteer MCP server                        |
 
+Suggested shell rules retain subcommands after a file redirection: `git > /dev/null push origin main` produces `Bash(git push *)`, the same scope as `git push origin main`. Existing saved rules are not rewritten; a saved `Bash(git)` still allows every Git subcommand.
+
 **Path pattern prefixes:**
 
 | Prefix | Meaning                               | Example             |
