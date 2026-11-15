@@ -170,9 +170,9 @@ substantive output is one or two turns back.
 | `/copy 2 code python` | Copies the last `python` code block from the 2nd-last. |
 | `/copy 3 latex`       | Copies the last LaTeX block from the 3rd-last message. |
 
-`/copy 1` is equivalent to `/copy`. Only AI messages with visible text are
-counted: a turn that only calls a tool (or only thinks) is skipped, so `/copy`
-and `/copy N` always land on a reply you can see. If `N` exceeds the number of
+`/copy 1` is equivalent to `/copy`. Only AI messages with text are counted: a
+turn that only calls a tool (or only thinks) is skipped, so tool calls between
+replies do not shift `N`. If `N` exceeds the number of
 AI messages in the session, `/copy` reports the actual count instead of
 copying anything.
 Without a leading integer, sub-selectors such as `/copy code python 2` keep

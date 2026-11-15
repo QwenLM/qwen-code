@@ -367,31 +367,31 @@ export const copyCommand: SlashCommand = {
   action: async (context, args): Promise<SlashCommandActionReturn | void> => {
     const chat = await context.services.config?.getLlmClient()?.getChat();
     const history = chat?.getHistoryShallow();
-    // A tool-call-only or thinking-only model turn shows no reply on screen,
-    // so it must not shift the N in `/copy N`; counting the extracted text
-    // keeps the counted set and the copyable set the same.
+    // A tool-call-only, thinking-only or whitespace-only model turn has no
+    // text to copy, so it must not shift the N in `/copy N`. A counted turn is
+    // exactly one whose extracted text below is non-blank. Model turns the
+    // transcript does not render as replies (e.g. the acknowledgement added
+    // after compression) still count.
     const aiMessages =
-      history
-        ?.filter((item) => item.role === 'model')
-        .map((item) =>
-          (item.parts ?? [])
-            .filter((part) => part.text && !part.thought)
-            .map((part) => part.text)
-            .join(''),
-        )
-        .filter((text) => text.length > 0) ?? [];
+      history?.filter(
+        (item) =>
+          item.role === 'model' &&
+          item.parts?.some((part) => !part.thought && part.text?.trim()),
+      ) ?? [];
 
     if (aiMessages.length === 0) {
       return {
         type: 'message',
         messageType: 'info',
-        content: 'No output in history',
+        content: history?.some((item) => item.role === 'model')
+          ? 'Last AI output contains no text to copy.'
+          : 'No output in history',
       };
     }
 
     const { messageIndex, subArgs } = parseLeadingMessageIndex(args);
 
-    let aiOutput;
+    let selectedAiMessage;
     if (messageIndex !== null) {
       if (messageIndex < 1) {
         return {
@@ -410,10 +410,15 @@ export const copyCommand: SlashCommand = {
           content: `Only ${aiMessages.length} ${turnLabel} in this session.`,
         };
       }
-      aiOutput = aiMessages[aiMessages.length - messageIndex];
+      selectedAiMessage = aiMessages[aiMessages.length - messageIndex];
     } else {
-      aiOutput = aiMessages[aiMessages.length - 1];
+      selectedAiMessage = aiMessages[aiMessages.length - 1];
     }
+
+    const aiOutput = (selectedAiMessage.parts ?? [])
+      .filter((part) => part.text && !part.thought)
+      .map((part) => part.text)
+      .join('');
 
     const isIndexed = messageIndex !== null && messageIndex > 1;
     const sourceLabel = isIndexed
