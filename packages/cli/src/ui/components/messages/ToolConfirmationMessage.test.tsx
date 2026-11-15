@@ -7,7 +7,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import { EOL } from 'node:os';
 import { promises as fsp } from 'node:fs';
-import { Box } from 'ink';
+import { Box, Text } from 'ink';
+import type React from 'react';
 
 // Capture launches of the external editor so the full-plan viewer (#7001)
 // can be asserted without spawning a real editor process.
@@ -55,6 +56,22 @@ import {
   useContextMenu,
   type ContextMenuContextValue,
 } from '../../context-menu/ContextMenuContext.js';
+import {
+  OverflowProvider,
+  useOverflowState,
+} from '../../contexts/OverflowContext.js';
+
+// Prints the global hidden-content count so the ctrl+s reveal shortcut can be
+// asserted: ShowMoreLines only renders when that set is non-empty.
+const OverflowProbe: React.FC = () => {
+  const state = useOverflowState();
+  return <Text>{`overflowing:${state ? state.overflowingIds.size : -1}`}</Text>;
+};
+
+// ink flushes the post-effect re-render on its own throttle, which can take
+// longer than any fixed sleep under load, so poll for the expected frame with
+// a bounded timeout instead.
+const WAIT_FOR_FRAME = { timeout: 2000, interval: 10 };
 
 describe('ToolConfirmationMessage', () => {
   // The tree is wrapped in the real ContextMenuProvider (as DefaultAppLayout
@@ -1397,6 +1414,716 @@ describe('ToolConfirmationMessage', () => {
       expect(frame).not.toContain('Line 8');
       expect(frame).not.toContain('Line 12');
       expect(frame).toMatch(/\.{3} last \d+ lines hidden \.{3}/);
+    });
+  });
+
+  // A body taller than the dialog's height budget pushes the question line and
+  // the option list out of the viewport, so the user decides blind.
+  describe('keeps the question and options inside the height budget', () => {
+    const longPrompt = Array.from(
+      { length: 40 },
+      (_, i) => `finding ${i + 1}`,
+    ).join('\n\n');
+
+    it('caps a long inline-Markdown info prompt', () => {
+      const availableTerminalHeight = 12;
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            type: 'info',
+            title: 'Confirm',
+            prompt: longPrompt,
+            hideAlwaysAllow: true,
+            onConfirm: vi.fn(),
+          }}
+          config={mockConfig}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={50}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      expect(frame).toContain('finding 1');
+      expect(frame).toContain('finding 2');
+      expect(frame).not.toContain('finding 40');
+      expect(frame).toMatch(/last \d+ lines hidden/);
+      expect(frame).toContain('Do you want to proceed?');
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain('No, suggest changes (esc)');
+    });
+
+    it('caps a long destination list to a contiguous prefix', () => {
+      const availableTerminalHeight = 12;
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            type: 'info',
+            title: 'Confirm Web Fetch',
+            prompt: 'fetch every page below',
+            urls: Array.from({ length: 30 }, (_, i) => `https://e.com/${i}`),
+            hideAlwaysAllow: true,
+            onConfirm: vi.fn(),
+          }}
+          config={mockConfig}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={50}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      expect(frame).toContain('Do you want to proceed?');
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain('No, suggest changes (esc)');
+      // The destinations are what is being authorised, so a clipped list must
+      // still show some of them, from the head of the list, and say how many
+      // are missing. Rows used to be compressed instead of cut, which rendered
+      // a scattered sample (e.com/6, /14, /22) that reads as a tail cut.
+      expect(frame).toContain('URLs to fetch:');
+      const shownUrls = frame.match(/https:\/\/e\.com\/\d+/g) ?? [];
+      expect(shownUrls.length).toBeGreaterThan(0);
+      expect(shownUrls[0]).toBe('https://e.com/0');
+      expect(frame).not.toContain('https://e.com/29');
+      expect(frame).toMatch(/\.\.\. \d+ more URLs hidden \.\.\./);
+    });
+
+    it('keeps the destinations when a long prose prompt competes with them', () => {
+      const availableTerminalHeight = 12;
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            type: 'info',
+            title: 'Confirm Web Fetch',
+            prompt: longPrompt,
+            urls: ['https://example.com/deep/target'],
+            hideAlwaysAllow: true,
+            onConfirm: vi.fn(),
+          }}
+          config={mockConfig}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={50}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      // The prose used to claim the whole budget and evict the block that
+      // names the host being fetched from.
+      expect(frame).toContain('URLs to fetch:');
+      expect(frame).toContain('https://example.com/deep/target');
+      expect(frame).toMatch(/last \d+ lines hidden/);
+      expect(frame).toContain('Do you want to proceed?');
+      expect(frame).toContain('Yes, allow once');
+    });
+
+    it('announces a plain-text prompt dropped to make room for destinations', () => {
+      const availableTerminalHeight = 11;
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            type: 'info',
+            title: 'Confirm Web Fetch',
+            prompt: longPrompt,
+            renderPromptAsPlainText: true,
+            urls: ['https://example.com/deep/target'],
+            hideAlwaysAllow: true,
+            onConfirm: vi.fn(),
+          }}
+          config={mockConfig}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={50}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      // A one-row prose budget cannot hold a MaxSizedBox plus its footer, so the
+      // prose is dropped whole. It must still be announced: silently vanishing
+      // text is what made the first fix hard to trust.
+      expect(frame).not.toContain('finding 1');
+      expect(frame).toMatch(/last \d+ lines hidden/);
+      expect(frame).toContain('URLs to fetch:');
+      expect(frame).toContain('https://example.com/deep/target');
+      expect(frame).toContain('Do you want to proceed?');
+      expect(frame).toContain('Yes, allow once');
+    });
+
+    it('gives the last row to the destinations when the prose has none', () => {
+      const availableTerminalHeight = 11;
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            type: 'info',
+            title: 'Confirm Web Fetch',
+            prompt: longPrompt,
+            urls: Array.from({ length: 30 }, (_, i) => `https://e.com/${i}`),
+            hideAlwaysAllow: true,
+            onConfirm: vi.fn(),
+          }}
+          config={mockConfig}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={50}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      // No prose row survives here, and a marker for the prose would have cost
+      // the destinations their own marker — the extra row pushed it past the cap
+      // and Ink cut it off, hiding the count that matters most.
+      expect(frame).not.toContain('finding 1');
+      expect(frame).not.toMatch(/last \d+ lines hidden/);
+      expect(frame).toContain('https://e.com/0');
+      expect(frame).toMatch(/\.\.\. \d+ more URLs hidden \.\.\./);
+      expect(frame).toContain('Do you want to proceed?');
+    });
+
+    it('still shows a plain-text prompt that fits a one-row budget', () => {
+      const availableTerminalHeight = 8;
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            type: 'info',
+            title: 'Confirm Web Fetch',
+            prompt: 'Summarise the fetched page for a maintainer.',
+            renderPromptAsPlainText: true,
+            hideAlwaysAllow: true,
+            onConfirm: vi.fn(),
+          }}
+          config={mockConfig}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={50}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      // MaxSizedBox floors its own ceiling at MINIMUM_MAX_HEIGHT, but a body
+      // that needs no footer still fits in one row. The floor only justifies
+      // dropping content that would have been clipped anyway.
+      expect(frame).toContain('Summarise the fetched page for a maintainer.');
+      expect(frame).not.toMatch(/last \d+ lines? hidden/);
+      expect(frame).toContain('Do you want to proceed?');
+      expect(frame).toContain('Yes, allow once');
+    });
+
+    it('shows a destination that wraps instead of reporting it hidden', () => {
+      const availableTerminalHeight = 11;
+      const wrappedUrl =
+        'https://example.com/api/v1/export?signature=abcdef0123456789abcdef';
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            type: 'info',
+            title: 'Confirm Web Fetch',
+            prompt: longPrompt,
+            urls: [wrappedUrl],
+            hideAlwaysAllow: true,
+            onConfirm: vi.fn(),
+          }}
+          config={mockConfig}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={50}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      // The list holds one destination that needs two wrapped rows, which is
+      // exactly what is left after the label. Charging a marker row before
+      // asking whether anything survives used to hide the only host and still
+      // announce it as hidden.
+      expect(frame).toContain('https://example.com/api/v1/export');
+      expect(frame).not.toMatch(/more URLs? hidden/);
+      expect(frame).toContain('Do you want to proceed?');
+    });
+
+    it('keeps a host on screen when the body budget is three rows', () => {
+      const availableTerminalHeight = 10;
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            type: 'info',
+            title: 'Confirm Web Fetch',
+            prompt: longPrompt,
+            urls: Array.from({ length: 30 }, (_, i) => `https://e.com/${i}`),
+            hideAlwaysAllow: true,
+            onConfirm: vi.fn(),
+          }}
+          config={mockConfig}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={50}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      // Blank row, label, one host, marker. Handing back the blank row is what
+      // keeps a host on screen; a label over an empty list answers nothing.
+      expect(frame).toContain('URLs to fetch:');
+      expect(frame).toContain('https://e.com/0');
+      expect(frame).toContain('... 29 more URLs hidden ...');
+      expect(frame).toContain('Do you want to proceed?');
+    });
+
+    it('keeps a host on screen when the body budget is two rows', () => {
+      const availableTerminalHeight = 9;
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            type: 'info',
+            title: 'Confirm Web Fetch',
+            prompt: longPrompt,
+            urls: Array.from({ length: 30 }, (_, i) => `https://e.com/${i}`),
+            hideAlwaysAllow: true,
+            onConfirm: vi.fn(),
+          }}
+          config={mockConfig}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={50}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      // Down to its last two rows the block drops its own label before it
+      // drops a destination: the host is the thing being authorised.
+      expect(frame).not.toContain('URLs to fetch:');
+      expect(frame).toContain('https://e.com/0');
+      expect(frame).not.toContain('finding 1');
+      expect(frame).toContain('Yes, allow once');
+    });
+
+    it('says one URL when a single destination is hidden', () => {
+      const availableTerminalHeight = 9;
+      const wrappedUrl =
+        'https://example.com/api/v1/export?signature=abcdef0123456789abcdef';
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            type: 'info',
+            title: 'Confirm Web Fetch',
+            prompt: longPrompt,
+            urls: ['https://e.com/0', wrappedUrl],
+            hideAlwaysAllow: true,
+            onConfirm: vi.fn(),
+          }}
+          config={mockConfig}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={50}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      const singular = (frame.match(/\.\.\. 1 more URL hidden \.\.\./g) ?? [])
+        .length;
+      const plural = (frame.match(/\.\.\. \d+ more URLs hidden \.\.\./g) ?? [])
+        .length;
+      expect(singular).toBe(1);
+      expect(plural).toBe(0);
+    });
+
+    it('counts an inline-Markdown prompt by what it renders', () => {
+      const availableTerminalHeight = 8;
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            type: 'info',
+            title: 'Confirm',
+            prompt: '**Fetch** **the** **Q4** **report** **today!**',
+            hideAlwaysAllow: true,
+            onConfirm: vi.fn(),
+          }}
+          config={mockConfig}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={40}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      // Emphasis is stripped by the renderer: this prompt is one row wide once
+      // it is on screen, two rows wide in Markdown source. Counting the source
+      // spends the budget on rows the user never sees and reports a tail that
+      // was never hidden.
+      expect(frame).toContain('Fetch the Q4 report today!');
+      expect(frame).not.toMatch(/last \d+ lines? hidden/);
+      expect(frame).toContain('Do you want to proceed?');
+    });
+
+    it('offers the reveal shortcut for a body clipped without MaxSizedBox', async () => {
+      const { lastFrame } = render(
+        <OverflowProvider>
+          {withProviders(
+            <ToolConfirmationMessage
+              confirmationDetails={{
+                type: 'info',
+                title: 'Confirm',
+                prompt: longPrompt,
+                urls: ['https://example.com/deep/target'],
+                hideAlwaysAllow: true,
+                onConfirm: vi.fn(),
+              }}
+              config={mockConfig}
+              availableTerminalHeight={12}
+              contentWidth={50}
+            />,
+          )}
+          <OverflowProbe />
+        </OverflowProvider>,
+      );
+
+      await vi.waitFor(() => {
+        expect(lastFrame()).toMatch(/last \d+ lines hidden/);
+      }, WAIT_FOR_FRAME);
+      await vi.waitFor(() => {
+        expect(lastFrame()).toContain('overflowing:1');
+      }, WAIT_FOR_FRAME);
+      expect(lastFrame()).toContain('https://example.com/deep/target');
+    });
+
+    it('caps long MCP server and tool labels', () => {
+      const availableTerminalHeight = 12;
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            type: 'mcp',
+            title: 'Confirm MCP tool',
+            serverName: 'server-'.repeat(40),
+            toolName: 'tool-'.repeat(40),
+            toolDisplayName: 'a very long tool display name',
+            hideAlwaysAllow: true,
+            onConfirm: vi.fn(),
+          }}
+          config={mockConfig}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={50}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      expect(frame).toContain('MCP Server:');
+      expect(frame).toContain('server-server-server');
+      expect(frame).toMatch(/last \d+ lines hidden/);
+      expect(frame).toContain('Allow execution of MCP tool');
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain('No, suggest changes (esc)');
+    });
+
+    it('keeps one MCP identity row when the body budget is a single row', () => {
+      const availableTerminalHeight = 5;
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            type: 'mcp',
+            title: 'Confirm MCP tool',
+            serverName: 'srv',
+            toolName: 'tool-a',
+            toolDisplayName: 'a very long tool display name',
+            hideAlwaysAllow: true,
+            onConfirm: vi.fn(),
+          }}
+          config={mockConfig}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={50}
+          compactMode={true}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      // The body budget floors at one row, but the sizing box used for the two
+      // identity rows floors its own ceiling at two and spends one of them on a
+      // footer, so it cannot answer a one-row budget with one row. At that point
+      // the identity rows are replaced by a pinned single row instead of letting
+      // the box render past the cap and take the options with it.
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      expect(frame).toContain('Tool: tool-');
+      expect(frame).not.toMatch(/last \d+ lines hidden/);
+      expect(frame).toContain('Yes, allow once');
+    });
+
+    it('keeps the auto-mode banner, the command and every option in one budget', () => {
+      const availableTerminalHeight = 12;
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            type: 'exec',
+            title: 'Confirm Shell Command',
+            command: 'npm run deploy -- --dry-run',
+            rootCommand: 'npm',
+            hideAlwaysAllow: true,
+            autoModeFallback: {
+              reason: 'classifier_unavailable',
+              message:
+                "Auto Mode couldn't classify this action. Switching to Default Mode is recommended.",
+            },
+            onConfirm: vi.fn(),
+          }}
+          config={mockConfig}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={80}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      // The banner and the extra option are each charged once, not once while
+      // sizing the body and again while capping it, which left the command the
+      // banner is warning about with no rows at all.
+      expect(frame).toContain("Auto Mode couldn't classify this action");
+      expect(frame).toContain('npm run deploy -- --dry-run');
+      expect(frame).toContain(
+        'Switch to Default Mode and allow once (recommended)',
+      );
+      expect(frame).toContain('No, suggest changes (esc)');
+    });
+
+    it('caps the body of a compact confirmation', () => {
+      const availableTerminalHeight = 8;
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            type: 'info',
+            title: 'Confirm',
+            prompt: longPrompt,
+            hideAlwaysAllow: true,
+            onConfirm: vi.fn(),
+          }}
+          config={mockConfig}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={50}
+          compactMode={true}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      expect(frame).toContain('Do you want to proceed?');
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain('No');
+    });
+
+    it('holds the compact body ceiling on a tall terminal', () => {
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            type: 'info',
+            title: 'Confirm',
+            prompt: longPrompt,
+            hideAlwaysAllow: true,
+            onConfirm: vi.fn(),
+          }}
+          config={mockConfig}
+          availableTerminalHeight={40}
+          contentWidth={50}
+          compactMode={true}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      // The compact ceiling is a ceiling, not a floor: spare terminal height
+      // must not let an inline subagent approval grow to the whole screen.
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(10);
+      expect(frame).toContain('finding 1');
+      expect(frame).not.toContain('finding 40');
+      expect(frame).toMatch(/last \d+ lines hidden/);
+      expect(frame).toContain('Yes, allow once');
+    });
+
+    it('caps compact MCP identity rows', () => {
+      const availableTerminalHeight = 12;
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            type: 'mcp',
+            title: 'Confirm MCP tool',
+            serverName: 'server-'.repeat(20),
+            toolName: 'tool-'.repeat(20),
+            toolDisplayName: 'a very long tool display name',
+            hideAlwaysAllow: true,
+            onConfirm: vi.fn(),
+          }}
+          config={mockConfig}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={50}
+          compactMode={true}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      expect(frame).toContain('MCP Server:');
+      expect(frame).toContain('server-server-server');
+      expect(frame).toMatch(/last \d+ lines hidden/);
+      expect(frame).toContain('Do you want to proceed?');
+    });
+
+    it('keeps the open-in-editor hint when the plan budget is one row', () => {
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            type: 'plan',
+            title: 'Allow entry into Plan Mode?',
+            plan: longPrompt,
+            onConfirm: vi.fn(),
+          }}
+          config={mockConfig}
+          availableTerminalHeight={9}
+          contentWidth={50}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      // A body that cannot render at least one row is skipped rather than
+      // rendered, so the only way to read the whole plan stays on screen. The
+      // announcement that says so is the last row and is what the last row gets
+      // cut away here, not the hint.
+      expect(frame).toContain('o open full plan in editor');
+      expect(frame).not.toMatch(/plan hidden/);
+      expect(frame).toContain('Allow entry into Plan Mode?');
+    });
+
+    it('keeps the plan hint on a row of its own when the plan is clipped', () => {
+      const availableTerminalHeight = 12;
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            type: 'plan',
+            title: 'Allow entry into Plan Mode?',
+            plan: longPrompt,
+            onConfirm: vi.fn(),
+          }}
+          config={mockConfig}
+          availableTerminalHeight={availableTerminalHeight}
+          contentWidth={50}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight,
+      );
+      // The hint is the way out of a clipped plan, so it must survive as its own
+      // row. Two unpinned Ink rows sharing a line overwrite each other rather
+      // than clip a prefix, so an exact row match is the meaningful assertion.
+      const hintRows = frame
+        .split(EOL)
+        .filter((line) => line.trim() === 'o open full plan in editor');
+      expect(hintRows).toHaveLength(1);
+      expect(frame).toContain('Allow entry into Plan Mode?');
+    });
+
+    it('announces the plan dropped to a two-row body budget', async () => {
+      const availableTerminalHeight = 11;
+      const details = {
+        type: 'plan' as const,
+        title: 'Allow entry into Plan Mode?',
+        plan: longPrompt,
+        onConfirm: vi.fn(),
+      };
+      const { lastFrame, rerender } = render(
+        <OverflowProvider>
+          {withProviders(
+            <ToolConfirmationMessage
+              confirmationDetails={details}
+              config={mockConfig}
+              availableTerminalHeight={availableTerminalHeight}
+              contentWidth={50}
+            />,
+          )}
+          <OverflowProbe />
+        </OverflowProvider>,
+      );
+
+      await vi.waitFor(() => {
+        const frame = lastFrame() ?? '';
+        expect(frame).toMatch(/plan hidden/);
+        expect(frame).toContain('overflowing:1');
+      }, WAIT_FOR_FRAME);
+      const frame = lastFrame() ?? '';
+      // The probe prints a row of its own, so the dialog keeps one row of slack.
+      expect(frame.split(EOL).length).toBeLessThanOrEqual(
+        availableTerminalHeight + 1,
+      );
+      // Two rows are enough for the hint and the announcement, both of which
+      // point somewhere: `o` opens the whole plan in an editor, ctrl-s lifts the
+      // budget in place. Silently deleting the plan is what made the first fix
+      // hard to trust.
+      expect(frame).toContain('o open full plan in editor');
+      expect(frame).toContain('Allow entry into Plan Mode?');
+      // Registering the overflow is what makes the reveal shortcut appear.
+      expect(frame).toContain('overflowing:1');
+
+      // The id belongs to this confirmation, not to the provider: leaving the
+      // confirmation must take the reveal hint back with it.
+      rerender(
+        <OverflowProvider>
+          <OverflowProbe />
+        </OverflowProvider>,
+      );
+      await vi.waitFor(
+        () => expect(lastFrame() ?? '').toContain('overflowing:0'),
+        WAIT_FOR_FRAME,
+      );
+    });
+
+    it('leaves a body that fits the budget untouched', () => {
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={{
+            type: 'info',
+            title: 'Confirm',
+            prompt: 'Delete node_modules?',
+            hideAlwaysAllow: true,
+            onConfirm: vi.fn(),
+          }}
+          config={mockConfig}
+          availableTerminalHeight={12}
+          contentWidth={50}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('Delete node_modules?');
+      expect(frame).toContain('Do you want to proceed?');
+      expect(frame).toContain('Yes, allow once');
+      // A body that fits must not be clipped, so no truncation marker.
+      expect(frame).not.toMatch(/hidden/);
     });
   });
 
