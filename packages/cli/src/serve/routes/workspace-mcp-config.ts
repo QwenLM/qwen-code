@@ -370,7 +370,6 @@ function registerFor(
                   // it and narrow it to the siblings it still has to deny.
                   const serverNames = collectConfiguredMcpServerNames(
                     settings,
-                    target.workspaceCwd,
                   );
                   next = [];
                   for (const pattern of existing) {
