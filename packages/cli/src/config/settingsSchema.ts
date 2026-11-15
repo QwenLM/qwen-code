@@ -94,6 +94,8 @@ export interface SettingDefinition {
   // `satisfies SettingsSchema` constraint and `InferSettings` below, and at
   // runtime it feeds only display and reset paths, never the load path.
   default: SettingsValue;
+  /** What a dialog toggle writes when the setting is unset and has no default. */
+  unsetToggleValue?: boolean;
   description?: string;
   parentKey?: string;
   key?: string;
@@ -4634,6 +4636,7 @@ const SETTINGS_SCHEMA = {
         category: 'Experimental',
         requiresRestart: true,
         default: undefined as boolean | undefined,
+        unsetToggleValue: true,
         description:
           'Run sessions on the shared agent loop. When unset, each surface uses its own default: headless sessions (`-p` and stream-json) run on the shared loop, while ACP sessions (Zed, VS Code, Web Shell, channels), the Ink TUI, OpenTUI, subagents and the Hosted Harness keep their own loop (experimental there). `true` runs all of them on the shared loop (the Hosted Harness runs its model rounds on it while keeping its journaled tool dispatch), and `false` keeps all of them, headless included, on their own loop. The QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP environment variable overrides this setting per surface: `1` enables every surface, `0` disables every surface, and a comma-separated list such as `headless,acp=0` forces individual surfaces (headless, acp, ink, opentui, agent-core, speculation, hosted). A bare `1`/`0` is only recognized as the whole value, not inside a list; surfaces the list does not name fall back to this setting. A project `.env` or `settings.env` cannot set it.',
         showInDialog: true,
