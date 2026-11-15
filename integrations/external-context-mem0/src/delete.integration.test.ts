@@ -103,7 +103,11 @@ async function start(mode: Mode = 'normal', outside = false) {
       res.writeHead(target ? 200 : 404, { 'content-type': 'application/json' });
       res.end(JSON.stringify(target ?? { detail: 'not found' }));
     };
-    if (mode === 'cumulative-deadline') timers.push(setTimeout(respond, 100));
+    // Inside the 900 ms budget: the preflight responses leave the verification
+    // GET enough time to reach the server, and its response lands after the
+    // deadline so the abort happens mid-flight.
+    if (mode === 'cumulative-deadline')
+      timers.push(setTimeout(respond, deleted ? 600 : 300));
     else respond();
   });
   await new Promise<void>((resolve, reject) => {
@@ -132,7 +136,7 @@ async function start(mode: Mode = 'normal', outside = false) {
         basePath: '',
         allowInsecureHttp: true,
       },
-      timeoutMs: mode === 'cumulative-deadline' ? 250 : 200,
+      timeoutMs: mode === 'cumulative-deadline' ? 900 : 200,
     }),
   );
   const client = new Client({ name: 'stdio-delete-test', version: '1' });
