@@ -161,6 +161,12 @@ public final class StoreModels {
                     // A user id the registry key cannot encode never matches.
                 }
             }
+            if (principal != null) {
+                // A principal caller never matches through the raw actor id
+                // below: the raw arm could admit a caller whose user id
+                // differs from the principal's user.
+                return false;
+            }
             if (actorId == null) {
                 return false;
             }
