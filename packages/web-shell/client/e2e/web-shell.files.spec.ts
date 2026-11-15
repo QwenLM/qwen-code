@@ -806,15 +806,15 @@ test('virtualizes a long source file and keeps its final lines reachable', async
 test('@smoke keeps large source files readable without tokenizing the entire text', async ({
   page,
 }, testInfo) => {
-  // The 1.1 MB fixture goes through five 256 KB chunk reads and a full decode
-  // before the virtualized render; on a loaded shard that can exhaust the
-  // shared 60 s budget before the Files panel even opens (#14969).
   test.setTimeout(180_000);
   const { browser, byteReads } = await openFiles(
     page,
     String(testInfo.project.use.baseURL),
   );
   await browser.getByRole('treeitem', { name: 'src', exact: true }).click();
+  await browser
+    .getByRole('textbox', { name: 'Filter files…', exact: true })
+    .fill('src/large.ts');
   await browser
     .getByRole('treeitem', { name: 'large.ts', exact: true })
     .click();
@@ -823,6 +823,7 @@ test('@smoke keeps large source files readable without tokenizing the entire tex
     .poll(
       () =>
         byteReads.filter((path) => path.endsWith('path=src/large.ts')).length,
+      { timeout: 60_000 },
     )
     .toBeGreaterThan(1);
   await expect(source).toContainText('export const large0');
