@@ -134,8 +134,22 @@ public final class StoreModels {
             String idempotencyKey, String requestDigest, String sessionId,
             String turnId, String status, String sessionStatusBefore,
             byte[] actorKey, long createdAt, long updatedAt) {
-        public boolean admitsReplayBy(String actorId) {
-            if (actorId == null || actorKey == null) {
+        /**
+         * Whether the receipt names the caller as its recorder. Both stamps
+         * this build writes are accepted: the raw Workspace actor key (the
+         * raw twin and legacy rows) and the principal encoding (the principal
+         * twin). A rolling deploy replays through either twin, so one arm
+         * must not refuse what the other recorded. Unbound-Session callers
+         * carry a null raw actor id, which never matches a recorded key.
+         */
+        public boolean admitsReplayBy(String actorId, SessionPrincipal principal) {
+            if (actorKey == null) {
+                return false;
+            }
+            if (principal != null && Arrays.equals(actorKey, principal.receiptActorKey())) {
+                return true;
+            }
+            if (actorId == null) {
                 return false;
             }
             try {
@@ -144,12 +158,6 @@ public final class StoreModels {
             } catch (IllegalArgumentException error) {
                 return false;
             }
-        }
-
-        /** The principal-carried twin of {@link #admitsReplayBy(String)}. */
-        public boolean admitsReplayBy(SessionPrincipal principal) {
-            return principal != null && actorKey != null
-                    && Arrays.equals(actorKey, principal.receiptActorKey());
         }
     }
 

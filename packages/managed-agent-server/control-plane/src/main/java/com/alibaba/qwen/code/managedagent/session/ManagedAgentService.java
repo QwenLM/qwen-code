@@ -3008,9 +3008,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     // unattributed or unstamped receipt leaves the creator gate in place.
     private boolean recordedByCaller(StoreModels.CommandRecord command,
             SessionPrincipal principal, String actorId) {
-        return principal == null
-                ? command.admitsReplayBy(actorId)
-                : command.admitsReplayBy(principal);
+        return command.admitsReplayBy(actorId, principal);
     }
 
     private void requireHarness() {

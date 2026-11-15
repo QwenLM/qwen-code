@@ -285,13 +285,10 @@ final class AgentSessionCommands {
             requireWriteAuthority(session.tenantId(), session.sessionId(), principal, actorId);
             return;
         }
-        // A subject-bearing caller's receipt stores the principal encoding
-        // (userId\0actor-present\0subject), so comparing it to the raw workspace
-        // actor key would refuse the recorder's own retry. Compare the encoding
-        // the recording path used; a different caller matches neither.
-        boolean recorder = principal == null
-                ? previous.admitsReplayBy(actorId)
-                : previous.admitsReplayBy(principal);
+        // A rolling deploy replays through either twin: the recorder match
+        // accepts the raw workspace key and the principal encoding alike, so
+        // the caller's encoding never refuses what the other twin recorded.
+        boolean recorder = previous.admitsReplayBy(actorId, principal);
         if (!recorder && !workspaces.createdSession(session.tenantId(), actorId,
                 session.sessionId())) {
             if ("DELETED".equals(session.status())) {

@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.model.StoreModels.CommandRecord;
+import com.alibaba.qwen.code.managedagent.model.SessionPrincipal;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
@@ -59,18 +60,37 @@ class StoreModelsTest {
     void admitsReplayByFollowsTheRecorderStamp() {
         byte[] recorder = ManagedWorkspaceRegistry.actorKey("tenant", "actor-a");
 
-        assertThat(command(recorder).admitsReplayBy("actor-a")).isTrue();
-        assertThat(command(recorder).admitsReplayBy("actor-b")).isFalse();
-        assertThat(command(recorder).admitsReplayBy("bad\nactor")).isFalse();
-        assertThat(command(recorder).admitsReplayBy((String) null)).isFalse();
+        assertThat(command(recorder).admitsReplayBy("actor-a", null)).isTrue();
+        assertThat(command(recorder).admitsReplayBy("actor-b", null)).isFalse();
+        assertThat(command(recorder).admitsReplayBy("bad\nactor", null)).isFalse();
+        assertThat(command(recorder).admitsReplayBy(null, null)).isFalse();
 
-        assertThat(command(ManagedReceipts.UNATTRIBUTED).admitsReplayBy("actor-a"))
+        assertThat(command(ManagedReceipts.UNATTRIBUTED).admitsReplayBy("actor-a", null))
                 .isFalse();
-        assertThat(command(ManagedReceipts.UNATTRIBUTED).admitsReplayBy((String) null))
+        assertThat(command(ManagedReceipts.UNATTRIBUTED).admitsReplayBy(null, null))
                 .isFalse();
 
-        assertThat(command(null).admitsReplayBy("actor-b")).isFalse();
-        assertThat(command(null).admitsReplayBy((String) null)).isFalse();
+        assertThat(command(null).admitsReplayBy("actor-b", null)).isFalse();
+        assertThat(command(null).admitsReplayBy(null, null)).isFalse();
+    }
+
+    // A rolling deploy replays through either twin: a raw-twin receipt must
+    // answer the same caller carrying a principal, and a principal-twin
+    // receipt must answer the same caller carrying only the raw actor id.
+    @Test
+    void admitsReplayByAcceptsEitherRecordingEncoding() {
+        SessionPrincipal principal = SessionPrincipal.ofUser("tenant", "actor-a");
+        byte[] rawStamp = ManagedWorkspaceRegistry.actorKey("tenant", "actor-a");
+        byte[] principalStamp = principal.receiptActorKey();
+
+        assertThat(command(rawStamp).admitsReplayBy(null, principal)).isTrue();
+        assertThat(command(rawStamp).admitsReplayBy("actor-a", principal)).isTrue();
+        assertThat(command(rawStamp).admitsReplayBy(null,
+                SessionPrincipal.ofUser("tenant", "actor-b"))).isFalse();
+
+        assertThat(command(principalStamp).admitsReplayBy("actor-a", null)).isTrue();
+        assertThat(command(principalStamp).admitsReplayBy("actor-b", null)).isFalse();
+        assertThat(command(principalStamp).admitsReplayBy(null, null)).isFalse();
     }
 
     // Every command receipt this build writes carries a recorder column: an
@@ -93,7 +113,7 @@ class StoreModelsTest {
                 "SUBMIT_TURN", "stamped", false).actorKey();
 
         assertThat(unattributed).isNotNull().isEmpty();
-        assertThat(command(unattributed).admitsReplayBy("actor-b")).isFalse();
+        assertThat(command(unattributed).admitsReplayBy("actor-b", null)).isFalse();
         assertThat(stamped).isEqualTo(
                 ManagedWorkspaceRegistry.actorKey("tenant", "actor-a"));
     }
