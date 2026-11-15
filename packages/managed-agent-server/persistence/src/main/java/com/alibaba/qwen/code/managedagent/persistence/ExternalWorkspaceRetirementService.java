@@ -307,9 +307,10 @@ public final class ExternalWorkspaceRetirementService {
     // The full JDBC row mapping is unnecessary here; the operation columns are
     // exactly what the fenced binding row carries.
     private Instant databaseNow() {
-        Long micros = jdbc.queryForObject("SELECT UNIX_TIMESTAMP() * 1000000"
-                + " + EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))", Long.class);
-        return Instant.ofEpochSecond(0, micros * 1000).truncatedTo(ChronoUnit.MICROS);
+        return jdbc.queryForObject(
+                "SELECT UNIX_TIMESTAMP(), EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))",
+                (row, index) -> Instant.ofEpochSecond(row.getLong(1),
+                        row.getLong(2) * 1000).truncatedTo(ChronoUnit.MICROS));
     }
     private void empty(String sql, Object... parameters) { require(WorkspaceOperations.rows(jdbc, sql, parameters).isEmpty()); }
     private WorkspaceOperations operations(Request request) { return new WorkspaceOperations(jdbc, request.tenantId()); }
