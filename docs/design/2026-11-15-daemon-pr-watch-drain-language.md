@@ -12,6 +12,8 @@ The daemon's PR-state watch delivers bound event prompts in English even when th
 
 ## Current state
 
+The table describes the tree before this increment.
+
 | Surface                                                                              | Location                                                                          | Language today                                                              |
 | ------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
 | Envelope prose (header, notices, workflow sentence, truncation marker)               | `packages/channels/base/src/bound-session-prompt.ts`, `BOUND_ENVELOPE_COPY`       | localized; the drain passes no `language`, so it resolves to `en`           |
@@ -89,6 +91,7 @@ Every new field is optional and defaults to `en`. A caller that does not set it 
 ## Constraints and risks
 
 - The locale is frozen at boot. An operator who changes `general.language` sees the new language only after a daemon restart, which is the same trade the channel lane already documents — and even then a summary already queued keeps its detection language.
+- The locale inherits `general.language`'s scope. The boot settings merge the operator scopes with a trusted workspace's file, and the workspace wins over the user scope — as it does for every other `general.*` consumer, including the channel lane. This increment documents that source rather than narrowing it: gating the key here would make the daemon disagree with the rest of the repo.
 - Entries detected before this change keep their English summary. That is the detection-language rule applied to history, not a defect.
 - The summary render is now shared by four transition types. The copy table is a total `Record<BoundPromptLanguage, …>`, so a new language cannot be added without its entries, and an absent language resolves to `en` — neither path can put `undefined` in a prompt.
 
