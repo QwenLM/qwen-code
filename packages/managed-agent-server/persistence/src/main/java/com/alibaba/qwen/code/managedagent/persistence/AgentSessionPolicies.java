@@ -41,7 +41,7 @@ final class AgentSessionPolicies {
     // creation admits extension pins for every public Shell, so apply must not
     // refuse a revision (shell/3) that creation accepted.
     private static final Set<String> EXTENSION_APPLY_PROFILES = Set.of(WorkspaceToolProfiles.SHELL,
-            WorkspaceToolProfiles.SHELL_V3, WorkspaceToolProfiles.MCP,
+            WorkspaceToolProfiles.SHELL_V3, WorkspaceToolProfiles.SHELL_V4, WorkspaceToolProfiles.MCP,
             WorkspaceToolProfiles.FILES, WorkspaceToolProfiles.READ);
 
     private final AgentEventJournal eventJournal;

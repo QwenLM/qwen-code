@@ -1326,6 +1326,48 @@ class WorkspaceRuntimeTest {
     }
 
     @Test
+    void terminalMaintenanceReachesTheDelegateWhileTheSessionIsClosing() throws Exception {
+        SessionRecord session = createSession("storage", ".");
+        var fixture = transport(session);
+        var runtimeSession = fixture.record().getSession();
+        authority.claim(session.workspace(), fixture.record());
+        Map<String, Object> status = Map.of("kind", "terminal-status",
+                "operationId", "terminal-attach:term-1:process", "targetOperationId", "term-1",
+                "sessionKey", Map.of("tenantId", session.tenantId(),
+                        "workspaceId", session.workspace().getWorkspaceId(), "sessionId", session.sessionId()));
+        Map<String, Object> evidence = new LinkedHashMap<>();
+        evidence.put("exitCode", 143);
+        evidence.put("exitSignal", null);
+        Map<String, Object> answer = Map.of("operationId", "term-1", "state", "exited",
+                "evidence", evidence);
+        when(fixture.http().control(any(), any(), any())).thenReturn(CompletableFuture.completedFuture(answer));
+        assertThat(fixture.transport().control(fixture.lease(), runtimeSession, status).toCompletableFuture().join())
+                .isEqualTo(answer);
+        // The close drain sweeps terminal holds after the Session leaves
+        // ACTIVE; the terminal family must ride the recovery arm like Shell
+        // and Monitor, not the ACTIVE-only generic arm that refuses before
+        // the delegate and wedges the hold.
+        jdbc.update("UPDATE ma_session SET status = 'CLOSING' WHERE tenant_id = ? AND session_id = ?",
+                session.tenantId(), session.sessionId());
+        assertThat(fixture.transport().control(fixture.lease(), runtimeSession, status).toCompletableFuture().join())
+                .isEqualTo(answer);
+        Map<String, Object> terminate = new LinkedHashMap<>(status);
+        terminate.put("kind", "terminal-terminate");
+        assertThat(fixture.transport().control(fixture.lease(), runtimeSession, terminate).toCompletableFuture().join())
+                .isEqualTo(answer);
+        verify(fixture.http(), times(3)).control(eq(fixture.lease()), eq(runtimeSession), any());
+        // The terminal branch still validates Session ownership before forwarding.
+        Map<String, Object> foreign = new LinkedHashMap<>(status);
+        foreign.put("sessionKey", Map.of("tenantId", session.tenantId(),
+                "workspaceId", session.workspace().getWorkspaceId(), "sessionId", "another-session"));
+        assertThatThrownBy(() -> fixture.transport().control(fixture.lease(), runtimeSession, foreign))
+                .isInstanceOf(RuntimeBrokerException.class)
+                .extracting(error -> ((RuntimeBrokerException) error).getCode())
+                .isEqualTo("runtime_control_operation_invalid");
+        verify(fixture.http(), times(3)).control(any(), any(), any());
+    }
+
+    @Test
     void closingReleasePreservesTheNewSharedHolderWithoutCurrentAuthorization() throws Exception {
         SessionRecord session = createSession("storage", ".");
         var fixture = transport(session);

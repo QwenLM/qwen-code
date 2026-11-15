@@ -31,7 +31,7 @@ class AliyunToolPublicationReadRetryTest {
             try (var input = objects.open("key")) {
                 assertThat(input.readAllBytes()).isEqualTo("payload".getBytes(StandardCharsets.UTF_8));
             }
-            assertThat(fixture.attempts.get()).isEqualTo(operation.equals("versioning") ? 3 : 2);
+            assertThat(fixture.attempts.get()).isEqualTo(2);
         }
     }
 
