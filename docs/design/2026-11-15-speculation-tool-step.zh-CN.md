@@ -23,7 +23,7 @@ Speculation 在后台以只读工具与 copy-on-write overlay 写跑在用户之
 
 ### 共享批处理接口已经允许什么
 
-上述执行与记录机制**并非**共享接口的结构性阻塞，部分结果也是如此。`runToolBatch` 接受调用方注入的 `executor`（`agent-loop.ts:476`），因此一个投机 executor 可以直接、顺序地运行调用；`client` 是可选的（`:467`），`client?.recordCompletedToolCall(...)`（`:671`）只把已执行调用计入会话的工具计数，省略 `client` 跳过的是该计数；已提交的工具结果写入是另一个调 `recordToolResult` 的 `record()` 闭包（`:735`、`:740`），`deferRecording`（`:488`）把它作为回调返回而不调用（`:755-759`），让表面只记录它发送的内容——避免已提交记录意味着延后这些回调，而非仅省略 `client`。另有三个接缝与 boundary/部分批次行为相关（此清单并非穷尽）：`keepCancelledResults`（`:483`）完成并返回被取消批次的结果，供保留它们的表面使用；`ToolBatchResult.responses`（`:498`）按调用返回 parts，「供丢弃部分调用结果的表面使用」，已有真实表面用它只发送一个子集（`use-llm-stream.ts:6710-6714`）；按调用的启动门 `host.beforeToolLaunch`（`:221`，在 `:630` 接线）按请求顺序拒绝某个调用并使其不执行。直接执行、顺序执行、避免已提交记录、部分结果与按调用拒绝，都能经此接口表达；它们本身并不构成保留独立工具步的理由。
+上述执行与记录机制**并非**共享接口的结构性阻塞，部分结果也是如此。`runToolBatch` 接受调用方注入的 `executor`（`agent-loop.ts:476`），因此一个投机 executor 可以直接、顺序地运行调用；`client` 是可选的（`:467`），`client?.recordCompletedToolCall(...)`（`:671`）更新会话记账——工具调用计数、供记忆使用的最近完成工具名、以及 skills-modified 标志——省略 `client` 跳过的是该记账；已提交的工具结果写入是另一个调 `recordToolResult` 的 `record()` 闭包（`:735`、`:740`），`deferRecording`（`:488`）把它作为回调返回而不调用（`:755-759`），让表面只记录它发送的内容——避免已提交记录意味着延后这些回调，而非仅省略 `client`。另有三个接缝与 boundary/部分批次行为相关（此清单并非穷尽）：`keepCancelledResults`（`:483`）完成并返回被取消批次的结果，供保留它们的表面使用；`ToolBatchResult.responses`（`:498`）按调用返回 parts，「供丢弃部分调用结果的表面使用」，已有真实表面用它只发送一个子集（`use-llm-stream.ts:6710-6714`）；按调用的启动门 `host.beforeToolLaunch`（`:221`，在 `:630` 接线）按请求顺序拒绝某个调用并使其不执行。直接执行、顺序执行、避免已提交记录、部分结果与按调用拒绝，都能经此接口表达；它们本身并不构成保留独立工具步的理由。
 
 ## 决策
 
@@ -33,7 +33,7 @@ Speculation 在后台以只读工具与 copy-on-write overlay 写跑在用户之
 
 **最终状态说明。** 永久保留 speculation 自有循环与 finalizer，意味着父设计「1 个 agent loop 实现」「1 个 `finalizeToolResponses` 调用者」的最终状态目标并非字面可达：speculation 的调用（`speculation.ts:607`）与共享批的调用（`agent-loop.ts:709`）并存。这两个目标按共享实现加上保留自有决策所留副本计数，[统一代理循环](2026-10-23-unified-agent-loop.md)的最终状态表现已注明；确切数字由 follow-up #17284 调和。
 
-**编号说明。** 跟踪 issue #17045 的「PR 6b」即本工具步决策。它取代了较早的[统一代理循环](2026-10-23-unified-agent-loop.md)迁移表中「6b」的编号含义（该表原指 speculation 的默认开启与删除步骤）；该表现已链接本决策，并把默认开启/删除保留为独立条目。表中的「6c」是本文对这些默认开启/删除步骤的自有标签；在 #17045 中它们曾是 6a/6b 之后的无编号「默认开启」与「删除旧路径」checkbox，故「6c」没有单独的 tracker 条目。tracker 的「内核默认开启（如果 PR 6b 把它的运行放到了 `runAgentLoop` 上）」框在本决策下是 moot（speculation 保留自有运行，内核从不运行其轮次）；该框以及 11-18 日期行「PR 6b 合入，连同 speculation 的集成场景」——本记录的单元 parity 门禁决定取代了它——都欠 follow-up #17284 的一次调和（#17284 收集 #17045 的遗留项；#17045 已关闭，completed）。默认开启与遗留删除仍是 #17284 跟踪的门控步骤，不属于本决策。
+**编号说明。** 跟踪 issue #17045 的「PR 6b」即本工具步决策。它取代了较早的[统一代理循环](2026-10-23-unified-agent-loop.md)迁移表中「6b」的编号含义（该表原指 speculation 的默认开启与删除步骤）；该表现已链接本决策，并把默认开启/删除保留为独立条目。表中的「6c」是本文对这些默认开启/删除步骤的自有标签；在 #17045 中它们曾是 6a/6b 之后的无编号「默认开启」与「删除旧路径」checkbox，故「6c」没有单独的 tracker 条目。tracker 的「内核默认开启（如果 PR 6b 把它的运行放到了 `runAgentLoop` 上）」框在本决策下是 moot（speculation 保留自有运行，内核从不运行其轮次）；该框以及 11-18 日期行「PR 6b 合入，连同 speculation 的集成场景」——本记录的单元 parity 门禁决定取代了它——都欠 follow-up #17284 的一次调和（#17284 收集 #17045 的遗留项；#17045 已关闭，completed）。#17284 尚未列出这些 speculation 项，须显式加入其中而非只留在 prose，否则 6c 门控与部分批次覆盖会被丢弃。默认开启与遗留删除仍是有待 #17284 承载的门控步骤，不属于本决策。
 
 ## 集成门禁决策
 
