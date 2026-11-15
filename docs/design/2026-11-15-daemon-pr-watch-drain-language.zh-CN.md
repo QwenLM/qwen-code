@@ -8,7 +8,7 @@
 
 即使运维者的 UI 语言是中文，daemon 的 PR 状态监视仍以英文投递绑定事件提示词。channel 车道已在 #16773 本地化，共享构造器自那时起就带有按语言的信封、角色指引表与文案映射，但 daemon 生产方从不传语言：`PrWatchDrainDeps` 未声明 `language` 成员，`buildDrainPrompt` 调用 `buildBoundEventPrompt` 时不带它，而四处转换摘要在 observation 生产方里是英文字面量。因此今天一个带事件订阅的 zh 部署收到的是英文 daemon 提示词。
 
-[绑定会话事件提示词语言](2026-11-09-bound-event-prompt-language.zh-CN.md) 的决策 7 把这件事记为仍欠着、而非已排到别处：启用增量（#17032）落地时没有穿它。本增量把它穿上。
+[绑定会话事件提示词语言](2026-11-09-bound-event-prompt-language.zh-CN.md) 的决策 7 曾把这件事记为仍欠着、而非已排到别处：启用增量（#17032）落地时没有穿它。本增量把它穿上。
 
 ## 现状
 
@@ -32,7 +32,7 @@
 - 运行时语言切换。locale 在 daemon 启动时读一次，与 channel worker 在启动时读取完全一致。
 - 本地化运维模板。`sessionPrWatch.actions` 的值按运维者书写的语言逐字渲染。
 - 本地化 channel 的评论车道，#16773 已覆盖。
-- 结构性标记。字段标签（`Repo:`、`PR:`、`Event:`、`Summary:`）、trusted-instruction 标签与 `Source:` 行在每种语言下都保持英文，这是共享契约的要求。
+- 结构性标记。字段标签（`Repo:`、`PR:`、`Title:`、`URL:`、`Event:`、`Summary:`、`Role:`）、trusted-instruction 标签与 `Source:` 行在每种语言下都保持英文，这是共享契约的要求。
 
 ## 拟议改动
 
@@ -64,10 +64,11 @@
 | ----------------------------------------------------------------- | --------------------------------------------------------------------------------- |
 | `packages/cli/src/utils/channel-locale.ts`（新增）                | 零导入的 locale 解析器，从 channel runtime 移出                                   |
 | `packages/cli/src/commands/channel/runtime.ts`                    | 再导出该解析器，其两个既有导入方不变                                              |
-| `packages/cli/src/serve/fast-path-settings.ts`                    | 启动设置面携带 `general.language`；读取器校验并复制它                             |
-| `packages/cli/src/serve/fast-path.test.ts`                        | 三个读取器用例：值被带出、非字符串被拒、chatRecording 与之共存                    |
+| `packages/cli/src/serve/fast-path-settings.ts`                    | 启动设置面携带 `general.language`；读取器复制字符串、丢弃其余取值                 |
+| `packages/cli/src/serve/fast-path.test.ts`                        | 三个读取器用例：值被带出、非字符串被容忍且不丢弃 summary、chatRecording 与之共存  |
 | `packages/cli/src/serve/run-qwen-serve.ts`                        | 启动时解析 locale 并传进 sources                                                  |
-| `packages/cli/src/serve/server/pr-watch-deps.ts`                  | sources 增加 `language`，带进两个接缝                                             |
+| `packages/cli/src/serve/run-qwen-serve.pr-watch-shutdown.test.ts` | 以 `general.language: zh` 真实启动 serve，locale 到达两个 watch 接缝              |
+| `packages/cli/src/serve/server/pr-watch-deps.ts`（+ 测试）        | sources 增加 `language`，带进两个接缝                                             |
 | `packages/cli/src/serve/server/pr-watch-observation.ts`（+ 测试） | tick 与 sweep deps 增加 `language`；按语言渲染摘要                                |
 | `packages/cli/src/serve/server/pr-watch-drain.ts`（+ 测试）       | drain deps 增加 `language`；信封、指引与来源说明的选择                            |
 | `packages/cli/src/serve/server/pr-watch-drain.scenario.test.ts`   | 两个端到端语言场景，经真实 gh 子进程与真实 admission                              |
@@ -89,16 +90,17 @@
 
 - locale 在启动时冻结。修改 `general.language` 的运维者只有在 daemon 重启后才看到新语言，这与 channel 车道已记录的取舍相同——而且即便如此，已排队的摘要仍保留其检测时的语言。
 - 本改动之前检测到的条目保留其英文摘要。这是检测语言规则应用于历史，不是缺陷。
-- 摘要渲染现在由四种转换类型共用；缺失的语言条目必须回退到英文，而不是在提示词里产出 `undefined`。
+- 摘要渲染现在由四种转换类型共用。文案映射是完整的 `Record<BoundPromptLanguage, …>`，因此新增语言必须同时补上其条目，而缺省语言解析为 `en`——两条路径都不会把 `undefined` 放进提示词。
 
 ## 验证计划
 
 - 单元（observation）：四种转换各自渲染其 zh 摘要；`en` 渲染与今天逐字节相同；缺省语言渲染英文；两种语言下转换 key 不变。
 - 单元（drain）：zh 语言选择 zh 信封、zh 角色指引与 zh 来源说明；摘要原样透传；缺省语言与今天逐字节相同。
 - 单元（deps）：sources 的语言到达两个接缝；缺省保持缺省。
+- 单元（启动设置与接线）：fast-path 读取器带出 `general.language`，并在不丢弃 summary 的前提下丢掉非字符串；以 `general.language: zh` 与一个事件订阅真实启动 serve，解析出的 locale 到达 `getPrWatchDeps()` 与 `getPrDrainDeps()` 两者。
 - 单元（refresh）：两个 no-deps 用例通过对 store 下 spy 来断言其名字声称的效果——既不认领 owner 记录，也不写 watch 文件。夹具无法把文件种在无 deps 的 drain 会去看的位置，因为 `drainNow` 在 deps 门处返回，早于任何目录被解析。
 - 单元（adapter）：弃用告警测试同时断言 `prWatchLimit` 与 `prWatchBudgetReserve`，含一个只设 `prWatchLimit` 的用例。
-- 真实场景：用真实临时 watch 目录与真实绑定扫描驱动已发布的解析器、deps 构造器、observation 与 drain，断言两种语言下投递的提示词文本。第三个用例在检测与投递之间切换 locale，断言同一条提示词里英文信封包着中文摘要。
+- 真实场景：用真实临时 watch 目录与真实绑定扫描驱动已发布的解析器、deps 构造器、observation 与 drain，断言两种语言下投递的提示词文本。另一个用例在检测与投递之间切换 locale，断言同一条提示词里英文信封包着中文摘要。
 
 ## 验收标准
 
@@ -111,6 +113,6 @@
 
 ## 关联
 
-- [绑定会话事件提示词语言](2026-11-09-bound-event-prompt-language.zh-CN.md) —— 决策 7 把这项穿线记为仍欠着。
+- [绑定会话事件提示词语言](2026-11-09-bound-event-prompt-language.zh-CN.md) —— 决策 7 曾把这项穿线记为仍欠着，现在指向这里作为其落地记录。
 - [Daemon PR watch：投递 drain](2026-11-08-daemon-pr-watch-drain.zh-CN.md) —— 本增量本地化的 drain。
 - [由 daemon PR 刷新产生 PR 状态转换事件](2026-11-04-daemon-pr-state-transitions.zh-CN.md) —— 母设计。

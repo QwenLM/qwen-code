@@ -8,7 +8,7 @@ Status: proposed (2026-11-15)
 
 The daemon's PR-state watch delivers bound event prompts in English even when the operator's UI language is Chinese. The channel lane was localized in #16773, and the shared builder has carried a per-language envelope, role-guidance table and copy map ever since, but the daemon producer never passes a language: `PrWatchDrainDeps` declares no `language` member, `buildDrainPrompt` calls `buildBoundEventPrompt` without one, and the four transition summaries are authored as English literals in the observation producer. A zh deployment with an event subscription therefore receives English daemon prompts today.
 
-[Bound-session event prompt language](2026-11-09-bound-event-prompt-language.md) decision 7 records this as owed rather than scheduled: the enablement increment (#17032) landed without threading it. This increment threads it.
+[Bound-session event prompt language](2026-11-09-bound-event-prompt-language.md) decision 7 recorded this as owed rather than scheduled: the enablement increment (#17032) landed without threading it. This increment threads it.
 
 ## Current state
 
@@ -32,7 +32,7 @@ The daemon's PR-state watch delivers bound event prompts in English even when th
 - Live language switching. The locale is read once at daemon boot, exactly as the channel worker reads it at startup.
 - Localizing operator templates. `sessionPrWatch.actions` values render verbatim in whatever language the operator wrote them.
 - Localizing the channel's comment lane, which #16773 already covers.
-- Structural markers. Field labels (`Repo:`, `PR:`, `Event:`, `Summary:`), the trusted-instruction label and the `Source:` line stay English in every language, as the shared contract requires.
+- Structural markers. Field labels (`Repo:`, `PR:`, `Title:`, `URL:`, `Event:`, `Summary:`, `Role:`), the trusted-instruction label and the `Source:` line stay English in every language, as the shared contract requires.
 
 ## Proposed changes
 
@@ -60,19 +60,20 @@ Every new field is optional and defaults to `en`. A caller that does not set it 
 
 ## Files affected
 
-| File                                                             | Change                                                                                                                    |
-| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `packages/cli/src/utils/channel-locale.ts` (new)                 | the import-free locale resolver, moved out of the channel runtime                                                         |
-| `packages/cli/src/commands/channel/runtime.ts`                   | re-exports the resolver so its two existing importers are unchanged                                                       |
-| `packages/cli/src/serve/fast-path-settings.ts`                   | the boot settings surface carries `general.language`; the reader validates and copies it                                  |
-| `packages/cli/src/serve/fast-path.test.ts`                       | three reader cases: the value is carried, a non-string is rejected, chatRecording survives alongside it                   |
-| `packages/cli/src/serve/run-qwen-serve.ts`                       | resolve the locale at boot and pass it into the sources                                                                   |
-| `packages/cli/src/serve/server/pr-watch-deps.ts`                 | `language` on the sources, carried into both seams                                                                        |
-| `packages/cli/src/serve/server/pr-watch-observation.ts` (+ test) | `language` on the tick and sweep deps; per-language summary render                                                        |
-| `packages/cli/src/serve/server/pr-watch-drain.ts` (+ test)       | `language` on the drain deps; envelope, guidance and provenance selection                                                 |
-| `packages/cli/src/serve/server/pr-watch-drain.scenario.test.ts`  | two end-to-end language scenarios through the real gh child and the real admission                                        |
-| `packages/cli/src/serve/server/session-pr-refresh.ts` (+ test)   | the listing write carries the language; the two no-deps cases assert their stated effects; stale "switch" wording retired |
-| `packages/channels/github/src/GithubAdapter.ts` (+ test)         | the deprecation predicate's JSDoc names all four keys; the warning test asserts both limit knobs                          |
+| File                                                              | Change                                                                                                                                  |
+| ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/cli/src/utils/channel-locale.ts` (new)                  | the import-free locale resolver, moved out of the channel runtime                                                                       |
+| `packages/cli/src/commands/channel/runtime.ts`                    | re-exports the resolver so its two existing importers are unchanged                                                                     |
+| `packages/cli/src/serve/fast-path-settings.ts`                    | the boot settings surface carries `general.language`; the reader copies a string and drops anything else                                |
+| `packages/cli/src/serve/fast-path.test.ts`                        | three reader cases: the value is carried, a non-string is tolerated without discarding the summary, chatRecording survives alongside it |
+| `packages/cli/src/serve/run-qwen-serve.ts`                        | resolve the locale at boot and pass it into the sources                                                                                 |
+| `packages/cli/src/serve/run-qwen-serve.pr-watch-shutdown.test.ts` | a real serve boot with `general.language: zh` carries the locale into both watch seams                                                  |
+| `packages/cli/src/serve/server/pr-watch-deps.ts` (+ test)         | `language` on the sources, carried into both seams                                                                                      |
+| `packages/cli/src/serve/server/pr-watch-observation.ts` (+ test)  | `language` on the tick and sweep deps; per-language summary render                                                                      |
+| `packages/cli/src/serve/server/pr-watch-drain.ts` (+ test)        | `language` on the drain deps; envelope, guidance and provenance selection                                                               |
+| `packages/cli/src/serve/server/pr-watch-drain.scenario.test.ts`   | two end-to-end language scenarios through the real gh child and the real admission                                                      |
+| `packages/cli/src/serve/server/session-pr-refresh.ts` (+ test)    | the listing write carries the language; the two no-deps cases assert their stated effects; stale "switch" wording retired               |
+| `packages/channels/github/src/GithubAdapter.ts` (+ test)          | the deprecation predicate's JSDoc names all four keys; the warning test asserts both limit knobs                                        |
 
 ## Key design decisions
 
@@ -89,16 +90,17 @@ Every new field is optional and defaults to `en`. A caller that does not set it 
 
 - The locale is frozen at boot. An operator who changes `general.language` sees the new language only after a daemon restart, which is the same trade the channel lane already documents — and even then a summary already queued keeps its detection language.
 - Entries detected before this change keep their English summary. That is the detection-language rule applied to history, not a defect.
-- The summary render is now shared by four transition types; a missing language entry must fall back to English rather than produce `undefined` in a prompt.
+- The summary render is now shared by four transition types. The copy table is a total `Record<BoundPromptLanguage, …>`, so a new language cannot be added without its entries, and an absent language resolves to `en` — neither path can put `undefined` in a prompt.
 
 ## Validation plan
 
 - Unit (observation): each of the four transitions renders its zh summary; the `en` render is byte-identical to today; an absent language renders English; the transition key is unchanged between languages.
 - Unit (drain): a zh language selects the zh envelope, the zh role guidance and the zh provenance; the summary passes through unchanged; an absent language is byte-identical to today.
 - Unit (deps): the sources' language reaches both seams; absent stays absent.
+- Unit (boot settings and wiring): the fast-path reader carries `general.language` and drops a non-string without discarding the summary; a real serve boot with `general.language: zh` and an event subscription carries the resolved locale into both `getPrWatchDeps()` and `getPrDrainDeps()`.
 - Unit (refresh): the two no-deps cases assert the effects their names claim by spying the store — neither claims an owner record nor writes a watch file. A fixture cannot seed a file where a deps-less drain would look, because `drainNow` returns at the deps gate before any directory is resolved.
 - Unit (adapter): the deprecation warning test asserts `prWatchLimit` as well as `prWatchBudgetReserve`, including a case that sets only `prWatchLimit`.
-- Real scenario: drive the shipped resolver, deps builder, observation and drain with a real temporary watch directory and a real bindings scan, and assert the delivered prompt text in both languages. A third case flips the locale between detection and delivery and asserts one prompt carrying an English envelope around a Chinese summary.
+- Real scenario: drive the shipped resolver, deps builder, observation and drain with a real temporary watch directory and a real bindings scan, and assert the delivered prompt text in both languages. A further case flips the locale between detection and delivery and asserts one prompt carrying an English envelope around a Chinese summary.
 
 ## Acceptance criteria
 
@@ -111,6 +113,6 @@ Every new field is optional and defaults to `en`. A caller that does not set it 
 
 ## Related
 
-- [Bound-session event prompt language](2026-11-09-bound-event-prompt-language.md) — decision 7 records this threading as owed.
+- [Bound-session event prompt language](2026-11-09-bound-event-prompt-language.md) — decision 7 recorded this threading as owed and now points here for its delivery.
 - [Daemon PR watch: delivery drain](2026-11-08-daemon-pr-watch-drain.md) — the drain this increment localizes.
 - [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md) — the master design.
