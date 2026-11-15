@@ -3818,6 +3818,76 @@ describe('turn-collapse deliverable final answer', () => {
     expect(rowIds(rows)).toContain('exact');
     expect(rowIds(rows)).not.toContain('closer');
   });
+
+  it('does not promote a deliverable past a user steering row', () => {
+    // The back-scan must stop at user mid-turn steering: the reply after
+    // the steering is the answer to it, and the report before it was
+    // superseded by the steering itself.
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      { ...makeAssistantMessage('report'), content: report },
+      {
+        id: 'steer',
+        role: 'system',
+        variant: 'info',
+        source: 'mid_turn_message_injected',
+        content: 'Verify the fix',
+      },
+      makeAssistantMessage('reply'),
+    ]);
+    const rows = collapseItems(items);
+    expect(rowIds(rows)).toContain('reply');
+    expect(rowIds(rows)).not.toContain('report');
+  });
+
+  it('does not promote a deliverable past an execution work step', () => {
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      { ...makeAssistantMessage('report'), content: report },
+      makeMultiToolGroup('work'),
+      makeAssistantMessage('final'),
+    ]);
+    const rows = collapseItems(items);
+    expect(rowIds(rows)).toContain('final');
+    expect(rowIds(rows)).not.toContain('report');
+  });
+
+  it('keeps every segment of a completion-split answer visible', () => {
+    // A passive completion splits one streamed answer into segments
+    // around the completion row; the deliverable resolution re-pointing
+    // the answer to the first segment must not hide the ones that follow.
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      { ...makeAssistantMessage('seg1'), content: 's'.repeat(1200) },
+      {
+        id: 'completed',
+        role: 'system',
+        variant: 'info',
+        source: 'background_task_completed',
+        content: 'Background shell finished',
+        data: { kind: 'shell', taskId: 'task', status: 'completed' },
+      },
+      makeAssistantMessage('seg2'),
+    ]);
+    const rows = collapseItems(items);
+    expect(rowIds(rows)).toContain('seg1');
+    expect(rowIds(rows)).toContain('seg2');
+  });
+
+  it('keeps a report-length tagged reply as the final answer, not an ack', () => {
+    // The daemon stamps the tag on the model's whole response to a
+    // background notification: a substantive reply stays the turn's final
+    // answer even though it carries the ack tag.
+    const items = groupParallelAgents([
+      makeUserMessage('u1'),
+      makeAssistantMessage('interim'),
+      makeBackgroundTurnMarker('marker'),
+      { ...makeAckMessage('long-reply'), content: 'r'.repeat(1200) },
+    ]);
+    const rows = collapseItems(items, { backgroundSummaryGraceActive: false });
+    expect(rowIds(rows)).toContain('long-reply');
+    expect(rowIds(rows)).not.toContain('interim');
+  });
 });
 
 describe('background completion markers', () => {

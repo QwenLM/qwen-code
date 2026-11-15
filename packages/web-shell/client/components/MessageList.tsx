@@ -54,6 +54,7 @@ import {
 import { useI18n } from '../i18n';
 import { formatContextTokens } from '../utils/formatTokenCount';
 import {
+  SUBSTANTIVE_REPLY_MIN_LENGTH as DELIVERABLE_MIN_LENGTH,
   isShellCompletionAckRow,
   isTurnStartMessage,
   shellAckRowFromMessage,
@@ -817,6 +818,7 @@ function isBackgroundTurnMarker(item: DisplayItem): boolean {
 const inertAckRow: ShellAckRow = {
   role: 'inert',
   hasContent: false,
+  contentLength: 0,
   isWorkStep: false,
   isAgentReply: false,
   isCompletionRow: false,
@@ -890,13 +892,15 @@ function findFinalAnswerIndex(
  * (a guard or todo-stop line) would otherwise fold the report and show
  * the note. The final candidate stands only if it is itself a
  * deliverable; otherwise the nearest preceding deliverable in the same
- * turn stands instead. Fail-toward-showing-more: with no preceding
- * deliverable the original candidate stands, so nothing is hidden.
- * The shell-ack fold already ran inside findFinalAnswerIndex; the two
- * rules compose, because a well-formed ack never carries report text.
+ * turn stands instead, without crossing a structural boundary: an
+ * execution work step, a background turn marker, or a user mid-turn
+ * steering row ends the segment, and a row past one was superseded by
+ * what the user steered the turn toward. Fail-toward-showing-more: with
+ * no preceding deliverable in the segment the original candidate stands,
+ * so nothing is hidden. The shell-ack fold already ran inside
+ * findFinalAnswerIndex; the two rules compose, because a well-formed ack
+ * never carries report text.
  */
-const DELIVERABLE_MIN_LENGTH = 1000;
-
 function isDeliverableAnswer(item: DisplayItem): boolean {
   if (item.type !== 'message' || item.message.role !== 'assistant') {
     return false;
@@ -905,6 +909,16 @@ function isDeliverableAnswer(item: DisplayItem): boolean {
   const content = item.message.content;
   return (
     typeof content === 'string' && content.length >= DELIVERABLE_MIN_LENGTH
+  );
+}
+
+function isDeliverableBackScanBoundary(item: DisplayItem): boolean {
+  return (
+    isExecutionWorkStep(item) ||
+    isBackgroundTurnMarker(item) ||
+    (item.type === 'message' &&
+      item.message.role === 'system' &&
+      item.message.source === 'mid_turn_message_injected')
   );
 }
 
@@ -917,6 +931,7 @@ function resolveDeliverableAnswerIdx(
     return candidateIdx;
   }
   for (let i = candidateIdx - 1; i > start; i--) {
+    if (isDeliverableBackScanBoundary(items[i]!)) return candidateIdx;
     if (isDeliverableAnswer(items[i]!)) return i;
   }
   return candidateIdx;
@@ -962,7 +977,13 @@ function collectFinalAssistantTurnIds(
       continue;
     }
     const turnHead = items[start];
-    const answerIdx = findFinalAnswerIndex(items, start, end, false);
+    // The same resolution the collapsed view applies: the footer, the
+    // actions and the feedback bind to the row the turn actually shows.
+    const answerIdx = resolveDeliverableAnswerIdx(
+      items,
+      start,
+      findFinalAnswerIndex(items, start, end, false),
+    );
     if (answerIdx < 0) continue;
     const item = items[answerIdx];
     if (
@@ -1350,11 +1371,12 @@ export function getSessionTimelineEntries(
   const pushTurn = () => {
     if (!turnStart) return;
     const timelineItems = groupParallelAgents(turnItems);
-    const finalAssistantIndex = findFinalAnswerIndex(
+    // The same resolution the collapsed view applies: the timeline labels
+    // the turn with the row the turn actually shows.
+    const finalAssistantIndex = resolveDeliverableAnswerIdx(
       timelineItems,
       -1,
-      timelineItems.length - 1,
-      false,
+      findFinalAnswerIndex(timelineItems, -1, timelineItems.length - 1, false),
     );
     const finalAssistantItem =
       finalAssistantIndex >= 0 ? timelineItems[finalAssistantIndex] : null;
@@ -2213,11 +2235,18 @@ export function applyTurnCollapse(
     const rawAnswerIdx = findFinalAnswerIndex(items, start, end);
     const answerIdx = resolveDeliverableAnswerIdx(items, start, rawAnswerIdx);
     let answerStartIdx = answerIdx;
-    // A passive completion can split one streamed answer into several rows.
-    // Keep those segments, but stop at work or an automatic execution marker.
-    if (answerIdx >= 0 && isFinalContentCandidate(items[answerIdx]!, false)) {
+    // A passive completion can split one streamed answer into several
+    // rows. The segments are found by walking back from the raw (last)
+    // segment across the completion marker — the deliverable resolution
+    // above may have re-pointed answerIdx to an earlier segment, and an
+    // extension starting there would drop the segments that follow it.
+    let splitConnected = false;
+    if (
+      rawAnswerIdx >= 0 &&
+      isFinalContentCandidate(items[rawAnswerIdx]!, false)
+    ) {
       let crossedCompletion = false;
-      for (let i = answerIdx - 1; i > start; i--) {
+      for (let i = rawAnswerIdx - 1; i > start; i--) {
         const item = items[i]!;
         if (item.type !== 'message') break;
         if (
@@ -2226,13 +2255,19 @@ export function applyTurnCollapse(
         ) {
           crossedCompletion = true;
         } else if (crossedCompletion && item.message.role === 'assistant') {
-          answerStartIdx = i;
+          answerStartIdx = Math.min(answerStartIdx, i);
+          splitConnected = true;
           crossedCompletion = false;
         } else {
           break;
         }
       }
     }
+    // With the segments connected, the displayed range runs to the raw
+    // segment so the whole streamed answer stays visible; otherwise it
+    // ends at the resolved answer, so a short closer after a deliverable
+    // stays hidden.
+    const answerEndIdx = splitConnected ? rawAnswerIdx : answerIdx;
     let hiddenCount = 0;
     let terminalTs: number | undefined;
     let cancelledElapsedMs: number | undefined;
@@ -2249,7 +2284,7 @@ export function applyTurnCollapse(
       const item = items[i]!;
       const isStep = isHideableStep(
         item,
-        i >= answerStartIdx && i <= answerIdx,
+        i >= answerStartIdx && i <= answerEndIdx,
       );
       if (isStep) {
         hiddenCount++;
@@ -2429,7 +2464,7 @@ export function applyTurnCollapse(
         });
         continue;
       }
-      if (!isHideableStep(item, i >= answerStartIdx && i <= answerIdx))
+      if (!isHideableStep(item, i >= answerStartIdx && i <= answerEndIdx))
         result.push(item);
     }
   }

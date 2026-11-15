@@ -3338,6 +3338,28 @@ describe('MessageList — turn collapse (DOM)', () => {
     ).toHaveLength(1);
   });
 
+  it('binds the footer to the report the collapse shows, not the hidden closer', () => {
+    const renderAssistantTurnFooter = vi.fn(() => (
+      <span data-testid="assistant-turn-footer">footer</span>
+    ));
+    const c = mount(
+      [
+        userMsg('u1'),
+        { ...asstMsg('report'), content: '## report\n' + 'x'.repeat(1200) },
+        asstMsg('closer'),
+      ],
+      undefined,
+      { customization: { renderAssistantTurnFooter } },
+    );
+
+    expect(
+      renderAssistantTurnFooter.mock.calls.map(([info]) => info.message.id),
+    ).toEqual(['report']);
+    expect(
+      c.querySelectorAll('[data-testid="assistant-turn-footer"]'),
+    ).toHaveLength(1);
+  });
+
   it('releases the latest turn after matched delayed agent notifications', () => {
     vi.useFakeTimers();
     const firstAgent = agentMsg('agent-1');

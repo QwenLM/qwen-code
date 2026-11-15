@@ -798,12 +798,17 @@ export function transcriptBlocksToDaemonMessages(
         // bookkeeping ack from a real reply. The persisted transcript keeps
         // the turn's `backgroundTurn` envelope but drops `_meta.source`, so
         // a restored session re-derives the tag from it and folds its acks
-        // the same way the live one did.
+        // the same way the live one did. The envelope is a fallback for the
+        // dropped tag, never an override: a chunk that carries its own
+        // source (e.g. the `todo_stop_guard` notice inside a background
+        // turn) keeps it, or the ack fold would fold a real warning.
+        const daemonSource = getString(meta, 'source');
         const source =
-          getString(meta, 'source') === BACKGROUND_NOTIFICATION_RESPONSE ||
-          backgroundTurn
+          daemonSource === BACKGROUND_NOTIFICATION_RESPONSE
             ? BACKGROUND_NOTIFICATION_RESPONSE
-            : undefined;
+            : daemonSource === undefined && backgroundTurn
+              ? BACKGROUND_NOTIFICATION_RESPONSE
+              : undefined;
         const reportedArtifacts = readReportedArtifacts(meta ?? undefined);
         if (notice?.source === 'vision_bridge_notice') {
           messages.push({

@@ -212,6 +212,38 @@ describe('Assistant branch anchors', () => {
     });
   });
 
+  it('keeps an explicit daemon source over the background turn envelope', () => {
+    // The envelope re-derivation is a fallback for the tag the persisted
+    // transcript drops, never an override: a guard notice inside a
+    // background turn keeps its own source, or the ack fold would fold a
+    // real warning out of the collapsed turn.
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock(
+        'assistant-1',
+        'assistant',
+        'Stopped after 2 attempts; 3 todo item(s) remain unfinished.',
+        1,
+        false,
+        {
+          meta: { source: 'todo_stop_guard' },
+          backgroundTurn: {
+            turnId: 'auto-task',
+            taskId: 'task',
+            kind: 'shell',
+            startedAt: 100,
+          },
+        },
+      ),
+    ]);
+
+    const assistant = messages.find((message) => message.role === 'assistant');
+    expect(assistant).toMatchObject({
+      role: 'assistant',
+      content: 'Stopped after 2 attempts; 3 todo item(s) remain unfinished.',
+    });
+    expect(assistant).not.toHaveProperty('source');
+  });
+
   it('leaves an ordinary assistant reply untagged outside a background turn', () => {
     const messages = transcriptBlocksToDaemonMessages([
       textBlock('assistant-1', 'assistant', 'Done.', 1),

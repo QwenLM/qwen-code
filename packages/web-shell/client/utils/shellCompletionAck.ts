@@ -12,6 +12,8 @@ export interface ShellAckRow {
   source?: string;
   /** The row carries non-blank text content. */
   hasContent: boolean;
+  /** The trimmed text length of the row; 0 for non-text rows. */
+  contentLength: number;
   /** An execution step: a tool group, a plan, or a parallel-agent group. */
   isWorkStep: boolean;
   /** A workspace agent's reply posted into this session. */
@@ -49,6 +51,14 @@ export interface ShellAckRow {
 export const BACKGROUND_NOTIFICATION_RESPONSE =
   'background_notification_response';
 
+/**
+ * A tagged reply at or above this length is a substantive answer, not a
+ * bookkeeping ack, whatever tag the daemon stamped on it. The turn-collapse
+ * deliverable rule reuses the same floor, so a reply the fold refuses to
+ * hide is one the collapsed turn would show as its final answer.
+ */
+export const SUBSTANTIVE_REPLY_MIN_LENGTH = 1000;
+
 const RAW_NOTIFICATION = 'background_notification';
 const TASK_COMPLETED = 'background_task_completed';
 
@@ -76,8 +86,11 @@ export function isTurnStartMessage(message: Message): boolean {
  *   marker (a raw machine notification never licenses a fold, so no
  *   consumer can license it differently);
  * - for an assistant reply, the daemon tagged it
- *   `background_notification_response`, and when the marker carries the
- *   task's terminal status that status is a clean completion;
+ *   `background_notification_response`, when the marker carries the
+ *   task's terminal status that status is a clean completion, and the
+ *   reply itself stays below the substantive-answer floor: the daemon
+ *   stamps the tag on the model's whole response to a notification, so
+ *   a report-length reply is content even though it is tagged;
  * - only thoughts, markers, daemon bookkeeping rows, and turn chrome sit
  *   between the marker and the row, and nothing but thoughts, markers,
  *   task-completed bookkeeping, turn chrome, and a reply this very rule
@@ -107,7 +120,8 @@ export function isShellCompletionAckRow(
     const status = rows[marker]!.markerTaskStatus;
     if (
       candidate.source !== BACKGROUND_NOTIFICATION_RESPONSE ||
-      !(status === undefined || status === 'completed')
+      !(status === undefined || status === 'completed') ||
+      candidate.contentLength >= SUBSTANTIVE_REPLY_MIN_LENGTH
     ) {
       return false;
     }
@@ -218,6 +232,10 @@ export function shellAckRowFromMessage(message: Message): ShellAckRow {
       'content' in message &&
       typeof message.content === 'string' &&
       message.content.trim().length > 0,
+    contentLength:
+      'content' in message && typeof message.content === 'string'
+        ? message.content.trim().length
+        : 0,
     isWorkStep: message.role === 'tool_group' || message.role === 'plan',
     isAgentReply:
       message.role === 'assistant' &&
