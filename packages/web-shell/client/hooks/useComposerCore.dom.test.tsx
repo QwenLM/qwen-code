@@ -32,6 +32,7 @@ function Harness({
   composerInput,
   onSubmit,
   prepareSubmit,
+  submitDisabled,
   renderComposerTag,
   renderComposerTagTooltip,
   onFileTagClick,
@@ -57,6 +58,7 @@ function Harness({
   composerInput?: WebShellComposerInput;
   onSubmit: ReturnType<typeof vi.fn>;
   prepareSubmit?: UseComposerCoreOptions['prepareSubmit'];
+  submitDisabled?: UseComposerCoreOptions['submitDisabled'];
   renderComposerTag?: () => ReactNode;
   renderComposerTagTooltip?: () => ReactNode;
   onFileTagClick?: UseComposerCoreOptions['onFileTagClick'];
@@ -86,6 +88,7 @@ function Harness({
   const composer = useComposerCore({
     onSubmit,
     prepareSubmit,
+    submitDisabled,
     commands: commands ?? [],
     allowEmptySlashMenu,
     cycleModeOnTab,
@@ -125,6 +128,7 @@ async function mount({
   composerInput,
   onSubmit = vi.fn(),
   prepareSubmit,
+  submitDisabled,
   renderComposerTag,
   renderComposerTagTooltip,
   onFileTagClick,
@@ -150,6 +154,7 @@ async function mount({
   composerInput?: WebShellComposerInput;
   onSubmit?: ReturnType<typeof vi.fn>;
   prepareSubmit?: UseComposerCoreOptions['prepareSubmit'];
+  submitDisabled?: UseComposerCoreOptions['submitDisabled'];
   renderComposerTag?: () => ReactNode;
   renderComposerTagTooltip?: () => ReactNode;
   onFileTagClick?: UseComposerCoreOptions['onFileTagClick'];
@@ -195,6 +200,7 @@ async function mount({
             composerInput={composerInput}
             onSubmit={onSubmit}
             prepareSubmit={prepareSubmit}
+            submitDisabled={submitDisabled}
             renderComposerTag={renderComposerTag}
             renderComposerTagTooltip={renderComposerTagTooltip}
             onFileTagClick={onFileTagClick}
@@ -5113,6 +5119,53 @@ describe('useComposerCore prepareSubmit gate', () => {
     expect(onSubmit).toHaveBeenCalledOnce();
     expect(onSubmit.mock.calls[0][0]).toBe('typed');
     expect(latest!.submitPreparing).toBe(false);
+  });
+
+  it('refuses a guarded Enter submit before arming the finalizer', async () => {
+    const prepareSubmit = vi.fn(async () => {});
+    const { onSubmit } = await mount({ prepareSubmit, submitDisabled: true });
+    act(() => latest!.setText('typed'));
+
+    act(() => pressEnter());
+    expect(prepareSubmit).not.toHaveBeenCalled();
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(latest!.submitPreparing).toBe(false);
+    expect(latest!.getText()).toBe('typed');
+  });
+
+  it('refuses a guarded submitText before arming the finalizer', async () => {
+    const prepareSubmit = vi.fn(async () => {});
+    const { onSubmit } = await mount({ prepareSubmit, submitDisabled: true });
+    act(() => latest!.setText('typed'));
+
+    act(() => latest!.submitText());
+    expect(prepareSubmit).not.toHaveBeenCalled();
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(latest!.submitPreparing).toBe(false);
+    expect(latest!.getText()).toBe('typed');
+  });
+
+  it('drops a programmatic submit landing inside the finalization window', async () => {
+    localStorage.setItem(
+      getPromptHistoryStorageKey(),
+      JSON.stringify(['earlier prompt']),
+    );
+    const { prepareSubmit, release } = deferredPrepare();
+    const { onSubmit } = await mount({ prepareSubmit });
+    act(() => latest!.setText('typed'));
+
+    act(() => latest!.submitText());
+    expect(latest!.submitPreparing).toBe(true);
+    // History-search Enter submits programmatically while the flush is in
+    // flight; it must be dropped, not race the flush continuation.
+    act(() => latest!.searchState.openHistorySearch());
+    act(() => latest!.searchState.submitSearchMatch('earlier prompt'));
+    expect(onSubmit).not.toHaveBeenCalled();
+
+    await act(async () => {
+      release();
+    });
+    expect(onSubmit).toHaveBeenCalledOnce();
   });
 
   it('cancels the submit without an unhandled rejection when prepareSubmit rejects', async () => {

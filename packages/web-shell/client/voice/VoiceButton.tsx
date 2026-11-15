@@ -279,10 +279,23 @@ export const VoiceButton = forwardRef<VoiceButtonHandle, VoiceButtonProps>(
       ref,
       () => ({
         flush: async () => {
+          const ownerKey = targetRef.current?.ownerKey;
+          const generation = capabilityRefreshGenerationRef.current;
           const text = await flush();
           // A send that finalizes an empty transcript must still surface the
           // no-speech notice — the suppressed onFinal would have shown it.
-          if (isActive && !text.trim()) setHasNoSpeech(true);
+          // Skip the write when the app tore the capture down mid-flush
+          // (owner switch, unmount): abort() also settles with '', but the
+          // notice would land on a session that never had the capture.
+          if (
+            isActive &&
+            !text.trim() &&
+            mountedRef.current &&
+            capabilityRefreshGenerationRef.current === generation &&
+            targetRef.current?.ownerKey === ownerKey
+          ) {
+            setHasNoSpeech(true);
+          }
           return text;
         },
       }),

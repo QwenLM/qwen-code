@@ -1180,4 +1180,61 @@ describe('VoiceButton', () => {
     });
     expect(container.querySelector('[role="status"]')).toBeNull();
   });
+
+  it('does not raise the no-speech notice when the owner changes mid-flush', async () => {
+    mocks.capture.status = 'recording';
+    let resolveFlush!: (text: string) => void;
+    mocks.capture.flush.mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          resolveFlush = resolve;
+        }),
+    );
+    const ref = createRef<VoiceButtonHandle>();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <VoiceButton
+            ref={ref}
+            disabled={false}
+            onInsert={() => {}}
+            target={legacyTarget}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    let pending!: Promise<string>;
+    act(() => {
+      pending = ref.current!.flush();
+    });
+    // Session switch mid-flush: the app tears the capture down (abort
+    // settles ''), so the empty result is not the user's silence.
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <VoiceButton
+            ref={ref}
+            disabled={false}
+            onInsert={() => {}}
+            target={{
+              ...legacyTarget,
+              ownerKey: 'primary:session-2',
+              sessionId: 'session-2',
+            }}
+          />
+        </I18nProvider>,
+      );
+    });
+    await act(async () => {
+      resolveFlush('');
+      expect(await pending).toBe('');
+    });
+    expect(container.querySelector('[role="status"]')).toBeNull();
+  });
 });

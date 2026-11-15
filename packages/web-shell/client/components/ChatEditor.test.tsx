@@ -171,6 +171,7 @@ const composerCoreState = vi.hoisted(() => ({
   toggleShellMode: vi.fn(),
   submitText: vi.fn(),
   submitPreparing: false,
+  submitBlocked: false,
   onFileUploadRequest: undefined as
     | ((targetDir: string, restoreQuery?: () => void) => void)
     | undefined,
@@ -254,9 +255,14 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
           mockComposerCoreState.composerTags.length > 0,
         hasContent: composerCoreState.hasContent,
         canSubmit:
+          !composerCoreState.submitBlocked &&
           !options?.disabled &&
           !options?.workspaceUploadBusy &&
           composerCoreState.hasContent,
+        submitBlocked:
+          composerCoreState.submitBlocked ||
+          Boolean(options?.disabled) ||
+          Boolean(options?.workspaceUploadBusy),
         submitPreparing: composerCoreState.submitPreparing,
         pendingImageBatchCount: composerCoreState.pendingImageBatchCount,
         imageDragActive: composerCoreState.imageDragActive,
@@ -402,6 +408,7 @@ afterEach(() => {
   composerCoreState.toggleShellMode.mockReset();
   composerCoreState.submitText.mockReset();
   composerCoreState.submitPreparing = false;
+  composerCoreState.submitBlocked = false;
   composerCoreState.shellMode = false;
   composerCoreState.hasContent = false;
   composerCoreState.pendingImageBatchCount = 0;
@@ -990,6 +997,85 @@ describe('ChatEditor voice toolbar integration', () => {
 
     act(() => voiceButtonState.onActiveChange?.(false));
     expect(latestComposerCoreOptions.current?.prepareSubmit).toBeUndefined();
+  });
+
+  it('sends the dictation instead of cancelling when a capture is active during a run', () => {
+    // Touch layouts have no Enter-to-submit: with an active dictation the
+    // button must send (queue) it, not take the Stop role.
+    composerCoreState.hasContent = false;
+    const onCancel = vi.fn();
+    const container = renderChatEditor({
+      visibleToolbarActions: ['voice'],
+      isRunning: true,
+      onCancel,
+    });
+    act(() => voiceButtonState.onActiveChange?.(true));
+    const submit = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-submit]',
+    )!;
+    expect(submit.disabled).toBe(false);
+    expect(submit.getAttribute('aria-label')).toBe('Send message');
+    act(() => submit.click());
+    expect(composerCoreState.submitText).toHaveBeenCalledOnce();
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it('keeps Send disabled while submit guards block even with an active capture', () => {
+    composerCoreState.hasContent = false;
+    composerCoreState.submitBlocked = true;
+    const container = renderChatEditor({ visibleToolbarActions: ['voice'] });
+    act(() => voiceButtonState.onActiveChange?.(true));
+    const submit = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-submit]',
+    )!;
+    expect(submit.disabled).toBe(true);
+  });
+
+  it('keeps a stop control reachable during dictation on an empty draft', () => {
+    composerCoreState.hasContent = false;
+    composerCoreState.submitPreparing = true;
+    const onCancel = vi.fn();
+    const container = renderChatEditor({
+      customization: { composerVariant: 'simple' },
+      visibleToolbarActions: ['voice'],
+      isRunning: true,
+      onCancel,
+    });
+    act(() => voiceButtonState.onActiveChange?.(true));
+    const stop = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-stop]',
+    );
+    expect(stop).not.toBeNull();
+    expect(stop!.disabled).toBe(false);
+    act(() => stop!.click());
+    expect(onCancel).toHaveBeenCalledOnce();
+  });
+
+  it('inserts the finalized transcript directly in the simple variant', async () => {
+    voiceButtonState.flush.mockResolvedValue('simple tail');
+    // Record whether the finalizer was still installed when the insertion
+    // happened: direct insertion runs while voiceActive is true; the
+    // deferred review path only inserts after the voiceActive=false render
+    // uninstalls it — too late for the submit in the same continuation.
+    let prepareSubmitAtInsert: unknown;
+    composerCoreState.insertText.mockImplementation(() => {
+      prepareSubmitAtInsert = latestComposerCoreOptions.current?.prepareSubmit;
+    });
+    renderChatEditor({
+      customization: { composerVariant: 'simple' },
+      visibleToolbarActions: ['voice'],
+    });
+    act(() => voiceButtonState.onActiveChange?.(true));
+
+    const prepareSubmit = latestComposerCoreOptions.current?.prepareSubmit as
+      | (() => Promise<void>)
+      | undefined;
+    expect(prepareSubmit).toBeTypeOf('function');
+    await act(async () => {
+      await prepareSubmit!();
+    });
+    expect(composerCoreState.insertText).toHaveBeenCalledWith('simple tail ');
+    expect(prepareSubmitAtInsert).toBeTypeOf('function');
   });
 });
 

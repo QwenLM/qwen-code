@@ -2780,6 +2780,11 @@ export const ChatEditor = memo(
       [onSelectModel, core, modelControlsDisabled, modelItems],
     );
     const showCancelButton = isRunning && !core.hasContent;
+    // While a dictation is active the send intent wins over the stop role:
+    // on touch layouts Send is the only submit path, so the button must send
+    // (queue) the dictation, not cancel the turn. The separate stop button
+    // below stays reachable during dictation, and desktop keeps Escape.
+    const stopAffordance = showCancelButton && !voiceActive;
     // Stopping a running agent is unrelated to submit finalization: a voice
     // flush may hold submitPreparing for up to a minute, and the stop buttons
     // must stay usable throughout (mobile/simple have no other composer exit).
@@ -2787,7 +2792,7 @@ export const ChatEditor = memo(
     const composerPreparing = cancelPreparing || core.submitPreparing;
     // With an empty draft during a run the submit button doubles as the Stop
     // control; finalization must not take that affordance away.
-    const submitLoading = composerPreparing && !showCancelButton;
+    const submitLoading = composerPreparing && !stopAffordance;
 
     const {
       searchMode,
@@ -4019,24 +4024,26 @@ export const ChatEditor = memo(
                 </span>
               </>
             )}
-            {(isMobile || isSimple) && isRunning && core.hasContent && (
-              <button
-                type="button"
-                className={`${styles.sendBtn} ${styles.sendBtnRunning}`}
-                disabled={cancelPreparing || !onCancel}
-                data-web-shell-composer-stop
-                aria-label={t('composerMobile.stop')}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onCancel?.();
-                }}
-              >
-                <StopIcon />
-              </button>
-            )}
+            {(isMobile || isSimple) &&
+              isRunning &&
+              (core.hasContent || voiceActive) && (
+                <button
+                  type="button"
+                  className={`${styles.sendBtn} ${styles.sendBtnRunning}`}
+                  disabled={cancelPreparing || !onCancel}
+                  data-web-shell-composer-stop
+                  aria-label={t('composerMobile.stop')}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onCancel?.();
+                  }}
+                >
+                  <StopIcon />
+                </button>
+              )}
             <button
               className={
-                submitLoading || showCancelButton
+                submitLoading || stopAffordance
                   ? `${styles.sendBtn} ${styles.sendBtnRunning}${
                       cancelArmed ? ` ${styles.sendBtnArmed}` : ''
                     }`
@@ -4045,9 +4052,9 @@ export const ChatEditor = memo(
               disabled={
                 submitLoading
                   ? true
-                  : showCancelButton
+                  : stopAffordance
                     ? !onCancel
-                    : !core.canSubmit && !voiceActive
+                    : core.submitBlocked || (!core.hasContent && !voiceActive)
               }
               data-web-shell-composer-submit
               onClick={(e) => {
@@ -4055,7 +4062,7 @@ export const ChatEditor = memo(
                 if (submitLoading) {
                   return;
                 }
-                if (showCancelButton) {
+                if (stopAffordance) {
                   onCancel?.();
                   return;
                 }
@@ -4064,7 +4071,7 @@ export const ChatEditor = memo(
               aria-label={
                 submitLoading
                   ? t('common.loading')
-                  : showCancelButton
+                  : stopAffordance
                     ? cancelArmed && !isMobile
                       ? t('stream.cancelArmed')
                       : t(isMobile ? 'composerMobile.stop' : 'stream.cancel')
@@ -4078,7 +4085,7 @@ export const ChatEditor = memo(
             >
               {submitLoading ? (
                 <LoadingIcon />
-              ) : showCancelButton ? (
+              ) : stopAffordance ? (
                 cancelArmed && !isMobile ? (
                   <span className={styles.escLabel} aria-hidden="true">
                     Esc

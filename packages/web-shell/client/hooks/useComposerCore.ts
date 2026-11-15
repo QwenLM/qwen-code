@@ -1572,6 +1572,13 @@ export interface UseComposerCoreReturn {
   hasAttachments: boolean;
   hasContent: boolean;
   canSubmit: boolean;
+  /**
+   * The content-independent submit guards (disabled, submitDisabled, draft
+   * restore, pending attachment batches, workspace upload). `canSubmit` is
+   * `!submitBlocked && hasContent`; render sites that relax the content term
+   * must keep these guards.
+   */
+  submitBlocked: boolean;
   /** True while `prepareSubmit` is running ahead of a user-initiated submit. */
   submitPreparing: boolean;
   pendingImageBatchCount: number;
@@ -2775,6 +2782,20 @@ export function useComposerCore(
     },
     [],
   );
+  // The same predicate submitComposerText enforces, exposed so the submit
+  // entrances can refuse BEFORE arming the finalizer — a refused submit must
+  // not tear down a live capture — and so render sites can relax only the
+  // content term of canSubmit without discarding these guards.
+  const submitGuardsBlock = useCallback(
+    () =>
+      disabledRef.current ||
+      submitDisabledRef.current ||
+      activeDraftAttachmentRestoreRef.current !== null ||
+      (sharedDraftRef.current?.session.pendingBatches ??
+        imageIngestionLaneRef.current.pendingBatches) > 0 ||
+      workspaceUploadBusyRef.current,
+    [],
+  );
   const autoTriggerRef = useRef<{ text: string; from: number } | null>(null);
   const [slashMenu, setSlashMenuState] = useState<SlashMenuState | null>(null);
   const slashMenuRef = useRef<SlashMenuState | null>(null);
@@ -3319,14 +3340,13 @@ export function useComposerCore(
     tagsOverride?: readonly WebShellComposerTag[],
     suppressFollowupCompletion = false,
   ) => {
-    if (
-      disabledRef.current ||
-      submitDisabledRef.current ||
-      activeDraftAttachmentRestoreRef.current !== null ||
-      (sharedDraftRef.current?.session.pendingBatches ??
-        imageIngestionLaneRef.current.pendingBatches) > 0 ||
-      workspaceUploadBusyRef.current
-    ) {
+    // A programmatic submit landing inside the finalization window is
+    // dropped like any other reentrant submit; otherwise the flush
+    // continuation would submit a second time after it.
+    if (submitPreparingRef.current) {
+      return true;
+    }
+    if (submitGuardsBlock()) {
       return true;
     }
     const inlineTags =
@@ -3811,7 +3831,12 @@ export function useComposerCore(
             }
             return submitText(target);
           };
-          if (!prepareSubmitRef.current) return submitDraft(view);
+          // Refuse before arming the finalizer: a submit the guards would
+          // reject must leave a live capture recording, as it did before
+          // finalization existed.
+          if (!prepareSubmitRef.current || submitGuardsBlock()) {
+            return submitDraft(view);
+          }
           const identity = composerIdentityRef.current;
           // CodeMirror commands are synchronous; the finalization runs in the
           // background and the key is consumed so no newline is inserted.
@@ -5528,13 +5553,17 @@ export function useComposerCore(
 
   // ---- Computed ----
 
-  const canSubmit =
-    !disabled &&
-    !submitDisabled &&
-    !draftAttachmentsRestoring &&
-    pendingImageBatchCount === 0 &&
-    !workspaceUploadBusy &&
-    hasContent;
+  // The content-independent submit guards, mirroring submitGuardsBlock (the
+  // ref-based predicate the submit path enforces). Render sites use this to
+  // relax only the content term of canSubmit — e.g. an active dictation —
+  // without discarding the guards themselves.
+  const submitBlocked =
+    disabled ||
+    submitDisabled ||
+    draftAttachmentsRestoring ||
+    pendingImageBatchCount > 0 ||
+    workspaceUploadBusy;
+  const canSubmit = !submitBlocked && hasContent;
   const showShortcutHints =
     !shellMode &&
     !searchMode &&
@@ -5646,7 +5675,7 @@ export function useComposerCore(
     submitText: useCallback(() => {
       const view = viewRef.current;
       if (!view && !isTouchComposer) return;
-      if (!prepareSubmitRef.current) {
+      if (!prepareSubmitRef.current || submitGuardsBlock()) {
         submitTextRef.current(view);
         return;
       }
@@ -5663,7 +5692,12 @@ export function useComposerCore(
         }
         submitTextRef.current(currentView);
       })();
-    }, [isTouchComposer, prepareForSubmit, submitIdentityMatches]),
+    }, [
+      isTouchComposer,
+      prepareForSubmit,
+      submitGuardsBlock,
+      submitIdentityMatches,
+    ]),
     clearText,
     getText,
     hasInput,
@@ -5674,6 +5708,7 @@ export function useComposerCore(
       pastedFiles.length > 0,
     hasContent,
     canSubmit,
+    submitBlocked,
     submitPreparing,
     pendingImageBatchCount,
     imageDragActive,
