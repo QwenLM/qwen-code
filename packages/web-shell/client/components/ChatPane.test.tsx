@@ -1281,6 +1281,63 @@ describe('ChatPane', () => {
     expect(controlGoal).toHaveBeenCalledTimes(1);
   });
 
+  it('renders the Goals-page affordance in the pane strip when wired', () => {
+    // Split-view panes reach the Goals page through this forward; deleting
+    // the `onOpenGoals={onOpenGoals}` line must turn this case red.
+    const onOpenGoals = vi.fn();
+    connectionState.goalState = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 1,
+        objective: 'ship it',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    render({ onOpenGoals });
+
+    const openGoals = container!.querySelector<HTMLButtonElement>(
+      '[data-testid="goal-status-strip"] [data-testid="goal-open-goals"]',
+    );
+    if (!openGoals) throw new Error('goals-page affordance was not rendered');
+    act(() => openGoals.click());
+    expect(onOpenGoals).toHaveBeenCalledOnce();
+  });
+
+  it('hides the Goals-page affordance in a pane without the Goals surface', () => {
+    connectionState.goalState = {
+      v: 2 as const,
+      activity: 'running' as const,
+      goal: {
+        goalId: 'goal-1',
+        revision: 1,
+        objective: 'ship it',
+        status: 'active' as const,
+        evidenceCursor: { recordId: 'record-1' },
+        turnCount: 1,
+        activeTimeMs: 10,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    };
+    render();
+
+    expect(
+      container!.querySelector('[data-testid="goal-open-goals"]'),
+    ).toBeNull();
+    // The strip itself still renders — only the navigation affordance is
+    // absent, so the pane keeps its controls.
+    expect(
+      container!.querySelector('[data-testid="goal-status-strip"]'),
+    ).not.toBeNull();
+  });
+
   it('builds the control request from the freshly fetched Goal', async () => {
     // `expectedGoalId`/`expectedRevision` must come from the getGoal round trip,
     // not from the possibly-stale snapshot in connection state, or every

@@ -362,7 +362,16 @@
   height: 100%;
   border-radius: 999px;
   background: var(--status-running-fg);
-  transition: width 0.3s ease;
+}
+
+/* The active-time ratio advances on the one-second tick, so an unguarded
+   transition would replay a 300ms animation every second for users who
+   asked for reduced motion. Same guard as the sibling progress fills in
+   PlanExecutionView / SessionWorkflowInspector. */
+@media (prefers-reduced-motion: no-preference) {
+  .budgetFill {
+    transition: width 0.3s ease;
+  }
 }
 
 .budgetFill[data-status='attention'] {

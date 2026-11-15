@@ -123,10 +123,19 @@ test('a stopped goal shows its lifecycle tone and budget progress @smoke', async
     'data-status',
     'attention',
   );
-  await expect(page.getByTestId('goal-budget-turns')).toHaveAttribute(
-    'aria-valuenow',
-    '15',
-  );
+  const turnsBar = page.getByTestId('goal-budget-turns');
+  await expect(turnsBar).toHaveAttribute('aria-valuenow', '15');
+  // Real-browser proof the fill actually renders at the ratio: aria alone
+  // would stay green with an empty bar. The fill is 15% of its track.
+  const widths = await turnsBar.evaluate((track) => {
+    const fill = track.firstElementChild as HTMLElement;
+    return {
+      track: track.getBoundingClientRect().width,
+      fill: fill.getBoundingClientRect().width,
+    };
+  });
+  expect(widths.track).toBeGreaterThan(0);
+  expect(Math.abs(widths.fill - widths.track * 0.15)).toBeLessThan(1);
 });
 
 test('the create form targets the picked workspace @smoke', async ({

@@ -652,13 +652,19 @@ export function GoalsDialog({
           // Only armed budgets get a bar: an unbounded goal has no ceiling to
           // show progress against. A token budget without a usage figure
           // (older daemon) is skipped too — a bar with no fill would claim
-          // zero spend the snapshot cannot actually attest.
+          // zero spend the snapshot cannot actually attest. The row is the
+          // single home for an armed budget's figures: the matching footer
+          // cell is suppressed below, and the text reuses the same localised
+          // templates the footer used so a catalogue change moves both.
           const budgets: GoalBudgetBar[] = [];
           if (goal.turnBudget !== undefined) {
             budgets.push({
               key: 'turns',
               label: t('goals.budget.turns'),
-              valueText: `${goal.turnCount} / ${goal.turnBudget}`,
+              valueText: t('goal.turnsOfBudget', {
+                count: goal.turnCount,
+                budget: goal.turnBudget,
+              }),
               ratio: goal.turnBudget > 0 ? goal.turnCount / goal.turnBudget : 1,
             });
           }
@@ -666,7 +672,10 @@ export function GoalsDialog({
             budgets.push({
               key: 'tokens',
               label: t('goals.budget.tokens'),
-              valueText: `${formatContextTokens(goal.tokensUsed)} / ${formatContextTokens(goal.tokenBudget)}`,
+              valueText: t('goal.tokensOfBudget', {
+                used: formatContextTokens(goal.tokensUsed),
+                budget: formatContextTokens(goal.tokenBudget),
+              }),
               ratio:
                 goal.tokenBudget > 0 ? goal.tokensUsed / goal.tokenBudget : 1,
             });
@@ -675,13 +684,18 @@ export function GoalsDialog({
             budgets.push({
               key: 'time',
               label: t('goals.budget.time'),
-              valueText: `${formatRuntime(activeTimeMs)} / ${formatRuntime(goal.activeTimeBudgetMs)}`,
+              valueText: t('goal.activeOfBudget', {
+                used: formatRuntime(activeTimeMs),
+                budget: formatRuntime(goal.activeTimeBudgetMs),
+              }),
               ratio:
                 goal.activeTimeBudgetMs > 0
                   ? activeTimeMs / goal.activeTimeBudgetMs
                   : 1,
             });
           }
+          const hasBudgetBar = (key: GoalBudgetBar['key']) =>
+            budgets.some((budget) => budget.key === key);
           return (
             <div key={item.sessionId} className={styles.card} role="listitem">
               <div className={styles.cardHeader}>
@@ -821,24 +835,23 @@ export function GoalsDialog({
                 <span className={styles.meta} data-testid="goal-activity">
                   {t(`goal.activity.${item.snapshot.activity}`)}
                 </span>
-                <span className={styles.meta} data-testid="goal-turns">
-                  {goal.turnCount > 0
-                    ? goal.turnBudget === undefined
+                {/* An armed budget's figures live in its progress row above;
+                    repeating them here would state the same fact twice. */}
+                {!hasBudgetBar('turns') && (
+                  <span className={styles.meta} data-testid="goal-turns">
+                    {goal.turnCount > 0
                       ? t(goal.turnCount === 1 ? 'goal.turn' : 'goal.turns', {
                           count: goal.turnCount,
                         })
-                      : t('goal.turnsOfBudget', {
-                          count: goal.turnCount,
-                          budget: goal.turnBudget,
-                        })
-                    : t('goals.notYetEvaluated')}
-                </span>
-                {tokenLabel ? (
+                      : t('goals.notYetEvaluated')}
+                  </span>
+                )}
+                {tokenLabel && !hasBudgetBar('tokens') ? (
                   <span className={styles.meta} data-testid="goal-tokens">
                     {tokenLabel}
                   </span>
                 ) : null}
-                {activeTimeMs > 0 && (
+                {activeTimeMs > 0 && !hasBudgetBar('time') && (
                   <span className={styles.meta} data-testid="goal-elapsed">
                     {getGoalActiveTimeLabel(goal, activeTimeMs, t)}
                   </span>

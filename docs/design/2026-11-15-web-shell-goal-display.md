@@ -74,14 +74,22 @@ cannot reach the aggregate view without the sidebar.
 - When at least one budget is armed, a `budgets` section renders one row per
   budget between the reason and the footer: label, a `role="progressbar"`
   track (`data-testid="goal-budget-<kind>"`, `aria-valuenow` = clamped
-  percent, `aria-label` = `"<label>: <used> / <budget>"`), a fill tinted with
-  the lifecycle tone, and the `used / budget` value text. Turns use
-  `turnCount / turnBudget`; tokens use `formatContextTokens` on
+  percent, `aria-label` = `"<label>: <figure>"`), a fill tinted with the
+  lifecycle tone, and the figure text. The row is the **single home** for an
+  armed budget's figures: the matching footer cell (`goal-turns`,
+  `goal-tokens`, `goal-elapsed`) is suppressed while its row renders, so a
+  fact is never stated twice, and the figure reuses the same localised
+  templates the footer used (`goal.turnsOfBudget`, `goal.tokensOfBudget`,
+  `goal.activeOfBudget`) so a catalogue change moves both surfaces. Turns
+  use `turnCount / turnBudget`; tokens use `formatContextTokens` on
   `tokensUsed / tokenBudget` and are skipped when the daemon reports no usage
   figure; active time uses the same live `getGoalActiveTimeMs` the elapsed
   meta already ticks with, against `activeTimeBudgetMs`. Ratios clamp to
   `[0, 1]` so a spent budget reads as a full bar. Unbounded goals render no
-  section at all.
+  section and keep the footer figures. The fill's width transition is gated
+  behind `@media (prefers-reduced-motion: no-preference)`, matching the
+  sibling progress fills, because the active-time ratio advances every
+  second.
 
 ### GoalStatusStrip
 
@@ -127,6 +135,11 @@ cannot reach the aggregate view without the sidebar.
   tracks for them would add noise and imply a ceiling that does not exist.
   A token budget without `tokensUsed` (older daemon) is skipped rather than
   drawn at zero, which would attest a spend the snapshot cannot prove.
+- **One home per figure.** The first iteration printed an armed budget's
+  figures in both the new row and the unchanged footer — the very meta noise
+  this PR removes, duplicated, and built from two different templates. The
+  row now owns the figure (localised template included) and the matching
+  footer cell is suppressed; unbounded goals keep the footer unchanged.
 - **`goalStatusTone` in the strip module.** Single source for both surfaces;
   the dialog already depends on the strip's helpers, so the dependency
   direction stays acyclic.
@@ -138,7 +151,8 @@ cannot reach the aggregate view without the sidebar.
 - `packages/web-shell/client/App.tsx` (strip wiring only)
 - `packages/web-shell/client/components/ChatPane.tsx` (split-view strip wiring)
 - `packages/web-shell/client/i18n.tsx` (en / zh / ru keys)
-- Tests: `GoalsDialog.test.tsx`, `GoalStatusStrip.test.tsx`
+- Tests: `GoalsDialog.test.tsx`, `GoalStatusStrip.test.tsx`,
+  `ChatPane.test.tsx`, `web-shell.goals-multi-workspace.spec.ts`
 
 ## Constraints and risks
 
@@ -154,13 +168,20 @@ cannot reach the aggregate view without the sidebar.
 
 - Unit: `GoalsDialog.test.tsx` (header action with and without a workspace
   tag, pill tone per lifecycle state, budget bars present/absent/clamped,
-  token-bar skip, fill tone) and `GoalStatusStrip.test.tsx` (affordance
-  wired/absent, status tone, tone mapping). The `ChatPane.test.tsx` goal-strip
-  tests must stay green under the split-view wiring.
+  token-bar skip, fill tone, inline fill width, single-occurrence figure
+  witness) and `GoalStatusStrip.test.tsx` (affordance wired/absent, status
+  tone, tone mapping). `ChatPane.test.tsx` pins the split-view forward both
+  ways: wired renders the button and fires the handler once; unwired renders
+  no button while the strip keeps its controls.
+- Mutation witnesses (byte-level restore verified): removing the footer
+  suppression, deleting the `ChatPane` forward, and hardcoding the fill width
+  to `0%` each turn their pin red.
 - `npm run typecheck`, ESLint, Prettier on the touched files.
 - E2E: the existing `web-shell.goal.spec.ts` and
   `web-shell.goals-multi-workspace.spec.ts` suites must stay green (they pin
-  the control actions and card structure the new button lives beside).
+  the control actions and card structure the new button lives beside); the
+  budget @smoke case additionally measures the fill's real pixel width
+  against its track (15% ± 1px).
 
 ## Acceptance criteria
 

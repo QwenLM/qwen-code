@@ -279,12 +279,20 @@ describe('GoalsDialog', () => {
         activeTimeBudgetMs: 1_800_000,
       }),
     ]);
+    // Armed budgets state their figures once, in the progress row; the
+    // matching footer cells are suppressed so the card never repeats them.
     expect(
-      document.querySelector('[data-testid="goal-turns"]')?.textContent,
-    ).toBe('3 / 20 turns');
+      document
+        .querySelector('[data-testid="goal-budget-turns"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Turns: 3 / 20 turns');
     expect(
-      document.querySelector('[data-testid="goal-elapsed"]')?.textContent,
-    ).toBe('12m 3s / 30m 0s');
+      document
+        .querySelector('[data-testid="goal-budget-time"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Active time: 12m 3s / 30m 0s');
+    expect(document.querySelector('[data-testid="goal-turns"]')).toBeNull();
+    expect(document.querySelector('[data-testid="goal-elapsed"]')).toBeNull();
   });
 
   it('keeps usage without budgets unchanged', async () => {
@@ -299,7 +307,7 @@ describe('GoalsDialog', () => {
     ).toBe('12m 3s');
   });
 
-  it('hides unused budgets', async () => {
+  it('renders zero-progress rows for armed budgets before any spend', async () => {
     await mount([
       withSpend({
         status: 'paused',
@@ -310,8 +318,16 @@ describe('GoalsDialog', () => {
       }),
     ]);
     expect(
-      document.querySelector('[data-testid="goal-turns"]')?.textContent,
-    ).not.toContain('/');
+      document
+        .querySelector('[data-testid="goal-budget-turns"]')
+        ?.getAttribute('aria-valuenow'),
+    ).toBe('0');
+    expect(
+      document
+        .querySelector('[data-testid="goal-budget-time"]')
+        ?.getAttribute('aria-valuenow'),
+    ).toBe('0');
+    expect(document.querySelector('[data-testid="goal-turns"]')).toBeNull();
     expect(document.querySelector('[data-testid="goal-elapsed"]')).toBeNull();
   });
 
@@ -319,8 +335,11 @@ describe('GoalsDialog', () => {
     await mount([withSpend({ tokensUsed: 1_234, tokenBudget: 30_000_000 })]);
 
     expect(
-      document.querySelector('[data-testid="goal-tokens"]')?.textContent,
-    ).toBe('1.2k / 30.0M tokens');
+      document
+        .querySelector('[data-testid="goal-budget-tokens"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Tokens: 1.2k / 30.0M tokens');
+    expect(document.querySelector('[data-testid="goal-tokens"]')).toBeNull();
   });
 
   it('shows spend alone when the Goal has no budget', async () => {
@@ -331,9 +350,14 @@ describe('GoalsDialog', () => {
     ).toBe('1.2k tokens');
   });
 
-  it('shows nothing for a Goal that has not billed a turn', async () => {
+  it('renders a zero token row when a budget is armed but nothing billed', async () => {
     await mount([withSpend({ tokensUsed: 0, tokenBudget: 30_000_000 })]);
 
+    expect(
+      document
+        .querySelector('[data-testid="goal-budget-tokens"]')
+        ?.getAttribute('aria-valuenow'),
+    ).toBe('0');
     expect(document.querySelector('[data-testid="goal-tokens"]')).toBeNull();
   });
 
@@ -366,11 +390,43 @@ describe('GoalsDialog', () => {
       expect(turns?.getAttribute('aria-valuenow')).toBe('15');
       expect(tokens?.getAttribute('aria-valuenow')).toBe('25');
       expect(time?.getAttribute('aria-valuenow')).toBe('33');
-      expect(turns?.getAttribute('aria-label')).toBe('Turns: 3 / 20');
-      expect(tokens?.getAttribute('aria-label')).toBe('Tokens: 5.0M / 20.0M');
+      expect(turns?.getAttribute('aria-label')).toBe('Turns: 3 / 20 turns');
+      expect(tokens?.getAttribute('aria-label')).toBe(
+        'Tokens: 5.0M / 20.0M tokens',
+      );
       expect(time?.getAttribute('aria-label')).toBe(
         'Active time: 10m 0s / 30m 0s',
       );
+      // The inline width is the visual readout; aria alone would stay green
+      // with every bar rendered empty or full. jsdom does no layout, so pin
+      // the inline style, not a computed pixel width.
+      expect(
+        document.querySelector<HTMLElement>(
+          '[data-testid="goal-budget-turns"] > div',
+        )?.style.width,
+      ).toBe('15%');
+      expect(
+        document.querySelector<HTMLElement>(
+          '[data-testid="goal-budget-tokens"] > div',
+        )?.style.width,
+      ).toBe('25%');
+      expect(
+        document.querySelector<HTMLElement>(
+          '[data-testid="goal-budget-time"] > div',
+        )?.style.width,
+      ).toBe('33%');
+    });
+
+    it("states an armed budget's figures exactly once on the card", async () => {
+      // Removing the footer suppression must turn this red: the row and the
+      // footer would both print the same localised figure.
+      await mount([withSpend({ turnCount: 3, turnBudget: 20 })]);
+
+      const card = document.querySelector('[role="listitem"]')!;
+      const occurrences =
+        (card.textContent ?? '').split('3 / 20 turns').length - 1;
+      expect(occurrences).toBe(1);
+      expect(document.querySelector('[data-testid="goal-turns"]')).toBeNull();
     });
 
     it('renders no bars when no budget is armed', async () => {
@@ -406,6 +462,11 @@ describe('GoalsDialog', () => {
           .querySelector('[data-testid="goal-budget-turns"]')
           ?.getAttribute('aria-valuenow'),
       ).toBe('100');
+      expect(
+        document.querySelector<HTMLElement>(
+          '[data-testid="goal-budget-turns"] > div',
+        )?.style.width,
+      ).toBe('100%');
     });
 
     it('tones the fill by lifecycle state', async () => {
