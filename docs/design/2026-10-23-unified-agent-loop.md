@@ -580,10 +580,11 @@ The unit suite in `speculation.test.ts` runs a text-only round, a single call, a
 | 5c    | AgentCore: each round and its batch in one `runAgentLoop` call, on the event-bus kernel when it is on                                               |
 | 5d    | AgentCore: default on, then remove its current loop                                                                                                 |
 | 6a    | speculation: every model round on the loop's round, on a `Turn` over the forked chat; speculation keeps its tool gate and direct execution          |
-| 6b    | speculation: default on, then remove its current round                                                                                              |
+| 6b    | speculation: tool-step decision — keep its own tool step; see the [PR 6b decision](2026-11-15-speculation-tool-step.md)                             |
+| 6c    | speculation: default on, then remove its current round                                                                                              |
 | —     | Hosted Harness: separate evaluation — see the [migration evaluation](2026-11-14-hosted-harness-loop-evaluation.md)                                  |
 
-PR 6b is speculation's default-on and removal step.
+PR 6b is speculation's tool-step decision (keep its own tool step); PR 6c is its default-on and removal step.
 
 A surface counts as moved when it passes its parity suite with the setting on and its known differences are listed. Each surface then changes its default on its own, without waiting for the others. Its default changes when:
 

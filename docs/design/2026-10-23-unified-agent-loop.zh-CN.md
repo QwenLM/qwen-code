@@ -580,10 +580,11 @@ speculation 的 `runSpeculativeLoop`（`speculation.ts`）在用户确认前，�
 | 5c    | AgentCore：每一轮及其工具批在一次 `runAgentLoop` 调用中运行，内核开启时跑在事件总线内核上                 |
 | 5d    | AgentCore：默认开启，然后移除现有 loop                                                                    |
 | 6a    | speculation：每一模型轮走 loop 的模型轮，在 forked chat 的 `Turn` 上；speculation 保留其工具门与直接执行  |
-| 6b    | speculation：默认开启，然后删除其现有模型轮                                                               |
+| 6b    | speculation：工具步决策——保留自有工具步；见 [PR 6b 决策](2026-11-15-speculation-tool-step.md)             |
+| 6c    | speculation：默认开启，然后删除其现有模型轮                                                               |
 | —     | Hosted Harness：单独评估——见[迁移评估](2026-11-14-hosted-harness-loop-evaluation.md)                      |
 
-PR 6b 是 speculation 的默认开启与删除步骤。
+PR 6b 是 speculation 的工具步决策（保留自有工具步）；PR 6c 是其默认开启与删除步骤。
 
 一个入口在设置开启时通过它的对拍测试，并列出了已知差异，才算完成迁移。之后每个入口各自修改默认值，不必等其他入口。修改默认值需要同时满足：
 

@@ -15,17 +15,23 @@
 
 Speculation runs ahead of the user in the background with read-only tools and copy-on-write overlay writes, and its tool step is built around that:
 
-1. **Direct execution, bypassing the scheduler.** Each call is run through `tool.build(args)` and `invocation.execute(signal)` directly (`speculation.ts:456-517`), not through `CoreToolScheduler`. The point is to run read-only work ahead without the scheduler's approval/scheduling path; permission-deferred calls bail to the normal flow instead (`:410-414`).
-2. **Overlay writes, not the real filesystem.** A `redirect` gate rewrites path arguments into the overlay (`rewritePathArgs`, `:446-454`); the overlay is copied to the real filesystem only on accept. The shared batch executes against the real filesystem.
-3. **A boundary gate that bails.** `evaluateToolCall` returns `boundary` / `redirect` / proceed; a boundary (or a failed rewrite, or a guard denial) stops the speculative run and hands back to the normal loop (`:433-454`, `:497-509`). The shared batch has no bail-to-normal-flow concept.
-4. **No committed recording.** Speculation finalizes responses (`finalizeToolResponses`, `:605`) but never calls `recordCompletedToolCall`; its results are speculative and must not enter the committed tool-call history. The shared `runToolBatch` records each executed call (`agent-loop.ts:671`).
-5. **Sequential with early bail, not a parallel batch.** Calls are processed one at a time and the run stops at the first boundary; the shared batch schedules concurrency-safe calls in parallel and settles the whole batch.
+1. **Direct execution, bypassing the scheduler.** Each call is run through `tool.build(args)` and `invocation.execute(signal)` directly (`speculation.ts:456-517`), not through `CoreToolScheduler`. Permission-deferred calls bail to the normal flow instead (`:410-414`).
+2. **Overlay writes, not the real filesystem.** A `redirect` gate rewrites path arguments into the overlay (`rewritePathArgs`, `:446-454`); the overlay is copied to the real filesystem only on accept, and discarded on reject.
+3. **A boundary gate that bails mid-batch.** `evaluateToolCall` returns `boundary` / `redirect` / proceed; a boundary (or a failed rewrite, or a guard denial) stops the speculative run at that call and hands back to the normal loop (`:433-454`, `:497-509`). The hand-back is a **partial batch**: the already-executed responses are kept and the unexecuted calls are stripped, keeping the first N `functionCall` parts by order to match the responses (`:609-657`).
+4. **No committed recording.** Speculation finalizes responses (`finalizeToolResponses`, `:605`) but never records them as committed tool calls; its results are speculative and must not enter the committed tool-call history.
+5. **Sequential with early bail.** Calls are processed one at a time and the run stops at the first boundary.
+
+### What the shared batch interface already allows
+
+The execution and recording mechanics above are **not** structural blockers of the shared interface. `runToolBatch` takes a caller-provided `executor` (`agent-loop.ts:476`), so a speculative executor could run calls directly and sequentially; `client` is optional (`:467`) and the recording call is `client?.recordCompletedToolCall(...)` (`:671`), so omitting it skips that channel; and `deferRecording` (`:488`) returns each result's recording as a callback instead of invoking it (`:755-759`), so a surface records only what it sends. Direct execution, sequential execution and avoiding committed recording are all expressible through this interface; they do not, by themselves, justify keeping a separate tool step.
 
 ## Decision
 
-**Keep speculation's own tool step and speculative loop.** The shared `runToolBatch` cannot express direct execution, overlay writes, the boundary bail, or the absence of committed recording without either polluting `packages/core` with speculation-specific behavior or weakening the speculative model. This is the same shape as the Hosted Harness decision: the model round is shared, the specialized tool step stays.
+**Keep speculation's own tool step and speculative loop — because of the boundary/partial-batch and overlay accept/reject semantics, not the execution or recording mechanics.** The mismatch is that speculation stops at the first boundary mid-batch and hands back a partial batch (executed responses kept, unexecuted calls stripped), with overlay writes that are accepted or discarded as a whole. The shared batch settles a whole batch and has no bail-at-a-boundary / partial-hand-back contract; expressing speculation's mid-batch bail and accept/reject on top of it would need a speculative adapter whose cost is not worthwhile for a background optimization. This is the same shape as the Hosted Harness decision: the model round is shared, the specialized tool step stays.
 
 The model round stays on the shared loop as PR 6a landed it (`runSpeculationModelRound`, gated by `isUnifiedAgentLoopEnabled('speculation')`); the tool gate, direct execution, overlay writes and boundary handling are unchanged.
+
+**Numbering note.** The tracker #17045's "PR 6b" is this tool-step decision. It supersedes the older [unified agent loop](2026-10-23-unified-agent-loop.md) migration table's "6b" numbering, which named speculation's default-on and removal step; that table now links this decision and keeps default-on/removal as a separate entry. Default-on and legacy removal remain gated steps of #17045, not part of this decision.
 
 ## Integration gate decision
 
