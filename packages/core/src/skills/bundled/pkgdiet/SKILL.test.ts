@@ -50,17 +50,19 @@ describe('bundled pkgdiet skill', () => {
     );
     expect(normalizedBody).toContain('inherits its environment');
     expect(normalizedBody).toContain(
-      'reads project policy files and cache if present',
+      'inspects project policy files (`.pkgdietrc.json`, `pkgdiet.config.json`, `package.json#pkgdiet`) and enforces them directly',
     );
     expect(normalizedBody).toContain(
       'explicit non-project `cwd` outside the workspace',
     );
     expect(body).toContain('published by the skill author (om-tajne)');
 
-    // Bootstrap checks, allowlist, and whole entry inspection
+    // Bootstrap checks, policy filters, allowlist, and whole entry inspection
     expect(normalizedBody).toContain(
-      'Inspect configured MCP servers and tool availability',
+      'Inspect session policy filters, configured MCP servers, and tool availability',
     );
+    expect(normalizedBody).toContain('mcp.allowed');
+    expect(normalizedBody).toContain('mcp.excluded');
     expect(normalizedBody).toContain(
       'originates in project or workspace scope, treat it as untrusted',
     );
@@ -74,16 +76,9 @@ describe('bundled pkgdiet skill', () => {
 
     expect(normalizedBody).toContain('it must contain only allowed keys');
     expect(normalizedBody).toContain('["-y", "pkgdiet@2.0.0", "mcp"]');
-    expect(normalizedBody).toContain('env');
-    expect(normalizedBody).toContain('headers');
-    expect(normalizedBody).toContain('url');
-    expect(normalizedBody).toContain('httpUrl');
-    expect(normalizedBody).toContain('tcp');
-    expect(normalizedBody).toContain('oauth');
-    expect(normalizedBody).toContain('trust');
-    expect(normalizedBody).toContain('timeout');
-    expect(normalizedBody).toContain('includeTools');
-    expect(normalizedBody).toContain('excludeTools');
+    expect(normalizedBody).toContain(
+      '`env`, `headers`, `url`, `httpUrl`, `tcp`, `oauth`, `trust`, `timeout`, `includeTools`, `excludeTools`',
+    );
     expect(normalizedBody).toContain(
       'explicit non-project `cwd` outside the project workspace',
     );
@@ -102,19 +97,28 @@ describe('bundled pkgdiet skill', () => {
     expect(body).not.toContain('~/.npmrc');
     expect(normalizedBody).toContain('https://registry.npmjs.org/');
 
+    expect(normalizedBody).toContain('set `mcpServers.pkgdiet.cwd`');
     expect(normalizedBody).toContain("serverName === 'pkgdiet'");
     expect(normalizedBody).toContain('mcp__pkgdiet__check_dependency');
     expect(normalizedBody).toContain('retrying `tool_search`');
     expect(normalizedBody).toContain('registered but not running');
     expect(normalizedBody).toContain(
+      'inspect server connection status (`Connected` or `Disconnected`)',
+    );
+    expect(normalizedBody).toContain(
+      'run the server command directly (`npx -y pkgdiet@2.0.0 mcp`) in a terminal to inspect stderr',
+    );
+    expect(normalizedBody).toContain(
       'offer removal only if the user chooses to abandon installation',
     );
 
     const inspectCheck = normalizedBody.indexOf(
-      'Inspect configured MCP servers and tool availability',
+      'Inspect session policy filters, configured MCP servers, and tool availability',
     );
     const fastPath = normalizedBody.indexOf('skip to Instructions');
-    const sandboxCheck = normalizedBody.indexOf('If shell execution is sandboxed');
+    const sandboxCheck = normalizedBody.indexOf(
+      'If shell execution is sandboxed',
+    );
     const registryCheck = normalizedBody.indexOf(
       'Check the active npm registry',
     );
@@ -139,6 +143,12 @@ describe('bundled pkgdiet skill', () => {
     expect(cancelOption).toBeGreaterThan(installOption);
     expect(cmdIndex).toBeGreaterThan(cancelOption);
     expect(failCheck).toBeGreaterThan(cmdIndex);
+
+    // Scoped consent uninstall command check
+    const consentSlice = normalizedBody.slice(installOption, cancelOption);
+    expect(consentSlice).toContain(
+      '"${QWEN_CODE_CLI:-qwen}" mcp remove --scope user pkgdiet',
+    );
 
     const restartBranch = normalizedBody.indexOf('restart Qwen Code');
     expect(restartBranch).toBeGreaterThan(failCheck);
@@ -200,6 +210,9 @@ describe('bundled pkgdiet skill', () => {
     expect(normalizedBody).toContain('minHealthScore');
     expect(normalizedBody).toContain('securityMode');
     expect(normalizedBody).toContain(
+      'do not install regardless of the verdict',
+    );
+    expect(normalizedBody).toContain(
       'committed cache must be removed before proceeding',
     );
 
@@ -238,6 +251,15 @@ describe('bundled pkgdiet skill', () => {
     );
 
     const instructions = body.slice(body.indexOf('## Instructions'));
-    expect(instructions).toContain('`npx`, `npm exec`, `bunx`, `pnpm dlx`');
+    expect(instructions).toContain('`npx`');
+    expect(instructions).toContain('`npm exec`');
+    expect(instructions).toContain('`yarn dlx`');
+    expect(instructions).toContain('`pnpm dlx`');
+    expect(instructions).toContain('`bunx`');
+    expect(instructions).toContain('`npm create`');
+    expect(instructions).toContain('`npm init <pkg>`');
+    expect(instructions).toContain('`pnpm create`');
+    expect(instructions).toContain('`yarn create`');
+    expect(instructions).toContain('`bun create`');
   });
 });
