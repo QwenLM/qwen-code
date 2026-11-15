@@ -825,6 +825,45 @@ describe('shouldForceAutoModeReviewForAllow', () => {
     );
   });
 
+  it('reads a variable redirect target after quote removal, as bash does', () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    restoringQwenHome(() =>
+      inTmpDir('qwen-quoted-redirect-', (home) => {
+        delete process.env['QWEN_HOME'];
+        vi.stubEnv('HOME', home);
+        vi.stubEnv('USERPROFILE', home);
+        vi.stubEnv('XDG_CONFIG_HOME', undefined);
+        Object.defineProperty(process, 'platform', { value: 'linux' });
+        try {
+          // Each of these writes the protected file in bash.
+          const commands = [
+            'cat > $HOME/.config/qwen/settings.json',
+            'cat > $HOME/.config/qwe""n/settings.json',
+            "cat > $HOME/.config/'qwen'/settings.json",
+            'cat > "$HOME"/.config/"qwen"/settings.json',
+            "cat > $HOME/.config/$'qwen'/settings.json",
+            'cat > $HOME/.config/qw\\en/hooks/pre-tool-use.json',
+            'cat > $HOME/.qwen/settings.json',
+            'cat > $HOME/.qwe""n/settings.json',
+            'cat > "$HOME"/.qwen/\'settings.json\'',
+            "cat > ${HOME}/'.qwen'/skills/x/SKILL.md",
+          ];
+          expect(commands.filter((command) => !forcesReview(command))).toEqual(
+            [],
+          );
+          expect(forcesReview('echo hi > "$HOME"/\'notes.txt\'')).toBe(false);
+          // Bash does not expand a `~` that comes from a variable, so this
+          // writes ./~/custom-qwen/settings.json, not the global dir.
+          vi.stubEnv('QWEN_HOME', '~/custom-qwen');
+          expect(forcesReview('cat > $QWEN_HOME/settings.json')).toBe(false);
+        } finally {
+          Object.defineProperty(process, 'platform', platform);
+          vi.unstubAllEnvs();
+        }
+      }),
+    );
+  });
+
   it('returns true for bidirectional redirects to protected paths', () => {
     expect(forcesReview('cat <> .qwen/settings.json')).toBe(true);
   });

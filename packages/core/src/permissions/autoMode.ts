@@ -43,7 +43,10 @@ import {
   sanitizeClassifierReason,
   type ClassifierResult,
 } from './classifier.js';
-import { extractShellOperationsAcrossCommand } from './shell-semantics.js';
+import {
+  extractShellOperationsAcrossCommand,
+  shellWords,
+} from './shell-semantics.js';
 import {
   consumePendingManualRetry,
   isDenialFallbackReason,
@@ -376,7 +379,9 @@ function hasRawProtectedRedirect(command: string, cwd: string): boolean {
       i++;
     }
 
-    const target = expandGlobalDirEnvVar(stripRawRedirectTargetToken(token));
+    // Match the word bash opens, after quote removal: `$HOME/.qwe""n/...` and
+    // `"$HOME"/.config/"qwen"/...` name the same files as the plain spelling.
+    const target = expandGlobalDirEnvVar(shellWords(token)[0] ?? '');
     if (!target || target.startsWith('&')) continue;
     // Anything left to expand can name any path, including the usual spelling
     // ${XDG_CONFIG_HOME:-$HOME/.config}/qwen/settings.json, so it gets reviewed.
@@ -398,7 +403,7 @@ const GLOBAL_DIR_ENV_VARS = new Set([
 // The global dir's prefix match needs the real path: `> $HOME/.config/qwen/...`
 // has no `.qwen/` segment for the patterns above to catch.
 function expandGlobalDirEnvVar(target: string): string {
-  const match = /^\$(?:\{(\w+)\}|(\w+))["']?/.exec(target);
+  const match = /^\$(?:\{(\w+)\}|(\w+))/.exec(target);
   const name = match?.[1] ?? match?.[2];
   const value =
     name && GLOBAL_DIR_ENV_VARS.has(name) ? process.env[name] : undefined;
