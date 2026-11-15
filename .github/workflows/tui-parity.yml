@@ -72,9 +72,11 @@ jobs:
                 /^integration-tests\/interactive\/tui-(session-recovery|checkpoint-restore)/i,
               ],
               integration: [
+                /^packages\/cli\/src\/(ui\/(opentui\/(MemoryDialog|dialogs-memory-status|opentui-dialog-mount)\.|components\/MemoryDialog\.|hooks\/useLaunchEditor\.|commands\/memoryCommand\.)|config\/settings\.)/,
+                /^packages\/core\/src\/(memory\/|utils\/(memory-constants|editor)\.)/,
                 /^packages\/cli\/src\/(dualOutput\/|ui\/.*(shell|client-tool-run|dialogs-confirm|extension|useReactToolScheduler|keyToAnsi)|services\/(interactive-mod|mod-session)|config\/extension|commands\/extensions)/i,
                 /^packages\/core\/src\/(extension|confirmation-bus|permissions|tools\/|services\/(shellExecutionService|backgroundShellRegistry|shellContextEnv)|sandbox\/|.*runtime-shell|mods\/tool)/i,
-                /^integration-tests\/interactive\/tui-(foreground-shell|extension-acquisition|dual-output)/i,
+                /^integration-tests\/interactive\/tui-(foreground-shell|extension-acquisition|dual-output|memory-manager)/i,
               ],
             };
             const sharedTurn = /^packages\/cli\/src\/(ui\/(opentui\/(live-turn|live-session|event-adapter|shared-model-round)|hooks\/(use-llm-stream|useReactToolScheduler))|services\/interactive-mod)|^packages\/core\/src\/core\/(client|turn|llm-chat|coreToolScheduler)/;
@@ -241,7 +243,7 @@ jobs:
           for leg in node:ink bun:ink bun:opentui; do
             export QWEN_E2E_RUNTIME="${leg%%:*}"
             export QWEN_E2E_RENDERER="${leg#*:}"
-            npx vitest run interactive/tui-migration.test.ts interactive/tui-input-ownership.test.ts interactive/tui-foreground-shell.test.ts interactive/tui-clipboard-source.test.ts interactive/tui-extension-acquisition.test.ts interactive/tui-session-recovery.test.ts interactive/tui-editor-parity.test.ts interactive/statusline-parity.test.ts interactive/tui-dual-output.test.ts --retry=0 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false || failed=1
+            npx vitest run interactive/tui-migration.test.ts interactive/tui-input-ownership.test.ts interactive/tui-foreground-shell.test.ts interactive/tui-clipboard-source.test.ts interactive/tui-extension-acquisition.test.ts interactive/tui-session-recovery.test.ts interactive/tui-editor-parity.test.ts interactive/statusline-parity.test.ts interactive/tui-dual-output.test.ts interactive/tui-memory-manager.test.ts --retry=0 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false || failed=1
           done
           exit "$failed"
       - name: 'Targeted product acceptance (Node+Ink, Bun+Ink, Bun+OpenTUI)'
@@ -271,7 +273,7 @@ jobs:
             tests+=(interactive/tui-session-recovery.test.ts)
           fi
           if [ "$TUI_INTEGRATION" = true ]; then
-            tests+=(interactive/tui-foreground-shell.test.ts interactive/tui-extension-acquisition.test.ts interactive/tui-dual-output.test.ts)
+            tests+=(interactive/tui-foreground-shell.test.ts interactive/tui-extension-acquisition.test.ts interactive/tui-dual-output.test.ts interactive/tui-memory-manager.test.ts)
           fi
           [ "${#tests[@]}" -gt 0 ]
           failed=0
