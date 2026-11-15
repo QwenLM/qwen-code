@@ -344,6 +344,9 @@ guarantee a provider cache hit.
 | ------------ | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | `imageModel` | string | Model used by the built-in `image_gen` tool. The selected route must set `supportsImageGeneration: true` (or legacy `imageOnly: true`) and declare an HTTPS `baseUrl` plus `envKey` in `modelProviders`. Leave empty to keep the tool unavailable. Can also be set via `/model --image`. | `""`    |
 
+See [Image Generation](../features/image-generation.md) for setup and usage in
+the Web Shell.
+
 #### visionBridgeTimeoutMs
 
 | Setting                 | Type    | Description                                                                                                                                                                                                                                                        | Default |
@@ -355,6 +358,9 @@ guarantee a provider cache hit.
 | Setting      | Type   | Description                                                                                                                                             | Default |
 | ------------ | ------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | `voiceModel` | string | Model used for voice transcription. Leave empty to keep voice dictation disabled until a voice model is selected. Can also be set via `/model --voice`. | `""`    |
+
+See [Voice Input](../features/voice-input.md) for setup and usage in the Web
+Shell.
 
 #### modelFallbacks
 
