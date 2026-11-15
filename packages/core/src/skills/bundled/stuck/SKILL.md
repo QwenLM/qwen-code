@@ -35,6 +35,8 @@ If the user gave an argument, treat it as a PID **only if it consists entirely o
 
 ```
 QWEN_DIR="${QWEN_HOME:-$HOME/.qwen}"
+# QWEN_HOME may be `~/...`; Storage.resolvePath() expands the leading ~
+case "$QWEN_DIR" in "~"|"~/"*) QWEN_DIR="$HOME${QWEN_DIR#\~}" ;; esac
 # Mirror Storage.getGlobalQwenDir(): without QWEN_HOME, Linux may use the XDG config directory
 if [ -z "${QWEN_HOME:-}" ]; then case "$(uname -s)" in Darwin|MINGW*|MSYS*|CYGWIN*) ;; *)
   case "${XDG_CONFIG_HOME:-}" in /*) XDG_QWEN_DIR="$XDG_CONFIG_HOME/qwen" ;; *) XDG_QWEN_DIR="$HOME/.config/qwen" ;; esac

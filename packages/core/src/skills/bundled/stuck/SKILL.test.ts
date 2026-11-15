@@ -117,6 +117,16 @@ describe.skipIf(process.platform === 'win32')(
       );
     });
 
+    it('expands a leading ~ in QWEN_HOME as core does', () => {
+      vi.stubEnv('QWEN_HOME', '~/custom-qwen');
+      expect(runPreamble('Linux', { QWEN_HOME: '~/custom-qwen' })).toBe(
+        path.join(home, 'custom-qwen'),
+      );
+      expect(runPreamble('Linux', { QWEN_HOME: '~/custom-qwen' })).toBe(
+        coreDir('linux'),
+      );
+    });
+
     it('uses an absolute XDG_CONFIG_HOME', () => {
       const configHome = path.join(home, 'xdg-config');
       vi.stubEnv('XDG_CONFIG_HOME', configHome);
