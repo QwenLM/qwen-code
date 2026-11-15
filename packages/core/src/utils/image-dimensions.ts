@@ -107,22 +107,25 @@ function isWebp(b: Uint8Array): boolean {
 function webpDimensions(
   b: Uint8Array,
 ): { width: number; height: number } | undefined {
+  // The chunk FourCC occupies bytes 12-15 and the chunk PAYLOAD starts at
+  // byte 20 (FourCC + 4-byte chunk size at 16-19): dimension fields live at
+  // payload offsets, not RIFF-header offsets.
   const tag = String.fromCharCode(b[12], b[13], b[14], b[15]);
   if (tag === 'VP8 ') {
-    // Lossy: chunk header(12) + frame tag(3) + sync 0x9d 0x01 0x2a(3),
-    // then 14-bit little-endian width and height.
-    if (b.length < 30 || b[15] !== 0x9d || b[16] !== 0x01 || b[17] !== 0x2a) {
+    // Lossy: payload = frame tag(3) at 20-22, sync 0x9d 0x01 0x2a at
+    // 23-25, then 14-bit little-endian width and height at 26-29.
+    if (b.length < 30 || b[23] !== 0x9d || b[24] !== 0x01 || b[25] !== 0x2a) {
       return undefined;
     }
-    const width = (b[18] | (b[19] << 8)) & 0x3fff;
-    const height = (b[20] | (b[21] << 8)) & 0x3fff;
+    const width = (b[26] | (b[27] << 8)) & 0x3fff;
+    const height = (b[28] | (b[29] << 8)) & 0x3fff;
     return positive(width, height);
   }
   if (tag === 'VP8L') {
-    // Lossless: signature 0x2f, then a little-endian bit stream whose
-    // first 14 bits are width-1 and next 14 bits are height-1.
-    if (b[15] !== 0x2f || b.length < 22) return undefined;
-    const bit = (p: number) => (b[16 + (p >> 3)] >> (p & 7)) & 1;
+    // Lossless: payload = signature 0x2f at 20, then the bit stream at 21
+    // whose first 14 bits are width-1 and next 14 bits are height-1.
+    if (b[20] !== 0x2f || b.length < 25) return undefined;
+    const bit = (p: number) => (b[21 + (p >> 3)] >> (p & 7)) & 1;
     const read = (from: number) => {
       let v = 0;
       for (let k = 0; k < 14; k++) v |= bit(from + k) << k;

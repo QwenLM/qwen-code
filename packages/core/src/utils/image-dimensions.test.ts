@@ -98,6 +98,67 @@ describe('parseImageDimensions', () => {
     });
   });
 
+  /** Lossy WebP: RIFF header + VP8 chunk with sync code and 14-bit dims. */
+  function webpVp8(width: number, height: number): Uint8Array {
+    const b = new Uint8Array(34);
+    b.set([0x52, 0x49, 0x46, 0x46], 0); // 'RIFF'
+    b.set([0x57, 0x45, 0x42, 0x50], 8); // 'WEBP'
+    b.set([0x56, 0x50, 0x38, 0x20], 12); // 'VP8 '
+    b[16] = 30;
+    b[17] = 0;
+    b[18] = 0;
+    b[19] = 0; // chunk size
+    b[20] = 0x30;
+    b[21] = 0x01;
+    b[22] = 0x00; // frame tag (keyframe)
+    b[23] = 0x9d;
+    b[24] = 0x01;
+    b[25] = 0x2a; // sync code
+    b[26] = width & 0xff;
+    b[27] = (width >> 8) & 0x3f;
+    b[28] = height & 0xff;
+    b[29] = (height >> 8) & 0x3f;
+    return b;
+  }
+
+  /** Lossless WebP: VP8L chunk with 0x2f signature and bitstream dims. */
+  function webpVp8l(width: number, height: number): Uint8Array {
+    const b = new Uint8Array(30);
+    b.set([0x52, 0x49, 0x46, 0x46], 0);
+    b.set([0x57, 0x45, 0x42, 0x50], 8);
+    b.set([0x56, 0x50, 0x38, 0x4c], 12); // 'VP8L'
+    b[16] = 10;
+    b[17] = 0;
+    b[18] = 0;
+    b[19] = 0;
+    b[20] = 0x2f; // signature
+    // width-1 in bits 0-13, height-1 in bits 14-27, from byte 21.
+    const wm1 = width - 1;
+    const hm1 = height - 1;
+    let bits = 0;
+    bits |= wm1 & 0x3fff;
+    bits |= (hm1 & 0x3fff) << 14;
+    for (let i = 0; i < 28; i++) {
+      const bit = (bits >> i) & 1;
+      b[21 + (i >> 3)] |= bit << (i & 7);
+    }
+    return b;
+  }
+
+  it('reads lossy WebP VP8 frame dimensions (#17320 C1)', () => {
+    expect(parseImageDimensions(webpVp8(550, 368))).toEqual({
+      width: 550,
+      height: 368,
+    });
+  });
+
+  it('reads lossless WebP VP8L dimensions (#17320 C1)', () => {
+    expect(parseImageDimensions(webpVp8l(800, 600))).toEqual({
+      width: 800,
+      height: 600,
+    });
+  });
+
   it('returns undefined for unknown or truncated payloads', () => {
     expect(parseImageDimensions(new Uint8Array(20))).toBeUndefined();
     expect(parseImageDimensions(new Uint8Array(8))).toBeUndefined();
