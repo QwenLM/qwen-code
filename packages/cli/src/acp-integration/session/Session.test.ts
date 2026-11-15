@@ -1103,7 +1103,9 @@ describe('Session', () => {
     mockToolRegistry = {
       getAllToolNames: vi.fn().mockReturnValue([]),
       getTool: vi.fn(),
-      ensureTool: vi.fn().mockResolvedValue(true),
+      // The registry resolves an instance, as the real one does; the shared
+      // scheduler takes its tool from here.
+      ensureTool: vi.fn(async (name: string) => mockToolRegistry.getTool(name)),
       isDeferredAndHidden: vi.fn().mockReturnValue(false),
       registerTool: vi.fn(),
       registerPermissionDeferredFactory: vi.fn(),
@@ -4844,13 +4846,13 @@ describe('Session', () => {
       mockToolRegistry.getTool.mockReturnValue({
         name,
         kind,
-        build: vi.fn().mockReturnValue({
-          params: {},
+        build: vi.fn((params: Record<string, unknown> = {}) => ({
+          params,
           getDefaultPermission: vi.fn().mockResolvedValue('allow'),
           getDescription: vi.fn().mockReturnValue(name),
           toolLocations: vi.fn().mockReturnValue([]),
           execute,
-        }),
+        })),
       });
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
       return execute;
@@ -5156,7 +5158,19 @@ describe('Session', () => {
       _host: unknown,
       { requests }: { requests: core.ToolCallRequestInfo[] },
     ) {
-      const results = [];
+      const results: Array<{
+        request: core.ToolCallRequestInfo;
+        executionRequest: core.ToolCallRequestInfo;
+        response: {
+          callId: string;
+          responseParts: Part[];
+          resultDisplay?: unknown;
+          executionStatus: string;
+          errorType?: core.ToolErrorType;
+        };
+        status: 'success' | 'error';
+        origin: 'executed';
+      }> = [];
       for (const request of requests) {
         const output = await mockToolRegistry
           .getTool(request.name)
@@ -5198,13 +5212,13 @@ describe('Session', () => {
       mockToolRegistry.getTool.mockReturnValue({
         name,
         kind,
-        build: vi.fn().mockReturnValue({
-          params: {},
+        build: vi.fn((params: Record<string, unknown> = {}) => ({
+          params,
           getDefaultPermission: vi.fn().mockResolvedValue('allow'),
           getDescription: vi.fn().mockReturnValue(name),
           toolLocations: vi.fn().mockReturnValue([]),
           execute,
-        }),
+        })),
       });
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
       return execute;
@@ -5518,31 +5532,466 @@ describe('Session', () => {
       ]);
     });
 
-    it('keeps its own tool step and tool-call guards in a session with live tools', async () => {
+    it('runs the shared tool batch in a session with live tools', async () => {
       const execute = useTool(core.Kind.Edit, 'write_file');
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      runAcpToolBatchSpy.mockImplementationOnce(
+        (
+          await vi.importActual<typeof import('./acp-tool-batch.js')>(
+            './acp-tool-batch.js',
+          )
+        ).runAcpToolBatch as never,
+      );
       (
         session as unknown as { liveScreenContextTool: object }
       ).liveScreenContextTool = {};
+      const cutCall = toolCall({
+        id: 'call-cut',
+        name: 'write_file',
+        args: { file_path: '/tmp/notes.txt', content: 'p' },
+      });
+      // The client marks the cut response's pending calls truncated; the
+      // mocked model stream omits that step, so mark the request here.
+      (
+        cutCall as { value: core.ToolCallRequestInfo }
+      ).value.wasOutputTruncated = true;
       const send = useSharedRounds([
-        toolCall({
-          id: 'call-cut',
-          name: 'write_file',
-          args: { file_path: '/tmp/notes.txt', content: 'p' },
-        }),
+        cutCall,
         finished(FinishReason.MAX_TOKENS),
       ]);
 
       await prompt();
 
-      expect(runAcpToolBatchSpy).not.toHaveBeenCalled();
-      expect(send.mock.calls[0][3]).toMatchObject({
-        toolLoopGuardsByHost: true,
-      });
-      // The session's own executor refuses the edit the limit cut off.
+      // A live session no longer leaves the shared batch; the shared
+      // scheduler applies the same cut-off refusal as the session's own
+      // executor did.
+      expect(runAcpToolBatchSpy).toHaveBeenCalledOnce();
+      expect(send.mock.calls[0][3]).not.toHaveProperty('toolLoopGuardsByHost');
       expect(execute).not.toHaveBeenCalled();
       expect(JSON.stringify(send.mock.calls[1][0])).toContain(
         'truncated due to max_tokens limit',
       );
+    });
+
+    it('executes trusted live tools without permission checks while keeping ordinary tools on ACP permission on the shared batch', async () => {
+      const directory = path.join(os.tmpdir(), 'qwen-live-shared-batch');
+      await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+      const screenshotPath = path.join(directory, `${randomUUID()}.png`);
+      await fs.writeFile(
+        screenshotPath,
+        Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1]),
+      );
+      const registered = new Map<string, core.AnyDeclarativeTool>();
+      const ordinaryExecute = vi.fn().mockResolvedValue({
+        llmContent: 'ordinary file contents',
+        returnDisplay: 'ordinary file contents',
+      });
+      const onConfirm = vi.fn().mockResolvedValue(undefined);
+      const ordinaryTool = {
+        name: 'read_file',
+        kind: core.Kind.Read,
+        displayName: 'Read file',
+        description: 'Read a file',
+        build: vi.fn((params: Record<string, unknown> = {}) => ({
+          params,
+          execute: ordinaryExecute,
+          getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+          getConfirmationDetails: vi.fn().mockResolvedValue({
+            type: 'info',
+            title: 'Read file',
+            prompt: 'Allow reading this file?',
+            onConfirm,
+          }),
+          getDescription: vi.fn().mockReturnValue('Read /tmp/private'),
+          toolLocations: vi.fn().mockReturnValue([]),
+        })),
+      } as unknown as core.AnyDeclarativeTool;
+      registered.set(ordinaryTool.name, ordinaryTool);
+      mockToolRegistry.registerTool = vi.fn((tool) => {
+        registered.set(tool.name, tool);
+      });
+      mockToolRegistry.getTool = vi.fn((name: string) => registered.get(name));
+      mockClient.extMethod = vi.fn().mockResolvedValue({
+        appName: 'Safari',
+        accessibilityText: 'AXWindow',
+        screenshotPath,
+      });
+      await session.enableLiveScreenContext();
+      const permissionManager = {
+        isToolEnabled: vi.fn(
+          async (name: string) => name !== CAPTURE_SCREEN_CONTEXT_TOOL_NAME,
+        ),
+        hasRelevantRules: vi.fn().mockReturnValue(true),
+        evaluate: vi.fn().mockResolvedValue('ask'),
+        hasMatchingAskRule: vi.fn().mockReturnValue(true),
+        findMatchingDenyRule: vi.fn(),
+      };
+      mockConfig.getApprovalMode = vi
+        .fn()
+        .mockReturnValue(ApprovalMode.DEFAULT);
+      mockConfig.getPermissionManager = vi
+        .fn()
+        .mockReturnValue(permissionManager);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(undefined);
+      mockConfig.getExperimentalZedIntegration = vi.fn().mockReturnValue(true);
+      mockConfig.isInteractive = vi.fn().mockReturnValue(false);
+      mockConfig.getTruncateToolOutputThreshold = vi
+        .fn()
+        .mockReturnValue(Number.POSITIVE_INFINITY);
+      mockConfig.getConditionalRulesRegistry = vi
+        .fn()
+        .mockReturnValue(undefined);
+      mockConfig.getSkillManager = vi.fn().mockReturnValue(null);
+      runAcpToolBatchSpy.mockImplementationOnce(
+        (
+          await vi.importActual<typeof import('./acp-tool-batch.js')>(
+            './acp-tool-batch.js',
+          )
+        ).runAcpToolBatch as never,
+      );
+      const send = useSharedRounds(
+        [
+          toolCall({
+            id: 'call-live-appshot',
+            name: CAPTURE_SCREEN_CONTEXT_TOOL_NAME,
+            args: {},
+          }),
+          toolCall({
+            id: 'call-ordinary-read',
+            name: 'read_file',
+            args: { file_path: '/tmp/private' },
+          }),
+          finished(),
+        ],
+        [text('Captured and read.'), finished()],
+      );
+
+      try {
+        const result = await prompt();
+
+        expect(result.stopReason).toBe('end_turn');
+        expect(runAcpToolBatchSpy).toHaveBeenCalledOnce();
+        expect(
+          permissionManager.isToolEnabled.mock.calls.map(([name]) => name),
+        ).not.toContain(CAPTURE_SCREEN_CONTEXT_TOOL_NAME);
+        expect(permissionManager.isToolEnabled).toHaveBeenCalledWith(
+          'read_file',
+          undefined,
+          undefined,
+        );
+        expect(mockClient.extMethod).toHaveBeenCalledWith(
+          'qwen/control/live/capture-screen-context',
+          { callerSessionId: 'test-session-id' },
+        );
+        expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+        expect(onConfirm).toHaveBeenCalledOnce();
+        expect(ordinaryExecute).toHaveBeenCalledOnce();
+        expect(send).toHaveBeenCalledTimes(2);
+      } finally {
+        await fs.unlink(screenshotPath).catch(() => undefined);
+      }
+    });
+
+    it('does not extend live trust to a second instance registered under the same tool name', async () => {
+      // The trust rule is by instance, not by name: `registerTool` overwrites
+      // on a same-name collision, so the session's field can point at an
+      // instance the registry no longer resolves. The replacement must take
+      // the normal permission flow.
+      const shadowExecute = vi.fn().mockResolvedValue({
+        llmContent: 'shadow output',
+        returnDisplay: 'shadow output',
+      });
+      const shadowTool = {
+        name: CAPTURE_SCREEN_CONTEXT_TOOL_NAME,
+        kind: core.Kind.Read,
+        displayName: 'Shadow capture',
+        description: 'A same-named replacement',
+        build: vi.fn((params: Record<string, unknown> = {}) => ({
+          params,
+          execute: shadowExecute,
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Shadow capture'),
+          toolLocations: vi.fn().mockReturnValue([]),
+        })),
+      } as unknown as core.AnyDeclarativeTool;
+      const liveTool = {
+        name: CAPTURE_SCREEN_CONTEXT_TOOL_NAME,
+        kind: core.Kind.Read,
+      } as unknown as core.AnyDeclarativeTool;
+      mockToolRegistry.getTool = vi.fn().mockReturnValue(shadowTool);
+      (
+        session as unknown as { liveScreenContextTool: core.AnyDeclarativeTool }
+      ).liveScreenContextTool = liveTool;
+      const permissionManager = {
+        isToolEnabled: vi.fn().mockResolvedValue(true),
+        hasRelevantRules: vi.fn().mockReturnValue(true),
+        evaluate: vi.fn().mockResolvedValue('deny'),
+        hasMatchingAskRule: vi.fn().mockReturnValue(false),
+        findMatchingDenyRule: vi
+          .fn()
+          .mockReturnValue(CAPTURE_SCREEN_CONTEXT_TOOL_NAME),
+      };
+      mockConfig.getApprovalMode = vi
+        .fn()
+        .mockReturnValue(ApprovalMode.DEFAULT);
+      mockConfig.getPermissionManager = vi
+        .fn()
+        .mockReturnValue(permissionManager);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(undefined);
+      mockConfig.getExperimentalZedIntegration = vi.fn().mockReturnValue(true);
+      mockConfig.isInteractive = vi.fn().mockReturnValue(false);
+      mockConfig.getConditionalRulesRegistry = vi
+        .fn()
+        .mockReturnValue(undefined);
+      mockConfig.getSkillManager = vi.fn().mockReturnValue(null);
+      runAcpToolBatchSpy.mockImplementationOnce(
+        (
+          await vi.importActual<typeof import('./acp-tool-batch.js')>(
+            './acp-tool-batch.js',
+          )
+        ).runAcpToolBatch as never,
+      );
+      useSharedRounds(
+        [
+          toolCall({
+            id: 'call-shadow',
+            name: CAPTURE_SCREEN_CONTEXT_TOOL_NAME,
+            args: {},
+          }),
+          finished(),
+        ],
+        [text('Refused.'), finished()],
+      );
+
+      const result = await prompt();
+
+      expect(result.stopReason).toBe('end_turn');
+      // A name comparison would skip both gates and run the shadow tool.
+      expect(
+        permissionManager.isToolEnabled.mock.calls.map(([name]) => name),
+      ).toContain(CAPTURE_SCREEN_CONTEXT_TOOL_NAME);
+      expect(shadowExecute).not.toHaveBeenCalled();
+      expect(mockClient.extMethod).not.toHaveBeenCalledWith(
+        'qwen/control/live/capture-screen-context',
+        expect.anything(),
+      );
+    });
+
+    it("keeps speak_to_user on the permission flow so a user's deny rule still applies", async () => {
+      // ACP's own executor bypassed the flow for the screen-context and
+      // live-task tools only; the shared batch must not widen that set.
+      const speakExecute = vi.fn().mockResolvedValue({
+        llmContent: 'The voice update was sent.',
+        returnDisplay: 'The voice update was sent.',
+      });
+      const speakTool = {
+        name: SPEAK_TO_USER_TOOL_NAME,
+        kind: core.Kind.Other,
+        displayName: 'Speak to user',
+        description: 'Speak a voice update',
+        build: vi.fn((params: Record<string, unknown> = {}) => ({
+          params,
+          execute: speakExecute,
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Speak'),
+          toolLocations: vi.fn().mockReturnValue([]),
+        })),
+      } as unknown as core.AnyDeclarativeTool;
+      mockToolRegistry.getTool = vi.fn().mockReturnValue(speakTool);
+      (
+        session as unknown as { liveSpeakToUserTool: core.AnyDeclarativeTool }
+      ).liveSpeakToUserTool = speakTool;
+      const permissionManager = {
+        isToolEnabled: vi.fn().mockResolvedValue(false),
+        hasRelevantRules: vi.fn().mockReturnValue(true),
+        evaluate: vi.fn().mockResolvedValue('deny'),
+        hasMatchingAskRule: vi.fn().mockReturnValue(false),
+        findMatchingDenyRule: vi.fn().mockReturnValue(SPEAK_TO_USER_TOOL_NAME),
+      };
+      mockConfig.getApprovalMode = vi
+        .fn()
+        .mockReturnValue(ApprovalMode.DEFAULT);
+      mockConfig.getPermissionManager = vi
+        .fn()
+        .mockReturnValue(permissionManager);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(undefined);
+      mockConfig.getExperimentalZedIntegration = vi.fn().mockReturnValue(true);
+      mockConfig.isInteractive = vi.fn().mockReturnValue(false);
+      mockConfig.getConditionalRulesRegistry = vi
+        .fn()
+        .mockReturnValue(undefined);
+      mockConfig.getSkillManager = vi.fn().mockReturnValue(null);
+      runAcpToolBatchSpy.mockImplementationOnce(
+        (
+          await vi.importActual<typeof import('./acp-tool-batch.js')>(
+            './acp-tool-batch.js',
+          )
+        ).runAcpToolBatch as never,
+      );
+      useSharedRounds(
+        [
+          toolCall({
+            id: 'call-speak',
+            name: SPEAK_TO_USER_TOOL_NAME,
+            args: { message: 'hello' },
+          }),
+          finished(),
+        ],
+        [text('Denied.'), finished()],
+      );
+
+      const result = await prompt();
+
+      expect(result.stopReason).toBe('end_turn');
+      expect(
+        permissionManager.isToolEnabled.mock.calls.map(([name]) => name),
+      ).toContain(SPEAK_TO_USER_TOOL_NAME);
+      expect(speakExecute).not.toHaveBeenCalled();
+      expect(mockClient.requestPermission).not.toHaveBeenCalled();
+    });
+
+    it('runs auto-allowed reads, enforces workspace confinement, and refuses approval-needing calls without prompting in a read-only Agent Host session on the shared batch', async () => {
+      const workspaceDir = process.cwd();
+      const insideNeedsApproval = path.join(workspaceDir, 'needs-approval.txt');
+      const outsidePath = '/outside/secret.txt';
+      const lsExecute = vi.fn().mockResolvedValue({
+        llmContent: 'README.md',
+        returnDisplay: 'README.md',
+      });
+      const readExecute = vi.fn().mockResolvedValue({
+        llmContent: 'should not run',
+        returnDisplay: 'should not run',
+      });
+      const tools = new Map<string, core.AnyDeclarativeTool>([
+        [
+          'list_directory',
+          {
+            name: 'list_directory',
+            kind: core.Kind.Read,
+            build: vi.fn((params: Record<string, unknown> = {}) => ({
+              params,
+              execute: lsExecute,
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              getDescription: vi.fn().mockReturnValue('List workspace'),
+              toolLocations: vi.fn().mockReturnValue([]),
+            })),
+          } as unknown as core.AnyDeclarativeTool,
+        ],
+        [
+          'read_file',
+          {
+            name: 'read_file',
+            kind: core.Kind.Read,
+            build: vi.fn((params: Record<string, unknown> = {}) => ({
+              params,
+              execute: readExecute,
+              getDefaultPermission: vi.fn(async () =>
+                params['file_path'] === insideNeedsApproval ? 'ask' : 'allow',
+              ),
+              getConfirmationDetails: vi.fn().mockResolvedValue({
+                type: 'info',
+                title: 'Read file',
+                prompt: 'Allow reading needs-approval.txt?',
+                onConfirm: vi.fn().mockResolvedValue(undefined),
+              }),
+              getDescription: vi.fn().mockReturnValue('Read file'),
+              toolLocations: vi.fn().mockReturnValue([]),
+            })),
+          } as unknown as core.AnyDeclarativeTool,
+        ],
+      ]);
+      mockToolRegistry.getTool = vi.fn((name: string) => tools.get(name));
+      mockConfig.getSessionSourceType = vi.fn().mockReturnValue('agent-host');
+      mockConfig.getApprovalMode = vi
+        .fn()
+        .mockReturnValue(ApprovalMode.DEFAULT);
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(undefined);
+      mockConfig.getExperimentalZedIntegration = vi.fn().mockReturnValue(true);
+      mockConfig.isInteractive = vi.fn().mockReturnValue(false);
+      mockConfig.getTruncateToolOutputThreshold = vi
+        .fn()
+        .mockReturnValue(Number.POSITIVE_INFINITY);
+      mockConfig.getConditionalRulesRegistry = vi
+        .fn()
+        .mockReturnValue(undefined);
+      mockConfig.getSkillManager = vi.fn().mockReturnValue(null);
+      mockConfig.getWorkspaceContext = vi.fn().mockReturnValue({
+        isPathWithinWorkspace: (candidate: string) =>
+          candidate === workspaceDir ||
+          candidate.startsWith(`${workspaceDir}${path.sep}`),
+      });
+      mockConfig.getToolInvocationGuard = vi
+        .fn()
+        .mockReturnValue(
+          createAgentHostToolInvocationGuard(
+            undefined,
+            workspaceDir,
+            (candidate) =>
+              mockConfig.getWorkspaceContext().isPathWithinWorkspace(candidate),
+          ),
+        );
+      runAcpToolBatchSpy.mockImplementationOnce(
+        (
+          await vi.importActual<typeof import('./acp-tool-batch.js')>(
+            './acp-tool-batch.js',
+          )
+        ).runAcpToolBatch as never,
+      );
+      const send = useSharedRounds(
+        [
+          toolCall({
+            id: 'call-allowed-ls',
+            name: 'list_directory',
+            args: { path: workspaceDir },
+          }),
+          toolCall({
+            id: 'call-outside-read',
+            name: 'read_file',
+            args: { file_path: outsidePath },
+          }),
+          toolCall({
+            id: 'call-approval-read',
+            name: 'read_file',
+            args: { file_path: insideNeedsApproval },
+          }),
+          finished(),
+        ],
+        [text('Finished inspection.'), finished()],
+      );
+
+      const result = await prompt();
+
+      expect(result.stopReason).toBe('end_turn');
+      expect(runAcpToolBatchSpy).toHaveBeenCalledOnce();
+      expect(lsExecute).toHaveBeenCalledOnce();
+      expect(readExecute).not.toHaveBeenCalled();
+      expect(mockClient.requestPermission).not.toHaveBeenCalled();
+      // The workspace confinement guard is the session Config's, applied at
+      // the scheduler's execution boundary.
+      expect(mockConfig.getToolInvocationGuard).toHaveBeenCalled();
+      expect(send).toHaveBeenCalledTimes(2);
+      const toolResultParts = send.mock.calls[1][0] as Part[];
+      const responsesById = new Map(
+        toolResultParts.map((part) => [
+          part.functionResponse?.id,
+          part.functionResponse?.response,
+        ]),
+      );
+      expect(responsesById.get('call-allowed-ls')).toEqual({
+        output: 'README.md',
+      });
+      expect(responsesById.get('call-outside-read')).toEqual({
+        error: 'Agent Host reads are limited to the assigned workspace.',
+      });
+      expect(responsesById.get('call-approval-read')).toEqual({
+        error:
+          'Tool "read_file" requires approval, which is unavailable on this read-only Agent Host.',
+      });
     });
 
     it('reports a UserPromptSubmit block without sending the prompt', async () => {
@@ -5979,7 +6428,7 @@ describe('Session', () => {
       },
     );
 
-    it('gives a Stop hook continuation a fresh host-owned tool budget with Live tools', async () => {
+    it('gives a Stop hook continuation a fresh tool budget with Live tools on the shared batch', async () => {
       const execute = useTool(core.Kind.Read, 'read_file');
       const registered = new Map<string, core.AnyDeclarativeTool>();
       registered.set('read_file', mockToolRegistry.getTool('read_file'));
@@ -6023,11 +6472,9 @@ describe('Session', () => {
 
       await expect(prompt()).resolves.toEqual({ stopReason: 'end_turn' });
 
-      expect(send.mock.calls[0][3]).toMatchObject({
-        toolLoopGuardsByHost: true,
-      });
+      expect(send.mock.calls[0][3]).not.toHaveProperty('toolLoopGuardsByHost');
       expect(execute).toHaveBeenCalledTimes(2);
-      expect(runAcpToolBatchSpy).not.toHaveBeenCalled();
+      expect(runAcpToolBatchSpy).toHaveBeenCalledTimes(2);
     });
 
     it("leaves the turn's background results that arrive after its response to a notification turn", async () => {

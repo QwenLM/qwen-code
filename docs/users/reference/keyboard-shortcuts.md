@@ -69,6 +69,8 @@ These shortcuts apply while an interactive foreground shell command is running.
 
 Focus the Background tasks pill in the footer (use `Down Arrow` from an empty composer — this moves through the live-agent panel and, if present, the Arena tab bar first) and press `Enter` to open the dialog. It lists background agents, shells, monitors, workflow runs, and memory dreams.
 
+A workflow approval that opens the list automatically stays selected when other tasks start or finish and the list reorders.
+
 | Shortcut                  | Description                                                                                                                                              |
 | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `Up Arrow` / `Down Arrow` | Move the selection between tasks.                                                                                                                        |
