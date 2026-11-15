@@ -5178,6 +5178,34 @@ export function registerSessionRoutes(
               ) {
                 throw new CdWhilePromptActiveError(storageSessionId);
               }
+              // Refuse when another live client-attached non-worktree session
+              // occupies the local checkout: the branch checkout below moves
+              // its shared HEAD (and the snapshot writes its files), which
+              // would silently relocate that session onto the handed-off
+              // branch. The branch route applies the same predicate; ownership
+              // is keyed on the worktree path, so two sessions from different
+              // worktrees sharing one originalCwd hold different locks over
+              // this same checkout. Worktree sessions are exempt — they run in
+              // their own cwd, including the handing-off session itself.
+              const occupyingSession = runtime.bridge
+                .listWorkspaceSessions(localCwd)
+                .find(
+                  (session) =>
+                    session.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE &&
+                    session.sourceType !== AGENT_SESSION_SOURCE_TYPE &&
+                    !session.worktree &&
+                    session.clientCount > 0,
+                );
+              if (occupyingSession) {
+                res.status(409).json({
+                  error:
+                    'Another session is already active in this workspace; handing off would move its shared checkout',
+                  code: 'handoff_workspace_occupied',
+                  existingSessionId: occupyingSession.sessionId,
+                  sessionId: storageSessionId,
+                });
+                return;
+              }
               const wtService = new GitWorktreeService(workspaceCwd);
               const wtCheckoutService = new GitWorktreeService(realTarget);
               // gateBase describes originalCwd's checkout (the local HEAD
@@ -5246,12 +5274,24 @@ export function registerSessionRoutes(
                 });
                 return;
               }
+              // Promotion carries the agent's work to the local checkout only
+              // when the worktree HEAD moved PAST its creation base. A HEAD
+              // behind the base (the agent checked out an older commit without
+              // committing) is an ancestor of the base: promoting it would
+              // rewind the user's clean checkout, so the handoff stays
+              // snapshot-only. The detached gate above guarantees head/base
+              // are non-empty when there is no branch.
+              const headBehindBase =
+                !branch &&
+                head !== base &&
+                (await isCommitAncestor(head, base, realTarget));
               // A descendant local HEAD is reconcilable only when no branch
               // is checked out (the snapshot applies on top of the local
               // HEAD). Checking out a branch — recorded, or promoted at the
               // worktree HEAD — would remove the user's own ahead-of-base
               // commit from the working tree, so refuse that combination.
-              const willCheckoutBranch = branch !== '' || head !== base;
+              const willCheckoutBranch =
+                branch !== '' || (head !== base && !headBehindBase);
               // A legacy sidecar may carry an empty originalHeadCommit, which
               // skips the local-HEAD gate above. The snapshot-only path is
               // still safe (it applies on top of the local HEAD), but a
@@ -5348,7 +5388,7 @@ export function registerSessionRoutes(
                 origBranch === 'HEAD'
                   ? ((await getHeadCommit(localCwd)) ?? null)
                   : origBranch;
-              if (!branch && head !== base) {
+              if (!branch && head !== base && !headBehindBase) {
                 branch = name || worktreeBranchForSlug(sidecar.slug);
                 // Same typed refusal as the explicit-name path: an occupied
                 // auto name must not degrade into a generic bridge error.
@@ -6121,9 +6161,20 @@ export function registerSessionRoutes(
                   return;
                 }
                 worktreeCreated = true;
+                // Record the carried overlay in the in-memory journal BEFORE
+                // the persist that can throw: if the journal write fails,
+                // cleanupPrepared still reads carriedPaths from this variable
+                // and can reap the worktree the carry just dirtied. Assigning
+                // only from the await's result would leave it undefined on a
+                // write failure, handing cleanup an empty exemption set that
+                // refuses the dirty checkout forever.
+                journal = {
+                  ...journal,
+                  carriedPaths: worktreeResult.carriedPaths,
+                };
                 journal = await updateBranchWorktreeJournal(
                   journalPath,
-                  { ...journal, carriedPaths: worktreeResult.carriedPaths },
+                  journal,
                   'worktree-created',
                 );
                 runtime.generationGuard?.assertOpen();

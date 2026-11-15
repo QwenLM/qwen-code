@@ -446,13 +446,32 @@ describe('GitWorktreeService', () => {
 
     it('setupWorktrees should still succeed when stash apply fails', async () => {
       git.stash.mockResolvedValue('snapshot-sha\n');
-      git.raw.mockRejectedValue(new Error('stash apply conflict'));
+      // Only the apply fails; the reset/clean restore succeeds, so the
+      // worktree is back at committed state and the fail-open baseline is
+      // safe. (A restore that ALSO fails is refused — see the R8-3 case.)
+      git.raw.mockImplementation(async (args: string[]) => {
+        if (args[0] === 'stash' && args[1] === 'apply') {
+          throw new Error('stash apply conflict');
+        }
+        return '';
+      });
 
       const result = await setupCreated('a');
 
       // Setup should still succeed — dirty state failure is non-fatal
       expect(result.success).toBe(true);
       expect(result.errors).toHaveLength(0);
+    });
+
+    it('setupWorktrees refuses to baseline when the carry restore itself fails (R8-3)', async () => {
+      git.stash.mockResolvedValue('snapshot-sha\n');
+      // Every raw call rejects, so the reset/clean restore fails too: the
+      // worktree may hold a half-applied overlay and must not be baselined.
+      git.raw.mockRejectedValue(new Error('stash apply conflict'));
+
+      await expect(setupCreated('a')).rejects.toThrow(
+        /restore to committed state also failed/,
+      );
     });
 
     it('setupWorktrees should still succeed when stash create fails', async () => {

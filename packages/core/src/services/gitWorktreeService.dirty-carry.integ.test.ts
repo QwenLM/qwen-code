@@ -634,10 +634,13 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
     expect(created.carriedPaths).toContain('root-untracked.txt');
   });
 
-  it('skips an uncopyable entry without aborting the carry', async () => {
-    // The source holds an untracked DIRECTORY x/y.txt while the worktree
-    // base has a tracked FILE x: mkdir(x) in the worktree fails, the loop
-    // must skip that entry and still carry the rest.
+  it('carries a tracked file deleted into a directory of the same name (R8-5)', async () => {
+    // Source: tracked FILE x deleted and replaced by directory x/y.txt (the
+    // user moved a file into a folder). `git stash create` cannot represent
+    // this file→directory shape — the stash omits the deletion and
+    // `stash show --name-only` names nothing — so the carry must remove the
+    // target's tracked file explicitly and land the untracked directory
+    // content rather than resurrect the file and report a complete carry.
     await fs.writeFile(path.join(repoRoot, 'x'), 'tracked-file\n');
     git(repoRoot, 'add', 'x');
     git(repoRoot, 'commit', '-qm', 'x file', '--no-verify');
@@ -652,7 +655,7 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
     await fs.writeFile(path.join(siblingPath, 'x', 'y.txt'), 'nested\n');
     await fs.writeFile(path.join(siblingPath, 'ok.txt'), 'ok\n');
 
-    const created = await service.createUserWorktree('skipfail', 'main', {
+    const created = await service.createUserWorktree('filetodir', 'main', {
       detached: true,
       carryDirtyState: true,
       dirtyStateSource: siblingPath,
@@ -660,8 +663,74 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
     expect(created.success).toBe(true);
     const wt = created.worktree!.path;
     expect(await read(path.join(wt, 'ok.txt'))).toBe('ok\n');
-    // x stays the tracked file; the uncopyable directory entry was skipped.
-    expect(await read(path.join(wt, 'x'))).toBe('tracked-file\n');
+    // The deletion is carried: x is the directory, not the resurrected file.
+    expect((await fs.lstat(path.join(wt, 'x'))).isDirectory()).toBe(true);
+    expect(await read(path.join(wt, 'x', 'y.txt'))).toBe('nested\n');
+    expect(created.carriedPaths).toContain('x');
+    expect(created.carriedPaths).toContain('x/y.txt');
+  });
+
+  it('skips an uncopyable untracked entry without aborting the rest of the carry', async () => {
+    // The target base tracks out -> outside; the capture predates the link
+    // and holds untracked out/escape.txt (uncopyable: the ancestor symlink
+    // would escape the checkout) plus a carryable ok.txt. The skip must not
+    // abort the remainder, and the skipped entry is not recorded.
+    const service = new GitWorktreeService(repoRoot);
+    const capture = await service.createUserWorktree('capture-skip', 'main', {
+      detached: true,
+    });
+    expect(capture.success).toBe(true);
+    const capturePath = capture.worktree!.path;
+    const outside = path.join(repoParent, 'outside-skip');
+    await fs.mkdir(outside);
+    await fs.symlink(outside, path.join(repoRoot, 'out'));
+    git(repoRoot, 'add', 'out');
+    git(repoRoot, 'commit', '-qm', 'out link', '--no-verify');
+    const base = git(repoRoot, 'rev-parse', 'HEAD');
+    await fs.mkdir(path.join(capturePath, 'out'), { recursive: true });
+    await fs.writeFile(path.join(capturePath, 'out', 'escape.txt'), 'escape\n');
+    await fs.writeFile(path.join(capturePath, 'ok.txt'), 'ok\n');
+
+    const created = await service.createUserWorktree('target-skip', base, {
+      detached: true,
+      carryDirtyState: true,
+      dirtyStateSource: capturePath,
+    });
+    expect(created.success).toBe(true);
+    const wt = created.worktree!.path;
+    expect(await read(path.join(wt, 'ok.txt'))).toBe('ok\n');
+    await expect(fs.lstat(path.join(outside, 'escape.txt'))).rejects.toThrow();
+    expect(created.carriedPaths ?? []).not.toContain('out/escape.txt');
+  });
+
+  it('createUserWorktree carry refuses when stash create fails on a held index lock (R8-6)', async () => {
+    // A tracked edit exists, but `git stash create` cannot run (held
+    // index.lock — the environment class carryApplyErrorDetection records).
+    // An empty carry here is NOT a clean source: the carry-requested
+    // creation must refuse rather than relocate the session without the
+    // user's edits and report success with an empty overlay.
+    await fs.writeFile(path.join(repoRoot, 'README.md'), 'edited\n');
+    const gitDir = git(repoRoot, 'rev-parse', '--absolute-git-dir');
+    const lock = path.join(gitDir, 'index.lock');
+    await fs.writeFile(lock, '');
+    const service = new GitWorktreeService(repoRoot);
+    let created: Awaited<ReturnType<typeof service.createUserWorktree>>;
+    try {
+      created = await service.createUserWorktree('lockfail', 'main', {
+        detached: true,
+        carryDirtyState: true,
+      });
+    } finally {
+      await fs.rm(lock, { force: true });
+    }
+    expect(created.success).toBe(false);
+    expect(created.error).toContain('dirty state');
+    // No checkout left behind for a refused carry.
+    await expect(
+      fs.lstat(service.getUserWorktreePath('lockfail')),
+    ).rejects.toThrow();
+    // The source edit is untouched.
+    expect(await read(path.join(repoRoot, 'README.md'))).toBe('edited\n');
   });
 
   it('writes the exclude rule for an in-root directory named ..cache', async () => {
@@ -680,22 +749,31 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
     );
   });
 
-  it('keeps the legacy file when the exclude rule cannot be established', async () => {
-    // A newline-bearing component cannot be represented in info/exclude;
-    // the migration must keep the legacy file (the only hiding mechanism)
-    // rather than unlink it and leave .qwen/ permanently untracked.
-    const nlSub = path.join(repoRoot, 'nl\nsub');
-    await fs.mkdir(nlSub);
-    const service = new GitWorktreeService(nlSub);
-    const legacy = path.join(nlSub, '.qwen', '.gitignore');
-    await fs.mkdir(path.join(nlSub, '.qwen'), { recursive: true });
-    await fs.writeFile(legacy, '# Auto-generated by qwen-code.\nworktrees/\n');
-    await service.migrateLegacyWorktreeGitignore();
-    // The rule was not representable: the legacy file survives.
-    expect(await read(legacy)).toBe(
-      '# Auto-generated by qwen-code.\nworktrees/\n',
-    );
-  });
+  // A newline in a DIRECTORY component is rejected by the Win32 path layer
+  // (ERROR_INVALID_NAME) before any git call, same as the newline-file
+  // fixtures above; gate it so the Windows lane does not red at setup.
+  it.skipIf(process.platform === 'win32')(
+    'keeps the legacy file when the exclude rule cannot be established',
+    async () => {
+      // A newline-bearing component cannot be represented in info/exclude;
+      // the migration must keep the legacy file (the only hiding mechanism)
+      // rather than unlink it and leave .qwen/ permanently untracked.
+      const nlSub = path.join(repoRoot, 'nl\nsub');
+      await fs.mkdir(nlSub);
+      const service = new GitWorktreeService(nlSub);
+      const legacy = path.join(nlSub, '.qwen', '.gitignore');
+      await fs.mkdir(path.join(nlSub, '.qwen'), { recursive: true });
+      await fs.writeFile(
+        legacy,
+        '# Auto-generated by qwen-code.\nworktrees/\n',
+      );
+      await service.migrateLegacyWorktreeGitignore();
+      // The rule was not representable: the legacy file survives.
+      expect(await read(legacy)).toBe(
+        '# Auto-generated by qwen-code.\nworktrees/\n',
+      );
+    },
+  );
 
   it('carries a large overlay when no journal bound is set', async () => {
     // The handoff and POST /session write no journal: a >32KiB overlay
@@ -1020,6 +1098,43 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
       } finally {
         await fs.chmod(path.join(wt, 'sub'), 0o755).catch(() => undefined);
         await service.cleanupSession('r741-session').catch(() => undefined);
+        git(repoRoot, 'config', '--unset', 'core.hooksPath');
+      }
+    },
+  );
+
+  // The post-checkout hook is a POSIX shell script; Windows has no sh.
+  it.skipIf(process.platform === 'win32')(
+    'setupWorktrees refuses to baseline when the carry restore itself fails (R8-3)',
+    async () => {
+      // Source tracked edit; a post-checkout hook holds the new worktree's
+      // index.lock so BOTH the stash apply and the reset --hard restore fail.
+      // The thrown error must report the restore failure (not claim the tree
+      // was restored to committed state), and setupWorktrees must refuse to
+      // baseline the half-applied overlay as pre-existing user state.
+      await fs.writeFile(path.join(repoRoot, 'README.md'), 'dirty\n');
+      const hooksDir = path.join(repoParent, 'hooks-r83');
+      await fs.mkdir(hooksDir);
+      await fs.writeFile(
+        path.join(hooksDir, 'post-checkout'),
+        '#!/bin/sh\ntouch "$(git rev-parse --absolute-git-dir)/index.lock"\n',
+        { mode: 0o755 },
+      );
+      git(repoRoot, 'config', 'core.hooksPath', hooksDir);
+      const service = new GitWorktreeService(
+        repoRoot,
+        path.join(repoParent, 'sessions-r83'),
+      );
+      try {
+        await expect(
+          service.setupWorktrees({
+            sessionId: 'r83-session',
+            sourceRepoPath: repoRoot,
+            worktreeNames: ['arena'],
+            baseBranch: 'main',
+          }),
+        ).rejects.toThrow(/restore to committed state also failed/);
+      } finally {
         git(repoRoot, 'config', '--unset', 'core.hooksPath');
       }
     },

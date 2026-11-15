@@ -213,6 +213,60 @@ describe('GitWorktreeService — detached managed worktrees', () => {
     ).rejects.toThrow(/already exists/);
   });
 
+  it('getRegisteredWorktreeBranch reports the bare branch when a same-named tag exists (R10-2)', async () => {
+    const worktree = await createDetached('sess-tag-ambig');
+    git(worktree.path, 'switch', '-qc', 'release/2.0');
+    git(repoRoot, 'tag', 'release/2.0');
+    // The short name really is ambiguous: --abbrev-ref qualifies it, which
+    // is exactly what must NOT reach the sidecar comparison.
+    expect(git(worktree.path, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(
+      'heads/release/2.0',
+    );
+    const info = await service.getRegisteredWorktreeBranch(worktree.path);
+    expect(info).not.toBeNull();
+    expect(info!.branch).toBe('release/2.0');
+    expect(info!.headCommit).toBe(git(worktree.path, 'rev-parse', 'HEAD'));
+  });
+
+  it('getRegisteredWorktreeBranch keeps a branch literally named heads/foo (R10-2)', async () => {
+    // Guards the normalization against a naive "strip heads/" rewrite: the
+    // branch name itself starts with heads/, and only the refs/heads/
+    // namespace prefix may be dropped.
+    const worktree = await createDetached('sess-heads-foo');
+    git(worktree.path, 'switch', '-qc', 'heads/foo');
+    const info = await service.getRegisteredWorktreeBranch(worktree.path);
+    expect(info).not.toBeNull();
+    expect(info!.branch).toBe('heads/foo');
+  });
+
+  // The post-checkout hook is a POSIX shell script; Windows has no sh.
+  it.skipIf(process.platform === 'win32')(
+    'createWorktreeBranch accepts a landed switch despite a failing hook when a same-named tag exists (R10-2)',
+    async () => {
+      const worktree = await createDetached('sess-hook-tag');
+      git(repoRoot, 'tag', 'release/2.0');
+      const hooksDir = path.join(repoParent, 'hooks-r102');
+      await fs.mkdir(hooksDir);
+      const marker = path.join(repoParent, 'hook-ran-r102');
+      await fs.writeFile(
+        path.join(hooksDir, 'post-checkout'),
+        `#!/bin/sh\ntouch ${marker}\nexit 1\n`,
+        { mode: 0o755 },
+      );
+      git(worktree.path, 'config', 'core.hooksPath', hooksDir);
+      // switch -c moves the checkout BEFORE the hook runs; the hook then
+      // fails. The recovery must compare on the bare name (a same-named tag
+      // makes --abbrev-ref report heads/release/2.0) and accept the landing.
+      await service.createWorktreeBranch(worktree.path, 'release/2.0');
+      // The hook really ran (so the recovery path, not a clean switch, is
+      // what this test exercises).
+      await expect(fs.lstat(marker)).resolves.toBeTruthy();
+      expect(git(worktree.path, 'branch', '--show-current')).toBe(
+        'release/2.0',
+      );
+    },
+  );
+
   it('removeUserWorktree refuses a detached worktree carrying unmerged commits', async () => {
     const worktree = await createDetached('sess-loss');
     await fs.writeFile(path.join(worktree.path, 'work.txt'), 'precious\n');
