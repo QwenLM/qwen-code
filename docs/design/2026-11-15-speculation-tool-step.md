@@ -31,7 +31,9 @@ The execution and recording mechanics above are **not** structural blockers of t
 
 The model round stays on the shared loop as PR 6a landed it (`runSpeculationModelRound`, gated by `isUnifiedAgentLoopEnabled('speculation')`); the tool gate, direct execution, overlay writes and boundary handling are unchanged.
 
-**Numbering note.** The tracker #17045's "PR 6b" is this tool-step decision. It supersedes the older [unified agent loop](2026-10-23-unified-agent-loop.md) migration table's "6b" numbering, which named speculation's default-on and removal step; that table now links this decision and keeps default-on/removal as a separate entry. Default-on and legacy removal remain gated steps of #17045, not part of this decision.
+**End-state note.** Keeping speculation's own loop and finalizer permanently means the parent design's end-state targets of 1 agent loop implementation and 1 `finalizeToolResponses` caller are not literally reachable: speculation's call (`speculation.ts:605`) remains alongside the shared batch's (`agent-loop.ts:709`). Those two targets count the shared implementation plus the copies the keep-its-own decisions retain, as the End state table in [unified agent loop](2026-10-23-unified-agent-loop.md) now notes; #17045 reconciles the exact numbers.
+
+**Numbering note.** The tracker #17045's "PR 6b" is this tool-step decision. It supersedes the older [unified agent loop](2026-10-23-unified-agent-loop.md) migration table's "6b" numbering, which named speculation's default-on and removal step; that table now links this decision and keeps default-on/removal as a separate entry. The table's "6c" is this doc's own label for those default-on/removal steps; #17045 tracks the default-on step as an unnumbered checkbox after its 6a/6b (the "Kernel on by default" box), so "6c" has no separate tracker entry. Default-on and legacy removal remain gated steps of #17045, not part of this decision.
 
 ## Integration gate decision
 

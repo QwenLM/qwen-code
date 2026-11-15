@@ -31,7 +31,9 @@ Speculation 在后台以只读工具与 copy-on-write overlay 写跑在用户之
 
 模型轮按 PR 6a 已落地的方式留在共享 loop（`runSpeculationModelRound`，由 `isUnifiedAgentLoopEnabled('speculation')` 门控）；工具门、直接执行、overlay 写与 boundary 处理不变。
 
-**编号说明。** 跟踪 issue #17045 的「PR 6b」即本工具步决策。它取代了较早的[统一代理循环](2026-10-23-unified-agent-loop.md)迁移表中「6b」的编号含义（该表原指 speculation 的默认开启与删除步骤）；该表现已链接本决策，并把默认开启/删除保留为独立条目。默认开启与遗留删除仍是 #17045 的门控步骤，不属于本决策。
+**最终状态说明。** 永久保留 speculation 自有循环与 finalizer，意味着父设计「1 个 agent loop 实现」「1 个 `finalizeToolResponses` 调用者」的最终状态目标并非字面可达：speculation 的调用（`speculation.ts:605`）与共享批的调用（`agent-loop.ts:709`）并存。这两个目标按共享实现加上保留自有决策所留副本计数，[统一代理循环](2026-10-23-unified-agent-loop.md)的最终状态表现已注明；确切数字由 #17045 调和。
+
+**编号说明。** 跟踪 issue #17045 的「PR 6b」即本工具步决策。它取代了较早的[统一代理循环](2026-10-23-unified-agent-loop.md)迁移表中「6b」的编号含义（该表原指 speculation 的默认开启与删除步骤）；该表现已链接本决策，并把默认开启/删除保留为独立条目。表中的「6c」是本文对这些默认开启/删除步骤的自有标签；#17045 在其 6a/6b 之后以无编号 checkbox（「内核默认开启」框）跟踪默认开启步骤，故「6c」没有单独的 tracker 条目。默认开启与遗留删除仍是 #17045 的门控步骤，不属于本决策。
 
 ## 集成门禁决策
 

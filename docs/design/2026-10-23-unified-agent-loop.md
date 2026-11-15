@@ -782,6 +782,8 @@ End state:
 | Loops that call `finalizeToolResponses`              | 6                                                | 1      |
 | Session turn-cap formulas                            | 3                                                | 1      |
 
+These targets assume full migration. The keep-its-own decisions retain specialized copies: speculation keeps its speculative loop and its `finalizeToolResponses` call (`speculation.ts:605`; [PR 6b decision](2026-11-15-speculation-tool-step.md)), and the Hosted Harness keeps its journaled loop and tool step ([migration evaluation](2026-11-14-hosted-harness-loop-evaluation.md)). "Agent loop implementations" and "Loops that call `finalizeToolResponses`" therefore end at the shared implementation plus the copies these decisions retain (speculation's finalizer sits alongside the shared batch's at `agent-loop.ts:709`); #17045 reconciles the exact numbers with a Plan-changes line.
+
 ## Open questions
 
 - Should `model.maxSessionTurns: 0` mean "no turns" or be rejected? Today the loops disagree (#15325).

@@ -782,6 +782,8 @@ PR 6b 是 speculation 的工具步决策（保留自有工具步）；PR 6c 是�
 | 调用 `finalizeToolResponses` 的 loop         | 6                                         | 1    |
 | 会话轮数上限的算法                           | 3                                         | 1    |
 
+这些目标假设全部入口完全迁移。保留自有的决策会留下特化副本：speculation 保留其投机循环与自己的 `finalizeToolResponses` 调用（`speculation.ts:605`；见 [PR 6b 决策](2026-11-15-speculation-tool-step.md)），Hosted Harness 保留其 journal 化循环与工具步（见[迁移评估](2026-11-14-hosted-harness-loop-evaluation.md)）。因此「agent loop 实现数」与「调用 `finalizeToolResponses` 的 loop」最终为共享实现加上这些决策保留的副本（speculation 的 finalizer 与共享批在 `agent-loop.ts:709` 的调用并存）；确切数字由 #17045 以 Plan changes 一行调和。
+
 ## 待定问题
 
 - `model.maxSessionTurns: 0` 应该表示“不允许任何轮次”，还是应该被拒绝？目前各 loop 的理解不一致（#15325）。
