@@ -58,8 +58,15 @@ cannot reach the aggregate view without the sidebar.
   `data-testid="goal-open-session"`) calls
   `onOpenSession(item.sessionId, item.workspaceCwd)` — the same handler as the
   footer link, including the workspace tag. It is navigation, not a control,
-  so it is never disabled by the per-session `busy` gate. The footer link
-  stays for discoverability and for the session name itself.
+  so it is never disabled by the per-session `busy` gate, and it wears the
+  interactive blue (`--agent-blue-500`) so it reads apart from the grey
+  edit/pause/clear control icons.
+- The footer session entry is a labeled link, not a grey label
+  (`data-testid="goal-session-link"`): message icon + session name + arrow
+  icon, interactive blue, underline on hover/focus, and a focus ring. The
+  first iteration kept the old grey text-only shape; in review it was
+  indistinguishable from the surrounding meta and readers could not find the
+  jump at all, so the link now carries every conventional link cue.
 - The status pill carries `data-status` mapped by `goalStatusTone(status)`:
   `active → running`, `paused | blocked | usage_limited → attention`,
   `complete → done`. CSS reuses the shared execution-status palette. This
@@ -107,6 +114,12 @@ cannot reach the aggregate view without the sidebar.
 - **Header icon instead of a clickable card.** A whole-card click target
   would nest five buttons and steal objective text selection; a constant
   header icon is discoverable without changing card semantics.
+- **Navigation wears link cues, control grey stays for controls.** The first
+  iteration rendered both jump affordances in the same achromatic grey as the
+  meta text; reviewers could not find the jump in the screenshots. The footer
+  entry now carries icon + name + arrow in the interactive blue with hover
+  underline and a focus ring, and the header icon is tinted blue — colour and
+  shape, not position alone, signal "this navigates".
 - **Shared palette, not new colours.** The tone mapping reuses
   `--status-*-fg/bg` so goals read identically to the cockpit and workflow
   surfaces in both themes; no new theme tokens are introduced.

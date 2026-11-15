@@ -557,6 +557,17 @@ describe('GoalsDialog', () => {
     expect(onOpenSession).toHaveBeenCalledWith('sess-1', undefined);
   });
 
+  it('renders the session link as a labeled navigation affordance', async () => {
+    await mount([baseGoal()]);
+
+    const link = document.querySelector('[data-testid="goal-session-link"]');
+    expect(link).not.toBeNull();
+    expect(link!.textContent).toContain('fix-ci');
+    // Message icon + arrow icon frame the name so it reads as a jump, not a
+    // label; the grey text-only shape was indistinguishable from the meta.
+    expect(link!.querySelectorAll('svg')).toHaveLength(2);
+  });
+
   it('opens the goal session in its tagged workspace from the header action', async () => {
     const onOpenSession = vi.fn();
     await mount([], {

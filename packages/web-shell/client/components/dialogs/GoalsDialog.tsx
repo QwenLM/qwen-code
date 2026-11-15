@@ -12,7 +12,14 @@ import {
   type DaemonGoal,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { DaemonWorkspaceCapability } from '@qwen-code/sdk/daemon';
-import { MessageSquareText, Pause, Pencil, Play, Trash2 } from 'lucide-react';
+import {
+  ArrowUpRight,
+  MessageSquareText,
+  Pause,
+  Pencil,
+  Play,
+  Trash2,
+} from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { formatRuntime } from '../../utils/formatRuntime';
 import { formatContextTokens } from '../../utils/formatTokenCount';
@@ -692,7 +699,7 @@ export function GoalsDialog({
                       Navigation, not a control: never gated on `busy`. */}
                   <button
                     type="button"
-                    className={styles.iconAction}
+                    className={`${styles.iconAction} ${styles.sessionAction}`}
                     onClick={() =>
                       onOpenSession(item.sessionId, item.workspaceCwd)
                     }
@@ -848,8 +855,13 @@ export function GoalsDialog({
                   // the target — the target stays in the accessible name so it
                   // still contains the visible label (WCAG 2.5.3).
                   aria-label={`${t('goals.openSessionHint')}: ${item.displayName || item.sessionId}`}
+                  data-testid="goal-session-link"
                 >
-                  {item.displayName || item.sessionId}
+                  <MessageSquareText size={13} aria-hidden="true" />
+                  <span className={styles.sessionLinkText}>
+                    {item.displayName || item.sessionId}
+                  </span>
+                  <ArrowUpRight size={12} aria-hidden="true" />
                 </button>
               </div>
             </div>

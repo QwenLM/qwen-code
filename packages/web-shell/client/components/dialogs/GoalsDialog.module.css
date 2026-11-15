@@ -264,6 +264,16 @@
   cursor: default;
 }
 
+/* Navigation, not a control: the session-jump icon wears the interactive
+   blue so it reads apart from the grey edit/pause/clear actions. Declared
+   after the `.iconAction:hover` rules so the blue survives hover at equal
+   specificity. */
+.sessionAction,
+.sessionAction:hover:not(:disabled),
+.sessionAction:focus-visible:not(:disabled) {
+  color: var(--agent-blue-500);
+}
+
 .cardReason {
   font-size: 12px;
   line-height: 1.5;
@@ -375,6 +385,9 @@
   color: var(--muted-foreground);
 }
 
+/* A link, not a label: interactive blue plus the message and arrow icons
+   make "jump to this session" readable at a glance — grey text alone was
+   indistinguishable from the surrounding meta. */
 .sessionLink {
   appearance: none;
   background: transparent;
@@ -383,16 +396,34 @@
   margin-left: auto;
   font: inherit;
   font-size: 12px;
-  color: var(--muted-foreground);
+  font-weight: 500;
+  color: var(--agent-blue-500);
   cursor: pointer;
   max-width: 40%;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 4px;
+}
+
+.sessionLink > svg {
+  flex: 0 0 auto;
+}
+
+.sessionLinkText {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.sessionLink:hover,
-.sessionLink:focus-visible {
-  color: var(--foreground);
+.sessionLink:hover .sessionLinkText,
+.sessionLink:focus-visible .sessionLinkText {
   text-decoration: underline;
+}
+
+.sessionLink:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
 }

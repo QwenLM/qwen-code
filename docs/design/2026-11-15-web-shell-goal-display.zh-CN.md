@@ -32,7 +32,8 @@ Goals 页列出每个已加载会话的目标，但要查看一个目标，只�
 
 ### GoalsDialog 卡片
 
-- 卡片头部新增第一个图标操作（`MessageSquareText`，`data-testid="goal-open-session"`），调用 `onOpenSession(item.sessionId, item.workspaceCwd)` —— 与页脚链接同一处理器，含工作区标签。它是导航而非控制，因此永不被按会话的 `busy` 门禁用。页脚链接保留，用于可发现性以及展示会话名本身。
+- 卡片头部新增第一个图标操作（`MessageSquareText`，`data-testid="goal-open-session"`），调用 `onOpenSession(item.sessionId, item.workspaceCwd)` —— 与页脚链接同一处理器，含工作区标签。它是导航而非控制，因此永不被按会话的 `busy` 门禁用，并着交互蓝（`--agent-blue-500`），与灰色的编辑/暂停/清除控制图标区分开。
+- 页脚会话入口是带标签的链接而非灰色文字（`data-testid="goal-session-link"`）：会话图标 + 会话名 + 箭头图标，交互蓝，悬停/聚焦下划线，聚焦环。第一版沿用了旧的灰色纯文本形态，评审中与周围 meta 无法区分、读者根本找不到跳转，因此现在链接具备全部常规链接线索。
 - 状态胶囊带上由 `goalStatusTone(status)` 映射的 `data-status`：`active → running`，`paused | blocked | usage_limited → attention`，`complete → done`。CSS 复用共享执行状态色板。这与 `GoalStatusMessage` 现有的 warning/success 颜色语言一致。
 - 当至少设定了一个预算时，在 reason 与页脚之间渲染 `budgets` 区块，每个预算一行：标签、`role="progressbar"` 的轨道（`data-testid="goal-budget-<kind>"`，`aria-valuenow` = 截断后的百分比，`aria-label` = `"<标签>: <已用> / <预算>"`）、按生命周期色调着色的填充条，以及 `已用 / 预算` 数值文本。轮数用 `turnCount / turnBudget`；tokens 对 `tokensUsed / tokenBudget` 使用 `formatContextTokens`，daemon 未上报用量时跳过；活跃时长复用 elapsed meta 已在使用的同一个实时 `getGoalActiveTimeMs`，对照 `activeTimeBudgetMs`。比例截断到 `[0, 1]`，耗尽的预算显示为满条。无上限的目标完全不渲染该区块。
 
@@ -54,6 +55,7 @@ Goals 页列出每个已加载会话的目标，但要查看一个目标，只�
 ## 设计决策
 
 - **头部图标而非整卡可点。** 整卡点击目标会嵌套五个按钮并夺走目标内容的文本选择；常驻头部图标在不改变卡片语义的前提下保证可发现性。
+- **导航带链接线索，控制灰留给控制。** 第一版两个跳转入口都用与 meta 文本相同的无彩色灰，评审者在截图里找不到跳转。页脚入口现在以交互蓝承载「图标 + 会话名 + 箭头」，悬停下划线、聚焦环；头部图标着蓝——用颜色与形状而非仅靠位置表明「这是导航」。
 - **共享色板，不引入新颜色。** 色调映射复用 `--status-*-fg/bg`，两种主题下 goals 与驾驶舱、工作流界面读起来完全一致；不新增主题 token。
 - **仅为已设定的预算渲染进度条。** 多数目标无上限；为它们渲染空轨道会增加噪音并暗示一个不存在的上限。有 `tokenBudget` 而无 `tokensUsed`（旧 daemon）时跳过而非画成零——零会断言一个快照无法证明的消耗。
 - **`goalStatusTone` 放在 strip 模块。** 两个界面共用单一来源；dialog 已依赖 strip 的辅助函数，依赖方向保持无环。
