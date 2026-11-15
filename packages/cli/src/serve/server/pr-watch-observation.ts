@@ -109,7 +109,7 @@ const PR_WATCH_SUMMARY_COPY: Readonly<
     mergeConflict: () => 'merge conflict detected',
   },
   zh: {
-    headChange: (prev, next) => `head 前进 ${prev} → ${next}`,
+    headChange: (prev, next) => `head 变更 ${prev} → ${next}`,
     ciFailing: (names) =>
       names.length > 0 ? `CI 失败：${names.join('、')}` : 'CI 失败',
     mergeConflict: () => '检测到合并冲突',

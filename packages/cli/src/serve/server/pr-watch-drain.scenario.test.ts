@@ -481,7 +481,7 @@ describe.skipIf(process.platform === 'win32')(
       expect((await observe('zh')).observed).toBe(1);
       // Detection localized the summary before it was persisted.
       expect((stored()?.pending ?? []).map((p) => p.summary)).toEqual([
-        `head 前进 ${HEAD_A} → ${HEAD_B}`,
+        `head 变更 ${HEAD_A} → ${HEAD_B}`,
         'CI 失败：CI / unit',
       ]);
 
@@ -499,7 +499,7 @@ describe.skipIf(process.platform === 'win32')(
       }
       expect(
         admissions.some((a) =>
-          a.text.includes(`head 前进 ${HEAD_A} → ${HEAD_B}`),
+          a.text.includes(`head 变更 ${HEAD_A} → ${HEAD_B}`),
         ),
       ).toBe(true);
       expect(
@@ -528,7 +528,7 @@ describe.skipIf(process.platform === 'win32')(
       }
       expect(
         admissions.some((a) =>
-          a.text.includes(`head 前进 ${HEAD_A} → ${HEAD_B}`),
+          a.text.includes(`head 变更 ${HEAD_A} → ${HEAD_B}`),
         ),
       ).toBe(true);
       expect(

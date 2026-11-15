@@ -119,7 +119,7 @@ describe('detectPrTransitions language', () => {
       'merge conflict detected',
     ]);
     expect(zh.transitions.map((t) => t.summary)).toEqual([
-      `head 前进 ${'a'.repeat(40)} → ${'b'.repeat(40)}`,
+      `head 变更 ${'a'.repeat(40)} → ${'b'.repeat(40)}`,
       'CI 失败：build、test',
       '检测到合并冲突',
     ]);
