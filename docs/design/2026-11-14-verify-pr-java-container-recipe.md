@@ -67,8 +67,14 @@ without `boundary.json`); this design removes the reason for it.
 ## Proposed solution
 
 A second recipe in the skill, selected when the delta touches
-`packages/sdk-java/` or `packages/managed-agent-server/` — the same two
-paths the CI lane's Java gate matches:
+`packages/sdk-java/` or `packages/managed-agent-server/` — the two paths
+that carry the Java source. The CI lane's Java gate
+(`managed-agent-gate-scope.mjs`) matches a broader set: it also fires on
+`packages/cli/src/serve/`, `packages/core/src/managed-runtime/`, the hosted
+integration helpers and the e2e scripts, which can break the Managed Agent
+suite without touching Java source. A delta confined to those broader paths
+keeps the JS recipe and leaves the Java tier to CI — the recipe does not
+claim to mirror the gate's full trigger:
 
 1. **Image.** A Maven image bundling the lane's Maven and JDK, such as
    `maven:3.9.11-eclipse-temurin-21`. Verify the exact tag exists at

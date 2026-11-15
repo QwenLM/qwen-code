@@ -755,6 +755,13 @@ describe('reviewState', () => {
 // These cases drive the real CLI through a POSIX `gh` stand-in; a Windows
 // runner cannot express it, and the Linux lane owns that coverage.
 describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
+  // The gate now requires an OBSERVED filesystem marker (R11-1): a SANDBOX=
+  // string alone is a declaration, not a boundary. The passing-gate cases
+  // therefore need a real container marker — they run in the verify job's
+  // container (/.dockerenv) and skip on a bare host; the declared-only
+  // refusal case is the mirror image (it skips where a marker is present).
+  const hasObservedMarker = () => detectIsolation().observed.length > 0;
+
   it('resolves the coordinates and reports a container boundary', () => {
     const { dir, base, head } = makeRepo();
     const env = installFakeGh(snapshotFor({ base, head }));
@@ -993,6 +1000,7 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
   // The CLI's own launcher attaches gcloud config, the ADC file and model
   // keys, so the gate also needs the attestation and a clean signal set.
   it('does not pass the gate on a container marker alone', () => {
+    if (!hasObservedMarker()) return;
     const { dir } = makeRepo();
     const env = {
       PATH: process.env.PATH ?? '',
@@ -1017,6 +1025,7 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
   // The gate record ties a container declaration to a gate run: it is
   // written only on a pass, and only when --artifact-dir is given.
   it('writes boundary-gate.json on a pass with --artifact-dir', () => {
+    if (!hasObservedMarker()) return;
     const { dir } = makeRepo();
     const art = makeTmpDir();
     const env = {
@@ -1059,6 +1068,10 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
   // R10-20: a self-chosen container= string is a declaration, not an observed
   // boundary. On a bare host it must not mint a passing gate record.
   it('refuses a declared-only container marker with no observed boundary', () => {
+    // Reachable only where no observed marker exists; inside the recipe's
+    // own container /.dockerenv is present and the gate rightly passes, so
+    // skip there rather than red against correct code (R11-5).
+    if (hasObservedMarker()) return;
     const { dir } = makeRepo();
     const art = makeTmpDir();
     const env = {
@@ -1077,10 +1090,34 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     expect(existsSync(join(art, 'boundary-gate.json'))).toBe(false);
   });
 
+  // R11-1: an inherited SANDBOX= string is a declaration too — the gate must
+  // not mint a record the checker (which requires an observed marker) would
+  // always refuse. Host-only: a real container carries /.dockerenv.
+  it('refuses a SANDBOX-only marker with no observed boundary', () => {
+    if (hasObservedMarker()) return;
+    const { dir } = makeRepo();
+    const art = makeTmpDir();
+    const env = {
+      PATH: process.env.PATH ?? '',
+      HOME: makeTmpDir(),
+      SANDBOX: 'docker',
+      QWEN_VERIFY_CREDENTIAL_FREE: '1',
+    };
+    const result = runPrepare(
+      dir,
+      ['--require-isolation', '--artifact-dir', art],
+      env,
+    );
+    expect(result.status).toBe(4);
+    expect(result.stderr).toMatch(/declared marker/);
+    expect(existsSync(join(art, 'boundary-gate.json'))).toBe(false);
+  });
+
   // A failed re-run must not leave an earlier pass's record behind: the
   // checker would still accept the container declaration against evidence
   // that predates the refusal.
   it('a failed gate re-run invalidates the earlier passing record', () => {
+    if (!hasObservedMarker()) return;
     const { dir } = makeRepo();
     const art = makeTmpDir();
     const env = {
@@ -1128,6 +1165,7 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
   // path, not an uncaught throw after the pass line: a driver keyed on
   // exit 4 must not proceed on a pass the record never landed.
   it('fails with exit 3 when the gate record cannot be written', () => {
+    if (!hasObservedMarker()) return;
     const { dir } = makeRepo();
     const env = {
       PATH: process.env.PATH ?? '',
@@ -1147,6 +1185,7 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
   });
 
   it('refuses an attested boundary that still shows credentials', () => {
+    if (!hasObservedMarker()) return;
     const { dir } = makeRepo();
     const home = makeTmpDir();
     const env = {

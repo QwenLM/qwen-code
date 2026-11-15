@@ -204,14 +204,16 @@ maintainer approval the waiver requires, never the round's own claim. The
 credential-free attestation (`QWEN_VERIFY_CREDENTIAL_FREE=1`) is the
 **operator's attestation**, never set by the round itself or left exported
 afterwards: unset it when the round ends. The
-VM round also runs under a **scratch `HOME`** — the credential scan reads `~/.ssh`,
-`~/.config/gh`, `~/.aws` and the rest under the process home, so the
-operator's real home fails the scan even on a clean
-VM. The scan reads credential **environment signals** too, so in that same
+VM round also runs under a **scratch `HOME`** — the gate
+(`--require-isolation`) reads `~/.ssh`, `~/.config/gh`, `~/.aws` and the rest
+under the process home, so the operator's real home fails the gate even on a
+clean VM. (The separate credential scan reads the round's work tree for
+credential-shaped files; the home and environment checks belong to the
+gate.) The gate reads credential **environment signals** too, so in that same
 shell unset `SSH_AUTH_SOCK`, `GH_TOKEN`, `GITHUB_TOKEN`, `KUBECONFIG`,
 `OPENAI_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`,
 `GOOGLE_APPLICATION_CREDENTIALS`, `AZURE_CLIENT_SECRET`, the `AWS_*` keys
-and `SANDBOX_MOUNTS` before running the scan: an agent-forwarded shell
+and `SANDBOX_MOUNTS` before running the gate: an agent-forwarded shell
 carries `SSH_AUTH_SOCK` even under a scratch home, and the gate refuses it
 with exit 4. The shapes:
 
@@ -264,8 +266,10 @@ creates `tmp/pr<n>-verify-<ts>/` with a `context.json` holding `repo`, `pr`,
 It does not gate on them — resolving metadata
 needs `gh`, which the boundary excludes, so this path always runs on the host.
 The boundary check belongs inside: run the trusted copy of the preflight with
-`--require-isolation` as the round's first command there, and treat exit 4 as
-"this is not a boundary". The Docker recipe below mounts that copy at
+`--require-isolation --artifact-dir <round-dir>` as the round's first command
+there — a pass writes the `boundary-gate.json` record the checker requires
+beside the declaration — and treat exit 4 as "this is not a boundary". The
+Docker recipe below mounts that copy at
 `/trusted-scripts/verify-pr-prepare.mjs`; a VM boundary runs the same file
 from the trusted checkout instead. A container
 marker alone does not pass: the CLI's own Docker/Podman launcher mounts
@@ -584,7 +588,12 @@ authority to certify the round.
    ```bash
    rc=0
    docker rm -f qwen-verify-<n> || rc=1
-   if [ -L "<round-dir>" ] || [ -L "$(dirname "<round-dir>")" ]; then
+   # A trailing slash makes `test -L` dereference the link and `dirname`
+   # return the grandparent, so the refusal would fail open; normalise the
+   # spelling before the symlink check (the clear/write below tolerate a
+   # doubled slash, and the file stays at <round-dir>/boundary.json).
+   rd="<round-dir>"; rd="${rd%/}"
+   if [ -L "$rd" ] || [ -L "$(dirname "$rd")" ]; then
      echo "round dir is a symlink" >&2; rc=1
    fi
    if [ "$rc" -eq 0 ]; then
@@ -2200,7 +2209,9 @@ workflow globs). It must contain:
 - `boundary.json` — where the untrusted PR code ran:
   `{"mode":"container","detail":…}` once the isolation gate passes, backed by
   the `boundary-gate.json` record that gate run wrote, or
-  `{"mode":"waived","by":…,"approval":…,"reason":…}` for a host round the
+  `{"mode":"vm","by":…,"approval":…,"attestation":…,"reason":…}` for an
+  attested VM (no observed container marker) with the maintainer's approval,
+  or `{"mode":"waived","by":…,"approval":…,"reason":…}` for a host round the
   maintainer explicitly approved, with a permalink to the approval comment
   (see the local invocation contract). The checker refuses a round without
   it. The one exception is the CI entry path (`$QWEN_VERIFY_CONTEXT` set),

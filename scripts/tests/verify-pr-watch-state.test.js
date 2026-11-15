@@ -31,6 +31,7 @@ import {
   statePath,
   withStateLock,
 } from '../../scripts/verify-pr-watch-state.mjs';
+import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
 
 const SCRIPT = fileURLToPath(
   new URL('../../scripts/verify-pr-watch-state.mjs', import.meta.url),
@@ -407,8 +408,9 @@ describe('startRound', () => {
     const deferred = readState(root, 1).deferredHeads;
     expect(deferred.map((entry) => entry.head)).toEqual([PREV, OLDER]);
     expect(deferred[0]).toMatchObject({ round: 14, artifactDir: 'r14' });
-    // The original deferredAt is kept: refreshing it would let the
-    // redelivered older head outrank the newer push in the supersede filter.
+    // The original deferredAt is kept as provenance (when the head was first
+    // deferred). Ordering is by seq, not by this timestamp — no production
+    // code reads deferredAt to rank heads.
     expect(deferred[0].deferredAt).toBe('2026-11-14T02:00:00.000Z');
     completeRound(root, { pr: 1, head: HEAD, round: 11, verdict: 'findings' });
     expect(
@@ -1105,7 +1107,10 @@ describe('withStateLock', () => {
 
   // A real I/O fault on the lock must surface as itself, not be retried into
   // a misleading "another invocation holds the lock" that retrying cannot fix.
-  it.skipIf(process.platform === 'win32' || process.getuid() === 0)(
+  // Probe the kernel rather than checking uid 0: ci.yml runs unit tests as
+  // root with CAP_DAC_OVERRIDE dropped, so permission bits still bind there
+  // and a uid-based skip would silently drop this coverage (R11 deferred).
+  it.skipIf(!arePermissionBitsEnforced())(
     'rethrows a non-EEXIST lock failure instead of reporting it held',
     () => {
       const root = makeRoot();
@@ -1875,17 +1880,27 @@ describe('seq push order', () => {
   // R10-1: a recovery restart of a released head must keep its original
   // push-order position, not mint a fresh maximum that supersedes heads
   // pushed AFTER it. The released head is not re-added as a deferral.
-  it('a recovery restart keeps newer deferred heads', () => {
+  it('a recovery restart keeps newer deferred heads and the retry count', () => {
     const root = makeRoot();
     startRound(root, { pr: 1, head: HEAD, round: 1, artifactDir: 'r1' });
     startRound(root, { pr: 1, head: PREV, round: 2, artifactDir: 'r2' });
+    // Give HEAD a retry so the carry is observable: inconclusive re-defers
+    // it at retries 1, then a restart takes it back in flight at that count.
+    completeRound(root, {
+      pr: 1,
+      head: HEAD,
+      round: 1,
+      verdict: 'inconclusive',
+    });
+    startRound(root, { pr: 1, head: HEAD, round: 3, artifactDir: 'r3' });
+    expect(readState(root, 1).inFlightHeads[0].retries).toBe(1);
     releaseRound(root, { pr: 1, head: HEAD });
     // The documented recovery: restart the released (older) head.
     const restart = startRound(root, {
       pr: 1,
       head: HEAD,
-      round: 3,
-      artifactDir: 'r3',
+      round: 4,
+      artifactDir: 'r4',
     });
     expect(restart.duplicate).toBeUndefined();
     const state = readState(root, 1);
@@ -1893,10 +1908,18 @@ describe('seq push order', () => {
     expect(state.deferredHeads.map((entry) => entry.head)).toEqual([PREV]);
     // The released head is not named as awaiting a round.
     expect(state.releasedHeads).toEqual([]);
+    // The restart keeps the released head's seq AND its retry count (R11
+    // deferred): a fresh maximum would supersede PREV, and a zeroed count
+    // would re-open the retry loop the cap closes.
+    expect(state.inFlightHeads[0]).toMatchObject({
+      head: HEAD,
+      seq: 1,
+      retries: 1,
+    });
     const completed = completeRound(root, {
       pr: 1,
       head: HEAD,
-      round: 3,
+      round: 4,
       verdict: 'merge-ready',
     });
     expect(completed.deferred.map((entry) => entry.head)).toEqual([PREV]);
@@ -2683,5 +2706,109 @@ describe('round-10 witnesses', () => {
     const res = run(root, [...COMPLETE, '--comment-id', '']);
     expect(res.status).toBe(2);
     expect(res.stderr).toMatch(/--comment-id must not be empty/);
+  });
+});
+
+describe('round-11 witnesses', () => {
+  // R10-1 sibling A: a retired head redelivered via the START path keeps its
+  // seq, so it does not mint a maximum that retires a newer pending head.
+  it('a redelivered retired head keeps its seq on the start path', () => {
+    const root = makeRoot();
+    startRound(root, { pr: 1, head: HEAD, round: 1, artifactDir: 'r1' });
+    startRound(root, { pr: 1, head: PREV, round: 2, artifactDir: 'r2' });
+    startRound(root, { pr: 1, head: OLDER, round: 3, artifactDir: 'r3' });
+    completeRound(root, { pr: 1, head: HEAD, round: 1, verdict: 'findings' });
+    // Starting OLDER (seq 3) supersedes PREV (seq 2) into a tombstone.
+    startRound(root, { pr: 1, head: OLDER, round: 4, artifactDir: 'r4' });
+    expect(readState(root, 1).retiredSeqs[PREV]).toMatchObject({ seq: 2 });
+    completeRound(root, { pr: 1, head: OLDER, round: 4, verdict: 'findings' });
+    // Redelivering PREV must restore seq 2, not mint a fresh maximum.
+    const re = startRound(root, {
+      pr: 1,
+      head: PREV,
+      round: 5,
+      artifactDir: 'r5',
+    });
+    expect(re.duplicate).toBeUndefined();
+    expect(readState(root, 1).inFlightHeads[0]).toMatchObject({
+      head: PREV,
+      seq: 2,
+    });
+  });
+
+  // R10-1 sibling B: a released head redelivered while another round is in
+  // flight is a first deferral; the release hint keeps its seq there too.
+  it('a released head redelivered into deferral keeps its seq', () => {
+    const root = makeRoot();
+    startRound(root, { pr: 1, head: HEAD, round: 1, artifactDir: 'r1' });
+    startRound(root, { pr: 1, head: PREV, round: 2, artifactDir: 'r2' });
+    releaseRound(root, { pr: 1, head: HEAD });
+    startRound(root, { pr: 1, head: PREV, round: 3, artifactDir: 'r3' });
+    const re = startRound(root, {
+      pr: 1,
+      head: HEAD,
+      round: 4,
+      artifactDir: 'r4',
+    });
+    expect(re.duplicate).toBe('in-flight');
+    const entry = readState(root, 1).deferredHeads.find((e) => e.head === HEAD);
+    expect(entry.seq).toBe(1);
+  });
+
+  // R11-2: a terminal head stays terminal after a newer push supersedes it
+  // out of the deferred list — the tombstone carries the retry count.
+  it('a superseded terminal head is still not-covered on redelivery', () => {
+    const root = makeRoot();
+    startRound(root, { pr: 1, head: HEAD, round: 1, artifactDir: 'r1' });
+    completeRound(root, {
+      pr: 1,
+      head: HEAD,
+      round: 1,
+      verdict: 'inconclusive',
+    });
+    startRound(root, { pr: 1, head: HEAD, round: 2, artifactDir: 'r2' });
+    completeRound(root, {
+      pr: 1,
+      head: HEAD,
+      round: 2,
+      verdict: 'inconclusive',
+    });
+    expect(duplicateHead(readState(root, 1), HEAD)).toBe('not-covered');
+    startRound(root, { pr: 1, head: PREV, round: 3, artifactDir: 'r3' });
+    expect(readState(root, 1).retiredSeqs[HEAD]).toMatchObject({ retries: 2 });
+    completeRound(root, { pr: 1, head: PREV, round: 3, verdict: 'findings' });
+    expect(duplicateHead(readState(root, 1), HEAD)).toBe('not-covered');
+    const re = startRound(root, {
+      pr: 1,
+      head: HEAD,
+      round: 4,
+      artifactDir: 'r4',
+    });
+    expect(re.duplicate).toBe('not-covered');
+  });
+
+  // R11 deferred: GitHub slugs are case-insensitive — a casing variant of
+  // the recorded repo must not wedge the state with a false refusal.
+  it('accepts a casing variant of the recorded repo', () => {
+    const root = makeRoot();
+    run(root, [
+      ...START,
+      '--artifact-dir',
+      'r11',
+      '--repo',
+      'QwenLM/qwen-code',
+    ]);
+    const res = run(root, [...COMPLETE, '--repo', 'qwenlm/qwen-code']);
+    expect(res.status).toBe(0);
+  });
+
+  // R11 deferred: an empty --artifact-dir on --complete would blank the
+  // recorded directory; it is a usage error like every sibling flag.
+  it('rejects an empty --artifact-dir on complete', () => {
+    const root = makeRoot();
+    run(root, [...START, '--artifact-dir', 'r11']);
+    const res = run(root, [...COMPLETE, '--artifact-dir', '']);
+    expect(res.status).toBe(2);
+    expect(res.stderr).toMatch(/--artifact-dir must not be empty/);
   });
 });

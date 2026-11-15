@@ -323,11 +323,15 @@ export function duplicateHead(existing, head) {
   if (inFlightEntries(existing).length > 0) return 'in-flight';
   // A terminal deferred head (repeated inconclusive) must not re-open the
   // retry loop the cap exists to close: a redelivered event for it is
-  // refused, not started. A live round above still wins.
+  // refused, not started. A live round above still wins. The tombstone
+  // carries the retry count too, so a terminal head stays terminal even
+  // after a newer push supersedes it out of the deferred list (R11-2).
+  const preserved = preservedEntry(existing, head);
   if (
     deferredEntries(existing).some(
       (entry) => sameCommit(entry.head, head) && isNotCovered(entry),
-    )
+    ) ||
+    (preserved !== null && preserved.retries >= 2)
   ) {
     return 'not-covered';
   }
@@ -355,18 +359,40 @@ function releasedEntries(existing) {
 }
 
 /**
- * The push-order seq of a head the supersede filter retired. A redelivery
- * of a retired head must restore its original position, not mint a new
- * maximum that would present it as the newest push (R10-34).
+ * A head's preserved push-order position and retry count, from either hint:
+ * a released head (releasedHeads) or a head the supersede filter retired
+ * (retiredSeqs). BOTH entry paths — start and deferral — must consult this,
+ * or a redelivered/restarted head mints a fresh maximum and retires the newer
+ * pending head's only delivery (R10-1, R11-2). The tombstone carries the
+ * retry count too, so a terminal head stays terminal across a supersede.
  */
-function retiredSeq(existing, head) {
+function preservedEntry(existing, head) {
+  const released = releasedEntries(existing).find((entry) =>
+    sameCommit(entry.head, head),
+  );
+  if (released) {
+    return { seq: released.seq ?? null, retries: released.retries ?? 0 };
+  }
   const map = existing?.retiredSeqs;
-  if (!map || typeof map !== 'object') return null;
-  for (const [h, s] of Object.entries(map)) {
-    if (sameCommit(h, head)) return s;
+  if (map && typeof map === 'object') {
+    for (const [h, value] of Object.entries(map)) {
+      if (!sameCommit(h, head)) continue;
+      // Older tombstones stored a bare seq; accept both shapes.
+      return value !== null && typeof value === 'object'
+        ? { seq: value.seq ?? null, retries: value.retries ?? 0 }
+        : { seq: value, retries: 0 };
+    }
   }
   return null;
 }
+
+/** GitHub repo slugs are case-insensitive; compare canonically so a casing
+ * variant cannot wedge the state with a false ownership refusal. An omitted
+ * repo (null) never matches a recorded one — the guard still fires. */
+const sameRepo = (a, b) =>
+  typeof a === 'string' &&
+  typeof b === 'string' &&
+  a.trim().toLowerCase() === b.trim().toLowerCase();
 
 /**
  * Monotonic event sequence: a start of a genuinely new head and every first
@@ -402,7 +428,7 @@ export function startRound(
     // The state file is keyed by PR number alone; a same-numbered PR of
     // another repository must not dedup against this one's answers. An
     // omitted --repo does not disarm the guard once a repo is recorded.
-    if (existing?.repo && repo !== existing.repo) {
+    if (existing?.repo && !sameRepo(repo, existing.repo)) {
       return {
         repoMismatch: true,
         recorded: existing.repo,
@@ -427,6 +453,10 @@ export function startRound(
         // not the newest write.
         const prior = deferredEntries(existing);
         const at = prior.findIndex((e) => sameCommit(e.head, head));
+        // A released head redelivered while another round is in flight is a
+        // first deferral (at < 0); it keeps its released position and count
+        // just like a retired head does (R10-1, R11-2).
+        const preserved = preservedEntry(existing, head);
         const entry = {
           head,
           round,
@@ -435,11 +465,9 @@ export function startRound(
             at >= 0
               ? (prior[at].deferredAt ?? now.toISOString())
               : now.toISOString(),
-          seq:
-            at >= 0
-              ? prior[at].seq
-              : (retiredSeq(existing, head) ?? nextSeq(existing)),
-          retries: at >= 0 ? (prior[at].retries ?? 0) : 0,
+          seq: at >= 0 ? prior[at].seq : (preserved?.seq ?? nextSeq(existing)),
+          retries:
+            at >= 0 ? (prior[at].retries ?? 0) : (preserved?.retries ?? 0),
         };
         const deferred = (
           at >= 0
@@ -474,18 +502,12 @@ export function startRound(
     // re-defer the head at its original push-order position.
     const priorDeferred = deferredEntries(existing);
     const own = priorDeferred.find((entry) => sameCommit(entry.head, head));
-    // A recovery restart of a released head keeps its original push-order
-    // position (the release hint); minting a fresh maximum here would
-    // supersede heads pushed after the released one. A genuinely new head
-    // consumes the next seq.
-    const releasedHint = releasedEntries(existing).find((entry) =>
-      sameCommit(entry.head, head),
-    );
-    const seq = own
-      ? (own.seq ?? null)
-      : releasedHint
-        ? (releasedHint.seq ?? null)
-        : nextSeq(existing);
+    // A recovery restart of a released head, or a redelivery of a retired
+    // head, keeps its original push-order position (either hint); minting a
+    // fresh maximum here would supersede heads pushed after it (R10-1). A
+    // genuinely new head consumes the next seq.
+    const preserved = preservedEntry(existing, head);
+    const seq = own ? (own.seq ?? null) : (preserved?.seq ?? nextSeq(existing));
     const deferredHeads = priorDeferred
       .filter(
         (entry) =>
@@ -493,12 +515,13 @@ export function startRound(
           (entry.seq == null || entry.seq > (seq ?? 0)),
       )
       .sort(bySeq);
-    // Remember the push-order seq of every head this start retires, so a
-    // later redelivery restores its position instead of minting a new
-    // maximum (R10-34). The started head's own tombstone is consumed.
+    // Remember the push-order seq AND retry count of every head this start
+    // retires, so a later redelivery restores its position and a terminal
+    // head stays terminal (R10-34, R11-2). The started head's own tombstone
+    // is consumed.
     const retiredSeqs = {};
-    for (const [h, s] of Object.entries(existing?.retiredSeqs ?? {})) {
-      if (!sameCommit(h, head)) retiredSeqs[h] = s;
+    for (const [h, value] of Object.entries(existing?.retiredSeqs ?? {})) {
+      if (!sameCommit(h, head)) retiredSeqs[h] = value;
     }
     if (seq != null) {
       for (const entry of priorDeferred) {
@@ -507,7 +530,10 @@ export function startRound(
           entry.seq != null &&
           entry.seq <= seq
         ) {
-          retiredSeqs[entry.head] = entry.seq;
+          retiredSeqs[entry.head] = {
+            seq: entry.seq,
+            retries: entry.retries ?? 0,
+          };
         }
       }
     }
@@ -522,7 +548,7 @@ export function startRound(
           artifactDir,
           startedAt,
           seq,
-          retries: own?.retries ?? releasedHint?.retries ?? 0,
+          retries: own?.retries ?? preserved?.retries ?? 0,
         },
       ],
       deferredHeads,
@@ -549,7 +575,7 @@ export function completeRound(
     const existing = readState(stateRoot, pr);
     // Same cross-repository guard as --start: a same-numbered PR of
     // another repository must not file a verdict into this one's state.
-    if (existing?.repo && repo !== existing.repo) {
+    if (existing?.repo && !sameRepo(repo, existing.repo)) {
       return {
         repoMismatch: true,
         recorded: existing.repo,
@@ -705,7 +731,7 @@ export function completeRound(
 export function releaseRound(stateRoot, { pr, head, round, repo }) {
   return withStateLock(stateRoot, pr, () => {
     const existing = readState(stateRoot, pr);
-    if (existing?.repo && repo !== existing.repo) {
+    if (existing?.repo && !sameRepo(repo, existing.repo)) {
       return {
         repoMismatch: true,
         recorded: existing.repo,
@@ -851,6 +877,15 @@ function parseArgs(argv) {
   }
   if (out.start && !out.artifactDir) {
     throw new Error(`--start requires --artifact-dir\n\n${HELP}`);
+  }
+  // A valueless or empty --artifact-dir on --complete would blank the
+  // recorded directory ('' is not null, so the ?? fallback never fires);
+  // reject it like every sibling flag.
+  if (
+    out.artifactDir !== null &&
+    (typeof out.artifactDir !== 'string' || out.artifactDir.trim() === '')
+  ) {
+    throw new Error(`--artifact-dir must not be empty\n\n${HELP}`);
   }
   if (out.complete && !VERDICTS.includes(out.verdict)) {
     throw new Error(

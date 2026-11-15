@@ -295,9 +295,12 @@ const TEMPLATE_TOKENS = [
 ];
 // A surviving template token inside an otherwise filled value is still a
 // placeholder: "node:22-bookworm, <network policy>, credential-free mount"
-// leaves the egress policy unstated even though the image was edited.
+// leaves the egress policy unstated even though the image was edited. The
+// body excludes '@' so a filled git identity whose local part starts with a
+// token word ("Name <repo@example.com>") is not accused — the skill's
+// placeholders never carry an address.
 const TEMPLATE_TOKEN_RE =
-  /<(?:image|network(?: policy)?|credential-free mount|maintainer|permalink|why|round-dir|owner|repo)\b[^>]*>/i;
+  /<(?:image|network(?: policy)?|credential-free mount|maintainer|permalink|why|round-dir|owner|repo)\b[^>@]*>/i;
 const placeholder = (value) =>
   typeof value === 'string' &&
   (/^<[^>]+>$/.test(value.trim()) ||
@@ -482,8 +485,25 @@ function boundaryLineWarnings(text, label, boundaryMode = null) {
       .replace(/^(\*{1,2}|_{1,2})/, '')
       .replace(/(\*{1,2}|_{1,2})$/, '')
       .trim();
-  const isMethodology = (line) => /^Methodology\b/i.test(normalize(line));
-  let idx = prose.findIndex((line) => isMethodology(line));
+  const isMethodology = (line, i) => {
+    if (!/^Methodology\b/i.test(normalize(line))) return false;
+    const trimmed = line.trim();
+    const isList = /^(?:[-*]\s+|\d+\.\s+)/.test(trimmed);
+    // Headings (ATX/Setext) and the bold numbered label are always sections.
+    if (
+      !isList ||
+      /\*\*Methodology/i.test(trimmed) ||
+      trimmed.includes(token)
+    ) {
+      return true;
+    }
+    // A bare list bullet ("− Methodology", "1. Methodology") is a section
+    // only when the Boundary line follows it; otherwise it is a table-of-
+    // contents entry and must not claim the section (R11 deferred).
+    const next = prose.slice(i + 1).find((l) => l.trim() !== '');
+    return !!next && next.trim().startsWith(token);
+  };
+  let idx = prose.findIndex((line, i) => isMethodology(line, i));
   if (idx === -1) {
     // Setext form: a "Methodology" line underlined by === or ---.
     idx = prose.findIndex(
@@ -545,9 +565,16 @@ function boundaryLineWarnings(text, label, boundaryMode = null) {
         `${label}: the **Boundary.** line carries ${content === '' ? 'no disclosure' : 'a <placeholder> disclosure'} — name the image and network policy, or the recorded waiver`,
       );
     }
+    // Probe for a positive waiver/VM claim, not the bare word: a truthful
+    // container report may say "not a VM" or "no VM used" without claiming
+    // a VM boundary. The abbreviated "VM" needs an execution preposition;
+    // the full phrase "virtual machine" is specific enough on its own.
     if (
       boundaryMode === 'container' &&
-      (/\bwaived\b/i.test(content) || /\bvm\b|virtual machine/i.test(content))
+      (/\bwaived\b/i.test(content) ||
+        /\b(?:in|on|inside|within|using|via)\s+(?:a\s+|an\s+)?vm\b|virtual machine/i.test(
+          content,
+        ))
     ) {
       warnings.push(
         `${label}: boundary.json records a container but the **Boundary.** line claims a waiver or VM — the prose names a boundary the declaration contradicts`,
@@ -1040,17 +1067,24 @@ function main(argv) {
       return 1;
     }
   } else {
+    // The eighth read from the PR-writable directory gets the same lstat
+    // guard as the other seven: a planted FIFO at context.json must refuse
+    // with a warning, not block open(2) forever (R11-3).
     snapshotPath = join(dir, 'context.json');
-    if (!existsSync(snapshotPath) && dirPrNumber) {
+    let snapshotText = readIfExists(snapshotPath);
+    if (snapshotText === null && dirPrNumber) {
       snapshotPath = join(
         dirname(resolve(dir)),
         'verify-context',
         `pr${dirPrNumber}.json`,
       );
+      snapshotText = readIfExists(snapshotPath);
     }
-    if (existsSync(snapshotPath)) {
+    if (snapshotText === UNREADABLE) {
+      snapshotWarning = `snapshot ${snapshotPath} is unreadable; the head-OID check fell back to presence-only`;
+    } else if (snapshotText !== null) {
       try {
-        const snapshot = JSON.parse(readFileSync(snapshotPath, 'utf8'));
+        const snapshot = JSON.parse(snapshotText);
         if (/^[0-9a-f]{40}$/.test(snapshot?.headRefOid ?? '')) {
           expectedHead = snapshot.headRefOid;
         } else {

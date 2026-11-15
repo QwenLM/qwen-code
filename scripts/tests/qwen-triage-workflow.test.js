@@ -6912,12 +6912,15 @@ describe('qwen-triage verify hardening round 2', () => {
     // the checker runs on the round dir.
     expect(flat).toContain('> "<round-dir>/boundary.json"');
     expect(flat).toContain('rm -rf -- "<round-dir>/boundary.json"');
-    expect(flat).toContain('[ -L "<round-dir>" ]');
+    // The symlink check runs on the trailing-slash-normalised spelling, or
+    // `test -L` dereferences the link and the refusal fails open (R11-4).
+    expect(flat).toContain('rd="<round-dir>"; rd="${rd%/}"');
+    expect(flat).toContain('[ -L "$rd" ]');
     // Presence guards first: indexOf returns -1 for a deleted line, and -1
     // is less than any positive index, so the ordering alone is vacuous.
     expect(flat).toContain('docker rm -f qwen-verify-<n>');
     const stop = flat.indexOf('docker rm -f qwen-verify-<n>');
-    const symlinkGuard = flat.indexOf('[ -L "<round-dir>" ]');
+    const symlinkGuard = flat.indexOf('[ -L "$rd" ]');
     const clear = flat.indexOf('rm -rf -- "<round-dir>/boundary.json"');
     const write = flat.indexOf('> "<round-dir>/boundary.json"');
     // The step-7 checker call, not the earlier generic mentions of the
@@ -6938,9 +6941,9 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(clear).toBeLessThan(write);
     expect(write).toBeLessThan(checker);
     // The symlink refusal records rc instead of exiting early, and checks
-    // the parent as well as the round dir itself.
+    // the parent as well as the round dir itself (normalised spelling).
     expect(flat).toContain(
-      'if [ -L "<round-dir>" ] || [ -L "$(dirname "<round-dir>")" ]; then echo "round dir is a symlink" >&2; rc=1 fi',
+      'if [ -L "$rd" ] || [ -L "$(dirname "$rd")" ]; then echo "round dir is a symlink" >&2; rc=1 fi',
     );
     // Every write's status is captured: a planted chmod 444/555 declaration
     // that resists removal must fail the block, not feed the checker.
@@ -6985,6 +6988,7 @@ describe('qwen-triage verify hardening round 2', () => {
       killFails = false,
       symlinkRound = false,
       spacesInPath = false,
+      trailingSlash = false,
     } = {}) => {
       const root = mkdtempSync(join(tmpdir(), 'verify-step7-'));
       // R10-48: a round path with a space exercises the quoted expansions.
@@ -7049,7 +7053,7 @@ describe('qwen-triage verify hardening round 2', () => {
         'enable -n kill\n' +
         block
           .replaceAll('<n>', '16866')
-          .replaceAll('<round-dir>', round)
+          .replaceAll('<round-dir>', trailingSlash ? `${round}/` : round)
           .replaceAll('<trusted-clone>', trusted);
       const res = spawnSync(
         'bash',
@@ -7104,6 +7108,28 @@ describe('qwen-triage verify hardening round 2', () => {
         for (const f of ['proxy.pid', 'proxy.json', 'proxy.err']) {
           expect(existsSync(join(proxyDir, f))).toBe(false);
         }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    // R11-4: a trailing slash on the round dir must not bypass the symlink
+    // refusal — `test -L "link/"` dereferences and `dirname "link/"` returns
+    // the grandparent, so the block normalises the spelling first.
+    it('refuses a symlinked round dir written with a trailing slash', () => {
+      const { res, log, root, victim } = replay({
+        symlinkRound: true,
+        trailingSlash: true,
+      });
+      try {
+        expect(res.status).toBe(1);
+        expect(res.stderr).toMatch(/round dir is a symlink/);
+        expect(log).not.toMatch(/^node /m);
+        expect(readFileSync(join(victim, 'victim.txt'), 'utf8')).toBe(
+          'host data',
+        );
+        expect(existsSync(join(victim, 'boundary.json'))).toBe(false);
+        expect(log).toMatch(/kill 424242/);
       } finally {
         rmSync(root, { recursive: true, force: true });
       }

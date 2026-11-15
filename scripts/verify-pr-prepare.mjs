@@ -818,13 +818,16 @@ function requireBoundary(artifactDir = null) {
     return 4;
   }
 
-  // A self-chosen `container=<name>` string is a declaration, not an observed
-  // boundary: on a bare host it would mint a container claim with no
-  // isolation. The gate needs an observed filesystem marker or the CLI
-  // launcher's runtime sandbox; an attested VM uses mode:"vm" with approval.
-  if (isolation.observed.length === 0 && !isolation.sandboxRuntime) {
+  // A self-chosen `container=<name>` string — or an inherited `SANDBOX=`
+  // string — is a declaration, not an observed boundary: on a bare host it
+  // would mint a container claim with no isolation, and the checker refuses
+  // every non-ci-lane record whose observed list is empty, so such a pass
+  // could never be published anyway (R11-1). The gate needs an OBSERVED
+  // filesystem marker; a launcher container always carries one. An attested
+  // VM uses mode:"vm" with approval, not this path.
+  if (isolation.observed.length === 0) {
     process.stderr.write(
-      `verify-pr boundary: only a declared marker (${isolation.signals.join(', ')}) — a self-chosen container= string is not an observed boundary; run inside a real container, or use mode:"vm" with the maintainer's approval\n`,
+      `verify-pr boundary: only a declared marker (${isolation.signals.join(', ')}) — a self-chosen container= or SANDBOX= string is not an observed boundary; run inside a real container, or use mode:"vm" with the maintainer's approval\n`,
     );
     return 4;
   }

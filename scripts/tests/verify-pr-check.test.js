@@ -1913,3 +1913,123 @@ describe('round-10 witnesses', () => {
     expect(res.stderr).toMatch(/must not point inside the artifact directory/);
   });
 });
+
+describe('round-11 witnesses', () => {
+  // R11-3: a FIFO at context.json (the eighth read from the PR-writable dir)
+  // must refuse with a warning, not block open(2) forever. The timeout turns
+  // the pre-fix hang into a failure rather than a hung suite.
+  it.skipIf(process.platform === 'win32')(
+    'refuses a FIFO context.json instead of hanging',
+    () => {
+      const dir = makeArtifactDir(validFiles({}), ['01-ab-cells.png']);
+      execFileSync('mkfifo', [join(dir, 'context.json')]);
+      const res = spawnSync(process.execPath, [SCRIPT, dir], {
+        encoding: 'utf8',
+        timeout: 5000,
+        env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+      });
+      expect(res.status).toBe(0);
+      expect(res.stdout).toMatch(/snapshot .*context\.json is unreadable/);
+    },
+  );
+
+  // R11 deferred: a filled git identity whose local part starts with a token
+  // word is not a placeholder; a bare skill token still is.
+  it('does not accuse an email-shaped git identity', () => {
+    const ok = checkBoundary(
+      JSON.stringify({
+        mode: 'waived',
+        by: 'Name <repo@example.com>',
+        approval: APPROVAL,
+        reason: 'why',
+      }),
+    );
+    expect(ok.errors).toEqual([]);
+    const bad = checkBoundary(
+      JSON.stringify({
+        mode: 'waived',
+        by: 'Name <maintainer>',
+        approval: APPROVAL,
+        reason: 'why',
+      }),
+    );
+    expect(bad.errors.join('\n')).toMatch(/placeholder/);
+  });
+
+  // R11 deferred: a table-of-contents bullet must not claim the Methodology
+  // section ahead of the real heading.
+  it('does not let a TOC bullet claim the Methodology section', () => {
+    const report = `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\nContents:\n\n- Methodology\n- Results\n\n## Methodology\n\n**Boundary.** node:22-bookworm, --network none, credential-free.\n`;
+    const result = checkArtifacts({
+      files: validFiles({ report }),
+      evidence: ['01-ab-cells.png'],
+    });
+    const warnings = result.warnings.join('\n');
+    expect(warnings).not.toMatch(/has no Methodology section/);
+    expect(warnings).not.toMatch(/first line after the Methodology opening/);
+  });
+
+  // R11 deferred: a truthful container report mentioning "not a VM" is not
+  // accused; a positive VM claim still is.
+  it('does not accuse a container report that negates a VM', () => {
+    const negated = checkArtifacts({
+      files: validFiles({
+        report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n## Methodology\n\n**Boundary.** node:22-bookworm, --network none (not a VM).\n`,
+      }),
+      evidence: ['01-ab-cells.png'],
+    });
+    expect(negated.warnings.join('\n')).not.toMatch(/claims a waiver or VM/);
+    const positive = checkArtifacts({
+      files: validFiles({
+        report: `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n## Methodology\n\n**Boundary.** ran in a VM, credential-free.\n`,
+      }),
+      evidence: ['01-ab-cells.png'],
+    });
+    expect(positive.warnings.join('\n')).toMatch(/claims a waiver or VM/);
+  });
+
+  // R11 deferred: the boundaryGate half of "unreadable is not missing" — a
+  // directory at boundary-gate.json is reported unreadable, not missing.
+  it('reports an unreadable boundary-gate.json as unreadable, not missing', () => {
+    const dir = makeArtifactDir(validFiles({}), ['01-ab-cells.png']);
+    rmSync(join(dir, 'boundary-gate.json'));
+    mkdirSync(join(dir, 'boundary-gate.json'));
+    const res = spawnSync(process.execPath, [SCRIPT, dir], {
+      encoding: 'utf8',
+      env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+    });
+    expect(res.status).toBe(1);
+    expect(res.stdout).toMatch(/boundary-gate\.json is unreadable/);
+    expect(res.stdout).not.toMatch(/boundary-gate\.json is missing/);
+  });
+
+  // R11-1 cross-tool contract: the gate refuses a SANDBOX-only record (no
+  // observed marker), and the checker refuses the same record — removing
+  // either side of the tightened contract reds one of these.
+  it('gate and checker agree a SANDBOX-only record is not a boundary', () => {
+    const sandboxOnly = JSON.stringify({
+      gate: 'require-isolation',
+      passed: true,
+      signals: ['SANDBOX=docker'],
+      observed: [],
+      credentialFree: true,
+    });
+    const refused = checkBoundary(
+      JSON.stringify({ mode: 'container', detail: 'node:22-bookworm' }),
+      sandboxOnly,
+    );
+    expect(refused.errors.join('\n')).toMatch(/no observed boundary marker/);
+    const observed = JSON.stringify({
+      gate: 'require-isolation',
+      passed: true,
+      signals: ['/.dockerenv'],
+      observed: ['/.dockerenv'],
+      credentialFree: true,
+    });
+    const accepted = checkBoundary(
+      JSON.stringify({ mode: 'container', detail: 'node:22-bookworm' }),
+      observed,
+    );
+    expect(accepted.errors).toEqual([]);
+  });
+});

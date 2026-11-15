@@ -107,9 +107,11 @@ silent:
   assertions with no gate results is a warning: the four such rounds among
   18 recent CI artifacts had each counted whole workspace suites.
 - `boundary.json` declares where the untrusted PR code ran: `mode:
-"container"` with a non-empty `detail`, or `mode: "waived"` naming the
-  approving maintainer (`by`), a permalink to the approval comment
-  (`approval`), and the `reason`. Unlike the three above, a merely absent
+"container"` with a non-empty `detail`, `mode: "vm"` for an attested VM, or
+  `mode: "waived"` for a host round — the latter two naming the approving
+  maintainer (`by`), a permalink to the approval comment (`approval`), and
+  the `reason` (a VM also records an `attestation`). Unlike the three above,
+  a merely absent
   file is an error on the authoritative check: the isolation rule existed
   only as prose until two local rounds on PR #16866 ran the whole battery on
   the host with no gate and no waiver. The one exception is the CI entry
