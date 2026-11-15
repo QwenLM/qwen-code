@@ -383,22 +383,58 @@ function caretNotation(code: number): string {
   return code === 0x7f ? '^?' : '^' + String.fromCharCode(code ^ 0x40);
 }
 
+/** `\uXXXX` notation (4 uppercase hex digits) for a code point with no caret form. */
+function hexNotation(code: number): string {
+  return '\\u' + code.toString(16).toUpperCase().padStart(4, '0');
+}
+
+/** C1 control bytes (0x80-0x9f, e.g. U+009B, CSI as a single code point). */
+function isC1Control(code: number): boolean {
+  return code >= 0x80 && code <= 0x9f;
+}
+
+/** Same set as {@link BIDI_OVERRIDE_CHARS_REGEX}, checked per code point. */
+function isBidiOverrideOrIsolate(code: number): boolean {
+  return (
+    code === 0x200e ||
+    code === 0x200f ||
+    (code >= 0x202a && code <= 0x202e) ||
+    (code >= 0x2066 && code <= 0x2069)
+  );
+}
+
+/**
+ * Zero-width characters: not silently discarded elsewhere in this file, but
+ * still invisible once rendered, so two different persisted values differing
+ * only by one of these would still look identical to the human approving the
+ * label. Does not cover every zero-width code point in Unicode (combining
+ * marks and variation selectors are left alone: both require a preceding
+ * base character to do anything, so an isolated one is inert, not collidable).
+ */
+function isZeroWidth(code: number): boolean {
+  return code === 0x200b || code === 0x200c || code === 0x200d || code === 0x2060 || code === 0xfeff;
+}
+
 /**
  * Sanitizes a single-row label that stands for a *persisted* decision (an
  * "Always allow" rule), where two different underlying values must never
  * render identically — a human approving one grant must not be shown the
  * same text a different, already-approved grant would show. `sanitizeTerminalLine`
- * is wrong here: it deletes bare C0 bytes outright, so `Bash(probe\x07 *)` and
- * `Bash(probe *)` collapse onto the same visible label even though they are
- * different stored authorizations.
+ * is wrong here: it deletes bare C0 bytes, C1 bytes, bidi override/isolate
+ * characters, and leaves zero-width characters untouched, so e.g. a rule
+ * carrying a BEL (U+0007), a bidi override (U+202E), or a zero-width space
+ * (U+200B) can each collapse onto the same visible label as the clean rule
+ * even though they are different stored authorizations.
  *
- * Every control byte is replaced with a visible, terminal-inert `\^X`
- * (backslash + caret-notation) instead of being dropped, and every literal
- * backslash already in the text is doubled first — so a real control byte's
- * `\^G` can never collide with a user who typed the three plain characters
- * `\`, `^`, `G` (which becomes `\\^G`, a different string). The result is a
- * lossless, single-row, terminal-safe stand-in for the raw value: no bytes
- * are silently discarded, so a different grant always reads differently.
+ * Every such code point is replaced with a visible, terminal-inert stand-in
+ * (caret notation for C0/DEL, `\uXXXX` for C1/bidi/zero-width) instead of
+ * being dropped or passed through, and every literal backslash already in
+ * the text is doubled first — so a real control byte's `\^G` (or a real
+ * bidi character's `‮`) can never collide with a user who typed the
+ * same characters as plain text (which becomes `\\^G` / `\\u202E`, a
+ * different string). The result is a lossless, single-row, terminal-safe
+ * stand-in for the raw value: no code point is silently discarded or passed
+ * through unexamined, so a different grant always reads differently.
  */
 export function sanitizeTerminalLineLossless(value: string): string {
   const backslashesEscaped = value.replace(/\\/g, '\\\\');
@@ -410,9 +446,13 @@ export function sanitizeTerminalLineLossless(value: string): string {
       result += '\\' + caretNotation(code);
       continue;
     }
+    if (isC1Control(code) || isBidiOverrideOrIsolate(code) || isZeroWidth(code)) {
+      result += hexNotation(code);
+      continue;
+    }
     result += char;
   }
-  return result.replace(BIDI_OVERRIDE_CHARS_REGEX, '');
+  return result;
 }
 
 /* Recursively traverses a JSON-like structure (objects, arrays, primitives)

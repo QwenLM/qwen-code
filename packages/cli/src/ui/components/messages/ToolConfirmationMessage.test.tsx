@@ -507,6 +507,39 @@ describe('ToolConfirmationMessage', () => {
     expect(frame).not.toContain("run 'probe\\^G *' commands");
   });
 
+  it('renders a rule containing a real bidi override character (U+202E) as a visible \\uXXXX marker, distinct from the clean label', () => {
+    // U+202E (RIGHT-TO-LEFT OVERRIDE) is the "Trojan Source" character class:
+    // sanitizeTerminalLine deletes it outright, which would make this rule's
+    // label collapse onto the clean 'probe *' label like the BEL case above.
+    const { frame, confirmationDetails } = renderAlwaysAllowLabel([
+      'Bash(probe‮ *)',
+    ]);
+    expect(frame).toContain("run 'probe\\u202E *' commands");
+    expect(frame).not.toContain("run 'probe *' commands");
+    expect(frame).not.toContain('‮');
+    expect(confirmationDetails.permissionRules).toEqual(['Bash(probe‮ *)']);
+  });
+
+  it('renders the literal text "\\u202E" differently from a real bidi override character', () => {
+    // Six plain characters (backslash, u, 2, 0, 2, E), no control code point.
+    const { frame } = renderAlwaysAllowLabel(['Bash(probe\\u202E *)']);
+    expect(frame).toContain("run 'probe\\\\u202E *' commands");
+    expect(frame).not.toContain("run 'probe\\u202E *' commands");
+  });
+
+  it('renders a rule containing a real C1 control byte (U+009B) as a visible \\uXXXX marker, distinct from the clean label', () => {
+    // U+009B (CSI as a single code point) falls in 0x80-0x9f: outside the
+    // caret-notation range and outside BIDI_OVERRIDE_CHARS_REGEX, so it used
+    // to pass through this function completely unexamined.
+    const { frame, confirmationDetails } = renderAlwaysAllowLabel([
+      'Bash(probe\u009b *)',
+    ]);
+    expect(frame).toContain("run 'probe\\u009B *' commands");
+    expect(frame).not.toContain("run 'probe *' commands");
+    expect(frame).not.toContain('\u009b');
+    expect(confirmationDetails.permissionRules).toEqual(['Bash(probe\u009b *)']);
+  });
+
   it('shows the same distinguishing marker for both the project and the user Always-allow scopes', () => {
     const { frame } = renderAlwaysAllowLabel(['Bash(probe\x07 *)']);
     const matches = frame.split("run 'probe\\^G *' commands").length - 1;
