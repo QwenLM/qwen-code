@@ -23818,6 +23818,27 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
           );
         });
 
+        it('renders the zh size-arm neutral lead and omission notice', async () => {
+          // A size-triggered digest on a healthy heartbeat must use the neutral
+          // zh lead (no outage claimed) and the zh omission notice for the tail.
+          await initChannel(commentOnlyConfig, { boundSessions, locale: 'zh' });
+          boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+          setLastPollAt(new Date(Date.now() - 5000).toISOString());
+          seedCommentEntry();
+          mockPull({});
+          routeCommentPaginate();
+          mockOctokit.rest.issues.listComments.mockResolvedValue(
+            gapComments(25),
+          );
+          mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+          await pollOnce();
+          expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+          const body = boundSessions.deliverPrompt.mock.calls[0]![1] as string;
+          expect(body).toContain('评论积压：本 PR 新增 25 条评论：');
+          expect(body).toContain('本摘要因篇幅省略了 5 条评论，将分批摘要补投');
+          expect(body).not.toContain('离线积压');
+        });
+
         it('validateCursor drops a malformed lastPollAt and keeps a valid one', async () => {
           await initChannel(watchConfig, { boundSessions });
           const validate = (p: unknown) =>
@@ -24295,6 +24316,15 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
             .calls[0]![2] as string;
           expect(idempotencyKey).toMatch(
             /^github:owner\/repo:comment-digest:42:[0-9a-f]{40}$/,
+          );
+          // Exercise the hash itself: it must be the sha256-40 of the sorted
+          // RENDERED member keys, so a constant 40-hex stand-in fails here.
+          const expectedHash = createHash('sha256')
+            .update(['IC_555', 'IC_556', 'IC_557'].sort().join('\n'))
+            .digest('hex')
+            .slice(0, 40);
+          expect(idempotencyKey).toBe(
+            `github:owner/repo:comment-digest:42:${expectedHash}`,
           );
           // Re-list the same window: every member is already dispatched, so
           // nothing delivers again.
@@ -25029,6 +25059,13 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
               line.includes('could not persist the downtime-gap digest arm'),
             ),
           ).toBe(true);
+          // In-memory fallback: the flag is set before the persist attempt, so
+          // even though the arm write failed this pass still digests the
+          // backlog instead of flooding one prompt per comment.
+          expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+          expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+            'Offline backlog: 3',
+          );
         });
 
         it('isPrWatchEntryShape drops an entry with a malformed digest field and keeps its sibling', async () => {
@@ -25405,6 +25442,150 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
           expect(boundSessions.deliverPrompt.mock.calls[1]![1]).not.toContain(
             'Offline backlog',
           );
+        });
+
+        it('a held digest never drags the cursor before an edited old comment', async () => {
+          // GitHub's `since` filters on updated_at, so a comment created before
+          // commentSince but edited today re-lists, sorts oldest-first and
+          // becomes deliverable[0]. The hold anchor must not drag commentSince
+          // back to its creation time — that would re-fetch the whole window and
+          // re-deliver members whose ring keys were evicted.
+          await initChannel(commentOnlyConfig, { boundSessions });
+          boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+          setLastPollAt(new Date(Date.now() - 5000).toISOString());
+          seedCommentEntry({
+            commentBaseline: '2026-06-01T00:00:00.000Z',
+            commentSince: '2026-07-02T00:00:00.000Z',
+          });
+          mockPull({});
+          routeCommentPaginate();
+          const newer = Array.from({ length: 25 }, (_, i) => ({
+            id: 701 + i,
+            node_id: `IC_${701 + i}`,
+            body: `member-${i}`,
+            created_at: `2026-07-02T10:${String(i).padStart(2, '0')}:00.000Z`,
+            user: { login: 'test-bot' },
+          }));
+          mockOctokit.rest.issues.listComments.mockResolvedValue([
+            {
+              id: 700,
+              node_id: 'IC_700',
+              body: 'old finding, edited today',
+              created_at: '2026-06-25T00:00:00.000Z',
+              updated_at: '2026-07-02T12:00:00.000Z',
+              user: { login: 'test-bot' },
+            },
+            ...newer,
+          ]);
+          mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+          await pollOnce();
+          // The size arm digests the 26-member window and omits a tail, so the
+          // hold branch runs with the edited old comment as deliverable[0].
+          expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+          const heldSince = readWatchState().entries['owner/repo#42']![
+            'commentSince'
+          ] as string;
+          // The hold may overlap one second before `since`, but must never
+          // retreat to the old comment's creation time.
+          expect(Date.parse(heldSince)).toBeGreaterThanOrEqual(
+            Date.parse('2026-07-02T00:00:00.000Z') - 1000,
+          );
+        });
+
+        it('a disabled-watch poll keeps the held digest frontier', async () => {
+          // The disabled-watch clear drops the arm so a re-enable does not
+          // digest comments accumulated while off, but the rendered frontier
+          // protects already-DELIVERED members and must survive: clearing it
+          // while commentSince stays held lets the ring-evicted rendered keys
+          // re-list and re-deliver once watch is back on.
+          await initChannel(commentOnlyConfig, { boundSessions });
+          seedCommentEntry({
+            digestPending: true,
+            digestRendered: ['IC_PREV_1', 'IC_PREV_2'],
+          });
+          await initChannel(
+            { ...commentOnlyConfig, prCommentWatch: false },
+            { boundSessions },
+          );
+          mockPull({});
+          routeCommentPaginate();
+          await pollOnce();
+          expect(
+            readWatchState().entries['owner/repo#42']!['digestPending'],
+          ).toBe(false);
+          expect(
+            readWatchState().entries['owner/repo#42']!['digestRendered'],
+          ).toEqual(['IC_PREV_1', 'IC_PREV_2']);
+        });
+
+        // A newest member whose URL alone exceeds the body budget makes the
+        // digest render nothing and fall through to the per-comment path. Both
+        // hold branches there must keep the frontier (the cursor stays held).
+        function oversizedUrlMembers() {
+          const conversation = Array.from({ length: 24 }, (_, i) => ({
+            id: 900 + i,
+            node_id: `IC_${900 + i}`,
+            body: `member-${i}`,
+            created_at: `2026-07-02T10:${String(i).padStart(2, '0')}:00.000Z`,
+            user: { login: 'test-bot' },
+          }));
+          const review = [
+            {
+              id: 999,
+              node_id: 'RC_999',
+              body: 'oversized url finding',
+              created_at: '2026-07-02T11:00:00.000Z',
+              html_url: `https://github.com/${'x'.repeat(7000)}`,
+              path: 'file.ts',
+              user: { login: 'test-bot' },
+            },
+          ];
+          return { conversation, review };
+        }
+
+        it('a transient per-comment deferral keeps the held digest frontier', async () => {
+          await initChannel(commentOnlyConfig, { boundSessions });
+          boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+          setLastPollAt(new Date(Date.now() - 5000).toISOString());
+          seedCommentEntry({
+            digestPending: true,
+            digestRendered: ['IC_PREV_1', 'IC_PREV_2'],
+          });
+          mockPull({});
+          routeCommentPaginate();
+          const { conversation, review } = oversizedUrlMembers();
+          mockOctokit.rest.issues.listComments.mockResolvedValue(conversation);
+          mockOctokit.rest.pulls.listReviewComments.mockResolvedValue(review);
+          boundSessions.deliverPrompt.mockRejectedValueOnce(
+            new BoundSessionQueueFullError('bound-session'),
+          );
+          await pollOnce();
+          // The fall-through is digesting (25 > cap); a queue-full deferral is
+          // transient, so the cursor holds and the frontier must survive.
+          expect(
+            readWatchState().entries['owner/repo#42']!['digestRendered'],
+          ).toEqual(['IC_PREV_1', 'IC_PREV_2']);
+        });
+
+        it('a capped per-comment fall-through keeps the held digest frontier', async () => {
+          await initChannel(commentOnlyConfig, { boundSessions });
+          boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+          setLastPollAt(new Date(Date.now() - 5000).toISOString());
+          seedCommentEntry({
+            digestPending: true,
+            digestRendered: ['IC_PREV_1', 'IC_PREV_2'],
+          });
+          mockPull({});
+          routeCommentPaginate();
+          const { conversation, review } = oversizedUrlMembers();
+          mockOctokit.rest.issues.listComments.mockResolvedValue(conversation);
+          mockOctokit.rest.pulls.listReviewComments.mockResolvedValue(review);
+          await pollOnce();
+          // The capped branch resumes the cursor before the last processed
+          // comment (still held), so it must not wipe the frontier.
+          expect(
+            readWatchState().entries['owner/repo#42']!['digestRendered'],
+          ).toEqual(['IC_PREV_1', 'IC_PREV_2']);
         });
 
         it('a held digest dedupes rendered members the ring evicts', async () => {

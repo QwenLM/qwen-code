@@ -471,8 +471,11 @@ reaches no one in that group.
 
 Comments are fetched on a periodic re-check (about every 2 minutes), and the
 first observation baselines silently — comments that predate the watch are not
-replayed. The channel issues no per-poll `pulls.get`; the comment fetch is the
-only watch call. A rate-limited or credential answer fails fast and aborts the
+replayed. After a downtime gap — or when the deliverable window exceeds the
+per-pass comment cap — the backlog arrives as a compact private digest (newest
+comments first, within the shared prompt body budget) instead of one prompt per
+comment; members that do not fit follow in further digests. The channel issues
+no per-poll `pulls.get`; the comment fetch is the only watch call. A rate-limited or credential answer fails fast and aborts the
 pass, so it never sleep-retries ahead of task recovery and notification intake. Delivery
 reuses the bound-session contract: role-aware templates (`comment` /
 `fix:comment` / `default`), stable comment-id dedupe, backpressure and

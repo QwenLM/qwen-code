@@ -42,8 +42,9 @@ delivered, but it should arrive as a compact summary, not a flood.
 - **Comment lane only.** The state watch is daemon-owned; this design does not
   touch state transitions.
 - **Notification lane unchanged.** Other-account comments keep today's behavior.
-- **Per-comment delivery unchanged within the cap.** Without a gap and with a
-  deliverable window within the pass cap, delivery is byte-identical to today.
+- **Per-comment delivery unchanged within the cap.** Without a gap, with no
+  persisted digest arm, and with a deliverable window within the pass cap,
+  delivery is byte-identical to today.
 - **First observation stays silent.** A PR with no persisted entry baselines
   silently even under a gap (no backlog delivery on first observation).
 

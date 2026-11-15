@@ -268,11 +268,17 @@ for (const key of [
 function startDaemon(logName) {
   const logPath = path.join(tagDir, logName);
   const logFd = fs.openSync(logPath, 'w');
-  const [bin, ...rest] = cli.split(' ');
+  const [binRaw, ...rest] = cli.split(' ');
   // A relative CLI script path must resolve against the INVOCATION directory,
   // not the scratch workspace the daemon runs in (cwd stays ws: the fixture
   // derives its state scope from realpathSync(ws)).
   const invocationDir = process.cwd();
+  // A relative executable (contains a path separator) resolves against the
+  // invocation directory too; a bare command name stays a PATH lookup.
+  const bin =
+    binRaw.includes('/') && !path.isAbsolute(binRaw)
+      ? path.resolve(invocationDir, binRaw)
+      : binRaw;
   const resolvedArgs = rest.map((a) =>
     !a.startsWith('-') && !path.isAbsolute(a) && /\.(js|mjs|cjs)$/.test(a)
       ? path.resolve(invocationDir, a)
@@ -524,6 +530,11 @@ async function main() {
       fail(`expected 5 per-comment prompts, got ${prompts.length}`);
     if (prompts.some((p) => /offline|离线/.test(p)))
       fail('digest lead present in no-gap arm');
+    // Pin WHICH comments arrived, not just the count: a wrong member set with
+    // the right cardinality must fail too.
+    for (let i = 1; i <= 5; i++)
+      if (!prompts.some((p) => p.includes(`gap-comment-${i}`)))
+        fail(`no-gap arm missing comment gap-comment-${i}`);
   } else if (expectMode === 'digest') {
     if (prompts.length !== 1)
       fail(`expected 1 digest prompt, got ${prompts.length}`);
@@ -534,6 +545,11 @@ async function main() {
         fail('digest lead missing total count 5');
       if (!prompts[0].includes('gap-comment-5'))
         fail('digest missing newest excerpt');
+      // All five members fit the budget here, so every body must be present —
+      // not just the newest one.
+      for (let i = 1; i <= 4; i++)
+        if (!prompts[0].includes(`gap-comment-${i}`))
+          fail(`digest missing member gap-comment-${i}`);
     }
     for (let i = 1; i <= 5; i++)
       if (!result.dispatchedComments.includes(`IC_fixture_${i}`))
@@ -556,6 +572,10 @@ async function main() {
       fail('newest member key not recorded');
     if (result.dispatchedComments.includes('IC_full_0'))
       fail('omitted oldest member key recorded as delivered');
+    // The omitted tail keeps the cursor held before the backlog head (the
+    // oldest member sits ~1h back); a consumed cursor would sit near NOW.
+    if (!(Date.parse(result.commentSince) < NOW - 30 * 60 * 1000))
+      fail('digest-full cursor not held before the backlog head');
   } else if (expectMode === 'none') {
     if (prompts.length !== 0) fail(`expected 0 prompts, got ${prompts.length}`);
     if (!watch?.entries?.['owner/repo#42']?.commentBaseline)

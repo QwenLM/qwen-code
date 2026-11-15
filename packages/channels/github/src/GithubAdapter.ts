@@ -2938,7 +2938,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             if (entry.digestPending === true) {
               entry.digestPending = false;
               entry.digestSizeArmed = false;
-              entry.digestRendered = [];
+              // Keep the rendered frontier: it dedupes already-DELIVERED
+              // members while commentSince stays held. Clearing it here would
+              // let ring-evicted rendered keys re-list and re-deliver on
+              // re-enable. It clears through the consumption paths instead.
               entry.digestRetiredCount = 0;
               cleared = true;
             }
@@ -8252,9 +8255,17 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
               ]),
             ];
           }
+          // Clamp the hold anchor at `since`: the fetch filters on updated_at,
+          // so an old comment edited today re-lists and sorts to deliverable[0]
+          // even though it was created before commentSince. Anchoring at its
+          // creation time would drag the cursor backwards and re-fetch (then
+          // re-deliver, once the ring evicts their keys) the whole window.
           commitCursor(
             new Date(
-              Date.parse(deliverable[0]!.createdAt) - 1000,
+              Math.max(
+                Date.parse(deliverable[0]!.createdAt),
+                Date.parse(since),
+              ) - 1000,
             ).toISOString(),
           );
         }
@@ -8297,7 +8308,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       // independent one). Keep commentSince so the next pass re-fetches and
       // retries; dispatchedComments dedupes anything already claimed. Advancing
       // here would skip the comment past with no task and no re-delivery chance.
-      commitCursor(since, digesting);
+      // The cursor stays held, so keep the arm AND the rendered frontier too —
+      // clearing the frontier would re-deliver ring-evicted rendered members.
+      commitCursor(since);
     } else {
       // Resume just before the last processed comment when capped so the
       // unprocessed tail is re-fetched next pass (a second of overlap is
@@ -8310,7 +8323,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         capped
           ? new Date(Date.parse(last.createdAt) - 1000).toISOString()
           : nowIso,
-        digesting,
+        // A capped cursor resumes before the last processed comment (still
+        // held), so it must keep the rendered frontier; only an uncapped
+        // advance to nowIso has consumed the backlog and may clear it.
+        digesting && !capped,
       );
     }
   }
