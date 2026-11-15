@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.ExtensionRecordJournal;
+import com.alibaba.qwen.code.managedagent.MySqlLockProbe;
 import com.alibaba.qwen.code.managedagent.VerificationFixtures;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
@@ -19,19 +20,26 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
+import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.Connection;
+import java.sql.SQLException;
 import java.time.Duration;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.function.LongSupplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 public class SessionResourceCollectionCollectorTest extends ToolPublicationRetentionStoreTest {
     private static final String CONTENT = "managed-tool-result-content";
@@ -356,6 +364,88 @@ public class SessionResourceCollectionCollectorTest extends ToolPublicationReten
         assertThat(collector.runOnce()).isTrue();
         assertThat(rows().getFirst().get("state")).isEqualTo("COLLECTED");
         assertThat(ledger().get("gc_blocker")).isNull();
+    }
+
+    @Test
+    void claimHoldsWhenALeaseCommitsWhileItWaitsOnTheHeadLock() throws Exception {
+        // MySQL-only witness (R2-1 sibling check): a lease committed while claim()
+        // waits on the head lock must not let it lease the operation. A live
+        // Session is fenced by blocker()'s first check (session_not_retired), so
+        // the lease probe is never reached and the early read view is harmless.
+        assumeTrue(isMySql());
+        initSession();
+        head(session);
+        publish("segment", CONTENT, new byte[64]);
+        try (var seed = retention.read(key)) {
+            // create the live root, then drop the seed lease
+        }
+        seedLedger();
+        jdbc.update("UPDATE ma_operation SET available_at = 0 WHERE operation_kind ="
+                + " 'SESSION_RESOURCE_GC' AND session_scope_key = ?", resScope);
+        var collector = collector(true, Duration.ZERO);
+        try (Connection holder = dataSource().getConnection();
+                var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            holder.setAutoCommit(false);
+            JdbcTemplate holderJdbc = new JdbcTemplate(new SingleConnectionDataSource(holder, true));
+            ToolPublicationRetentionStore.lockSessionHeadWithoutGuard(holderJdbc, tenant, session);
+            Future<Boolean> run = executor.submit(collector::runOnce);
+            MySqlLockProbe.awaitLockWaits(jdbc, jdbc.queryForObject("SELECT DATABASE()", String.class), 1,
+                    "claim behind the reader's root/head lock");
+            holderJdbc.update("INSERT INTO ma_read_lease (lease_id, tenant_key, session_key,"
+                            + " retirement_generation, expires_at) VALUES (?, ?, ?, 0, ?)",
+                    UUID.randomUUID().toString(), ToolPublicationRetentionStore.hash(tenant),
+                    ToolPublicationRetentionStore.hash(session),
+                    ToolPublicationRetentionStore.now(holderJdbc) + 120_000);
+            holder.commit();
+            assertThat(run.get(10, TimeUnit.SECONDS)).isFalse();
+            assertThat(ledger().get("gc_blocker")).isEqualTo("session_not_retired");
+            assertThat(jdbc.queryForObject("SELECT state FROM ma_operation WHERE operation_kind ="
+                    + " 'SESSION_RESOURCE_GC' AND session_scope_key = ?", String.class, resScope))
+                    .isNotEqualTo("LEASED");
+        }
+    }
+
+    @Test
+    void claimSeesALeaseThatPredatesRetirementDespiteTheEarlyView() throws Exception {
+        // MySQL-only witness: a retired Session's lease predates retirement and so
+        // predates the view fixed by the consistent probe; blocker() still sees it
+        // (reader_active) even though the view was fixed before the head lock.
+        // Retired Sessions admit no new or renewed lease, so none can appear in the
+        // wait window — the fence that distinguishes claim() from collect().
+        assumeTrue(isMySql());
+        initSession();
+        head(session);
+        publish("segment", CONTENT, new byte[64]);
+        var lease = retention.read(key);
+        retire();
+        seedLedger();
+        jdbc.update("UPDATE ma_operation SET available_at = 0 WHERE operation_kind ="
+                + " 'SESSION_RESOURCE_GC' AND session_scope_key = ?", resScope);
+        var collector = collector(true, Duration.ZERO);
+        try (Connection holder = dataSource().getConnection();
+                var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            holder.setAutoCommit(false);
+            JdbcTemplate holderJdbc = new JdbcTemplate(new SingleConnectionDataSource(holder, true));
+            ToolPublicationRetentionStore.lockSessionHeadWithoutGuard(holderJdbc, tenant, session);
+            Future<Boolean> run = executor.submit(collector::runOnce);
+            MySqlLockProbe.awaitLockWaits(jdbc, jdbc.queryForObject("SELECT DATABASE()", String.class), 1,
+                    "claim behind the reader's root/head lock");
+            holder.commit();
+            assertThat(run.get(10, TimeUnit.SECONDS)).isFalse();
+            assertThat(ledger().get("gc_blocker")).isEqualTo("reader_active");
+            assertThat(jdbc.queryForObject("SELECT state FROM ma_operation WHERE operation_kind ="
+                    + " 'SESSION_RESOURCE_GC' AND session_scope_key = ?", String.class, resScope))
+                    .isNotEqualTo("LEASED");
+        } finally {
+            lease.close();
+        }
+    }
+
+    private boolean isMySql() throws SQLException {
+        try (Connection connection = dataSource().getConnection()) {
+            return connection.getMetaData().getDatabaseProductName()
+                    .toLowerCase(java.util.Locale.ROOT).contains("mysql");
+        }
     }
 
     @Test

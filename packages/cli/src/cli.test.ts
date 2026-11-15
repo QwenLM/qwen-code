@@ -27,6 +27,7 @@ import { FatalError } from '@qwen-code/qwen-code-core';
 import { AlreadyReportedError } from './utils/errors.js';
 import { CHECKED_NODE_VERSION_ENV } from './utils/env-provenance.js';
 import { TOP_LEVEL_HELP_OPTIONS } from './config/top-level-options.js';
+import { commandMetadata } from './commands/command-metadata.js';
 import {
   MCP_COMMANDS,
   TOP_LEVEL_COMMANDS,
@@ -1926,23 +1927,8 @@ describe('bootstrap import boundaries', () => {
   it('keeps bootstrap top-level help commands aligned with config registrations', () => {
     const configSource = readFileSync('src/config/config.ts', 'utf8');
     const commandNameByIdentifier = new Map([
-      ['agentsCommand', 'agents'],
-      ['attachCommand', 'attach'],
       ['autofixPrCommand', 'autofix-pr'],
-      ['authCommand', 'auth'],
-      ['batchCommand', 'batch'],
-      ['boardCommand', 'board'],
-      ['channelCommand', 'channel'],
-      ['daemonCommand', 'daemon'],
-      ['extensionsCommand', 'extensions'],
-      ['hooksCommand', 'hooks'],
-      ['mcpCommand', 'mcp'],
-      ['memoryCommand', 'memory'],
       ['reviewCommand', 'review'],
-      ['sandboxCommand', 'sandbox'],
-      ['serveCommand', 'serve'],
-      ['sessionsCommand', 'sessions'],
-      ['updateCommand', 'update'],
     ]);
     const registeredIdentifiers = [
       ...configSource.matchAll(/\.command\((\w+Command)\)/g),
@@ -1952,11 +1938,15 @@ describe('bootstrap import boundaries', () => {
     );
 
     expect(registeredIdentifiers).toHaveLength(commandNameByIdentifier.size);
-    for (const identifier of registeredIdentifiers) {
-      const commandName = commandNameByIdentifier.get(identifier);
-      expect(commandName, `missing mapping for ${identifier}`).toBeDefined();
-      expect(bootstrapCommands).toContain(commandName);
-    }
+    const registeredCommands = new Set([
+      ...Object.values(commandMetadata).map(
+        ({ command }) => command.split(' ')[0],
+      ),
+      ...registeredIdentifiers.map((identifier) =>
+        commandNameByIdentifier.get(identifier),
+      ),
+    ]);
+    expect(bootstrapCommands).toEqual(registeredCommands);
   });
 
   it('keeps bootstrap MCP help commands aligned with MCP registrations', () => {

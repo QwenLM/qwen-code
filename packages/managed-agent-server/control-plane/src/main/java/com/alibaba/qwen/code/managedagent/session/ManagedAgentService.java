@@ -121,11 +121,28 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     }
     private org.springframework.beans.factory.ObjectProvider<SessionRecoveryService> recoveryServices;
     private BooleanSupplier sideQueriesEnabled = () -> false;
+    private BooleanSupplier terminalEnabled = () -> false;
+    private java.util.function.Predicate<SessionRecord> terminalPlacementCapable = session -> false;
 
     @Autowired
     void configureSideQueries(ManagedAgentSettings properties) {
         sideQueriesEnabled = () -> properties.isSideQueriesEnabled() && properties.getSessionStore().isEnabled()
                 && harness.supportsSideQueries();
+    }
+
+    @Autowired
+    void configureTerminal(ManagedAgentSettings properties) {
+        terminalEnabled = () -> properties.getRuntimeBroker().isWebTerminal();
+    }
+
+    @Autowired(required = false)
+    void configureTerminalPlacement(
+            org.springframework.beans.factory.ObjectProvider<
+                    com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRuntimeResolver> resolvers) {
+        var resolver = resolvers.getIfAvailable();
+        if (resolver != null) {
+            terminalPlacementCapable = resolver::terminalCapable;
+        }
     }
 
     private boolean supportsSideQueries(SessionRecord session) {
@@ -585,7 +602,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         }
         Admission admission;
         Set<String> extensionLifecycleProfiles = extensionPins == null ? Set.of()
-                : java.util.stream.Stream.of(WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.SHELL_V3, WorkspaceToolProfiles.MCP)
+                : java.util.stream.Stream.of(WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.SHELL_V3, WorkspaceToolProfiles.SHELL_V4, WorkspaceToolProfiles.MCP)
                         .filter(harness::supportsLifecycle).collect(java.util.stream.Collectors.toSet());
         if (worktree != null && sessionWorktrees == null) {
             throw new ManagedAgentException(409, "worktree_unavailable", "Session worktrees are unavailable.");
@@ -1572,6 +1589,14 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                         childAgentsCapability(session, worktree),
                         (session.workspace() == null || maySubmit) && supportsSideQueries(session),
                         (session.workspace() == null || maySubmit) && supportsSideQueries(session),
+                        // UI hint only; the relay re-runs the full admission on attach.
+                        // Null while the opt-in is off so both surfaces omit it alike.
+                        // Only advertise it for placements that can actually attach
+                        // (local-mount measured), not ssh/resident/extension ones.
+                        terminalEnabled.getAsBoolean()
+                                ? maySubmit && Boolean.TRUE.equals(foregroundShell(session, worktree))
+                                        && terminalPlacementCapable.test(session)
+                                : null,
                         // Registration refuses a Workspace-less Session (mayExecute
                         // requires a bound Workspace), so the capability must not
                         // advertise it there.
@@ -1916,6 +1941,39 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             throw new ManagedAgentException(404,
                     "session_not_found", "The Session was not found.");
         }
+    }
+
+    /**
+     * The Managed Web Terminal handshake admission: a readable, active,
+     * Workspace-bound Shell Session whose Shell opt-ins and persisted
+     * approval are valid, and whose caller holds OPERATOR on the Workspace.
+     * The terminal deployment opt-in and the terminal-capable Runtime
+     * binding are checked by the relay, not here. A human terminal is not a
+     * model tool call, so the per-command approval mode does not gate it;
+     * the OPERATOR grant plus the deployment opt-in are the boundary.
+     */
+    public SessionRecord admitTerminalSession(String tenantId, String actorId,
+            String sessionId) {
+        SessionRecord session = requireReadableSession(tenantId, actorId, sessionId);
+        if (!"ACTIVE".equals(session.status())) {
+            throw new ManagedAgentException(409, "session_operation_active",
+                    "The Session is not active.");
+        }
+        // Authorization before capability, like every other OPERATOR surface:
+        // a caller below the grant learns the role refusal, not whether the
+        // Session happens to carry a Shell.
+        if (session.workspace() != null && !workspaces.accessOf(session.tenantId(),
+                actorId, session.workspace().getWorkspaceId())
+                .atLeast(WorkspaceAccess.OPERATOR)) {
+            throw new ManagedAgentException(403, "session_operation_forbidden",
+                    "Only a Workspace operator may open a terminal.");
+        }
+        var worktree = store.findSessionWorktree(tenantId, sessionId);
+        if (!Boolean.TRUE.equals(foregroundShell(session, worktree))) {
+            throw new ManagedAgentException(409, "workspace_unavailable",
+                    "The Session does not admit a terminal.");
+        }
+        return session;
     }
 
     /**

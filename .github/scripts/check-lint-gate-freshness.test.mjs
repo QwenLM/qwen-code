@@ -344,12 +344,17 @@ function prettierFetch(
     baseScope = {},
     headScope = {},
     truncated = false,
+    // Per-side flags: a single shared one cannot tell the two halves of
+    // `baseTree.truncated || headTree.truncated` apart, so each arm would
+    // survive its own removal. `truncated` stays as shorthand for both.
+    baseTruncated = truncated,
+    headTruncated = truncated,
     baseRef = BASE_REF,
   },
   calls = [],
 ) {
-  const treeFor = (scope, pi) => ({
-    truncated,
+  const treeFor = (scope, pi, isTruncated) => ({
+    truncated: isTruncated,
     tree: [
       { type: 'blob', path: '.prettierignore', sha: blob(ignoreFile(pi)) },
       ...Object.entries(scope).map(([path, text]) => ({
@@ -361,8 +366,8 @@ function prettierFetch(
     ],
   });
   const trees = {
-    [baseRef]: treeFor(baseScope, basePi),
-    [HEAD_SHA]: treeFor(headScope, headPi),
+    [baseRef]: treeFor(baseScope, basePi, baseTruncated),
+    [HEAD_SHA]: treeFor(headScope, headPi, headTruncated),
   };
   const piText = {
     [baseRef]: ignoreFile(basePi),
@@ -789,40 +794,196 @@ test('an ignore file added or removed on either side blocks the narrowing', asyn
   }
 });
 
-test('a truncated tree never narrows, and says so', async () => {
-  // Same principle as the extraction miss: a silent false would stop the
-  // narrowing with nothing in the log to explain the stale verdict.
-  const logged = [];
-  const original = console.log;
-  let stale;
-  console.log = (m) => logged.push(String(m));
-  try {
-    stale = await findStaleGateFiles({
-      ...PRETTIER_OPTS,
-      ...prettierFetch({
+// One case per side, not just both at once: the guard is
+// `baseTree.truncated || headTree.truncated`, and a shared flag lets either
+// arm be deleted with the suite still green. Each shape below is the sole
+// witness for its own arm.
+for (const [shape, flags] of [
+  ['both trees', { truncated: true }],
+  ['only the base tree', { baseTruncated: true }],
+  ['only the head tree', { headTruncated: true }],
+]) {
+  test(`a truncated tree never narrows, and says so (${shape})`, async () => {
+    // Same principle as the extraction miss: a silent false would stop the
+    // narrowing with nothing in the log to explain the stale verdict.
+    const logged = [];
+    const original = console.log;
+    let stale;
+    console.log = (m) => logged.push(String(m));
+    try {
+      stale = await findStaleGateFiles({
+        ...PRETTIER_OPTS,
+        ...prettierFetch({
+          basePi: ['node_modules', 'packages/live-host/'],
+          headPi: ['node_modules'],
+          ...flags,
+        }),
+      });
+    } finally {
+      console.log = original;
+    }
+    assert.equal(stale.length, 1);
+    assert.ok(
+      logged.some(
+        (m) =>
+          m.includes('could not narrow .prettierignore') &&
+          m.includes('truncated'),
+      ),
+      'a truncated tree must annotate why the verdict was kept',
+    );
+  });
+}
+
+test('a base ref containing a hash is URI-encoded in the tree path', async () => {
+  // This is the shape the encoder is actually for. '#' and '%' are legal in a
+  // git branch name, and an unencoded '#' starts the fragment and swallows
+  // '?recursive=1' with it, so the request answers for a DIFFERENT ref instead
+  // of failing. Measured live: git/trees/main#frag?recursive=1 -> 200 with 42
+  // top-level entries, git/trees/main%23frag?recursive=1 -> 404, and
+  // git/trees/main?recursive=1 -> 200 with 16226. Silent wrong-tree read, not a
+  // fail-closed refusal. BASE_REF is github.event.pull_request.base.ref, so a
+  // 'fix#1'-style base branch reaches this path verbatim.
+  const calls = [];
+  const stale = await findStaleGateFiles({
+    ...PRETTIER_OPTS,
+    baseRef: 'fix#1',
+    ...prettierFetch(
+      {
         basePi: ['node_modules', 'packages/live-host/'],
         headPi: ['node_modules'],
-        truncated: true,
-      }),
-    });
-  } finally {
-    console.log = original;
-  }
-  assert.equal(stale.length, 1);
-  assert.ok(
-    logged.some(
-      (m) =>
-        m.includes('could not narrow .prettierignore') &&
-        m.includes('truncated'),
+        baseRef: 'fix#1',
+      },
+      calls,
     ),
-    'a truncated tree must annotate why the verdict was kept',
+  });
+  assert.deepEqual(stale, []);
+  assert.ok(
+    calls.some((c) => c.includes('/git/trees/fix%231?recursive=1')),
+    `expected an encoded tree ref, got ${JSON.stringify(calls)}`,
+  );
+  // On this path the base ref reaches three URLs, not just the tree one: the
+  // root `.prettierignore` contents `?ref=` read and the commits `&sha=` lookup
+  // interpolate it too. (Two encoders sit outside this path: the ci.yml
+  // narrowing's `?ref=` takes a branch name and is pinned by its own case
+  // below; `fetchGateFilePair`'s takes hex SHAs.) The tree assertion above says
+  // nothing about the other two, and the fixture decodes recorded paths and
+  // answers the commits lookup whatever `sha` it carries, so this sweep is what
+  // covers them. A raw '#' at the commits site cuts the ref VALUE at the '#',
+  // so this case's own `fix#1` is looked up as `fix`: measured live, that 404s
+  // (no such branch) and reaches main()'s fail-open, while `&sha=x6#frag`
+  // answers 200 with 28415ddff367 — the same commit as `&sha=x6`, a branch that
+  // is NOT the default one — and `&sha=x6%23frag` answers 404. Either a silent
+  // read of another branch or a false green, never a clean refusal.
+  assert.deepEqual(
+    calls.filter((c) => c.includes('fix#1')),
+    [],
+    'every URL embedding the base ref must encode it',
+  );
+});
+
+test('a base ref containing a percent is URI-encoded in the tree path', async () => {
+  // The server decodes '%' escapes, so the ref it looks up is the DECODED one.
+  // 'fix%201' is a legal ref; unencoded it is requested verbatim and the server
+  // decodes it to 'fix 1', which is NOT a legal ref, so the lookup 404s. What
+  // that costs depends on the site: inside the narrowing it fails closed and
+  // keeps a stuck stale verdict, but the commits lookup is awaited outside that
+  // try, so its 404 reaches main()'s fail-open and reports the branch fresh — a
+  // false green. This sample only 404s because its decoded form is illegal; a
+  // '%' escape that decodes to an existing ref does read that one (measured:
+  // &sha=mai%6E answers 200 with main's commit). The fixture keys trees by the
+  // raw ref, so pass 'fix%201' unencoded.
+  const calls = [];
+  const stale = await findStaleGateFiles({
+    ...PRETTIER_OPTS,
+    baseRef: 'fix%201',
+    ...prettierFetch(
+      {
+        basePi: ['node_modules', 'packages/live-host/'],
+        headPi: ['node_modules'],
+        baseRef: 'fix%201',
+      },
+      calls,
+    ),
+  });
+  assert.deepEqual(stale, []);
+  assert.ok(
+    calls.some((c) => c.includes('/git/trees/fix%25201?recursive=1')),
+    `expected an encoded tree ref, got ${JSON.stringify(calls)}`,
+  );
+  // The all-hazards case below pins the encoded form at every ref-bearing site,
+  // so it already witnesses '%' at the commits `&sha=` encoder too. What this
+  // case adds is a sweep of every recorded URL for the raw ref, which catches a
+  // leak at a site no case pins by name. 'fix%25201' does not contain
+  // 'fix%201', so correct encoding cannot trip the sweep.
+  assert.deepEqual(
+    calls.filter((c) => c.includes('fix%201')),
+    [],
+    'every URL embedding the base ref must encode it',
+  );
+});
+
+// One sample carrying every URL-hazardous character that git still allows in a
+// ref ('&', '#', '%', '+', '=', ';', '@' — all pass git check-ref-format; '?'
+// and space do not), asserted per site. Adding a row per character is what kept
+// regenerating findings: '#' and '%' each got a case while '&' had none, so an
+// encoder narrowed to '%'/'#'/'/' passed the whole suite. Three of them can
+// name a DIFFERENT EXISTING ref, by three mechanisms: '&' starts another query
+// parameter (measured: contents/.prettierignore?ref=main&x answers 200 with
+// main's file, ?ref=main%26x answers 404), '#' cuts the value at the fragment
+// (measured: &sha=x6#frag reads branch x6), and '%' is decoded server-side
+// (measured: &sha=mai%6E reads main). The other four all 404 at that site
+// (measured: sha=main;x, main=x, main+x, main@x). A raw-ref scan cannot stand
+// in for these: once '#' and '%' are escaped the full raw needle is gone, and
+// the query-value sites are exactly where the meaning changes.
+const HAZARD_REF = 'a&b#c%d+e=f;g@h';
+const HAZARD_ENC = 'a%26b%23c%25d%2Be%3Df%3Bg%40h';
+
+test('every prettier-path URL encodes a ref carrying every hazardous character', async () => {
+  const calls = [];
+  const stale = await findStaleGateFiles({
+    ...PRETTIER_OPTS,
+    baseRef: HAZARD_REF,
+    ...prettierFetch(
+      {
+        basePi: ['node_modules', 'packages/live-host/'],
+        headPi: ['node_modules'],
+        baseRef: HAZARD_REF,
+      },
+      calls,
+    ),
+  });
+  assert.deepEqual(stale, []);
+  for (const wire of [
+    `/git/trees/${HAZARD_ENC}?recursive=1`,
+    `/contents/.prettierignore?ref=${HAZARD_ENC}`,
+    `&sha=${HAZARD_ENC}&per_page=1`,
+  ]) {
+    assert.ok(
+      calls.some((c) => c.includes(wire)),
+      `expected ${wire}, got ${JSON.stringify(calls)}`,
+    );
+  }
+});
+
+test('the ci.yml URL encodes a ref carrying every hazardous character', async () => {
+  const calls = [];
+  const stale = await findStaleGateFiles({
+    ...CI_OPTS,
+    baseRef: HAZARD_REF,
+    ...ciFetch(realCi, realCi, calls, MERGE_BASE_SHA, HAZARD_REF),
+  });
+  assert.deepEqual(stale, []);
+  assert.ok(
+    calls.some((c) => c.includes(`?ref=${HAZARD_ENC}`)),
+    `expected an encoded contents ref, got ${JSON.stringify(calls)}`,
   );
 });
 
 test('a base ref containing a slash is URI-encoded in the tree path', async () => {
-  // Without encodeURIComponent the request 404s for e.g. release/1.0, the
-  // narrowing throws into the fail-closed catch and the verdict is kept — a
-  // false red rather than a false green, but silent. Pin the encoded shape.
+  // A slash survives an unencoded path: measured against the live API,
+  // git/trees/agent/agent-view-commands?recursive=1 answers 200 with the same
+  // tree sha as the encoded form. So this case pins the encoded STRING; the
+  // shape that actually misbehaves without the encoder is the '#' case above.
   const calls = [];
   const stale = await findStaleGateFiles({
     ...PRETTIER_OPTS,
@@ -909,6 +1070,52 @@ test('the fail-closed catch leaves a diagnostic', () => {
   );
 });
 
+// Both wiring pins below read the same call, so its shape is checked here once.
+// Without these checks a hoisted options literal misdiagnoses intact wiring,
+// and a decoy call earlier in main() lets the real one encode its ref unseen
+// (measured: that pair passed 82/82 before the checks existed).
+function mainWiring() {
+  const source = readFileSync(
+    join(repoRoot, '.github/scripts/check-lint-gate-freshness.mjs'),
+    'utf8',
+  );
+  const at = source.indexOf('async function main()');
+  assert.ok(at > 0, 'main() not found');
+  const main = source.slice(at);
+  const anchor = 'await findStaleGateFiles({';
+  assert.equal(
+    main.split(anchor).length - 1,
+    1,
+    'main() must make exactly one verdict call for the pins to anchor to it',
+  );
+  // Bounded by the option-line shape, not by a `});` search: that substring
+  // also occurs inside main()'s own warning template (`(${error.message}); …`),
+  // so a missing closer widens the slice into the catch block instead of
+  // failing. Measured: 146 chars intact, 745 with the closer changed.
+  const call =
+    /await findStaleGateFiles\(\{\n(?:[ \t]+[\w$]+(?::[^,\n]*)?,\n)+[ \t]*\}\);/.exec(
+      main,
+    );
+  assert.ok(
+    call,
+    'the verdict call must be an options literal closed by `});`',
+  );
+  return { main, call: call[0] };
+}
+
+test('main() passes BASE_REF through verbatim', () => {
+  // Every other case injects baseRef directly, so nothing watches this wiring.
+  // For a ref carrying a hazardous character, encoding it here double-encodes
+  // at the request sites: the lookup 404s, the throw reaches main()'s fail-open,
+  // and the whole check reports fresh.
+  // Measured: wrapping it in encodeURIComponent leaves every other case green.
+  assert.match(
+    mainWiring().call,
+    /^\s*baseRef: BASE_REF,$/m,
+    'main() must hand BASE_REF to the verdict call unencoded',
+  );
+});
+
 test('the JSON media type is pinned alongside the raw one', () => {
   // The two Accept values sit side by side and read as interchangeable; only
   // the raw one had a pin. Swapping the JSON half would break every containment
@@ -928,19 +1135,11 @@ test('main() wires fetchText into the verdict call', () => {
   // Source-read pin, same style as the ci.yml wiring case above: deleting the
   // wiring leaves fetchText undefined, the narrowing throws into the
   // fail-closed catch, and every injected-fixture test still passes.
-  const source = readFileSync(
-    join(repoRoot, '.github/scripts/check-lint-gate-freshness.mjs'),
-    'utf8',
-  );
-  const main = source.slice(source.indexOf('async function main()'));
+  const { main, call } = mainWiring();
   assert.match(
     main,
     /const fetchText = \(path\) => curlText\(path, GITHUB_TOKEN\);/,
     'main() must build fetchText from curlText',
-  );
-  const call = main.slice(
-    main.indexOf('await findStaleGateFiles({'),
-    main.indexOf('});', main.indexOf('await findStaleGateFiles({')),
   );
   assert.match(
     call,
@@ -1050,7 +1249,13 @@ const realCi = readFileSync(join(repoRoot, CI_FILE), 'utf8');
 // is a bug, not a match. A second compare is refused: the narrowing must reuse
 // the containment compare, because a fresh `base...head` one is ~4 MB here and
 // timed out against the live API.
-function ciFetch(baseText, branchText, calls = [], mergeBase = MERGE_BASE_SHA) {
+function ciFetch(
+  baseText,
+  branchText,
+  calls = [],
+  mergeBase = MERGE_BASE_SHA,
+  baseRef = 'main',
+) {
   return {
     fetchJson: async (path) => {
       calls.push(path);
@@ -1066,8 +1271,8 @@ function ciFetch(baseText, branchText, calls = [], mergeBase = MERGE_BASE_SHA) {
     fetchText: async (path) => {
       calls.push(path);
       const prefix = `/repos/QwenLM/qwen-code/contents/${CI_FILE}?ref=`;
-      if (path === `${prefix}main`) return baseText;
-      if (path === `${prefix}${MERGE_BASE_SHA}`) return branchText;
+      if (path === `${prefix}${encodeURIComponent(baseRef)}`) return baseText;
+      if (path === `${prefix}${mergeBase}`) return branchText;
       throw new Error(`unexpected text path: ${path}`);
     },
   };
@@ -1385,6 +1590,51 @@ test('the gate is compared at the merge base, not at the head', async () => {
     ...ciFetch(realCi, realCi),
   });
   assert.deepEqual(stale, []);
+});
+
+test('the ci.yml branch side is read at the merge base it was given', async () => {
+  // A second, distinct merge base: with only one value the fixture could pin
+  // the branch side to a constant and still pass. ciFetch honours `mergeBase`
+  // in fetchJson, so its fetchText must honour the same value.
+  const other = 'c'.repeat(40);
+  const calls = [];
+  const stale = await findStaleGateFiles({
+    ...CI_OPTS,
+    ...ciFetch(realCi, realCi, calls, other),
+  });
+  assert.deepEqual(stale, []);
+  assert.ok(
+    calls.some((c) => c.includes(`?ref=${other}`)),
+    `expected the branch side at ${other}, got ${JSON.stringify(calls)}`,
+  );
+  assert.ok(
+    !calls.some((c) => c.includes(`?ref=${MERGE_BASE_SHA}`)),
+    'the branch side must not fall back to the default merge base',
+  );
+});
+
+test('the ci.yml narrowing encodes a hash-bearing base ref too', async () => {
+  // narrowsToUnchangedLintSlice reads the base side at baseRef, so its `?ref=`
+  // takes a branch name just like the prettier path does. Before this case
+  // nothing drove that path with a ref needing encoding, so deleting its
+  // encoder left every case green. The all-hazards ci.yml case above now covers
+  // the whole character family here; this one keeps the '#' shape explicit.
+  const calls = [];
+  const stale = await findStaleGateFiles({
+    ...CI_OPTS,
+    baseRef: 'fix#1',
+    ...ciFetch(realCi, realCi, calls, MERGE_BASE_SHA, 'fix#1'),
+  });
+  assert.deepEqual(stale, []);
+  assert.ok(
+    calls.some((c) => c.includes('?ref=fix%231')),
+    `expected an encoded contents ref, got ${JSON.stringify(calls)}`,
+  );
+  assert.deepEqual(
+    calls.filter((c) => c.includes('fix#1')),
+    [],
+    'every URL embedding the base ref must encode it',
+  );
 });
 
 test('a comment-only base-side edit does not stale the branch', () => {

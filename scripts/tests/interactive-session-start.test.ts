@@ -81,4 +81,29 @@ describe('InteractiveSession.start source pins (#13552)', () => {
     expect(source).toContain('this.closed = true;');
     expect(source).toContain('Session closed while waiting for text:');
   });
+
+  it('pins the isolated-env loop-switch pass-through', () => {
+    // The nightly loop legs export the two switches; deleting the forwarding
+    // block (or narrowing it to one switch) leaves the inheritEnv:false
+    // suites on the default loop on every arm, and only a nightly run would
+    // notice. The guard must forward exactly the two switches, the assignment
+    // must be live code, and it must run before the child env is built from
+    // baseEnv — otherwise the forwarded values never reach the child.
+    expect(source).toMatch(
+      /if \(options\?\.inheritEnv === false\) \{[\s\S]*?for \(const key of \[\s*'QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP',\s*'QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP',?\s*\]\)/,
+    );
+    const forwardAt = source.search(
+      /^\s*if \(process\.env\[key\] !== undefined\)\s*baseEnv\[key\]\s*=\s*process\.env\[key\];$/m,
+    );
+    const envBuiltAt = source.indexOf('const env = {');
+    expect(forwardAt).toBeGreaterThan(-1);
+    expect(envBuiltAt).toBeGreaterThan(forwardAt);
+  });
+
+  it('pins that a test own env overrides the forwarded switches', () => {
+    // The parity control arm pins the switches off through options.env; that
+    // only wins if options.env is spread after baseEnv. Reordering the spread
+    // re-arms the control arm on the nightly legs.
+    expect(source).toMatch(/\.\.\.baseEnv,\s*\.\.\.options\?\.env,/);
+  });
 });
