@@ -2000,6 +2000,81 @@ describe('workspace-qualified core REST', () => {
     }
   });
 
+  it('persists a narrowing that keeps the exclusion list the same length', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      await fsp.mkdir(path.join(h.secondaryCwd, '.qwen'), { recursive: true });
+      await fsp.writeFile(
+        path.join(h.secondaryCwd, '.qwen', 'settings.json'),
+        JSON.stringify({
+          mcp: { excluded: ['docs*'] },
+          mcpServers: {
+            docs: { command: 'node' },
+            'docs-upstream': { command: 'node' },
+          },
+        }),
+      );
+
+      const response = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/config/mcp/docs/enable`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ scope: 'workspace' });
+
+      // `['docs*']` narrows to `['docs-upstream']`: same length, different
+      // content. Comparing lengths alone treats this as unchanged and leaves
+      // `docs*` on disk, so the click reports success and denies nothing.
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({ changed: true });
+      expect(h.persistSetting).toHaveBeenCalledWith(
+        h.secondaryCwd,
+        expect.any(String),
+        'mcp.excluded',
+        ['docs-upstream'],
+        expect.any(Function),
+      );
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('re-enables a server excluded by its own bare name', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      await fsp.mkdir(path.join(h.secondaryCwd, '.qwen'), { recursive: true });
+      await fsp.writeFile(
+        path.join(h.secondaryCwd, '.qwen', 'settings.json'),
+        JSON.stringify({
+          mcp: { excluded: ['docs'] },
+          mcpServers: { docs: { command: 'node' } },
+        }),
+      );
+
+      const response = await request(h.app)
+        .post(
+          `/workspaces/${encodeURIComponent(h.secondaryId)}/config/mcp/docs/enable`,
+        )
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({ scope: 'workspace' });
+
+      // A bare name is what the disable route writes, so refusing the empty
+      // result makes disable→enable a dead end on this endpoint.
+      expect(response.status).toBe(200);
+      expect(h.persistSetting).toHaveBeenCalledWith(
+        h.secondaryCwd,
+        expect.any(String),
+        'mcp.excluded',
+        [],
+        expect.any(Function),
+      );
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('does not refuse on a workspace pattern an untrusted workspace drops', async () => {
     const h = await makeHarness({ primaryTrusted: false, token: 'secret' });
     try {

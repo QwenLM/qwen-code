@@ -7,6 +7,7 @@
 import { matchesAnyServerPattern } from '@qwen-code/qwen-code-core';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { redactMcpServersSetting } from '../../config/mcp-server-secrets.js';
+import { assembleMcpServers } from '../../config/mcpServers.js';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import {
   getSettingDefinition,
@@ -368,9 +369,18 @@ function registerFor(
                   // enabled (`*` would erase the whole policy). Lift a pattern
                   // only when nothing but this name matches it; otherwise keep
                   // it and narrow it to the siblings it still has to deny.
-                  const serverNames = collectConfiguredMcpServerNames(
-                    settings,
-                  );
+                  // `.mcp.json` and extension servers are denied by the same
+                  // patterns but are absent from every settings scope, so the
+                  // sibling set has to come from the assembled map.
+                  const serverNames = [
+                    ...collectConfiguredMcpServerNames(settings),
+                    ...Object.keys(
+                      assembleMcpServers(
+                        settings.merged.mcpServers,
+                        target.workspaceCwd,
+                      ),
+                    ),
+                  ];
                   next = [];
                   for (const pattern of existing) {
                     if (!matchesAnyServerPattern(serverName, [pattern])) {
@@ -386,15 +396,11 @@ function registerFor(
                         candidate !== serverName &&
                         matchesAnyServerPattern(candidate, [pattern]),
                     );
-                    if (siblings.length === 0) continue;
+                    // No sibling matches: the pattern covers only the name
+                    // being enabled, so dropping it is exact and an empty
+                    // result is the right write (a bare-name entry is the
+                    // shape the disable route produces).
                     next.push(...siblings);
-                  }
-                  if (next.length === 0 && existing.length > 0) {
-                    // Never persist `[]` over a policy: an empty list is
-                    // indistinguishable from "no exclusions" to every later
-                    // reader.
-                    blocking = [existing.join(', ')];
-                    return;
                   }
                   next = dedupe(next);
                 } else {
@@ -402,7 +408,12 @@ function registerFor(
                     ? existing
                     : [...existing, serverName];
                 }
-                changed = next.length !== existing.length;
+                // The enable branch rewrites list content (a glob becomes the
+                // sibling names it still has to deny), so a narrowing that
+                // keeps the length is still a write.
+                changed =
+                  next.length !== existing.length ||
+                  next.some((pattern, index) => pattern !== existing[index]);
                 if (changed) {
                   await deps.persistSetting(
                     target.workspaceCwd,
