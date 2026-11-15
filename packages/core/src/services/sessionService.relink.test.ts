@@ -27,9 +27,11 @@ describe('SessionService project relinking', () => {
     roots.push(root);
     const runtimeBaseDir = path.join(root, 'runtime');
     const oldCwd = path.join(root, name);
-    const newCwd = path.join(root, 'moved-project');
+    // Keep the destination at a different depth so an external cwd would
+    // visibly change if remapRelinkPath lost its parent-path guard.
+    const newCwd = path.join(root, 'moved', 'project');
     fs.mkdirSync(oldCwd);
-    fs.mkdirSync(newCwd);
+    fs.mkdirSync(newCwd, { recursive: true });
     const oldStorage = new Storage(oldCwd, runtimeBaseDir);
     const oldChatsDir = path.join(oldStorage.getProjectDir(), 'chats');
     fs.mkdirSync(oldChatsDir, { recursive: true });

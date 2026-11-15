@@ -59,6 +59,8 @@ vi.mock(
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
+const mockMaybeRelinkResumeSession = vi.hoisted(() => vi.fn());
+const mockIsInteractiveResumeInvocation = vi.hoisted(() => vi.fn());
 const mockConsumeLastRenderError = vi.hoisted(() => vi.fn());
 const mockHandleListExtensions = vi.hoisted(() => vi.fn());
 const mockStartEarlyStartupPrefetches = vi.hoisted(() => vi.fn());
@@ -229,6 +231,11 @@ vi.mock('./utils/stdioHelpers.js', () => ({
   clearScreen: vi.fn(),
 }));
 
+vi.mock('./utils/session-relink.js', () => ({
+  maybeRelinkResumeSession: mockMaybeRelinkResumeSession,
+  isInteractiveResumeInvocation: mockIsInteractiveResumeInvocation,
+}));
+
 vi.mock('./utils/relaunch.js', () => ({
   exitWhenSupervisorExits: vi.fn(),
   relaunchAppInChildProcess: vi.fn(),
@@ -385,6 +392,10 @@ describe('llm.tsx main function', () => {
     [];
 
   beforeEach(() => {
+    mockMaybeRelinkResumeSession.mockReset();
+    mockMaybeRelinkResumeSession.mockResolvedValue({ status: 'unchanged' });
+    mockIsInteractiveResumeInvocation.mockReset();
+    mockIsInteractiveResumeInvocation.mockReturnValue(true);
     mockStartNonInteractiveOpenAILogHousekeeping.mockClear();
     mockStopNonInteractiveOpenAILogHousekeeping.mockClear();
     lspConfigWatcherMock.instances.length = 0;
@@ -440,6 +451,79 @@ describe('llm.tsx main function', () => {
       }
     }
     vi.restoreAllMocks();
+  });
+
+  it('prints a blocked resume relink as one CLI error and exits with status 1', async () => {
+    const sessionId = '11111111-1111-4111-8111-111111111111';
+    const refusal = 'Qwen Code could not safely complete session reattachment.';
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
+
+    vi.mocked(parseArguments).mockResolvedValue({
+      resume: sessionId,
+      extensions: [],
+    } as unknown as CliArgs);
+    vi.mocked(loadSandboxConfig).mockResolvedValue(undefined);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        security: { auth: {} },
+        ui: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getSystemHooks: () => undefined,
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    } as never);
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      ...sessionRegistryConfigStub,
+      isInteractive: () => true,
+      isProjectHooksPendingApproval: () => false,
+      getQuestion: () => '',
+      getSandbox: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getDebugMode: () => false,
+      getListExtensions: () => false,
+      getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
+      getModelProvidersConfig: () => undefined,
+      initialize: vi.fn(),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getScreenReader: () => false,
+      getMemoryFileCount: () => 0,
+      getWarnings: () => [],
+      isSafeMode: () => false,
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+      getSessionId: () => 'test-session-id',
+    } as unknown as Config);
+    mockMaybeRelinkResumeSession.mockResolvedValue({
+      status: 'blocked',
+      message: refusal,
+    });
+
+    await expect(main()).rejects.toEqual(new MockProcessExitError(1));
+
+    expect(mockMaybeRelinkResumeSession).toHaveBeenCalledWith({
+      sessionId,
+      cwd: process.cwd(),
+      interactive: true,
+    });
+    expect(mockWriteStderrLine).toHaveBeenCalledTimes(1);
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(refusal);
+    expect(processExitSpy).toHaveBeenCalledWith(1);
   });
 
   it.each([
