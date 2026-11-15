@@ -236,13 +236,16 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   },
   scheduled_task_session_reuse: {
     standing: 'managed',
-    evidence: 'surface:AUTOMATION_RUN',
+    evidence:
+      'surface:AUTOMATION_RUN,surface:STORE_AUTOMATION_CREATE,surface:STORE_AUTOMATION_LIST,surface:STORE_AUTOMATION_RETIRE',
   },
-  // Managed automations carry no `gate`: a definition has a cron, a prompt
-  // and catch-up limits, so a quiet watch still spends a turn there.
-  scheduled_task_gate: NO_MANAGED_EQUIVALENT(
-    'no scheduled-task gate in Managed automations',
-  ),
+  // Fixed-interval /loop: cron_create passes a gate through to the
+  // definition, probed before each firing by the same gateCommandError the
+  // daemon's scheduled-task gate uses, so a quiet watch spends no turn.
+  scheduled_task_gate: {
+    standing: 'managed',
+    evidence: 'tool:cron_create',
+  },
   autofix_pr_watches: NO_MANAGED_EQUIVALENT(
     'no /autofix-pr watch in a Managed workspace',
   ),

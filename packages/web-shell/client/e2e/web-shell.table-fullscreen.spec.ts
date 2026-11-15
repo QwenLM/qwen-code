@@ -425,7 +425,10 @@ test.describe('enhanced table fullscreen', () => {
   test('@smoke compacts the mid-width toolbar only while cells are selected', async ({
     page,
   }, testInfo) => {
-    await openFixture(page, testInfo, { width: 700, theme: 'light' });
+    // The desktop chrome leaves the toolbar container ~500px narrower than
+    // the page; 1280 lands it in the 620–1200px band that hides labels only
+    // while a selection exists (700 lands below 620px, always compact).
+    await openFixture(page, testInfo, { width: 1280, theme: 'light' });
     const table = page.locator('[data-selection-copy-table]');
     const toolbar = table.locator(':scope > [data-selection-copy-ignore]');
     const copy = toolbar.getByRole('button', { name: 'Copy', exact: true });
