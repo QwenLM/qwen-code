@@ -381,9 +381,20 @@ export class ManagedDingtalkAdapter {
       skip();
       return;
     }
+    // Evaluate the allowlist before touching the cache: a sender the policy
+    // refuses must not spend the webhook-cache budget admission depends on
+    // (#17173 R4-2).
+    if (!this.senderAllowed(senderId)) {
+      this.log(
+        `Managed DingTalk sender ${senderId} is not allowed; message skipped.`,
+      );
+      skip();
+      return;
+    }
     // Remember the newest webhook for the conversation: the reply may arrive
-    // after this webhook's own message is long gone. Only private frames reach
-    // this point, so group traffic never evicts a private conversation.
+    // after this webhook's own message is long gone. Only private frames from
+    // allowed senders reach this point, so neither group traffic nor refused
+    // senders evict a private conversation (#17173 R3-2, R4-2).
     if (sessionWebhook) {
       this.touchWebhook(conversationId, sessionWebhook);
     }
@@ -411,13 +422,6 @@ export class ManagedDingtalkAdapter {
       state.recent.includes(eventId) ||
       state.pending.some((entry) => entry.eventId === eventId)
     ) {
-      return;
-    }
-    if (!this.senderAllowed(senderId)) {
-      this.log(
-        `Managed DingTalk sender ${senderId} is not allowed; message skipped.`,
-      );
-      skip();
       return;
     }
     const event: ManagedInboundEvent = {

@@ -329,6 +329,25 @@ describe('managed DingTalk adapter inbound', () => {
     await adapter.disconnect();
   });
 
+  it('a refused sender does not spend the webhook cache budget (R4-2)', async () => {
+    const { adapter, fake } = await connectedAdapter();
+    // An intruder outside the allowlist DMs with a webhook; the frame must be
+    // dropped without caching its conversation.
+    fake.push(
+      'intruder',
+      messageData({
+        msgId: 'intruder',
+        conversationId: 'conv-intruder',
+        senderStaffId: 'intruder',
+      }),
+    );
+    await adapter.tick();
+    const store = (adapter as unknown as { store: { file: string } }).store;
+    const persisted = JSON.parse(readFileSync(store.file, 'utf8'));
+    expect(Object.hasOwn(persisted.webhooks, 'conv-intruder')).toBe(false);
+    await adapter.disconnect();
+  });
+
   it('a frame admitted on a cached webhook snapshots it into the claim (R3-3)', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
     fake.push(
@@ -1624,14 +1643,28 @@ describe('managed DingTalk adapter review fixes', () => {
     const store = (
       first.adapter as unknown as { store: { save: (s: unknown) => void } }
     ).store;
-    const saveSpy = vi.spyOn(store, 'save').mockImplementation(() => {
-      throw new Error('disk full');
-    });
-    // No sessionWebhook of its own, so the claim write is the first persist
-    // this frame hits.
+    // The webhook-less probe frame hits the recency-refresh persist first
+    // (claim table empty), then the claim-write persist (claim table non-empty).
+    // Fail only the claim write so the rollback under test is actually reached
+    // (#17173 R4-1).
+    const realSave = store.save.bind(store);
+    const saveSpy = vi
+      .spyOn(store, 'save')
+      .mockImplementation((state: unknown) => {
+        if ((state as { pending: unknown[] }).pending.length > 0) {
+          throw new Error('disk full');
+        }
+        realSave(state);
+      });
     const frame = messageData({ msgId: 'm1', sessionWebhook: '' });
     // The claim write fails: ack LATER, and no claim may remain in memory.
     expect(first.fake.push('m1', frame)).toBe(false);
+    // The rollback must have cleared the in-memory claim table; without it the
+    // leftover claim survives the failed save (#17173 R4-1).
+    const stateAfterFail = (
+      first.adapter as unknown as { state: { pending: unknown[] } }
+    ).state;
+    expect(stateAfterFail.pending).toHaveLength(0);
     // Redelivery while the save still fails must also be LATER, never SUCCESS.
     expect(first.fake.push('m1', frame)).toBe(false);
     saveSpy.mockRestore();
