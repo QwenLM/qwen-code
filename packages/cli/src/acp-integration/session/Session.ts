@@ -7613,9 +7613,11 @@ export class Session implements SessionContext {
             // itself: UserPromptSubmit on the admitted verdict, memory recall,
             // system reminders and workflow intent for a UserQuery, then the
             // Stop hook and stop-policy continuations. ACP keeps the user turn
-            // with its file-history snapshot and the interaction span. Live
-            // and Agent Host sessions also keep ACP's tool executor and guards
-            // instead of the shared tool batch.
+            // with its file-history snapshot and the interaction span; tool
+            // batches run on the shared loop's batch with live-tool trust and
+            // read-only refusal; the Agent Host invocation guard stays on the
+            // session Config and is evaluated by the scheduler at its
+            // execution boundary.
             const sharedModelRound =
               this.config.isUnifiedAgentLoopEnabled?.('acp') === true;
             // A retry, a continue or a restore re-enters a turn: its first
@@ -7630,10 +7632,14 @@ export class Session implements SessionContext {
             const pauseGoalForLoopStop = () => {
               if (sharedModelRound && goalTurn) goalTurn.loopStopped = true;
             };
-            // Its tool batches run on the shared loop's batch, and the
-            // client then runs its own tool-call guards.
-            const sharedToolBatch =
-              sharedModelRound && this.#runsToolsOnSharedBatch();
+            // Every session's tool batches run on the shared loop's batch;
+            // the batch host carries live-tool trust and read-only refusal,
+            // while the Agent Host invocation guard stays on the session
+            // Config and is evaluated by the scheduler at its execution
+            // boundary. With the switch off the turn never reaches LlmClient
+            // at all: it sends through the session's own chat, so no client
+            // guard or reminder can run twice.
+            const sharedToolBatch = sharedModelRound;
             let promptAdmission: UserPromptAdmission | undefined;
             // A continue, a restore or a runtime continuation runs no
             // UserPromptSubmit hook.
@@ -9028,9 +9034,6 @@ export class Session implements SessionContext {
             type: roundType,
             modelOverride: round.modelOverride,
             stopPolicies: round.stopPolicies,
-            ...(!round.sharedToolBatch && {
-              toolLoopGuardsByHost: true,
-            }),
             toolCallPreparations: true,
             ...round.options,
           },
@@ -9362,7 +9365,7 @@ export class Session implements SessionContext {
     stoppedShort?: boolean;
   }> {
     const { promptId, signal, responseCapture } = turn;
-    const sharedToolBatch = this.#runsToolsOnSharedBatch();
+    const sharedToolBatch = true;
     let toolLoopState = createDaemonToolLoopState('off');
     const resetToolLoopState = () => {
       toolLoopState = createDaemonToolLoopState('off');
@@ -15753,21 +15756,6 @@ export class Session implements SessionContext {
    * sequential batch to preserve the implicit ordering the model may rely
    * on. Response-part ordering matches the original `functionCalls` order.
    */
-  /**
-   * Whether a fresh prompt's tool batches run on the shared loop's batch.
-   * Live tools, which ACP trusts without the permission flow, and a
-   * read-only Agent Host session, which refuses approvals, keep ACP's own
-   * tool step.
-   */
-  #runsToolsOnSharedBatch(): boolean {
-    return (
-      !this.liveScreenContextTool &&
-      this.liveTaskTools.length === 0 &&
-      !this.liveSpeakToUserTool &&
-      this.config.getSessionSourceType?.() !== 'agent-host'
-    );
-  }
-
   /** The calls a loop stop left unrun, shown as skipped. */
   async #emitLoopSkippedToolCalls(
     requests: ReadonlyArray<{ callId: string; name: string }>,
@@ -15799,6 +15787,19 @@ export class Session implements SessionContext {
       client: this.client,
       toolCallEmitter: this.toolCallEmitter,
       messageEmitter: this.messageEmitter,
+      // The tools ACP's own executor bypassed the permission flow for:
+      // `capture_screen_context` and the five live-task tools, matched by
+      // instance so a same-named tool inherits none of it. `speak_to_user`
+      // stays on the flow, as it did there: its own default is `allow`, and a
+      // user's `permissions.deny` / `permissions.ask` rule still applies.
+      isTrustedLiveTool: (tool) =>
+        tool !== undefined &&
+        (tool === this.liveScreenContextTool ||
+          this.liveTaskTools.some((live) => live === tool)),
+      readOnlyRefusalMessage:
+        this.config.getSessionSourceType?.() === 'agent-host'
+          ? 'Tool "__name__" requires approval, which is unavailable on this read-only Agent Host.'
+          : undefined,
       sendUpdate: (update) => this.sendUpdate(update),
       requestPermission: (params, signal) =>
         this.#requestPermissionQueued(params, signal),
