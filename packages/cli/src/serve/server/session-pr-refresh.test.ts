@@ -2779,12 +2779,29 @@ describe('startSessionPrRefreshTimer', () => {
   it('drainNow delivers nothing when no drain deps are provisioned', async () => {
     const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
     const registry = createWorkspaceRegistry([trustedRuntime]);
+    await seedPendingBinding(trustedRuntime, SESSION_A, 42);
+    const watchDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-watch-drain-now-nodeps-'),
+    );
+    // A leftover watch file with an undelivered transition and a live binder.
+    // Enablement is deps presence, so reading the seam and finding it
+    // unprovisioned must stop delivery — not merely stop at the seam read.
+    // The entry has to survive untouched for a successor that does have deps.
+    const identity = { host: 'github.com', repo: 'o/r', number: 42 };
+    const pending = {
+      type: 'ci_failure' as const,
+      key: 'leftover-ci',
+      summary: 'CI failing: build',
+      detectedAt: '2026-08-01T00:00:00.000Z',
+    };
+    writePrWatchStateSync(watchDir, identity, {
+      pr: identity,
+      state: 'open',
+      headSha: 'a'.repeat(40),
+      checks: 'failing',
+      pending: [pending],
+    });
     const getPrDrainDeps = vi.fn(() => undefined);
-    // No observationEnabled and no deps: enablement is deps presence, which
-    // the daemon derives from the operator's subscription. The getter IS
-    // consulted — the gate moved from "never read the seam" to "read it and
-    // find it unprovisioned" — and a resume must still deliver nothing from
-    // watch files a previous owner left behind.
     const handle = startSessionPrRefreshTimer({
       workspaceRegistry: registry,
       env: {},
@@ -2793,8 +2810,14 @@ describe('startSessionPrRefreshTimer', () => {
     try {
       await handle?.drainNow(trustedCwd);
       expect(getPrDrainDeps).toHaveBeenCalled();
+      const after = readPrWatchStateSync(watchDir, identity);
+      expect(after.kind).toBe('state');
+      if (after.kind !== 'state') throw new Error('watch file vanished');
+      expect(after.state.pending).toEqual([pending]);
+      expect(after.state.delivered ?? []).toEqual([]);
     } finally {
       handle?.dispose();
+      await removeTempTree(watchDir);
     }
   });
 
@@ -3231,6 +3254,9 @@ describe('startSessionPrRefreshTimer', () => {
       pullRequests: [pr(42, 'open')],
     });
     const getPrWatchDeps = vi.fn(() => undefined);
+    const store = await import('./pr-watch-store.js');
+    const claim = vi.spyOn(store, 'claimPrWatchOwnershipSync');
+    const write = vi.spyOn(store, 'writePrWatchStateSync');
     vi.useFakeTimers();
 
     const handle = startSessionPrRefreshTimer({
@@ -3238,18 +3264,25 @@ describe('startSessionPrRefreshTimer', () => {
       env: {},
       getPrWatchDeps,
     });
-    await vi.advanceTimersByTimeAsync(60_000); // crosses the first-run delay
-    await vi.waitFor(() => {
-      expect(fetchGitHubPullRequestsMock).toHaveBeenCalled();
-    });
-    // Enablement is deps presence: the tick consults the seam, finds it
-    // unprovisioned, and does nothing further — no claim, no view, no
-    // watch-file write — while the state refresh below still runs.
-    expect(getPrWatchDeps).toHaveBeenCalled();
-    handle?.dispose();
+    try {
+      await vi.advanceTimersByTimeAsync(60_000); // crosses the first-run delay
+      await vi.waitFor(() => {
+        expect(fetchGitHubPullRequestsMock).toHaveBeenCalled();
+      });
+      // Enablement is deps presence: the tick consults the seam, finds it
+      // unprovisioned, and does nothing further. Pin each named effect, not
+      // just the seam read — a claim or a write would otherwise pass silently.
+      expect(getPrWatchDeps).toHaveBeenCalled();
+      expect(claim).not.toHaveBeenCalled();
+      expect(write).not.toHaveBeenCalled();
+    } finally {
+      handle?.dispose();
+      claim.mockRestore();
+      write.mockRestore();
+    }
   });
 
-  it('stopWatch reads no watch seam while the switch is off', async () => {
+  it('stopWatch reads no watch seam while no watch deps are provisioned', async () => {
     const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
     const registry = createWorkspaceRegistry([trustedRuntime]);
     const getPrWatchDeps = vi.fn(() => undefined);
@@ -3283,7 +3316,7 @@ describe('startSessionPrRefreshTimer', () => {
     }
   });
 
-  it('stopWatch stops the refresh timer while the switch is off', async () => {
+  it('stopWatch stops the refresh timer while no watch deps are provisioned', async () => {
     // The off path's early return calls the same dispose(); pin it by effect.
     // Stop before any tick runs, like 'stops ticking after dispose' — once a
     // sweep is in flight its `running` guard skips later ticks under fake
@@ -3587,7 +3620,7 @@ describe('startSessionPrRefreshTimer', () => {
     }
   });
 
-  it('never reads the PR-drain deps while the observation switch is off', async () => {
+  it('never reads the PR-drain deps while no watch deps are provisioned', async () => {
     const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
     const registry = createWorkspaceRegistry([trustedRuntime]);
     await seedPendingBinding(trustedRuntime, SESSION_A);
@@ -3607,8 +3640,8 @@ describe('startSessionPrRefreshTimer', () => {
     await vi.waitFor(() => {
       expect(fetchGitHubPullRequestsMock).toHaveBeenCalled();
     });
-    // The switch is off: the drain seam is never read (no drain, no admission,
-    // no restore, no deletion), exactly like the observation seam.
+    // No deps are provisioned: the drain seam is never read (no drain, no
+    // admission, no restore, no deletion), exactly like the observation seam.
     expect(getPrDrainDeps).not.toHaveBeenCalled();
     handle?.dispose();
   });
