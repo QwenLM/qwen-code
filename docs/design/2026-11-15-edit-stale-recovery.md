@@ -59,8 +59,9 @@ The shell tool's simulated `sed -i` edit also waits for a successful text Read.
 It supports regex substitution against the current file and writes the complete
 result; it does not use Edit's unique-literal recovery contract. A fresh
 fingerprint with a pending baseline reports that Read is required after recovery,
-rather than claiming that mtime or size changed. Actual drift and mismatched
-frozen snapshots retain the file-changed rejection.
+rather than claiming that mtime or size changed. Actual drift retains the drift
+message. Frozen-snapshot mismatches name the prepared snapshot, even when the
+cache is fresh; they still return `FILE_CHANGED_SINCE_READ`.
 
 A recovery decision captures a dev/inode/mtime/size snapshot. Post-read,
 confirmation and pre-write checks must match that snapshot. Passing

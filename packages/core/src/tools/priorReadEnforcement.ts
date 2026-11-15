@@ -71,6 +71,20 @@ function makeReadBaselineRejection(
   };
 }
 
+function makeSnapshotRejection(
+  filePath: string,
+  verb: PriorReadVerb,
+): PriorReadFailure {
+  return {
+    type: ToolErrorType.FILE_CHANGED_SINCE_READ,
+    rawMessage:
+      `File ${filePath} no longer matches the snapshot captured when this ` +
+      `change was prepared. Re-read it with the ${ToolNames.READ_FILE} tool ` +
+      `before ${verb} it.`,
+    displayMessage: `file changed since preparation; re-run ${ToolNames.READ_FILE} first.`,
+  };
+}
+
 function matchesStaleSnapshot(
   stats: fs.Stats,
   snapshot: StaleFileSnapshot,
@@ -308,7 +322,7 @@ export async function checkPriorRead(
     if (options.expectedStaleSnapshot !== undefined) {
       const rejection = makeStaleRejection(filePath, verb);
       if (!matchesStaleSnapshot(stats, options.expectedStaleSnapshot)) {
-        return { ok: false, ...rejection };
+        return { ok: false, ...makeSnapshotRejection(filePath, verb) };
       }
       return {
         ok: true,
@@ -330,10 +344,12 @@ export async function checkPriorRead(
         ? makeReadBaselineRejection(filePath, verb)
         : makeStaleRejection(filePath, verb);
     if (options.expectedStaleSnapshot !== undefined) {
+      if (!matchesStaleSnapshot(stats, options.expectedStaleSnapshot)) {
+        return { ok: false, ...makeSnapshotRejection(filePath, verb) };
+      }
       if (
         status.entry.lastReadAt !== undefined &&
-        status.entry.lastReadCacheable &&
-        matchesStaleSnapshot(stats, options.expectedStaleSnapshot)
+        status.entry.lastReadCacheable
       ) {
         return {
           ok: true,
@@ -342,7 +358,7 @@ export async function checkPriorRead(
           staleRejection: rejection,
         };
       }
-      return { ok: false, ...makeStaleRejection(filePath, verb) };
+      return { ok: false, ...rejection };
     }
     if (
       options.allowStaleRecovery &&

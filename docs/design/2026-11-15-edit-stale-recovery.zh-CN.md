@@ -41,8 +41,9 @@ Edit 准备期间内部读取磁盘不调用 `recordRead`，不能清除标记�
 
 Shell 工具模拟执行的 `sed -i` 编辑同样等待一次成功文本 Read。它对当前文件执行正则
 替换并写入完整结果，不使用 Edit 的唯一字面目标恢复合同。指纹 fresh 但基线待刷新时，
-错误说明恢复后需要 Read，不再声称 mtime 或 size 已变化；实际漂移及冻结快照不匹配
-仍返回文件已变更提示。
+错误说明恢复后需要 Read，不再声称 mtime 或 size 已变化。实际漂移保留漂移提示；
+冻结快照不匹配则明确指出准备时的快照，即使缓存 fresh 也仍返回
+`FILE_CHANGED_SINCE_READ`。
 
 恢复决定捕获 dev/inode/mtime/size 快照。读后、确认及写前检查必须匹配该快照。
 传入 `expectedStaleSnapshot` 本身会允许匹配的恢复继续执行，即使未传 `allowStaleRecovery`；

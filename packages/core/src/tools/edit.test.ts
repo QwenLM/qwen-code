@@ -2351,6 +2351,8 @@ describe('EditTool', () => {
             expect(result.error?.type).toBe(
               ToolErrorType.FILE_CHANGED_SINCE_READ,
             );
+            expect(result.llmContent).toContain('snapshot captured');
+            expect(result.llmContent).not.toContain('mtime or size changed');
             expect(readText(filePath)).toBe('header-v3\ntarget\n');
           } else {
             expect(result.error).toBeUndefined();
@@ -2358,6 +2360,31 @@ describe('EditTool', () => {
           }
         },
       );
+
+      it('reports a frozen snapshot mismatch after another recovered edit refreshes the fingerprint', async () => {
+        seedFile(filePath, 'header-v1\ntarget\n');
+        modifyExternally(filePath, 'header-v2\ntarget\n');
+        expect(
+          (await run(edit(filePath, 'target', 'updated'))).error,
+        ).toBeUndefined();
+        const pending = tool.build(edit(filePath, 'updated', 'final'));
+        await pending.getConfirmationDetails(new AbortController().signal);
+
+        expect(
+          (await run(edit(filePath, 'updated', 'concurrent update'))).error,
+        ).toBeUndefined();
+        const current = fileReadCache.check(fs.statSync(filePath));
+        expect(current.state).toBe('fresh');
+        if (current.state === 'fresh') {
+          expect(current.entry.readBaselineNeedsRefresh).toBe(true);
+        }
+
+        const result = await pending.execute(new AbortController().signal);
+        expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
+        expect(result.llmContent).toContain('snapshot captured');
+        expect(result.llmContent).not.toContain('mtime or size changed');
+        expect(readText(filePath)).toBe('header-v2\nconcurrent update\n');
+      });
 
       it('does not attach a stale warning to a fresh confirmation', async () => {
         seedFile(filePath, 'target\n');
@@ -2439,6 +2466,8 @@ describe('EditTool', () => {
         const result = await inv.execute(new AbortController().signal);
 
         expect(result.error?.type).toBe(ToolErrorType.FILE_CHANGED_SINCE_READ);
+        expect(result.llmContent).toContain('snapshot captured');
+        expect(result.llmContent).not.toContain('mtime or size changed');
         expect(readText(filePath)).toBe('header-v3\ntarget\n');
       });
 
