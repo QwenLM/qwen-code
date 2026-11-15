@@ -1989,7 +1989,7 @@ describe('serve fast path environment bootstrap', () => {
     });
   });
 
-  it('lets a trusted workspace general.language override the user scope', () => {
+  it('lets a workspace general.language override the user scope while folder trust is off', () => {
     // The daemon boot reads the bound workspace's merged settings, so this is
     // the value both PR-watch seams follow — daemon-wide, not per workspace.
     const qwenHome = useTempQwenHome();
@@ -2011,7 +2011,7 @@ describe('serve fast path environment bootstrap', () => {
     expect(settings.general?.language).toBe('zh');
   });
 
-  it('ignores an untrusted workspace general.language', () => {
+  it('ignores the workspace general.language when folder trust is on and no rule trusts it', () => {
     const qwenHome = useTempQwenHome();
     tempWorkspace = realpathSync(
       mkdtempSync(join(os.tmpdir(), 'qws-fast-path-language-untrusted-')),
@@ -2032,6 +2032,28 @@ describe('serve fast path environment bootstrap', () => {
     const settings = loadServeFastPathSettings(tempWorkspace);
 
     expect(settings.general?.language).toBe('en');
+  });
+
+  it('merges general per key across the user and workspace scopes', () => {
+    // Folder trust is off, so the workspace participates; each scope sets a
+    // different general key and both must survive the merge.
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-language-merge-')),
+    );
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ general: { language: 'zh' } }),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({ general: { chatRecording: false } }),
+    );
+
+    const settings = loadServeFastPathSettings(tempWorkspace);
+
+    expect(settings.general).toEqual({ language: 'zh', chatRecording: false });
   });
 
   it('retains unrelated boot settings when workspace startup channels are malformed', () => {

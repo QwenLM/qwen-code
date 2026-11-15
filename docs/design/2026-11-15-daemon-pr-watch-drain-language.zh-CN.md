@@ -62,20 +62,20 @@
 
 ## 涉及文件
 
-| 文件                                                              | 改动                                                                                                                           |
-| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `packages/cli/src/utils/channel-locale.ts`（新增）                | 零导入的 locale 解析器，从 channel runtime 移出                                                                                |
-| `packages/cli/src/commands/channel/runtime.ts`                    | 再导出该解析器，其两个既有导入方不变                                                                                           |
-| `packages/cli/src/serve/fast-path-settings.ts`                    | 启动设置面携带 `general.language`；读取器复制字符串、丢弃其余取值                                                              |
-| `packages/cli/src/serve/fast-path.test.ts`                        | 五个读取器用例：值被带出、非字符串被容忍且不丢弃 summary、chatRecording 与之共存、workspace 压过 user 的优先级及其不受信任镜像 |
-| `packages/cli/src/serve/run-qwen-serve.ts`                        | 启动时解析 locale 并传进 sources                                                                                               |
-| `packages/cli/src/serve/run-qwen-serve.pr-watch-shutdown.test.ts` | 以 `general.language: zh` 真实启动 serve，locale 到达两个 watch 接缝                                                           |
-| `packages/cli/src/serve/server/pr-watch-deps.ts`（+ 测试）        | sources 增加 `language`，带进两个接缝                                                                                          |
-| `packages/cli/src/serve/server/pr-watch-observation.ts`（+ 测试） | tick 与 sweep deps 增加 `language`；按语言渲染摘要                                                                             |
-| `packages/cli/src/serve/server/pr-watch-drain.ts`（+ 测试）       | drain deps 增加 `language`；信封、指引与来源说明的选择                                                                         |
-| `packages/cli/src/serve/server/pr-watch-drain.scenario.test.ts`   | 两个端到端语言场景，经真实 gh 子进程与真实 admission                                                                           |
-| `packages/cli/src/serve/server/session-pr-refresh.ts`（+ 测试）   | listing write 携带语言；两个 no-deps 用例断言其声称的效果；退役陈旧「switch」措辞                                              |
-| `packages/channels/github/src/GithubAdapter.ts`（+ 测试）         | 弃用谓词的 JSDoc 点名全部四个键；告警测试断言两个 limit 旋钮                                                                   |
+| 文件                                                              | 改动                                                                                                                                                     |
+| ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/cli/src/utils/channel-locale.ts`（新增）                | 零导入的 locale 解析器，从 channel runtime 移出                                                                                                          |
+| `packages/cli/src/commands/channel/runtime.ts`                    | 再导出该解析器，其两个既有导入方不变                                                                                                                     |
+| `packages/cli/src/serve/fast-path-settings.ts`                    | 启动设置面携带 `general.language`；读取器复制字符串、丢弃其余取值                                                                                        |
+| `packages/cli/src/serve/fast-path.test.ts`                        | 六个读取器用例：值被带出、非字符串被容忍且不丢弃 summary、chatRecording 与之共存、workspace 压过 user 的优先级及其信任开启镜像、general 跨作用域逐键合并 |
+| `packages/cli/src/serve/run-qwen-serve.ts`                        | 启动时解析 locale 并传进 sources                                                                                                                         |
+| `packages/cli/src/serve/run-qwen-serve.pr-watch-shutdown.test.ts` | 以 `general.language: zh` 真实启动 serve，locale 到达两个 watch 接缝                                                                                     |
+| `packages/cli/src/serve/server/pr-watch-deps.ts`（+ 测试）        | sources 增加 `language`，带进两个接缝                                                                                                                    |
+| `packages/cli/src/serve/server/pr-watch-observation.ts`（+ 测试） | tick 与 sweep deps 增加 `language`；按语言渲染摘要                                                                                                       |
+| `packages/cli/src/serve/server/pr-watch-drain.ts`（+ 测试）       | drain deps 增加 `language`；信封、指引与来源说明的选择                                                                                                   |
+| `packages/cli/src/serve/server/pr-watch-drain.scenario.test.ts`   | 两个端到端语言场景，经真实 gh 子进程与真实 admission                                                                                                     |
+| `packages/cli/src/serve/server/session-pr-refresh.ts`（+ 测试）   | listing write 携带语言；两个 no-deps 用例断言其声称的效果；退役陈旧「switch」措辞                                                                        |
+| `packages/channels/github/src/GithubAdapter.ts`（+ 测试）         | 弃用谓词的 JSDoc 点名全部四个键；告警测试断言两个 limit 旋钮                                                                                             |
 
 ## 关键设计决策
 
@@ -100,7 +100,7 @@
 - 单元（observation）：四种转换各自渲染其 zh 摘要；`en` 渲染与今天逐字节相同；缺省语言渲染英文；两种语言下转换 key 不变。
 - 单元（drain）：zh 语言选择 zh 信封、zh 角色指引与 zh 来源说明；摘要原样透传；缺省语言与今天逐字节相同。
 - 单元（deps）：sources 的语言到达两个接缝；缺省保持缺省。
-- 单元（启动设置与接线）：fast-path 读取器带出 `general.language`，并在不丢弃 summary 的前提下丢掉非字符串；受信任 workspace 的值覆盖 user 作用域，不受信任 workspace 的值被忽略（互为镜像臂，因此「完全忽略 workspace」无法让两者同时通过）；以 `general.language: zh` 与一个事件订阅真实启动 serve，解析出的 locale 到达 `getPrWatchDeps()` 与 `getPrDrainDeps()` 两者。
+- 单元（启动设置与接线）：fast-path 读取器带出 `general.language`，并在不丢弃 summary 的前提下丢掉非字符串；folder trust 关闭时 workspace 的值覆盖 user 作用域，开启且无规则信任该目录时同一值被忽略，且 `general` 在两个作用域间逐键合并；以 `general.language: zh` 与一个事件订阅真实启动 serve，解析出的 locale 到达 `getPrWatchDeps()` 与 `getPrDrainDeps()` 两者。
 - 单元（refresh）：两个 no-deps 用例通过对 store 下 spy 来断言其名字声称的效果——既不认领 owner 记录，也不写 watch 文件。夹具无法把文件种在无 deps 的 drain 会去看的位置，因为 `drainNow` 在 deps 门处返回，早于任何目录被解析。
 - 单元（adapter）：弃用告警测试同时断言 `prWatchLimit` 与 `prWatchBudgetReserve`，含一个只设 `prWatchLimit` 的用例。
 - 真实场景：场景套件用真实临时 watch 目录、真实 gh 子进程与真实 admission 驱动已发布的 observation 与 drain，locale 设在 deps 上，断言两种语言下投递的提示词文本。启动路径本身由上面的 serve 启动用例与读取器用例覆盖；本增量另跑了一个本地全链路探针（属验证探针，不是入库用例），从真实设置文件驱动已发布的解析器与 deps 构造器。另一个用例在检测与投递之间切换 locale，断言同一条提示词里英文信封包着中文摘要。
