@@ -33,7 +33,12 @@ class GetContextRemainingInvocation extends BaseToolInvocation<
   }
 
   async execute(): Promise<ToolResult> {
-    const chat = this.config.getLlmClient()?.getChat();
+    let chat;
+    try {
+      chat = this.config.getLlmClient()?.getChat();
+    } catch {
+      chat = undefined;
+    }
     if (!chat) {
       return {
         llmContent: 'No active chat session.',
@@ -58,7 +63,7 @@ class GetContextRemainingInvocation extends BaseToolInvocation<
       : '';
     const message = [
       `Context window: ${snapshot.contextWindowTokens} tokens`,
-      `Used: ${used} tokens${estimateNote}`,
+      `Used: ${used} tokens${used === 0 ? ' (no measurement yet — this is a fresh session or the first request is in flight)' : estimateNote}`,
       `Remaining: ${remaining} tokens`,
       `Auto-compaction fires near ${autoCompactAt} tokens used; call request_compaction earlier if a large task is coming and its summary should capture specific state.`,
     ].join('\n');
@@ -78,10 +83,9 @@ export class GetContextRemainingTool extends BaseDeclarativeTool<
       ToolDisplayNames.GET_CONTEXT_REMAINING,
       'Check how much of the context window remains before auto-compaction fires. ' +
         'Use before starting a large sub-task (a long file read, a big refactor, ' +
-        'many tool results) to decide whether to request compaction first, wrap ' +
-        'up, or proceed. Returns the window size, tokens used (flagged as an ' +
+        'many tool results) to decide whether to wrap up, start a sub-task, or proceed. Returns the window size, tokens used (flagged as an ' +
         'estimate until the model reports real counts), tokens remaining, and ' +
-        'the level where auto-compaction will trigger. Read-only; costs no ' +
+        'the level where auto-compaction will trigger. Read-only. ' +
         'tokens beyond this declaration.',
       Kind.Read,
       {
