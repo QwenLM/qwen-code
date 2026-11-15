@@ -678,6 +678,38 @@ describe('managed DingTalk adapter outbox', () => {
     await adapter.disconnect();
   });
 
+  it('the dropped orphan entry is gone from persisted outbound (R1-14)', async () => {
+    const cwd = tempCwd();
+    const first = await connectedAdapter(cwd);
+    first.plane.setReceiptError(() =>
+      Object.assign(new Error('answer lost'), { status: 503 }),
+    );
+    first.plane.enqueue([delivery('d-A', 1), delivery('d-B', 1)]);
+    await first.adapter.tick();
+    expect(first.fake.sent).toHaveLength(2);
+    first.plane.setReceiptError((id) =>
+      id === 'd-A'
+        ? Object.assign(new Error('gone'), {
+            status: 404,
+            code: 'delivery_not_found',
+          })
+        : undefined,
+    );
+    await first.adapter.tick();
+    expect(first.plane.receipts.map((entry) => entry.deliveryId)).toEqual([
+      'd-B',
+    ]);
+    await first.adapter.disconnect();
+    // Settling d-B this tick is not enough: the dropped d-A must also be gone
+    // from the persisted ledger, or a restart would re-drive it. Neither entry
+    // remains, so the restart replays nothing and re-sends nothing.
+    const second = await connectedAdapter(cwd);
+    await second.adapter.tick();
+    expect(second.plane.receipts).toHaveLength(0);
+    expect(second.fake.sent).toHaveLength(0);
+    await second.adapter.disconnect();
+  });
+
   it('re-registers after an orphan receipt is refused as not registered', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
     plane.setReceiptError(() =>
