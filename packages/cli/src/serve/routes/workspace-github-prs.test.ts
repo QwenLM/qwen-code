@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createGitHubPullRequest,
   fetchGitHubPullRequests,
+  fetchGitHubPullRequestFiles,
   getDefaultBranch,
 } from '@qwen-code/qwen-code-core';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
@@ -26,6 +27,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@qwen-code/qwen-code-core')>()),
   createGitHubPullRequest: vi.fn(),
   fetchGitHubPullRequests: vi.fn(),
+  fetchGitHubPullRequestFiles: vi.fn(),
   getDefaultBranch: vi.fn(),
 }));
 
@@ -39,6 +41,7 @@ vi.mock('@qwen-code/qwen-code-core/utils/debugLogger.js', () => ({
 
 const createGitHubPullRequestMock = vi.mocked(createGitHubPullRequest);
 const fetchGitHubPullRequestsMock = vi.mocked(fetchGitHubPullRequests);
+const fetchGitHubPullRequestFilesMock = vi.mocked(fetchGitHubPullRequestFiles);
 const getDefaultBranchMock = vi.mocked(getDefaultBranch);
 
 const passthroughMutate = () =>
@@ -533,6 +536,131 @@ describe('workspace GitHub PR routes', () => {
 
     expect(response.status).toBe(200);
     expect(response.body).toEqual({ branch: 'origin/main' });
+  });
+
+  it('returns a PR file list and scale for a trusted workspace', async () => {
+    fetchGitHubPullRequestFilesMock.mockResolvedValue({
+      kind: 'ok',
+      files: {
+        files: [{ path: 'src/a.ts', additions: 10, deletions: 2 }],
+        hiddenCount: 0,
+        additions: 10,
+        deletions: 2,
+        headSha: 'abc1234',
+        baseRefName: 'main',
+      },
+    });
+    const app = mount();
+
+    const response = await request(app).get(
+      '/workspaces/primary/github/prs/42/files',
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers['cache-control']).toContain('no-store');
+    expect(response.body).toEqual({
+      v: 1,
+      workspaceCwd: '/work/main',
+      available: true,
+      files: [{ path: 'src/a.ts', additions: 10, deletions: 2 }],
+      hiddenCount: 0,
+      additions: 10,
+      deletions: 2,
+      headSha: 'abc1234',
+      baseRefName: 'main',
+    });
+    expect(fetchGitHubPullRequestFilesMock).toHaveBeenCalledWith(
+      '/work/main',
+      42,
+      undefined,
+    );
+  });
+
+  it('returns available:false for a PR files request outside a git repo', async () => {
+    fetchGitHubPullRequestFilesMock.mockResolvedValue({ kind: 'not_a_repo' });
+    const app = mount();
+
+    const response = await request(app).get(
+      '/workspaces/primary/github/prs/42/files',
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.available).toBe(false);
+    expect(response.body.files).toEqual([]);
+  });
+
+  it('rejects a non-integer PR number before calling gh', async () => {
+    const app = mount();
+
+    for (const bad of ['abc', '0', '-3', '1.5']) {
+      const response = await request(app).get(
+        `/workspaces/primary/github/prs/${bad}/files`,
+      );
+      expect(response.status).toBe(400);
+      expect(response.body.errorKind).toBe('parse_error');
+    }
+    expect(fetchGitHubPullRequestFilesMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects an untrusted workspace before fetching PR files', async () => {
+    const app = express();
+    registerWorkspaceQualifiedGitHubPrsRoutes(app, {
+      workspaceRegistry: registry([
+        runtime('primary', '/work/main', true),
+        runtime('untrusted', '/work/untrusted', false),
+      ]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    const response = await request(app).get(
+      '/workspaces/untrusted/github/prs/42/files',
+    );
+
+    expect(response.status).toBe(403);
+    expect(response.body.code).toBe('untrusted_workspace');
+    expect(fetchGitHubPullRequestFilesMock).not.toHaveBeenCalled();
+  });
+
+  it('maps a missing gh binary to github_cli_unavailable for PR files', async () => {
+    fetchGitHubPullRequestFilesMock.mockResolvedValue({
+      kind: 'cli_unavailable',
+    });
+    const app = mount();
+
+    const response = await request(app).get(
+      '/workspaces/primary/github/prs/42/files',
+    );
+
+    expect(response.status).toBe(502);
+    expect(response.body.code).toBe('github_cli_unavailable');
+  });
+
+  it('redacts a gh failure message and logs it server-side', async () => {
+    const raw = 'spawn /Users/alice/.local/bin/gh EACCES';
+    fetchGitHubPullRequestFilesMock.mockResolvedValue({
+      kind: 'failed',
+      message: raw,
+      gitRoot: '/work/main',
+      binary: '/Users/alice/.local/bin/gh',
+    });
+    const app = mount();
+
+    const response = await request(app).get(
+      '/workspaces/primary/github/prs/42/files',
+    );
+
+    expect(response.status).toBe(502);
+    expect(response.body.code).toBe('github_pr_files_failed');
+    expect(response.body.error).not.toContain('/Users/alice');
+    expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+      'GitHub PR files failed',
+      {
+        workspaceCwd: '/work/main',
+        gitRoot: '/work/main',
+        message: raw,
+      },
+    );
   });
 });
 

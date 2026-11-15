@@ -2681,6 +2681,9 @@ function serializeArtifactPanelTabs(
           : [];
       case 'workflow':
         return [{ id, kind: tab.kind, title, sessionId: tab.sessionId }];
+      case 'change_overview':
+        // Refetched from git on open; nothing durable to persist.
+        return [];
       case 'pending': {
         const common = {
           id,
@@ -6669,6 +6672,27 @@ export function App({
     latestReviewTurnId,
     openReviewPanel,
   ]);
+  const openChangeOverviewPanel = useCallback(() => {
+    const cwd = activeWorkspaceCwd;
+    if (!cwd) return;
+    const tab: ArtifactPanelTab = {
+      id: 'change_overview',
+      kind: 'change_overview',
+      title: t('changeOverview.title'),
+      workspaceCwd: cwd,
+      ...(connection.sessionId ? { sessionId: connection.sessionId } : {}),
+    };
+    setArtifactPanelTabs((tabs) =>
+      tabs.some((item) => item.id === tab.id)
+        ? tabs.map((item) => (item.id === tab.id ? tab : item))
+        : [tab, ...tabs],
+    );
+    setActiveArtifactPanelTabId(tab.id);
+    setArtifactPanelWidth((width) =>
+      artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+    );
+    setArtifactPanelOpen(true);
+  }, [activeWorkspaceCwd, connection.sessionId, getDefaultReviewPanelWidth, t]);
   const openScheduledTaskPanel = useCallback(
     (
       task: TurnOutputScheduledTask,
@@ -23221,6 +23245,11 @@ export function App({
     onWebPreviewChange: updateWebPreviewTab,
     latestReviewAvailable: latestReviewChanges.length > 0,
     onOpenLatestReview: openLatestReviewPanel,
+    // Available for any workspace; the panel itself reports non-git workspaces.
+    // Deliberately not gated on the branch chip's git status, which is only
+    // fetched while that chip (or the environment panel) is visible.
+    changeOverviewAvailable: Boolean(activeWorkspaceCwd),
+    onOpenChangeOverview: openChangeOverviewPanel,
     onOpenTrajectory: connection.sessionId
       ? () => openTrajectoryPanel(connection.sessionId!)
       : undefined,

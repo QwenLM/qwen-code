@@ -152,6 +152,7 @@ import type {
   DaemonGitRemotesResult,
   DaemonGitRemoteMutationResult,
   DaemonGitHubPullRequestList,
+  DaemonGitHubPullRequestFiles,
   DaemonGitHubPullRequestCreateResult,
   DaemonWorkspaceMcpStatus,
   DaemonWorkspaceDirectories,
@@ -8969,6 +8970,24 @@ export class WorkspaceDaemonClient {
       this.workspaceSelector,
       '/github/prs',
       'GET /workspaces/:workspace/github/prs',
+      { mode: 'rest' },
+    );
+  }
+
+  workspaceGitHubPullRequestFiles(
+    number: number,
+    cwd?: string,
+    sessionId?: string,
+  ): Promise<DaemonGitHubPullRequestFiles> {
+    const params = new URLSearchParams();
+    if (cwd != null) params.set('cwd', cwd);
+    if (sessionId != null) params.set('sessionId', sessionId);
+    const query = params.toString();
+    const suffix = `/github/prs/${number}/files${query ? `?${query}` : ''}`;
+    return this.client.workspaceJsonRequest<DaemonGitHubPullRequestFiles>(
+      this.workspaceSelector,
+      suffix,
+      'GET /workspaces/:workspace/github/prs/:number/files',
       { mode: 'rest' },
     );
   }

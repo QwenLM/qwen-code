@@ -8,6 +8,7 @@ import type { Application, RequestHandler } from 'express';
 import {
   GITHUB_PR_ERROR_MESSAGE_MAX,
   fetchGitHubPullRequests,
+  fetchGitHubPullRequestFiles,
   createGitHubPullRequest,
   getDefaultBranch,
   type FetchGitHubPullRequestsResult,
@@ -191,6 +192,107 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
       deps.sendBridgeError(res, err, { route });
     }
   });
+
+  app.get(
+    '/workspaces/:workspace/github/prs/:number/files',
+    async (req, res) => {
+      const route = 'GET /workspaces/:workspace/github/prs/:number/files';
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        deps.workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime) return;
+      if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
+
+      const number = Number(req.params['number']);
+      if (!Number.isInteger(number) || number <= 0) {
+        res.status(400).json({
+          errorKind: 'parse_error',
+          error: 'PR number must be a positive integer',
+          status: 400,
+        });
+        return;
+      }
+
+      const cwd = await resolveSessionManagedGitCwdForRoute(
+        req,
+        res,
+        runtime,
+        route,
+        deps.sendBridgeError,
+      );
+      if (cwd === undefined) return;
+
+      applyReadHeaders(res);
+      try {
+        const result = await fetchGitHubPullRequestFiles(
+          cwd,
+          number,
+          runtime.env.effectiveEnv,
+        );
+        switch (result.kind) {
+          case 'ok':
+            res.status(200).json({
+              v: 1,
+              workspaceCwd: runtime.workspaceCwd,
+              available: true,
+              ...result.files,
+            });
+            return;
+          case 'not_a_repo':
+            res.status(200).json({
+              v: 1,
+              workspaceCwd: runtime.workspaceCwd,
+              available: false,
+              files: [],
+              hiddenCount: 0,
+              additions: 0,
+              deletions: 0,
+              headSha: '',
+              baseRefName: '',
+            });
+            return;
+          case 'cli_unavailable':
+            res.status(502).json({
+              error:
+                'The GitHub CLI (gh) is not installed on the daemon host; install it and run `gh auth login`.',
+              code: 'github_cli_unavailable',
+              status: 502,
+            });
+            return;
+          case 'failed': {
+            debugLogger.debug('GitHub PR files failed', {
+              workspaceCwd: runtime.workspaceCwd,
+              gitRoot: result.gitRoot,
+              message: result.message,
+            });
+            const error = sweepAbsolutePaths(
+              sanitizeMessage(
+                sanitizeMessage(
+                  redactKnownValue(result.message, result.binary),
+                  runtime.workspaceCwd,
+                ),
+                result.gitRoot,
+              ),
+            ).slice(0, GITHUB_PR_ERROR_MESSAGE_MAX);
+            res.status(502).json({
+              error,
+              code: 'github_pr_files_failed',
+              status: 502,
+            });
+            return;
+          }
+          default:
+            throw new Error(
+              `unexpected fetchGitHubPullRequestFiles result: ${JSON.stringify(result)}`,
+            );
+        }
+      } catch (err) {
+        deps.sendBridgeError(res, err, { route });
+      }
+    },
+  );
 
   app.post(
     '/workspaces/:workspace/github/prs/create',

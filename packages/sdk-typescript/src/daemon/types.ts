@@ -711,6 +711,30 @@ export interface DaemonGitHubPullRequestList {
   pullRequests: DaemonGitHubPullRequest[];
 }
 
+/** One changed file within a pull request's file list. */
+export interface DaemonGitHubPullRequestFile {
+  path: string;
+  additions: number;
+  deletions: number;
+}
+
+/** Response from `GET /workspaces/:workspace/github/prs/:number/files`. */
+export interface DaemonGitHubPullRequestFiles {
+  v: 1;
+  workspaceCwd: string;
+  /** `false` when the workspace is not a git repository. */
+  available: boolean;
+  files: DaemonGitHubPullRequestFile[];
+  /** Rows dropped because the per-file list is capped. */
+  hiddenCount: number;
+  /** PR-wide totals (cover hidden rows too). */
+  additions: number;
+  deletions: number;
+  /** The PR head commit (`headRefOid`), for scoping commit fallback. */
+  headSha: string;
+  baseRefName: string;
+}
+
 /** Response from `POST /workspaces/:workspace/github/prs/create`. */
 export interface DaemonGitHubPullRequestCreateResult {
   url: string;

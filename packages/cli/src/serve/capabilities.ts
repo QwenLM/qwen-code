@@ -310,10 +310,14 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // release lookup, workflow download, and `.gitignore` update logic.
   workspace_github_setup: { since: 'v1' },
   // `GET /workspaces/:workspace/github/prs` lists the open pull requests
-  // of the workspace's GitHub remote via the `gh` CLI (read-only). The
-  // tag means the route contract exists; runtime availability of `gh`
+  // of the workspace's GitHub remote via the `gh` CLI (read-only), and
+  // `GET /workspaces/:workspace/github/prs/:number/files` returns one PR's
+  // changed-file list and +/- scale for the delivery-unit change overview.
+  // The tag means the route contract exists; runtime availability of `gh`
   // and its auth is reported per-request through the
-  // `github_cli_unavailable` / `github_prs_failed` error codes.
+  // `github_cli_unavailable` / `github_prs_failed` error codes. Daemons
+  // predating the files route answer it with 404, which the overview treats
+  // as "file list unavailable" rather than a hard failure.
   workspace_github_prs: { since: 'v1' },
   // `GET /workspaces/:workspace/git/worktrees` lists every worktree of the
   // workspace's repository, `GET .../git/worktrees/status?path=` reads one

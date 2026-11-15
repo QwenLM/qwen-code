@@ -2245,6 +2245,17 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   // the code-review result view (`codeReview.*`) took over the word.
   'turnOutputs.review': 'Changes',
   'turnOutputs.reviewLatest': 'View recent file changes',
+  'changeOverview.title': 'Change overview',
+  'changeOverview.uncommitted': 'Uncommitted',
+  'changeOverview.loading': 'Loading changes…',
+  'changeOverview.notGit': 'This workspace is not a git repository.',
+  'changeOverview.empty': 'No changes in this scope.',
+  'changeOverview.files': (v) => `${v?.count ?? 0} files`,
+  'changeOverview.prUnavailable':
+    'File list unavailable (gh missing, or the daemon predates this route).',
+  'changeOverview.refresh': 'Refresh',
+  'changeOverview.openPr': 'Open PR',
+  'changeOverview.hiddenFiles': (v) => `…and ${v?.count ?? 0} more files`,
   'codeReview.authoritativeVerdict': 'Authoritative verdict',
   'codeReview.targetEffort': (v) =>
     `Target: ${v?.target ?? ''} · Effort: ${v?.effort ?? ''}`,
@@ -7427,6 +7438,17 @@ const ZH: Messages = {
   // 代码审查结果视图使用 `codeReview.*`，请勿“修正”此不一致。
   'turnOutputs.review': '文件更改',
   'turnOutputs.reviewLatest': '查看最近文件修改',
+  'changeOverview.title': '变更总览',
+  'changeOverview.uncommitted': '未提交',
+  'changeOverview.loading': '正在加载变更…',
+  'changeOverview.notGit': '当前工作区不是 git 仓库。',
+  'changeOverview.empty': '该范围暂无变更。',
+  'changeOverview.files': (v) => `${v?.count ?? 0} 个文件`,
+  'changeOverview.prUnavailable':
+    '文件列表不可用（缺少 gh，或 daemon 版本早于该路由）。',
+  'changeOverview.refresh': '刷新',
+  'changeOverview.openPr': '打开 PR',
+  'changeOverview.hiddenFiles': (v) => `…另有 ${v?.count ?? 0} 个文件`,
   'codeReview.authoritativeVerdict': '权威裁决',
   'codeReview.targetEffort': (v) =>
     `目标：${v?.target ?? ''} · 强度：${v?.effort ?? ''}`,
