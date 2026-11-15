@@ -60,7 +60,8 @@ interface GoalsDialogProps {
   /** Forces all goal listing through this workspace's route. */
   lockedWorkspace?: DaemonWorkspaceCapability;
   /** The workspace the create form defaults to (the App's currently selected
-   * workspace). Falls back to the primary when absent or not operable. */
+   * workspace). Falls back to a creatable primary, else the first creatable
+   * entry, when absent or not creatable. */
   defaultWorkspaceCwd?: string;
   onError: (error: unknown, fallback: string) => void;
 }
@@ -176,6 +177,18 @@ export function GoalsDialog({
   )
     ? formWorkspaceCwd
     : defaultCreateWorkspaceCwd;
+
+  // Retire the no-creatable refusal once a creatable target reappears (a
+  // capabilities refresh grants trust or registers a workspace); unrelated
+  // form errors are left alone.
+  const workspaceUnavailableMessage = t('goals.error.workspaceUnavailable');
+  useEffect(() => {
+    if (effectiveFormWorkspaceCwd) {
+      setFormError((prev) =>
+        prev === workspaceUnavailableMessage ? null : prev,
+      );
+    }
+  }, [effectiveFormWorkspaceCwd, workspaceUnavailableMessage]);
 
   const [now, setNow] = useState(() => Date.now());
 
@@ -503,13 +516,23 @@ export function GoalsDialog({
                   }
                 >
                   {labeledWorkspaces
-                    .filter((ws) => ws.trusted !== false)
+                    .filter((ws) =>
+                      creatableWorkspaces.some((c) => c.id === ws.id),
+                    )
                     .map((ws) => (
                       <option key={ws.id} value={ws.cwd}>
                         {ws.label}
                       </option>
                     ))}
                 </select>
+                {creatableWorkspaces.length === 0 && (
+                  <span
+                    className={styles.formError}
+                    data-testid="goals-no-creatable"
+                  >
+                    {workspaceUnavailableMessage}
+                  </span>
+                )}
               </label>
             )}
             <label className={styles.field}>

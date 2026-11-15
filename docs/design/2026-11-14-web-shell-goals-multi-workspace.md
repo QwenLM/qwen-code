@@ -49,13 +49,17 @@ lookup.) This design preserves each surface's existing gate.
   (the primary plus every trusted secondary), each card tagged with its
   workspace when more than one workspace is present.
 - The create form can target any trusted local workspace; the default
-  stays the currently selected workspace when it is creatable, else the
-  primary. The untrusted primary stays in the aggregated listing so its
-  failure is visible, but is never a create target.
+  stays the currently selected workspace when it is creatable, else a
+  creatable primary, else the first creatable entry. The untrusted primary
+  stays in the aggregated listing so its failure is visible, but is never
+  a create target.
 - Pause / resume / edit / clear keep working for goals in any workspace
   (the per-session control routes already resolve the owner).
 - Single-workspace deployments keep today's behavior and chrome (no
-  badges, no picker). A deployment locked to the primary keeps the
+  badges, no picker) — except a deployment whose only workspace is
+  untrusted or remote, where the New form now reports
+  `goals.error.workspaceUnavailable` instead of silently doing nothing.
+  A deployment locked to the primary keeps the
   unqualified route; one locked to a secondary lists through that
   workspace's qualified route, still without badges or a picker.
 
@@ -165,9 +169,12 @@ ordinaryWorkspaces`, and `lockedWorkspaceCapability`).
   that removes or untrusts the selected workspace reconciles both the
   rendered `<select>` and the submit (without it, the control falls back
   to its first option while the submit still sends the vanished cwd).
-  When no workspace is creatable at all, the submit surfaces the
-  translated `goals.error.workspaceUnavailable` refusal instead of a
-  silent no-op. Picker and badge labels go through
+  When the daemon advertises workspaces but none is creatable, the form
+  shows the translated `goals.error.workspaceUnavailable` both as an
+  inline hint under the empty picker and on submit, instead of a silent
+  no-op; the refusal retires once a creatable target reappears. A daemon
+  advertising no workspace list keeps the legacy submit-undefined shape.
+  Picker and badge labels go through
   `disambiguateWorkspaceLabels` so two checkouts sharing a basename stay
   distinguishable in a native `<select>` (which cannot carry tooltips).
   Edit form: no picker — the goal's session already owns its workspace.
@@ -295,7 +302,9 @@ display names come from the existing `workspaceLabel` /
 - One workspace failing to list does not blank the others; the error and
   dropped counts surface.
 - Single-workspace views are unchanged (no badges, no picker, unqualified
-  route). A deployment locked to the primary keeps the unqualified route;
+  route), except that an only-untrusted-or-remote workspace now gets the
+  `goals.error.workspaceUnavailable` refusal on submit instead of a silent
+  no-op. A deployment locked to the primary keeps the unqualified route;
   one locked to a secondary uses that workspace's qualified route, with no
   badges and no picker.
 - The primary `GET /goals` response contract is unchanged.

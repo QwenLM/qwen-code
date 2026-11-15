@@ -45,11 +45,13 @@ scheduled tasks 回 503，goals primary 列举不做运行时查询。）本设�
 - Goals 页列出每个可操作 workspace（primary 加所有受信 secondary）的非终
   态 Goal；存在多个 workspace 时每张卡片标注所属 workspace。
 - 创建表单可指向任一受信本地 workspace；默认仍是当前选中的 workspace
-  （若可创建），否则 primary。未受信 primary 留在聚合列举里让其失败可见，
-  但绝不成为创建目标。
+  （若可创建），否则可创建的 primary，再否则第一个可创建项。未受信
+  primary 留在聚合列举里让其失败可见，但绝不成为创建目标。
 - 暂停 / 恢复 / 编辑 / 清除对任何 workspace 的 Goal 保持可用（会话级控制
   路由已能解析属主）。
-- 单 workspace 部署保持今天的行为与外观（无徽章、无选择器）。锁定到
+- 单 workspace 部署保持今天的行为与外观（无徽章、无选择器）——唯一例外
+  是仅有的 workspace 未受信或远程时，新建表单现在报
+  `goals.error.workspaceUnavailable`，而不是静默无操作。锁定到
   primary 的部署保持无后缀路由；锁定到 secondary 的部署经该 workspace 的
   限定路由列举，同样无徽章、无选择器。
 
@@ -143,8 +145,10 @@ ordinaryWorkspaces`，以及 `lockedWorkspaceCapability`）。
   `effectiveFormWorkspaceCwd`：选择仍可创建时用选择，否则用默认——
   capabilities 刷新移除或撤销所选 workspace 的信任时，渲染的 `<select>`
   与提交一并回退（否则控件会落到第一项、提交却仍是已消失的 cwd）。
-  完全没有可创建 workspace 时，提交显示已翻译的
-  `goals.error.workspaceUnavailable` 拒绝提示，而不是静默无操作。选择器
+  daemon 宣告了 workspace 但无一可创建时，表单在空选择器下方内联提示
+  并在提交时显示已翻译的 `goals.error.workspaceUnavailable`，而不是静默
+  无操作；可创建目标重新出现后该拒绝提示自动退役。不宣告 workspace 列表
+  的 daemon 保持 legacy 的提交 undefined 形状。选择器
   与徽章标签经 `disambiguateWorkspaceLabels` 消歧，两个同 basename 的
   checkout 在原生 `<select>`（无法承载 tooltip）里仍可区分。编辑表单无
   选择器——Goal 的会话已确定其 workspace。
@@ -171,7 +175,7 @@ ordinaryWorkspaces`，以及 `lockedWorkspaceCapability`）。
 ### i18n
 
 en、zh、ru 三个语言包各新增 `goals.workspace`（选择器标签）、
-`goals.workspacesSkipped`（被跳过 workspace 提示，「未受信或远程」）与
+`goals.workspacesSkipped`（被跳过 workspace 提示，「不受信任或远程」）与
 `goals.error.workspaceUnavailable`——ru 语言包翻译了整个 Goals 对话框，
 因此补全这三个键，而不是在整片俄文里留一个英文回退；ru 提示的名词经
 `ruPlural` 变格。workspace 显示名来自现有 `workspaceLabel` /
@@ -251,7 +255,9 @@ en、zh、ru 三个语言包各新增 `goals.workspace`（选择器标签）、
 - 经选择器创建的 Goal 落在所选 workspace，页面下次轮询即列出。
 - 暂停/恢复/编辑/清除对 secondary workspace 的 Goal 可用。
 - 单个 workspace 列举失败不清空其他 workspace；错误与丢弃计数可见。
-- 单 workspace 视图不变（无徽章、无选择器、无后缀路由）。锁定到 primary
+- 单 workspace 视图不变（无徽章、无选择器、无后缀路由），唯一例外是仅
+  有的 workspace 未受信或远程时，提交现在报
+  `goals.error.workspaceUnavailable` 而非静默无操作。锁定到 primary
   的部署保持无后缀路由；锁定到 secondary 的部署走该 workspace 的限定路
   由，无徽章、无选择器。
 - primary `GET /goals` 响应契约不变。

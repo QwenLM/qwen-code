@@ -41,6 +41,7 @@ import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeWithLiveCompatibilityFromParam,
   sendConversationRuntimeUnavailable,
+  sendDaemonDrainingError,
   sendGenerationClosedError,
   sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
@@ -281,17 +282,7 @@ export function registerWorkspaceQualifiedGoalsRoutes(
     try {
       await gate.run(listing);
     } catch (err) {
-      if (
-        err &&
-        typeof err === 'object' &&
-        (err as { code?: unknown }).code === 'daemon_draining'
-      ) {
-        res.status(503).json({
-          error: 'The daemon is draining and no longer accepts work.',
-          code: 'daemon_draining',
-        });
-        return;
-      }
+      if (sendDaemonDrainingError(res, err)) return;
       throw err;
     }
   });

@@ -1436,6 +1436,59 @@ describe('GoalsDialog multi-workspace', () => {
     );
   });
 
+  it('retires the no-creatable refusal once a creatable target reappears', async () => {
+    // The refusal must not outlive its condition: a capabilities refresh
+    // that grants trust re-enables the picker, and the stale alert must
+    // clear without another submit. Removing the retirement effect reds
+    // this case.
+    const onCreateGoal = vi.fn().mockResolvedValue(undefined);
+    await mount([], {
+      workspaces: [{ ...primaryWs, trusted: false }, untrustedWs],
+      onCreateGoal,
+      listGoalsByWorkspace: {},
+    });
+
+    click(findButton('New goal'));
+    setTextarea('ship it');
+    click(findButton('Set goal'));
+    await flush();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'unavailable or untrusted',
+    );
+
+    await act(async () => {
+      root!.render(
+        <I18nProvider language="en">
+          <GoalsDialog
+            onCreateGoal={onCreateGoal}
+            onOpenSession={vi.fn()}
+            onError={vi.fn()}
+            workspaces={[{ ...primaryWs, trusted: false }, secondaryWs]}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+    expect(document.querySelector('select')!.value).toBe('/w-secondary');
+  });
+
+  it('explains the empty picker inline when nothing is creatable', async () => {
+    // The disabled empty picker must carry the reason before any submit,
+    // not only after a dead-button click.
+    await mount([], {
+      workspaces: [{ ...primaryWs, trusted: false }, untrustedWs],
+      listGoalsByWorkspace: {},
+    });
+
+    click(findButton('New goal'));
+    const hint = document.querySelector('[data-testid="goals-no-creatable"]');
+    expect(hint).not.toBeNull();
+    expect(hint!.textContent).toContain('unavailable or untrusted');
+    expect(document.querySelector('select')!.disabled).toBe(true);
+  });
+
   it('reconciles a vanished selection with the creatable set for control and submit', async () => {
     // A capabilities refresh can drop the selected workspace while the form
     // stays open. Both the rendered select and the submitted cwd must fall

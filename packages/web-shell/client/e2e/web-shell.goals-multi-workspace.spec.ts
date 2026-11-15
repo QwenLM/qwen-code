@@ -136,7 +136,7 @@ test('the create form targets the picked workspace @smoke', async ({
   ).not.toContain('ship the secondary goal');
 });
 
-test('pausing a secondary goal uses its own session route', async ({
+test('pausing a secondary goal uses its own session route @smoke', async ({
   page,
   baseURL,
 }) => {
@@ -171,7 +171,7 @@ test('pausing a secondary goal uses its own session route', async ({
   ).toBeVisible();
 });
 
-test('one workspace failing keeps the others listed', async ({
+test('one workspace failing keeps the others listed @smoke', async ({
   page,
   baseURL,
 }) => {
@@ -197,7 +197,7 @@ test('one workspace failing keeps the others listed', async ({
   await expect(page.getByText('secondary listing exploded')).toBeVisible();
 });
 
-test('an untrusted secondary is neither listed nor requested', async ({
+test('an untrusted secondary is neither listed nor requested @smoke', async ({
   page,
   baseURL,
 }) => {
@@ -223,7 +223,7 @@ test('an untrusted secondary is neither listed nor requested', async ({
   expect(status).toBe(403);
 });
 
-test('an advertised workspace with no goals lists empty, not an error', async ({
+test('an advertised workspace with no goals lists empty, not an error @smoke', async ({
   page,
   baseURL,
 }) => {
@@ -239,7 +239,7 @@ test('an advertised workspace with no goals lists empty, not an error', async ({
   await expect(page.getByTestId('goals-skipped')).toHaveCount(0);
 });
 
-test('a single workspace keeps the plain primary-only view', async ({
+test('a single workspace keeps the plain primary-only view @smoke', async ({
   page,
   baseURL,
 }) => {
@@ -263,7 +263,7 @@ test('a single workspace keeps the plain primary-only view', async ({
   ).toHaveLength(0);
 });
 
-test('both surfaces agree on the primary goal even if the map carries a primary key', async ({
+test('both surfaces agree on the primary goal even if the map carries a primary key @smoke', async ({
   page,
   baseURL,
 }) => {
