@@ -40,7 +40,7 @@ The table describes the tree before this increment.
 
 ### One locale, resolved at boot
 
-`run-qwen-serve.ts` resolves `resolveChannelLocale(bootSettings?.general?.language)` next to the existing `resolveSessionPrWatchConfig` call and carries it into `prWatchSources`. Both seams read the same value, so within one boot the observation and the drain cannot disagree about the locale. Across a restart they can: a summary persisted under the old locale is delivered inside an envelope composed under the new one, which is the intended split.
+`run-qwen-serve.ts` resolves `resolveChannelLocale(bootSettings?.general?.language)` next to the existing `resolveSessionPrWatchConfig` call and carries it into `prWatchSources`; `bootSettings` is the bound workspace's merged settings, the first `--workspace`, and `prWatchSources` is the single daemon-wide sources object. Both seams read the same value, so within one boot the observation and the drain cannot disagree about the locale. Across a restart they can: a summary persisted under the old locale is delivered inside an envelope composed under the new one, which is the intended split.
 
 ### The observation localizes the summary at detection time
 
@@ -91,7 +91,7 @@ Every new field is optional and defaults to `en`. A caller that does not set it 
 ## Constraints and risks
 
 - The locale is frozen at boot. An operator who changes `general.language` sees the new language only after a daemon restart, which is the same trade the channel lane already documents — and even then a summary already queued keeps its detection language.
-- The locale inherits `general.language`'s scope. The boot settings merge the operator scopes with a trusted workspace's file, and the workspace wins over the user scope — as it does for every other `general.*` consumer, including the channel lane. This increment documents that source rather than narrowing it: gating the key here would make the daemon disagree with the rest of the repo.
+- The locale inherits `general.language`'s scope, and its reach is daemon-wide. It is resolved once at boot from the **bound** workspace's merged settings — the first `--workspace` — so a trusted file there overrides the user scope and re-languages the PR-watch prompts delivered into every hosted workspace, while the same key in any other workspace's file changes nothing. Other `general.*` consumers share the precedence but not the reach: their value stays inside their own workspace or process. This increment documents that source rather than narrowing it: gating the key here would make the daemon disagree with the rest of the repo.
 - Entries detected before this change keep their English summary. That is the detection-language rule applied to history, not a defect.
 - The summary render is now shared by four transition types. The copy table is a total `Record<BoundPromptLanguage, …>`, so a new language cannot be added without its entries, and an absent language resolves to `en` — neither path can put `undefined` in a prompt.
 

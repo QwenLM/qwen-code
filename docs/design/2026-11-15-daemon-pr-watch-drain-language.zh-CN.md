@@ -40,7 +40,7 @@
 
 ### 一个 locale，在启动时解析
 
-`run-qwen-serve.ts` 在既有 `resolveSessionPrWatchConfig` 调用旁解析 `resolveChannelLocale(bootSettings?.general?.language)`，并把它带进 `prWatchSources`。两个接缝读同一个值，因此在同一次启动内 observation 与 drain 不会对 locale 产生分歧。跨重启则可能：在旧 locale 下持久化的摘要，会被装进按新 locale 组装的信封里投递——这正是预期的切分。
+`run-qwen-serve.ts` 在既有 `resolveSessionPrWatchConfig` 调用旁解析 `resolveChannelLocale(bootSettings?.general?.language)`，并把它带进 `prWatchSources`；`bootSettings` 是绑定 workspace（第一个 `--workspace`）的合并设置，而 `prWatchSources` 是唯一的、daemon 全局的 sources 对象。两个接缝读同一个值，因此在同一次启动内 observation 与 drain 不会对 locale 产生分歧。跨重启则可能：在旧 locale 下持久化的摘要，会被装进按新 locale 组装的信封里投递——这正是预期的切分。
 
 ### observation 在检测时本地化摘要
 
@@ -91,7 +91,7 @@
 ## 约束与风险
 
 - locale 在启动时冻结。修改 `general.language` 的运维者只有在 daemon 重启后才看到新语言，这与 channel 车道已记录的取舍相同——而且即便如此，已排队的摘要仍保留其检测时的语言。
-- locale 继承 `general.language` 的作用域。启动设置把运维作用域与受信任 workspace 的文件合并，workspace 优先于 user 作用域——与其他所有 `general.*` 消费方（含 channel 车道）一致。本增量写明该来源而不收窄它：在此门控该键会让 daemon 与仓库其余部分不一致。
+- locale 继承 `general.language` 的作用域，且其影响范围是全 daemon。它在启动时由**绑定** workspace 的合并设置解析一次——即第一个 `--workspace`——因此那里的受信任文件会覆盖 user 作用域，并改变投递到每个托管 workspace 的 PR-watch 提示词语言；而其他任何 workspace 文件里的同一个键不起作用。其他 `general.*` 消费方共享这个优先级，但不共享这个影响范围：它们的值只作用于自己的 workspace 或进程。本增量写明该来源而不收窄它：在此门控该键会让 daemon 与仓库其余部分不一致。
 - 本改动之前检测到的条目保留其英文摘要。这是检测语言规则应用于历史，不是缺陷。
 - 摘要渲染现在由四种转换类型共用。文案映射是完整的 `Record<BoundPromptLanguage, …>`，因此新增语言必须同时补上其条目，而缺省语言解析为 `en`——两条路径都不会把 `undefined` 放进提示词。
 
