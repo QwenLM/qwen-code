@@ -445,15 +445,19 @@ function transformPart(
   // `functionCall.args.content`, and `estimatePartChars` bills them through
   // the JSON.stringify fallthrough — left untouched they ride into the
   // side-query at full size (#10380). Bridge calls carry those same args one
-  // level deeper under `tool_call.arguments`, so walk that envelope too.
+  // level deeper under `tool_call.arguments`, so walk that envelope too. A
+  // file's contents can quote a block, so the cut closes it as it does in
+  // text (#15936 R8-1).
   const fc = nextPart.functionCall;
   if (maxTextChars !== undefined && fc?.args) {
     const args = fc.args;
     let argsTouched = false;
     const newArgs: Record<string, unknown> = { ...args };
     for (const [key, value] of Object.entries(args)) {
-      if (typeof value === 'string' && value.length > maxTextChars) {
-        newArgs[key] = truncateTextForSlimming(value, maxTextChars);
+      if (typeof value !== 'string' || value.length <= maxTextChars) continue;
+      const cut = truncateKeepingEnvelopes(value, maxTextChars);
+      if (cut !== value) {
+        newArgs[key] = cut;
         stats.textPartsTruncated++;
         argsTouched = true;
       }
@@ -468,8 +472,10 @@ function transformPart(
       let bridgedArgsTouched = false;
       const newBridgedArgs: Record<string, unknown> = { ...bridgedArgs };
       for (const [key, value] of Object.entries(bridgedArgs)) {
-        if (typeof value === 'string' && value.length > maxTextChars) {
-          newBridgedArgs[key] = truncateTextForSlimming(value, maxTextChars);
+        if (typeof value !== 'string' || value.length <= maxTextChars) continue;
+        const cut = truncateKeepingEnvelopes(value, maxTextChars);
+        if (cut !== value) {
+          newBridgedArgs[key] = cut;
           stats.textPartsTruncated++;
           bridgedArgsTouched = true;
         }
@@ -620,7 +626,10 @@ function closesOfBlocksOpenAt(value: string, cutAt: number): string[] {
  * does before the prompt, or end a tool result without opening it. A cut
  * before an envelope's body leaves nothing of it to close. A cut inside a
  * block that sits at neither end, as one quoted in a tool's output does,
- * closes that block after the marker too.
+ * closes that block after the marker too. Wherever the text ends, every block
+ * open there is closed, the inner one first: an envelope can hold another
+ * block, and a file's contents carried in a tool call's arguments are not
+ * escaped the way an envelope's body is (#15936 R8-1).
  */
 function truncateKeepingEnvelopes(value: string, maxTextChars: number): string {
   const span = envelopesAtEnds(value).find(
@@ -632,12 +641,13 @@ function truncateKeepingEnvelopes(value: string, maxTextChars: number): string {
     return [cut, ...closesOfBlocksOpenAt(value, maxTextChars)].join('\n');
   }
   if (span.closeAt > maxTextChars) {
-    return `${truncateTextForSlimming(value, maxTextChars)}\n${span.close}`;
+    const cut = truncateTextForSlimming(value, maxTextChars);
+    return [cut, ...closesOfBlocksOpenAt(value, maxTextChars)].join('\n');
   }
   const closedAt = span.closeAt + span.close.length;
-  return value.slice(closedAt).trim() === ''
-    ? value
-    : value.slice(0, closedAt) + SLIM_TEXT_TRUNCATION_MARKER;
+  if (value.slice(closedAt).trim() === '') return value;
+  const kept = value.slice(0, closedAt) + SLIM_TEXT_TRUNCATION_MARKER;
+  return [kept, ...closesOfBlocksOpenAt(value, closedAt)].join('\n');
 }
 
 function truncateTextForSlimming(value: string, maxTextChars: number): string {

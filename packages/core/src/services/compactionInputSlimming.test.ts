@@ -938,6 +938,48 @@ describe('compactionInputSlimming', () => {
       );
     });
 
+    it('closes a block nested in the envelope that ends the text, the inner one first', () => {
+      // The same blocks as above with nothing after them, so the notification
+      // is the envelope at the end of the text (#15936 R8-1).
+      const original = `${'p'.repeat(300)}<task-notification>${'n'.repeat(100)}<system-reminder>${'r'.repeat(400)}</system-reminder>${'n'.repeat(100)}</task-notification>`;
+
+      const [part] = slimText(original, 500).slimmedHistory[0]!.parts!;
+
+      expect(part!.text).toBe(
+        original.slice(0, 500) +
+          SLIM_TEXT_TRUNCATION_MARKER +
+          '\n</system-reminder>\n</task-notification>',
+      );
+    });
+
+    it('closes both blocks when the envelope that opens the text nests another of its kind', () => {
+      const original = `<system-reminder>${'a'.repeat(200)}<system-reminder>${'b'.repeat(600)}</system-reminder>${'c'.repeat(100)}</system-reminder>\n\nfix the bug`;
+
+      const [part] = slimText(original, 500).slimmedHistory[0]!.parts!;
+
+      expect(part!.text).toBe(
+        original.slice(0, 500) +
+          SLIM_TEXT_TRUNCATION_MARKER +
+          '\n</system-reminder>\n</system-reminder>',
+      );
+    });
+
+    it('closes the outer block when the cut lands on the closing tag of a nested one', () => {
+      // The nested block's closing tag spans characters 494 to 512, so it is
+      // kept whole and the text ends there with the outer block still open.
+      const original = `<system-reminder>${'a'.repeat(200)}<system-reminder>${'b'.repeat(260)}</system-reminder>${'c'.repeat(100)}</system-reminder>\n\nfix the bug`;
+      const nestedClosedAt = original.indexOf('</system-reminder>') + 18;
+
+      const [part] = slimText(original, 500).slimmedHistory[0]!.parts!;
+
+      expect(nestedClosedAt).toBe(512);
+      expect(part!.text).toBe(
+        original.slice(0, nestedClosedAt) +
+          SLIM_TEXT_TRUNCATION_MARKER +
+          '\n</system-reminder>',
+      );
+    });
+
     it('leaves a tool output whole when only its reminder’s closing tag runs past the cap', () => {
       const head = `${'o'.repeat(3_000)}\n\n<system-reminder>\n`;
       const original = `${head}${'s'.repeat(4_000 - head.length - 6)}\n</system-reminder>\n`;
@@ -1142,6 +1184,91 @@ describe('compactionInputSlimming', () => {
           >
         )['content'],
       ).toBe(bridgedContent);
+    });
+
+    describe('blocks quoted in tool-call arguments (#15936 R8-1)', () => {
+      const directCall = (content: string): Content => ({
+        role: 'model',
+        parts: [{ functionCall: { name: 'write_file', args: { content } } }],
+      });
+      const bridgedCall = (content: string): Content => ({
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              name: ToolNames.TOOL_CALL,
+              args: { name: 'write_file', arguments: { content } },
+            },
+          },
+        ],
+      });
+      const directContent = (history: Content[]) =>
+        history[0]!.parts![0]!.functionCall!.args!['content'] as string;
+      const bridgedContent = (history: Content[]) =>
+        (
+          history[0]!.parts![0]!.functionCall!.args!['arguments'] as Record<
+            string,
+            unknown
+          >
+        )['content'] as string;
+      const carriers = [
+        { carrier: 'a direct call', call: directCall, read: directContent },
+        { carrier: 'a bridged call', call: bridgedCall, read: bridgedContent },
+      ];
+
+      it.each(carriers)(
+        'closes a block the cut lands in, in $carrier',
+        ({ call, read }) => {
+          const original = `${'a'.repeat(450)}<system-reminder>${'b'.repeat(200)}</system-reminder>${'c'.repeat(100)}`;
+
+          const { slimmedHistory, stats } = slimCompactionInput(
+            [call(original)],
+            undefined,
+            { maxTextChars: 500 },
+          );
+
+          expect(stats.textPartsTruncated).toBe(1);
+          expect(read(slimmedHistory)).toBe(
+            original.slice(0, 500) +
+              SLIM_TEXT_TRUNCATION_MARKER +
+              '\n</system-reminder>',
+          );
+        },
+      );
+
+      it.each(carriers)(
+        'adds no closing tag for an opening tag quoted alone, in $carrier',
+        ({ call, read }) => {
+          const original = `const OPEN = '<system-reminder>';\n${'x'.repeat(900)}`;
+
+          const { slimmedHistory } = slimCompactionInput(
+            [call(original)],
+            undefined,
+            { maxTextChars: 500 },
+          );
+
+          expect(read(slimmedHistory)).toBe(
+            original.slice(0, 500) + SLIM_TEXT_TRUNCATION_MARKER,
+          );
+        },
+      );
+
+      it.each(carriers)(
+        'leaves an argument whole when only its block’s closing tag runs past the cap, in $carrier',
+        ({ call }) => {
+          const original = `<system-reminder>${'s'.repeat(480)}</system-reminder>`;
+          const history = [call(original)];
+
+          const { slimmedHistory, stats } = slimCompactionInput(
+            history,
+            undefined,
+            { maxTextChars: 500 },
+          );
+
+          expect(stats.textPartsTruncated).toBe(0);
+          expect(slimmedHistory).toBe(history);
+        },
+      );
     });
 
     it('does not split surrogate pairs when truncating text', () => {

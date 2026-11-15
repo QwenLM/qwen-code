@@ -3535,6 +3535,8 @@ describe('issue #7960: compression side-query output budget vs small windows', (
       usage?: (promptTokens: number) => {
         promptTokenCount: number;
         candidatesTokenCount?: number;
+        thoughtsTokenCount?: number;
+        totalTokenCount?: number;
       };
     } = {},
   ) {
@@ -3754,7 +3756,7 @@ describe('issue #7960: compression side-query output budget vs small windows', (
     // guard cannot fire; the unclosed snapshot at the end of the window is
     // the sign of the cut.
     mockVllmBackend(WINDOW, false, {
-      text: '<state_snapshot><overall_goal>port the parser</overall_goal><cur',
+      text: '<state_snapshot><overall_goal>port the parser</overall_goal><current_task>fix the',
       usage: windowFillingUsage,
     });
 
@@ -3786,7 +3788,7 @@ describe('issue #7960: compression side-query output budget vs small windows', (
       // window; within the margin, the unclosed snapshot is still a cut
       // (#15936 R3-5).
       mockVllmBackend(WINDOW, false, {
-        text: '<state_snapshot><overall_goal>port the parser</overall_goal><cur',
+        text: '<state_snapshot><overall_goal>port the parser</overall_goal><current_task>fix the',
         usage: (promptTokens: number) => {
           const counted = Math.ceil(promptTokens * 1.2);
           return {
@@ -3892,6 +3894,154 @@ describe('issue #7960: compression side-query output budget vs small windows', (
     },
   );
 
+  it.each(
+    [
+      // After prose on its line, where the snapshot check does not look.
+      'Here is the snapshot: <state_snapshot><overall_goal>port the parser</overall_goal><cur',
+      '<state_snapshot><overall_goal>port the parser</overall_goal><cur',
+      '<state_snapshot><overall_goal>port the parser</overall_go',
+      '<state_snapshot><overall_goal>port the parser</',
+      'Goal: port the parser. Next: <next_st',
+    ].flatMap((text) => [
+      [text, 'filled the window', windowFillingUsage],
+      [text, 'left the window room', undefined],
+    ]),
+  )(
+    'drops a summary that ends inside a tag (%j) when the usage %s',
+    async (text, _label, usage) => {
+      // A model does not stop halfway through a tag's name, whichever tag it
+      // is and wherever it sits; only a cut leaves one (#15936 R8-2).
+      mockVllmBackend(WINDOW, false, { text, usage });
+
+      const result = await compressChars(182_000, 45_000);
+
+      expectNoNewHistory(
+        result,
+        CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+      );
+    },
+  );
+
+  it.each([
+    'Goal: port the parser. Latency stayed <5ms',
+    'Goal: port the parser. Keep a < b',
+    'Goal: port the parser. It returns Promise<void>',
+  ])(
+    'keeps a complete summary whose last words only look like a tag (%j)',
+    async (text) => {
+      mockVllmBackend(WINDOW, false, { text, usage: windowFillingUsage });
+
+      const result = await compressChars(182_000, 45_000);
+
+      expectCompressed(result);
+    },
+  );
+
+  describe('reasoning tokens in the room check (#15936 R8-2)', () => {
+    const UNCLOSED =
+      '<state_snapshot><overall_goal>port the parser</overall_goal><current_task>fix the';
+    const withAuthType = (authType: AuthType) =>
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        model: 'test-model',
+        contextWindowSize: WINDOW,
+        authType,
+      });
+
+    it('drops an unclosed snapshot when reasoning reported apart from the output filled the window', async () => {
+      // Gemini reports thoughts outside candidatesTokenCount, and both are
+      // spent from the same output budget.
+      withAuthType(AuthType.USE_GEMINI);
+      mockVllmBackend(WINDOW, false, {
+        text: UNCLOSED,
+        usage: (promptTokens) => ({
+          promptTokenCount: promptTokens,
+          candidatesTokenCount: 2_000,
+          thoughtsTokenCount: WINDOW - promptTokens - 2_000,
+        }),
+      });
+
+      const result = await compressChars(182_000, 45_000);
+
+      expectNoNewHistory(
+        result,
+        CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+      );
+    });
+
+    it('keeps an unclosed snapshot when the output count already holds the reasoning', async () => {
+      // Chat completions report reasoning inside the output count. Adding it
+      // again would fill the window on paper and drop this summary.
+      withAuthType(AuthType.USE_OPENAI);
+      mockVllmBackend(WINDOW, false, {
+        text: UNCLOSED,
+        usage: (promptTokens) => {
+          const output = Math.floor((WINDOW - promptTokens) * 0.6);
+          return {
+            promptTokenCount: promptTokens,
+            candidatesTokenCount: output,
+            thoughtsTokenCount: output - 500,
+          };
+        },
+      });
+
+      const result = await compressChars(182_000, 45_000);
+
+      expectCompressed(result);
+    });
+
+    it('reads the usage by the provider the compaction model is sent on, not the main one', async () => {
+      // The session runs on a provider whose output count holds the
+      // reasoning; the summary comes from one that reports it apart, on a
+      // window large enough that the compaction model is kept.
+      const compactionWindow = 200_000;
+      withAuthType(AuthType.USE_OPENAI);
+      vi.mocked(mockConfig.getCompactionModel).mockReturnValue(
+        `${AuthType.USE_GEMINI}:compact-model`,
+      );
+      vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue([
+        { id: 'compact-model', contextWindowSize: compactionWindow },
+      ] as never[]);
+      mockVllmBackend(compactionWindow, false, {
+        text: UNCLOSED,
+        usage: (promptTokens) => ({
+          promptTokenCount: promptTokens,
+          candidatesTokenCount: 2_000,
+          thoughtsTokenCount: compactionWindow - promptTokens - 2_000,
+        }),
+      });
+
+      const result = await compressChars(182_000, 45_000);
+
+      expect(capturedModel).toBe(`${AuthType.USE_GEMINI}:compact-model`);
+      expectNoNewHistory(
+        result,
+        CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+      );
+    });
+
+    it('reads a reported total over the provider’s convention', async () => {
+      // The total shows the reasoning was spent on top of the output, so it
+      // counts even on a provider whose output count usually holds it.
+      withAuthType(AuthType.USE_OPENAI);
+      mockVllmBackend(WINDOW, false, {
+        text: UNCLOSED,
+        usage: (promptTokens) => ({
+          promptTokenCount: promptTokens,
+          candidatesTokenCount: 2_000,
+          thoughtsTokenCount: WINDOW - promptTokens - 2_000,
+          totalTokenCount: WINDOW,
+        }),
+      });
+
+      const result = await compressChars(182_000, 45_000);
+
+      expectNoNewHistory(
+        result,
+        CompressionStatus.COMPRESSION_FAILED_OUTPUT_TRUNCATED,
+      );
+    });
+  });
+
   it('keeps a complete summary that quotes the compression directive', async () => {
     // Real models list the directive among the user's messages, <analysis>
     // tag included. An unclosed-block strip would cut the snapshot at that
@@ -3935,7 +4085,7 @@ describe('issue #7960: compression side-query output budget vs small windows', (
     mockVllmBackend(WINDOW, false, {
       text:
         '<analysis>The user asked to port the parser.</analysis> The format is <state_snapshot>...</state_snapshot>.\n' +
-        '<state_snapshot><overall_goal>port the parser</overall_goal><cur',
+        '<state_snapshot><overall_goal>port the parser</overall_goal><current_task>fix the',
       usage: windowFillingUsage,
     });
 
@@ -3954,7 +4104,7 @@ describe('issue #7960: compression side-query output budget vs small windows', (
     mockVllmBackend(WINDOW, false, {
       text:
         '<analysis>The format is:\n<state_snapshot>...</state_snapshot>\n</analysis>\n' +
-        '<state_snapshot><overall_goal>port the parser</overall_goal><cur',
+        '<state_snapshot><overall_goal>port the parser</overall_goal><current_task>fix the',
       usage: windowFillingUsage,
     });
 
@@ -3978,7 +4128,7 @@ describe('issue #7960: compression side-query output budget vs small windows', (
       mockVllmBackend(WINDOW, false, {
         text:
           '<analysis>The user asked to port the parser.\n' +
-          '<state_snapshot><overall_goal>port the parser</overall_goal><cur',
+          '<state_snapshot><overall_goal>port the parser</overall_goal><current_task>fix the',
         usage,
       });
 
@@ -3997,7 +4147,7 @@ describe('issue #7960: compression side-query output budget vs small windows', (
     mockVllmBackend(WINDOW, false, {
       text:
         'The format is <state_snapshot>x</state_snapshot>.\n' +
-        '<state_snapshot><overall_goal>port the parser</overall_goal><cur',
+        '<state_snapshot><overall_goal>port the parser</overall_goal><current_task>fix the',
       usage: windowFillingUsage,
     });
 
@@ -4181,7 +4331,7 @@ describe('issue #9455: compression requests fit the receiving window', () => {
         promptTokens + maxOutputTokens > window
       ) {
         return {
-          text: '<state_snapshot><overall_goal>port the parser</overall_goal><cur',
+          text: '<state_snapshot><overall_goal>port the parser</overall_goal><current_task>fix the',
           usage: {
             promptTokenCount: promptTokens,
             candidatesTokenCount: window - promptTokens,

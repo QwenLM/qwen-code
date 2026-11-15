@@ -22,6 +22,7 @@ import { runSideQuery } from '../utils/sideQuery.js';
 import { movePromptContextAheadOfUserText } from '../core/prompt-context-order.js';
 import { buildModelIdContext, resolveModelId } from '../utils/modelId.js';
 import { supportsOpenAIPrefixCaching } from '../core/openaiContentGenerator/prefix-caching.js';
+import { outputTokenCount } from '../telemetry/gen-ai-usage.js';
 import { logChatCompression } from '../telemetry/loggers.js';
 import { withModelObservationSource } from '../telemetry/model-observation.js';
 import { makeChatCompressionEvent } from '../telemetry/types.js';
@@ -582,6 +583,20 @@ function endsInsideSnapshotOpening(summary: string): boolean {
   return tail.startsWith('<') && STATE_SNAPSHOT_OPENING.startsWith(tail);
 }
 
+/**
+ * Whether the summary ends inside a tag's name: `<cur`, `</overall_go`, or a
+ * closing tag's bare `</`. A model does not stop there, so only a cut can
+ * leave it, whichever tag it is and wherever it sits. The name must start
+ * with a letter, so `<5ms` at the end of a sentence is not one; a finished
+ * tag (`Promise<void>`, `mid-<state_snapshot>.`) is not one either. A cut
+ * anywhere else, in a tag's text or right after a tag, cannot be told from
+ * a summary that just ends, and is left to the stop reason this path does
+ * not yet carry (#15936 R8-2).
+ */
+function endsInsideTag(summary: string): boolean {
+  return /<\/?[A-Za-z_][\w.-]*$|<\/$/.test(summary.trimEnd());
+}
+
 export class ChatCompressionService {
   async compress(
     chat: LlmChat,
@@ -916,6 +931,15 @@ export class ChatCompressionService {
     // Re-read after the guard so a window-forced downgrade to the main model
     // counts as the main route.
     const sideQueryOnMainRoute = onMainRoute(effectiveCompactionModel);
+    // The provider the side-query is sent on, whose convention says whether
+    // its output count already holds the reasoning. A selector that names no
+    // provider resolves within the main one.
+    const compactionAuthType = sideQueryOnMainRoute
+      ? contentGeneratorConfig.authType
+      : (resolveModelId(
+          effectiveCompactionModel.split('\0')[0],
+          buildModelIdContext(config),
+        )?.authType ?? contentGeneratorConfig.authType);
     // The server-reported ceiling is scoped to the route that reported it
     // (#13876): it is evidence about the endpoint and model the rejected
     // request targeted, and nothing more. A per-turn model override, or a
@@ -1461,15 +1485,40 @@ export class ChatCompressionService {
     //   ~1.5x actual tokens, so below ~2/3 of the ceiling the estimate can
     //   never reach the fixed threshold. That path also drops a summary
     //   without a closed snapshot.
+    //   Reasoning is spent from the same output budget. A provider that
+    //   reports it apart from the output count (Gemini) would otherwise show
+    //   room after spending the budget on thinking, so the room check counts
+    //   it, once: where the output count already holds it, it is not added
+    //   again (#15936 R8-2).
+    // - A summary that ends inside a tag was cut, whatever the usage says.
+    const reportedOutputTokenCount =
+      compressionUsageMetadata?.candidatesTokenCount;
+    const outputSpentTokenCount =
+      typeof reportedOutputTokenCount === 'number' &&
+      typeof compressionInputTokenCount === 'number'
+        ? outputTokenCount(
+            {
+              input: compressionInputTokenCount,
+              output: reportedOutputTokenCount,
+              thoughts: Math.max(
+                0,
+                compressionUsageMetadata?.thoughtsTokenCount ?? 0,
+              ),
+              total: compressionUsageMetadata?.totalTokenCount ?? 0,
+            },
+            compactionAuthType,
+          )
+        : compressionOutputTokenCount;
     const usageShowsRoom =
       !outputCountIsEstimated &&
       typeof compressionInputTokenCount === 'number' &&
-      typeof compressionOutputTokenCount === 'number' &&
-      compressionInputTokenCount + compressionOutputTokenCount <
+      typeof outputSpentTokenCount === 'number' &&
+      compressionInputTokenCount + outputSpentTokenCount <
         coldWindow - COMPACTION_BUDGET_SAFETY_MARGIN;
     const cutMidSnapshot =
       (!usageShowsRoom && hasUnclosedStateSnapshot(summary)) ||
-      endsInsideSnapshotOpening(summary);
+      endsInsideSnapshotOpening(summary) ||
+      endsInsideTag(summary);
     if (
       !usedCacheSharing &&
       !isSummaryEmpty &&
@@ -1482,9 +1531,10 @@ export class ChatCompressionService {
         .getDebugLogger()
         .warn(
           cutMidSnapshot
-            ? `[chat-compression] summary opens <state_snapshot> but never ` +
-                `closes it, and the reported usage does not show room left ` +
-                `in the window; dropping truncated result. This counts as a ` +
+            ? `[chat-compression] summary ends inside a tag, or opens ` +
+                `<state_snapshot> without closing it while the reported ` +
+                `usage does not show room left in the window; dropping ` +
+                `truncated result. This counts as a ` +
                 `compression failure for the per-chat circuit breaker.`
             : `[chat-compression] summary lacks a closed <state_snapshot> ` +
                 `while the output budget was clamped (${coldOutputBudget}) ` +
