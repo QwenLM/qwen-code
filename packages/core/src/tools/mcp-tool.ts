@@ -554,6 +554,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
    */
   private repairConnectionOnDisconnectAfterAbort(
     statusAtCall: MCPServerStatus | undefined,
+    generationAtCall?: number,
   ): void {
     if (!this.cliConfig) {
       return;
@@ -576,11 +577,12 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     const connection: object | undefined = this.mcpClient;
     // The lifetime this call started in. A restart keeps the same SDK
     // `Client`, so only the generation can tell a rejection from the
-    // transport the owner stopped apart from the one now live.
-    const generation =
-      connection === undefined
-        ? undefined
-        : getMCPConnectionGeneration(connection);
+    // transport the owner stopped apart from the one now live. `generation`
+    // is read here, after the abort may have been followed by reconnects;
+    // `generationAtCall` is the one the invocation actually ran in and is
+    // what the marker question has to be answered against, or an old abort
+    // binds its repair to a generation that did not produce it.
+    const generation = generationAtCall ?? this.connectionGeneration();
     const status = this.connectionStatus();
     // The transport reported the drop before this catch ran, so no later
     // transition is coming to fire the latch below. Only a connection that
@@ -676,7 +678,10 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       // so a read at this point always sees the stale `connected` value.
       // Repair on the later transition instead, and never make this
       // invocation's rejection wait for a reconnect (issue #12160).
-      this.repairConnectionOnDisconnectAfterAbort(statusAtCall);
+      this.repairConnectionOnDisconnectAfterAbort(
+        statusAtCall,
+        generationAtCall,
+      );
       throw error;
     }
 
@@ -1005,7 +1010,10 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           // The App branch classifies the abort before reaching
           // handleReconnectOnError, so arm the same repair here or an aborted
           // App call keeps the dead transport for the health monitor's budget.
-          this.repairConnectionOnDisconnectAfterAbort(statusAtCall);
+          this.repairConnectionOnDisconnectAfterAbort(
+            statusAtCall,
+            generationAtCall,
+          );
           throw createToolCallAbortError();
         }
         if (

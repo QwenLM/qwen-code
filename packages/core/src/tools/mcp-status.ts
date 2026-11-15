@@ -84,11 +84,8 @@ export function markMCPServerTeardownIntent(serverName: string): void {
  */
 const connectionGenerations: WeakMap<object, number> = new WeakMap();
 
-/** Generations of a connection that its owner stopped on purpose. */
-const stoppedConnectionGenerations: WeakMap<
-  object,
-  Set<number>
-> = new WeakMap();
+/** The last generation of a connection that its owner stopped on purpose. */
+const stoppedThroughGenerations: WeakMap<object, number> = new WeakMap();
 
 /**
  * The transport generation `connection` is on, or 0 before its first
@@ -104,12 +101,18 @@ export function getMCPConnectionGeneration(connection: object): number {
  * stop is filed against the generation live at this moment, so a later
  * `CONNECTED` on the same client starts a fresh lifetime that is repairable
  * again while pending work from the stopped one stays stopped.
+ *
+ * Only the newest stopped generation is kept. Generations only move forward,
+ * so a single cutoff answers for every older one — and those older stops have
+ * to keep answering: a call pending in g1 can outlive a g2 and a g3 on the
+ * same client, and forgetting its stop would repair a cancelled invocation.
  */
 export function markMCPConnectionTeardownIntent(connection: object): void {
   const generation = getMCPConnectionGeneration(connection);
-  const stopped = stoppedConnectionGenerations.get(connection) ?? new Set();
-  stopped.add(generation);
-  stoppedConnectionGenerations.set(connection, stopped);
+  const stopped = stoppedThroughGenerations.get(connection);
+  if (stopped === undefined || generation > stopped) {
+    stoppedThroughGenerations.set(connection, generation);
+  }
 }
 
 /**
@@ -123,7 +126,8 @@ export function isMCPConnectionTeardownIntent(
   connection: object,
   generation: number = getMCPConnectionGeneration(connection),
 ): boolean {
-  return stoppedConnectionGenerations.get(connection)?.has(generation) ?? false;
+  const stopped = stoppedThroughGenerations.get(connection);
+  return stopped !== undefined && generation <= stopped;
 }
 
 /** Whether `serverName` is currently being torn down on purpose. */
@@ -153,16 +157,10 @@ export function recordMCPConnectionStatus(
   if (status === MCPServerStatus.CONNECTED) {
     // A reachable connection is a new transport lifetime on the same client:
     // bump it so the stop recorded against the old one no longer vetoes
-    // repair, and drop stops old enough that no live invocation can still
-    // reject against them.
+    // repair. Stops filed against older generations stay, because a call
+    // pending in one of them can still reject later and must stay cancelled.
     const generation = getMCPConnectionGeneration(connection) + 1;
     connectionGenerations.set(connection, generation);
-    const stopped = stoppedConnectionGenerations.get(connection);
-    if (stopped) {
-      for (const stale of stopped) {
-        if (stale < generation - 1) stopped.delete(stale);
-      }
-    }
   }
 }
 
