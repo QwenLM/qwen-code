@@ -48,6 +48,14 @@ function asset(profile: ManagedLoopProfile): {
   return JSON.parse(readFileSync(join(contractsDir, ASSETS[profile]), 'utf8'));
 }
 
+/** The loop.md section of a body, up to the next top-level heading. */
+function loopMdSection(body: string): string {
+  const start = body.indexOf('## loop.md task-file mode');
+  if (start < 0) return '';
+  const next = body.indexOf('\n## ', start + 1);
+  return body.slice(start, next < 0 ? undefined : next);
+}
+
 describe('managed loop skill parity', () => {
   const { body, description } = bundled();
 
@@ -105,13 +113,28 @@ describe('managed loop skill parity', () => {
       const b = asset(profile).body;
       expect(b).not.toContain('`.qwen/loop.md` (project)');
       expect(b).not.toContain('project wins');
-      expect(b).toContain('~/.qwen/loop.md');
+      // The project-path trigger phrase must not be advertised either.
+      expect(b).not.toContain('the tasks in .qwen/loop.md');
     }
+    expect(asset('union').body).toContain('~/.qwen/loop.md');
+    expect(asset('wakeup').body).toContain('~/.qwen/loop.md');
+  });
+
+  it('the cron body carries no loop.md task-file mode and no sentinel at all', () => {
+    // A cron fire expands no sentinel and the model cannot open the home file,
+    // so the cron body must not teach the file mode or any sentinel.
+    const cron = asset('cron').body;
+    expect(cron).not.toContain('## loop.md task-file mode');
+    expect(cron).not.toMatch(/<<[^>]+>>/);
+  });
+
+  it('the union loop.md mode is self-paced only (no cron file bullet)', () => {
+    const section = loopMdSection(asset('union').body);
+    expect(section).toContain('<<loop.md-dynamic>>');
+    expect(section).not.toContain('CronCreate');
   });
 
   it('the cron and union bodies teach no non-expanding cron sentinel', () => {
-    // Managed cron fires do not expand sentinels; only the wakeup path may use
-    // the self-paced sentinels the wakeup fire expands.
     for (const profile of ['union', 'cron'] as const) {
       expect(asset(profile).body).not.toMatch(
         /<<loop\.md>>|<<autonomous-loop>>/,
@@ -121,32 +144,73 @@ describe('managed loop skill parity', () => {
     expect(asset('wakeup').body).toContain('<<autonomous-loop-dynamic>>');
   });
 
+  it('the loop.md fallback/confirmation passage ships exactly once', () => {
+    const count = (b: string) => (b.match(/absent at fire time/g) ?? []).length;
+    expect(count(asset('union').body)).toBe(1);
+    expect(count(asset('wakeup').body)).toBe(1);
+    expect(count(asset('cron').body)).toBe(0);
+  });
+
+  it('the cron body drops the sentinel-era short-reminder sentence', () => {
+    expect(asset('cron').body).not.toContain(
+      'later fires send a short reminder',
+    );
+    expect(asset('union').body).toContain('later fires send a short reminder');
+    expect(asset('wakeup').body).toContain('later fires send a short reminder');
+  });
+
   it('no body says midnight local (Managed defaults to UTC)', () => {
     for (const profile of ['union', 'cron', 'wakeup'] as const) {
-      const b = asset(profile).body;
-      expect(b).not.toContain('midnight local');
+      expect(asset(profile).body).not.toContain('midnight local');
     }
     expect(asset('cron').body).toContain('midnight UTC');
     expect(asset('union').body).toContain('midnight UTC');
   });
 
-  it('the wakeup parsing strips a requested interval', () => {
+  it('the wakeup parsing strips a requested interval and routes interval-only input', () => {
     const wakeup = asset('wakeup').body;
     expect(wakeup).toContain('strip the interval token');
     expect(wakeup).toContain('self-paced follow-ups only');
+    // Both the compact and the unit-word "every" forms are honoured.
+    expect(wakeup).toContain('every <N> <unit-word>');
+    // An interval with no prompt routes to the self-paced autonomous sentinel.
+    expect(wakeup).toContain('Interval with no prompt');
+    expect(wakeup).toContain('`5m` → self-paced autonomous loop');
   });
 
-  it('pins the shared steward prose to the bundled source', () => {
-    // The steward paragraph is derived from the source Autonomous section; a
-    // change to it in SKILL.md must redden every profile, not just union.
+  it('pins the shared steward prose to the bundled source per profile', () => {
     const marker =
       'The first immediate check, and each scheduled fire, advance work';
     const idx = body.indexOf(marker);
     expect(idx).toBeGreaterThanOrEqual(0);
     const cut = body.indexOf(' In self-paced mode re-arm', idx);
     const steward = body.slice(idx, cut < 0 ? undefined : cut).trimEnd();
+    expect(asset('union').body).toContain(steward);
+    expect(asset('wakeup').body).toContain(steward);
+    // Cron additionally drops the short-reminder sentence.
+    const rem = steward.indexOf(
+      ' The first fire (and the first after a compaction) delivers fuller guidance',
+    );
+    const cronSteward = (rem < 0 ? steward : steward.slice(0, rem)).trimEnd();
+    expect(asset('cron').body).toContain(cronSteward);
+  });
+
+  it('rejects an unclassified bundled section instead of silently dropping it', () => {
+    const withNewSection = `${body}\n## What to do on failure\n\nNew guidance.\n`;
     for (const profile of ['union', 'cron', 'wakeup'] as const) {
-      expect(asset(profile).body).toContain(steward);
+      expect(() =>
+        buildManagedLoopSkill(profile, withNewSection, description),
+      ).toThrow(/Unclassified bundled loop section: What to do on failure/);
     }
+  });
+
+  it('rejects any sentinel smuggled into the cron body, including -dynamic', () => {
+    const mutated = body.replace(
+      '# /loop — run a prompt repeatedly',
+      '# /loop — run a prompt repeatedly\n\n<<loop.md-dynamic>>',
+    );
+    expect(() => buildManagedLoopSkill('cron', mutated, description)).toThrow(
+      /non-expanding sentinel/,
+    );
   });
 });

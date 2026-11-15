@@ -455,6 +455,31 @@ class ManagedSessionCreationSkillsTest {
         }
     }
 
+    @Test
+    void aDefinitionAuthoredLoopSkillSurvivesAdmission() throws Exception {
+        Object target = org.springframework.test.util.AopTestUtils.getUltimateTargetObject(store);
+        Object previousProfiles = com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "definitionToolProfiles");
+        com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles",
+                List.of("hosted-workspace-files/1", "hosted-workspace-files/4"));
+        try {
+            // A definition-authored loop is the author's artifact: the server neither
+            // drops it on a creator-less profile nor replaces it on a creator-bearing one.
+            var defLoop = Map.<String, Object>of("name", "loop", "description", "Definition loop", "body", "DEFINITION_LOOP_BODY");
+            String filesAgent = defineProfile("hosted-workspace-files/1", "def-loop-files", List.of(defLoop));
+            String filesSession = create(request(filesAgent, List.of()), "def-loop-files", false).get("id").asText();
+            var filesCatalog = snapshots.effective(store.requireSession(tenant, filesSession));
+            assertThat(filesCatalog).extracting(s -> s.get("name")).containsExactly("loop");
+            assertThat((String) filesCatalog.getFirst().get("body")).isEqualTo("DEFINITION_LOOP_BODY");
+            String cronAgent = defineProfile("hosted-workspace-files/4", "def-loop-cron", List.of(defLoop));
+            String cronSession = create(request(cronAgent, List.of()), "def-loop-cron", false).get("id").asText();
+            var cronCatalog = snapshots.effective(store.requireSession(tenant, cronSession));
+            assertThat(cronCatalog).extracting(s -> s.get("name")).containsExactly("loop");
+            assertThat((String) cronCatalog.getFirst().get("body")).isEqualTo("DEFINITION_LOOP_BODY");
+        } finally {
+            com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles", previousProfiles);
+        }
+    }
+
     private String defineProfile(String profile, String key, List<Map<String, Object>> skills) throws Exception {
         var definition = json.createObjectNode();
         definition.putObject("model");

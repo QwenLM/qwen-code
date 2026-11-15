@@ -237,7 +237,7 @@ final class AgentSessionAdmissions {
             merged.addAll(AgentDefinitionExtensions.skills(storeRows.readMap(definitions.find(tenantId, agentId,
                     Long.parseLong(pin.revision())).orElseThrow().definitionJson()).get("skills"), true));
         }
-        ManagedLoopSkill.mergeInto(merged, skills, pin.toolProfile(), command.sessionSkillsSupported());
+        boolean loopInjected = ManagedLoopSkill.mergeInto(merged, skills, pin.toolProfile(), command.sessionSkillsSupported());
         var effectiveSkills = AgentDefinitionExtensions.sessionSkills(merged);
         if (worktree != null && sessionWorktrees == null) {
             throw new ManagedAgentException(409, "worktree_unavailable", "Session worktrees are unavailable.");
@@ -259,7 +259,7 @@ final class AgentSessionAdmissions {
             jdbc.update("UPDATE ma_session SET public_child_agents_version=1 WHERE tenant_id=? AND session_id=?",
                     tenantId, admission.sessionId());
         }
-        if (!effectiveSkills.isEmpty()) {
+        if (!effectiveSkills.isEmpty() && (!skills.isEmpty() || loopInjected)) {
             creationSkills.save(tenantId, admission.sessionId(), effectiveSkills);
         }
         if (extensionPins != null) {
@@ -611,9 +611,8 @@ final class AgentSessionAdmissions {
                 idempotencyKey, requestDigest, sessionId, turnId, now);
         var inheritedSkills = snapshot == null ? creationSkills.snapshot(tenantId, parentSessionId)
                 : creationSkills.fromLaunchReference(tenantId, parentSessionId, snapshot.path("skillsRef"));
-        if (inheritedSkills != null) {
-            creationSkills.save(tenantId, sessionId, toolProfile == null ? inheritedSkills : ManagedLoopSkill.reselectForProfile(inheritedSkills, toolProfile));
-        }
+        java.util.Optional.ofNullable(ManagedLoopSkill.childCatalog(inheritedSkills, toolProfile))
+                .ifPresent(skills -> creationSkills.save(tenantId, sessionId, skills));
         eventJournal.appendEvent(tenantId, sessionId, null, "session.created",
                 Map.of("sessionId", sessionId), false, null, now);
         if (turnId != null) {

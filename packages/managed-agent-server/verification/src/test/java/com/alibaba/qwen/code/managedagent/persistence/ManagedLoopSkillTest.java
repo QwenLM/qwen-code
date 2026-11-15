@@ -82,6 +82,39 @@ class ManagedLoopSkillTest {
     }
 
     @Test
+    void childCatalogSavesNothingWhenAResolvedChildCatalogWouldBeEmpty() {
+        var loop = Map.<String, Object>of("name", "loop", "description", "d", "body", "b");
+        var other = Map.<String, Object>of("name", "review", "description", "d", "body", "b");
+        assertThat(ManagedLoopSkill.childCatalog(null, WorkspaceToolProfiles.READ)).isNull();
+        var inherited = java.util.List.of(loop, other);
+        assertThat(ManagedLoopSkill.childCatalog(inherited, null)).isSameAs(inherited);
+        // A read-only child of a loop-only parent resolves to nothing: no empty row.
+        assertThat(ManagedLoopSkill.childCatalog(java.util.List.of(loop), WorkspaceToolProfiles.READ)).isNull();
+        assertThat(ManagedLoopSkill.childCatalog(inherited, WorkspaceToolProfiles.READ))
+                .extracting(s -> s.get("name")).containsExactly("review");
+    }
+
+    @Test
+    void mergeIntoPreservesADefinitionAuthoredLoopAndOnlyReplacesTheCallerLoop() {
+        var defLoop = Map.<String, Object>of("name", "loop", "description", "def", "body", "DEFINITION_LOOP");
+        var callerLoop = Map.<String, Object>of("name", "loop", "description", "local", "body", "LOCAL");
+        // Definition already owns a loop: the server neither replaces it nor injects a rival.
+        var merged = new java.util.ArrayList<>(java.util.List.of(defLoop));
+        boolean injected = ManagedLoopSkill.mergeInto(merged, java.util.List.of(callerLoop),
+                WorkspaceToolProfiles.FILES_V4, true);
+        assertThat(injected).isFalse();
+        assertThat(merged).extracting(s -> s.get("name")).containsExactly("loop");
+        assertThat((String) merged.get(0).get("body")).isEqualTo("DEFINITION_LOOP");
+        // No definition loop: the caller's loop is replaced by the server variant.
+        var merged2 = new java.util.ArrayList<Map<String, Object>>();
+        boolean injected2 = ManagedLoopSkill.mergeInto(merged2, java.util.List.of(callerLoop),
+                WorkspaceToolProfiles.FILES_V4, true);
+        assertThat(injected2).isTrue();
+        assertThat(merged2).hasSize(1);
+        assertThat((String) merged2.get(0).get("body")).contains("CronCreate").doesNotContain("LOCAL");
+    }
+
+    @Test
     void injectionIsSkippedWhenTheCallerCatalogIsAlreadyAtTheEntryCap() {
         var caller = new java.util.ArrayList<Map<String, Object>>();
         for (int i = 0; i < 256; i++) {

@@ -2,13 +2,13 @@
 
 [English](2026-11-14-managed-loop-skill-asset.md) | [简体中文](2026-11-14-managed-loop-skill-asset.zh-CN.md)
 
-Status: proposal. Resolves open question 4 of the
+Status: implemented in this change. Resolves open question 4 of the
 [fixed-interval schedule design](2026-11-10-managed-loop-schedule.md) and the
 shared skill touchpoint of the
 [self-paced wakeup design](2026-11-10-managed-loop-wakeup.md). The two tool
 slices are merged (#16835 `70a487be84`, #17088 `f3dc48c79e`, review follow-ups
 #17197 `0ffaea08ba` and #17235 `9d390e23af`); the skill variant they both
-deferred is still unimplemented.
+deferred ships here.
 
 ## Problem statement
 
@@ -141,9 +141,13 @@ the managed loop variant when the profile declares at least one loop creator
 deployment gates do not condition it, because they are operation gates that
 leave the tool declaration in place (see Current state), and the skill mirrors
 the declaration. The variant is a server contribution, not a caller skill: it
-must be added even when the caller supplies an empty `skills` array (the
-built-in `qwen-code` case), so the `if (!skills.isEmpty())` save guard is widened
-to "save when the effective catalog is non-empty". The variant is injected
+must be added even when the caller supplies an empty `skills` array (a
+definition pinned to a creator-bearing profile). The save guard writes a row
+when the effective catalog is non-empty AND there is a caller contribution or
+the variant was injected; a definition-only catalog (no caller skills, no
+variant) stays on the definition `skillsRef` so skill reads keep the
+definition-digest conflict check, and an empty effective catalog never writes a
+row. The variant is injected
 **after** the request digest is computed so it does not perturb idempotency;
 because the profile is a deterministic input of the same creation request, a
 replay injects the identical variant and reproduces the identical snapshot.
@@ -158,6 +162,11 @@ name a tool the Session does not declare"
   only when the profile declares `cron_create` (files/4, team-lead/2, shell/4).
 - The self-paced / wakeup section (which calls `loop_wakeup`) is included only
   when the profile declares `loop_wakeup` (shell/3, shell/4).
+- The loop.md task-file mode is described only for the self-paced path: the
+  wakeup fire resolves the `<<loop.md-dynamic>>` sentinel, while a cron fire
+  neither expands a sentinel nor lets the model open the Harness-host home file
+  (reads are confined to the Session working directory), so the cron body and
+  the cron half of the union carry no loop.md mode.
 - `cron_list` / `cron_delete` and the `list` / `clear` subcommands are always
   described where the union is declared (all four creator-bearing profiles).
 - The READ profile and any profile declaring no loop creator get no variant
@@ -176,8 +185,12 @@ in the bundled `SKILL.md`. A TypeScript generator
 `buildManagedLoopSkill(profile, bundledBody, frontmatterDescription)` derives the
 managed skill (description + body) from it: a small documented set of wording
 substitutions (the durable/expiry/UTC sentences) plus profile-conditional section
-selection. Because the two paths interleave throughout the body (Parsing, loop.md
-mode, and Autonomous mode all reference both creators), the composition lives in
+selection. Every top-level section must be classified in an allowlist — an
+unknown or renamed section fails the generator until deliberately consumed or
+ignored — and the Parsing interval grammar is derived from the source, so a new
+section or a grammar edit cannot silently drop out of the managed bodies. Because
+the two paths interleave throughout the body (Parsing, loop.md mode, and
+Autonomous mode all reference both creators), the composition lives in
 TypeScript, not Java string surgery. Three JSON sidecars (description + body) are
 generated and committed under `packages/core/src/managed-runtime/contracts/` —
 union (shell/4), cron-only (files/4, team-lead/2), and wakeup-only (shell/3) — the
@@ -194,25 +207,31 @@ bump. The loop bodies are ~6–10 KiB, far under the 512 KiB per-body / 2 MiB
 catalog limits (`AgentDefinitionExtensions.java:42-81`). Injection is
 deterministic in the profile, preserving replay under the idempotency key.
 
-**D5 — Naming.** The variant keeps the skill name `loop` so `/loop` invocation
-and the `allowedTools` source property are unchanged; only the body wording and
-the profile-conditional sections differ. The server variant is authoritative:
-the Web Shell imports the bundled `loop` skill verbatim from the daemon snapshot,
-so a caller catalog already contains a `loop` entry on the default creation path.
-`mergeInto` therefore **replaces** any existing `loop` entry rather than refusing
-the request — rejecting would 409 every Web Shell creation on a loop-bearing
-profile. The override is pinned by an admission test (a caller-imported local
-`loop` body is replaced by the server variant, not refused).
+**D5 — Naming and provenance.** The variant keeps the skill name `loop` so
+`/loop` invocation and the `allowedTools` source property are unchanged; only the
+body wording and the profile-conditional sections differ. The Web Shell imports
+the bundled `loop` skill verbatim from the daemon snapshot, so a caller catalog
+already contains a `loop` entry on the default creation path. `mergeInto`
+therefore **replaces the caller's** `loop` entry rather than refusing the request
+— rejecting would 409 every Web Shell creation on a loop-bearing profile. The
+replacement is scoped to the caller segment: a **definition-authored** `loop`
+skill is the definition author's artifact and is preserved — the server neither
+replaces it nor injects a rival entry (the catalog must keep unique names). Both
+behaviours are pinned by admission tests (a caller-imported local `loop` body is
+replaced by the server variant; a definition-authored `loop` body survives on
+creator-less and creator-bearing profiles alike).
 
 The injection is gated on the negotiated Session Skills capability
 (`sessionSkillsSupported`, threaded through `SessionCreationCommand` like the
 other capability flags): a Harness that does not advertise `session-skills/2`
 gets no server row, keeping the failure at creation time rather than at dispatch.
-The save guard writes a row whenever the effective catalog (definition skills +
-caller skills + the injected variant, after any strip) is non-empty; a pinned
-definition's stored skills are merged whenever a definition is pinned, so an
+The save guard is D1's: a row is written only for a caller contribution or the
+injected variant (never a definition-only catalog, never an empty one), so an
 injected row carries the definition's skills plus `loop` and never shadows the
-definition catalog on the consumer side.
+definition catalog on the consumer side. A child catalog is re-selected by the
+child's profile before save, and an empty resolved child catalog (a read-only
+child whose inherited catalog was only the injected `loop`) saves nothing rather
+than an empty row that every later snapshot read would reject.
 
 ### Files affected
 

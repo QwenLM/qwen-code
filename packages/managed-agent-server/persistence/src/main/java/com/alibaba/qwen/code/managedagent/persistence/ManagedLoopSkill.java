@@ -59,26 +59,37 @@ final class ManagedLoopSkill {
 
     /**
      * Append the caller skills and the profile's loop variant to the admission
-     * catalog, returning whether the variant was injected. The variant is a
-     * server contribution added even when the caller supplies no skills. It is
-     * authoritative: a caller-imported "loop" skill (the Web Shell imports the
-     * bundled one verbatim from the daemon snapshot) is replaced, not refused,
-     * so the default creation path is not broken by a duplicate name. On a
-     * profile with no loop creator the caller's "loop" entry is still dropped,
-     * so a creator-less Session never publishes a body naming tools it lacks.
-     * The injection is gated on the negotiated Session Skills capability and on
-     * the catalog capacity: if the variant cannot fit within the published
-     * 256-entry / 2 MiB limits it is skipped rather than refusing the creation.
-     * Kept here so the admission class does not grow.
+     * catalog, returning whether the variant was injected. {@code merged} already
+     * holds the pinned definition's skills; the caller skills are appended after
+     * them. The variant is a server contribution added even when the caller
+     * supplies no skills. It replaces a caller-imported "loop" skill (the Web
+     * Shell imports the bundled one verbatim from the daemon snapshot), not
+     * refuses it, so the default creation path is not broken by a duplicate name.
+     * A definition-authored "loop" is the definition author's artifact and is
+     * preserved: the server neither replaces it nor injects a rival entry. On a
+     * profile with no loop creator the caller's "loop" entry is still dropped, so
+     * a creator-less Session never publishes a body naming tools it lacks. The
+     * injection is gated on the negotiated Session Skills capability and on the
+     * catalog capacity: if the variant cannot fit within the published 256-entry
+     * / 2 MiB limits it is skipped rather than refusing the creation. Kept here
+     * so the admission class does not grow.
      */
     static boolean mergeInto(List<Map<String, Object>> merged,
             List<Map<String, Object>> callerSkills, String profile,
             boolean sessionSkillsSupported) {
+        int definitionCount = merged.size();
         merged.addAll(callerSkills);
         if (!sessionSkillsSupported) {
             return false;
         }
-        merged.removeIf(skill -> NAME.equals(skill.get("name")));
+        boolean definitionHasLoop = merged.subList(0, definitionCount).stream()
+                .anyMatch(skill -> NAME.equals(skill.get("name")));
+        // Only the caller segment's "loop" is the server's to replace.
+        merged.subList(definitionCount, merged.size())
+                .removeIf(skill -> NAME.equals(skill.get("name")));
+        if (definitionHasLoop) {
+            return false;
+        }
         Map<String, Object> loop = forProfile(profile);
         if (loop == null) {
             return false;
@@ -111,6 +122,26 @@ final class ManagedLoopSkill {
             result.add(loop);
         }
         return result;
+    }
+
+    /**
+     * The catalog to save for a child, or null when there is nothing to save. A
+     * null inherited catalog saves nothing; a null child profile inherits the
+     * parent catalog unchanged; otherwise the loop entry is re-selected by the
+     * child's profile. An empty result (a read-only child whose inherited catalog
+     * was only the injected loop) saves nothing rather than an empty row, which
+     * every later snapshot read would reject with a conflict.
+     */
+    static List<Map<String, Object>> childCatalog(
+            List<Map<String, Object>> inherited, String childProfile) {
+        if (inherited == null) {
+            return null;
+        }
+        if (childProfile == null) {
+            return inherited;
+        }
+        List<Map<String, Object>> result = reselectForProfile(inherited, childProfile);
+        return result.isEmpty() ? null : result;
     }
 
     @SuppressWarnings("unchecked")

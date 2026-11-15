@@ -10925,7 +10925,7 @@
             "items": {
               "$ref": "#/components/schemas/SessionCreationSkill"
             },
-            "description": "Optional static Skills imported from the enabled management catalog or added explicitly to the pinned AgentDefinition catalog. The merged catalog has unique names, at most 256 entries, 512 KiB per body and 2 MiB compact JSON. On a creator-bearing tool profile the server also contributes a loop skill variant selected by the Session profile, replacing any same-named caller entry and added even when this array is empty; on a creator-less profile a caller-imported loop entry is dropped. Requires session-skills/2; persisted immutably and included in creation idempotency."
+            "description": "Optional static Skills imported from the enabled management catalog or added explicitly to the pinned AgentDefinition catalog. The merged catalog has unique names, at most 256 entries, 512 KiB per body and 2 MiB compact JSON. On a creator-bearing tool profile the server also contributes a loop skill variant selected by the Session profile, replacing a same-named caller entry and added even when this array is empty (a definition-authored loop skill is preserved and suppresses the variant); on a creator-less profile a caller-imported loop entry is dropped. Requires session-skills/2; persisted immutably and included in creation idempotency."
           },
           "extensionPins": {
             "type": "array",
@@ -12016,7 +12016,7 @@
             "items": {
               "$ref": "#/components/schemas/SessionCreationSkill"
             },
-            "description": "Optional static Skills imported from the enabled management catalog or added explicitly to the pinned AgentDefinition catalog. The merged catalog has unique names, at most 256 entries, 512 KiB per body and 2 MiB compact JSON. On a creator-bearing tool profile the server also contributes a loop skill variant selected by the Session profile, replacing any same-named caller entry and added even when this array is empty; on a creator-less profile a caller-imported loop entry is dropped. Requires session-skills/2; persisted immutably and included in creation idempotency."
+            "description": "Optional static Skills imported from the enabled management catalog or added explicitly to the pinned AgentDefinition catalog. The merged catalog has unique names, at most 256 entries, 512 KiB per body and 2 MiB compact JSON. On a creator-bearing tool profile the server also contributes a loop skill variant selected by the Session profile, replacing a same-named caller entry and added even when this array is empty (a definition-authored loop skill is preserved and suppresses the variant); on a creator-less profile a caller-imported loop entry is dropped. Requires session-skills/2; persisted immutably and included in creation idempotency."
           },
           "extensionPins": {
             "type": "array",

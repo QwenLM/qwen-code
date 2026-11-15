@@ -2,7 +2,7 @@
 
 [English](2026-11-14-managed-loop-skill-asset.md) | [简体中文](2026-11-14-managed-loop-skill-asset.zh-CN.md)
 
-状态：提案。解决[固定间隔调度设计](2026-11-10-managed-loop-schedule.md)的开放问题 4，以及[自定步调唤醒设计](2026-11-10-managed-loop-wakeup.md)的共享 skill 触点。两个工具切片均已合入（#16835 `70a487be84`、#17088 `f3dc48c79e`，评审跟进 #17197 `0ffaea08ba` 与 #17235 `9d390e23af`）；两者共同延后的 skill 变体仍未实现。
+状态：已在本改动中实现。解决[固定间隔调度设计](2026-11-10-managed-loop-schedule.md)的开放问题 4，以及[自定步调唤醒设计](2026-11-10-managed-loop-wakeup.md)的共享 skill 触点。两个工具切片均已合入（#16835 `70a487be84`、#17088 `f3dc48c79e`，评审跟进 #17197 `0ffaea08ba` 与 #17235 `9d390e23af`）；两者共同延后的 skill 变体已在本改动中落地。
 
 ## 问题陈述
 
@@ -58,24 +58,25 @@ skill 发布有两个生产者、一个消费者；Harness 只是消费者。
 
 ### 设计决策
 
-**D1 — 生产者：Java 创建准入。** 在 `AgentSessionAdmissions` 中，caller/definition skills 合并之后、`creationSkills.save` 之前，当 profile 声明至少一个 loop creator（`cron_create` 或 `loop_wakeup`）时，加入 managed loop 变体。注入**纯按 profile 驱动**：部署门不作为条件，因为它们是保留工具声明的操作门（见现状），skill 镜像声明。变体是服务端贡献，不是 caller skill：即使 caller 提供空 `skills` 数组（内置 `qwen-code` 情形）也必须加入，因此 `if (!skills.isEmpty())` 的 save 守卫放宽为"effective 目录非空即 save"。变体在请求 digest 计算**之后**注入，不扰动幂等；由于 profile 是同一创建请求的确定性输入，重放注入相同变体、复现相同快照。
+**D1 — 生产者：Java 创建准入。** 在 `AgentSessionAdmissions` 中，caller/definition skills 合并之后、`creationSkills.save` 之前，当 profile 声明至少一个 loop creator（`cron_create` 或 `loop_wakeup`）时，加入 managed loop 变体。注入**纯按 profile 驱动**：部署门不作为条件，因为它们是保留工具声明的操作门（见现状），skill 镜像声明。变体是服务端贡献，不是 caller skill：即使 caller 提供空 `skills` 数组（pinned 到携带 creator profile 的 definition）也必须加入。save 守卫在 effective 目录非空且有 caller 贡献或注入了变体时写行；仅 definition 的目录（无 caller skills、无变体）留在 definition `skillsRef`，使 skill 读取保留 definition-digest 冲突检查；空的 effective 目录绝不写行。变体在请求 digest 计算**之后**注入，不扰动幂等；由于 profile 是同一创建请求的确定性输入，重放注入相同变体、复现相同快照。
 
 **D2 — 可见性随工具门控，按 profile。** 变体 body 由章节块组合，使其只描述 profile 声明的 creator，镜像工具描述原则"声明绝不点名 Session 未声明的工具"（`hosted-workspace-tool-turn.ts:920-931`）。具体：
 
 - 固定间隔 recurring 章节（调用 `cron_create`）仅在 profile 声明 `cron_create` 时包含（files/4、team-lead/2、shell/4）。
 - 自定步调 / wakeup 章节（调用 `loop_wakeup`）仅在 profile 声明 `loop_wakeup` 时包含（shell/3、shell/4）。
+- loop.md 任务文件模式只为自定步调路径描述：wakeup fire 会解析 `<<loop.md-dynamic>>` 哨兵，而 cron fire 既不展开哨兵、模型也无法打开 Harness 主机上的 home 文件（读取被限制在会话工作目录内），故 cron body 与 union 的 cron 半部不带 loop.md 模式。
 - `cron_list` / `cron_delete` 与 `list` / `clear` 子命令在声明并集处恒描述（全部四个携带 creator 的 profile）。
 - READ profile 与任何不声明 loop creator 的 profile 不得到变体（空贡献），与现有 READ 空目录规则一致。
 
 两个部署门都不改变 body。变体在 profile 声明 `loop_wakeup` 处描述 wakeup 路径、在声明 `cron_create` 处描述固定间隔路径，与门无关；门在运行时以类型化错误拒绝 create/arming 调用，正如不变的工具声明已然允许。这使 skill 与工具面一致，而非试图从控制面预测运行时操作门（其中之一 loop env 门甚至对 Java 不可见）。
 
-**D3 — skill 来源与单一来源。** 共享 skill 内容住在 bundled `SKILL.md`。TypeScript 生成器 `buildManagedLoopSkill(profile, bundledBody, frontmatterDescription)` 从它派生 managed skill（description + body）：一组小的、有文档的措辞替换（durable/expiry/UTC 句）加 profile 条件章节选择。由于两条路径在 body 中深度交织（Parsing、loop.md 模式、Autonomous 模式都引用两个 creator），组合住在 TypeScript，而非 Java 字符串外科手术。三个 JSON sidecar（description + body）生成并提交在 `packages/core/src/managed-runtime/contracts/` 下——union（shell/4）、cron-only（files/4、team-lead/2）、wakeup-only（shell/3）——contracts 模块已把该目录拷贝到 Java classpath（`contracts/pom.xml:53-54`）。TypeScript 一致性测试断言每个提交 sidecar 与生成器输出逐字节相等，并把生成器绑回 bundled 源；任一方向漂移都使测试变红（"从生产者钉消费者"模式）。Java 是纯选择器：按 Session 的 profile 读 sidecar 并注入，不做字符串组合。
+**D3 — skill 来源与单一来源。** 共享 skill 内容住在 bundled `SKILL.md`。TypeScript 生成器 `buildManagedLoopSkill(profile, bundledBody, frontmatterDescription)` 从它派生 managed skill（description + body）：一组小的、有文档的措辞替换（durable/expiry/UTC 句）加 profile 条件章节选择。每个顶层章节都必须在允许列表中分类——未知或重命名的章节会使生成器失败，直到被显式消费或忽略——且 Parsing 的间隔语法从源派生，因此新增章节或语法改动不会静默地从 managed body 中丢失。由于两条路径在 body 中深度交织（Parsing、loop.md 模式、Autonomous 模式都引用两个 creator），组合住在 TypeScript，而非 Java 字符串外科手术。三个 JSON sidecar（description + body）生成并提交在 `packages/core/src/managed-runtime/contracts/` 下——union（shell/4）、cron-only（files/4、team-lead/2）、wakeup-only（shell/3）——contracts 模块已把该目录拷贝到 Java classpath（`contracts/pom.xml:53-54`）。TypeScript 一致性测试断言每个提交 sidecar 与生成器输出逐字节相等，并把生成器绑回 bundled 源；任一方向漂移都使测试变红（"从生产者钉消费者"模式）。Java 是纯选择器：按 Session 的 profile 读 sidecar 并注入，不做字符串组合。
 
 **D4 — 冻结、重放安全、容量受限。** 注入的变体搭乘现有不可变 receipt 与 digest；无新资源 kind、无 schema 版本 bump。loop body 约 6–10 KiB，远低于 512 KiB 单 body / 2 MiB 目录上限（`AgentDefinitionExtensions.java:42-81`）。注入对 profile 确定，保持幂等键下的重放。
 
-**D5 — 命名。** 变体保持 skill 名 `loop`，使 `/loop` 调用与 `allowedTools` 源属性不变；只有 body 措辞与 profile 条件章节不同。服务端变体是权威的：Web Shell 从 daemon 快照原样导入 bundled `loop` skill，故默认创建路径的 caller 目录已含一个 `loop` 项。因此 `mergeInto` **替换**任何已有 `loop` 项而非拒绝请求——拒绝会使所有携带 loop 的 profile 上的 Web Shell 创建都 409。覆盖由准入测试钉住（caller 导入的本地 `loop` body 被服务端变体替换，而非被拒）。
+**D5 — 命名与归属。** 变体保持 skill 名 `loop`，使 `/loop` 调用与 `allowedTools` 源属性不变；只有 body 措辞与 profile 条件章节不同。Web Shell 从 daemon 快照原样导入 bundled `loop` skill，故默认创建路径的 caller 目录已含一个 `loop` 项。因此 `mergeInto` **替换 caller 的** `loop` 项而非拒绝请求——拒绝会使所有携带 loop 的 profile 上的 Web Shell 创建都 409。替换只作用于 caller 段：**definition 作者自带的** `loop` skill 是定义作者的产物，予以保留——服务端既不替换它、也不注入竞争项（目录须保持名字唯一）。两种行为均由准入测试钉住（caller 导入的本地 `loop` body 被服务端变体替换；definition 自带的 `loop` body 在无 creator 与携带 creator 的 profile 上都存活）。
 
-注入按协商的 Session Skills 能力门控（`sessionSkillsSupported`，循其他能力标志经 `SessionCreationCommand` 传入）：不通告 `session-skills/2` 的 Harness 得不到服务端行，使失败留在创建期而非派发期。save 守卫在 effective 目录（definition skills + caller skills + 注入变体，剥离后）非空时写行；pinned definition 的存储 skills 只要有 pinned definition 就合并，故注入的行携带 definition 的 skills 加 `loop`，绝不在消费端遮蔽 definition 目录。
+注入按协商的 Session Skills 能力门控（`sessionSkillsSupported`，循其他能力标志经 `SessionCreationCommand` 传入）：不通告 `session-skills/2` 的 Harness 得不到服务端行，使失败留在创建期而非派发期。save 守卫即 D1 所述：仅 caller 贡献或注入变体才写行（绝不写仅 definition 的目录、绝不写空目录），故注入的行携带 definition 的 skills 加 `loop`，绝不在消费端遮蔽 definition 目录。子会话目录在保存前按子 profile 重选；空的解析结果（只读子会话继承的目录仅有注入的 `loop`）不写行，而非写一个此后每次快照读取都会拒绝的空行。
 
 ### 涉及文件
 

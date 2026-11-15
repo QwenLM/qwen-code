@@ -3542,8 +3542,17 @@ describe('managed-agent-server e2e runner', () => {
     );
     expect(includes.length).toBeGreaterThan(0);
     const dockerfile = read('packages/managed-agent-server/Dockerfile');
+    // Only the jar-building stage (the first FROM) copies the assets into the
+    // Maven build. Strip comment lines and scope to that stage, then match the
+    // whole COPY line, so a commented-out instruction or a COPY appended to the
+    // runtime stage cannot satisfy the pin.
+    const buildStage = dockerfile.split(/^FROM\s/im)[1] ?? '';
+    const stageLines = buildStage
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line && !line.startsWith('#'));
     for (const include of includes) {
-      expect(dockerfile).toContain(
+      expect(stageLines).toContain(
         `COPY packages/core/src/managed-runtime/contracts/${include} packages/core/src/managed-runtime/contracts/`,
       );
     }
