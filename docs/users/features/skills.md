@@ -482,3 +482,9 @@ description: Analyze Excel spreadsheets, create pivot tables, and generate chart
 - Does the Skill activate when expected?
 - Are the instructions clear?
 - Are there missing examples or edge cases?
+
+## SKILL.md frontmatter
+
+### MCP dependencies
+
+See the `mcp:` field in SKILL.md YAML frontmatter to declare MCP server dependencies for a skill.
