@@ -2426,22 +2426,24 @@ export abstract class ChannelBase {
     // here. The replay is attributed to the LAST entry's route, so coalescing
     // two routes into one turn would answer one of them in the wrong chat —
     // the exact harm `runningTurnOwnsEnvelope` prevents for mid-turn
-    // injections. Replay each route's slice as its own turn, in arrival order.
-    const byRoute = new Map<string, CollectBufferEntry[]>();
-    for (const entry of buffer) {
-      const key = this.routeKey(entry.envelope);
-      const slice = byRoute.get(key);
-      if (slice) {
-        slice.push(entry);
-      } else {
-        byRoute.set(key, [entry]);
+    // injections. Replay each contiguous run of one route as its own turn in
+    // arrival order: grouping every entry of a route instead would let a later
+    // message overtake an earlier one from another route, and these replays
+    // share one session's arrival order.
+    const ordered = [...buffer].sort((a, b) => a.sequence - b.sequence);
+    let run: CollectBufferEntry[] = [];
+    for (const entry of ordered) {
+      if (
+        run.length > 0 &&
+        this.routeKey(run[0]!.envelope) !== this.routeKey(entry.envelope)
+      ) {
+        this.replayCollectedEntries(sessionId, run, taskLabel);
+        run = [];
       }
+      run.push(entry);
     }
-    const slices = [...byRoute.values()].sort(
-      (a, b) => a[0]!.sequence - b[0]!.sequence,
-    );
-    for (const slice of slices) {
-      this.replayCollectedEntries(sessionId, slice, taskLabel);
+    if (run.length > 0) {
+      this.replayCollectedEntries(sessionId, run, taskLabel);
     }
   }
 

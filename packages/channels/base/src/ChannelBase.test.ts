@@ -27031,6 +27031,178 @@ describe('ChannelBase', () => {
       }
     });
 
+    it('replays alternating routes as separate turns in arrival order', async () => {
+      const queueMidTurnMessage = enableInjection();
+      const resolvers = resolvablePrompts();
+      const ch = createChannel({
+        dispatchMode: 'inject',
+        sessionScope: 'single',
+        operators: ['user1'],
+      });
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        const running = ch.handleInbound(
+          envelope({
+            text: 'start',
+            messageId: 'm-alternating-1',
+            chatId: 'chatA',
+          }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+        const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[0]![0] as string;
+
+        // A's first message is accepted mid-turn and never drained.
+        await ch.handleInbound(
+          envelope({
+            text: 'A first',
+            messageId: 'm-alternating-2',
+            chatId: 'chatA',
+          }),
+        );
+        expect(queueMidTurnMessage).toHaveBeenCalledTimes(1);
+        // B cannot ride A's turn, so it parks and gates the rest of the turn.
+        await ch.handleInbound(
+          envelope({
+            text: 'B parked',
+            messageId: 'm-alternating-3',
+            chatId: 'chatB',
+          }),
+        );
+        // A's second message therefore parks behind B to keep arrival order.
+        await ch.handleInbound(
+          envelope({
+            text: 'A second',
+            messageId: 'm-alternating-4',
+            chatId: 'chatA',
+          }),
+        );
+        expect(queueMidTurnMessage).toHaveBeenCalledTimes(1);
+        const parked = collectBuffers(ch).get(sessionId) ?? [];
+        expect(parked).toHaveLength(2);
+
+        (
+          bridge as unknown as {
+            takeUndrainedMidTurnMessages: ReturnType<typeof vi.fn>;
+          }
+        ).takeUndrainedMidTurnMessages.mockReturnValueOnce(['A first']);
+
+        resolvers[0]!('done');
+        await running;
+
+        const promptText = (index: number) =>
+          String(
+            (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[index]?.[1],
+          );
+
+        // Arrival order A first -> B parked -> A second is replayed as three
+        // turns: grouping every A entry would deliver "A second" before "B".
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+        expect(ch.promptStarts[1]?.chatId).toBe('chatA');
+        expect(promptText(1)).toContain('A first');
+        expect(promptText(1)).not.toContain('A second');
+        expect(promptText(1)).not.toContain('B parked');
+
+        resolvers[1]?.('replay a1 done');
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(3));
+        expect(ch.promptStarts[2]?.chatId).toBe('chatB');
+        expect(promptText(2)).toContain('B parked');
+        expect(promptText(2)).not.toContain('A second');
+
+        resolvers[2]?.('replay b done');
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(4));
+        expect(ch.promptStarts[3]?.chatId).toBe('chatA');
+        expect(promptText(3)).toContain('A second');
+        expect(promptText(3)).not.toContain('B parked');
+
+        resolvers[3]?.('replay a2 done');
+        await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(4));
+      } finally {
+        stderr.mockRestore();
+        resolvers.forEach((resolve) => resolve('done'));
+      }
+    });
+
+    it('coalesces a contiguous run of one route before the next route', async () => {
+      const queueMidTurnMessage = enableInjection();
+      const resolvers = resolvablePrompts();
+      const ch = createChannel({
+        dispatchMode: 'inject',
+        sessionScope: 'single',
+        operators: ['user1'],
+      });
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        const running = ch.handleInbound(
+          envelope({
+            text: 'start',
+            messageId: 'm-contiguous-1',
+            chatId: 'chatA',
+          }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+
+        await ch.handleInbound(
+          envelope({
+            text: 'A first',
+            messageId: 'm-contiguous-2',
+            chatId: 'chatA',
+          }),
+        );
+        await ch.handleInbound(
+          envelope({
+            text: 'A second',
+            messageId: 'm-contiguous-3',
+            chatId: 'chatA',
+          }),
+        );
+        expect(queueMidTurnMessage).toHaveBeenCalledTimes(2);
+        await ch.handleInbound(
+          envelope({
+            text: 'B parked',
+            messageId: 'm-contiguous-4',
+            chatId: 'chatB',
+          }),
+        );
+
+        (
+          bridge as unknown as {
+            takeUndrainedMidTurnMessages: ReturnType<typeof vi.fn>;
+          }
+        ).takeUndrainedMidTurnMessages.mockReturnValueOnce([
+          'A first',
+          'A second',
+        ]);
+
+        resolvers[0]!('done');
+        await running;
+
+        const promptText = (index: number) =>
+          String(
+            (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[index]?.[1],
+          );
+
+        // A first and A second are contiguous, so they keep coalescing into one
+        // turn; the route change after them still starts a new one.
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+        expect(ch.promptStarts[1]?.chatId).toBe('chatA');
+        expect(promptText(1)).toContain('A first');
+        expect(promptText(1)).toContain('A second');
+        expect(promptText(1)).not.toContain('B parked');
+
+        resolvers[1]?.('replay a done');
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(3));
+        expect(ch.promptStarts[2]?.chatId).toBe('chatB');
+        expect(promptText(2)).toContain('B parked');
+
+        resolvers[2]?.('replay b done');
+        await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(3));
+      } finally {
+        stderr.mockRestore();
+        resolvers.forEach((resolve) => resolve('done'));
+      }
+    });
+
     it('replays only the undrained tail of the accepted injections', async () => {
       const queueMidTurnMessage = enableInjection();
       const resolvers = resolvablePrompts();
