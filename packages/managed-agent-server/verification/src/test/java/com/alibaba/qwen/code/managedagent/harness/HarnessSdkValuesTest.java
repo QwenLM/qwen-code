@@ -48,6 +48,16 @@ class HarnessSdkValuesTest {
         verify(delegate).supportsPersonalMemory();
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void boundaryForwardsSavedLifecycleCapability(boolean supported) {
+        var delegate = mock(HarnessConnector.class);
+        when(delegate.supportsSavedLifecycle("hosted-workspace-external-files/1")).thenReturn(supported);
+        assertThat(new SdkHarnessBoundary(delegate).supportsSavedLifecycle("hosted-workspace-external-files/1"))
+                .isEqualTo(supported);
+        verify(delegate).supportsSavedLifecycle("hosted-workspace-external-files/1");
+    }
+
     @Test
     void httpStatusBodyFieldsAndTransportCauseSurviveTheBoundary() throws Exception {
         var cause = new IOException("disconnected");

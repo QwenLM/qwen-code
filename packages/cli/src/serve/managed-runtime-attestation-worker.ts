@@ -337,6 +337,10 @@ export async function startManagedRuntimeAttestationWorker(
         sshRuntime !== undefined || externalBoot !== undefined,
       );
       sshRuntime?.register(app, boot, executor);
+      // The main listener mounts the same publication channels as the
+      // dedicated listener; the route plan gates them from the same
+      // `publication` flag (#15685's shared-channel contract).
+      publication?.register(app, executor);
     } else {
       registerManagedRuntimeAttestationRoute(app, boot);
       // A Managed session's host names one ledger per worker incarnation and
