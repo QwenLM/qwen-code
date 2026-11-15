@@ -69,11 +69,13 @@ Each generated image is:
 
 ## Troubleshooting
 
-- **"Image generation is not configured with a valid endpoint"** — the
+- **`image_gen` is not offered / the agent cannot generate images** — the
   `imageModel` selector is empty or unparsable, matches zero or several
   image-capable routes, or the matched route lacks an `envKey`, lacks a
-  `baseUrl`, or declares a non-HTTPS `baseUrl`. A missing `envKey` produces
-  this message too, not the environment-variable message below.
+  `baseUrl`, or declares a non-HTTPS `baseUrl`. The tool is then simply not
+  registered, with no error message. If the model was valid when the session
+  started and is invalidated afterwards, the tool call instead fails with
+  "Image generation is not configured with a valid endpoint".
 - **"Image generation requires the … environment variable"** — the route's
   `envKey` is not set in the daemon's environment (or the `env` block of
   `settings.json`).

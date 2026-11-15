@@ -47,9 +47,11 @@ the **Qwen Live** card (marked Experimental):
    step 4; the route then supplies both the endpoint (derived from its
    `baseUrl`) and the key (read from its `envKey`), and this row shows that
    the key comes from the selected model. A key pasted here is saved in clear
-   text in your user settings file; to keep it out of settings, configure a
-   `realtimeOnly` route whose `envKey` names an environment variable and
-   select it as the Realtime model instead.
+   text in your user settings file. To keep it out of settings, export the
+   variable in the daemon's environment and select a `realtimeOnly` route
+   whose `envKey` names it as the Realtime model: the route reads the daemon
+   environment first, then falls back to the clear-text `env` block of
+   `settings.json`, so a key left in that block is still stored in settings.
 4. **Realtime model** — pick one of your configured `realtimeOnly` routes, or
    choose **Other model id…** to enter any Realtime model id. The default is
    `qwen3.5-omni-plus-realtime`.
