@@ -1973,13 +1973,19 @@ export const ChatEditor = memo(
       [onAttachmentPreview, onComposerTagClick],
     );
 
+    const [voiceActive, setVoiceActive] = useState(false);
     const voiceButtonRef = useRef<VoiceButtonHandle>(null);
     // Assigned below once insertVoiceText exists; useComposerCore awaits it
     // before a user-initiated submit so dictation lands in the sent message.
     const prepareVoiceSubmitRef = useRef<() => Promise<void>>(async () => {});
     const core = useComposerCore({
       onSubmit,
-      prepareSubmit: () => prepareVoiceSubmitRef.current(),
+      // Only install the finalizer while a capture is active (voiceActive
+      // stays true through transcribing), so plain typed sends keep the
+      // synchronous submit path.
+      prepareSubmit: voiceActive
+        ? () => prepareVoiceSubmitRef.current()
+        : undefined,
       onInputTextChange,
       onCycleMode,
       cycleModeOnTab,
@@ -2512,7 +2518,6 @@ export const ChatEditor = memo(
     const toolbarMeasurementsRef = useRef<HTMLDivElement>(null);
     const widthToggleRef = useRef<HTMLButtonElement>(null);
     const [widthToggleFits, setWidthToggleFits] = useState(false);
-    const [voiceActive, setVoiceActive] = useState(false);
     const pendingVoiceInsertRef = useRef<{
       text: string;
       sessionId: string | undefined;
@@ -2780,6 +2785,9 @@ export const ChatEditor = memo(
     // must stay usable throughout (mobile/simple have no other composer exit).
     const cancelPreparing = isPreparing || core.pendingImageBatchCount > 0;
     const composerPreparing = cancelPreparing || core.submitPreparing;
+    // With an empty draft during a run the submit button doubles as the Stop
+    // control; finalization must not take that affordance away.
+    const submitLoading = composerPreparing && !showCancelButton;
 
     const {
       searchMode,
@@ -4028,23 +4036,23 @@ export const ChatEditor = memo(
             )}
             <button
               className={
-                composerPreparing || showCancelButton
+                submitLoading || showCancelButton
                   ? `${styles.sendBtn} ${styles.sendBtnRunning}${
                       cancelArmed ? ` ${styles.sendBtnArmed}` : ''
                     }`
                   : styles.sendBtn
               }
               disabled={
-                composerPreparing
+                submitLoading
                   ? true
                   : showCancelButton
                     ? !onCancel
-                    : !core.canSubmit
+                    : !core.canSubmit && !voiceActive
               }
               data-web-shell-composer-submit
               onClick={(e) => {
                 e.stopPropagation();
-                if (composerPreparing) {
+                if (submitLoading) {
                   return;
                 }
                 if (showCancelButton) {
@@ -4054,7 +4062,7 @@ export const ChatEditor = memo(
                 core.submitText();
               }}
               aria-label={
-                composerPreparing
+                submitLoading
                   ? t('common.loading')
                   : showCancelButton
                     ? cancelArmed && !isMobile
@@ -4068,7 +4076,7 @@ export const ChatEditor = memo(
                   : undefined
               }
             >
-              {composerPreparing ? (
+              {submitLoading ? (
                 <LoadingIcon />
               ) : showCancelButton ? (
                 cancelArmed && !isMobile ? (

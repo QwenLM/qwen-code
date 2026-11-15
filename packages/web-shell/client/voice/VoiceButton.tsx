@@ -270,12 +270,24 @@ export const VoiceButton = forwardRef<VoiceButtonHandle, VoiceButtonProps>(
       },
     });
 
-    useImperativeHandle(ref, () => ({ flush }), [flush]);
-
     const isActive =
       status === 'connecting' ||
       status === 'recording' ||
       status === 'transcribing';
+
+    useImperativeHandle(
+      ref,
+      () => ({
+        flush: async () => {
+          const text = await flush();
+          // A send that finalizes an empty transcript must still surface the
+          // no-speech notice — the suppressed onFinal would have shown it.
+          if (isActive && !text.trim()) setHasNoSpeech(true);
+          return text;
+        },
+      }),
+      [flush, isActive],
+    );
     const isRecording = status === 'recording';
 
     useEffect(() => {

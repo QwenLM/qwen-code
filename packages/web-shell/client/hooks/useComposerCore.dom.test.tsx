@@ -5105,6 +5105,16 @@ describe('useComposerCore prepareSubmit gate', () => {
     }
   });
 
+  it('keeps submits synchronous and never preparing without a finalizer', async () => {
+    const { onSubmit } = await mount();
+    act(() => latest!.setText('typed'));
+
+    act(() => latest!.submitText());
+    expect(onSubmit).toHaveBeenCalledOnce();
+    expect(onSubmit.mock.calls[0][0]).toBe('typed');
+    expect(latest!.submitPreparing).toBe(false);
+  });
+
   it('cancels the submit without an unhandled rejection when prepareSubmit rejects', async () => {
     const prepareSubmit = vi.fn(async () => {
       throw new Error('prepare failed');

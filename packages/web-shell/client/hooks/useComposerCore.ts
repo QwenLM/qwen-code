@@ -1191,7 +1191,8 @@ export interface UseComposerCoreOptions {
    * draft, so the host can finalize pending input first — e.g. stop voice
    * dictation and insert its final transcript. Submits stay synchronous when
    * it is absent. While it runs, further user submits are ignored and
-   * `submitPreparing` is true; a session switch or unmount cancels the submit.
+   * `submitPreparing` is true; a session switch, unmount, or a rejecting
+   * finalizer cancels the submit.
    */
   prepareSubmit?: () => Promise<void>;
   onInputTextChange?: (text: string) => void;

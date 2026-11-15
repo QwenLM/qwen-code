@@ -1104,7 +1104,7 @@ describe('useVoiceCapture flush', () => {
     ).toHaveLength(1);
   });
 
-  it('aborts and resolves empty when finalization never lands', async () => {
+  it('surfaces a timeout error and resolves empty when finalization never lands', async () => {
     vi.useFakeTimers();
     const result = await renderHookHost();
     await act(async () => {
@@ -1123,7 +1123,11 @@ describe('useVoiceCapture flush', () => {
       await pending;
     });
     expect(flushed).toBe('');
-    expect(capture?.status).toBe('idle');
+    // The stalled send must tell the user why the dictation is missing —
+    // a silent abort would drop the words without any feedback.
+    expect(capture?.status).toBe('error');
+    expect(capture?.errorMessage).toBe('Transcription timed out.');
+    expect(onError).toHaveBeenCalledWith('Transcription timed out.');
     expect(vi.getTimerCount()).toBe(0);
   });
 });

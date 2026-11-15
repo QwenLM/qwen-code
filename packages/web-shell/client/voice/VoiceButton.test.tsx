@@ -1123,4 +1123,61 @@ describe('VoiceButton', () => {
     expect(await ref.current!.flush()).toBe('final transcript');
     expect(mocks.capture.flush).toHaveBeenCalledOnce();
   });
+
+  it('surfaces the no-speech notice when a send finalizes an empty transcript', async () => {
+    mocks.capture.status = 'recording';
+    mocks.capture.flush.mockResolvedValue('');
+    const ref = createRef<VoiceButtonHandle>();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <VoiceButton
+            ref={ref}
+            disabled={false}
+            onInsert={() => {}}
+            target={legacyTarget}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    await act(async () => {
+      expect(await ref.current!.flush()).toBe('');
+    });
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(
+      'No speech detected.',
+    );
+  });
+
+  it('does not show the no-speech notice for a flush while idle', async () => {
+    mocks.capture.flush.mockResolvedValue('');
+    const ref = createRef<VoiceButtonHandle>();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <VoiceButton
+            ref={ref}
+            disabled={false}
+            onInsert={() => {}}
+            target={legacyTarget}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    await act(async () => {
+      expect(await ref.current!.flush()).toBe('');
+    });
+    expect(container.querySelector('[role="status"]')).toBeNull();
+  });
 });

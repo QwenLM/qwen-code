@@ -583,15 +583,17 @@ export function useVoiceCapture({
     const pending: PendingFlush = { promise, resolve };
     flushRef.current = pending;
     // stop() while still connecting clears the start timeout, so a flush
-    // needs its own bound: if finalization never lands, abort and let the
-    // caller proceed without the dictation instead of hanging the send.
+    // needs its own bound. Route the expiry through fail() like the regular
+    // transcribe timeout: the send proceeds without the dictation, but the
+    // user sees why instead of a silent abort that also clears the error.
     pending.timeout = setTimeout(() => {
-      settleFlush('');
-      abort();
+      const snapshot = snapshotRef.current;
+      if (snapshot) fail('Transcription timed out.', snapshot);
+      else settleFlush('');
     }, TRANSCRIPTION_TIMEOUT_MS);
     stop();
     return promise;
-  }, [abort, settleFlush, stop]);
+  }, [fail, settleFlush, stop]);
 
   useEffect(() => {
     const unsubscribe = availability?.subscribe(() => {

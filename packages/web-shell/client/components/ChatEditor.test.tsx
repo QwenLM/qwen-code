@@ -941,6 +941,56 @@ describe('ChatEditor voice toolbar integration', () => {
     )!;
     expect(submit.disabled).toBe(true);
   });
+
+  it('keeps the desktop stop affordance usable while a submit finalizes dictation', () => {
+    // Empty draft during a run: the submit button doubles as the Stop control.
+    composerCoreState.hasContent = false;
+    composerCoreState.submitPreparing = true;
+    const onCancel = vi.fn();
+    const container = renderChatEditor({
+      visibleToolbarActions: ['voice'],
+      isRunning: true,
+      onCancel,
+    });
+    const submit = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-submit]',
+    )!;
+    expect(submit.disabled).toBe(false);
+    expect(submit.getAttribute('aria-label')).toBe('esc to cancel');
+    act(() => submit.click());
+    expect(onCancel).toHaveBeenCalledOnce();
+    expect(composerCoreState.submitText).not.toHaveBeenCalled();
+  });
+
+  it('enables Send for an active dictation even with an empty draft', () => {
+    composerCoreState.hasContent = false;
+    const container = renderChatEditor({ visibleToolbarActions: ['voice'] });
+    const submit = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-submit]',
+    )!;
+    expect(submit.disabled).toBe(true);
+
+    act(() => voiceButtonState.onActiveChange?.(true));
+    expect(submit.disabled).toBe(false);
+    act(() => submit.click());
+    expect(composerCoreState.submitText).toHaveBeenCalledOnce();
+
+    act(() => voiceButtonState.onActiveChange?.(false));
+    expect(submit.disabled).toBe(true);
+  });
+
+  it('installs the submit finalizer only while a capture is active', () => {
+    renderChatEditor({ visibleToolbarActions: ['voice'] });
+    expect(latestComposerCoreOptions.current?.prepareSubmit).toBeUndefined();
+
+    act(() => voiceButtonState.onActiveChange?.(true));
+    expect(latestComposerCoreOptions.current?.prepareSubmit).toBeTypeOf(
+      'function',
+    );
+
+    act(() => voiceButtonState.onActiveChange?.(false));
+    expect(latestComposerCoreOptions.current?.prepareSubmit).toBeUndefined();
+  });
 });
 
 describe('ChatEditor add menu (+)', () => {
@@ -5574,6 +5624,20 @@ describe('ChatEditor mobile composer actions', () => {
     ].find((b) => b.textContent === 'Stop')!;
     act(() => stop.click());
     expect(onCancel).toHaveBeenCalledTimes(2);
+    expect(composerCoreState.submitText).not.toHaveBeenCalled();
+
+    // The expanded Stop must survive submit finalization too — while the
+    // modal is open it is the only reachable stop control.
+    composerCoreState.submitPreparing = true;
+    rerenderChatEditor(container, { isRunning: true, onCancel });
+    const stopDuringFlush = [
+      ...document.querySelectorAll<HTMLButtonElement>(
+        '[data-web-shell-expanded-editor] button',
+      ),
+    ].find((b) => b.textContent === 'Stop')!;
+    expect(stopDuringFlush.disabled).toBe(false);
+    act(() => stopDuringFlush.click());
+    expect(onCancel).toHaveBeenCalledTimes(3);
     expect(composerCoreState.submitText).not.toHaveBeenCalled();
   });
 
