@@ -1,5 +1,6 @@
+import { randomUUID } from '../../utils/random-uuid.js';
 export function managedRequestId(): string {
-  return `managed_${typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`}`;
+  return `managed_${randomUUID()}`;
 }
 
 const clientIds = new Map<string, string>();
