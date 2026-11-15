@@ -108,6 +108,7 @@ function makeFixture(
   let cdReject = false;
   let cdLandThenReject = false;
   let cdTimeoutThenLand = false;
+  let cdTimeoutAfterLand = false;
   const bridge = {
     getSessionSummary: (id: string) => {
       gateOrder.push(`summary:${id}`);
@@ -151,6 +152,14 @@ function makeFixture(
         setTimeout(() => {
           effectiveCwd = landed;
         }, 0);
+        throw new BridgeTimeoutError('changeSessionCwd', 30_000);
+      }
+      if (cdTimeoutAfterLand) {
+        // The queued cd already landed (effectiveCwd updated) before the
+        // caller-facing timeout rejects: the catch observes the new cwd.
+        effectiveCwd = opts.symlinkWorkspace
+          ? realpathSync(req.path)
+          : req.path;
         throw new BridgeTimeoutError('changeSessionCwd', 30_000);
       }
       const previousCwd = effectiveCwd;
@@ -246,6 +255,9 @@ function makeFixture(
     },
     setCdTimeoutThenLand(timeoutThenLand: boolean) {
       cdTimeoutThenLand = timeoutThenLand;
+    },
+    setCdTimeoutAfterLand(timeoutAfterLand: boolean) {
+      cdTimeoutAfterLand = timeoutAfterLand;
     },
     setEffectiveCwd(cwd: string) {
       effectiveCwd = cwd;
@@ -1561,5 +1573,102 @@ describe('POST /session/:id/worktree-handoff', () => {
     expect(existsSync(path.join(fixture.workspaceDir, 'ahead.txt'))).toBe(
       false,
     );
+  });
+
+  it('to=local finishes the transfer when a timeout lands the cd in local (R7-7)', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    await fixture.createDetachedWorktree();
+    writeFileSync(path.join(fixture.worktreeDir, 'work.txt'), 'work\n');
+    git(fixture.worktreeDir, 'add', 'work.txt');
+    git(fixture.worktreeDir, 'commit', '-qm', 'agent work', '--no-verify');
+    fixture.setEffectiveCwd(fixture.worktreeDir);
+    // The queued cd lands (effectiveCwd = local) before the timeout rejects.
+    fixture.setCdTimeoutAfterLand(true);
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'local' });
+
+    // The transfer completes instead of rolling back the carried work.
+    expect(res.status).toBe(200);
+    expect(res.body.worktree).toBeNull();
+    expect(git(fixture.workspaceDir, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(
+      'worktree-task',
+    );
+    expect(existsSync(path.join(fixture.workspaceDir, 'work.txt'))).toBe(true);
+    const sidecar = await fixture.readSidecar();
+    expect(sidecar.state).toBe('missing');
+  });
+
+  it('to=local keeps the checkout and sidecar when a timeout leaves the cd undetermined (R7-7)', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    await fixture.createDetachedWorktree();
+    writeFileSync(path.join(fixture.worktreeDir, 'work.txt'), 'work\n');
+    git(fixture.worktreeDir, 'add', 'work.txt');
+    git(fixture.worktreeDir, 'commit', '-qm', 'agent work', '--no-verify');
+    // Session still in the worktree; the cd lands only AFTER the catch reads.
+    fixture.setEffectiveCwd(fixture.worktreeDir);
+    fixture.setCdTimeoutThenLand(true);
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'local' });
+
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    // No destructive rollback: the promoted branch and carried work survive,
+    // and the sidecar still names the worktree.
+    expect(git(fixture.workspaceDir, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(
+      'worktree-task',
+    );
+    expect(existsSync(path.join(fixture.workspaceDir, 'work.txt'))).toBe(true);
+    const sidecar = await fixture.readSidecar();
+    expect(sidecar.state).toBe('valid');
+  });
+
+  it('refuses a branch handoff when the recorded base is empty (legacy sidecar) (R7-9)', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    // A named-branch worktree (a branch would be checked out) whose legacy
+    // sidecar carries an empty originalHeadCommit, skipping the local-HEAD
+    // gate. The branch checkout must fail closed, not move the local checkout
+    // without verifying its HEAD.
+    const result = await fixture.service.createUserWorktree(
+      fixture.slug,
+      'main',
+    );
+    expect(result.success).toBe(true);
+    await createWorktreeSessionMarkerExclusive(
+      fixture.worktreeDir,
+      fixture.sessionId,
+    );
+    await writeWorktreeSession(
+      fixture.sessionService.getWorktreeSessionPath(fixture.sessionId),
+      {
+        slug: fixture.slug,
+        worktreePath: fixture.worktreeDir,
+        worktreeBranch: 'worktree-task',
+        originalCwd: fixture.workspaceDir,
+        workspaceCwd: fixture.workspaceDir,
+        originalBranch: 'main',
+        originalHeadCommit: '',
+      },
+    );
+    // The user commits locally ahead of the (unrecorded) base.
+    writeFileSync(path.join(fixture.workspaceDir, 'local.txt'), 'local\n');
+    git(fixture.workspaceDir, 'add', 'local.txt');
+    git(fixture.workspaceDir, 'commit', '-qm', 'local work', '--no-verify');
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'local' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('worktree_handoff_base_unavailable');
+    expect(git(fixture.workspaceDir, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(
+      'main',
+    );
+    expect(existsSync(path.join(fixture.workspaceDir, 'local.txt'))).toBe(true);
   });
 });

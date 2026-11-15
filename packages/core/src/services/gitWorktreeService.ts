@@ -1551,6 +1551,62 @@ export class GitWorktreeService {
   }
 
   /**
+   * Copy one overlay entry into the target checkout with destination
+   * containment. Returns true only when the entry was CREATED. Skips (does
+   * not throw) when the destination already exists — a pre-existing file
+   * (e.g. a git-ignored secret the clean gate cannot see) must survive the
+   * carry — or when an ancestor symlink would redirect the write outside
+   * the target checkout (a committed `out -> <outside>` link): the deepest
+   * existing ancestor's realpath is checked BEFORE mkdir (which follows
+   * symlink ancestors), and the parent is re-verified after. Shared by both
+   * untracked-copy paths so neither can write outside the checkout.
+   */
+  private async copyOverlayEntryContained(
+    srcTop: string,
+    targetTop: string,
+    realTargetTop: string,
+    rel: string,
+  ): Promise<boolean> {
+    const dst = path.join(targetTop, rel);
+    const exists = await fs
+      .lstat(dst)
+      .then(() => true)
+      .catch(() => false);
+    if (exists) return false;
+    const parent = path.dirname(dst);
+    let ancestor = parent;
+    while (
+      !(await fs
+        .lstat(ancestor)
+        .then(() => true)
+        .catch(() => false))
+    ) {
+      const up = path.dirname(ancestor);
+      if (up === ancestor) break;
+      ancestor = up;
+    }
+    if (
+      !isWithinRoot(
+        await fs.realpath(ancestor).catch(() => ancestor),
+        realTargetTop,
+      )
+    ) {
+      return false;
+    }
+    await fs.mkdir(parent, { recursive: true });
+    if (
+      !isWithinRoot(
+        await fs.realpath(parent).catch(() => parent),
+        realTargetTop,
+      )
+    ) {
+      return false;
+    }
+    await this.copyOverlayEntry(path.join(srcTop, rel), dst);
+    return true;
+  }
+
+  /**
    * Copy this checkout's untracked files into another checkout of the
    * same repository at the same repository-relative offset (the target
    * may be rooted at a subdirectory). Fail-open per file; a pre-existing
@@ -1577,55 +1633,19 @@ export class GitWorktreeService {
     const copied: string[] = [];
     for (const rel of files) {
       try {
-        const dst = path.join(targetTop, rel);
-        // Never overwrite a pre-existing destination: the caller's rollback
-        // removes the paths returned here, and a pre-existing file (e.g. a
-        // git-ignored .env.local the clean gate cannot see) must survive the
-        // carry. Only files this call CREATES are recorded for undo.
-        const exists = await fs
-          .lstat(dst)
-          .then(() => true)
-          .catch(() => false);
-        if (exists) continue;
-        const parent = path.dirname(dst);
-        // Refuse to write through an ancestor symlink that escapes the
-        // target checkout: a committed `out -> <outside>` link (a clean
-        // descendant HEAD) would otherwise let mkdir/copyFile land the carry
-        // outside the repo, where the rollback cannot reap it. Check the
-        // deepest existing ancestor's real location BEFORE creating anything
-        // — mkdir recursive follows symlink ancestors.
-        let ancestor = parent;
-        while (
-          !(await fs
-            .lstat(ancestor)
-            .then(() => true)
-            .catch(() => false))
-        ) {
-          const up = path.dirname(ancestor);
-          if (up === ancestor) break;
-          ancestor = up;
-        }
+        // Only files this call CREATES are recorded for undo: the caller's
+        // rollback removes the returned paths, and a pre-existing file must
+        // survive the carry. Containment skips escaping ancestor symlinks.
         if (
-          !isWithinRoot(
-            await fs.realpath(ancestor).catch(() => ancestor),
+          await this.copyOverlayEntryContained(
+            repoTop,
+            targetTop,
             realTargetTop,
+            rel,
           )
         ) {
-          continue;
+          copied.push(rel);
         }
-        await fs.mkdir(parent, { recursive: true });
-        // Re-verify after mkdir: the created tail is real directories, but an
-        // ancestor swapped to a symlink mid-flight must still not escape.
-        if (
-          !isWithinRoot(
-            await fs.realpath(parent).catch(() => parent),
-            realTargetTop,
-          )
-        ) {
-          continue;
-        }
-        await this.copyOverlayEntry(path.join(repoTop, rel), dst);
-        copied.push(rel);
       } catch {
         // Fail-open: skip files that can't be copied.
       }
@@ -1635,10 +1655,15 @@ export class GitWorktreeService {
 
   /**
    * Overlay a captured dirty state onto a worktree: apply the tracked
-   * changes, then copy untracked files. A tracked apply that conflicts or
-   * fails for an environment reason throws WorktreeDirtyCarryConflictError
-   * so creation is refused rather than relocating the session without the
-   * user's work; the per-file untracked copy stays fail-open.
+   * changes and copy untracked files. A tracked apply that conflicts or
+   * fails for an environment reason restores the worktree to committed
+   * state and throws WorktreeDirtyCarryConflictError, so creation is refused
+   * rather than relocating the session without the user's work. The
+   * untracked half is independent and is carried even when the tracked apply
+   * failed, so a fail-open caller (setupWorktrees) still baselines the user's
+   * untracked work on top of committed state; the per-file copy stays
+   * fail-open and contained (no pre-existing overwrite, no ancestor-symlink
+   * escape).
    */
   private async applyDirtyState(
     worktreePath: string,
@@ -1647,11 +1672,12 @@ export class GitWorktreeService {
       untrackedFiles: string[];
       repoTop: string;
     },
-  ): Promise<void> {
+  ): Promise<string[]> {
     const { simpleGit } = await loadSimpleGit();
     const wtGit = simpleGit(worktreePath, {
       errors: carryApplyErrorDetection,
     }).env(gitEnv());
+    let carryError: WorktreeDirtyCarryConflictError | null = null;
     if (dirtyState.stashCommit) {
       let applyError: unknown;
       try {
@@ -1660,48 +1686,61 @@ export class GitWorktreeService {
         applyError = error;
       }
       // A conflicting 3-way apply writes conflict markers and unmerged
-      // index entries — and simple-git's raw mode may RESOLVE even on that
-      // non-zero exit, so detect by the index state, not the throw.
-      // Swallowing it would relocate the session into a poisoned tree (the
-      // markers get committed by the first `git add -A`). Restore committed
-      // state and fail closed. The rollback gate exempts the carried overlay
-      // as a plain copy, so a half-merged tree must never survive this call.
+      // index entries — simple-git's raw mode may RESOLVE even on the
+      // non-zero exit, so detect by the index state, not the throw. ANY
+      // failure (conflict or environment, e.g. an unwritable path that
+      // leaves a partially applied overlay) must restore committed state:
+      // a fail-open caller baselines whatever is on disk, so a half-applied
+      // tracked overlay must never survive into the baseline.
       const unmerged = (
         await wtGit.raw(['ls-files', '-u']).catch(() => '')
       ).trim();
-      if (unmerged.length > 0) {
+      if (unmerged.length > 0 || applyError) {
         await wtGit.raw(['reset', '--hard', 'HEAD']).catch(() => undefined);
         await wtGit.raw(['clean', '-fd']).catch(() => undefined);
-        throw new WorktreeDirtyCarryConflictError(
-          `Dirty carry conflicted with the worktree base: ${
-            applyError instanceof Error ? applyError.message : 'merge conflict'
-          }`,
-        );
-      }
-      if (applyError) {
-        // A non-conflict apply failure (e.g. an unwritable index) means the
-        // tracked carry did not land. Surface it rather than record a carry
-        // that never happened; the per-file untracked copy below stays
-        // fail-open, and an empty snapshot attempts no apply at all.
-        throw new WorktreeDirtyCarryConflictError(
-          `Dirty carry failed to apply: ${
-            applyError instanceof Error
-              ? applyError.message
-              : String(applyError)
-          }`,
+        carryError = new WorktreeDirtyCarryConflictError(
+          unmerged.length > 0
+            ? `Dirty carry conflicted with the worktree base: ${
+                applyError instanceof Error
+                  ? applyError.message
+                  : 'merge conflict'
+              }`
+            : `Dirty carry failed to apply: ${
+                applyError instanceof Error
+                  ? applyError.message
+                  : String(applyError)
+              }`,
         );
       }
     }
+    // The untracked half runs even when the tracked apply failed: the
+    // reset/clean above restored tracked state, and the carried untracked
+    // work is copied on top of it for fail-open callers. Containment and the
+    // pre-existing-destination skip apply per file. Only paths actually
+    // CREATED are returned, so the caller's carried-overlay record (and its
+    // rollback exemption) never names a skipped entry.
+    const realTargetTop = await fs
+      .realpath(worktreePath)
+      .catch(() => worktreePath);
+    const createdUntracked: string[] = [];
     for (const relPath of dirtyState.untrackedFiles) {
       try {
-        const src = path.join(dirtyState.repoTop, relPath);
-        const dst = path.join(worktreePath, relPath);
-        await fs.mkdir(path.dirname(dst), { recursive: true });
-        await this.copyOverlayEntry(src, dst);
+        if (
+          await this.copyOverlayEntryContained(
+            dirtyState.repoTop,
+            worktreePath,
+            realTargetTop,
+            relPath,
+          )
+        ) {
+          createdUntracked.push(relPath);
+        }
       } catch {
-        // Non-fatal: skip files that can't be copied
+        // Non-fatal: skip files that can't be copied.
       }
     }
+    if (carryError) throw carryError;
+    return createdUntracked;
   }
 
   /**
@@ -2906,8 +2945,12 @@ export class GitWorktreeService {
               `(${overlay.length} paths); starting from committed state`,
           );
         } else {
+          let createdUntracked: string[];
           try {
-            await this.applyDirtyState(worktreePath, dirtyState);
+            createdUntracked = await this.applyDirtyState(
+              worktreePath,
+              dirtyState,
+            );
           } catch (error) {
             if (error instanceof WorktreeDirtyCarryConflictError) {
               // The worktree was restored to committed state; remove it so
@@ -2918,7 +2961,11 @@ export class GitWorktreeService {
             }
             throw error;
           }
-          carriedPaths = overlay;
+          // Record only what the carry actually applied: every tracked path
+          // (the apply succeeded) plus the untracked paths it CREATED. A
+          // skipped untracked entry (pre-existing destination or escaping
+          // ancestor symlink) is not part of the overlay the rollback exempts.
+          carriedPaths = [...dirtyState.trackedFiles, ...createdUntracked];
         }
       }
 
@@ -3567,19 +3614,72 @@ export class GitWorktreeService {
         existing.length > 0 && !existing.endsWith('\n') ? '\n' : '';
       await fs.appendFile(excludePath, `${prefix}${rule}\n`, 'utf8');
     }
-    // Verify against git itself: a rule that matches nothing would
-    // silently bring back the dirty-checkout failure this replaces.
-    // Forward slashes: a win32 native path would read as an escaped
-    // pathspec and spuriously report the rule as ineffective.
+    // Verify against git itself that the rule JUST WRITTEN is the one in
+    // force. A bare `check-ignore -q` is vacuous twice over: it exits 1
+    // with no output when the path is not ignored (simple-git's default
+    // detector resolves that, so a `.then(() => true)` always wins), and it
+    // answers whether ANY source ignores the path — a higher-priority
+    // per-directory `.gitignore` (e.g. `.qwen/*` + `!.qwen/worktrees/`)
+    // would answer for the info/exclude rule and let the migration unlink
+    // the only effective hiding mechanism. Use `-v` and accept only a
+    // verdict whose source is this exclude file and whose pattern is the
+    // rule. Forward slashes: a win32 native path would read as an escaped
+    // pathspec. Probe a FILE path, not the directory: a directory-form
+    // re-include negation only applies to paths git knows are directories.
     const probe = path
       .join(realRoot, '.qwen', WORKTREES_DIR, 'probe')
       .split(path.sep)
       .join('/');
-    const ignored = await git
-      .raw(['check-ignore', '-q', '--', probe])
-      .then(() => true)
-      .catch(() => false);
-    if (!ignored) {
+    // The legacy daemon .qwen/.gitignore outranks info/exclude and is the
+    // very file the migration removes, so verify with it temporarily moved
+    // aside — otherwise it answers for the rule just written and the probe
+    // can never attribute the match to info/exclude. A user-curated
+    // .gitignore (any other content) is left in place: if it outranks the
+    // rule (e.g. re-includes the worktrees path), the rule is powerless and
+    // the migration must keep the legacy file.
+    const legacyGitignore = path.join(
+      this.sourceRepoPath,
+      '.qwen',
+      '.gitignore',
+    );
+    let legacyMoved: string | null = null;
+    const legacyContent = await fs
+      .readFile(legacyGitignore, 'utf8')
+      .catch(() => null);
+    if (
+      legacyContent === `# Auto-generated by qwen-code.\n${WORKTREES_DIR}/\n`
+    ) {
+      const moved = `${legacyGitignore}.probe-tmp`;
+      try {
+        await fs.rename(legacyGitignore, moved);
+        legacyMoved = moved;
+      } catch {
+        // Leave it in place; the probe below will attribute conservatively.
+      }
+    }
+    let verdict = '';
+    try {
+      verdict = (
+        await git.raw(['check-ignore', '-v', '--', probe]).catch(() => '')
+      ).trim();
+    } finally {
+      if (legacyMoved !== null) {
+        await fs.rename(legacyMoved, legacyGitignore).catch(() => undefined);
+      }
+    }
+    // Format: "<source>:<linenum>:<pattern>\t<path>". Parse from the right
+    // (a win32 drive letter and the pattern itself can contain ':'); the
+    // line number is the numeric anchor.
+    const match = /^(.*):(\d+):(.*)$/.exec(verdict.split('\t')[0]);
+    const realExclude = await fs.realpath(excludePath).catch(() => excludePath);
+    // git reports the source relative to its cwd (the repo top), e.g.
+    // ".git/info/exclude"; resolve it there before comparing realpaths.
+    const reportedSource = match
+      ? await fs
+          .realpath(path.resolve(repoTop, match[1]))
+          .catch(() => path.resolve(repoTop, match[1]))
+      : null;
+    if (!match || reportedSource !== realExclude || match[3] !== rule) {
       debugLogger.warn(
         `ensureWorktreesGitignored: rule ${rule} does not ignore the worktrees directory`,
       );

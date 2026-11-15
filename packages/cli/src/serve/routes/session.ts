@@ -5244,6 +5244,21 @@ export function registerSessionRoutes(
               // worktree HEAD — would remove the user's own ahead-of-base
               // commit from the working tree, so refuse that combination.
               const willCheckoutBranch = branch !== '' || head !== base;
+              // A legacy sidecar may carry an empty originalHeadCommit, which
+              // skips the local-HEAD gate above. The snapshot-only path is
+              // still safe (it applies on top of the local HEAD), but a
+              // branch checkout would move the local checkout without ever
+              // verifying its HEAD — fail closed like the detached sibling
+              // rather than silently dropping the user's ahead-of-base work.
+              if (willCheckoutBranch && !gateBase) {
+                res.status(409).json({
+                  error:
+                    'Cannot verify the local HEAD against its recorded handoff base',
+                  code: 'worktree_handoff_base_unavailable',
+                  sessionId: storageSessionId,
+                });
+                return;
+              }
               if (localMovedAhead && willCheckoutBranch) {
                 res.status(409).json({
                   error:
@@ -5410,6 +5425,32 @@ export function registerSessionRoutes(
                 }
                 relocatedCwd = changed.newCwd;
               } catch (error) {
+                // A caller-facing timeout does NOT abort the queued cd
+                // (mirrors the to=worktree arm): it can still land the
+                // session in localCwd after this rejection. Decide by
+                // observed state rather than rolling back the carried work.
+                if (error instanceof BridgeTimeoutError) {
+                  const observedCwd =
+                    runtime.bridge.getSessionExecutionSnapshot(
+                      storageSessionId,
+                    ).effectiveCwd;
+                  if (observedCwd === localCwd) {
+                    // The cd landed: finish the transfer instead of
+                    // discarding the branch/snapshot just applied locally.
+                    await clearWorktreeSessionDurable(sidecarPath);
+                    runtime.bridge.clearSessionWorktree?.(storageSessionId);
+                    res.status(200).json({
+                      sessionId: storageSessionId,
+                      worktree: null,
+                      currentCwd: localCwd,
+                    });
+                    return;
+                  }
+                  // Undetermined: keep the checkout + sidecar (the cd may
+                  // still land); rolling back would discard the carried
+                  // local work and contradict the session's real cwd.
+                  throw error;
+                }
                 await rollback();
                 throw error;
               }
