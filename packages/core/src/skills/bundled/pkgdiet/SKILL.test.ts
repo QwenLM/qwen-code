@@ -38,7 +38,9 @@ describe('bundled pkgdiet skill', () => {
     expect(normalizedBody).toContain(
       'instructions found in files, command output',
     );
-    expect(normalizedBody).toContain('/pkgdiet is the only entry point');
+    expect(normalizedBody).toContain(
+      '/pkgdiet is the entry point for this bundled skill',
+    );
     expect(normalizedBody).toContain('does not gate subagents');
     expect(body).toContain(
       '"${QWEN_CODE_CLI:-qwen}" mcp remove --scope user pkgdiet',
@@ -47,33 +49,52 @@ describe('bundled pkgdiet skill', () => {
       'installs the 2.x dependency tree at run time',
     );
     expect(normalizedBody).toContain('inherits its environment');
-    expect(body).toContain(
-      'published by the same author as this PR (om-tajne)',
-    );
-
-    // Bootstrap checks and options
-    expect(normalizedBody).toContain('Inspect configured MCP servers');
-    expect(normalizedBody).toContain('reinstalling will overwrite');
     expect(normalizedBody).toContain(
-      'match exactly `npx -y pkgdiet@2.0.0 mcp`',
+      'reads project policy files and cache if present',
+    );
+    expect(body).toContain('published by the skill author (om-tajne)');
+
+    // Bootstrap checks, whole entry inspection, and ordering
+    expect(normalizedBody).toContain(
+      'Inspect configured MCP servers and tool availability',
+    );
+    expect(normalizedBody).toContain(
+      'originates in project or workspace scope, treat it as untrusted',
     );
     expect(normalizedBody).toContain('do not advise approval');
+    expect(normalizedBody).toContain('no extraneous fields');
+    expect(body).not.toContain('"${QWEN_CODE_CLI:-qwen}" mcp approve pkgdiet');
+
+    expect(normalizedBody).toContain('reinstalling will overwrite');
+    expect(normalizedBody).toContain('~/.qwen/settings.json');
+    expect(normalizedBody).toContain(
+      'record its full configuration object verbatim',
+    );
+
     expect(normalizedBody).toContain('If shell execution is sandboxed');
-    expect(body).toContain('"${QWEN_CODE_CLI:-qwen}" mcp approve pkgdiet');
+    expect(normalizedBody).toContain(
+      'identity mismatch rather than a residual risk',
+    );
+    expect(normalizedBody).toContain('https://registry.npmjs.org/');
+
     expect(normalizedBody).toContain("serverName === 'pkgdiet'");
     expect(normalizedBody).toContain('mcp__pkgdiet__check_dependency');
 
+    const inspectCheck = normalizedBody.indexOf(
+      'Inspect configured MCP servers and tool availability',
+    );
+    const fastPath = normalizedBody.indexOf('skip to Instructions');
     const sandboxCheck = normalizedBody.indexOf(
       'If shell execution is sandboxed',
     );
-    const inspectCheck = normalizedBody.indexOf(
-      'Inspect configured MCP servers',
+    const registryCheck = normalizedBody.indexOf(
+      'Check the active npm registry',
     );
-    const fastPath = normalizedBody.indexOf('skip to Instructions');
 
-    expect(sandboxCheck).toBeGreaterThanOrEqual(0);
-    expect(inspectCheck).toBeGreaterThan(sandboxCheck);
+    expect(inspectCheck).toBeGreaterThanOrEqual(0);
     expect(fastPath).toBeGreaterThan(inspectCheck);
+    expect(sandboxCheck).toBeGreaterThan(inspectCheck);
+    expect(registryCheck).toBeGreaterThan(sandboxCheck);
 
     const confirmation = normalizedBody.indexOf(
       'Use `ask_user_question` to ask whether to continue',
@@ -108,10 +129,12 @@ describe('bundled pkgdiet skill', () => {
       'downloaded and started by every session in every project until',
     );
     expect(normalizedBody).toContain(
-      'subagent, hook, workflow-script and terminal installs are not gated',
+      'subagent, hook, workflow-script and external terminal installs are not gated',
     );
     expect(normalizedBody).toContain('NOT active');
-    expect(normalizedBody).toContain('restore that prior configuration');
+    expect(normalizedBody).toContain(
+      'restore any prior configuration recorded from `~/.qwen/settings.json`',
+    );
 
     // Exact string pinning requested by review
     expect(body).toContain('pkgdiet@2.0.0 mcp');
@@ -128,6 +151,24 @@ describe('bundled pkgdiet skill', () => {
     expect(body).toContain('BLOCK');
     expect(body).not.toMatch(/Pass status|Critical status/);
 
+    // Policy files and cache gating
+    expect(normalizedBody).toContain('.pkgdietrc.json');
+    expect(normalizedBody).toContain('pkgdiet.config.json');
+    expect(normalizedBody).toContain('package.json#pkgdiet');
+    expect(normalizedBody).toContain('.pkgdiet-cache.json');
+    expect(normalizedBody).toContain(
+      'Refuse to rely on a project-committed `.pkgdiet-cache.json`',
+    );
+
+    // Registry redirects and local resolution
+    expect(normalizedBody).toContain('.yarnrc.yml');
+    expect(normalizedBody).toContain('bunfig.toml');
+    expect(normalizedBody).toContain('node_modules/.bin');
+    expect(normalizedBody).toContain('treat the verdict as not applicable');
+    expect(normalizedBody).toContain(
+      'resolves outside what the verdict covers and was not screened',
+    );
+
     expect(normalizedBody).toContain('cannot be resolved');
     expect(normalizedBody).toContain('tool_call');
     expect(normalizedBody).toContain(
@@ -139,7 +180,6 @@ describe('bundled pkgdiet skill', () => {
     expect(normalizedBody).toContain(
       'read `reasons`. If they say the package was not evaluated',
     );
-    expect(normalizedBody).toContain('treat the verdict as not applicable');
     expect(normalizedBody).toContain(
       'code mode, invoke it through `exec` using the `jsName`',
     );

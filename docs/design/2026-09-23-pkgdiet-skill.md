@@ -31,14 +31,17 @@ The `/pkgdiet` skill provides an interactive, opt-in guardrail powered by the Pk
 
 ### 2.3 Configuration Precedence and Identity Security
 
-- **Command-Based Identity Verification:** To prevent hostile repositories from intercepting package verdicts by committing a malicious `.mcp.json` that defines `pkgdiet`, the skill requires an exact command match (`npx -y pkgdiet@2.0.0 mcp`). If an existing entry specifies an alternative command, the skill halts and refuses approval advice.
-- **Full Config Tier Inspection:** The skill inspects all configuration tiers (user, project, workspace, system) via `"${QWEN_CODE_CLI:-qwen}" mcp list`.
-- **Restoration on Failure:** If a user-scope `pkgdiet` configuration was already present before registration, the prior configuration is recorded and restored if registration fails or reachability cannot be established.
+- **Whole-Entry Identity Verification:** To prevent hostile repositories from intercepting package verdicts by declaring `pkgdiet` with custom `env` (e.g. `NODE_OPTIONS` preload scripts) or `cwd`, the skill inspects the declaring configuration file (`~/.qwen/settings.json`) to verify the full entry: `command: npx`, `args: ["-y", "pkgdiet@2.0.0", "mcp"]`, and no extraneous fields (`env`, `cwd`, `headers`, `url`, etc.).
+- **Untrusted Gated Scopes:** Any `pkgdiet` entry originating in project or workspace scope (`.mcp.json`, `.qwen/settings.json`) is treated as untrusted. The skill halts immediately, refuses to advise `mcp approve`, and notes that repository entries must be removed from the declaring project file.
+- **Evaluator Registry Integrity:** The bootstrap verifies that the active registry is `https://registry.npmjs.org/`. If project configuration (`.npmrc`, `npm_config_registry`) redirects the package manager, registration halts; redirected resolution is classified as an identity mismatch rather than an accepted residual risk.
+- **Full Configuration Restoration:** If a prior user-scope entry exists in `~/.qwen/settings.json`, its full configuration object is recorded and restored upon non-zero command exit or reachability failure.
+- **Sandbox Fast-Path:** Inspection occurs before sandbox checks, allowing container-sandboxed sessions with mounted `~/.qwen` settings to reuse an existing reachable guardrail without requiring host re-installation.
 
 ### 2.4 Verdict Contracts and Execution Modes
 
 - **Fail-Closed on Unscreened Packages:** If `check_dependency` returns `ALLOW` with `reasons` indicating that the package was not evaluated (network failure, private `.npmrc` mapping, or fail-open fallback), the skill halts and requests explicit user instructions rather than permitting unscreened installation.
-- **Registry Alignment:** Verdicts are valid only for packages hosted on `https://registry.npmjs.org` at latest. If the installation command or project `.npmrc` redirects resolution to a private or alternate registry, the verdict is treated as not applicable.
+- **Project Policy and Cache Gating:** Before checking packages, the skill inspects the repository for `.pkgdietrc.json`, `pkgdiet.config.json`, `package.json#pkgdiet`, and `.pkgdiet-cache.json`. Any active policy rules are disclosed to the user and treated as repository-declared. Reliance on committed `.pkgdiet-cache.json` files is refused.
+- **Registry Alignment & Local Resolution:** Verdicts are valid only for packages hosted on `https://registry.npmjs.org` at latest. If resolution redirects via `--registry`, project `.npmrc`, user `~/.npmrc`, `npm_config_registry`, `.yarnrc.yml` (`npmRegistryServer`), `.yarnrc`, `bunfig.toml`, or lockfile, OR if the command executes an existing local binary (`node_modules/.bin`, `devDependencies`, scripts), the verdict is treated as not applicable and execution is halted.
 - **Version Scoping:** Verdicts apply to the package at latest. Caching is not reused across differing pinned versions or ranges.
 - **Single-Hop Alternative Bounding:** When `suggest_alternative` is invoked for `WARN` or `BLOCK` verdicts, suggestions are evaluated once and bounded to at most 1 hop to prevent recursive recommendation loops.
 - **Execution Mode Parity:** In direct tool mode, tools are called via `tool_call`. In code mode, deferred tools are invoked through `exec` using the `jsName` returned by `tool_search`.
@@ -55,3 +58,4 @@ Users can remove the persistent server registration at any time by executing:
 
 1. **Runtime Dependency Fetch:** The initial `npx` execution fetches package code from npm over the network. Network isolation or proxy environments must have connectivity to the public npm registry during bootstrap.
 2. **Environment Variable Exposure:** Local MCP servers spawned over stdio inherit exported credentials from the host session environment.
+3. **Repository-Declared Policies:** Project-level configuration files (`.pkgdietrc.json`, `pkgdiet.config.json`) override default evaluation thresholds when present in the inspected repository.

@@ -31,14 +31,17 @@
 
 ### 2.3 配置优先级与身份安全
 
-- **基于命令的身份验证**：为防范恶意仓库通过提交定义 `pkgdiet` 的 `.mcp.json` 伪造评审结果，技能强制比对命令与参数是否严格等于 `npx -y pkgdiet@2.0.0 mcp`。若已存在其它命令，则立刻终止并不建议执行审批。
-- **全配置层级审查**：通过 `"${QWEN_CODE_CLI:-qwen}" mcp list` 综合检查系统、工作区、项目及用户层配置。
-- **失败状态回滚**：若注册前用户级已存在 `pkgdiet` 配置，系统预先记录旧配置；若注册失败或健康探测未通过，自动还原旧配置。
+- **全字段身份比对**：为防范恶意仓库通过声明带自定义 `env`（如 `NODE_OPTIONS` 预加载脚本）或 `cwd` 的 `pkgdiet` 拦截评审，技能直接读取配置文件（`~/.qwen/settings.json`）并完整比对：`command: npx`、`args: ["-y", "pkgdiet@2.0.0", "mcp"]`，且不得包含其它扩展字段（`env`、`cwd`、`headers`、`url` 等）。
+- **不受信的作用域隔离**：任何来源于项目或工作区作用域（`.mcp.json`、`.qwen/settings.json`）的 `pkgdiet` 条目均视为不受信。技能立刻终止并拒绝建议 `mcp approve`，告知用户必须从项目文件中手动删除。
+- **评估器源地址完整性**：引导阶段核验当前 npm 活跃源是否为 `https://registry.npmjs.org/`。若检测到重定向（通过 `.npmrc`、`npm_config_registry`），技能中止注册；重定向被归类为身份不匹配（identity mismatch）而非可接受的残留风险。
+- **完整配置还原**：若 `~/.qwen/settings.json` 中已存在旧的用户级配置，其完整配置对象在写入前被记录；当注册命令退出码非零或连通性校验未通过时，完整还原该对象。
+- **沙箱快路径优先**：在沙箱校验前先进行连通性与配置检查，允许挂载了 `~/.qwen` 的容器化沙箱会话直接复用已有的守卫服务，免去宿主机重复注册流程。
 
 ### 2.4 判定契约与运行模式
 
 - **未评估包安全闭门（Fail-Closed）**：若 `check_dependency` 返回 `ALLOW` 但附带未评估原因（如网络超时、私有 `.npmrc` 映射或降级模式），技能立刻终止并提示用户决策，绝不放行未经筛查的依赖。
-- **源地址对齐**：评审判定仅对 `https://registry.npmjs.org` 的 latest 版本有效。若安装命令（如 `--registry`）或本地 `.npmrc` 将依赖重定向至其它镜像源，判定视为不适用。
+- **项目策略与缓存门禁**：在首次检查前，技能排查仓库中的 `.pkgdietrc.json`、`pkgdiet.config.json`、`package.json#pkgdiet` 与 `.pkgdiet-cache.json`。若存在策略规则，将规则明确展示给用户并作为仓库声明判定处理；拒绝信任仓库内提交的 `.pkgdiet-cache.json`。
+- **源地址对齐与本地解析识别**：判定仅对 `https://registry.npmjs.org` 的 latest 版本有效。若通过 `--registry`、项目 `.npmrc`、用户 `~/.npmrc`、`npm_config_registry`、`.yarnrc.yml` (`npmRegistryServer`)、`.yarnrc`、`bunfig.toml` 或 lockfile 重定向，或者执行命令解析为项目已存在的本地二进制文件（`node_modules/.bin`、`devDependencies`、scripts），判定视为不适用，技能不执行命令。
 - **版本作用域**：判定仅适用于最新包名级别，不同版本或范围不复用缓存。
 - **单跳替代建议限制**：调用 `suggest_alternative` 时，替代包仅评审一次（最多单跳），防止递归死循环。
 - **运行模式兼容**：直接工具模式下使用 `tool_call`；代码模式（Code Mode）下通过 `exec` 驱动工具函数（`tools.<jsName>`）。
@@ -55,3 +58,4 @@
 
 1. **运行时网络拉取**：首次通过 `npx` 启动时需访问 npm 官方镜像源，网络隔离环境需具备公共 registry 访问权限。
 2. **环境变量可读性**：本地 stdio 启动的 MCP 服务会继承当前会话导出的环境变量与 API 凭据。
+3. **仓库声明策略**：项目级配置文件（`.pkgdietrc.json`、`pkgdiet.config.json`）在存在时会覆盖默认评估阈值。
