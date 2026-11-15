@@ -1071,16 +1071,38 @@ function main(argv) {
     } catch {
       realContext = resolve(contextPath);
     }
-    let trustRoot = resolve(dir);
+    // Classify the git probe instead of collapsing every failure into a
+    // round-dir fallback: a damaged .git (bad format version, safe.directory
+    // refusal) must NOT widen the trust root to the round dir, or the round
+    // could judge its own waiver from the verify-context sibling (R13 R12-1).
+    // Only git's clean "not a git repository" answer falls back, and the
+    // fallback root is real-path resolved so both sides of the comparison
+    // agree even when the dir is reached through a symlink (macOS TMPDIR).
+    let trustRoot;
     try {
       trustRoot = realpathSync(
         execFileSync('git', ['-C', dir, 'rev-parse', '--show-toplevel'], {
           encoding: 'utf8',
-          stdio: ['ignore', 'pipe', 'ignore'],
+          stdio: ['ignore', 'pipe', 'pipe'],
         }).trim(),
       );
-    } catch {
-      // Not a git worktree: the artifact dir itself is the writable root.
+    } catch (error) {
+      const gitStderr = typeof error?.stderr === 'string' ? error.stderr : '';
+      if (!/not a git repository/i.test(gitStderr)) {
+        process.stderr.write(
+          `verify-pr check: cannot establish the PR-writable root for ${dir} (git: ${gitStderr.trim() || 'unknown failure'}) — refusing to judge a waiver without a trusted root\n`,
+        );
+        return 1;
+      }
+      // A legitimate non-repo artifact dir. A pr<n>-verify-<ts> dir inside a
+      // tmp/ container sits alongside the verify-context sibling prepare
+      // writes, so the writable root is that container; a plain mkdtemp
+      // fixture (or a pr-verify dir not under tmp/) is its own root.
+      const container = dirname(resolve(dir));
+      trustRoot =
+        dirPrNumber && basename(container) === 'tmp'
+          ? realpathSync(container)
+          : realpathSync(dir);
     }
     if (realContext === trustRoot || realContext.startsWith(trustRoot + sep)) {
       process.stderr.write(

@@ -2201,3 +2201,73 @@ describe('round-12 witnesses', () => {
     },
   );
 });
+
+describe('round-13 witnesses', () => {
+  // R13 R12-1: the trust root must not collapse to the round dir when git
+  // fails. A damaged .git refuses outright; a cleanly absent .git falls back
+  // to the tmp container that also holds the verify-context sibling.
+  const setupClone = () => {
+    const root = mkdtempSync(join(tmpdir(), 'verify-pr-r13-'));
+    tmpDirs.push(root);
+    execFileSync('git', ['init', '--quiet', root], {
+      env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1' },
+    });
+    const dir = join(root, 'tmp', 'pr7-verify-20261115-000000');
+    mkdirSync(join(dir, 'evidence'), { recursive: true });
+    writeFileSync(join(dir, 'report.md'), validFiles({}).report);
+    writeFileSync(join(dir, 'verdict.txt'), 'merge-ready\n');
+    writeFileSync(
+      join(dir, 'assertions.json'),
+      '{"pass":1,"fail":0,"total":1}',
+    );
+    writeFileSync(
+      join(dir, 'boundary.json'),
+      JSON.stringify({
+        mode: 'waived',
+        by: 'maintainer',
+        approval: APPROVAL,
+        reason: 'why',
+      }),
+    );
+    writeFileSync(join(dir, 'evidence/01-x.png'), 'png');
+    const sibling = join(root, 'tmp', 'verify-context', 'pr7.json');
+    mkdirSync(join(root, 'tmp', 'verify-context'), { recursive: true });
+    writeFileSync(
+      sibling,
+      JSON.stringify({ repo: 'evil/repo', pr: 9, headRefOid: HEAD }),
+    );
+    return { root, dir, sibling };
+  };
+  const runContext = (dir, sibling) =>
+    spawnSync(process.execPath, [SCRIPT, '--context', sibling, dir], {
+      encoding: 'utf8',
+      env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+    });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses the verify-context sibling when .git is absent',
+    () => {
+      const { root, dir, sibling } = setupClone();
+      rmSync(join(root, '.git'), { recursive: true, force: true });
+      const res = runContext(dir, sibling);
+      expect(res.status).toBe(1);
+      expect(res.stderr).toMatch(
+        /must not point inside the PR-writable worktree/,
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses to judge a waiver when the git root is unresolvable',
+    () => {
+      const { root, dir, sibling } = setupClone();
+      writeFileSync(
+        join(root, '.git', 'config'),
+        '[core]\nrepositoryformatversion = 99\n',
+      );
+      const res = runContext(dir, sibling);
+      expect(res.status).toBe(1);
+      expect(res.stderr).toMatch(/cannot establish the PR-writable root/);
+    },
+  );
+});
