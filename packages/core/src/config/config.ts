@@ -170,6 +170,7 @@ import {
   UNIFIED_SURFACE_DEFAULTS,
   EVENT_BUS_SURFACE_DEFAULTS,
   type AgentLoopSurface,
+  type AgentLoopPath,
 } from './agent-loop-rollout.js';
 import { ApprovalMode } from './approval-mode.js';
 
@@ -179,6 +180,7 @@ import { InputFormat, OutputFormat } from '../output/types.js';
 import { PromptRegistry } from '../prompts/prompt-registry.js';
 import { ResourceRegistry } from '../resources/resource-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
+import { clearCollectedSkillEntriesCache } from '../tools/skill-utils.js';
 import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
 import {
   authoredSkillName,
@@ -10887,6 +10889,20 @@ export class Config {
   }
 
   /**
+   * The loop path a surface runs: unified off -> legacy; otherwise the kernel
+   * only when the event-bus switch is on AND the surface's execution branch
+   * actually enters it, else shared. Speculation and the Hosted Harness never
+   * read the event-bus switch (their rounds always run on the shared loop), so
+   * both are capped at shared even with both switches on.
+   */
+  getAgentLoopPath(surface: AgentLoopSurface): AgentLoopPath {
+    if (!this.isUnifiedAgentLoopEnabled(surface)) return 'legacy';
+    if (!this.isEventBusAgentLoopEnabled(surface)) return 'shared';
+    if (surface === 'speculation' || surface === 'hosted') return 'shared';
+    return 'kernel';
+  }
+
+  /**
    * Whether persistent workspace Agents may answer @-mentions in chat
    * sessions.
    *
@@ -13286,6 +13302,9 @@ export class Config {
     provider: () => ReadonlyArray<{ name: string; description: string }>,
   ): void {
     this.modelInvocableCommandsProvider = provider;
+    if (this.skillManager) {
+      clearCollectedSkillEntriesCache(this.skillManager);
+    }
   }
 
   /**

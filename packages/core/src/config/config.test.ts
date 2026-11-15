@@ -101,7 +101,10 @@ import { logGoalState, logRipgrepFallback } from '../telemetry/loggers.js';
 import { RipgrepFallbackEvent } from '../telemetry/types.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
 import { ToolNames } from '../tools/tool-names.js';
-import { applySkillSideEffects } from '../tools/skill-utils.js';
+import {
+  applySkillSideEffects,
+  collectAvailableSkillEntries,
+} from '../tools/skill-utils.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import { AgentType, HookEventName } from '../hooks/types.js';
 import { MessageBus } from '../confirmation-bus/message-bus.js';
@@ -1098,6 +1101,26 @@ describe('Server Config (config.ts)', () => {
     await config.initialize(options);
     return config;
   };
+
+  it('publishes late registered commands without waiting for the skills cache TTL', async () => {
+    const config = await initConfig(
+      {},
+      { ...SKIP_ALL_INIT, skipSkillManager: false },
+    );
+    const manager = config.getSkillManager()!;
+    expect(
+      (await collectAvailableSkillEntries(manager, config)).entries,
+    ).toEqual([]);
+
+    for (const name of ['validation:echo', 'validation:replacement']) {
+      config.setModelInvocableCommandsProvider(() => [
+        { name, description: name },
+      ]);
+      expect(
+        (await collectAvailableSkillEntries(manager, config)).entries,
+      ).toEqual([{ name, description: name }]);
+    }
+  });
   /** A recording Config in an ACP session opted in to the writer lease. */
   const leasedConfig = (overrides: Partial<ConfigParameters> = {}) =>
     makeConfig({
@@ -7505,6 +7528,67 @@ describe('Server Config (config.ts)', () => {
         expect(config.isUnifiedAgentLoopEnabled('headless')).toBe(
           savedUnified.headless,
         );
+      });
+    });
+
+    describe('getAgentLoopPath', () => {
+      beforeEach(() => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
+      });
+      afterEach(() => vi.unstubAllEnvs());
+
+      it('defaults to legacy for every surface', () => {
+        for (const surface of AGENT_LOOP_SURFACES) {
+          expect(makeConfig().getAgentLoopPath(surface)).toBe('legacy');
+        }
+      });
+
+      it('is shared when unified is on and the kernel is off', () => {
+        expect(
+          makeConfig({ unifiedAgentLoopEnabled: true }).getAgentLoopPath('acp'),
+        ).toBe('shared');
+      });
+
+      it('is kernel when both switches are on', () => {
+        const config = makeConfig({
+          unifiedAgentLoopEnabled: true,
+          eventBusAgentLoopEnabled: true,
+        });
+        // Every surface except speculation and hosted can enter the kernel;
+        // pin the arm for ink, opentui and agent-core too, not just acp.
+        for (const surface of AGENT_LOOP_SURFACES) {
+          if (surface === 'speculation' || surface === 'hosted') continue;
+          expect(config.getAgentLoopPath(surface)).toBe('kernel');
+        }
+      });
+
+      it('stays legacy when only the kernel switch is on', () => {
+        expect(
+          makeConfig({ eventBusAgentLoopEnabled: true }).getAgentLoopPath(
+            'acp',
+          ),
+        ).toBe('legacy');
+      });
+
+      it('follows the env overrides that drive the switches', () => {
+        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'headless');
+        vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', 'headless');
+        const config = makeConfig();
+        expect(config.getAgentLoopPath('headless')).toBe('kernel');
+        expect(config.getAgentLoopPath('acp')).toBe('legacy');
+      });
+
+      it('caps speculation and hosted at shared even with both switches on', () => {
+        // runSpeculationModelRound and the Hosted Harness model round only call
+        // runModelRound and never read the event-bus switch, so neither can
+        // enter the kernel.
+        const config = makeConfig({
+          unifiedAgentLoopEnabled: true,
+          eventBusAgentLoopEnabled: true,
+        });
+        expect(config.getAgentLoopPath('speculation')).toBe('shared');
+        expect(config.getAgentLoopPath('hosted')).toBe('shared');
       });
     });
 
