@@ -3,6 +3,7 @@ import type { DaemonGitCommitDetail } from '@qwen-code/sdk/daemon';
 import {
   buildCommitFallbackUnits,
   commitFallbackRange,
+  prRepoFromUrl,
 } from './change-overview';
 
 function detail(
@@ -86,5 +87,47 @@ describe('buildCommitFallbackUnits', () => {
 
   it('returns an empty list when there are no entries', () => {
     expect(buildCommitFallbackUnits([], new Map())).toEqual([]);
+  });
+
+  it('surfaces hiddenCount when the commit detail caps its file rows', () => {
+    // A 60-file commit whose detail lists only 50 rows (the route's cap) must
+    // report the 10 missing files, not silently truncate.
+    const files = Array.from({ length: 50 }, (_, i) => ({
+      path: `src/f${i}.ts`,
+      added: 1,
+      removed: 0,
+      isBinary: false,
+    }));
+    const details = new Map([
+      ['c3', detail({ files, filesCount: 60, linesAdded: 60 })],
+    ]);
+    const units = buildCommitFallbackUnits([entries[0]!], details);
+    expect(units[0]).toMatchObject({
+      id: 'commit:c3',
+      filesCount: 60,
+      hiddenCount: 10,
+    });
+    expect(units[0]!.files).toHaveLength(50);
+  });
+});
+
+describe('prRepoFromUrl', () => {
+  it('extracts owner/repo from a GitHub PR URL', () => {
+    expect(
+      prRepoFromUrl('https://github.com/QwenLM/qwen-code/pull/17378'),
+    ).toBe('QwenLM/qwen-code');
+  });
+
+  it('accepts dotted and dashed slugs', () => {
+    expect(prRepoFromUrl('https://github.com/my.org/my-repo/pull/1')).toBe(
+      'my.org/my-repo',
+    );
+  });
+
+  it('returns undefined for non-PR or malformed URLs', () => {
+    expect(prRepoFromUrl('https://github.com/o/r')).toBeUndefined();
+    expect(prRepoFromUrl('https://github.com/o/r/issues/1')).toBeUndefined();
+    expect(prRepoFromUrl('not a url')).toBeUndefined();
+    expect(prRepoFromUrl('')).toBeUndefined();
   });
 });

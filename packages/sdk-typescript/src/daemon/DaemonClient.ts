@@ -8978,10 +8978,12 @@ export class WorkspaceDaemonClient {
     number: number,
     cwd?: string,
     sessionId?: string,
+    repo?: string,
   ): Promise<DaemonGitHubPullRequestFiles> {
     const params = new URLSearchParams();
     if (cwd != null) params.set('cwd', cwd);
     if (sessionId != null) params.set('sessionId', sessionId);
+    if (repo != null) params.set('repo', repo);
     const query = params.toString();
     const suffix = `/github/prs/${number}/files${query ? `?${query}` : ''}`;
     return this.client.workspaceJsonRequest<DaemonGitHubPullRequestFiles>(

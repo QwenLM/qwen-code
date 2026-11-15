@@ -573,6 +573,34 @@ describe('workspace GitHub PR routes', () => {
       '/work/main',
       42,
       undefined,
+      undefined,
+    );
+  });
+
+  it('forwards the repo query parameter to the core helper', async () => {
+    fetchGitHubPullRequestFilesMock.mockResolvedValue({
+      kind: 'ok',
+      files: {
+        files: [],
+        hiddenCount: 0,
+        additions: 0,
+        deletions: 0,
+        headSha: '',
+        baseRefName: 'main',
+      },
+    });
+    const app = mount();
+
+    const response = await request(app).get(
+      '/workspaces/primary/github/prs/42/files?repo=other%2Frepo',
+    );
+
+    expect(response.status).toBe(200);
+    expect(fetchGitHubPullRequestFilesMock).toHaveBeenCalledWith(
+      '/work/main',
+      42,
+      undefined,
+      'other/repo',
     );
   });
 

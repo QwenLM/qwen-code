@@ -8,14 +8,17 @@ import { useWorkspace } from '@qwen-code/web-shell/daemon-react-sdk';
 import {
   buildCommitFallbackUnits,
   commitFallbackRange,
+  prRepoFromUrl,
   type ChangeOverviewUnit,
 } from './change-overview';
 
 const COMMIT_FALLBACK_LIMIT = 20;
 
 export interface ChangeOverviewState {
-  /** False when the workspace is not a git repository (hide the overview). */
+  /** False when the workspace is not a git repository. */
   gitAvailable: boolean;
+  /** True when a fetch failed transiently; retryable, not a workspace property. */
+  loadFailed: boolean;
   loading: boolean;
   units: ChangeOverviewUnit[];
 }
@@ -38,6 +41,7 @@ export function useChangeOverview(
   const refresh = useCallback(() => setRefreshKey((key) => key + 1), []);
   const [state, setState] = useState<ChangeOverviewState>({
     gitAvailable: true,
+    loadFailed: false,
     loading: true,
     units: [],
   });
@@ -69,8 +73,24 @@ export function useChangeOverview(
         .workspaceGitDiff(gitCwd, sessionId)
         .catch(() => undefined);
       if (!active) return;
-      if (!diff || diff.available === false) {
-        setState({ gitAvailable: false, loading: false, units: [] });
+      if (!diff) {
+        // A thrown fetch (timeout, 5xx, dropped connection) is retryable; do
+        // not mislabel it as a permanent property of the workspace.
+        setState({
+          gitAvailable: true,
+          loadFailed: true,
+          loading: false,
+          units: [],
+        });
+        return;
+      }
+      if (diff.available === false) {
+        setState({
+          gitAvailable: false,
+          loadFailed: false,
+          loading: false,
+          units: [],
+        });
         return;
       }
 
@@ -104,7 +124,12 @@ export function useChangeOverview(
               url: pr.url,
             };
             const result = await ws
-              .workspaceGitHubPullRequestFiles(pr.number, gitCwd, sessionId)
+              .workspaceGitHubPullRequestFiles(
+                pr.number,
+                gitCwd,
+                sessionId,
+                prRepoFromUrl(pr.url),
+              )
               .catch(() => undefined);
             if (!result || result.available === false) {
               return {
@@ -152,32 +177,51 @@ export function useChangeOverview(
       }
 
       // Commit fallback: the loose window after the latest bound PR head (or
-      // since the base branch when there is no PR). Fetch each commit's detail.
-      const range = commitFallbackRange(latestPrHeadSha, baseBranch);
-      const log = await ws
-        .workspaceGitLog(COMMIT_FALLBACK_LIMIT, 0, gitCwd, range, {
-          sessionId,
-        })
-        .catch(() => undefined);
-      if (!active) return;
-      const entries: DaemonGitLogEntry[] = log?.entries ?? [];
-      if (entries.length > 0) {
-        const details = new Map<string, DaemonGitCommitDetail>();
-        await Promise.all(
-          entries.map(async (entry) => {
-            const detail = await ws
-              .workspaceGitCommitDetail(entry.sha, gitCwd, sessionId)
-              .catch(() => undefined);
-            if (detail) details.set(entry.sha, detail);
-          }),
-        );
+      // since the base branch when there is no PR). When bound PRs exist but no
+      // head resolved, suppress the fallback entirely — an unbounded window
+      // would list history the PRs already cover, and duplicated units are
+      // worse than none.
+      const showFallback =
+        boundPrs.length === 0 || latestPrHeadSha !== undefined;
+      if (showFallback) {
+        const range = commitFallbackRange(latestPrHeadSha, baseBranch);
+        const log = await ws
+          .workspaceGitLog(COMMIT_FALLBACK_LIMIT, 0, gitCwd, range, {
+            sessionId,
+          })
+          .catch(() => undefined);
         if (!active) return;
-        units.push(...buildCommitFallbackUnits(entries, details));
+        const entries: DaemonGitLogEntry[] = log?.entries ?? [];
+        if (entries.length > 0) {
+          const details = new Map<string, DaemonGitCommitDetail>();
+          await Promise.all(
+            entries.map(async (entry) => {
+              const detail = await ws
+                .workspaceGitCommitDetail(entry.sha, gitCwd, sessionId)
+                .catch(() => undefined);
+              if (detail) details.set(entry.sha, detail);
+            }),
+          );
+          if (!active) return;
+          units.push(...buildCommitFallbackUnits(entries, details));
+        }
       }
 
-      setState({ gitAvailable: true, loading: false, units });
+      setState({
+        gitAvailable: true,
+        loadFailed: false,
+        loading: false,
+        units,
+      });
     })().catch(() => {
-      if (active) setState({ gitAvailable: false, loading: false, units: [] });
+      if (active) {
+        setState({
+          gitAvailable: true,
+          loadFailed: true,
+          loading: false,
+          units: [],
+        });
+      }
     });
 
     return () => {

@@ -191,4 +191,63 @@ describe('useChangeOverview', () => {
     expect(ws.workspaceGitHubPullRequestFiles).not.toHaveBeenCalled();
     expect(output.units.map((unit) => unit.kind)).not.toContain('pr');
   });
+
+  it('counts hidden PR files toward the PR scope file count', async () => {
+    const ws = {
+      workspaceGitDiff: vi.fn().mockResolvedValue(gitDiff),
+      workspaceGitHubPullRequestFiles: vi
+        .fn()
+        .mockImplementation((number: number) =>
+          Promise.resolve({ ...prFiles(number), hiddenCount: 65 }),
+        ),
+      workspaceGitLog: vi
+        .fn()
+        .mockResolvedValue({ entries: [], hasMore: false }),
+      workspaceGitCommitDetail: vi.fn(),
+    };
+    mock.workspaceByCwd.mockReturnValue(ws);
+    await renderAndSettle();
+    const pr1 = output.units.find((unit) => unit.id === 'pr:1');
+    expect(pr1).toMatchObject({ filesCount: 66, hiddenCount: 65 });
+  });
+
+  it('resolves each bound PR in its own repository', async () => {
+    await renderAndSettle();
+    const ws = mock.workspaceByCwd.mock.results[0]!.value;
+    expect(ws.workspaceGitHubPullRequestFiles).toHaveBeenCalledWith(
+      1,
+      '/work/wt',
+      's1',
+      'o/r',
+    );
+  });
+
+  it('reports a retryable loadFailed when the git diff fetch throws', async () => {
+    const ws = {
+      workspaceGitDiff: vi.fn().mockRejectedValue(new Error('timeout')),
+      workspaceGitHubPullRequestFiles: vi.fn(),
+      workspaceGitLog: vi.fn(),
+      workspaceGitCommitDetail: vi.fn(),
+    };
+    mock.workspaceByCwd.mockReturnValue(ws);
+    await renderAndSettle();
+    expect(output.loadFailed).toBe(true);
+    expect(output.gitAvailable).toBe(true);
+    expect(output.units).toEqual([]);
+  });
+
+  it('suppresses the commit fallback when bound PRs resolve no head', async () => {
+    const ws = {
+      workspaceGitDiff: vi.fn().mockResolvedValue(gitDiff),
+      workspaceGitHubPullRequestFiles: vi
+        .fn()
+        .mockRejectedValue(new Error('gh missing')),
+      workspaceGitLog: vi.fn(),
+      workspaceGitCommitDetail: vi.fn(),
+    };
+    mock.workspaceByCwd.mockReturnValue(ws);
+    await renderAndSettle();
+    expect(ws.workspaceGitLog).not.toHaveBeenCalled();
+    expect(output.units.map((unit) => unit.kind)).not.toContain('commit');
+  });
 });

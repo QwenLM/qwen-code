@@ -62,6 +62,7 @@ const units: ChangeOverviewState['units'] = [
     additions: 1,
     deletions: 0,
     filesCount: 1,
+    hiddenCount: 0,
   },
 ];
 
@@ -166,5 +167,47 @@ describe('ChangeOverviewPanel', () => {
       refreshButton.click();
     });
     expect(mock.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the hidden-files note for a truncated commit scope', () => {
+    mock.state = {
+      gitAvailable: true,
+      loadFailed: false,
+      loading: false,
+      units: [
+        {
+          kind: 'commit',
+          id: 'commit:big',
+          sha: 'big1234',
+          shortSha: 'big1234',
+          subject: 'feat: squash',
+          files: [{ path: 'f0.ts', additions: 1, deletions: 0 }],
+          additions: 60,
+          deletions: 0,
+          filesCount: 60,
+          hiddenCount: 10,
+        },
+      ],
+    };
+    renderPanel();
+    expect(container.textContent).toContain('60 files');
+    expect(container.textContent).toContain('…and 10 more files');
+  });
+
+  it('shows a retryable load-failed message on a transient fetch failure', () => {
+    mock.state = {
+      gitAvailable: true,
+      loadFailed: true,
+      loading: false,
+      units: [],
+    };
+    renderPanel();
+    expect(container.textContent).toContain(
+      'Couldn’t load the change overview',
+    );
+    expect(container.textContent).not.toContain('not a git repository');
+    expect(
+      container.querySelector('button[aria-label="Refresh"]'),
+    ).not.toBeNull();
   });
 });

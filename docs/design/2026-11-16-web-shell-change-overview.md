@@ -84,8 +84,12 @@ It returns a discriminated result mirroring the existing PR helpers
 - `headSha` (`headRefOid`) and `baseRefName` for attribution and links.
 
 `gh` output is untrusted; reuse the existing redaction / timeout / cwd-guard
-patterns from `fetchGitHubPullRequestView`. File paths and counts are bounded the
-same way the diff routes bound theirs.
+patterns from `fetchGitHubPullRequestView`. The per-file list is capped at
+`GITHUB_PR_FILES_MAX`, but `gh` itself truncates the `files` array well below
+that cap (100 rows on the current CLI), so `hiddenCount` is derived from the
+PR-wide `changedFiles` total rather than the parsed row count — that keeps the
+file count and the "…and N more" note accurate for large PRs. This is a different
+bound from the git diff routes' `MAX_FILES`; the two are not the same mechanism.
 
 ### Route layer (serve)
 
@@ -144,8 +148,14 @@ Degradation:
   environment panel) is visible.
 - `gh` unavailable / PR files fetch fails: the PR unit still appears (number,
   title, link) with a "file list unavailable" state, never a blank panel.
-- Shared (non-worktree) workspace: units are workspace-scoped; the header labels
-  the scope so it is not mistaken for session-only attribution.
+- Transient git-diff fetch failure (timeout / 5xx): a distinct retryable
+  "couldn't load" state, not mislabelled as "not a git repository".
+- Bound PRs present but no head SHA resolves: the commit fallback is suppressed
+  entirely, so an unbounded window cannot list history the PRs already cover.
+- A bound PR in another repository is resolved there via `gh --repo owner/repo`
+  derived from its URL, not by number in the session's checkout.
+- Shared (non-worktree) workspace: units are workspace-scoped rather than
+  session-attributed.
 
 ## Files affected
 
@@ -163,8 +173,8 @@ Degradation:
 - Read-only. No stage / commit / push / PR-create behavior is added.
 - Does not replace the per-turn tool-call cards or the existing review tab; those
   remain the turn-level detail. The overview is the delivery-unit roll-up.
-- No real-time file-tree watching; the overview refetches on open and on an
-  explicit refresh, and after git-status-change events already emitted.
+- No real-time file-tree watching and no subscription to git-status-change
+  events; the overview refetches on open and on an explicit refresh only.
 
 ## Phasing
 

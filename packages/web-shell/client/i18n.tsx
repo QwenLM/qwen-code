@@ -2249,6 +2249,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'changeOverview.uncommitted': 'Uncommitted',
   'changeOverview.loading': 'Loading changes…',
   'changeOverview.notGit': 'This workspace is not a git repository.',
+  'changeOverview.loadFailed':
+    'Couldn’t load the change overview. Use refresh to retry.',
   'changeOverview.empty': 'No changes in this scope.',
   'changeOverview.files': (v) => `${v?.count ?? 0} files`,
   'changeOverview.prUnavailable':
@@ -7442,6 +7444,7 @@ const ZH: Messages = {
   'changeOverview.uncommitted': '未提交',
   'changeOverview.loading': '正在加载变更…',
   'changeOverview.notGit': '当前工作区不是 git 仓库。',
+  'changeOverview.loadFailed': '无法加载变更总览，请点刷新重试。',
   'changeOverview.empty': '该范围暂无变更。',
   'changeOverview.files': (v) => `${v?.count ?? 0} 个文件`,
   'changeOverview.prUnavailable':

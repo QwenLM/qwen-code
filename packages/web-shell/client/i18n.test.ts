@@ -227,6 +227,31 @@ describe('web-shell i18n catalog', () => {
     }
   });
 
+  it('keeps every change-overview translation in both locales', () => {
+    const en = getTranslator('en');
+    const zh = getTranslator('zh-CN');
+    const keys = [
+      'changeOverview.title',
+      'changeOverview.uncommitted',
+      'changeOverview.loading',
+      'changeOverview.notGit',
+      'changeOverview.loadFailed',
+      'changeOverview.empty',
+      'changeOverview.files',
+      'changeOverview.prUnavailable',
+      'changeOverview.refresh',
+      'changeOverview.openPr',
+      'changeOverview.hiddenFiles',
+    ];
+    for (const key of keys) {
+      // zh against en, not against the key: the translator falls back to EN
+      // per key, so a deleted zh entry would otherwise pass silently.
+      expect(en(key, { count: 2 })).not.toBe(key);
+      expect(zh(key, { count: 2 })).not.toBe(key);
+      expect(zh(key, { count: 2 })).not.toBe(en(key, { count: 2 }));
+    }
+  });
+
   it.each(WEB_SHELL_LANGUAGES)(
     'keeps shared connection and webhook copy platform-neutral in %s',
     (language) => {

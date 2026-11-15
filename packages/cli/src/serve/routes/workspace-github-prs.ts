@@ -224,12 +224,21 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
       );
       if (cwd === undefined) return;
 
+      // Optional owner/repo of the bound PR when it lives in a different
+      // repository than the session checkout; the core helper validates the
+      // slug before it reaches `gh --repo`.
+      const repo =
+        typeof req.query['repo'] === 'string' && req.query['repo'] !== ''
+          ? req.query['repo']
+          : undefined;
+
       applyReadHeaders(res);
       try {
         const result = await fetchGitHubPullRequestFiles(
           cwd,
           number,
           runtime.env.effectiveEnv,
+          repo,
         );
         switch (result.kind) {
           case 'ok':

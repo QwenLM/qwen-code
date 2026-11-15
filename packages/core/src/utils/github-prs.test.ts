@@ -986,6 +986,21 @@ describe('parseGhPrFiles', () => {
     expect(result.deletions).toBe(8888);
   });
 
+  it('reports hiddenCount from changedFiles when gh truncates below the code cap', () => {
+    // gh itself caps the files array (100 rows on current CLI) well below
+    // GITHUB_PR_FILES_MAX, so the hidden count must come from changedFiles,
+    // not from the parsed row count. Reproduces a 165-file PR listing 100.
+    const files = Array.from({ length: 100 }, (_, i) => ({
+      path: `src/f${i}.ts`,
+      additions: 1,
+      deletions: 0,
+    }));
+    const result = parse({ files, changedFiles: 165, additions: 12291 });
+    expect(result.files).toHaveLength(100);
+    expect(result.hiddenCount).toBe(65);
+    expect(result.additions).toBe(12291);
+  });
+
   it('sums parsed rows when gh omits the PR-wide totals', () => {
     const result = parse({ additions: undefined, deletions: undefined });
     expect(result.additions).toBe(10);
@@ -1056,7 +1071,7 @@ describe('fetchGitHubPullRequestFiles', () => {
         'view',
         '7',
         '--json',
-        'files,additions,deletions,headRefOid,baseRefName',
+        'files,additions,deletions,headRefOid,baseRefName,changedFiles',
       ],
     );
     const result = await fetchGitHubPullRequestFiles(repo, 7);
@@ -1070,6 +1085,45 @@ describe('fetchGitHubPullRequestFiles', () => {
         baseRefName: 'main',
       },
     });
+  });
+
+  it('resolves the number in the bound PR repository via --repo', async () => {
+    const repo = tmp.repo();
+    mockGhSuccess({ files: [], additions: 0, deletions: 0, changedFiles: 0 }, [
+      'pr',
+      'view',
+      '7',
+      '--json',
+      'files,additions,deletions,headRefOid,baseRefName,changedFiles',
+      '--repo',
+      'other/repo',
+    ]);
+    const result = await fetchGitHubPullRequestFiles(
+      repo,
+      7,
+      undefined,
+      'other/repo',
+    );
+    expect(result).toMatchObject({ kind: 'ok' });
+  });
+
+  it('rejects a malformed repo slug before spawning gh', async () => {
+    const repo = tmp.repo();
+    for (const bad of [
+      '--upload-pack=evil',
+      '-owner/repo',
+      'owner/repo/extra',
+      'owner repo',
+      'https://github.com/o/r',
+      'owner/',
+    ]) {
+      const result = await fetchGitHubPullRequestFiles(repo, 7, undefined, bad);
+      expect(result).toMatchObject({
+        kind: 'failed',
+        message: 'invalid pull request repository',
+      });
+    }
+    expect(mockExecFile).not.toHaveBeenCalled();
   });
 
   it('maps a missing gh binary to cli_unavailable', async () => {

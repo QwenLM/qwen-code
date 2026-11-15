@@ -28,10 +28,8 @@ export function ChangeOverviewPanel({
 }) {
   const { t } = useI18n();
   const openExternalLink = useExternalLinkOpener();
-  const { gitAvailable, loading, units, refresh } = useChangeOverview(
-    workspaceCwd,
-    sessionId,
-  );
+  const { gitAvailable, loadFailed, loading, units, refresh } =
+    useChangeOverview(workspaceCwd, sessionId);
   const [selectedId, setSelectedId] = useState<string>('uncommitted');
 
   const selected = useMemo(
@@ -92,7 +90,9 @@ export function ChangeOverviewPanel({
       )}
 
       <div className={styles.body}>
-        {loading && units.length === 0 ? (
+        {loadFailed ? (
+          <div className={styles.message}>{t('changeOverview.loadFailed')}</div>
+        ) : loading && units.length === 0 ? (
           <div className={styles.message}>{t('changeOverview.loading')}</div>
         ) : !selected ? (
           <div className={styles.message}>{t('changeOverview.empty')}</div>
@@ -155,7 +155,7 @@ export function ChangeOverviewPanel({
               </div>
             )}
 
-            {selected.kind !== 'commit' && selected.hiddenCount > 0 && (
+            {selected.hiddenCount > 0 && (
               <div className={styles.hiddenNote}>
                 {t('changeOverview.hiddenFiles', {
                   count: selected.hiddenCount,

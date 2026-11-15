@@ -41,7 +41,21 @@ export type ChangeOverviewUnit =
       additions: number;
       deletions: number;
       filesCount: number;
+      hiddenCount: number;
     };
+
+/**
+ * The `owner/repo` a bound PR's URL points at, so its file list is resolved in
+ * that repository rather than by number in the session's checkout (a same
+ * number in another repo is a different PR). Returns undefined for anything
+ * that is not a plain GitHub PR URL with a valid slug.
+ */
+export function prRepoFromUrl(url: string): string | undefined {
+  const match = /^https?:\/\/[^/]+\/([^/]+)\/([^/]+)\/pull\/\d+/.exec(url);
+  if (!match) return undefined;
+  const repo = `${match[1]}/${match[2]}`;
+  return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) ? repo : undefined;
+}
 
 /**
  * The git log range that yields the commit-fallback window: commits a bound PR
@@ -83,6 +97,7 @@ export function buildCommitFallbackUnits(
       additions: file.added,
       deletions: file.removed,
     }));
+    const filesCount = detail.filesCount ?? files.length;
     units.push({
       kind: 'commit',
       id: `commit:${entry.sha}`,
@@ -92,7 +107,10 @@ export function buildCommitFallbackUnits(
       files,
       additions: detail.linesAdded ?? 0,
       deletions: detail.linesRemoved ?? 0,
-      filesCount: detail.filesCount ?? files.length,
+      filesCount,
+      // The commit-detail route caps its per-file rows, so a large commit lists
+      // only part of its files; surface the remainder like the other units.
+      hiddenCount: Math.max(0, filesCount - files.length),
     });
   }
   return units;
