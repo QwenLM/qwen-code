@@ -98,6 +98,7 @@ import type {
   AgentLoopStopReason,
 } from '@qwen-code/qwen-code-core/core/agent-loop.js';
 import { findPlanModeEntryBatchBoundaryIndex } from '@qwen-code/qwen-code-core/core/plan-mode-entry-policy.js';
+import { logAgentLoopEntry } from '@qwen-code/qwen-code-core/config/agent-loop-rollout.js';
 import { startSharedLoopRound } from './shared-loop-round.js';
 import type { InteractiveToolCall } from '../../services/interactive-mod-tool-scheduler.js';
 import { createInkToolExecutor } from './ink-tool-executor.js';
@@ -5087,6 +5088,7 @@ export const useLlmStream = (
                   }
                 : {}),
           };
+          logAgentLoopEntry(config, 'ink');
           const sharedSource: SharedModelRound | undefined =
             config.isUnifiedAgentLoopEnabled?.('ink')
               ? {
