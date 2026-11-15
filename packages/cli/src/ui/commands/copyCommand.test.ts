@@ -893,7 +893,7 @@ math then literal: $x^2\$$`,
     });
   });
 
-  it('should return info message when no text parts found in AI message', async () => {
+  it('should report no output when the only AI message has no text', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
 
     const historyWithEmptyParts = [
@@ -910,7 +910,7 @@ math then literal: $x^2\$$`,
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Last AI output contains no text to copy.',
+      content: 'No output in history',
     });
 
     expect(mockCopyToClipboard).not.toHaveBeenCalled();
@@ -940,7 +940,57 @@ math then literal: $x^2\$$`,
     });
   });
 
-  it('should label the error with AI message N when /copy N has no text', async () => {
+  it('should not count tool-call-only model turns toward /copy N', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    const history = [
+      { role: 'user', parts: [{ text: 'first question' }] },
+      {
+        role: 'model',
+        parts: [{ text: 'previous reply\n\n```ts\nconst one = 1;\n```' }],
+      },
+      { role: 'user', parts: [{ text: 'second question' }] },
+      {
+        role: 'model',
+        parts: [
+          { text: 'planning', thought: true },
+          { functionCall: { name: 'glob', args: { pattern: '*' } } },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [{ functionResponse: { name: 'glob', response: {} } }],
+      },
+      { role: 'model', parts: [{ text: 'latest reply' }] },
+    ];
+
+    mockGetHistoryShallow.mockReturnValue(history);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    expect(await copyCommand.action(mockContext, '2')).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'AI message 2 copied to the clipboard',
+    });
+    expect(mockCopyToClipboard).toHaveBeenLastCalledWith(
+      'previous reply\n\n```ts\nconst one = 1;\n```',
+    );
+
+    expect(await copyCommand.action(mockContext, '2 code')).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Code block 1 copied to the clipboard',
+    });
+    expect(mockCopyToClipboard).toHaveBeenLastCalledWith('const one = 1;');
+
+    expect(await copyCommand.action(mockContext, '3')).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Only 2 AI messages in this session.',
+    });
+  });
+
+  it('should skip AI messages without text when counting /copy N', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
 
     const history = [
@@ -956,7 +1006,7 @@ math then literal: $x^2\$$`,
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'AI message 2 contains no text to copy.',
+      content: 'Only 1 AI message in this session.',
     });
     expect(mockCopyToClipboard).not.toHaveBeenCalled();
   });

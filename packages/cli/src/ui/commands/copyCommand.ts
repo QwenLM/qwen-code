@@ -367,7 +367,14 @@ export const copyCommand: SlashCommand = {
   action: async (context, args): Promise<SlashCommandActionReturn | void> => {
     const chat = await context.services.config?.getLlmClient()?.getChat();
     const history = chat?.getHistoryShallow();
-    const aiMessages = history?.filter((item) => item.role === 'model') ?? [];
+    // A tool-call-only model turn shows no reply on screen, so it must not
+    // shift the N in `/copy N`.
+    const aiMessages =
+      history?.filter(
+        (item) =>
+          item.role === 'model' &&
+          item.parts?.some((part) => part.text && !part.thought),
+      ) ?? [];
 
     if (aiMessages.length === 0) {
       return {
