@@ -1536,6 +1536,7 @@ public class SurfaceAdmissionAcceptanceTest {
                 : pendingAction);
         variables.put("workspaceId", "ws");
         variables.put("nodeId", "node-probe");
+        variables.put("uploadId", "11111111-1111-4111-8111-111111111111");
         variables.put("worktreeId", "worktree-probe");
         variables.put("extensionId", "ext_11111111-1111-4111-8111-111111111111");
         variables.put("packageRevision", "1");
@@ -1568,12 +1569,35 @@ public class SurfaceAdmissionAcceptanceTest {
             query.add("generation=1");
             query.add("connection_id=conn-probe");
         }
-        if (entry.capabilities().contains(Capability.WORKSPACE_FILES_UPLOAD)) {
-            query.add("workspaceId=workspace");
-            query.add("cwdRelative=.");
+        if (entry.surface() == Surface.PUBLIC && entry.capabilities().contains(Capability.WORKSPACE_FILES_QUERY)) {
+            query.add("workspace_id=workspace");
+            query.add("cwd_relative=.");
+            query.add("directory=.");
+        }
+        if (entry.surface() == Surface.PUBLIC && entry.capabilities().contains(Capability.WORKSPACE_FILES_READ)) {
+            query.add("workspace_id=workspace");
+            query.add("cwd_relative=.");
             query.add("path=file.txt");
-            query.add("expectedScopeRevision=" + digest());
-            query.add("uploadId=11111111-1111-4111-8111-111111111111");
+            query.add("expected_scope_revision=revision");
+        }
+        if (entry.surface() == Surface.PUBLIC && entry.capabilities().contains(Capability.WORKSPACE_DIRECTORIES)) {
+            query.add("workspace_id=workspace");
+            query.add("cwd_relative=.");
+        }
+        if (entry.capabilities().contains(Capability.WORKSPACE_FILES_UPLOAD)) {
+            if (entry.surface() == Surface.PUBLIC) {
+                query.add("workspace_id=workspace");
+                query.add("cwd_relative=.");
+                query.add("path=file.txt");
+                query.add("expected_scope_revision=" + digest());
+                query.add("upload_id=11111111-1111-4111-8111-111111111111");
+            } else {
+                query.add("workspaceId=workspace");
+                query.add("cwdRelative=.");
+                query.add("path=file.txt");
+                query.add("expectedScopeRevision=" + digest());
+                query.add("uploadId=11111111-1111-4111-8111-111111111111");
+            }
         }
         if (entry.capabilities().contains(Capability.EXTENSION_PUBLISH)
                 && entry != SurfaceRegistry.PUBLIC_EXTENSION_SOURCE_IMPORT) {
@@ -1812,7 +1836,9 @@ public class SurfaceAdmissionAcceptanceTest {
             case ARTIFACT_GET -> "{\"sessionId\":\"" + session
                     + "\",\"artifactId\":\"" + artifactId + "\"}";
             case ARTIFACT_LIST -> "{\"sessionId\":\"" + session + "\"}";
-            case WORKSPACE_CREATE -> "{\"displayName\":\"New workspace\",\"idempotencyKey\":\"create-key\"}";
+            case WORKSPACE_CREATE -> publicSurface
+                    ? "{\"display_name\":\"New workspace\"}"
+                    : "{\"displayName\":\"New workspace\",\"idempotencyKey\":\"create-key\"}";
             case WORKSPACE_FILES_QUERY -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\",\"directory\":\".\"}";
             case WORKSPACE_FILES_READ -> "{\"workspaceId\":\"workspace\",\"cwdRelative\":\".\",\"path\":\"file.txt\",\"expectedScopeRevision\":\"revision\"}";
             case WORKSPACE_FILES_UPLOAD_QUERY -> "{\"uploadId\":\"11111111-1111-4111-8111-111111111111\"}";

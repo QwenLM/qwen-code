@@ -882,6 +882,9 @@ class ManagedAgentApiContractTest {
         exchange(drift, "getWebShellToolDetails", 401,
                 post("/api/agent/web-shell/v1/tool-details/get").header(TENANT, tenant),
                 "{\"sessionId\":\"%s\",\"itemId\":\"item_missing\"}".formatted(sessionId));
+        exchange(drift, "getPublicToolDetails", 401,
+                get("/v1/agents/sessions/%s/items/item_missing/tool-details".formatted(sessionId))
+                        .header(TENANT, tenant), null);
         exchange(drift, "getWebShellToolResult", 401,
                 post("/api/agent/web-shell/v1/tool-results/get").header(TENANT, tenant),
                 "{\"sessionId\":\"%s\",\"itemId\":\"item_missing\"}".formatted(sessionId));
@@ -1565,6 +1568,32 @@ class ManagedAgentApiContractTest {
                 post(WEB_SHELL + "/workspaces/files/uploads/query")
                         .header(TENANT, workspaceTenant).principal(actor),
                 "{\"uploadId\":\"" + UUID.randomUUID() + "\"}");
+        exchange(drift, "createPublicWorkspace", 409,
+                post("/v1/agents/workspaces")
+                        .header(TENANT, workspaceTenant).principal(actor).header(IDEMPOTENCY_KEY, "workspace-create"),
+                "{\"display_name\":\"New workspace\"}");
+        exchange(drift, "listPublicWorkspaceDirectories", 409,
+                get("/v1/agents/workspaces/directories")
+                        .param("workspace_id", "ws-default").param("cwd_relative", ".")
+                        .header(TENANT, workspaceTenant).principal(actor), null);
+        exchange(drift, "listPublicWorkspaceFiles", 409,
+                get("/v1/agents/workspace-files")
+                        .param("workspace_id", "ws-default").param("cwd_relative", ".").param("directory", ".")
+                        .header(TENANT, workspaceTenant).principal(actor), null);
+        exchange(drift, "readPublicWorkspaceFile", 409,
+                get("/v1/agents/workspace-files/content")
+                        .param("workspace_id", "ws-default").param("cwd_relative", ".")
+                        .param("path", "a.txt").param("expected_scope_revision", "old")
+                        .header(TENANT, workspaceTenant).principal(actor), null);
+        exchange(drift, "uploadPublicWorkspaceFile", 409,
+                post("/v1/agents/workspace-files/uploads")
+                        .header(TENANT, workspaceTenant).principal(actor)
+                        .param("workspace_id", "ws-default").param("cwd_relative", ".").param("path", "file.bin")
+                        .param("expected_scope_revision", "a".repeat(64)).param("upload_id", UUID.randomUUID().toString())
+                        .contentType(MediaType.APPLICATION_OCTET_STREAM).content(new byte[] {0}), null);
+        exchange(drift, "getPublicWorkspaceFileUpload", 404,
+                get("/v1/agents/workspace-files/uploads/{uploadId}", UUID.randomUUID().toString())
+                        .header(TENANT, workspaceTenant).principal(actor), null);
         String publicBoundId = json(exchange(drift, "createSession", 202,
                 post("/v1/agents/sessions").header(TENANT, workspaceTenant)
                         .principal(actor).header(IDEMPOTENCY_KEY, "bound-public"),

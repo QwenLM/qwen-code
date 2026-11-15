@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.118.0",
+    "version": "1.119.0",
     "description": "Canonical first-release contract for the public Managed Agent resources and the WebShell adapter. Implemented routes and fields describe the current matching Server, Broker, Harness and WebShell build. Partial entries have remaining implementation or contract-test work; planned entries are not current server capabilities and must be excluded from production SDKs. Turn submission and cancellation always return the durable operation identifier and its persisted admission and delivery state. Session-list cursors are bound to the normalized archive state and title query. Earlier development API shapes, checkpoints and database catalogs are unsupported; initialize fresh state for this build. Runtime feature capabilities and deployment policy still govern optional execution modes. Public conversation history reads directly from mutable message projections; persisted conversation snapshots and fixed-content paging are no longer provided. Retained removed MCP-management entries stay in the response snapshot: only non-removed entries count toward the 32-server selection capacity, so the servers array may exceed 32 while preserving tombstones."
   },
   "servers": [
@@ -1525,6 +1525,41 @@
             "$ref": "#/components/responses/Forbidden"
           }
         }
+      },
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "createPublicWorkspace",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Admits actor-scoped, idempotent creation of a Workspace from a source Workspace directory or an explicit local import. The Idempotency-Key header carries the idempotency key; a retry with the same content returns the original Workspace. Creation rechecks ACL, state and Agent/config compatibility and starts no Runtime worker.",
+        "parameters": [
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/PublicWorkspaceCreateRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The created Workspace summary.",
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
+              "Cache-Control": { "schema": { "type": "string", "const": "no-store" } }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PublicWorkspaceSummary" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
       }
     },
     "/v1/agents/workspaces/{workspaceId}": {
@@ -1911,6 +1946,184 @@
                 "schema": { "$ref": "#/components/schemas/PublicWorkspaceRegistrationOperation" }
               }
             }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/agents/workspace-files": {
+      "get": {
+        "tags": ["Public Resources"],
+        "operationId": "listPublicWorkspaceFiles",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Lists a bounded directory page of the authorized Workspace or Session scope. Requires a trusted actor and a rechecked scope revision; refuses traversal and never starts a Runtime.",
+        "parameters": [
+          { "name": "session_id", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 128 } },
+          { "name": "workspace_id", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 128 } },
+          { "name": "cwd_relative", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 1024 } },
+          { "name": "directory", "in": "query", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 1024 } },
+          { "name": "query", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 256 } },
+          { "name": "expected_scope_revision", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 64 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authorized directory page.",
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
+              "Cache-Control": { "schema": { "type": "string", "const": "no-store" } }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicFileQueryResult" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/v1/agents/workspace-files/content": {
+      "get": {
+        "tags": ["Public Resources"],
+        "operationId": "readPublicWorkspaceFile",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Reads one bounded text file of the authorized Workspace or Session scope at the expected scope revision. Requires a trusted actor; refuses traversal and never starts a Runtime.",
+        "parameters": [
+          { "name": "session_id", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 128 } },
+          { "name": "workspace_id", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 128 } },
+          { "name": "cwd_relative", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 1024 } },
+          { "name": "path", "in": "query", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 1024 } },
+          { "name": "expected_scope_revision", "in": "query", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 64 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authorized file content.",
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
+              "Cache-Control": { "schema": { "type": "string", "const": "no-store" } }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicFileResult" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/v1/agents/workspace-files/uploads": {
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "uploadPublicWorkspaceFile",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Uploads one bounded file into the authorized Workspace or Session scope as an idempotent upload operation. The body is application/octet-stream; encoded uploads are refused. Requires a trusted actor.",
+        "parameters": [
+          { "name": "session_id", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 128 } },
+          { "name": "workspace_id", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 128 } },
+          { "name": "cwd_relative", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 1024 } },
+          { "name": "path", "in": "query", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 1024 } },
+          { "name": "expected_scope_revision", "in": "query", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 64 } },
+          { "name": "upload_id", "in": "query", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 36 } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Durable upload result.",
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
+              "Cache-Control": { "schema": { "type": "string", "const": "no-store" } }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicFileUploadResult" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "415": {
+            "description": "Encoded Workspace uploads are unsupported.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+          }
+        }
+      }
+    },
+    "/v1/agents/workspace-files/uploads/{uploadId}": {
+      "parameters": [
+        { "name": "uploadId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 36 } }
+      ],
+      "get": {
+        "tags": ["Public Resources"],
+        "operationId": "getPublicWorkspaceFileUpload",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Reads the durable state of one actor-owned upload operation; an unknown or foreign upload answers 404.",
+        "responses": {
+          "200": {
+            "description": "Latest durable upload state.",
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
+              "Cache-Control": { "schema": { "type": "string", "const": "no-store" } }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicFileUploadStatus" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/agents/workspaces/directories": {
+      "get": {
+        "tags": ["Public Resources"],
+        "operationId": "listPublicWorkspaceDirectories",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Lists bounded immediate real directories on the selected Workspace storage host, or a local import root when local_path is given. Requires an authenticated OWNER of the ACTIVE ROOT Workspace and verified storage; refuses traversal, symlinks and reserved maintenance directories.",
+        "parameters": [
+          { "name": "workspace_id", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 128 } },
+          { "name": "cwd_relative", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 1024 } },
+          { "name": "local_path", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 1024 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authorized directory page.",
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
+              "Cache-Control": { "schema": { "type": "string", "const": "no-store" } }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicWorkspaceDirectoryPage" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/items/{itemId}/tool-details": {
+      "parameters": [
+        { "$ref": "#/components/parameters/SessionId" },
+        { "name": "itemId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 128 } }
+      ],
+      "get": {
+        "tags": ["Public Sessions"],
+        "operationId": "getPublicToolDetails",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Reads the inline input, output and structured shell result of one tool item in an authorized workspace-bound Session. Requires a trusted actor with read access.",
+        "responses": {
+          "200": {
+            "description": "Tool details for the authorized item.",
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
+              "Cache-Control": { "schema": { "type": "string", "const": "private, no-store" } }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicToolDetails" } } }
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
@@ -17782,6 +17995,153 @@
             "$ref": "#/components/schemas/ManagedPermissionRules",
             "description": "Immutable rules snapshot for this Turn; omitted when empty."
           }
+        }
+      },
+      "PublicFileEntry": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "name", "kind"],
+        "properties": {
+          "path": { "type": "string" },
+          "name": { "type": "string" },
+          "kind": { "type": "string" }
+        }
+      },
+      "PublicFileQueryResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["scope_revision", "directory", "entries", "truncated"],
+        "properties": {
+          "scope_revision": { "type": "string" },
+          "directory": { "type": "string" },
+          "entries": { "type": "array", "items": { "$ref": "#/components/schemas/PublicFileEntry" } },
+          "truncated": { "type": "boolean" },
+          "max_upload_bytes": { "type": ["integer", "null"] }
+        }
+      },
+      "PublicFileResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["scope_revision", "path", "name", "mime_type", "text", "byte_length", "sha256"],
+        "properties": {
+          "scope_revision": { "type": "string" },
+          "path": { "type": "string" },
+          "name": { "type": "string" },
+          "mime_type": { "type": "string" },
+          "text": { "type": "string" },
+          "byte_length": { "type": "integer" },
+          "sha256": { "type": "string" }
+        }
+      },
+      "PublicFileUploadResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["scope_revision", "upload_id", "path", "size_bytes", "sha256"],
+        "properties": {
+          "scope_revision": { "type": "string" },
+          "upload_id": { "type": "string" },
+          "path": { "type": "string" },
+          "size_bytes": { "type": "integer" },
+          "sha256": { "type": "string" }
+        }
+      },
+      "PublicFileUploadStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["scope_revision", "upload_id", "state", "path", "size_bytes"],
+        "properties": {
+          "scope_revision": { "type": "string" },
+          "upload_id": { "type": "string" },
+          "state": { "type": "string" },
+          "path": { "type": "string" },
+          "size_bytes": { "type": "integer" },
+          "sha256": { "type": ["string", "null"] },
+          "code": { "type": ["string", "null"] }
+        }
+      },
+      "PublicWorkspaceCreateRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["display_name"],
+        "properties": {
+          "display_name": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "source_workspace_id": { "type": ["string", "null"], "maxLength": 128 },
+          "cwd_relative": { "type": ["string", "null"], "maxLength": 1024 },
+          "local_path": { "type": ["string", "null"], "maxLength": 1024 }
+        }
+      },
+      "PublicWorkspaceSummary": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["workspace_id", "display_name", "state", "can_create_session", "default_cwd_relative", "can_select_directory"],
+        "properties": {
+          "workspace_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "display_name": { "type": "string", "maxLength": 512 },
+          "state": { "type": "string", "enum": ["active", "draining", "removed"] },
+          "can_create_session": { "type": "boolean" },
+          "default_cwd_relative": { "type": ["string", "null"] },
+          "can_select_directory": { "type": "boolean" }
+        }
+      },
+      "PublicWorkspaceDirectoryEntry": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "cwd_relative"],
+        "properties": {
+          "name": { "type": "string" },
+          "cwd_relative": { "type": "string" }
+        }
+      },
+      "PublicWorkspaceDirectoryPage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["root", "cwd_relative", "directories", "truncated"],
+        "properties": {
+          "root": { "type": "string" },
+          "cwd_relative": { "type": "string" },
+          "directories": { "type": "array", "items": { "$ref": "#/components/schemas/PublicWorkspaceDirectoryEntry" } },
+          "truncated": { "type": "boolean" }
+        }
+      },
+      "PublicToolDetails": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["input", "output", "truncated"],
+        "properties": {
+          "input": {
+            "type": ["object", "null"],
+            "additionalProperties": true,
+            "description": "Allowlisted display arguments, or null when unavailable or larger than 4 KiB."
+          },
+          "output": {
+            "type": ["string", "null"],
+            "description": "Recorded text or error, bounded to 8 KiB and 200 lines; null means unavailable, an empty string means recorded empty output."
+          },
+          "truncated": { "type": "boolean" },
+          "shell_result": {
+            "$ref": "#/components/schemas/PublicShellResult",
+            "description": "Validated saved Shell display, when available."
+          }
+        }
+      },
+      "PublicShellResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "version", "text", "output", "directory", "exit_code", "signal", "pid", "error", "outcome", "notices", "truncated", "output_files"],
+        "properties": {
+          "type": { "type": "string", "const": "shell_result" },
+          "version": { "type": "integer", "const": 1 },
+          "text": { "type": "string" },
+          "output": { "type": "string" },
+          "directory": { "type": "string" },
+          "exit_code": { "type": ["integer", "null"], "minimum": -9007199254740991, "maximum": 9007199254740991 },
+          "signal": { "type": ["integer", "null"], "minimum": -9007199254740991, "maximum": 9007199254740991 },
+          "pid": { "type": ["integer", "null"], "minimum": -9007199254740991, "maximum": 9007199254740991 },
+          "error": { "type": ["string", "null"] },
+          "outcome": { "type": "string", "enum": ["completed", "failed", "cancelled", "timed_out"] },
+          "notices": { "type": "array", "maxItems": 32, "items": { "type": "string" } },
+          "truncated": { "type": "boolean" },
+          "output_files": { "type": "array", "maxItems": 32, "items": { "type": "string" } }
         }
       },
       "PublicClientFilesConnectionRequest": {
