@@ -806,6 +806,10 @@ test('virtualizes a long source file and keeps its final lines reachable', async
 test('@smoke keeps large source files readable without tokenizing the entire text', async ({
   page,
 }, testInfo) => {
+  // The 1.1 MB fixture goes through five 256 KB chunk reads and a full decode
+  // before the virtualized render; on a loaded shard that can exhaust the
+  // shared 60 s budget before the Files panel even opens (#14969).
+  test.setTimeout(180_000);
   const { browser, byteReads } = await openFiles(
     page,
     String(testInfo.project.use.baseURL),
