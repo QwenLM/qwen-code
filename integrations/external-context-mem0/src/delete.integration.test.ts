@@ -279,12 +279,14 @@ describe('packaged deletion MCP through real HTTP', () => {
       expect(
         test.requests.filter((req) => req.method === 'DELETE'),
       ).toHaveLength(mode === 'slow-preflight-body' ? 0 : 1);
-      if (mode === 'cumulative-deadline')
+      if (mode === 'cumulative-deadline') {
+        expect(Date.now() - startTime).toBeGreaterThanOrEqual(850);
         expect(test.requests.map((req) => req.method)).toEqual([
           'GET',
           'DELETE',
           'GET',
         ]);
+      }
       expect(test.stderr()).toBe('');
     },
   );
