@@ -1865,11 +1865,11 @@ describe('serve fast path environment bootstrap', () => {
           advanced: {
             excludedEnvVars: ['FAST_PATH_USER_EXCLUDED'],
           },
-          // Exercises the projection's language arm. This fixture's user
-          // scope enables folder trust and the workspace is not trusted, so the
-          // workspace's general is dropped before the merge: the arm is
-          // exercised by the user-scope value alone.
-          general: { language: 'zh-CN' },
+          // Exercises both general arms of the projection. This fixture's
+          // user scope enables folder trust and the workspace is not trusted,
+          // so the workspace's general is dropped before the merge: both keys
+          // must come from the user scope to reach the compared objects.
+          general: { language: 'zh-CN', chatRecording: false },
           security: { folderTrust: { enabled: true } },
           tools: { approvalMode: 'auto' },
         }),

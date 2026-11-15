@@ -2,7 +2,7 @@
 
 [English](2026-11-15-daemon-pr-watch-drain-language.md) | [简体中文](2026-11-15-daemon-pr-watch-drain-language.zh-CN.md)
 
-Status: proposed (2026-11-15)
+Status: implemented as #17352 (proposed 2026-11-15). The body below describes the increment as designed.
 
 ## Problem
 
@@ -65,7 +65,7 @@ Every new field is optional and defaults to `en`. A caller that does not set it 
 | File                                                              | Change                                                                                                                                                                                                                                             |
 | ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `packages/cli/src/utils/channel-locale.ts` (new)                  | the import-free locale resolver, moved out of the channel runtime                                                                                                                                                                                  |
-| `packages/cli/src/commands/channel/runtime.ts`                    | re-exports the resolver so its two existing importers are unchanged                                                                                                                                                                                |
+| `packages/cli/src/commands/channel/runtime.ts` (+ test)           | re-exports the resolver so its two existing importers are unchanged; the resolver table gains trim and uppercase rows                                                                                                                              |
 | `packages/cli/src/serve/fast-path-settings.ts`                    | the boot settings surface carries `general.language`; the reader copies a string and drops anything else                                                                                                                                           |
 | `packages/cli/src/serve/fast-path.test.ts`                        | six reader cases: the value is carried, a non-string is tolerated without discarding the summary, chatRecording survives alongside it, the workspace-over-user precedence with its trust-on mirror, and the per-key merge of general across scopes |
 | `packages/cli/src/serve/run-qwen-serve.ts`                        | resolve the locale at boot and pass it into the sources                                                                                                                                                                                            |
@@ -76,6 +76,10 @@ Every new field is optional and defaults to `en`. A caller that does not set it 
 | `packages/cli/src/serve/server/pr-watch-drain.scenario.test.ts`   | two end-to-end language scenarios through the real gh child and the real admission                                                                                                                                                                 |
 | `packages/cli/src/serve/server/session-pr-refresh.ts` (+ test)    | the listing write carries the language; the two no-deps cases assert their stated effects; stale "switch" wording retired                                                                                                                          |
 | `packages/channels/github/src/GithubAdapter.ts` (+ test)          | the deprecation predicate's JSDoc names all four keys; the warning test asserts both limit knobs                                                                                                                                                   |
+| `docs/users/configuration/settings.md`                            | the `general.language` row records the prompt-language effect, the match rule and the trust condition; the `serve.sessionPrWatch.events` row points at it and distinguishes a present setting from an absent one                                   |
+| `docs/users/features/channels/github.md`                          | the prompt locale is not the rendered UI language; the match rule replaces the shape list; each producer's read point is named                                                                                                                     |
+| `docs/design/2026-11-09-bound-event-prompt-language.md` (+ zh-CN) | decision 7 moves to the past tense, the current-state table is calibrated to the shipped tree, and the deferred open question is resolved                                                                                                          |
+| `docs/design/2026-11-08-bound-session-role-guidance.md` (+ zh-CN) | the same deferred open question is resolved                                                                                                                                                                                                        |
 
 ## Key design decisions
 
