@@ -23,7 +23,7 @@ Speculation 在后台以只读工具与 copy-on-write overlay 写跑在用户之
 
 ### 共享批处理接口已经允许什么
 
-上述执行与记录机制**并非**共享接口的结构性阻塞，部分结果也是如此。`runToolBatch` 接受调用方注入的 `executor`（`agent-loop.ts:476`），因此一个投机 executor 可以直接、顺序地运行调用；`client` 是可选的（`:467`），记录调用是 `client?.recordCompletedToolCall(...)`（`:671`），省略它即跳过该通道；`deferRecording`（`:488`）把每个结果的记录作为回调返回而不调用（`:755-759`），让表面只记录它发送的内容。另有三个接缝与 boundary/部分批次行为相关（此清单并非穷尽）：`keepCancelledResults`（`:483`）完成并返回被取消批次的结果，供保留它们的表面使用；`ToolBatchResult.responses`（`:498`）按调用返回 parts，「供丢弃部分调用结果的表面使用」，已有真实表面用它只发送一个子集（`use-llm-stream.ts:6707-6711`）；按调用的启动门 `host.beforeToolLaunch`（`:221`，在 `:630` 接线）按请求顺序拒绝某个调用并使其不执行。直接执行、顺序执行、避免已提交记录、部分结果与按调用拒绝，都能经此接口表达；它们本身并不构成保留独立工具步的理由。
+上述执行与记录机制**并非**共享接口的结构性阻塞，部分结果也是如此。`runToolBatch` 接受调用方注入的 `executor`（`agent-loop.ts:476`），因此一个投机 executor 可以直接、顺序地运行调用；`client` 是可选的（`:467`），`client?.recordCompletedToolCall(...)`（`:671`）只把已执行调用计入会话的工具计数，省略 `client` 跳过的是该计数；已提交的工具结果写入是另一个调 `recordToolResult` 的 `record()` 闭包（`:735`、`:740`），`deferRecording`（`:488`）把它作为回调返回而不调用（`:755-759`），让表面只记录它发送的内容——避免已提交记录意味着延后这些回调，而非仅省略 `client`。另有三个接缝与 boundary/部分批次行为相关（此清单并非穷尽）：`keepCancelledResults`（`:483`）完成并返回被取消批次的结果，供保留它们的表面使用；`ToolBatchResult.responses`（`:498`）按调用返回 parts，「供丢弃部分调用结果的表面使用」，已有真实表面用它只发送一个子集（`use-llm-stream.ts:6707-6711`）；按调用的启动门 `host.beforeToolLaunch`（`:221`，在 `:630` 接线）按请求顺序拒绝某个调用并使其不执行。直接执行、顺序执行、避免已提交记录、部分结果与按调用拒绝，都能经此接口表达；它们本身并不构成保留独立工具步的理由。
 
 ## 决策
 
@@ -37,7 +37,7 @@ Speculation 在后台以只读工具与 copy-on-write overlay 写跑在用户之
 
 ## 集成门禁决策
 
-今天没有集成测试运行 speculation。**记录决策：speculation 的单元 parity 套件即其门禁。** 该套件已对比共享轮 off/on（`speculation.test.ts` 的「speculation model round on the shared agent loop」与「speculation shared-round event semantics」），含一个分支标记钉住共享轮仅在开关开启时运行。确定性的端到端投机轮不是可行的集成门禁：speculation 是后台、依赖时序的优化，其 accept/boundary 结果取决于运行中途到达的用户输入。把关共享轮迁移的是单元 parity 套件，而非集成场景。off/on 对比覆盖的是共享模型轮；boundary 交回是 speculation 自有且不变的工具步，由 boundary 测试在 raw-chunk 臂上运行。共享轮输出的 parts 与该 boundary 剥离的组合尚未在共享臂上被覆盖——这是应在 6c 默认翻转前补齐的覆盖项，而非本决策引入的缺口。
+今天没有集成测试运行 speculation。**记录决策：speculation 的单元 parity 套件即其门禁。** 该套件已对比共享轮 off/on（`speculation.test.ts` 的「speculation model round on the shared agent loop」与「speculation shared-round event semantics」），含一个分支标记钉住共享轮仅在开关开启时运行。确定性的端到端投机轮不是可行的集成门禁：speculation 是后台、依赖时序的优化，其 accept/boundary 结果取决于运行中途到达的用户输入。把关共享轮迁移的是单元 parity 套件，而非集成场景。off/on 对比覆盖的是共享模型轮。boundary 交回是 speculation 自有且不变的工具步：现有 boundary 测试只在 raw-chunk 臂上覆盖它的零执行 bail，而部分批次交回（第 3 项）——包括它与共享轮 parts 的组合——在两臂都没有测试。这部分部分批次覆盖是应在 6c 默认翻转前补齐的项（该路径经 opt-in 设置已可达），而非本决策引入的缺口。
 
 本决定把关的是共享轮迁移（PR 6a），而非 PR 6c 的默认翻转。父设计的集成条目（「该运行在其准备默认开启时加入」）与其默认变更判据（在设置开启下运行该入口集成测试的定时任务已在 main 上连续通过两周，见[统一代理循环](2026-10-23-unified-agent-loop.md)），以及 #17045 的连续 14 夜规则，对 6c 仍然有效。由于确定性端到端投机轮因上述时序原因不可行，6c 作者必须调和这一要求：点名一个满足该规则的 nightly 集成信号，或经 #17045 的 Plan changes 记录「单元 parity 套件对默认翻转亦足够」。本记录把这个问题留给 6c，而不预先替代它。
 
