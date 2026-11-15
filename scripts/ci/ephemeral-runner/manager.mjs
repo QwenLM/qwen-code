@@ -50,20 +50,63 @@ export function command(
     });
     child.on('close', (code) => {
       clearTimeout(timer);
-      if (code === 0 && outputSize <= 4 * 1024 * 1024)
-        resolveCommand(
-          binary ? Buffer.concat(output) : Buffer.concat(output).toString(),
-        );
-      else {
-        const status = Number(stderr.match(/HTTP (\d{3})/)?.[1] || 0);
-        const error = new Error(
-          `${program} failed (exit ${code}${status ? `, HTTP ${status}` : ''})`,
-        );
-        error.status = status;
-        error.exitCode = code;
-        error.stderr = stderr.slice(0, 8192);
-        reject(error);
+      const stdout = Buffer.concat(output);
+      const text = binary ? '' : stdout.toString();
+      const response = args.includes('--include')
+        ? /^HTTP\/[\d.]+ (\d{3})[^\r\n]*\r?\n((?:[^\r\n]+\r?\n)*)\r?\n/.exec(
+            text,
+          )
+        : null;
+      if (code === 0 && outputSize <= 4 * 1024 * 1024) {
+        resolveCommand(binary ? stdout : text.slice(response?.[0].length ?? 0));
+        return;
       }
+      const status = Number(
+        response?.[1] ?? stderr.match(/HTTP (\d{3})/)?.[1] ?? 0,
+      );
+      const error = new Error(
+        `${program} failed (exit ${code}${status ? `, HTTP ${status}` : ''})`,
+      );
+      error.status = status;
+      error.exitCode = code;
+      error.stderr = stderr.slice(0, 8192);
+      if (response && (status === 403 || status === 429)) {
+        const headers = new Map(
+          response[2]
+            .trim()
+            .split(/\r?\n/)
+            .map((line) => {
+              const colon = line.indexOf(':');
+              return [
+                line.slice(0, colon).toLowerCase(),
+                line.slice(colon + 1).trim(),
+              ];
+            }),
+        );
+        const retryAfter = headers.get('retry-after');
+        const reset = headers.get('x-ratelimit-reset');
+        const exhausted = headers.get('x-ratelimit-remaining') === '0';
+        error.rateLimited =
+          status === 429 ||
+          exhausted ||
+          retryAfter !== undefined ||
+          /rate limit|abuse detection/i.test(stderr);
+        const now = Date.now();
+        const retryAfterAt = /^\d+$/.test(retryAfter ?? '')
+          ? now + Number(retryAfter) * 1000
+          : 0;
+        const resetAt =
+          exhausted && /^\d+$/.test(reset ?? '') ? Number(reset) * 1000 : 0;
+        const retryAt = Math.max(
+          Number.isSafeInteger(retryAfterAt) ? retryAfterAt : 0,
+          Number.isSafeInteger(resetAt) ? resetAt : 0,
+        );
+        if (retryAt > now) error.retryAt = retryAt;
+        if (!error.rateLimited)
+          error.message =
+            'GitHub runner registration permission denied (HTTP 403)';
+      }
+      reject(error);
     });
     child.stdin.on('error', () => {});
     child.stdin.end(input);
@@ -775,6 +818,7 @@ export function createManager(config, dependencies = {}) {
       result = parseJson(
         await gh(
           [
+            '--include',
             '-X',
             'POST',
             `/repos/${config.repo}/actions/runners/generate-jitconfig`,
@@ -793,6 +837,12 @@ export function createManager(config, dependencies = {}) {
       // escaped error is what the retry loop reads its backoff ladder from, so
       // a cleanup failure must not downgrade a rate-limited request to the
       // ordinary ladder.
+      if (error.rateLimited !== undefined) {
+        // This registration was refused before creating a runner, and this
+        // cycle already reconciled the slot. Avoid another API call for cleanup.
+        await rm(slotPath(slot), { force: true });
+        throw error;
+      }
       const rateLimited = error.status === 403 || error.status === 429;
       try {
         if (error.status >= 400 && error.status < 500 && error.status !== 408) {
@@ -1157,8 +1207,13 @@ export function createManager(config, dependencies = {}) {
               // still escalates instead of restarting from the base delay.
               consecutiveFailures += 1;
               const isRateLimited =
-                error.status === 403 || error.status === 429;
-              const delay = backoffDelay(consecutiveFailures, isRateLimited);
+                error.rateLimited ??
+                (error.status === 403 || error.status === 429);
+              const delay =
+                error.retryAt === undefined
+                  ? backoffDelay(consecutiveFailures, isRateLimited)
+                  : Math.max(0, error.retryAt - Date.now()) +
+                    Math.floor(Math.random() * 1000);
               if (!stallAlerted && Date.now() - stalledSince >= stallAlertMs) {
                 stallAlerted = true;
                 log(
@@ -1167,7 +1222,7 @@ export function createManager(config, dependencies = {}) {
                 );
               } else
                 log(
-                  `slot ${slot}: ${error.message}; retrying in ${Math.round(delay / 1000)}s without replenishing`,
+                  `slot ${slot}: ${error.message}; ${error.rateLimited === false ? 'next credential check' : 'retrying'} in ${Math.round(delay / 1000)}s without replenishing`,
                 );
               await interruptibleWait(delay);
             }

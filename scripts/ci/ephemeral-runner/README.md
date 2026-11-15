@@ -228,10 +228,12 @@ output exceeding the capture limits is discarded.
 `minDiskBytes` applies to the Docker data filesystem. Configure and verify
 disk quotas or a dedicated data volume as appropriate for the host.
 
-Failed cycles retry with jittered exponential backoff: 10 s doubling to a
-60 s cap, or 30 s doubling to a 300 s cap while GitHub answers HTTP 403/429,
-so a rate-limited pool stops sustaining its own rate limit. The backoff
-sleep stays interruptible and a shutdown cuts it short.
+Failed cycles use jittered exponential backoff: 10 s doubling to a 60 s
+cap, or 30 s doubling to a 300 s cap on rate limits without a usable
+deadline. For JIT registration, the manager waits at least until GitHub's
+quota reset or `Retry-After`, whichever is later when both apply. A
+permission-only 403 is logged as a credential problem and uses the ordinary
+cadence. Shutdown can interrupt the wait.
 
 `stallAlertSeconds` (default 1800, thirty minutes) sets how long a slot may
 repeat the same failure before the manager logs `STALL ALERT` instead of the
