@@ -616,6 +616,8 @@ Use {{args}} for parameter injection.
 | Raw Injection    | `prompt = "Fix: {{args}}"`              | `/fix "Button issue"` | `Fix: "Button issue"`    |
 | In Shell Command | `prompt = "Search: !{grep {{args}} .}"` | `/search "hello"`     | Execute `grep "hello" .` |
 
+Argument text is inserted literally: dollar sequences such as `$$` and `$&` keep their characters, and placeholder names inside the arguments are not expanded again. Arguments inside `!{...}` still receive shell escaping before permission checks and execution.
+
 #### 2. Default Parameter Processing
 
 | Input Situation | Processing Method                                      | Example                                        |

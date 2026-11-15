@@ -85,7 +85,12 @@ export class ShellProcessor implements IPromptProcessor {
 
     if (!prompt.includes(SHELL_INJECTION_TRIGGER)) {
       return [
-        { text: prompt.replaceAll(SHORTHAND_ARGS_PLACEHOLDER, userArgsRaw) },
+        {
+          text: prompt.replaceAll(
+            SHORTHAND_ARGS_PLACEHOLDER,
+            () => userArgsRaw,
+          ),
+        },
       ];
     }
 
@@ -106,7 +111,12 @@ export class ShellProcessor implements IPromptProcessor {
     // If extractInjections found no closed blocks (and didn't throw), treat as raw.
     if (injections.length === 0) {
       return [
-        { text: prompt.replaceAll(SHORTHAND_ARGS_PLACEHOLDER, userArgsRaw) },
+        {
+          text: prompt.replaceAll(
+            SHORTHAND_ARGS_PLACEHOLDER,
+            () => userArgsRaw,
+          ),
+        },
       ];
     }
 
@@ -131,9 +141,14 @@ export class ShellProcessor implements IPromptProcessor {
           return { ...injection, resolvedCommand: undefined };
         }
 
-        const resolvedCommand = command
-          .replaceAll(SHORTHAND_ARGS_PLACEHOLDER, userArgsEscaped) // Replace {{args}}
-          .replaceAll('$ARGUMENTS', userArgsForArgumentsPlaceholder);
+        // Expand only template tokens; inserted arguments stay literal.
+        const resolvedCommand = command.replace(
+          /\{\{args\}\}|\$ARGUMENTS/g,
+          (placeholder) =>
+            placeholder === SHORTHAND_ARGS_PLACEHOLDER
+              ? userArgsEscaped
+              : userArgsForArgumentsPlaceholder,
+        );
         return { ...injection, resolvedCommand };
       },
     );
@@ -191,7 +206,7 @@ export class ShellProcessor implements IPromptProcessor {
       const segment = prompt.substring(lastIndex, injection.startIndex);
       processedPrompt += segment.replaceAll(
         SHORTHAND_ARGS_PLACEHOLDER,
-        userArgsRaw,
+        () => userArgsRaw,
       );
 
       // Execute the resolved command (which already has ESCAPED input).
@@ -244,7 +259,7 @@ export class ShellProcessor implements IPromptProcessor {
     const finalSegment = prompt.substring(lastIndex);
     processedPrompt += finalSegment.replaceAll(
       SHORTHAND_ARGS_PLACEHOLDER,
-      userArgsRaw,
+      () => userArgsRaw,
     );
 
     return [{ text: processedPrompt }];

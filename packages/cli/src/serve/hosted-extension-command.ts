@@ -84,9 +84,12 @@ export async function expandHostedExtensionCommand(options: {
       injection.toolName === 'shell'
         ? {
             command: renderShellArguments(
-              injection.content,
+              injection.content.replaceAll(
+                '${extensionPath}',
+                '${QWEN_EXTENSION_ROOT}',
+              ),
               options.args,
-            ).replaceAll('${extensionPath}', '${QWEN_EXTENSION_ROOT}'),
+            ),
             timeout: 120000,
           }
         : { file_path: raw(injection.content) };
@@ -279,10 +282,13 @@ export async function expandHostedExtensionCommand(options: {
   return `<extension_command name="${command.name}" source="extension://${command.extensionId}/" revision="${options.revision}">\n${prompt}\n</extension_command>`;
 
   function raw(text: string): string {
-    return text
-      .replaceAll('{{args}}', options.args)
-      .replaceAll('$ARGUMENTS', options.args)
-      .replaceAll('${extensionPath}', `extension://${command.extensionId}`);
+    return text.replace(
+      /\{\{args\}\}|\$ARGUMENTS|\$\{extensionPath\}/g,
+      (placeholder) =>
+        placeholder === '${extensionPath}'
+          ? `extension://${command.extensionId}`
+          : options.args,
+    );
   }
   function injectionsFor(trigger: string) {
     try {
