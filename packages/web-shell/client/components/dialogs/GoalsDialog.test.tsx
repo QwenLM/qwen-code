@@ -341,11 +341,7 @@ describe('GoalsDialog', () => {
   it('shows spend against the budget once a turn has billed', async () => {
     await mount([withSpend({ tokensUsed: 1_234, tokenBudget: 30_000_000 })]);
 
-    expect(
-      document
-        .querySelector('[data-testid="goal-budget-tokens"]')
-        ?.getAttribute('aria-label'),
-    ).toBe('Tokens: 1.2k / 30.0M tokens');
+    expect(barName('goal-budget-tokens')).toBe('Tokens: 1.2k / 30.0M tokens');
     expect(document.querySelector('[data-testid="goal-tokens"]')).toBeNull();
   });
 
