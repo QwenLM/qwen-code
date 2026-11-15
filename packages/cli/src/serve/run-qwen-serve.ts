@@ -38,6 +38,7 @@ import { isWithinRoot } from '../config/path-comparison.js';
 import {
   getDefaultQwenDirLite,
   markDefaultGlobalQwenDirLite,
+  readEnvironmentVariable,
 } from '../config/storage-paths-lite.js';
 import { readSshWorkspace } from './ssh-workspace-store.js';
 import {
@@ -208,7 +209,6 @@ import {
 } from './managed-scratch-workspace.js';
 import { ConversationRuntimeOwnershipError } from './conversations/conversation-runtime-errors.js';
 import { ConversationWorkspace } from './conversations/conversation-workspace.js';
-import { readEnvironmentVariable } from '../config/storage-paths-lite.js';
 import { LIVE_HOST_PROTOCOL_VERSION } from './live/types.js';
 import { ServeAppLifecycleController } from './serve-app-lifecycle.js';
 import {
