@@ -167,9 +167,12 @@ them. A slot that repeats the same failure for `stallAlertSeconds` (default
 1800, thirty minutes) logs a `STALL ALERT` naming the slot, the duration, the
 count and the error; the clock resets on any successful cycle or changed error
 and each stall episode alerts once. The threshold is wall-clock because failed cycles
-retry with jittered exponential backoff (10 s to 60 s, or 30 s to 300 s under
-HTTP 403/429), so a retry count no longer maps to a fixed delay. The backoff
-sleep is sliced and ends early on shutdown. This is the operator signal for a
+retry with jittered exponential backoff (10 s to 60 s, or 30 s to 300 s when rate
+limited without a usable deadline). JIT registration honors the later of the
+primary quota reset or `Retry-After` when both apply and spreads retries after the
+deadline. A permission-only registration failure uses ordinary backoff. The stall
+check runs when a failure is observed, so a long wait can delay the alert.
+The backoff sleep is sliced and ends early on shutdown. This is the operator signal for a
 slot that is consuming no jobs; alert on it rather than on service state. The
 earlier retry-count key `stallAlertRetries` is no longer read; a config that
 still carries it falls back to the default.

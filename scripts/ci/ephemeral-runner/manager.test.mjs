@@ -2339,6 +2339,24 @@ test('runner registration retries honor GitHub response headers', async (t) => {
       maxDelay: 91_000,
     },
     {
+      name: 'spreads retries past a shared primary reset',
+      status: 403,
+      reason: 'API rate limit exceeded',
+      headers: 'X-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 1090',
+      random: 0.5,
+      minDelay: 93_000,
+      maxDelay: 99_000,
+    },
+    {
+      name: 'spreads retries after a short secondary limit',
+      status: 429,
+      reason: 'You have exceeded a secondary rate limit',
+      headers: 'Retry-After: 4',
+      random: 0.75,
+      minDelay: 7_000,
+      maxDelay: 9_000,
+    },
+    {
       name: 'honors the secondary limit Retry-After',
       status: 429,
       reason: 'You have exceeded a secondary rate limit',
@@ -2372,6 +2390,31 @@ test('runner registration retries honor GitHub response headers', async (t) => {
       maxDelay: 30_000,
     },
     {
+      name: 'ignores a reset timestamp expressed in milliseconds',
+      status: 403,
+      reason: 'API rate limit exceeded',
+      headers: 'X-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 1090000',
+      minDelay: 15_000,
+      maxDelay: 30_000,
+    },
+    {
+      name: 'honors Retry-After alongside a malformed primary reset',
+      status: 403,
+      reason: 'API rate limit exceeded',
+      headers:
+        'Retry-After: 4\r\nX-RateLimit-Remaining: 0\r\nX-RateLimit-Reset: 1090000',
+      minDelay: 4_000,
+      maxDelay: 5_000,
+    },
+    {
+      name: 'keeps rate-limit backoff for a bare 429',
+      status: 429,
+      reason: 'Too Many Requests',
+      headers: 'Content-Type: application/json',
+      minDelay: 15_000,
+      maxDelay: 30_000,
+    },
+    {
       name: 'identifies a permission denial despite normal quota headers',
       status: 403,
       reason: 'Resource not accessible by integration',
@@ -2386,12 +2429,13 @@ test('runner registration retries honor GitHub response headers', async (t) => {
     status,
     reason,
     headers,
+    random,
     minDelay,
     maxDelay,
     permission,
   } of cases) {
     await t.test(name, async (t) => {
-      const { f, clock, messages } = await stallHarness(t);
+      const { f, clock, messages } = await stallHarness(t, { random });
       const requests = [];
       const attempts = [];
       const command = async (program, args, options) => {
@@ -2429,9 +2473,40 @@ test('runner registration retries honor GitHub response headers', async (t) => {
       );
       assert.deepEqual(requests, attempts, 'no cleanup request after refusal');
       if (permission)
-        assert.match(messages.join('\n'), /credential|permission/i);
+        assert.match(
+          messages.join('\n'),
+          /registration permission denied \(HTTP 403\); check runner administration permissions and restart/,
+        );
     });
   }
+});
+
+test('a failed removal of refused slot state preserves the registration error', async (t) => {
+  const { f, clock, messages } = await stallHarness(t);
+  const slotState = join(f.config.stateDir, 'slot-1.json');
+  const refusal = Object.assign(new Error('gh failed (exit 1, HTTP 403)'), {
+    status: 403,
+    rateLimited: true,
+    retryAt: clock.now + 75_000,
+  });
+  let githubCalls = 0;
+  const command = async (program, args, options) => {
+    if (program !== 'gh') return f.command(program, args, options);
+    githubCalls += 1;
+    assert.ok(
+      args.includes('/repos/owner/repo/actions/runners/generate-jitconfig'),
+    );
+    await rm(slotState);
+    await mkdir(slotState);
+    throw refusal;
+  };
+  const manager = createManager(f.config, { command });
+  await assert.rejects(manager.cycle(1), (error) => error === refusal);
+  assert.equal(githubCalls, 1);
+  assert.match(
+    messages.join('\n'),
+    /cleanup after a rejected JIT request also failed/,
+  );
 });
 
 async function stallThresholdRun(t, { rateLimited, config }) {

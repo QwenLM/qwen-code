@@ -97,9 +97,11 @@ export function command(
           : 0;
         const resetAt =
           exhausted && /^\d+$/.test(reset ?? '') ? Number(reset) * 1000 : 0;
+        // The primary quota resets hourly. Allow clock skew, but reject values
+        // too far away to be this window (such as epoch milliseconds).
         const retryAt = Math.max(
           Number.isSafeInteger(retryAfterAt) ? retryAfterAt : 0,
-          Number.isSafeInteger(resetAt) ? resetAt : 0,
+          resetAt <= now + 7_200_000 ? resetAt : 0,
         );
         if (retryAt > now) error.retryAt = retryAt;
         if (!error.rateLimited)
@@ -840,7 +842,11 @@ export function createManager(config, dependencies = {}) {
       if (error.rateLimited !== undefined) {
         // This registration was refused before creating a runner, and this
         // cycle already reconciled the slot. Avoid another API call for cleanup.
-        await rm(slotPath(slot), { force: true });
+        await rm(slotPath(slot), { force: true }).catch((cleanupError) => {
+          log(
+            `slot ${slot}: cleanup after a rejected JIT request also failed (${cleanupError.message})`,
+          );
+        });
         throw error;
       }
       const rateLimited = error.status === 403 || error.status === 429;
@@ -1209,11 +1215,17 @@ export function createManager(config, dependencies = {}) {
               const isRateLimited =
                 error.rateLimited ??
                 (error.status === 403 || error.status === 429);
+              const remaining = Math.max(0, (error.retryAt ?? 0) - Date.now());
+              // Slots share a deadline. Spread requests after it so even the
+              // earliest retry cannot run before GitHub allows it.
               const delay =
-                error.retryAt === undefined
-                  ? backoffDelay(consecutiveFailures, isRateLimited)
-                  : Math.max(0, error.retryAt - Date.now()) +
-                    Math.floor(Math.random() * 1000);
+                error.retryAt !== undefined
+                  ? remaining +
+                    Math.floor(
+                      Math.random() *
+                        Math.min(30_000, Math.max(5_000, remaining / 10)),
+                    )
+                  : backoffDelay(consecutiveFailures, isRateLimited);
               if (!stallAlerted && Date.now() - stalledSince >= stallAlertMs) {
                 stallAlerted = true;
                 log(
@@ -1222,7 +1234,7 @@ export function createManager(config, dependencies = {}) {
                 );
               } else
                 log(
-                  `slot ${slot}: ${error.message}; ${error.rateLimited === false ? 'next credential check' : 'retrying'} in ${Math.round(delay / 1000)}s without replenishing`,
+                  `slot ${slot}: ${error.message}; ${error.rateLimited === false ? 'check runner administration permissions and restart if the token changes; next attempt' : 'retrying'} in ${Math.round(delay / 1000)}s without replenishing`,
                 );
               await interruptibleWait(delay);
             }
