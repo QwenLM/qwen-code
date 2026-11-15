@@ -17,7 +17,7 @@ Speculation 在后台以只读工具与 copy-on-write overlay 写跑在用户之
 
 1. **直接执行，绕过调度器。** 每个调用经 `tool.build(args)` 与 `invocation.execute(signal)` 直接运行（`speculation.ts:458-519`），不走 `CoreToolScheduler`。permission-deferred 调用则 bail 回正常流（`:412-416`）。
 2. **overlay 写，而非真实文件系统。** `redirect` 门把路径实参重写入 overlay（`rewritePathArgs`，`:448-456`）；overlay 仅在 accept 时拷回真实文件系统，reject 时丢弃。
-3. **批中途 bail 的 boundary 门。** `evaluateToolCall` 返回 `boundary` / `redirect` / 放行；boundary（或重写失败、或 guard 拒绝）在该调用处停止投机运行并交回正常循环（`:435-456`、`:499-511`）。交回的是**部分批次**：保留已执行的响应、剥离未执行的调用，按序保留前 N 个 `functionCall` part 以与响应对应（`:611-659`）。
+3. **批中途 bail 的 boundary 门。** `evaluateToolCall` 返回 `boundary` / `redirect` / `allow`（放行）；boundary（或重写失败、或 guard 拒绝）在该调用处停止投机运行并交回正常循环（`:435-456`、`:499-511`）。交回的是**部分批次**：保留已执行的响应、剥离未执行的调用，按序保留前 N 个 `functionCall` part 以与响应对应（`:611-659`）。
 4. **不做已提交记录。** Speculation 会 finalize 响应（`finalizeToolResponses`，`:607`）但从不把它们记录为已提交工具调用；其结果是投机性的，不得进入已提交工具调用历史。
 5. **顺序 + 提前 bail。** 调用逐个处理、遇首个 boundary 即停。
 
