@@ -47,6 +47,12 @@ import type {
  * Covers all built-in tools plus common aliases (including Claude Code's "Bash").
  */
 export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
+  // Context tools
+  get_context_remaining: 'get_context_remaining',
+  GetContextRemaining: 'get_context_remaining',
+  request_compaction: 'request_compaction',
+  RequestCompaction: 'request_compaction',
+
   // Exec tool
   exec: 'exec',
   Exec: 'exec',

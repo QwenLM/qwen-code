@@ -49,6 +49,8 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   create_sub_session: 'CreateSubSession',
   task_stop: 'TaskStop',
   list_agents: 'ListAgents',
+  get_context_remaining: 'GetContextRemaining',
+  request_compaction: 'RequestCompaction',
   send_message: 'SendMessage',
   structured_output: 'StructuredOutput',
   monitor: 'Monitor',

@@ -5,6 +5,7 @@
  */
 
 import type { Config } from '../config/config.js';
+import { computeThresholds } from '../services/chatCompressionService.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import {
   BaseDeclarativeTool,
@@ -15,8 +16,6 @@ import {
 } from './tools.js';
 
 export type GetContextRemainingParams = Record<string, never>;
-
-const AUTO_COMPACT_THRESHOLD_PCT = 0.85;
 
 class GetContextRemainingInvocation extends BaseToolInvocation<
   GetContextRemainingParams,
@@ -44,8 +43,15 @@ class GetContextRemainingInvocation extends BaseToolInvocation<
     const snapshot = chat.getContextUsageSnapshot();
     const used = snapshot.promptTokens + snapshot.outputTokens;
     const remaining = Math.max(0, snapshot.contextWindowTokens - used);
-    const autoCompactAt = Math.floor(
-      snapshot.contextWindowTokens * AUTO_COMPACT_THRESHOLD_PCT,
+    // The real send-path ladder, not a flat percentage: auto is
+    // min(pct * window, (window - SUMMARY_RESERVE) - AUTOCOMPACT_BUFFER),
+    // and the pct is user-overridable (context.autoCompactThreshold).
+    const autoCompactAt = Math.max(
+      0,
+      computeThresholds(
+        snapshot.contextWindowTokens,
+        this.config.getAutoCompactThreshold?.(),
+      ).auto,
     );
     const estimateNote = snapshot.promptTokensIsEstimated
       ? ' (estimated until the model reports real counts)'

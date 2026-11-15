@@ -58,6 +58,12 @@ export const AGENT_TOOL_CLASSIFICATION = {
   [ToolNames.LOOP_WAKEUP]: 'deny',
   [ToolNames.CREATE_SUB_SESSION]: 'deny',
   [ToolNames.LIST_AGENTS]: 'deny',
+  // Read-only context-visibility query: an agent can check its own budget
+  // but not act on it. request_compaction replaces conversation history, so
+  // it sits above the read-only ceiling and needs an explicit deny rather
+  // than the default-fallback.
+  [ToolNames.GET_CONTEXT_REMAINING]: 'allow',
+  [ToolNames.REQUEST_COMPACTION]: 'deny',
   [ToolNames.TASK_STOP]: 'deny',
   [ToolNames.TASK_CREATE]: 'deny',
   [ToolNames.TASK_UPDATE]: 'deny',

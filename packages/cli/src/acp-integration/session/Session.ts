@@ -1273,7 +1273,9 @@ function formatCompressionDiagnostic(
   const reasonClause =
     info.triggerReason === 'image_overflow'
       ? `accumulated enough tool screenshots to trigger compaction for ${model}`
-      : `approached the input token limit for ${model}`;
+      : info.triggerReason === 'model_requested'
+        ? `requested this compaction for ${model} ahead of the limit`
+        : `approached the input token limit for ${model}`;
   const warningSuffix = info.warning ? `\n⚠️ ${info.warning}` : '';
   // Estimated counts (#9309) get a '~' prefix so the notice doesn't read as an
   // API-reported figure on a different scale than a later banner.

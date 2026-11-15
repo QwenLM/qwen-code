@@ -6058,6 +6058,8 @@ const ZH: Messages = {
   'toolName.send_message': '发送消息',
   'toolName.request_shutdown': '请求下线',
   'toolName.list_agents': '列出 Agent',
+  'toolName.get_context_remaining': '查询剩余上下文',
+  'toolName.request_compaction': '请求压缩',
   'toolName.structured_output': '结构化输出',
   'toolName.monitor': '监控',
   'toolName.notebook_edit': '编辑 Notebook',

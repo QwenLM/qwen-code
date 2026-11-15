@@ -45,7 +45,8 @@ class RequestCompactionInvocation extends BaseToolInvocation<
       'the next model round, before the next request is sent. Finish the ' +
       'current tool batch first — results still being written are preserved ' +
       'by design; anything you need the summary to keep should be stated ' +
-      'in your next message.';
+      'in your next message. A conversation with fewer than two messages ' +
+      'is not compacted; the next round proceeds unchanged.';
     return { llmContent: message, returnDisplay: message };
   }
 }
