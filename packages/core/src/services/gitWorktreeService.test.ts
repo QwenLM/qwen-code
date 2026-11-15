@@ -748,4 +748,37 @@ describe('applyStashSnapshot index-state verification', () => {
       service.applyStashSnapshot('/repo', 'snap'),
     ).resolves.toBeUndefined();
   });
+
+  it('restores committed state after a conflicting apply', async () => {
+    git.raw.mockImplementation(async (args: string[]) => {
+      if (args[0] === 'ls-files') return '100644 sha 1\tf.txt\n';
+      return '';
+    });
+    const service = new GitWorktreeService('/repo');
+    await expect(
+      service.applyStashSnapshot('/repo', 'snap'),
+    ).rejects.toMatchObject({ conflict: true, restoreFailed: false });
+    expect(git.raw).toHaveBeenCalledWith(['reset', '--hard', 'HEAD']);
+  });
+
+  it('reports a failed restore after a conflicting apply (R8-3 sibling)', async () => {
+    // The apply conflicts (unmerged entries) AND the reset --hard restore
+    // fails (locked index): the error must not claim the checkout was
+    // restored — the caller's rollback must know markers may survive.
+    git.raw.mockImplementation(async (args: string[]) => {
+      if (args[0] === 'ls-files') return '100644 sha 1\tf.txt\n';
+      if (args[0] === 'reset') throw new Error('index locked');
+      return '';
+    });
+    const service = new GitWorktreeService('/repo');
+    await expect(
+      service.applyStashSnapshot('/repo', 'snap'),
+    ).rejects.toMatchObject({
+      conflict: true,
+      restoreFailed: true,
+      message: expect.stringContaining(
+        'restore to committed state also failed',
+      ),
+    });
+  });
 });

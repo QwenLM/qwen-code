@@ -3204,9 +3204,12 @@ export class GitWorktreeService {
    * Throws WorktreeDirtyCarryConflictError when the 3-way apply conflicts
    * (detected by unmerged index entries — simple-git's raw mode may resolve
    * even on the non-zero exit), restoring the checkout to committed state
-   * first so no conflict markers survive. Any other apply failure (e.g. an
-   * unwritable index) also throws: the handoff must never move the session
-   * without the user's work, so there is no fail-open here.
+   * first so no conflict markers survive; when that restore itself fails
+   * the error carries `restoreFailed` and the checkout may still hold the
+   * markers, so the caller's rollback must not assume a clean checkout.
+   * Any other apply failure (e.g. an unwritable index) also throws: the
+   * handoff must never move the session without the user's work, so there
+   * is no fail-open here.
    */
   async applyStashSnapshot(
     checkoutPath: string,
@@ -3230,11 +3233,29 @@ export class GitWorktreeService {
     }
     const unmerged = (unmergedRaw ?? '').trim();
     if (unmerged.length > 0) {
-      await git.raw(['reset', '--hard', 'HEAD']).catch(() => undefined);
+      // Do not swallow the restore's own failure: if reset cannot run
+      // (locked index, read-only git dir) the checkout keeps the conflict
+      // markers, and the error must not claim it was restored — the
+      // caller's rollback needs to know the checkout may still be dirty.
+      let restoreError: unknown;
+      try {
+        await git.raw(['reset', '--hard', 'HEAD']);
+      } catch (error) {
+        restoreError = error;
+      }
+      const restoreNote =
+        restoreError !== undefined
+          ? ` (restore to committed state also failed: ${
+              restoreError instanceof Error
+                ? restoreError.message
+                : String(restoreError)
+            })`
+          : '';
       throw new WorktreeDirtyCarryConflictError(
         `Stash snapshot conflicted with the checkout: ${
           applyError instanceof Error ? applyError.message : 'merge conflict'
-        }`,
+        }` + restoreNote,
+        { restoreFailed: restoreError !== undefined },
       );
     }
     if (applyError || unmergedRaw === null) {
