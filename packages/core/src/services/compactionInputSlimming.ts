@@ -215,8 +215,7 @@ export function estimatePartChars(
 ): number {
   if (part.inlineData || part.fileData) {
     return (
-      estimateInlineImageTokenChars(part, imageTokenEstimate) *
-      TOKEN_TO_CHAR_RATIO
+      estimateInlineImageTokens(part, imageTokenEstimate) * TOKEN_TO_CHAR_RATIO
     );
   }
   if (typeof part.text === 'string') {
@@ -265,14 +264,14 @@ export function getFunctionResponseParts(part: Part): Part[] | undefined {
 }
 
 /**
- * Resolution-derived token estimate for an inline image (#17315): when the
+ * Token estimate for an inline image (#17315): when the
  * base64 payload carries a parseable image header, charge the patch-grid
  * formula the omni pipeline already uses (pixels / VISUAL_PIXELS_PER_TOKEN)
  * so a small screenshot and a 4K diagram stop costing the same flat 1600.
  * Anything unparseable — other binary kinds, fileData without bytes —
  * keeps the configured flat estimate.
  */
-function estimateInlineImageTokenChars(
+function estimateInlineImageTokens(
   part: Part,
   resolvedTokenEstimate: number,
 ): number {

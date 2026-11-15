@@ -262,11 +262,29 @@ describe('compactionInputSlimming', () => {
       ).toBe(1013 * 4);
     });
 
-    it('keeps the flat budget for non-image inline binary kinds', () => {
-      const pdf = Buffer.from('not a pdf header at all').toString('base64');
+    it('keeps the flat budget for non-image inline binary kinds (#17321 F4)', () => {
+      // Real parseable PNG bytes under a non-image mime: the mime gate must
+      // reject them before the parser runs, proving the gate exists rather
+      // than the parser just failing on the bytes.
+      const png = new Uint8Array(33);
+      png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+      png[8] = 0;
+      png[9] = 0;
+      png[10] = 0;
+      png[11] = 13;
+      png.set([0x49, 0x48, 0x44, 0x52], 12);
+      png[16] = 0;
+      png[17] = 0;
+      png[18] = 0x07;
+      png[19] = 0x80;
+      png[20] = 0;
+      png[21] = 0;
+      png[22] = 0x04;
+      png[23] = 0x38;
+      const data = Buffer.from(png).toString('base64');
       expect(
         estimatePartChars(
-          { inlineData: { mimeType: 'application/pdf', data: pdf } },
+          { inlineData: { mimeType: 'application/pdf', data } },
           1600,
         ),
       ).toBe(1600 * 4);
