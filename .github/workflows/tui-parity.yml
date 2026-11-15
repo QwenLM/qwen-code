@@ -72,9 +72,11 @@ jobs:
                 /^integration-tests\/interactive\/tui-(session-recovery|checkpoint-restore)/i,
               ],
               integration: [
+                /^packages\/cli\/src\/(ui\/(opentui\/(MemoryDialog|dialogs-memory-status|opentui-dialog-mount)\.|components\/MemoryDialog\.|hooks\/useLaunchEditor\.|commands\/memoryCommand\.)|config\/settings\.)/,
+                /^packages\/core\/src\/(memory\/|utils\/(memory-constants|editor)\.)/,
                 /^packages\/cli\/src\/(dualOutput\/|ui\/.*(shell|client-tool-run|dialogs-confirm|extension|useReactToolScheduler|keyToAnsi)|services\/(interactive-mod|mod-session)|config\/extension|commands\/extensions)/i,
                 /^packages\/core\/src\/(extension|confirmation-bus|permissions|tools\/|services\/(shellExecutionService|backgroundShellRegistry|shellContextEnv)|sandbox\/|.*runtime-shell|mods\/tool)/i,
-                /^integration-tests\/interactive\/tui-(foreground-shell|extension-acquisition|dual-output)/i,
+                /^integration-tests\/interactive\/tui-(foreground-shell|extension-acquisition|dual-output|memory-manager)/i,
               ],
             };
             const sharedTurn = /^packages\/cli\/src\/(ui\/(opentui\/(live-turn|live-session|event-adapter|shared-model-round)|hooks\/(use-llm-stream|useReactToolScheduler))|services\/interactive-mod)|^packages\/core\/src\/core\/(client|turn|llm-chat|coreToolScheduler)/;
@@ -172,6 +174,20 @@ jobs:
             chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+      # The heal above fixes permissions, not index state. A previous fleet
+      # job's sparse checkout (qwen-triage's publisher scripts check out
+      # non-cone at the base-branch head on this fleet) leaves a sparse
+      # index: checkout's clean/reset skip the excluded paths, and
+      # `sparse-checkout disable` then exits without materialising them, so
+      # the tree ends up without .github/actions/self-hosted-node — runs
+      # 43621213523 and 43621721648 lost the parity job at the next step
+      # exactly that way. Drop .git to
+      # force a fresh clone, as ci.yml and e2e.yml do before every
+      # self-hosted checkout.
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
       - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
       # The pool reuses its pre-installed Node and on-disk pnpm store: nodejs.org
       # may be unreachable through its egress proxy (ci.yml does the same).
@@ -241,7 +257,7 @@ jobs:
           for leg in node:ink bun:ink bun:opentui; do
             export QWEN_E2E_RUNTIME="${leg%%:*}"
             export QWEN_E2E_RENDERER="${leg#*:}"
-            npx vitest run interactive/tui-migration.test.ts interactive/tui-input-ownership.test.ts interactive/tui-foreground-shell.test.ts interactive/tui-clipboard-source.test.ts interactive/tui-extension-acquisition.test.ts interactive/tui-session-recovery.test.ts interactive/tui-editor-parity.test.ts interactive/statusline-parity.test.ts interactive/tui-dual-output.test.ts --retry=0 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false || failed=1
+            npx vitest run interactive/tui-migration.test.ts interactive/tui-input-ownership.test.ts interactive/tui-foreground-shell.test.ts interactive/tui-clipboard-source.test.ts interactive/tui-extension-acquisition.test.ts interactive/tui-session-recovery.test.ts interactive/tui-editor-parity.test.ts interactive/statusline-parity.test.ts interactive/tui-dual-output.test.ts interactive/tui-memory-manager.test.ts --retry=0 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false || failed=1
           done
           exit "$failed"
       - name: 'Targeted product acceptance (Node+Ink, Bun+Ink, Bun+OpenTUI)'
@@ -271,7 +287,7 @@ jobs:
             tests+=(interactive/tui-session-recovery.test.ts)
           fi
           if [ "$TUI_INTEGRATION" = true ]; then
-            tests+=(interactive/tui-foreground-shell.test.ts interactive/tui-extension-acquisition.test.ts interactive/tui-dual-output.test.ts)
+            tests+=(interactive/tui-foreground-shell.test.ts interactive/tui-extension-acquisition.test.ts interactive/tui-dual-output.test.ts interactive/tui-memory-manager.test.ts)
           fi
           [ "${#tests[@]}" -gt 0 ]
           failed=0
@@ -315,6 +331,20 @@ jobs:
             chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+      # The heal above fixes permissions, not index state. A previous fleet
+      # job's sparse checkout (qwen-triage's publisher scripts check out
+      # non-cone at the base-branch head on this fleet) leaves a sparse
+      # index: checkout's clean/reset skip the excluded paths, and
+      # `sparse-checkout disable` then exits without materialising them, so
+      # the tree ends up without .github/actions/self-hosted-node — runs
+      # 43621213523 and 43621721648 lost the parity job at the next step
+      # exactly that way. Drop .git to
+      # force a fresh clone, as ci.yml and e2e.yml do before every
+      # self-hosted checkout.
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
       - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
       # The pool reuses its pre-installed Node and on-disk pnpm store: nodejs.org
       # may be unreachable through its egress proxy (ci.yml does the same).

@@ -23,9 +23,11 @@ import {
 import { MANAGED_SHELL_PUBLISHER_ROUTE } from './managed-shell-publisher.js';
 import { PUBLICATION_INSTALL_ROUTE } from './remote-shell-result-publication.js';
 import {
-  MEASURED_WORKSPACE_CAPABILITY_DIGEST,
+  isMeasuredWorkspaceCapability,
+  MEASURED_WORKSPACE_TERMINAL_CAPABILITY_DIGEST,
   resolveManagedShellPublisherMode,
 } from './managed-workspace-activation.js';
+import { MANAGED_TERMINAL_WORKER_ROUTE } from './managed-terminal-routes.js';
 
 export interface ManagedRuntimeWorkerRouteInput {
   readonly bootVersion: 1 | 2;
@@ -57,9 +59,17 @@ export interface ManagedRuntimeWorkerRoutePlan {
 export function resolveManagedRuntimeWorkerRoutePlan(
   input: ManagedRuntimeWorkerRouteInput,
 ): ManagedRuntimeWorkerRoutePlan {
+  const terminalControlRoutes =
+    input.capabilityDigest === MEASURED_WORKSPACE_TERMINAL_CAPABILITY_DIGEST
+      ? [MANAGED_TERMINAL_WORKER_ROUTE]
+      : [];
   if (input.bootVersion === 1) {
     return {
-      routes: [...OWNED_MANAGED_RUNTIME_ROUTES, MANAGED_RUNTIME_PROVIDER_ROUTE],
+      routes: [
+        ...OWNED_MANAGED_RUNTIME_ROUTES,
+        MANAGED_RUNTIME_PROVIDER_ROUTE,
+        ...terminalControlRoutes,
+      ],
       toolV4: false,
       toolResult: false,
       publicationInstall: false,
@@ -71,11 +81,11 @@ export function resolveManagedRuntimeWorkerRoutePlan(
     capturePublisher: input.capturePublisher || input.publication,
     remotePublishers: input.remotePublishers,
   });
-  const toolV4 =
-    input.capabilityDigest === MEASURED_WORKSPACE_CAPABILITY_DIGEST;
+  const toolV4 = isMeasuredWorkspaceCapability(input.capabilityDigest);
   return {
     routes: [
       ...MANAGED_CONTEXT_WORKER_ROUTES,
+      ...terminalControlRoutes,
       ...(toolV4 ? MANAGED_RUNTIME_TOOL_V4_ROUTES : []),
       ...(input.managedExtensions
         ? [

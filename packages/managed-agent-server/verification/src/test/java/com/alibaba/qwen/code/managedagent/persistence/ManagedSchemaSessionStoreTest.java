@@ -13,6 +13,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -393,6 +395,47 @@ public class ManagedSchemaSessionStoreTest {
         assertThat(jdbc.queryForObject(
                 "SELECT COUNT(*) FROM ma_operation WHERE operation_kind = 'RENAME' AND tenant_id = ?",
                 Long.class, tenant)).isZero();
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void anOpenFirstRenameDoesNotHoldBackAnotherSessionsFirstRename(boolean sameTenant) throws Exception {
+        // Synchronous settlement writes no delivery row, so the tenant placement guard was the
+        // only lock a first rename held across Sessions. Holding one rename's transaction open
+        // must not hold back another Session's first rename, in the same tenant or another.
+        String otherTenant = sameTenant ? tenant : tenant + "-other";
+        String other = tx.execute(status -> store.insertSessionCommand(
+                otherTenant, "actor", "CREATE_SESSION", "create-other", "other-digest",
+                "qwen-code", null, "other", List.of(), null)).sessionId();
+        var held = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        try (var threads = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor()) {
+            var first = threads.submit(() -> tx.execute(status -> {
+                var rename = store.settleRenameSync(
+                        tenant, "first", "first-digest", session, "first", "actor");
+                held.countDown();
+                try {
+                    // The hold must outlast the second rename's bound below, or a restored
+                    // guard self-releases before that bound expires and the case passes.
+                    release.await(30, java.util.concurrent.TimeUnit.SECONDS);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+                return rename;
+            }));
+            try {
+                if (!held.await(10, java.util.concurrent.TimeUnit.SECONDS)) {
+                    first.get(1, java.util.concurrent.TimeUnit.SECONDS); // rethrows the settlement's cause
+                    throw new AssertionError("first rename did not reach the held point");
+                }
+                var second = threads.submit(() -> tx.execute(status -> store.settleRenameSync(
+                        otherTenant, "second", "second-digest", other, "second", "actor")));
+                assertThat(second.get(15, java.util.concurrent.TimeUnit.SECONDS).revision()).isEqualTo(1);
+            } finally {
+                release.countDown();
+            }
+            assertThat(first.get(10, java.util.concurrent.TimeUnit.SECONDS).revision()).isEqualTo(1);
+        }
     }
 
     @Test

@@ -71,6 +71,7 @@ describe('Hosted Harness private contract', () => {
         'session-skills/2',
         'workspace-shell-mcp/1',
         'session-mcp-management/1',
+        'client-files/1',
         'session-extension-packages/1',
         'managed-package-preparation/1',
         'managed-runtime-skill-import/1',

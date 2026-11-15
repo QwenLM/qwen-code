@@ -145,6 +145,15 @@ public class JdbcManagedSessionStore
         lifecycleAuthorization.authorizeOrdinary(tenantId, sessionId, writerToken, request);
     }
 
+    /**
+     * The Session's creator actor, for the internal writer-binding routes that
+     * have no user principal: the automation mutations act as the creator.
+     * Empty when the Session has no creator key.
+     */
+    public String creatorActor(String tenantId, String sessionId) {
+        return storeRows.creatorActor(tenantId, sessionId);
+    }
+
     @Transactional
     public java.util.Map<String, Object> approvalSelection(String tenantId, String sessionId, String writerToken,
             ManagedSessionStoreModels.AuthorizeLifecycleRequest request) {

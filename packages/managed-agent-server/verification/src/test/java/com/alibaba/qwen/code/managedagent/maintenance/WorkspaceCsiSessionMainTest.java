@@ -643,7 +643,7 @@ class WorkspaceCsiSessionMainTest {
                     .sorted(Comparator.comparing(JsonNode::toString)).toList();
             result.put(table, json.valueToTree(rows));
         }
-        assertThat(result).hasSize(45);
+        assertThat(result).hasSize(47);
         return result;
     }
 

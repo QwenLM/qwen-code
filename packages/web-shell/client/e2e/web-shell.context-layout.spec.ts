@@ -183,6 +183,20 @@ for (const theme of ['light', 'dark']) {
         )
         .toBe(true);
     }
+    await surface.evaluate((element) => {
+      (element as HTMLElement).style.width = '850px';
+    });
+    await expect(
+      page.getByRole('button', { name: 'Ultra wide', exact: true }),
+    ).toBeVisible();
+    const expandedToolbar = surface.locator('[class*="toolbarLeft"]');
+    await expect
+      .poll(() =>
+        expandedToolbar.evaluate(
+          (element) => element.scrollWidth <= element.clientWidth + 1,
+        ),
+      )
+      .toBe(true);
     await surface.evaluate((element) =>
       (element as HTMLElement).style.removeProperty('width'),
     );
