@@ -343,7 +343,6 @@ export const legacyCoreBarrelImports = [
   'packages/cli/src/ui/utils/goal-runtime.ts',
   'packages/cli/src/ui/utils/inline-image-parts.ts',
   'packages/cli/src/ui/utils/osc8.ts',
-  'packages/cli/src/ui/utils/statsDataService.ts',
   'packages/cli/src/ui/utils/terminal-image-renderer.ts',
   'packages/cli/src/ui/utils/terminalSetup.ts',
   'packages/cli/src/ui/utils/updateCheck.ts',

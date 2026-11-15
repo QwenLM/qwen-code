@@ -411,6 +411,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
     case 'settings':
       return (
         <OpenTuiSettingsDialog
+          sessionStats={host.sessionStats}
           settings={settings}
           config={config}
           onRestartRequest={props.onRestartRequest}
@@ -690,6 +691,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
     case 'stats':
       return (
         <OpenTuiStatsDialog
+          sessionStats={host.sessionStats}
           config={config}
           onClose={onClose}
           availableTerminalHeight={props.availableTerminalHeight}

@@ -1,0 +1,65 @@
+# OpenTUI historical statistics parity
+
+[English](2026-11-15-opentui-stats-history.md) | [简体中文](2026-11-15-opentui-stats-history.zh-CN.md)
+
+## Validation checkpoint — 2026-11-16
+
+This implementation was independently verified on base `88e3f19c01d52110353ed1013e5d750c45e0cb0d`. Earlier checkpoints below describe intermediate candidates and remain as history. The tested source tree is `52580959c379688b8e81335b6e6806e77cb7d1ee`; its source bundle contains 1,454 files, with entry SHA-256 `07ad9eae84861fedeb7ce452626c8f8c6fc5981f345120fc0dd5db68f88b6dce`.
+
+Build, typecheck, lint, formatting and bundle passed. The affected whole-file checks passed 220 CLI tests, 59 existing usage-history tests and 424 workflow tests, with four workflow tests skipped. The eight relocated public test/config files also passed typechecking.
+
+Groups A–D passed on Node24 + Ink, Bun1.4.4 + Ink and strict Bun1.4.4 + OpenTUI0.5.10. The 13 public legs cover 16 case executions, 22 natural exits before helper cleanup and three closed model requests. Group D combines four saved sessions with 8,100 live tokens into five sessions and visible `10.0k`; reopening does not inflate the result. Its current-session summary was first captured on disk after natural exit, so this public case does not exercise replacement of an already persisted same-ID record. Group C verifies no append for empty history and one legacy summary with stable hot/cold reopening.
+
+Native geometry passed at 120×40, 80×18, 40×18, 20×15 and 40×12. Independent review replayed all 61 saved frames and 80 inputs, including selected tabs, complete frame bounds and the tested PageUp/PageDown transitions. This does not establish reachability of every long value or every scroll position.
+
+This checkpoint changes documentation only. The other 17 source, test and workflow files retain the tested bytes; documentation formatting and reference checks are recorded separately. These checks do not qualify installed distributions, Windows/Linux, GUI, IME, exhaustive Unicode, continuous mid-open refresh or long-run stability. The separate Bun + Ink Trust restart failure remains unresolved. Default selection, removal of Ink and overall migration acceptance require their own approval and evidence.
+
+## Status and problem
+
+Group A actual baselines are complete: global0.23 passed (85377, zero model HTTP, natural exit0); current strict Native failed at all-time (97112), after Session-live-zero passed, with an actual Activity(this session) zero-metric frame. Only Group A ran; B/C and the new implementation three-profile acceptance remain pending.
+
+This CLI-only implementation is based on frozen main04bb3c64473eb6f2c980434e6e612a180c65055f in a separate feature worktree. Its build, units and new-artifact public acceptance are pending. It does not depend on the Trust/Common or sidecar polling candidates.
+
+`/stats` reaches the real native statistics dialog. Session displays live metrics, but Activity and Efficiency display another current-session summary. Ink loads persisted history plus the live session, supports All time / Last 30 days / Last 7 days / Today, and allows month navigation in All-time Activity. The native component is also embedded in Settings → Stats, so this is a mounted user capability gap, not a dead export.
+
+## Scope and user behavior
+
+Restore historical Activity and Efficiency using existing aggregation semantics. Activity includes session/duration/token totals and deltas, heatmap/streak, monthly token trend and projects. Efficiency includes cache hit rate, tool success, latency, tool leaderboard, model breakdown and code impact. Keep the existing Session values and live generation statistics; do not rewrite the dashboard or history store.
+
+Tab / Shift+Tab cycle Session, Activity and Efficiency. `r` cycles `all → month → week → today → all` using the existing range definitions; it is not a new same-range retry command, despite Ink's existing error hint. In All-time Activity, Left/h moves to an older available month and Right/l returns toward the newest, clamped to real available months. Preserve existing captions and translation keys. Loading, empty history, missing latency, malformed/unreadable history and failed loads must follow the existing reader/service contract; distinguish an empty successful report from an actual rejected load.
+
+The embedded Settings host keeps its existing focus ownership: outer tab navigation while the tab bar owns focus, statistics keys only after entering content, Up/Escape returning to the host as currently wired. No duplicate handling or settings writes. Long tables and labels remain reachable inside the actual supplied height, with native wrapping/scrolling and truthful hidden-row counts where applicable; avoid fixed-height clipping and invented navigation keys.
+
+## Native narrow-frame follow-up
+
+The first main88 five-size public geometry run failed at40×18 Session: the top border was at row5, the hint moved to row16 and the bottom border was outside the18-row viewport. The earlier120×40 and80×18 tab/scroll stages passed;20×15 and40×12 were not reached. This is actual clipping, not a reason to weaken complete-frame recognition. The fixed eight/ten chrome-row subtraction omitted wrapping in the natural tab bar, range line and hints.
+
+Only the native Stats module adapts. It reads its outer BoxRenderable width through the public ref/onSizeChange surface; the compact decision compares that width against the normal padding and complete normal chrome, so changing compact padding cannot oscillate the decision. Wide views retain the three-tab presentation and all range labels. Narrow/short views retain the complete selected tab, the current range and short Tab/r/month/PgUp/PgDn/Escape hints; padding and optional margins shrink. Compact scroll content also drops its extra right padding, leaving the eleven-cell Session ID label visible beside the existing scrollbar at20columns. Header, range and hint are actual word-wrapping text with existing styled spans, and the existing wrappedRows helper counts those exact strings. The one-row header/body separator stays present; the scroll body receives the remaining region height.
+
+All fourteen Row and five SubRow consumers are local Session metrics. In compact mode they stack the complete label and value. Styled tool/code/time/model values use a wrapping text flow so a fixed28-column label or a multi-box row cannot hide the value in a20-column terminal. Direct Stats and embedded Settings retain their existing session/focus/height inputs; there is no shared Frame, region-reservation or Core change.
+
+Structural unit seams cover the five declared frame/body budgets and independence from scrollbar viewport width. They do not qualify painted bounds, complete Unicode wrapping, every tiny embedded region or real scrolling. The unchanged five-size public scenario, existing180-second test/12-second condition/240-second outer budgets and original label/frame/navigation assertions must run against the new artifact. Original geometry failure and all earlier candidate results remain separate; this follow-up has not yet been built or executed.
+
+## Data reuse and ownership
+
+Reuse CLI `loadStatsData`, `computeSessionStats`, `computeGenerationRates` and existing Core `metricsToUsageRecord`. The real local startup passes the same Config through Entry, AppShell and OpenTuiDialogMount; the mount supplies host.sessionStats to both direct Stats and Settings, which forwards it while preserving focus. No foreign/daemon history-store route is introduced. History remains the existing process-global QWEN_HOME usage_record.jsonl store, not project-filtered merely because a selected Config was captured. The live record uses that selected Config/session/project and session metrics; the service already excludes the same session ID before adding its live record. No new network/model call, persistence mechanism, schema, Core aggregation or Core API change. Existing loadUsageHistory defaults to rebuilding and persisting migration from existing session journals when no valid cached records exist; this is Ink behavior, so the history API is not unconditionally read-only. Group A with four valid seeded records must preserve store bytes; Group C empty/malformed cases classify exact existing migration paths and writes separately.
+
+Capture selected Config identity, session ID and project identity for each request. Range changes issue a new request revision; close/unmount, observed owner replacement or a newer request invalidates old results, including late success/failure and A→B→A. Do not key the whole dialog by each telemetry tick or metadata refresh. Preserve the existing history reload cadence on range/session changes rather than rereading disk every metric update. Same-owner Session telemetry remains live; asynchronous history must not paint another owner's data.
+
+Reuse only actual pure formatting/chart projections. Ink React components and the mixed Ink stats-helpers module cannot be imported as native renderables; share a small pure range/label/projection only if both actual consumers need it. Prefer existing ascii chart builders and native primitives. Move any newly reached Core value imports to their actual leaf modules and update only the relevant legacy allowlist/mock entries; no new Core barrel exemption.
+
+## Affected CLI files
+
+The native statistics component currently lives in `ui/opentui/dialogs-stats-skills.tsx`; a focused native statistics file may be extracted if it keeps Skills unchanged. Its two real consumers are the dialog mount and Settings. Add collocated state/interaction tests and public interactive acceptance; reuse `ui/utils/statsDataService.ts`, `computeStats.ts` and existing chart helpers. An optional small pure helper extraction must serve both real renderers, preserve Ink behavior and include its consumers. CI admission must update the actual full/targeted lists and every parser test, including the dynamic runner-checkout test when applicable. Exact files are fixed after the baseline, not speculative stubs now.
+
+## Validation and acceptance
+
+First run a genuine installed-global Ink baseline using an explicit absolute command and owned HOME/runtime/TMP; record any old-version missing feature as failure or unsupported scope, without weakening the oracle. Then run current strict native against the same public scenario to capture the gap. Only after Root consumes both may production implementation start. Reuse InteractiveSession, renderer-matrix and the zero-request fake server; no private imports, time mocking, fake rendered statistics or model calls.
+
+Use four real-date persisted sessions with unique totals across Today, 2, 14 and 60 days ago, multiple models/projects/tools and at least two calendar months. Freeze the fixture reference time and write a golden manifest; reject setup crossing a date boundary rather than alter the app clock. Assert exact aggregate values and visible range/month labels, not merely a tab name. Verify hot reopen and cold reconstruction, empty/error handling, embedded focus, read-only store/settings/workspace maps, zero model HTTP and natural exit. New source/artifact identities must be bound on all Node+Ink, Bun+Ink and strict Bun+OpenTUI legs. The public 1.9k token display only proves rounded formatting; the exact 1920 total is covered by service units and the fixture golden. Unit seams cover live-record deduplication and async cancellation/ABA that cannot be manufactured through public interaction.
+
+Build/typecheck, affected whole tests, actual workflow metadata, zero-warning lint, formatting, bundle, real native geometry and all three public profiles precede a completion claim. Old Trust/Common or generic stats frame passes do not qualify this feature. The tracked Group A case preserves the calibrated behavior and uses the normal renderer/runtime matrix and built product by default; an explicit absolute command override remains available for global baselines. Its fixture and application both use UTC without mocking time. See the ignored E2E plan `opentui-stats-history-20261115.md`; baseline observations above do not qualify the new implementation. Groups B/C and CI admission remain separate pending work.
+
+## Boundaries and open questions
+
+No Core production edits, usage collection changes, history repair/export/delete, new range, default renderer switch or Ink removal. Read failures may be normalized to empty by the existing history reader; the baseline must pin that actual public result rather than invent an error. Stronger storage behavior requires maintainer triage. Windows, installed distribution, GUI/device and overall migration qualification remain separate. 04bb is the pinned implementation base, not a claim about future latest main. Public read-only guarantees apply to Group A valid-history fixtures, not all reader migration paths.

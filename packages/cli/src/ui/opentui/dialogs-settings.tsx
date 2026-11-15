@@ -69,6 +69,7 @@ import {
 } from './dialogs-shared.js';
 
 import { getCachedStringWidth, truncateToWidth } from '../utils/textUtils.js';
+import type { SessionStatsState } from '../contexts/SessionContext.js';
 import { OpenTuiStatsDialog } from './dialogs-stats-skills.js';
 import { followScrollOffset, wrappedRows } from './dialogs-core.js';
 import { clampDialogHeight } from '../utils/layoutUtils.js';
@@ -285,6 +286,7 @@ export interface OpenTuiSettingsDialogProps {
   /** Backend seam for runtime side effects (vim sync, approval mode). */
   onSettingApplied?: (key: string, value: SettingsValue) => void;
   config?: Config;
+  sessionStats?: SessionStatsState;
   availableTerminalHeight?: number;
 }
 
@@ -875,6 +877,12 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
       ) : activeTab === 'stats' ? (
         <OpenTuiStatsDialog
           config={config}
+          sessionStats={props.sessionStats}
+          availableTerminalHeight={
+            regionHeight === undefined
+              ? undefined
+              : Math.max(1, regionHeight - 6)
+          }
           isFocused={focusZone === 'list'}
           onClose={() => setFocusZone('tabs')}
         />
