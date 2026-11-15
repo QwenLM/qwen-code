@@ -11,7 +11,10 @@ import type { Config, SkillConfig } from '@qwen-code/qwen-code-core';
 import { LoadedSettings, SettingScope } from '../../../config/settings.js';
 import { setLanguageAsync } from '../../../i18n/index.js';
 import { KeypressProvider } from '../../contexts/KeypressContext.js';
-import { slowHostBudgetMs } from '../../../test-utils/slow-test-host.js';
+import {
+  isSlowTestHost,
+  slowHostBudgetMs,
+} from '../../../test-utils/slow-test-host.js';
 import { SkillsManagerDialog } from './SkillsManagerDialog.js';
 
 // The macOS nightly legs run on contended 3-core hosts where the ink
@@ -24,6 +27,11 @@ import { SkillsManagerDialog } from './SkillsManagerDialog.js';
 const WAIT_FOR_TIMEOUT = slowHostBudgetMs(5_000, 15_000);
 const waitForRender = (assertion: () => void | Promise<void>) =>
   vi.waitFor(assertion, { timeout: WAIT_FOR_TIMEOUT });
+// A slow host's 15s render-wait budget must sit UNDER the case ceiling, or a
+// starved wait reports an opaque runner timeout instead of its own assertion.
+// Give any slow host (not only the macOS runner the config keys on) headroom;
+// the fast arm inherits the lane grant so it never outranks the autofix gate.
+const CEILING_MS = isSlowTestHost() ? 60_000 : undefined;
 
 const lockedSkills: SkillConfig[] = ['one', 'two', 'three', 'four', 'five'].map(
   (name) => ({
@@ -112,7 +120,7 @@ function renderDialog(overrides: Partial<DialogProps> = {}, columns?: number) {
   return result;
 }
 
-describe('SkillsManagerDialog', () => {
+describe('SkillsManagerDialog', { timeout: CEILING_MS }, () => {
   it.each([18, 12, 11, 6, 5, 1])(
     'keeps the interactive list within a %i-row budget',
     async (availableTerminalHeight) => {
