@@ -189,9 +189,13 @@ daemon-only.
   diagnosing it first would hide the tunnel guidance behind "use Chrome".
   When the control can derive an absolute daemon URL, a "Copy SSH tunnel
   command" button copies `ssh -L <localPort>:localhost:<remotePort> <hostname>`
-  — the remote port comes from the URL (defaulting by protocol), and a
-  privileged remote port (<1024) maps to `remotePort + 8000` locally so the
-  tunnel does not need a privileged local bind. The host is allowlisted
+  — the remote port comes from the URL (defaulting by protocol), and the
+  local bind is always offset by 8000 (added, or subtracted near the top of
+  the port range). The offset serves two purposes: a
+  non-root user cannot bind a privileged remote port (<1024) locally, and in
+  the same-machine LAN case — the browser runs on the daemon host and the
+  page was opened via the LAN IP — the daemon already holds the remote port,
+  so an identity forward could not bind at all. The host is allowlisted
   (`[A-Za-z0-9._:-]`, no leading `-`, keeping `:` for bare IPv6) because the
   command is pasted into a shell and the WHATWG URL parser preserves shell
   metacharacters in the host; an unsafe host yields no command. The
@@ -224,8 +228,8 @@ listener in the daemon-hosted shell. The managed-only boot path
 listener: non-empty message guard, tone+message de-duplication, a capped
 stack, and deadline-based auto-dismiss. Without it, the Change-directory
 failure toast dispatches into a document with no listener and is silently
-dropped. The toast stack constants live in `ToastHost.tsx` and are shared
-with App so the two hosts cannot drift.
+dropped. The queue contract itself lives in shared `ToastHost.tsx` helpers
+consumed by both hosts, so the two implementations cannot drift.
 
 The channel is shell-scoped, and ownership is never inferred from focus
 alone: every toast-raising control and hook (both local-files controls,
@@ -235,7 +239,13 @@ over any focus state. The artifact registration runs in a dedicated
 `ReportedArtifactRegistration` child rendered inside App's portal-root
 provider: App calls `useSessionArtifacts` in its own body, above the
 provider it returns, so the registration cannot ride inside that hook
-without reading an unpopulated context. Without a scope,
+without reading an unpopulated context. The child is mounted once per
+session consumer — App for the main session, `ChatPane` for split panes and
+side tasks, `SubagentDetailContent` for subagent sessions — because each of
+those runs under its own `DaemonSessionProvider`; a single mount in App
+would leave every other session's reported artifacts unregistered. All of
+these mounts sit inside App's provider, so the failure toast stays scoped.
+Without a scope,
 `requestToast` walks the focused element through shadow roots
 (`document.activeElement` is the shadow host, not the focused control) to its
 `[data-web-shell-root]`; failing that, a single mounted shell root still
@@ -287,19 +297,23 @@ a different tenant's.
 - `packages/web-shell/client/local-files/capabilities.ts` — insecure-context
   diagnosed before unsupported-browser.
 - `packages/web-shell/client/components/ToastHost.tsx` — `WindowToastHost`
-  and the shared toast stack constants.
+  and the shared toast queue helpers (create + dedupe/cap) both hosts consume.
 - `packages/web-shell/client/ManagedAgentWebShell.tsx` — mount the toast host.
 - `packages/web-shell/client/components/ReportedArtifactRegistration.tsx` —
   the registration child rendered inside the portal-root provider.
 - `packages/web-shell/client/hooks/useSessionArtifacts.ts` — registration
   lifted out so the hook no longer reads the toast scope above the provider.
+- `packages/web-shell/client/components/ChatPane.tsx` and
+  `components/artifacts/SubagentDetail.tsx` — mount the registration child
+  for their own session (split panes, side tasks, subagent detail).
 - `packages/web-shell/client/hooks/useExternalLinkOpener.ts` and
   `useReportedArtifactRegistration.ts` — pass their shell root as the toast
   scope.
-- `packages/web-shell/client/App.tsx` — consume the shared toast constants;
-  render the registration child inside the provider.
+- `packages/web-shell/client/App.tsx` — consume the shared toast queue
+  helpers; render the registration child inside the provider.
 - `packages/web-shell/client/i18n.tsx` — new EN/ZH keys (both locales); the
-  insecure-context instruction is function-valued with the local port.
+  insecure-context instruction is function-valued with the local port; the
+  local-files key list is derived from the EN catalog for the parity test.
 - `packages/web-templates/src/export-html/build.mjs` — the export bundle byte
   ceiling raised by the measured delta of the new copy.
 - Tests: `LocalFilesPanel.test.tsx`, `LocalFilesControl.test.tsx`,
@@ -342,8 +356,12 @@ a different tenant's.
   in another shell, a disconnect landing inside the identity await, a
   same-basename/different-identity Managed re-pick, terminal-phase rebuild
   assertions, the PowerShell startup command on Windows, and both
-  `execCommand` fallback outcomes. Every new guard is mutation-verified with
-  byte-level restore.
+  `execCommand` fallback outcomes. New guards are mutation-verified with
+  byte-level restore, and each round's kill results are recorded in the
+  verification report posted on the PR; where a guard's side effects are
+  neutralized downstream (the same-entry stale exit after a disconnect),
+  the test pins the contract and the shared stale recheck is witnessed by
+  the other arm's kill.
 - `npm run build && npm run typecheck` plus the focused vitest suites from
   `packages/web-shell`. The export bundle's byte budget
   (`packages/web-templates/src/export-html/build.mjs`) carries the whole i18n
@@ -363,9 +381,10 @@ a different tenant's.
 
 ## 9. Acceptance criteria
 
-- A failed bridge shows a red dot; a grant needing re-authorization shows a
-  warning-colored dot and a one-time warning toast; tooltips name the state
-  and directory.
+- A failed bridge shows a red dot; a **daemon** grant needing
+  re-authorization shows a warning-colored dot and a one-time warning toast
+  (the Managed hook has no `needs-gesture` phase, so this criterion applies
+  to the daemon entry only); tooltips name the state and directory.
 - A connected panel offers Change directory… which opens the picker directly
   and rebuilds the bridge on a new grant; cancelling leaves the old bridge
   running.

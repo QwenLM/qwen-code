@@ -138,10 +138,14 @@ interface LocalFilesTunnelTarget {
 }
 
 /**
- * Parse the daemon URL into an SSH tunnel target. The local bind port must be
- * unprivileged (a non-root user cannot bind 80/443), so a privileged remote
- * port is mapped to a high local port; the remote port stays the daemon's.
- * IPv6 hostnames are unbracketed because ssh takes a bare host.
+ * Parse the daemon URL into an SSH tunnel target. The local bind port is
+ * always DIFFERENT from the daemon's port: in the same-machine LAN case (the
+ * browser runs on the daemon host and the page was opened via the LAN IP)
+ * the daemon already holds that port, so an identity forward cannot bind.
+ * The offset also keeps the bind unprivileged (a non-root user cannot bind
+ * 80/443); it wraps down for ports near the top of the range. The remote
+ * port stays the daemon's. IPv6 hostnames are unbracketed because ssh takes
+ * a bare host.
  *
  * The host is allowlisted because the command is pasted into a shell: the
  * WHATWG URL parser preserves shell metacharacters in the host (`http://a;b/`
@@ -162,7 +166,8 @@ function parseLocalFilesTunnelTarget(
     const remotePort = Number(
       url.port || (url.protocol === 'https:' ? '443' : '80'),
     );
-    const localPort = remotePort < 1024 ? remotePort + 8000 : remotePort;
+    const localPort =
+      remotePort + 8000 <= 65535 ? remotePort + 8000 : remotePort - 8000;
     return { host, remotePort, localPort };
   } catch {
     return undefined;

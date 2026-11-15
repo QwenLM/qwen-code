@@ -429,6 +429,45 @@ describe('useReportedArtifactRegistration', () => {
     }
   });
 
+  it('re-reads a portal root that appears after mount (F1)', async () => {
+    // The scope must be read per render, not captured once at mount: a host
+    // can mount the shell tree before its portal-root provider resolves.
+    const shellRoot = document.createElement('div');
+    shellRoot.setAttribute('data-web-shell-root', '');
+    document.body.append(shellRoot);
+    try {
+      sdk.blocks = [transcriptBlock('assistant', [exportedArtifact])];
+      sdk.addArtifact.mockRejectedValue(new Error('offline'));
+      await render();
+      expect(requestToast).toHaveBeenCalledWith(
+        'error',
+        'Could not add exported artifact: offline',
+        null,
+      );
+      // A reconnect resets the per-path attempt latch, so the retry fails
+      // again — now under a provider that appeared after the first render.
+      sdk.connection.status = 'disconnected';
+      await render();
+      sdk.connection.status = 'connected';
+      await act(async () => {
+        root.render(
+          <I18nProvider language="en">
+            <WebShellPortalRootContext.Provider value={shellRoot}>
+              <Host />
+            </WebShellPortalRootContext.Provider>
+          </I18nProvider>,
+        );
+      });
+      expect(requestToast).toHaveBeenLastCalledWith(
+        'error',
+        'Could not add exported artifact: offline',
+        shellRoot,
+      );
+    } finally {
+      shellRoot.remove();
+    }
+  });
+
   it('stays out of the way without the artifact capability', async () => {
     sdk.connection.capabilities.features = [];
     sdk.blocks = [transcriptBlock('assistant', [exportedArtifact])];

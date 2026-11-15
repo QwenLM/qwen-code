@@ -31,8 +31,17 @@ const storeSpies = vi.hoisted(() => ({
 vi.mock('./directory-handle-store.js', () => ({
   createDirectoryHandleStore: () => storeSpies,
 }));
+// Capture WHICH handle each registration serves: both fixtures can share a
+// basename, so bookkeeping alone cannot tell a rebuild onto the new entry
+// from one onto the old handle.
+const localDirectorySpy = vi.hoisted(() => ({
+  handles: [] as unknown[],
+}));
 vi.mock('./local-directory.js', () => ({
   LocalDirectory: class {
+    constructor(handle: unknown) {
+      localDirectorySpy.handles.push(handle);
+    }
     get name() {
       return 'my-dir';
     }
@@ -199,6 +208,7 @@ describe('useManagedLocalFilesBridge', () => {
     );
     storeSpies.clear.mockReset();
     storeSpies.clear.mockResolvedValue(true);
+    localDirectorySpy.handles.length = 0;
   });
 
   it('connects through the picker and reports the tool count', async () => {
@@ -921,9 +931,11 @@ describe('useManagedLocalFilesBridge', () => {
         win: fakeWin,
       }),
     );
-    // The record holds the bound handle from the start so the first connect's
-    // rebind effect keeps handleRef deterministically (a record that lands
-    // later races the rebind and can clear it).
+    // Keep the record consistent with the handle the first connect binds
+    // (the picker mock returns fakeHandle). The Managed hook has no rebind
+    // effect: its mount restore only retains a handle when permission is
+    // granted, and the final disconnect's clear is identity-guarded against
+    // this record.
     storeSpies.load.mockResolvedValue(fakeHandle);
     act(() => {
       void result.current.connect();
@@ -954,6 +966,11 @@ describe('useManagedLocalFilesBridge', () => {
     // connecting): the rebuild must actually complete.
     await waitFor(() => expect(result.current.status.phase).toBe('connected'));
     expect(result.current.status.rootName).toBe('my-dir');
+    // WHICH directory the rebuild serves: both handles are named 'my-dir',
+    // so only the handle handed to the new registration proves the swap —
+    // a rebuild onto the old handle keeps every bookkeeping assertion green.
+    expect(localDirectorySpy.handles[0]).toBe(fakeHandle);
+    expect(localDirectorySpy.handles.at(-1)).toBe(twinHandle);
     await act(async () => {
       await result.current.disconnect();
     });

@@ -16,6 +16,11 @@ import {
  * failure toast is scoped to this shell: App calls useSessionArtifacts in
  * its own body, above the provider it returns, so the registration cannot
  * ride along inside that hook without reading an unpopulated context.
+ *
+ * Mounted once per session consumer: App for the main session, ChatPane for
+ * split panes and side tasks, SubagentDetailContent for subagent sessions —
+ * each of those runs under its own DaemonSessionProvider, so a single mount
+ * in App would leave their reported artifacts unregistered.
  */
 export function ReportedArtifactRegistration({
   registered,

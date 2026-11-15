@@ -196,11 +196,13 @@ describe('ManagedLocalFilesControl', () => {
     }
   });
 
-  it('renders the warning-token dot for a grant that needs a gesture (R3-4)', () => {
+  it('renders the muted dot while registering (a phase the hook emits)', () => {
+    // The Managed hook never emits needs-gesture/reconnecting (no gesture
+    // restore path), so the warning dot is pinned on the daemon side and in
+    // the shared getLocalFilesDotClass table; here we pin a reachable phase.
     bridge.status = {
-      phase: 'needs-gesture',
+      phase: 'connecting',
       blocker: null,
-      rootName: 'my-dir',
     };
     render(
       <ManagedLocalFilesControl
@@ -211,7 +213,7 @@ describe('ManagedLocalFilesControl', () => {
     );
     const trigger = screen.getByLabelText('localFiles.trigger');
     const dot = trigger.querySelector('span[aria-hidden="true"]');
-    expect(dot?.className).toContain('var(--warning-color)');
+    expect(dot?.className).toContain('bg-muted-foreground');
   });
 
   it('omits the session row when no name is passed', () => {

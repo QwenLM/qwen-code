@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { formatSubscriptionQuotaDisplay } from '@qwen-code/qwen-code-core/utils/subscription-quota.js';
 import {
   WEB_SHELL_LANGUAGES,
+  LOCAL_FILES_MESSAGE_KEYS,
   getTranslator,
   languageLabel,
   languageSettingToWebShellLanguage,
@@ -292,41 +293,19 @@ describe('web-shell i18n catalog', () => {
   it('keeps every local files translation in both locales (R1-11)', () => {
     const en = getTranslator('en');
     const zh = getTranslator('zh-CN');
-    const keys = [
-      'localFiles.changeDirectory',
-      'localFiles.session',
-      'localFiles.newSession',
-      'localFiles.retry',
-      'localFiles.copyStartupCommand',
-      'localFiles.copyTunnelCommand',
-      'localFiles.copied',
-      'localFiles.copyFailed',
-      'localFiles.changeDirectoryFailed',
-      'localFiles.changeDirectoryDeferred',
-      // The two blocker messages this change rewrites are exactly the ones
-      // whose zh drift would otherwise go unseen (R3-9).
-      'localFiles.blocker.insecureContext',
-      'localFiles.blocker.workspaceIneligible',
-    ];
-    for (const key of keys) {
-      expect(en(key)).not.toBe(key);
-      expect(zh(key)).not.toBe(key);
+    // Derived from the EN catalog, not a hardcoded subset: a new localFiles
+    // key enters the parity check automatically. The vars bag feeds the
+    // function-valued entries (tools/gestureToast/insecureContext); string
+    // entries ignore it.
+    const vars = { count: 2, name: 'proj', localPort: 8080 };
+    for (const key of LOCAL_FILES_MESSAGE_KEYS) {
+      expect(en(key, vars)).not.toBe(key);
+      expect(zh(key, vars)).not.toBe(key);
       // zh against en, not zh against the key: the translator falls back to EN
       // per key, so a deleted zh entry (or one pasted with the EN text) would
       // otherwise pass. Several of these are never rendered by a panel case.
-      expect(zh(key)).not.toBe(en(key));
+      expect(zh(key, vars)).not.toBe(en(key, vars));
     }
-    // The gesture toast is function-valued; pass a name so both locales render.
-    const vars = { name: 'proj' };
-    expect(en('localFiles.gestureToast', vars)).not.toBe(
-      'localFiles.gestureToast',
-    );
-    expect(zh('localFiles.gestureToast', vars)).not.toBe(
-      'localFiles.gestureToast',
-    );
-    expect(zh('localFiles.gestureToast', vars)).not.toBe(
-      en('localFiles.gestureToast', vars),
-    );
     // Both locales must interpolate the directory name, not drop it (R4-4).
     expect(en('localFiles.gestureToast', vars)).toContain('proj');
     expect(zh('localFiles.gestureToast', vars)).toContain('proj');

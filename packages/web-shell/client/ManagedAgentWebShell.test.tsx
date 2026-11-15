@@ -228,15 +228,29 @@ describe('ManagedAgentWebShell', () => {
         rootB.render(<ManagedAgentWebShell managedAgentProvider={providerB} />);
       });
       const shellA = container.querySelector('[data-web-shell-root]')!;
+      const shellB = containerB.querySelector('[data-web-shell-root]');
+      // Non-vacuity: "B shows nothing" must not pass for a B that never
+      // mounted a root or a live toast host. Prove B's host delivers its own
+      // scoped notice first, then prove neither host shows the other's.
+      expect(shellB).not.toBeNull();
+      await act(async () => {
+        requestToast('error', 'shell-b failure', shellB!);
+      });
+      expect(
+        containerB.querySelectorAll('[data-web-shell-toast]'),
+      ).toHaveLength(1);
+      expect(container.querySelectorAll('[data-web-shell-toast]')).toHaveLength(
+        0,
+      );
       await act(async () => {
         requestToast('error', 'shell-a failure', shellA);
       });
-      expect(container.querySelectorAll('[data-web-shell-toast]')).toHaveLength(
-        1,
-      );
-      expect(
-        containerB.querySelectorAll('[data-web-shell-toast]'),
-      ).toHaveLength(0);
+      const toastsA = container.querySelectorAll('[data-web-shell-toast]');
+      expect(toastsA).toHaveLength(1);
+      expect(toastsA[0]!.textContent).toContain('shell-a failure');
+      const toastsB = containerB.querySelectorAll('[data-web-shell-toast]');
+      expect(toastsB).toHaveLength(1);
+      expect(toastsB[0]!.textContent).toContain('shell-b failure');
     } finally {
       await act(async () => rootB.unmount());
       containerB.remove();

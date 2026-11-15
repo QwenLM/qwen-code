@@ -10,6 +10,9 @@ import {
   requestToast,
   TOAST_REQUEST_EVENT,
   MAX_TOASTS,
+  TOAST_AUTO_DISMISS_MS,
+  createWebShellToast,
+  appendToastDeduped,
   type WebShellToast,
 } from './ToastHost';
 
@@ -355,5 +358,51 @@ describe('WindowToastHost', () => {
     } finally {
       window.removeEventListener(TOAST_REQUEST_EVENT, windowListener);
     }
+  });
+});
+
+describe('shared toast queue contract (App + WindowToastHost)', () => {
+  it('creates a deadline-based toast, not a fresh duration', () => {
+    const now = 1_700_000_000_000;
+    const spy = vi.spyOn(Date, 'now').mockReturnValue(now);
+    try {
+      const toast = createWebShellToast('error', 'boom', 7);
+      expect(toast.dismissAt).toBe(now + TOAST_AUTO_DISMISS_MS);
+      expect(toast.id).toBe(`web-shell-toast-${now}-7`);
+      expect(toast.tone).toBe('error');
+      expect(toast.message).toBe('boom');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('moves a tone+message repeat to the top instead of stacking twice', () => {
+    const a = createWebShellToast('error', 'same', 1);
+    const b = createWebShellToast('info', 'other', 2);
+    const repeat = createWebShellToast('error', 'same', 3);
+    const stack = appendToastDeduped(appendToastDeduped([a], b), repeat);
+    expect(stack.map((toast) => toast.message)).toEqual(['other', 'same']);
+    expect(stack[1]).toBe(repeat);
+  });
+
+  it('does not dedupe the same message under a different tone', () => {
+    const a = createWebShellToast('error', 'same', 1);
+    const b = createWebShellToast('warning', 'same', 2);
+    const stack = appendToastDeduped([a], b);
+    expect(stack).toEqual([a, b]);
+  });
+
+  it('caps the stack at MAX_TOASTS, dropping the oldest', () => {
+    let stack: WebShellToast[] = [];
+    for (let i = 0; i < MAX_TOASTS + 2; i += 1) {
+      stack = appendToastDeduped(
+        stack,
+        createWebShellToast('info', `m${i}`, i),
+      );
+    }
+    expect(stack).toHaveLength(MAX_TOASTS);
+    expect(stack.map((toast) => toast.message)).toEqual(
+      Array.from({ length: MAX_TOASTS }, (_, i) => `m${i + 2}`),
+    );
   });
 });

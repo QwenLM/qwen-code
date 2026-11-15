@@ -466,6 +466,13 @@ describe('useLocalFilesBridge connect', () => {
 });
 
 describe('useLocalFilesBridge forcePicker', () => {
+  // The full connect() return union, derived from the hook so a new outcome
+  // discriminant cannot silently narrow these annotations (the test tree is
+  // excluded from the build's typecheck).
+  type ConnectOutcome = Awaited<
+    ReturnType<ReturnType<typeof useLocalFilesBridge>['connect']>
+  >;
+
   async function connectAndDrive(h: Harness): Promise<void> {
     await act(async () => {
       await h.get().connect();
@@ -575,13 +582,30 @@ describe('useLocalFilesBridge forcePicker', () => {
 
   it('re-picking the already-bound entry keeps the live bridge (no rebuild)', async () => {
     const first = fakeHandle('project', { query: 'granted' });
+    // A DISTINCT handle object for the same entry: production load() returns
+    // a fresh structured clone per call, so the short-circuit must key on
+    // isSameEntry identity, not reference equality. The bound handle answers
+    // the identity probe (sameBoundEntry calls bound.isSameEntry(picked)).
+    const clone = fakeHandle('project', { query: 'granted' });
+    (
+      first as unknown as { isSameEntry: ReturnType<typeof vi.fn> }
+    ).isSameEntry.mockImplementation(
+      async (other: unknown) => other === first || other === clone,
+    );
     const pick = vi.fn(async () => first);
-    const h = renderWithPick(pick);
+    const store = fakeStore();
+    const h = render({
+      sessionId: 'session-1',
+      baseUrl: 'https://daemon.example/',
+      win: secureWindow(pick),
+      store,
+    });
     await h.flush();
     await connectAndDrive(h);
     expect(h.sockets).toHaveLength(1);
 
     pick.mockClear();
+    pick.mockImplementation(async () => clone);
     // The picker reopens the last choice: confirming without navigating returns
     // the same entry. The live bridge must not be torn down and rebuilt.
     await act(async () => {
@@ -592,6 +616,11 @@ describe('useLocalFilesBridge forcePicker', () => {
     expect(h.sockets).toHaveLength(1);
     expect(h.sockets[0]!.closeCount).toBe(0);
     expect(h.get().status.phase).toBe('connected');
+    // Save BEFORE the identity short-circuit: re-confirming the bound entry
+    // re-persists the grant (a peer tab's Disconnect may have cleared the
+    // record). Moving the save below the short-circuit drops this re-save.
+    expect(store.saves).toEqual([first, clone]);
+    expect(await store.load()).toBe(clone);
     h.unmount();
   });
 
@@ -697,8 +726,8 @@ describe('useLocalFilesBridge forcePicker', () => {
 
   it('a disconnect inside the identity await wins over the forced re-pick', async () => {
     const first = fakeHandle('project', { query: 'granted' });
-    // Same basename, different entry: the only shape that actually awaits
-    // isSameEntry (the picker reopens the last location, so this is ordinary).
+    // Same basename, different entry: the identity answer is false, so the
+    // fall-through exit must honor the disconnect too.
     const second = fakeHandle('project', { query: 'granted' });
     const pick = vi.fn(async () => first);
     const h = renderWithPick(pick);
@@ -736,6 +765,48 @@ describe('useLocalFilesBridge forcePicker', () => {
     h.unmount();
   });
 
+  it('a disconnect inside the identity await wins on the same-entry exit too', async () => {
+    const first = fakeHandle('project', { query: 'granted' });
+    const second = fakeHandle('project', { query: 'granted' });
+    const pick = vi.fn(async () => first);
+    const h = renderWithPick(pick);
+    await h.flush();
+    await connectAndDrive(h);
+    expect(h.sockets).toHaveLength(1);
+
+    let releaseIdentity!: (same: boolean) => void;
+    const gate = new Promise<boolean>((resolve) => {
+      releaseIdentity = resolve;
+    });
+    (
+      first as unknown as { isSameEntry: ReturnType<typeof vi.fn> }
+    ).isSameEntry = vi.fn(() => gate);
+    pick.mockClear();
+    pick.mockImplementation(async () => second);
+    let connectDone: Promise<unknown> | undefined;
+    await act(async () => {
+      connectDone = h.get().connect({ forcePicker: true });
+      await h.flush();
+    });
+    await act(async () => {
+      await h.get().disconnect();
+    });
+    // The SAME-entry answer: the stale recheck must win on this exit too,
+    // or the short-circuit re-binds handleRef behind the disconnect. (The
+    // re-bind's downstream effects are neutralized by the next connect's
+    // store check, so the shared recheck's kill is witnessed by the
+    // false-arm sibling; this case pins the same-entry contract.)
+    releaseIdentity(true);
+    await act(async () => {
+      await connectDone;
+    });
+    await h.flush();
+    expect(h.sockets).toHaveLength(1);
+    expect(h.sockets[0]!.closeCount).toBe(1);
+    expect(h.get().status.phase).toBe('idle');
+    h.unmount();
+  });
+
   it('a cancelled forcePicker pick keeps the running bridge', async () => {
     const first = fakeHandle('first', { query: 'granted' });
     const pick = vi.fn(async () => first);
@@ -747,7 +818,7 @@ describe('useLocalFilesBridge forcePicker', () => {
     pick.mockImplementation(async () => {
       throw new DOMException('aborted', 'AbortError');
     });
-    let result: { kind: 'repick-failed' } | undefined;
+    let result: ConnectOutcome;
     await act(async () => {
       result = await h.get().connect({ forcePicker: true });
     });
@@ -771,7 +842,7 @@ describe('useLocalFilesBridge forcePicker', () => {
     pick.mockImplementation(async () => {
       throw new Error('picker broke');
     });
-    let result: { kind: 'repick-failed' } | undefined;
+    let result: ConnectOutcome;
     await act(async () => {
       result = await h.get().connect({ forcePicker: true });
     });
@@ -810,7 +881,7 @@ describe('useLocalFilesBridge forcePicker', () => {
       store.saves.push(handle);
       return false;
     };
-    let result: { kind: 'repick-failed' } | undefined;
+    let result: ConnectOutcome;
     await act(async () => {
       result = await h.get().connect({ forcePicker: true });
     });

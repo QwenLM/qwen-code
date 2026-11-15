@@ -236,8 +236,8 @@ import { readWaitingGamesEnabled } from './utils/waitingGamesConfig';
 import {
   ToastHost,
   TOAST_REQUEST_EVENT,
-  MAX_TOASTS,
-  TOAST_AUTO_DISMISS_MS,
+  createWebShellToast,
+  appendToastDeduped,
   type ToastRequestDetail,
   type ToastTone,
   type WebShellToast,
@@ -5074,21 +5074,8 @@ export function App({
       onToastRef.current(tone, message);
       return;
     }
-    const toast: WebShellToast = {
-      id: `web-shell-toast-${Date.now()}-${++toastIdRef.current}`,
-      tone,
-      message,
-      // Deadline instead of duration: the host remounts its items when the
-      // elevated portal moves, and a fresh timer per remount would keep a
-      // toast on screen indefinitely across repeated fullscreen toggles.
-      dismissAt: Date.now() + TOAST_AUTO_DISMISS_MS,
-    };
-    setToasts((current) => {
-      const withoutDuplicate = current.filter(
-        (item) => item.tone !== tone || item.message !== message,
-      );
-      return [...withoutDuplicate, toast].slice(-MAX_TOASTS);
-    });
+    const toast = createWebShellToast(tone, message, ++toastIdRef.current);
+    setToasts((current) => appendToastDeduped(current, toast));
   }, []);
 
   const messages = useMessagesFromBlocks(t, blocks, blockChangeSummary);

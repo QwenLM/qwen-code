@@ -69,6 +69,38 @@ export interface WebShellToast {
   dismissAt: number;
 }
 
+/**
+ * The toast queue contract shared by App's listener and WindowToastHost, in
+ * one place so the two hosts cannot drift: deadline-based auto-dismiss and
+ * tone+message de-duplication with a capped stack (a repeat moves to the top
+ * instead of stacking twice; the oldest overflow drops).
+ */
+export function createWebShellToast(
+  tone: ToastTone,
+  message: string,
+  sequence: number,
+): WebShellToast {
+  return {
+    id: `web-shell-toast-${Date.now()}-${sequence}`,
+    tone,
+    message,
+    // Deadline instead of duration: the host remounts its items when the
+    // elevated portal moves, and a fresh timer per remount would keep a
+    // toast on screen indefinitely across repeated fullscreen toggles.
+    dismissAt: Date.now() + TOAST_AUTO_DISMISS_MS,
+  };
+}
+
+export function appendToastDeduped(
+  current: readonly WebShellToast[],
+  toast: WebShellToast,
+): WebShellToast[] {
+  const withoutDuplicate = current.filter(
+    (item) => item.tone !== toast.tone || item.message !== toast.message,
+  );
+  return [...withoutDuplicate, toast].slice(-MAX_TOASTS);
+}
+
 interface ToastHostProps {
   toasts: readonly WebShellToast[];
   onDismiss: (id: string) => void;
@@ -166,18 +198,12 @@ export function WindowToastHost({ scope }: { scope?: HTMLElement | null }) {
       if (!detail || typeof detail.message !== 'string' || !detail.message) {
         return;
       }
-      const toast: WebShellToast = {
-        id: `web-shell-toast-${Date.now()}-${++toastIdRef.current}`,
-        tone: detail.tone,
-        message: detail.message,
-        dismissAt: Date.now() + TOAST_AUTO_DISMISS_MS,
-      };
-      setToasts((current) => {
-        const withoutDuplicate = current.filter(
-          (item) => item.tone !== toast.tone || item.message !== toast.message,
-        );
-        return [...withoutDuplicate, toast].slice(-MAX_TOASTS);
-      });
+      const toast = createWebShellToast(
+        detail.tone,
+        detail.message,
+        ++toastIdRef.current,
+      );
+      setToasts((current) => appendToastDeduped(current, toast));
     };
     const target: HTMLElement | Window = scope ?? window;
     target.addEventListener(TOAST_REQUEST_EVENT, handler);

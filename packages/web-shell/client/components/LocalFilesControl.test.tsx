@@ -621,14 +621,22 @@ describe('deriveLocalFilesTunnelCommand (R1-3)', () => {
       'ssh -L 8443:localhost:443 daemon.example',
     );
   });
-  it('keeps an unprivileged port unchanged', () => {
+  it('offsets an unprivileged port so the same-machine LAN bind is free', () => {
+    // The browser may run ON the daemon host (page opened via the LAN IP):
+    // the daemon already holds 4170 there, so an identity forward cannot
+    // bind. The local port must differ from the remote one.
     expect(deriveLocalFilesTunnelCommand('http://host:4170/')).toBe(
-      'ssh -L 4170:localhost:4170 host',
+      'ssh -L 12170:localhost:4170 host',
+    );
+  });
+  it('wraps the offset down near the top of the port range', () => {
+    expect(deriveLocalFilesTunnelCommand('http://host:60000/')).toBe(
+      'ssh -L 52000:localhost:60000 host',
     );
   });
   it('strips IPv6 brackets so ssh gets a bare host', () => {
     expect(deriveLocalFilesTunnelCommand('http://[2001:db8::1]:4170/')).toBe(
-      'ssh -L 4170:localhost:4170 2001:db8::1',
+      'ssh -L 12170:localhost:4170 2001:db8::1',
     );
   });
   it('returns undefined for a relative or base-less URL', () => {
@@ -687,7 +695,7 @@ describe('deriveLocalFilesTunnelLocalPort (R3-15)', () => {
     expect(deriveLocalFilesTunnelLocalPort('https://daemon.example/')).toBe(
       8443,
     );
-    expect(deriveLocalFilesTunnelLocalPort('http://host:4170/')).toBe(4170);
+    expect(deriveLocalFilesTunnelLocalPort('http://host:4170/')).toBe(12170);
     expect(
       deriveLocalFilesTunnelLocalPort('/api/agent/web-shell/v1'),
     ).toBeUndefined();

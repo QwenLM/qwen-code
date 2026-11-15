@@ -5316,6 +5316,15 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
 };
 
 /**
+ * Every local-files message key, derived from the EN catalog so the
+ * locale-parity test covers new keys automatically instead of drifting
+ * behind a hardcoded subset.
+ */
+export const LOCAL_FILES_MESSAGE_KEYS = Object.keys(EN).filter((key) =>
+  key.startsWith('localFiles.'),
+);
+
+/**
  * zh-CN descriptions for the GitHub boundSessionActions keys. The 20 base
  * event descriptions are written once; the 60 role-qualified spellings
  * reuse them (the picker group header names the role). English needs no
