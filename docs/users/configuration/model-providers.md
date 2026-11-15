@@ -518,7 +518,7 @@ Things to know about this endpoint:
 Things to know about this endpoint:
 
 - **Use the ids from `/v1/models` as written.** Claude ids use hyphens (`claude-sonnet-5-5`), and the list only contains the models the key can call; an id outside it returns an error rather than being routed to another model.
-- **Set `modalities` for `deepseek-v4.1-flash`.** It reads images on HopBase, but the built-in model lookup has no modality row for it, so the example sets image input explicitly. `claude-sonnet-5-5` gets image input from the `^claude-` row.
+- **Set `modalities` for `deepseek-v4.1-flash`.** It reads images on HopBase, but the built-in model lookup records it as text-only, so the example sets image input explicitly. `claude-sonnet-5-5` gets image input from the `^claude-` row.
 - **No `contextWindowSize` needed for these two.** `claude-sonnet-5-5` resolves to 200K and `deepseek-v4.1-flash` to 1M, neither larger than what HopBase serves. For an id the lookup does not know (for example `gpt-6.1-sol`, which falls to the generic `^gpt-` row), pin `contextWindowSize` to the model's documented window.
 
 ### OpenAI Responses API (`openai-responses`)
