@@ -1811,6 +1811,20 @@ class ManagedAgentApiContractTest {
         exchange(drift, "respondWebShellClientFiles", 404,
                 post(WEB_SHELL + "/client-files/responses").header(TENANT, tenant).principal(actor(tenant)),
                 "{\"sessionId\":\"" + sideSession + "\",\"generation\":1,\"rpcRequestId\":\"probe\",\"responseJson\":\"{}\"}");
+        String clientBase = "/v1/agents/sessions/" + sideSession + "/client-files";
+        exchange(drift, "registerPublicClientFiles", 404,
+                post(clientBase + "/register").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"connection_id\":\"conn-contract\"}");
+        exchange(drift, "unregisterPublicClientFiles", 404,
+                post(clientBase + "/unregister").header(TENANT, tenant).principal(actor(tenant)), "{}");
+        exchange(drift, "getPublicClientFilesStatus", 404,
+                get(clientBase).param("connection_id", "conn-contract").header(TENANT, tenant).principal(actor(tenant)), null);
+        exchange(drift, "streamPublicClientFilesRequests", 404,
+                get(clientBase + "/requests").param("generation", "1").param("connection_id", "conn-contract")
+                        .header(TENANT, tenant).principal(actor(tenant)), null);
+        exchange(drift, "respondPublicClientFiles", 404,
+                post(clientBase + "/responses").header(TENANT, tenant).principal(actor(tenant)),
+                "{\"generation\":1,\"connection_id\":\"conn-contract\",\"rpc_request_id\":\"probe\",\"response_json\":\"{}\"}");
         assertThat(exercised).containsExactlyInAnyOrderElementsOf(
                 CONTRACT.operations().stream()
                         .filter(operation -> !"planned".equals(
@@ -1918,6 +1932,32 @@ class ManagedAgentApiContractTest {
                 post(WEB_SHELL + "/workspaces/register").header(TENANT, tenant), create);
         exchange(drift, "webShellGetWorkspaceOperation", 401,
                 post(WEB_SHELL + "/workspaces/operations/get").header(TENANT, tenant), "{\"operationId\":\"missing\"}");
+        JsonNode publicNodes = json(exchange(drift, "listPublicRuntimeNodes", 200,
+                get("/v1/agents/runtime-nodes").header(TENANT, tenant).principal(owner), null));
+        assertThat(publicNodes.path("supported").asBoolean()).isFalse();
+        assertThat(publicNodes.path("data")).isEmpty();
+        String publicDirectory = "{\"path\":\"/work/project\"}";
+        String publicCreate = "{\"node_id\":\"mac\",\"path\":\"/work/project\",\"display_name\":\"Project\"}";
+        for (String code : List.of(
+                exchange(drift, "checkPublicWorkspaceDirectory", 404,
+                        post("/v1/agents/runtime-nodes/mac/check-directory").header(TENANT, tenant).principal(owner),
+                        publicDirectory),
+                exchange(drift, "registerPublicWorkspace", 404,
+                        post("/v1/agents/workspaces/registrations").header(TENANT, tenant).principal(owner)
+                                .header(IDEMPOTENCY_KEY, "contract-registration"), publicCreate))) {
+            assertThat(json(code).at("/error/code").asText()).isEqualTo("ssh_runtime_disabled");
+        }
+        exchange(drift, "getPublicWorkspaceRegistration", 404,
+                get("/v1/agents/workspaces/registrations/missing").header(TENANT, tenant).principal(owner), null);
+        exchange(drift, "listPublicRuntimeNodes", 401,
+                get("/v1/agents/runtime-nodes").header(TENANT, tenant), null);
+        exchange(drift, "checkPublicWorkspaceDirectory", 401,
+                post("/v1/agents/runtime-nodes/mac/check-directory").header(TENANT, tenant), publicDirectory);
+        exchange(drift, "registerPublicWorkspace", 401,
+                post("/v1/agents/workspaces/registrations").header(TENANT, tenant)
+                        .header(IDEMPOTENCY_KEY, "contract-registration"), publicCreate);
+        exchange(drift, "getPublicWorkspaceRegistration", 401,
+                get("/v1/agents/workspaces/registrations/missing").header(TENANT, tenant), null);
     }
 
     @Test

@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.117.0",
+    "version": "1.118.0",
     "description": "Canonical first-release contract for the public Managed Agent resources and the WebShell adapter. Implemented routes and fields describe the current matching Server, Broker, Harness and WebShell build. Partial entries have remaining implementation or contract-test work; planned entries are not current server capabilities and must be excluded from production SDKs. Turn submission and cancellation always return the durable operation identifier and its persisted admission and delivery state. Session-list cursors are bound to the normalized archive state and title query. Earlier development API shapes, checkpoints and database catalogs are unsupported; initialize fresh state for this build. Runtime feature capabilities and deployment policy still govern optional execution modes. Public conversation history reads directly from mutable message projections; persisted conversation snapshots and fixed-content paging are no longer provided. Retained removed MCP-management entries stay in the response snapshot: only non-removed entries count toward the 32-server selection capacity, so the servers array may exceed 32 while preserving tombstones."
   },
   "servers": [
@@ -1567,6 +1567,355 @@
           "403": {
             "$ref": "#/components/responses/Forbidden"
           }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/client-files/register": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ],
+      "post": {
+        "tags": ["Public Sessions"],
+        "operationId": "registerPublicClientFiles",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Registers the calling actor's client directory grant into the Session and dispatches the one-time relay credential to the Harness server-side for the Runtime MCP leg; the credential is never part of the response. Requires the deployment opt-in and current execution authority on the bound ACTIVE Workspace. Registration is ephemeral session state: the bounded TTL queue holds size-bounded JSON-RPC bodies only until they settle or expire, no credential or directory path is persisted, and no file content enters the journal or public events beyond the normal durable tool-result policy.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublicClientFilesConnectionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The registration ack; the relay credential stays on the server-to-harness path.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicClientFilesRegistration"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/client-files/unregister": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ],
+      "post": {
+        "tags": ["Public Sessions"],
+        "operationId": "unregisterPublicClientFiles",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Closes the calling actor's registration (or an operator's teardown of it) and fails every queued request with the structured offline error.",
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublicClientFilesConnectionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The closed binding summary.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicClientFilesStatus"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/client-files": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ],
+      "get": {
+        "tags": ["Public Sessions"],
+        "operationId": "getPublicClientFilesStatus",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Reads the Session's binding summary without the credential; an absent binding answers an empty 200.",
+        "parameters": [
+          {
+            "name": "connection_id",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 128 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The binding summary, or an empty body when nothing is registered.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicClientFilesStatus"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/client-files/requests": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ],
+      "get": {
+        "tags": ["Public Sessions"],
+        "operationId": "streamPublicClientFilesRequests",
+        "x-qwen-implementation-status": "implemented",
+        "description": "The browser downlink: SSE events named request carrying opaque JSON-RPC payloads for the registering actor's own active binding generation. Each poll revalidates the read grant.",
+        "parameters": [
+          {
+            "name": "generation",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "integer", "minimum": 0 }
+          },
+          {
+            "name": "connection_id",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "maxLength": 128 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Queued JSON-RPC requests as SSE events.",
+            "content": {
+              "text/event-stream": {
+                "schema": { "type": "string" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/client-files/responses": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/SessionId"
+        }
+      ],
+      "post": {
+        "tags": ["Public Sessions"],
+        "operationId": "respondPublicClientFiles",
+        "x-qwen-implementation-status": "implemented",
+        "description": "The browser uplink: settles one queued JSON-RPC request with either a response payload or a structured error code, never both.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublicClientFilesRespondRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The request was settled.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicClientFilesRespondReceipt"
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/v1/agents/runtime-nodes": {
+      "get": {
+        "tags": ["Public Resources"],
+        "operationId": "listPublicRuntimeNodes",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Lists only administrator-configured SSH nodes authorized for the current tenant and actor. Requires a trusted actor. Registration is disabled by default and answers 200 with supported=false and an empty data array; an enabled deployment may answer supported=true with no authorized nodes. Node credentials, SSH aliases and server paths are not exposed. This read starts no worker.",
+        "responses": {
+          "200": {
+            "description": "SSH registration capability and authorized machine display names.",
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
+              "Cache-Control": { "schema": { "type": "string", "const": "no-store" } }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PublicRuntimeNodePage" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/v1/agents/runtime-nodes/{nodeId}/check-directory": {
+      "parameters": [
+        {
+          "name": "nodeId",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "minLength": 1, "maxLength": 128 }
+        }
+      ],
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "checkPublicWorkspaceDirectory",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Checks the configured Node.js and pinned qwen-code versions, allowed directory range, existing canonical directory and access permissions over SSH. Requires an enabled deployment and an exact tenant/actor node grant; disabled registration answers 404 ssh_runtime_disabled and an unknown or unauthorized node answers 403 runtime_node_forbidden. This is a preview: registration revalidates the directory and never creates a directory, clones a repository or starts a worker.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/PublicWorkspaceDirectoryCheckRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Validated canonical directory on the selected Linux or macOS node.",
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
+              "Cache-Control": { "schema": { "type": "string", "const": "no-store" } }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PublicWorkspaceDirectory" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "502": {
+            "description": "The SSH bootstrap response is invalid.",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } }
+            }
+          },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/v1/agents/workspaces/registrations": {
+      "post": {
+        "tags": ["Public Resources"],
+        "operationId": "registerPublicWorkspace",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Admits actor-scoped, idempotent registration of an existing remote directory. The Idempotency-Key header carries the idempotency key; a retry with the same node_id, path and display_name returns the original operation and its latest durable state, even after new registration is disabled or node admission is revoked. Reusing the key for different content answers 409 idempotency_conflict. Fresh admission requires an enabled deployment and an authorized node (404 ssh_runtime_disabled or 403 runtime_node_forbidden). A completed operation atomically creates the Workspace and creator OWNER grant. 202 does not mean registration is complete; query the operation, then read the Workspace and its can_create_session hint. This operation creates no Session and starts no Runtime worker.",
+        "parameters": [
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/PublicWorkspaceRegistrationRequest" }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Durable registration operation; repeated requests retain the original identity.",
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
+              "Cache-Control": { "schema": { "type": "string", "const": "no-store" } }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PublicWorkspaceRegistrationOperation" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/v1/agents/workspaces/registrations/{operationId}": {
+      "parameters": [
+        {
+          "name": "operationId",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "minLength": 1, "maxLength": 128 }
+        }
+      ],
+      "get": {
+        "tags": ["Public Resources"],
+        "operationId": "getPublicWorkspaceRegistration",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Reads only a Workspace registration owned by the current tenant and actor; an unknown operation or another actor's operation answers 404 operation_not_found. Queries and accepted registration settlement remain available when new registration is disabled. Pending or running operations may resume their original registration attempt. A registration refused before it reserved its directory fails. One that may have reached its node is recovery_blocked and keeps the directory reserved while Java reads the node again, never registering anything. Querying never unlocks it or starts a Runtime worker.",
+        "responses": {
+          "200": {
+            "description": "Latest durable state of the original actor-owned registration.",
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
+              "Cache-Control": { "schema": { "type": "string", "const": "no-store" } }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PublicWorkspaceRegistrationOperation" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
         }
       }
     },
@@ -17434,6 +17783,183 @@
             "description": "Immutable rules snapshot for this Turn; omitted when empty."
           }
         }
+      },
+      "PublicClientFilesConnectionRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "connection_id": {
+            "type": "string",
+            "maxLength": 128,
+            "description": "Optional caller-chosen registration identity echoed for downlink correlation."
+          }
+        }
+      },
+      "PublicClientFilesRegistration": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The registration ack. The relay credential is dispatched server-to-harness and is never part of this response; the bridge correlates on generation, tool_count and connection_id.",
+        "required": ["server_id", "generation", "expires_at", "tool_count"],
+        "properties": {
+          "server_id": { "type": "string" },
+          "generation": { "type": "integer", "minimum": 1 },
+          "expires_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Binding deadline in Unix epoch milliseconds."
+          },
+          "tool_count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Number of browser tools the Harness discovered during registration."
+          },
+          "connection_id": {
+            "type": ["string", "null"],
+            "description": "Echo of the registration identity the caller supplied, for downlink correlation."
+          }
+        }
+      },
+      "PublicClientFilesStatus": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The binding summary. Every field is optional because an absent binding answers 200 with an empty summary. generation and connection_id are the fence for the downlink and settlement, so they are echoed only when the request's connection_id proves the caller owns the binding (owned=true); otherwise they are 0 / null.",
+        "properties": {
+          "server_id": { "type": ["string", "null"] },
+          "generation": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "The binding generation, echoed only when owned; 0 otherwise."
+          },
+          "state": { "enum": ["active", "closed", null] },
+          "expires_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Binding deadline in Unix epoch milliseconds."
+          },
+          "connection_id": {
+            "type": ["string", "null"],
+            "description": "The binding's registration identity, echoed only when owned=true; null otherwise."
+          },
+          "owned": {
+            "type": "boolean",
+            "description": "Whether the request's connection_id matched the live binding, gating the generation/connection_id echo."
+          }
+        }
+      },
+      "PublicClientFilesRespondRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["generation", "connection_id", "rpc_request_id"],
+        "properties": {
+          "generation": { "type": "integer", "minimum": 0 },
+          "connection_id": { "type": "string", "maxLength": 128 },
+          "rpc_request_id": { "type": "string", "maxLength": 128 },
+          "response_json": {
+            "type": ["string", "null"],
+            "description": "Opaque JSON-RPC response payload; mutually exclusive with error_code."
+          },
+          "error_code": {
+            "type": ["string", "null"],
+            "description": "Structured offline/error code; mutually exclusive with response_json."
+          }
+        }
+      },
+      "PublicClientFilesRespondReceipt": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["settled"],
+        "properties": {
+          "settled": { "type": "boolean" }
+        }
+      },
+      "PublicRuntimeNode": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["node_id", "display_name"],
+        "properties": {
+          "node_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "display_name": { "type": "string", "minLength": 1, "maxLength": 512 }
+        },
+        "x-qwen-implementation-status": "implemented"
+      },
+      "PublicRuntimeNodePage": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["supported", "data"],
+        "properties": {
+          "supported": { "type": "boolean", "default": false },
+          "data": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/PublicRuntimeNode" }
+          }
+        },
+        "x-qwen-implementation-status": "implemented",
+        "description": "Disabled registration returns supported=false and no nodes. This capability controls fresh registration only; existing operation queries remain available.",
+        "allOf": [
+          {
+            "if": { "properties": { "supported": { "const": false } } },
+            "then": { "properties": { "data": { "maxItems": 0 } } }
+          }
+        ]
+      },
+      "PublicWorkspaceDirectoryCheckRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Existing absolute directory on the selected node; no directory or repository is created."
+          }
+        },
+        "x-qwen-implementation-status": "implemented"
+      },
+      "PublicWorkspaceDirectory": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["node_id", "canonical_path", "platform"],
+        "properties": {
+          "node_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "canonical_path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "Canonical absolute path after remote directory validation."
+          },
+          "platform": { "type": "string", "enum": ["linux", "darwin"] }
+        },
+        "x-qwen-implementation-status": "implemented"
+      },
+      "PublicWorkspaceRegistrationRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["node_id", "path", "display_name"],
+        "properties": {
+          "node_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "path": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "display_name": { "type": "string", "minLength": 1, "maxLength": 512 }
+        },
+        "x-qwen-implementation-status": "implemented"
+      },
+      "PublicWorkspaceRegistrationOperation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["operation_id", "type", "status", "replayed"],
+        "properties": {
+          "operation_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "type": { "type": "string", "const": "workspace_create" },
+          "status": {
+            "type": "string",
+            "enum": ["pending", "running", "completed", "failed", "cancelled", "recovery_blocked"]
+          },
+          "workspace_id": { "type": ["string", "null"], "minLength": 1, "maxLength": 128 },
+          "failure_code": { "type": ["string", "null"] },
+          "replayed": { "type": "boolean" }
+        },
+        "x-qwen-implementation-status": "implemented",
+        "description": "workspace_id is returned only after completed registration. recovery_blocked keeps the original ownership until Java reads the node and completes it, or fails it and releases the directory. failed releases the directory if the registration reserved it. replayed=true identifies an existing operation returned by a repeated key or a query."
       },
       "WebShellRuntimeNode": {
         "type": "object",
