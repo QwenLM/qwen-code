@@ -52,6 +52,10 @@ In a fresh home, run the command once, then `mkdir ~/.qwen` and write `{}` to `~
 
 Each in its own fresh home: run `qwen mcp list`, and start `qwen serve --port 0` and stop it once it prints its listening line. Expect `~/.config/qwen/.qwen-global-dir` after each. `qwen --version` and `qwen --help` still create nothing under `HOME`.
 
+### Sandboxed run on a new install
+
+In a fresh home with Docker or Podman available, run `qwen --sandbox -p "say hi"`. Expect `~/.config/qwen/.qwen-global-dir` on the host and no `~/.qwen`. The host writes the marker before it starts the sandbox, because the sandboxed child always runs with `QWEN_HOME` set and never writes one.
+
 ### A ~/.qwen/.env left behind on an XDG install
 
 In the new-install group's home, run `printf 'QWEN_HOME=%s/legacy\nDEMO_VAR=1\n' "$HOME" > ~/.qwen/.env` after `mkdir ~/.qwen`, so the file holds an absolute path (`.env` values are not shell-expanded), then run the command. Expect `~/.config/qwen` to stay in use, no `$HOME/legacy`, and a warning that names `~/.qwen/.env` and `QWEN_HOME`.
@@ -106,6 +110,10 @@ All runs used a throwaway `HOME` with `QWEN_HOME` and `XDG_CONFIG_HOME` unset.
 
 The Linux groups above ran in a `node:22-bookworm` container as an unprivileged user, using the launcher from a built checkout (`node scripts/cli-entry.js`), a throwaway `HOME` per group and no credentials. All 44 checks passed. They cover a new install, bare mode with usage statistics off, an existing install, unrelated and recreated directories, the sign-in warning, `mcp list`, `serve --port 0`, `--version`, `--help`, a left-behind `~/.qwen/.env`, a custom and a relative `XDG_CONFIG_HOME`, one outside the home directory, `QWEN_HOME`, and the migration command with its refusals. The macOS group ran the same way on a Mac: `~/.qwen` was used with a `~/.config/qwen` present.
 
+The sandboxed group ran only on the host side. The container had no Docker or Podman, so the CLI stopped at "failed to determine command for sandbox", after writing `~/.config/qwen/.qwen-global-dir` and nothing else under `HOME`.
+
 ## Not run
 
 The Windows group was not run, because no Windows machine was available. Unit tests that stub the platform cover it.
+
+The sandboxed child was not started, for the reason above. `llm.test.tsx` pins the host-side order: the marker is written before arguments are parsed, and the sandbox handoff comes after parsing.

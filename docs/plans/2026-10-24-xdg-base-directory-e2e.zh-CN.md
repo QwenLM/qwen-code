@@ -52,6 +52,10 @@ for var in $(compgen -e | grep -E '_API_KEY$|_AUTH_TOKEN$'); do unset "$var"; do
 
 各自使用一个全新的主目录：运行 `qwen mcp list`；启动 `qwen serve --port 0`，在它打印监听信息后停止。预期每次之后都有 `~/.config/qwen/.qwen-global-dir`。`qwen --version` 和 `qwen --help` 仍不会在 `HOME` 下创建任何内容。
 
+### 全新安装上的沙箱运行
+
+在一个全新的主目录中、Docker 或 Podman 可用时，运行 `qwen --sandbox -p "say hi"`。预期宿主机上有 `~/.config/qwen/.qwen-global-dir`，且没有 `~/.qwen`。宿主在启动沙箱之前写入标记，因为沙箱子进程总是在设置了 `QWEN_HOME` 的情况下运行，从不写入标记。
+
 ### XDG 安装上遗留的 ~/.qwen/.env
 
 在“全新安装”测试组的主目录中执行 `mkdir ~/.qwen`，然后运行 `printf 'QWEN_HOME=%s/legacy\nDEMO_VAR=1\n' "$HOME" > ~/.qwen/.env`，让文件中保存绝对路径（`.env` 中的值不会做 shell 展开），再运行该命令。预期仍使用 `~/.config/qwen`，没有 `$HOME/legacy`，并出现一条提到 `~/.qwen/.env` 和 `QWEN_HOME` 的警告。
@@ -106,6 +110,10 @@ for var in $(compgen -e | grep -E '_API_KEY$|_AUTH_TOKEN$'); do unset "$var"; do
 
 上述 Linux 测试组在 `node:22-bookworm` 容器中以非特权用户运行，使用已构建检出目录中的启动器（`node scripts/cli-entry.js`），每个测试组使用一次性的 `HOME`，且没有任何凭据。全部 44 项检查通过，覆盖全新安装、关闭使用统计的 bare 模式、已有安装、无关和重新创建的目录、登录警告、`mcp list`、`serve --port 0`、`--version`、`--help`、遗留的 `~/.qwen/.env`、自定义和相对路径的 `XDG_CONFIG_HOME`、位于主目录之外的 `XDG_CONFIG_HOME`、`QWEN_HOME`，以及迁移命令及其拒绝情形。macOS 测试组以同样方式在 Mac 上运行：存在 `~/.config/qwen` 时仍使用 `~/.qwen`。
 
+沙箱运行测试组只运行了宿主一侧。容器中没有 Docker 或 Podman，因此 CLI 停在 "failed to determine command for sandbox"，此前它写入了 `~/.config/qwen/.qwen-global-dir`，`HOME` 下没有其他内容。
+
 ## 未运行
 
 Windows 测试组没有运行，因为没有可用的 Windows 机器。模拟平台的单元测试覆盖了它。
+
+由于上述原因，沙箱子进程没有启动。`llm.test.tsx` 固定了宿主一侧的顺序：标记在解析参数之前写入，而沙箱交接发生在解析之后。
