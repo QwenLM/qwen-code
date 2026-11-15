@@ -15,10 +15,10 @@ or `--safe-mode` sessions and when `tools.executionSandbox` is configured.
 
 Image generation uses a [`modelProviders`](../configuration/model-providers.md)
 route marked with `supportsImageGeneration: true` (or the legacy
-`imageOnly: true`). The route must declare an explicit HTTPS `baseUrl` and a
-non-empty `envKey`; the API key is read from that environment variable.
-DashScope-compatible image endpoints and MiniMax
-(`api.minimax.io` / `api.minimaxi.com`) are supported.
+`imageOnly: true`). The route must declare an explicit HTTPS `baseUrl`
+without credentials, query, or fragment, and a non-empty `envKey`; the API
+key is read from that environment variable. DashScope-compatible image
+endpoints and MiniMax (`api.minimax.io` / `api.minimaxi.com`) are supported.
 
 The tool appends the generation path itself, so enter the API root as the
 `baseUrl`: for DashScope use `https://dashscope.aliyuncs.com/api/v1` — the
@@ -69,13 +69,15 @@ Each generated image is:
 
 ## Troubleshooting
 
-- **`image_gen` is not offered / the agent cannot generate images** — the
-  `imageModel` selector is empty or unparsable, matches zero or several
-  image-capable routes, or the matched route lacks an `envKey`, lacks a
-  `baseUrl`, or declares a non-HTTPS `baseUrl`. The tool is then simply not
-  registered, with no error message. If the model was valid when the session
-  started and is invalidated afterwards, the tool call instead fails with
-  "Image generation is not configured with a valid endpoint".
+- **`image_gen` is not offered / the agent cannot generate images** —
+  `imageModel` must resolve to exactly one image-capable route (a
+  `fastOnly` or `voiceOnly` route does not qualify) with a non-empty
+  `envKey` and a plain HTTPS `baseUrl` — no credentials, query, or
+  fragment. An empty or unparsable selector, zero or several matching
+  routes, or any missing or invalid field leaves the tool unregistered,
+  with no error message. If the model was valid when the session started
+  and is invalidated afterwards, the tool call instead fails with "Image
+  generation is not configured with a valid endpoint".
 - **"Image generation requires the … environment variable"** — the route's
   `envKey` is not set in the daemon's environment (or the `env` block of
   `settings.json`).
