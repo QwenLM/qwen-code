@@ -140,7 +140,6 @@ final class AgentSessionAdmissions {
         List<Map<String, Object>> input = command.input();
         String payloadDigest = command.payloadDigest();
         WorkspaceSelection selection = command.selection();
-        String requestedApprovalMode = command.requestedApprovalMode();
         boolean approvalSelectionSupported = command.approvalSelectionSupported();
         Boolean requestedPlanMode = command.requestedPlanMode();
         boolean planModeSupported = command.planModeSupported();
@@ -182,8 +181,11 @@ final class AgentSessionAdmissions {
             throw new ManagedAgentException(400, "unsupported_model",
                     "The model is not published for this Agent.");
         }
-        AgentSessionPolicies.AgentPin pin = AgentSessionPolicies.selectApprovalMode(sessionPolicies.resolveAgentPin(tenantId, agentId,
-                requestedRevision, true), requestedApprovalMode, approvalSelectionSupported);
+        AgentSessionPolicies.AgentPin resolvedPin = sessionPolicies.resolveAgentPin(tenantId, agentId, requestedRevision, true);
+        requireCreationScope(tenantId, idempotencyKey, true);
+        ResolvedBinding workspace = workspaces.resolveForCreation(tenantId, actorId, selection);
+        boolean external = workspaces.isExternal(workspace.binding());
+        AgentSessionPolicies.AgentPin pin = ExternalWorkspaceSessionPolicies.creationPin(external, workspaces, workspace.binding(), resolvedPin, command);
         boolean planMode = Boolean.TRUE.equals(requestedPlanMode);
         if (planMode && (!planModeSupported || !approvalSelectionSupported
                 || pin.hooks() || pin.mcp() || !(WorkspaceToolProfiles.FILES.equals(pin.toolProfile())
@@ -194,20 +196,17 @@ final class AgentSessionAdmissions {
                 && !workspaceShellEnabled) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
-        requireCreationScope(tenantId, idempotencyKey, true);
-        ResolvedBinding workspace = workspaces.resolveForCreation(
-                tenantId, actorId, selection);
         requireModelConfiguration(modelConfig);
         if (extensionPins != null) {
             if (extensionPackages == null) {
                 throw AgentSessionPolicies.workspaceExecutionUnavailable();
             }
-            if ((!WorkspaceToolProfiles.SHELL.equals(pin.toolProfile()) && !WorkspaceToolProfiles.MCP.equals(pin.toolProfile()))
+            if ((!WorkspaceToolProfiles.isPublicShell(pin.toolProfile()) && !WorkspaceToolProfiles.MCP.equals(pin.toolProfile()))
                     || !extensionLifecycleProfiles.contains(pin.toolProfile())) {
                 throw new ManagedAgentException(409, "unsupported_feature",
                         "Extension configuration requires a negotiated Shell or MCP Session lifecycle profile.");
             }
-            extensionPackages.requireSelection(tenantId, actorId, workspace.binding().getWorkspaceId(), extensionPins);
+            extensionPackages.requireSelection(tenantId, actorId, workspace.binding().getWorkspaceId(), extensionPins, command.extensionSelection());
         }
         WorkspaceMigrationAdmission.requireOpen(jdbc, tenantId, workspace.binding().getStorageId());
         boolean sshWorkspace = sessionPolicies.isSshWorkspace(workspace.binding());
@@ -223,13 +222,13 @@ final class AgentSessionAdmissions {
                 throw AgentSessionPolicies.workspaceExecutionUnavailable();
             }
             residentWorkspaces.requireCreation(jdbc, workspace.binding(), pin.toolProfile());
-        } else if (!sshWorkspace) {
+        } else if (!sshWorkspace && !external) {
             WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, workspace.binding().getStorageId());
         }
         if (!resident && !input.isEmpty()
                 && (!WorkspaceExecutionProfile.CONFIG_REF.equals(workspace.configRef())
                         || !WorkspaceExecutionProfile.POLICY_REF.equals(workspace.policyRef())
-                        || !sshWorkspace && !configuredStorage(tenantId, workspace.binding().getStorageId()))) {
+                        || !sshWorkspace && !external && !configuredStorage(tenantId, workspace.binding().getStorageId()))) {
             throw AgentSessionPolicies.workspaceExecutionUnavailable();
         }
         List<Map<String, Object>> merged = new ArrayList<>();
@@ -255,7 +254,7 @@ final class AgentSessionAdmissions {
         }
         if (workspaceChildAgentsEnabled && publicChildrenSupported && !resident && (!sshWorkspace || managedExtensionExecutionEnabled)
                 && (managedExtensionExecutionEnabled || "qwen-code".equals(agentId) && pin.digest() == null)
-                && WorkspaceToolProfiles.SHELL.equals(pin.toolProfile())) {
+                && WorkspaceToolProfiles.isPublicShell(pin.toolProfile())) {
             jdbc.update("UPDATE ma_session SET public_child_agents_version=1 WHERE tenant_id=? AND session_id=?",
                     tenantId, admission.sessionId());
         }
@@ -702,7 +701,7 @@ final class AgentSessionAdmissions {
             String requestDigest, WorkspaceCommand command, boolean internalTeamLead) {
         SessionRecord session = storeRows.requireSession(tenantId, command.sessionId());
         if (!command.requestDigest().equals(requestDigest)
-                || internalTeamLead != WorkspaceToolProfiles.INTERNAL_TEAM_LEAD.equals(session.toolProfile())
+                || internalTeamLead != WorkspaceToolProfiles.isInternalTeamLead(session.toolProfile())
                 || internalTeamLead && (!"qwen-code".equals(session.agentId())
                         || session.agentDefinitionDigest() != null)) {
             throw new ManagedAgentException(409,

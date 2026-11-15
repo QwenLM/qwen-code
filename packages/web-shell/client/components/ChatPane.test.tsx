@@ -81,6 +81,7 @@ const setModel = vi.fn(async () => ({}) as any);
 const setReasoningEffort = vi.fn(async () => {});
 const setWorkflowMode = vi.fn(async (_requested: boolean) => {});
 const loadArtifacts = vi.fn(async () => ({ artifacts: [] }));
+const addArtifact = vi.fn(async () => ({}) as any);
 const getTasks = vi.fn();
 const getWorkflowTasks = vi.fn();
 const getGoal = vi.fn();
@@ -101,6 +102,7 @@ const daemonActions = {
   setReasoningEffort,
   setWorkflowMode,
   loadArtifacts,
+  addArtifact,
   getTasks,
   getWorkflowTasks,
   getGoal,
@@ -168,6 +170,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useOptionalWorkspace: () => undefined,
   useWorkspaceActions: () => subscriptionActions,
   useWorkspace: () => ({
+    baseUrl: 'https://pane.example/daemon/proxy',
     capabilities: connectionState.capabilities,
     client: paneWorkspaceClient,
     status: connectionState.status,
@@ -210,8 +213,14 @@ vi.mock('../hooks/useMessages', () => ({
   useMessagesFromBlocks: () => messagesState,
 }));
 
+let transcriptBlocksMock: any[] = [];
 vi.mock('../hooks/useAnimationFrameTranscriptBlocks', () => ({
-  useAnimationFrameTranscriptSnapshot: () => ({ blocks: [] }),
+  // Fresh array per call, like the previous inline literal: consumers memo
+  // on `blocks` identity, and the mocked extractPendingPermission reads a
+  // mutable test variable that must be re-read on every render.
+  useAnimationFrameTranscriptSnapshot: () => ({
+    blocks: transcriptBlocksMock.slice(),
+  }),
 }));
 
 vi.mock('../adapters/transcriptAdapter', () => ({
@@ -511,6 +520,9 @@ beforeEach(() => {
   sendPrompt.mockReset();
   loadArtifacts.mockReset();
   loadArtifacts.mockResolvedValue({ artifacts: [] });
+  addArtifact.mockReset();
+  addArtifact.mockResolvedValue({} as any);
+  transcriptBlocksMock = [];
   getTasks.mockReset();
   getWorkflowTasks.mockReset();
   getGoal.mockReset();
@@ -1890,6 +1902,33 @@ describe('ChatPane', () => {
     expect(latestChatEditorProps.mountUnavailableModelTooltip).toBe(
       mountUnavailableModelTooltip,
     );
+  });
+
+  it('scopes model picker content to its own pane and connected daemon', () => {
+    connectionState.currentModel = 'pane-model';
+    render({ workspaceCwd: '/pane-workspace' });
+    expect(latestChatEditorProps.modelPickerScope).toEqual({
+      sessionId: 'sess-1',
+      workspaceCwd: '/pane-workspace',
+      daemonBaseUrl: 'https://pane.example/daemon/proxy',
+    });
+    expect(latestChatEditorProps.currentModel).toBe('pane-model');
+
+    const initialScope = latestChatEditorProps.modelPickerScope;
+    messagesState = [
+      ...messagesState,
+      { id: 'm2', role: 'assistant', content: 'Streaming delta' },
+    ];
+    rerender({ workspaceCwd: '/pane-workspace' });
+    expect(latestChatEditorProps.modelPickerScope).toBe(initialScope);
+
+    connectionState.sessionId = 'other-pane-session';
+    rerender({ workspaceCwd: '/other-pane-workspace' });
+    expect(latestChatEditorProps.modelPickerScope).toEqual({
+      sessionId: 'other-pane-session',
+      workspaceCwd: '/other-pane-workspace',
+      daemonBaseUrl: 'https://pane.example/daemon/proxy',
+    });
   });
 
   it('shows the Plan entry only when explicitly enabled and hides it on removal', () => {
@@ -4061,6 +4100,7 @@ describe('ChatPane continuation errors', () => {
       // Actual action + actual ChatPane/Banner; only SDK request and hook state
       // delivery are simulated. No SSE frames or provider replay are invented.
       const actions = createDaemonSessionActions({
+        getPromptStatus: () => 'idle',
         store: { getSnapshot: () => ({ activeAssistantBlockId: undefined }) },
         sessionRef,
         activePromptsRef: { current: new Map() },
@@ -4414,5 +4454,45 @@ describe('pane approval mode allowlist', () => {
     expect(workspaceByCwd).toHaveBeenCalledOnce();
     // A failed scoped read fails closed rather than offering every mode.
     expect(latestChatEditorProps.availableModes).toEqual([]);
+  });
+});
+
+describe('pane reported-artifact registration (R6-1)', () => {
+  it('registers reported artifacts for the pane session under its own provider', async () => {
+    // Split panes and side tasks render ChatPane under their own
+    // DaemonSessionProvider, so App's single registration mount (main
+    // session only) must not be the only registration site.
+    connectionState.sessionId = 'sess-pane';
+    connectionState.capabilities = { features: ['session_artifacts'] };
+    transcriptBlocksMock = [
+      {
+        kind: 'assistant',
+        meta: {
+          source: 'slash_command',
+          sessionArtifacts: [
+            {
+              title: 'report',
+              workspacePath: 'report.html',
+              kind: 'html',
+              storage: 'workspace',
+            },
+          ],
+        },
+      },
+    ];
+    render();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(addArtifact).toHaveBeenCalledTimes(1);
+    expect(addArtifact).toHaveBeenCalledWith({
+      title: 'report',
+      workspacePath: 'report.html',
+      kind: 'html',
+      storage: 'workspace',
+    });
   });
 });

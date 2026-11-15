@@ -44,8 +44,20 @@ class WorkspaceProfileLifecycleTest {
         return f.transactions.execute(ignored -> f.store.claimOperation("tenant", f.session, id, "server-1", Duration.ofSeconds(30)).orElseThrow());
     }
 
+    @Test
+    void loopShellRevisionsArePublicShellOnLifecycleV2() {
+        assertThat(WorkspaceToolProfiles.isPublicShell(WorkspaceToolProfiles.SHELL_V3)).isTrue();
+        assertThat(WorkspaceToolProfiles.lifecycleProtocol(WorkspaceToolProfiles.SHELL_V3)).isEqualTo(2);
+        assertThat(WorkspaceToolProfiles.isPublicShell(WorkspaceToolProfiles.SHELL_V4)).isTrue();
+        assertThat(WorkspaceToolProfiles.lifecycleProtocol(WorkspaceToolProfiles.SHELL_V4)).isEqualTo(2);
+        // The retired shell/2 stays refused by the canonical vocabulary.
+        assertThat(WorkspaceToolProfiles.isPublicShell("hosted-workspace-shell/2")).isFalse();
+        assertThat(WorkspaceToolProfiles.lifecycleProtocol("hosted-workspace-shell/2")).isEqualTo(0);
+    }
+
     @ParameterizedTest
-    @ValueSource(strings = {WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.MCP})
+    @ValueSource(strings = {WorkspaceToolProfiles.SHELL, WorkspaceToolProfiles.SHELL_V3,
+            WorkspaceToolProfiles.SHELL_V4, WorkspaceToolProfiles.MCP})
     void closesWithoutResourcesAndDeletesAtomicallyWithPrivateRetirement(String profile) {
         var f = fixture();
         var op = admit(f, profile, OperationKind.DELETE);
@@ -634,7 +646,9 @@ class WorkspaceProfileLifecycleTest {
                     .putObject("subject").put("type", "turn").put("turnId", "queued-monitor");
             records += activation + "\n";
         }
-        f.jdbc.update("UPDATE ma_session_journal_tx SET record_bytes = ?", records.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        byte[] rewritten = records.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        f.jdbc.update("UPDATE ma_session_journal_tx SET record_bytes = ?, byte_length = ?, record_digest = ?",
+                rewritten, rewritten.length, ToolPublicationContract.sha256(rewritten));
         if (activated) {
             assertThatThrownBy(() -> admit(f, WorkspaceToolProfiles.SHELL, OperationKind.CLOSE))
                     .isInstanceOfSatisfying(ManagedAgentException.class, error -> assertThat(error.getCode()).isEqualTo("turn_active"));

@@ -4,7 +4,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -73,10 +73,10 @@ class ChildWorkspaceStoreTest {
     }
 
     private void alias(String id, String kind) {
-        String alias = JdbcRuntimeBindingRepository.storageAliasKey("tenant", id);
+        String alias = RuntimeAdmissionFences.storageAliasKey("tenant", id);
         jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, storage_kind) VALUES (?, ?, ?, ?, ?, ?)",
-                alias, JdbcRuntimeBindingRepository.storageFenceKey("tenant"),
-                JdbcRuntimeBindingRepository.storageFenceKey(id), "tenant".getBytes(StandardCharsets.UTF_8),
+                alias, RuntimeAdmissionFences.storageFenceKey("tenant"),
+                RuntimeAdmissionFences.storageFenceKey(id), "tenant".getBytes(StandardCharsets.UTF_8),
                 id.getBytes(StandardCharsets.UTF_8), kind);
         if ("LOCAL".equals(kind)) {
             String physical = ManagedSchemaKeys.key("local-test", id);

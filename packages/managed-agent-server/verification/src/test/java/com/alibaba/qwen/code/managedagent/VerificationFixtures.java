@@ -71,7 +71,7 @@ public final class VerificationFixtures {
         return new JdbcManagedSessionStore(jdbc, records, actions,
                 new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules(),
                 new com.alibaba.qwen.code.managedagent.config.ManagedSessionReaderVersion(),
-                execution, sessions, objects, results, transport, credentials, bindings);
+                execution, sessions, objects, results, transport, credentials, bindings, null);
     }
 
     public static java.util.List<Object> agentStoreOwners(Object store, String name) {

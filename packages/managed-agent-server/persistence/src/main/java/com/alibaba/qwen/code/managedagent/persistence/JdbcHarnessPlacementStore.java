@@ -11,7 +11,7 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedExtensionRecordStore
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.WorkspaceLifecycleStore;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -155,8 +155,8 @@ public class JdbcHarnessPlacementStore
                 (row, index) -> new Object[] {row.getString(1), row.getObject(2, Long.class),
                         row.getString(3), row.getObject(4, Long.class), row.getObject(5, Long.class),
                         row.getLong(6), row.getLong(7)},
-                JdbcRuntimeBindingRepository.harnessDrainKey(tenant),
-                JdbcRuntimeBindingRepository.harnessDrainKey(session), tenant, session);
+                RuntimeAdmissionFences.harnessDrainKey(tenant),
+                RuntimeAdmissionFences.harnessDrainKey(session), tenant, session);
         if (!heads.isEmpty()) {
             Object[] head = heads.getFirst();
             long now = now(jdbc);
@@ -256,8 +256,8 @@ public class JdbcHarnessPlacementStore
                 (row, index) -> new Object[] {row.getLong(1), row.getLong(2), row.getString(3), row.getString(4),
                         row.getInt(5), row.getString(6), row.getString(7)},
                 operation.tenantId(), operation.sessionId(), operation.operationId(), operation.kind().name(),
-                JdbcRuntimeBindingRepository.harnessDrainKey(operation.tenantId()),
-                JdbcRuntimeBindingRepository.harnessDrainKey(operation.sessionId()));
+                RuntimeAdmissionFences.harnessDrainKey(operation.tenantId()),
+                RuntimeAdmissionFences.harnessDrainKey(operation.sessionId()));
         if (rows.size() != 1) {
             throw WorkspaceLifecycleStore.blocked("workspace_lifecycle_claim_fenced");
         }

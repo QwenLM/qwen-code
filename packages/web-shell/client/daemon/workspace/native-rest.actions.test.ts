@@ -76,3 +76,27 @@ it('retains the existing server error for a native goal request on an empty base
   await expect(actions.listGoals()).rejects.toThrow('Unavailable goal');
   expect(restFetch.mock.calls[0][0]).toBe('/goals');
 });
+
+it('sends the QR-login release as a keepalive DELETE scoped to its workspace', async () => {
+  // keepalive is the whole point: the release fires from pagehide, so the
+  // request has to outlive the document. Without it the abandonment path leaks.
+  const { actions, restFetch, acpFetch } = setup('https://daemon/prefix');
+  await actions.channelQrLogin.release('login/1', 'tab-a', '/secondary b');
+  const [url, init] = restFetch.mock.calls[0];
+  expect(url).toBe(
+    'https://daemon/prefix/workspaces/%2Fsecondary%20b/channel-qr-logins/login%2F1',
+  );
+  expect(init.method).toBe('DELETE');
+  expect(init.keepalive).toBe(true);
+  expect(new Headers(init.headers).get('x-qwen-client-id')).toBe('tab-a');
+  expect(new Headers(init.headers).get('authorization')).toBe('Bearer secret');
+  expect(acpFetch).not.toHaveBeenCalled();
+});
+
+it('omits the client id header when no tab identity is attached', async () => {
+  const { actions, restFetch } = setup('https://daemon/prefix');
+  await actions.channelQrLogin.release('login-1', undefined, '/secondary b');
+  const [, init] = restFetch.mock.calls[0];
+  expect(init.keepalive).toBe(true);
+  expect(new Headers(init.headers).get('x-qwen-client-id')).toBeNull();
+});

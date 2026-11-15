@@ -2,12 +2,14 @@ import { describe, expect, it, vi } from 'vitest';
 import { formatSubscriptionQuotaDisplay } from '@qwen-code/qwen-code-core/utils/subscription-quota.js';
 import {
   WEB_SHELL_LANGUAGES,
+  LOCAL_FILES_MESSAGE_KEYS,
   getTranslator,
   languageLabel,
   languageSettingToWebShellLanguage,
   normalizeLanguage,
 } from './i18n';
 import type { WebShellLanguage } from './i18n';
+import { CHANNEL_METHOD_PLATFORMS } from './components/channels/channel-platform';
 
 // getTranslator returns the raw key when EN has no entry. SettingsMessage
 // translateSettingText then substitutes the settingsSchema.ts description,
@@ -110,9 +112,42 @@ const SCHEDULED_TASK_DELIVERY_KEYS = [
   'user',
   'chat',
   'cardPrefix',
+  'configuredGroupHint',
+  'configuredHint',
+  'useConfiguredDestination',
+  'differentConfiguredDestination',
 ].map((suffix) => `scheduledTasks.delivery.${suffix}`);
 
+const OUTBOUND_CHANNEL_KEYS = [
+  'method.title',
+  'method.description',
+  'method.applicationBot',
+  'method.applicationBot.description',
+  'method.webhook',
+  'method.webhook.description',
+  'status.readyToSend',
+  'statusDescription.readyToSend',
+  'statusDescription.notReadyToSend',
+  'statusDescription.outbound',
+  'editor.field.webhook.webhookUrl',
+  'editor.field.webhook.webhookUrl.description',
+  'editor.field.webhook.signingSecret',
+  'editor.field.webhook.signingSecret.description',
+].map((suffix) => `channels.${suffix}`);
+
 describe('web-shell i18n catalog', () => {
+  it('labels the incremental session expansion with its count in both locales', () => {
+    expect(getTranslator('en')('sidebar.showMoreSessions', { count: 10 })).toBe(
+      'Show 10 more',
+    );
+    expect(
+      getTranslator('zh-CN')('sidebar.showMoreSessions', { count: 10 }),
+    ).toBe('再显示 10 个');
+    expect(
+      getTranslator('zh-CN')('sidebar.showMoreSessions', { count: 3 }),
+    ).toBe('再显示 3 个');
+  });
+
   it('localizes the scheduled-task workspace host-lock hint', () => {
     expect(getTranslator('en')('scheduledTasks.workspaceFixedByHost')).toBe(
       'Fixed by host',
@@ -120,6 +155,53 @@ describe('web-shell i18n catalog', () => {
     expect(getTranslator('zh-CN')('scheduledTasks.workspaceFixedByHost')).toBe(
       '由宿主固定',
     );
+  });
+
+  it('localizes the Goals workspace picker label in every catalog that translates the dialog', () => {
+    // The ru catalog translates the whole Goals dialog; leaving the picker
+    // label English would strand one untranslated string mid-surface.
+    const en = getTranslator('en')('goals.workspace');
+    expect(en).toBe('Workspace');
+    expect(getTranslator('zh-CN')('goals.workspace')).not.toBe(en);
+    expect(getTranslator('ru')('goals.workspace')).not.toBe(en);
+    // Compare against the EN string, not the raw key: the translator falls
+    // back to EN for a missing entry, so a raw-key comparison would pass
+    // even if the zh/ru entry were deleted.
+    const enSkipped = getTranslator('en')('goals.workspacesSkipped', {
+      count: 2,
+    });
+    for (const language of ['zh-CN', 'ru'] as const) {
+      expect(
+        getTranslator(language)('goals.workspacesSkipped', { count: 2 }),
+      ).not.toBe(enSkipped);
+    }
+    // Full-string pins: the noun must agree with the count AND the predicate
+    // must be grammatical for every count. The impersonal "Не показано: N …"
+    // form avoids the neuter-vs-feminine clash a quantified singular subject
+    // would create ("1 рабочая область не показано" is ungrammatical).
+    expect(getTranslator('ru')('goals.workspacesSkipped', { count: 1 })).toBe(
+      'Не показано: 1 рабочая область (нет доверия или удалённый доступ).',
+    );
+    expect(getTranslator('ru')('goals.workspacesSkipped', { count: 5 })).toBe(
+      'Не показано: 5 рабочих областей (нет доверия или удалённый доступ).',
+    );
+    // zh terminology must match the catalog: the sibling scheduled-task
+    // error spells the same condition 不受信任, not the clipped 未受信.
+    const zh = getTranslator('zh-CN');
+    expect(zh('goals.workspacesSkipped', { count: 2 })).toBe(
+      '有 2 个工作区未显示（不受信任或远程）。',
+    );
+    expect(zh('goals.error.workspaceUnavailable')).toBe(
+      '所选工作区不可用或不受信任。',
+    );
+    const enUnavailable = getTranslator('en')(
+      'goals.error.workspaceUnavailable',
+    );
+    for (const language of ['zh-CN', 'ru'] as const) {
+      expect(
+        getTranslator(language)('goals.error.workspaceUnavailable'),
+      ).not.toBe(enUnavailable);
+    }
   });
 
   it('keeps every scheduled-task delivery translation in both locales', () => {
@@ -133,6 +215,69 @@ describe('web-shell i18n catalog', () => {
     expect(zh('scheduledTasks.delivery.perRun')).toContain(
       '每次新会话不支持频道投递',
     );
+  });
+
+  it('keeps the outbound Channel translations in both locales', () => {
+    const en = getTranslator('en');
+    const zh = getTranslator('zh-CN');
+    for (const key of OUTBOUND_CHANNEL_KEYS) {
+      expect(en(key)).not.toBe(key);
+      expect(zh(key)).not.toBe(key);
+      expect(zh(key)).not.toBe(en(key));
+    }
+  });
+
+  it.each(WEB_SHELL_LANGUAGES)(
+    'keeps shared connection and webhook copy platform-neutral in %s',
+    (language) => {
+      const t = getTranslator(language);
+      for (const key of [
+        'channels.method.title',
+        'channels.method.description',
+        'channels.method.webhook.description',
+        'channels.editor.field.webhook.webhookUrl.description',
+        'channels.editor.field.webhook.signingSecret.description',
+      ]) {
+        expect(t(key)).not.toBe(key);
+        expect(t(key)).not.toMatch(/DingTalk|钉钉|Feishu|飞书|WeCom|企业微信/i);
+      }
+      for (const key of [
+        'channels.method.title',
+        'channels.method.description',
+      ]) {
+        expect(t(key, { platform: 'Example platform' })).toContain(
+          'Example platform',
+        );
+      }
+    },
+  );
+
+  it('defines names for every grouped channel platform', () => {
+    for (const platform of new Set(Object.values(CHANNEL_METHOD_PLATFORMS))) {
+      if (!platform) continue;
+      const key = `channels.platform.name.${platform.type}`;
+      for (const language of WEB_SHELL_LANGUAGES) {
+        expect(getTranslator(language)(key)).not.toBe(key);
+      }
+    }
+  });
+
+  it.each([
+    { type: 'dingtalk', english: 'DingTalk', chinese: '钉钉' },
+    { type: 'feishu', english: 'Feishu', chinese: '飞书' },
+    { type: 'wecom', english: 'WeCom', chinese: '企业微信' },
+  ])('localizes $type in the connection chooser', (platform) => {
+    for (const language of ['en', 'zh-CN'] as const) {
+      const t = getTranslator(language);
+      const name = t(`channels.platform.name.${platform.type}`);
+      expect(name).toBe(
+        language === 'zh-CN' ? platform.chinese : platform.english,
+      );
+      expect(t('channels.method.title', { platform: name })).toContain(name);
+      expect(t('channels.method.description', { platform: name })).toContain(
+        name,
+      );
+    }
   });
 
   it('keeps the channel range message spacing in both locales', () => {
@@ -191,6 +336,42 @@ describe('web-shell i18n catalog', () => {
     expect(zh('browserNotifications.reply', { text: 'Task' })).toBe(
       '回复：Task',
     );
+  });
+
+  it('keeps every local files translation in both locales (R1-11)', () => {
+    const en = getTranslator('en');
+    const zh = getTranslator('zh-CN');
+    // The enumeration itself is load-bearing: the loop below cannot observe
+    // its own source being replaced by the old hardcoded subset, so pin keys
+    // outside that subset here.
+    expect(LOCAL_FILES_MESSAGE_KEYS).toContain('localFiles.status.connected');
+    expect(LOCAL_FILES_MESSAGE_KEYS).toContain(
+      'localFiles.blocker.unsupportedDaemon',
+    );
+    // Derived from the EN catalog, not a hardcoded subset: a new localFiles
+    // key enters the parity check automatically. The vars bag feeds the
+    // function-valued entries (tools/gestureToast/insecureContext); string
+    // entries ignore it.
+    const vars = { count: 2, name: 'proj', localPort: 8080 };
+    for (const key of LOCAL_FILES_MESSAGE_KEYS) {
+      expect(en(key, vars)).not.toBe(key);
+      expect(zh(key, vars)).not.toBe(key);
+      // zh against en, not zh against the key: the translator falls back to EN
+      // per key, so a deleted zh entry (or one pasted with the EN text) would
+      // otherwise pass. Several of these are never rendered by a panel case.
+      expect(zh(key, vars)).not.toBe(en(key, vars));
+    }
+    // Both locales must interpolate the directory name, not drop it (R4-4).
+    expect(en('localFiles.gestureToast', vars)).toContain('proj');
+    expect(zh('localFiles.gestureToast', vars)).toContain('proj');
+    // The insecure-context instruction is function-valued too: pin its
+    // local-port branch in both locales, naming the same address.
+    const portVars = { localPort: 8080 };
+    const enPort = en('localFiles.blocker.insecureContext', portVars);
+    const zhPort = zh('localFiles.blocker.insecureContext', portVars);
+    expect(enPort).toContain('http://localhost:8080');
+    expect(zhPort).toContain('http://localhost:8080');
+    expect(zhPort).not.toBe(enPort);
   });
 
   it.each([

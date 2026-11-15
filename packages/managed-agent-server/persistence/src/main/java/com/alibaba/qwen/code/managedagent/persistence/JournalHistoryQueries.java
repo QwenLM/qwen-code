@@ -22,13 +22,35 @@ final class JournalHistoryQueries {
     private final JournalFencing fencing;
     private final JournalStoreRows storeRows;
     private final JdbcTemplate jdbc;
+    private final JdbcJournalPacks packs;
 
     JournalHistoryQueries(JournalFencing fencing,
             JournalStoreRows storeRows,
             JdbcTemplate jdbc) {
+        this(fencing, storeRows, jdbc, null);
+    }
+
+    JournalHistoryQueries(JournalFencing fencing,
+            JournalStoreRows storeRows,
+            JdbcTemplate jdbc,
+            JdbcJournalPacks packs) {
         this.fencing = fencing;
         this.storeRows = storeRows;
         this.jdbc = jdbc;
+        this.packs = packs;
+    }
+
+    private ManagedSessionStoreModels.StoredTransaction stored(
+            JournalStoreRows.TransactionRow row, String tenantId, String sessionId) {
+        if (row.recordBytes() != null || packs == null) {
+            return storeRows.storedTransaction(row);
+        }
+        byte[] bytes = packs.resolveBytes(tenantId, sessionId, row.journalRevision(),
+                row.recordDigest(), row.byteLength());
+        if (bytes == null) {
+            throw JournalStoreRows.journalCorrupt();
+        }
+        return storeRows.storedTransaction(storeRows.withRecordBytes(row, bytes));
     }
 
     static final RequestDigests INITIAL_DIGESTS = new RequestDigests();
@@ -119,7 +141,7 @@ final class JournalHistoryQueries {
         boolean hasMore = candidates.size() > selectedCount;
         rows.forEach(row -> JournalStoreRows.requireTransactionWorkspace(row, workspaceId));
         List<StoredTransaction> transactions = rows.stream()
-                .map(storeRows::storedTransaction).toList();
+                .map(row -> stored(row, tenantId, sessionId)).toList();
         long nextRevision = transactions.isEmpty() ? afterRevision
                 : transactions.get(transactions.size() - 1)
                         .journalRevision();
@@ -172,7 +194,7 @@ final class JournalHistoryQueries {
                 throw JournalStoreRows.journalCorrupt();
             }
             JournalStoreRows.requireTransactionWorkspace(row, workspaceId);
-            transactions.add(storeRows.storedTransaction(row));
+            transactions.add(stored(row, tenantId, sessionId));
         }
         boolean more = candidates.size() > selected;
         Long next = more ? transactions.getLast().journalRevision() : null;
@@ -209,7 +231,7 @@ final class JournalHistoryQueries {
                     || row.byteLength() < 1 || row.byteLength() > ManagedSessionStoreModels.MAX_TRANSACTION_BYTES) {
                 throw JournalStoreRows.journalCorrupt();
             }
-            transaction = storeRows.storedTransaction(row);
+            transaction = stored(row, tenantId, sessionId);
         }
         restore(tenantId, workspaceId, sessionId, writerToken);
         return new ManagedSessionStoreModels.CommandTransaction(through, transaction);
@@ -262,7 +284,9 @@ final class JournalHistoryQueries {
                         || !Objects.equals(digest, row.previousCommitDigest())) {
                     return false;
                 }
-                storeRows.storedTransaction(row);
+                if (row.recordBytes() == null) {
+                    return false;
+                }
                 JournalStoreRows.validateUtf8JsonLines(row.recordBytes(), revision == 1 ? 2 : row.eventCount() + 1);
                 String[] lines = new String(row.recordBytes(), StandardCharsets.UTF_8).split("\n");
                 if (revision == 1) {

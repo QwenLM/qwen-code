@@ -101,10 +101,8 @@ class ManagedStoreDecompositionTest {
                 workspaceSessionOptions/2::REQUIRED:DEFAULT:false supportsPlanMode/1:- hasMcpServers/1:-
                 requireMcpManagement/4::REQUIRED:DEFAULT:false requireMcpSettingsCommit/3::MANDATORY:DEFAULT:false requireExtensionManagement/5::REQUIRED:DEFAULT:false canApplyExtensions/1:-
                 requireConfigurationCommit/4::MANDATORY:DEFAULT:false insertTurnCommand/7::REQUIRED:DEFAULT:false insertTurnCommand/8::REQUIRED:DEFAULT:false
-                insertCancelCommand/6::REQUIRED:DEFAULT:false insertCancelCommand/7::REQUIRED:DEFAULT:false beginSessionRename/5::REQUIRED:DEFAULT:false
-                beginSessionRename/6::REQUIRED:DEFAULT:false completeSessionRename/6::REQUIRED:DEFAULT:false completeSessionRename/3::REQUIRED:DEFAULT:false
-                abandonSessionRename/5::REQUIRED:DEFAULT:false deliverableRenames/1::REQUIRED:DEFAULT:false claimRename/3::REQUIRED:DEFAULT:false
-                markRenameSubmitted/2:- retryRename/3::REQUIRED:DEFAULT:false beginSessionMutation/6::REQUIRED:DEFAULT:false
+                insertCancelCommand/6::REQUIRED:DEFAULT:false insertCancelCommand/7::REQUIRED:DEFAULT:false settleRenameSync/6::REQUIRED:DEFAULT:false
+                beginSessionMutation/6::REQUIRED:DEFAULT:false
                 beginSessionMutation/7::REQUIRED:DEFAULT:false completeSessionMutation/7::REQUIRED:DEFAULT:false abandonSessionMutation/4::REQUIRED:DEFAULT:false
                 beginOperation/6::REQUIRED:DEFAULT:false workspaceFilesEnabled/0:- workspaceShellEnabled/0:-
                 beginWorkspaceClose/7::REQUIRED:DEFAULT:false beginWorkspaceLifecycle/8::REQUIRED:DEFAULT:false beginWorkspaceLifecycle/9::REQUIRED:DEFAULT:false
@@ -115,7 +113,7 @@ class ManagedStoreDecompositionTest {
                 settleContextCompression/5::REQUIRED:DEFAULT:false retryContextCompressionPreparation/3::REQUIRED:DEFAULT:false awaitContextCompression/5::REQUIRED:DEFAULT:false
                 completeCwdChangeOperation/5::REQUIRED:DEFAULT:false failCwdChangeOperation/6::REQUIRED:DEFAULT:false beginTaskCancelOperation/6::REQUIRED:DEFAULT:false
                 findDeliverableTaskCancels/1:- findParkedOperations/1:- settleParkedOperation/3::REQUIRED:DEFAULT:false
-                turnInputAcceptance/3:- renameAcceptance/1:- settleParkedRename/3::REQUIRED:DEFAULT:false
+                turnInputAcceptance/3:-
                 settleTaskCancel/7::REQUIRED:DEFAULT:false hasExecutionRegistryFacts/2:- sessionsWithExecutionRegistryFacts/2:-
                 findOperation/3:- findDeliverableOperations/2:- claimOperation/5::REQUIRED:DEFAULT:false
                 completeOperation/6::REQUIRED:DEFAULT:false failOperation/6::REQUIRED:DEFAULT:false renewLifecycleOperation/6::REQUIRED:DEFAULT:false
@@ -148,6 +146,7 @@ class ManagedStoreDecompositionTest {
         assertEntries(JdbcManagedSessionStore.class, """
                 authorizeLifecycle/5::REQUIRED:DEFAULT:false skipContended/2:- lockBounded/1:-
                 lockBoundedResult/1:- namedRootDeadlock/1:- authorizeOrdinary/4::REQUIRED:DEFAULT:false
+                creatorActor/2:-
                 approvalSelection/4::REQUIRED:DEFAULT:false usesDataSource/1:- lockSnapshotWriter/4:-
                 lockPublicationWriter/6:- lockPublicationWriter/8:- acquireWriter/4::NOT_SUPPORTED:DEFAULT:false acquireWriter/5::NOT_SUPPORTED:DEFAULT:false
                 renewWriter/4::REQUIRED:DEFAULT:false renewWriter/5::REQUIRED:DEFAULT:false sealWriter/4::REQUIRED:DEFAULT:false
@@ -160,7 +159,7 @@ class ManagedStoreDecompositionTest {
                 publishToolResult/5::REQUIRED:DEFAULT:false toolResultLimit/1:- requireCsiApplicationCredential/3:-
                 requireCsiHistoricalCredential/5:- preflightCsiTerminal/5:- commitCsiTerminal/5:-
                 validateCsiTerminalBytes/1:- lockCsiOriginal/2:- hasLiveWriter/2::REQUIRED:DEFAULT:false
-                commandKeyHash/2:- journalCorrupt/0:-
+                commandKeyHash/2:- journalCorrupt/0:- journalPacks/0:-
                 """);
     }
 

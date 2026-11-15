@@ -13,7 +13,7 @@ import type {
 import { useDaemonWorkspace } from '../DaemonWorkspaceProvider.js';
 import type {
   DaemonChannelPairingActions,
-  DaemonChannelQrLoginActions,
+  DaemonChannelQrLoginHandlers,
   DaemonChannelsResource,
   DaemonResourceOptions,
 } from '../types.js';
@@ -25,6 +25,13 @@ interface WorkspaceChannelsResource extends DaemonChannelsResource {
 
 interface DaemonChannelsOptions extends DaemonResourceOptions {
   workspaceCwd?: string;
+  /**
+   * This tab's daemon-registered client id. QR-login routes use it to attribute
+   * a login to the tab that created it, so a peer tab neither reattaches nor
+   * cancels it. Omitted when no session is attached, which keeps the previous
+   * id-less behaviour rather than sending an id the daemon would reject.
+   */
+  clientId?: string;
 }
 
 export function useDaemonChannels(options: DaemonChannelsOptions = {}) {
@@ -33,7 +40,11 @@ export function useDaemonChannels(options: DaemonChannelsOptions = {}) {
     client,
     workspaceCwd: providerWorkspaceCwd,
   } = useDaemonWorkspace();
-  const { workspaceCwd: requestedWorkspaceCwd, ...resourceOptions } = options;
+  const {
+    workspaceCwd: requestedWorkspaceCwd,
+    clientId,
+    ...resourceOptions
+  } = options;
   const workspaceCwd = requestedWorkspaceCwd ?? providerWorkspaceCwd;
   const usesProviderWorkspace = workspaceCwd === providerWorkspaceCwd;
   const workspaceClient = useMemo(
@@ -172,19 +183,28 @@ export function useDaemonChannels(options: DaemonChannelsOptions = {}) {
     [actions.channelPairing, workspaceClient],
   );
 
-  const qrLogin = useMemo<DaemonChannelQrLoginActions>(
-    () =>
-      workspaceClient
-        ? {
-            start: (name) => workspaceClient.startWorkspaceChannelQrLogin(name),
-            state: (loginId) =>
-              workspaceClient.workspaceChannelQrLogin(loginId),
-            cancel: (loginId) =>
-              workspaceClient.cancelWorkspaceChannelQrLogin(loginId),
-          }
-        : actions.channelQrLogin,
-    [actions.channelQrLogin, workspaceClient],
-  );
+  const qrLogin = useMemo<DaemonChannelQrLoginHandlers>(() => {
+    return workspaceClient
+      ? {
+          start: (name) =>
+            workspaceClient.startWorkspaceChannelQrLogin(name, { clientId }),
+          state: (loginId) =>
+            workspaceClient.workspaceChannelQrLogin(loginId, { clientId }),
+          cancel: (loginId) =>
+            workspaceClient.cancelWorkspaceChannelQrLogin(loginId, {
+              clientId,
+            }),
+          release: (loginId) =>
+            actions.channelQrLogin.release(loginId, clientId, workspaceCwd),
+        }
+      : {
+          start: (name) => actions.channelQrLogin.start(name, clientId),
+          state: (loginId) => actions.channelQrLogin.state(loginId, clientId),
+          cancel: (loginId) => actions.channelQrLogin.cancel(loginId, clientId),
+          release: (loginId) =>
+            actions.channelQrLogin.release(loginId, clientId, workspaceCwd),
+        };
+  }, [actions.channelQrLogin, workspaceClient, clientId, workspaceCwd]);
 
   return {
     data: current

@@ -271,9 +271,41 @@ export interface DaemonChannelObservedContacts {
 }
 
 export interface DaemonChannelQrLoginActions {
+  /**
+   * `clientId` attributes the login to this browser tab. Without it the daemon
+   * treats every id-less caller as the same client, so it reattaches a peer's
+   * login and lets any of them cancel it.
+   */
+  start(
+    name: string,
+    clientId?: string,
+  ): Promise<DaemonChannelQrLoginStartResult>;
+  state(loginId: string, clientId?: string): Promise<DaemonChannelQrLoginView>;
+  cancel(loginId: string, clientId?: string): Promise<DaemonChannelQrLoginView>;
+  /**
+   * Release a login while the page is going away. Sent with `keepalive` so the
+   * request outlives the document: a reload or tab close runs no React cleanup,
+   * so `cancel` alone never fires for the abandonment path operators use most.
+   * Best-effort — the session still expires if the request is lost.
+   */
+  release(
+    loginId: string,
+    clientId?: string,
+    workspaceCwd?: string,
+  ): Promise<void>;
+}
+
+/**
+ * What the channels hook hands its consumers: the identity is the tab's own, so
+ * a caller cannot supply one per call. Advertising the wider contract here
+ * would promise an attribution the hook does not honour — and with no tab id
+ * attached, honouring a caller's would attribute the login to a peer tab.
+ */
+export interface DaemonChannelQrLoginHandlers {
   start(name: string): Promise<DaemonChannelQrLoginStartResult>;
   state(loginId: string): Promise<DaemonChannelQrLoginView>;
   cancel(loginId: string): Promise<DaemonChannelQrLoginView>;
+  release(loginId: string): Promise<void>;
 }
 
 export interface DaemonChannelPairingActions {
@@ -443,6 +475,10 @@ export interface DaemonGoal {
   hasActivePrompt: boolean;
   /** Canonical lifecycle state; UI controls must use its goalId/revision. */
   snapshot: GoalSnapshotV2;
+  /** The owning workspace's cwd, tagged client-side by the Goals page (in
+   * every listing branch) so opening a goal's session restores it in that
+   * workspace's context. Absent when the daemon advertises no workspaces. */
+  workspaceCwd?: string;
 }
 
 /** The `GET /goals` payload. */
@@ -795,8 +831,10 @@ export interface DaemonWorkspaceActions
     query?: DaemonChannelEventsQuery,
   ): Promise<DaemonChannelEventList>;
 
-  // Goals (session-scoped runtimes, listed workspace-wide)
-  listGoals(): Promise<DaemonGoalList>;
+  // Goals (session-scoped runtimes, listed workspace-wide). `workspaceId` as
+  // for `listScheduledTasks`: the aggregated Web Shell view fans `listGoals`
+  // out over every operable workspace; undefined targets the primary surface.
+  listGoals(workspaceId?: string): Promise<DaemonGoalList>;
   controlGoal(
     sessionId: string,
     request: GoalControlRequest,

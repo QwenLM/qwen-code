@@ -17,10 +17,13 @@ export function createMem0McpServer(runtime: {
   instance: InstanceConfigV2;
   search: SearchProvider;
 }): McpServer {
-  const server = new McpServer({
-    name: 'external-context-mem0',
-    version: '0.1.0',
-  });
+  const server = new McpServer(
+    {
+      name: 'external-context-mem0',
+      version: '0.1.0',
+    },
+    { maxToolInputElements: 100_000 },
+  );
 
   server.registerTool(
     'context_search',

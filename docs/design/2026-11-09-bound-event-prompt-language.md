@@ -2,7 +2,7 @@
 
 [English](2026-11-09-bound-event-prompt-language.md) | [简体中文](2026-11-09-bound-event-prompt-language.zh-CN.md)
 
-Status: proposed (2026-11-09)
+Status: implemented as #16773 (proposed 2026-11-09). The body below describes the change as designed. Two things have moved since: the daemon drain's language is still not threaded (decision 7), and PR B (#17214) removed the channel's state detection, so the watch summaries named below belong to the daemon now.
 
 ## Problem statement
 
@@ -22,14 +22,14 @@ language, but the product-authored event text itself does not follow the UI.
 
 ## Current state
 
-| Surface                                                                         | Location                                                                                                                                                      | Language today                                  |
-| ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| Envelope prose (header, notices, workflow sentence, truncation marker)          | `packages/channels/base/src/bound-session-prompt.ts`, `buildBoundEventPrompt`                                                                                 | hardcoded English                               |
-| Built-in role guidance                                                          | same file, `DEFAULT_BOUND_ROLE_GUIDANCE`                                                                                                                      | hardcoded English                               |
-| Provenance, instruction source, aggregate-comment header                        | `packages/channels/github/src/GithubAdapter.ts`, `buildBoundSessionPrompt`                                                                                    | hardcoded English                               |
-| Watch summaries (`head_change`, `ci_failure`, `merge_conflict`, `state_change`) | same file, `watchOnePr`                                                                                                                                       | hardcoded English                               |
-| Daemon drain prompt                                                             | `packages/cli/src/serve/server/pr-watch-drain.ts`, `buildDrainPrompt`                                                                                         | hardcoded English; producer inert in production |
-| Locale wiring                                                                   | `packages/cli/src/commands/channel/daemon-worker.ts` and `start.ts` → `resolveChannelLocale(settings.merged.general?.language)` → `ChannelBaseOptions.locale` | exists, unused by `GithubAdapter`               |
+| Surface                                                                         | Location                                                                                                                                                      | Language today                           |
+| ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| Envelope prose (header, notices, workflow sentence, truncation marker)          | `packages/channels/base/src/bound-session-prompt.ts`, `buildBoundEventPrompt`                                                                                 | localized (`BOUND_ENVELOPE_COPY`)        |
+| Built-in role guidance                                                          | same file, `DEFAULT_BOUND_ROLE_GUIDANCE_BY_LANGUAGE`                                                                                                          | localized (per role)                     |
+| Provenance, instruction source, aggregate-comment header                        | `packages/channels/github/src/GithubAdapter.ts`, `buildBoundSessionPrompt`                                                                                    | localized (`BOUND_DELIVERY_COPY`)        |
+| Watch summaries (`head_change`, `ci_failure`, `merge_conflict`, `state_change`) | `packages/cli/src/serve/server/pr-watch-observation.ts` (four `summary:` literals); rendered by `buildDrainPrompt` in `pr-watch-drain.ts`                     | hardcoded English                        |
+| Daemon drain prompt                                                             | `packages/cli/src/serve/server/pr-watch-drain.ts`, `buildDrainPrompt`                                                                                         | hardcoded English; language not threaded |
+| Locale wiring                                                                   | `packages/cli/src/commands/channel/daemon-worker.ts` and `start.ts` → `resolveChannelLocale(settings.merged.general?.language)` → `ChannelBaseOptions.locale` | consumed by `GithubAdapter`              |
 
 Constraints established by the existing contracts
 (`2026-11-02-github-channel-bound-session-events.md`,
@@ -47,10 +47,14 @@ Constraints established by the existing contracts
   64 code points; the header and the trusted label must stay within that window
   so a copy at the start of untrusted text loses its brackets.
 
-The daemon PR-state watch (observation + drain) is gated off in production:
-`SESSION_PR_WATCH_OBSERVATION_ENABLED` is `false` and `run-qwen-serve.ts` never
-populates `getPrWatchDeps` / `getPrDrainDeps`. The GitHub channel is the only
-live producer of bound event prompts today.
+The daemon PR-state watch (observation + drain) is live whenever the
+effective PR-watch subscription has an event: `serve.sessionPrWatch` (or its
+`QWEN_SESSION_PR_WATCH_EVENTS` override), or, when neither is configured, the
+deprecated per-host channel alias. Enablement is deps presence, and
+`run-qwen-serve.ts` populates `getPrWatchDeps` / `getPrDrainDeps` from that
+subscription. The internal constant that gated it off was removed in #17214.
+The channel no longer detects PR state, so alongside the channel's comment
+lane the daemon is now a producer of bound event prompts too.
 
 ## Goals
 
@@ -59,8 +63,10 @@ live producer of bound event prompts today.
   provenance, instruction-source prose, aggregate-comment header, and watch
   summaries.
 - Every other locale keeps today's English output byte-for-byte.
-- The language dimension is extensible: adding a language later is a copy-map
-  entry plus the locale union, not a structural change.
+- The supported set is deliberately `'en' | 'zh'` today. Adding a supported
+  language later is an explicit increment to the existing union, locale
+  resolver and copy maps, with focused tests; the builder's structural
+  contract stays unchanged. No automatic translation fallback is claimed.
 - No new setting and no new wiring: reuse the existing
   `general.language` → `resolveChannelLocale` → `ChannelBase.locale` path.
 
@@ -71,7 +77,9 @@ live producer of bound event prompts today.
   line, and the data-line field labels (`Type:`, `Title:`, `URL:`, `Trigger:`,
   `Event:`, `Author:`). They are stable trust-boundary and field markers next
   to platform data, not prose; keeping them language-invariant preserves the
-  peel/copy invariants and avoids re-parsing rendered metadata lines.
+  peel/copy invariants and avoids re-parsing rendered metadata lines. The
+  literal `[truncated]` cap marker and the `Author: unknown` missing-identity
+  fallback are also technical sentinels, not localized narrative text.
 - **Platform-derived content is never translated**: PR titles, comment bodies,
   check names, SHAs, `mergeable_state` values, notification reasons.
 - **Operator templates are unchanged**: `boundSessionActions` /
@@ -82,9 +90,9 @@ live producer of bound event prompts today.
   every other consumer of that locale — it does not follow the OS locale.
 - **The public channel lane is unchanged**: publication instructions, trigger
   guidance, and channel-owned session prompts keep their current text.
-- **The daemon drain producer stays English**: it is inert pre-enablement;
-  threading a language through its deps belongs to its enablement increment.
-  It is unchanged by this change.
+- **The daemon drain producer stays English**: its language is not threaded
+  yet (decision 7), not because the producer is inert — it runs once the
+  effective subscription has an event. It is unchanged by this change.
 - **No live language switching**: the locale is read at channel worker startup,
   exactly like the existing permission-copy locale. Changing `general.language`
   takes effect on the next channel start. Watch summaries are rendered at
@@ -227,10 +235,12 @@ Check names keep their `, ` join in both languages; they are platform data.
    than the English one; both stay ≤ 64 code points, so `sanitizePromptText`
    peels copies of them exactly like the English tags. The copy tests are
    extended to run against the zh envelope as well.
-7. **The inert daemon producer is not wired.** Adding a language field to
-   `PrWatchDrainDeps` that no production caller sets would be a dead switch.
-   The drain keeps the English default; its enablement increment threads the
-   language then. The shared builder already supports it.
+7. **The daemon producer's language is not wired.** Adding a language field
+   to `PrWatchDrainDeps` that no production caller sets would be a dead switch.
+   The drain keeps the English default. The enablement increment has since
+   landed (#17032) without threading it — `PrWatchDrainDeps` still declares no
+   language field — so the threading is still owed rather than scheduled
+   elsewhere. The shared builder already supports it.
 
 ## Files affected
 
@@ -294,14 +304,18 @@ Check names keep their `, ` join in both languages; they are platform data.
 
 1. A channel whose locale resolves to `zh` delivers bound prompts whose
    product-authored prose (envelope, guidance, provenance, summaries, aggregate
-   header) is Chinese, in both legacy and role-aware modes.
+   header) is Chinese, in both legacy and role-aware modes. Whenever built-in
+   role guidance is rendered, it is Chinese as well; a selected operator
+   instruction replaces that guidance rather than appearing alongside it.
 2. With no locale or an English locale, every delivered prompt is byte-identical
    to today, including the daemon drain's.
 3. Structural markers (`[Operator instruction — trusted]`, `Source:`, `Role:`,
    data-line labels) and platform-derived values are unchanged in both
    languages.
 4. Operator templates render verbatim in both languages; an unmatched role is
-   still skipped in role-aware mode.
+   still skipped in role-aware mode. The chosen operator instruction and the
+   built-in role guidance never both render for one event: the operator
+   instruction takes the built-in guidance's slot instead of supplementing it.
 5. Copies of the zh header and truncation marker at the start of untrusted text
    lose their brackets, exactly like the English tags.
 6. No watch summary contains an imperative action in either language.

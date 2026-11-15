@@ -524,9 +524,19 @@ public final class ToolPublicationAdmissionStore {
         long revision = ((Number) publication.get("receipt_revision")).longValue();
         long sequence = ((Number) publication.get("receipt_sequence")).longValue();
         require(revision > 0 && sequence > 0, "Original receipt pointer is invalid");
-        byte[] records = jdbc.queryForObject("SELECT record_bytes FROM ma_session_journal_tx"
-                + " WHERE tenant_id = ? AND session_id = ? AND journal_revision = ?",
-                byte[].class, text(key, "tenantId"), text(key, "sessionId"), revision);
+        var journalRows = jdbc.query("SELECT record_bytes, record_digest, byte_length FROM"
+                + " ma_session_journal_tx WHERE tenant_id = ? AND session_id = ? AND journal_revision = ?",
+                (row, index) -> ManagedSchemaRows.read(row),
+                text(key, "tenantId"), text(key, "sessionId"), revision);
+        require(journalRows.size() == 1, "Original receipt is missing");
+        byte[] records = (byte[]) journalRows.getFirst().get("record_bytes");
+        if (records == null) {
+            JdbcJournalPacks packs = sessions.journalPacks();
+            records = packs == null ? null : packs.resolveBytes(text(key, "tenantId"),
+                    text(key, "sessionId"), revision,
+                    (String) journalRows.getFirst().get("record_digest"),
+                    ((Number) journalRows.getFirst().get("byte_length")).longValue());
+        }
         require(records != null, "Original receipt is missing");
         JsonNode event = null;
         for (String line : new String(records, StandardCharsets.UTF_8).split("\n")) {

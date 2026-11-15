@@ -44,6 +44,7 @@ import type { SubagentExecutor } from '../../agents/runtime/subagent-executor.js
 import { resolveAgentExecutionBackend } from '../../subagents/execution-backend.js';
 import type { AgentExternalInput } from '../../agents/runtime/agent-types.js';
 import type { Content } from '@google/genai';
+import type { DispatchedLlmRequest } from '../../core/llm-chat.js';
 import {
   FORK_AGENT,
   FORK_DEFAULT_MAX_TURNS,
@@ -2000,6 +2001,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     agentConfig: Config,
     eventEmitter: AgentEventEmitter = this.eventEmitter,
     subagentId?: string,
+    parentRequest?: DispatchedLlmRequest,
   ): Promise<{
     subagent: SubagentExecutor;
     initialMessages?: Content[];
@@ -2007,7 +2009,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     toolConfig: ToolConfig;
   }> {
     const llmClient = this.config.getLlmClient();
-    const generationConfig = llmClient?.getChat().getGenerationConfig();
+    const parentChat = llmClient?.getChat();
+    const generationConfig =
+      parentRequest?.generationConfig ??
+      parentChat?.getDispatchedGenerationConfig?.() ??
+      parentChat?.getGenerationConfig();
     const parentToolNames = generationConfig?.systemInstruction
       ? extractParentToolNames(generationConfig)
       : [];
@@ -2244,12 +2250,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       FORK_AGENT.name,
       agentConfig,
       promptConfig,
-      {},
+      parentRequest ? { model: parentRequest.model } : {},
       { max_turns: FORK_DEFAULT_MAX_TURNS },
       toolConfig,
       eventEmitter,
       undefined,
-      undefined,
+      parentRequest?.runtimeView,
       this.params.description,
       subagentId,
     );
@@ -3091,6 +3097,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         );
       }
       const isFork = isForkRequested;
+      const parentRequest = isFork
+        ? this.config.getLlmClient()?.getChat().getDispatchedRequest?.()
+        : undefined;
       if (isFork) {
         debugLogger.debug(
           `[AgentTool] Fork request accepted with inherited context (${
@@ -3263,12 +3272,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           // resolveSubagentModel maps it to the actual model ID, falling back to
           // the parent's current model when the sub-agent inherits (forks always
           // inherit, since FORK_AGENT has no model selector).
-          const resolvedSubagentModel = this.resolveSubagentModel(
-            subagentConfig.model,
-          );
+          const resolvedSubagentModel = parentRequest
+            ? undefined
+            : this.resolveSubagentModel(subagentConfig.model);
           subagentModelId = resolvedSubagentModel?.modelId;
-          subagentModelId ??= this.config.getModel();
+          subagentModelId ??= parentRequest?.model ?? this.config.getModel();
           const parentContentGeneratorConfig =
+            parentRequest?.runtimeView?.contentGeneratorConfig ??
             this.config.getContentGeneratorConfig();
           const authType =
             resolvedSubagentModel?.authType ??
@@ -3779,6 +3789,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           agentConfig,
           backgroundEventEmitter,
           hookOpts.agentId,
+          parentRequest,
         );
         subagent = fork.subagent;
         taskPrompt = fork.taskPrompt;

@@ -187,7 +187,7 @@ class ManagedSessionStoreWiringTest {
                 @Nullable ToolPublicationObjectStore objects, @Nullable JdbcManagedToolResultStore results,
                 @Nullable JournalEventTransport transport, @Nullable RuntimeBindingRepository bindings) {
             return new JdbcManagedSessionStore(jdbc, records, actions, rules, reader, execution, sessions,
-                    objects, results, transport, credentials, bindings);
+                    objects, results, transport, credentials, bindings, null);
         }
     }
 }

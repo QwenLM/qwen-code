@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.runtimebroker.persistence;
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONReader;
 import com.alibaba.fastjson2.JSONWriter;
+import com.alibaba.qwen.code.managedagent.persistence.JdbcJournalPacks;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAdmission;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -377,7 +378,7 @@ public final class JdbcToolExecutionRepository
                     }
                     if (continuation != null) {
                         JdbcCsiExecutionAdmission.requireDispatch(
-                                connection, continuation.original(), current);
+                                connection, continuation.original(), current, journalPacks());
                     }
                     ToolExecutionRecord claimed =
                             current.withDispatch(
@@ -572,11 +573,15 @@ public final class JdbcToolExecutionRepository
         return JdbcToolExecutionObservations.resolve(dataSource, expected, resolutionResult, resolutionTime, false);
     }
 
+    private JdbcJournalPacks journalPacks() {
+        return csiBindings == null ? null : csiBindings.journalPacks();
+    }
+
     private CsiContinuation lockCsiContinuation(Connection connection, ToolExecutionRecord hint)
             throws SQLException {
         var scope =
                 JdbcCsiActivationAdmission.lockForContinuation(
-                        connection, hint.getBindingId(), csiBindings);
+                        connection, hint.getBindingId(), csiBindings, journalPacks());
         if (scope == null) {
             return null;
         }
@@ -599,7 +604,7 @@ public final class JdbcToolExecutionRepository
                     "The private CSI profile requires original native execution evidence.",
                     false);
         } else {
-            JdbcCsiExecutionAdmission.verifyRelated(connection, original);
+            JdbcCsiExecutionAdmission.verifyRelated(connection, original, journalPacks());
         }
         requireCsiCurrentTime(connection, continuation);
         return continuation;
@@ -666,17 +671,18 @@ public final class JdbcToolExecutionRepository
         }
     }
 
-    @Override
-    public List<ToolExecutionRecord> findUnsettled(RuntimeSessionRecord session,
-            String afterExecutionCallId, int limit) {
+    private static String scanCursor(RuntimeSessionRecord session, String afterExecutionCallId, int limit) {
         if (session == null || limit < 1 || limit > 100) {
             throw new IllegalArgumentException("session and limit in [1, 100] are required");
         }
-        String after =
-                afterExecutionCallId == null
-                        ? ""
-                        : JdbcRepositorySupport.valueKey(
-                                BrokerValues.requireId(afterExecutionCallId, "cursor"));
+        return afterExecutionCallId == null ? ""
+                : JdbcRepositorySupport.valueKey(BrokerValues.requireId(afterExecutionCallId, "cursor"));
+    }
+
+    @Override
+    public List<ToolExecutionRecord> findUnsettled(RuntimeSessionRecord session,
+            String afterExecutionCallId, int limit) {
+        String after = scanCursor(session, afterExecutionCallId, limit);
         return JdbcRepositorySupport.read(
                 dataSource,
                 connection -> {
@@ -716,14 +722,7 @@ public final class JdbcToolExecutionRepository
     @Override
     public List<ToolExecutionRecord> findBackgroundProcesses(
             RuntimeSessionRecord session, String afterExecutionCallId, int limit) {
-        if (session == null || limit < 1 || limit > 100) {
-            throw new IllegalArgumentException("session and limit in [1, 100] are required");
-        }
-        String after =
-                afterExecutionCallId == null
-                        ? ""
-                        : JdbcRepositorySupport.valueKey(
-                                BrokerValues.requireId(afterExecutionCallId, "cursor"));
+        String after = scanCursor(session, afterExecutionCallId, limit);
         return JdbcRepositorySupport.read(
                 dataSource,
                 connection -> {

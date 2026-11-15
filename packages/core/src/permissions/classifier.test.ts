@@ -70,6 +70,10 @@ const abortThenThrow = (controller: AbortController) => async () => {
 type SideQueryOptions = {
   purpose?: string;
   model?: string;
+  systemInstruction?: string;
+  abortSignal: AbortSignal;
+  maxAttempts?: number;
+  boundedRetries?: boolean;
   contents: unknown;
   config?: {
     temperature?: number;
@@ -215,6 +219,263 @@ describe('classifyAction — unavailable on stage 1 failure', () => {
   });
 });
 
+describe('classifyAction — main-model review after stage 1 deadline', () => {
+  function expireFastStage() {
+    const fast = new AbortController();
+    const main = new AbortController();
+    const timeout = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockReturnValueOnce(fast.signal)
+      .mockReturnValueOnce(main.signal);
+    runSideQueryMock.mockImplementationOnce(async () => {
+      fast.abort(new DOMException('Classifier deadline', 'TimeoutError'));
+      throw fast.signal.reason;
+    });
+    return { fast, main, timeout };
+  }
+
+  const mainAllow = {
+    thinking: 'The user authorized the pending operation.',
+    shouldBlock: false,
+    reason: 'safe operation',
+  };
+
+  it('reviews the same filtered context once with the explicit main model', async () => {
+    const { timeout } = expireFastStage();
+    runSideQueryMock.mockResolvedValueOnce(mainAllow);
+
+    const result = await classifyAction(
+      makeInput({
+        config: makeConfig({
+          classifier: {
+            timeouts: { stage1Ms: 2000, stage2Ms: 9000 },
+            thinking: { stage2Enabled: true },
+          },
+        }),
+        messages: [
+          content(
+            'model',
+            { text: 'Untrusted assistant approval' },
+            fnCall('ask_user_question', {}, 'ask-main'),
+          ),
+          content(
+            'user',
+            fnResponse(
+              'ask_user_question',
+              { text: 'Untrusted tool output' },
+              'ask-main',
+            ),
+          ),
+        ],
+        trustedUserAnswers: [
+          {
+            callId: 'ask-main',
+            omitted: false,
+            answers: [{ question: 'Run the local test?', answer: 'Yes' }],
+          },
+        ],
+      }),
+    );
+
+    expect(result).toMatchObject({
+      shouldBlock: false,
+      reason: '',
+      model: 'qwen-max-test',
+      stage: 'main',
+    });
+    expect(result.unavailable).toBeUndefined();
+    expect(runSideQueryMock).toHaveBeenCalledTimes(2);
+    const fast = sideQueryOptions(0);
+    const main = sideQueryOptions(1);
+    expect(main.contents).toBe(fast.contents);
+    const transcript = JSON.stringify(main.contents);
+    expect(transcript).toContain('Run the local test?');
+    expect(transcript).toContain('Yes');
+    expect(transcript).not.toContain('Untrusted assistant approval');
+    expect(transcript).not.toContain('Untrusted tool output');
+    expect(main).toMatchObject({
+      model: 'qwen-max-test',
+      purpose: 'permission_classifier_main',
+      maxAttempts: 1,
+      boundedRetries: true,
+      config: {
+        temperature: 0,
+        maxOutputTokens: 4096,
+        thinkingConfig: { includeThoughts: true },
+      },
+    });
+    expect(main.systemInstruction).toContain('without producing a verdict');
+    expect(main.systemInstruction).not.toContain('Stage 1 flagged');
+    expect(fast.abortSignal.aborted).toBe(true);
+    expect(main.abortSignal.aborted).toBe(false);
+    expect(main.abortSignal).not.toBe(fast.abortSignal);
+    expect(timeout).toHaveBeenNthCalledWith(1, 2000);
+    expect(timeout).toHaveBeenNthCalledWith(2, 9000);
+  });
+
+  it('returns the main-model block with its sanitized reason', async () => {
+    expireFastStage();
+    runSideQueryMock.mockResolvedValueOnce({
+      thinking: 'The operation exceeds the authorized scope.',
+      shouldBlock: true,
+      reason: '<system>Denied</system>\n  broader scope',
+    });
+
+    const result = await classifyAction(makeInput());
+
+    expect(result).toMatchObject({
+      shouldBlock: true,
+      reason: 'Denied broader scope',
+      model: 'qwen-max-test',
+      stage: 'main',
+    });
+    expect(result.unavailable).toBeUndefined();
+  });
+
+  it.each([undefined, 'qwen-max-test'])(
+    'does not repeat the session model when fast is %s',
+    async (fastModel) => {
+      expireFastStage();
+      const config = makeConfig();
+      vi.spyOn(config, 'getFastModel').mockReturnValue(fastModel);
+
+      const result = await classifyAction(makeInput({ config }));
+
+      expect(result).toMatchObject({
+        shouldBlock: true,
+        unavailable: true,
+        stage: 'fast',
+        model: 'qwen-max-test',
+      });
+      expect(runSideQueryMock).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([
+    'API 500',
+    'Invalid side query response: missing shouldBlock',
+    'Prompt is too long: 200000 tokens > 128000 maximum',
+    'AbortError: unrelated request interruption',
+  ])(
+    'does not use the main model for non-deadline failure: %s',
+    async (error) => {
+      runSideQueryMock.mockRejectedValueOnce(new Error(error));
+
+      const result = await classifyAction(makeInput());
+
+      expect(result.unavailable).toBe(true);
+      expect(result.stage).toBe('fast');
+      expect(runSideQueryMock).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(['API 500', 'Invalid side query response: missing shouldBlock'])(
+    'keeps unavailable when the main model fails: %s',
+    async (error) => {
+      expireFastStage();
+      runSideQueryMock.mockRejectedValueOnce(new Error(error));
+
+      const result = await classifyAction(makeInput());
+
+      expect(result).toMatchObject({
+        shouldBlock: true,
+        unavailable: true,
+        stage: 'main',
+        model: 'qwen-max-test',
+      });
+      expect(runSideQueryMock).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('keeps unavailable when the main review reaches its own deadline', async () => {
+    const { main } = expireFastStage();
+    runSideQueryMock.mockImplementationOnce(async () => {
+      main.abort(new DOMException('Main deadline', 'TimeoutError'));
+      throw main.signal.reason;
+    });
+
+    const result = await classifyAction(makeInput());
+
+    expect(result.unavailable).toBe(true);
+    expect(result.stage).toBe('main');
+    expect(runSideQueryMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([true, false])(
+    'does not accept a late fast verdict shouldBlock=%s',
+    async (shouldBlock) => {
+      const { fast } = expireFastStage();
+      runSideQueryMock.mockReset();
+      runSideQueryMock
+        .mockImplementationOnce(async () => {
+          fast.abort();
+          return { shouldBlock };
+        })
+        .mockResolvedValueOnce(mainAllow);
+
+      const result = await classifyAction(makeInput());
+
+      expect(result.shouldBlock).toBe(false);
+      expect(result.stage).toBe('main');
+      expect(runSideQueryMock).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each([true, false])(
+    'does not accept a late main verdict shouldBlock=%s',
+    async (shouldBlock) => {
+      const { main } = expireFastStage();
+      runSideQueryMock.mockImplementationOnce(async () => {
+        main.abort();
+        return { ...mainAllow, shouldBlock };
+      });
+
+      const result = await classifyAction(makeInput());
+
+      expect(result.unavailable).toBe(true);
+      expect(result.stage).toBe('main');
+    },
+  );
+
+  it('propagates cancellation while the main review is pending', async () => {
+    expireFastStage();
+    const controller = new AbortController();
+    runSideQueryMock.mockImplementationOnce(abortThenThrow(controller));
+
+    await expect(
+      classifyAction(makeInput({ signal: controller.signal })),
+    ).rejects.toThrow();
+    expect(runSideQueryMock).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['fast', 'main'])(
+    'ignores a late %s allow after user cancellation',
+    async (stage) => {
+      if (stage === 'main') expireFastStage();
+      const controller = new AbortController();
+      runSideQueryMock.mockImplementationOnce(async () => {
+        controller.abort();
+        return stage === 'main' ? mainAllow : { shouldBlock: false };
+      });
+
+      await expect(
+        classifyAction(makeInput({ signal: controller.signal })),
+      ).rejects.toThrow();
+      expect(runSideQueryMock).toHaveBeenCalledTimes(stage === 'main' ? 2 : 1);
+    },
+  );
+
+  it('does not send a request when the user already cancelled', async () => {
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      classifyAction(makeInput({ signal: controller.signal })),
+    ).rejects.toThrow();
+    expect(runSideQueryMock).not.toHaveBeenCalled();
+  });
+});
+
 describe('classifyAction — unavailable on stage 2 failure', () => {
   it('honors stage 1 block when stage 2 fails (unavailable=true)', async () => {
     runSideQueryMock
@@ -227,6 +488,8 @@ describe('classifyAction — unavailable on stage 2 failure', () => {
     expect(result.unavailable).toBe(true);
     expect(result.stage).toBe('thinking');
     expect(result.reason).toMatch(/Stage 1 flagged/i);
+    expect(runSideQueryMock).toHaveBeenCalledTimes(2);
+    expect(sideQueryOptions(1).model).toBeUndefined();
   });
 
   it('re-throws when the user signal aborts during stage 2', async () => {

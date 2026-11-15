@@ -17,7 +17,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.BindingContext;
-import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService.BindingRenewal;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -50,7 +49,7 @@ import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.u
  * {@link RuntimeBrokerService}: durable provisioning and attestation, the
  * bounded reconciliation loop, lost-binding cleanup, and the trusted
  * maintenance recovery path. Every step runs under this Broker's operation
- * claim, renewed by the service's {@code BindingRenewal}.
+ * claim, renewed by {@code BindingRenewal}.
  */
 final class RuntimeBindingProvisioning {
     private final RuntimeBindingRegistry bindingRegistry;
@@ -136,10 +135,8 @@ final class RuntimeBindingProvisioning {
                 }
                 return reconcileBinding(record);
             }
-            BindingContext context = new BindingContext(record,
-                    live.lease());
-            CompletableFuture<BindingContext> confirmed =
-                    new CompletableFuture<>();
+            BindingContext context = new BindingContext(record, live.lease());
+            CompletableFuture<BindingContext> confirmed = new CompletableFuture<>();
             safeStage(() -> provisioner.confirm(request, live.lease()))
                     .whenComplete((ignored, error) -> {
                         if (error == null) {
@@ -184,11 +181,12 @@ final class RuntimeBindingProvisioning {
             return failed(unavailable("runtime_binding_unavailable",
                     "Runtime binding is not available"));
         }
-        CompletableFuture<BindingContext> created =
-                new CompletableFuture<>();
+        if (RuntimeBrokerSupport.shouldReconcileExternalWorkspace(request, record)) {
+            return reconcileBinding(record);
+        }
+        CompletableFuture<BindingContext> created = new CompletableFuture<>();
         CompletableFuture<BindingContext> existing =
-                bindingRegistry.reserveBinding(record.getBindingId(),
-                        created);
+                bindingRegistry.reserveBinding(record.getBindingId(), created);
         if (existing != null) {
             return existing;
         }
@@ -352,6 +350,7 @@ final class RuntimeBindingProvisioning {
                 try {
                     RuntimeBindingRecord timedOut = renewal.stopAndGet();
                     blocked = request.isManagedContext() && timedOut != null
+                            && !RuntimeBrokerSupport.retryableExternalWorkspaceProvision(request, answer)
                             && blockRecoveryQuietly(timedOut, answer);
                 } finally {
                     bindingRegistry.releaseOperationQuietly(bindingId, operationGeneration);

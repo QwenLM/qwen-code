@@ -455,6 +455,34 @@ describe('Mod session renders', () => {
     },
   );
 
+  it('tells a transcript that switched first when the Mods adopt its session', async () => {
+    const { config, runtime, session } = setup({ sites: ['AssistantMessage'] });
+    await session.initialize(new AbortController().signal);
+    runtime.render.mockResolvedValue({
+      tree: ENGINE_NODE,
+      notes: [],
+      props: { ...replyRow.props, text: 'Rewritten' },
+    });
+    const adopted = vi.fn();
+    session.subscribeSession(adopted);
+    // The transcript already belongs to the new session; the Mods do not yet.
+    config.getSessionId.mockReturnValue('session-2');
+    expect(session.rowSession).toBe('session-1');
+    expect(session.watchRow('session-2', replyRow, () => {})).toBeUndefined();
+
+    await session.syncSession('resume');
+    expect(adopted).toHaveBeenCalledOnce();
+    expect(session.rowSession).toBe('session-2');
+    // Asked again, the row renders for the adopted session.
+    session.watchRow('session-2', replyRow, () => {});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(runtime.render).toHaveBeenCalledOnce();
+    expect(session.rowProps('session-2', replyRow)).toEqual({
+      ...replyRow.props,
+      text: 'Rewritten',
+    });
+  });
+
   it('aborts a stalled row on its wall-clock deadline and releases the next tool', async () => {
     const { runtime, session } = setup({ sites: ['AssistantMessage'] });
     runtime.hasToolHooks = true;

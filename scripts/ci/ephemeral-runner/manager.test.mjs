@@ -2416,6 +2416,306 @@ test('rejects an invalid stall alert threshold', async (t) => {
     );
 });
 
+test('rejects an invalid drain window', async (t) => {
+  const f = await fixture(t);
+  for (const drainTimeoutSeconds of [-1, '60', Number.NaN, Infinity])
+    assert.throws(
+      () => createManager({ ...f.config, drainTimeoutSeconds }),
+      /Invalid manager configuration/,
+    );
+});
+
+async function drainHarness(t) {
+  const f = await fixture(t);
+  await writeFile(join(f.config.stateDir, 'flock'), '#!/bin/sh\nexec cat\n', {
+    mode: 0o755,
+  });
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${f.config.stateDir}:${previousPath}`;
+  t.after(() => {
+    process.env.PATH = previousPath;
+  });
+  const clock = { now: 1_000_000 };
+  t.mock.method(Date, 'now', () => clock.now);
+  return { f, clock };
+}
+
+test('drain stops an idle runner instead of waiting out the window', async (t) => {
+  const { f, clock } = await drainHarness(t);
+  f.config.drainTimeoutSeconds = 600;
+  let manager;
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'start') manager.stop();
+    // An idle ephemeral runner never exits on its own, so the drain has to
+    // decide; the wait stays pending for the whole test.
+    if (program === 'docker' && args[0] === 'wait')
+      return new Promise(() => {});
+    if (program === 'docker' && args[0] === 'top') return 'sh\n';
+    return f.command(program, args, options);
+  };
+  manager = createManager(f.config, {
+    command,
+    sleep: async (ms) => {
+      clock.now += ms;
+      if (clock.now > 1_060_000)
+        throw new Error('an idle slot waited out the drain window');
+    },
+  });
+  await manager.start();
+  assert.ok(
+    clock.now - 1_000_000 <= 15_000,
+    `idle drain took ${clock.now - 1_000_000}ms`,
+  );
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'rm').length,
+    1,
+  );
+});
+
+test('drain keeps draining when GitHub refuses the registration retirement', async (t) => {
+  const { f, clock } = await drainHarness(t);
+  f.config.drainTimeoutSeconds = 600;
+  // 422 (busy) and 404 (hidden resource) are the same decision: neither
+  // confirms the gate, so the container must keep draining and the job that
+  // may already be assigned must still run and exit on its own.
+  for (const status of [422, 404]) {
+    f.setRejectFirstDelete(status);
+    const callStart = f.calls.length;
+    const jobStartsAt = clock.now + 10_000;
+    const jobEndsAt = clock.now + 20_000;
+    let workerSeen = false;
+    let removedBeforeWorker = 0;
+    let releaseWait;
+    let manager;
+    const command = (program, args, options) => {
+      if (program === 'docker' && args[0] === 'start') manager.stop();
+      if (program === 'docker' && args[0] === 'wait')
+        return new Promise((resolveWait) => {
+          releaseWait = () => resolveWait('0\n');
+        });
+      if (program === 'docker' && args[0] === 'top') {
+        if (clock.now < jobStartsAt) return '';
+        workerSeen = true;
+        return 'Runner.Worker\n';
+      }
+      if (program === 'docker' && args[0] === 'rm' && !workerSeen)
+        removedBeforeWorker += 1;
+      return f.command(program, args, options);
+    };
+    manager = createManager(f.config, {
+      command,
+      sleep: async (ms) => {
+        clock.now += ms;
+        if (clock.now >= jobEndsAt) releaseWait?.();
+      },
+    });
+    await manager.start();
+    const calls = f.calls.slice(callStart);
+    assert.equal(
+      workerSeen,
+      true,
+      `the job assigned after a ${status} refusal must keep running`,
+    );
+    assert.equal(
+      removedBeforeWorker,
+      0,
+      `a ${status} refusal must not remove the container before the job runs`,
+    );
+    assert.equal(
+      calls.filter((c) => c.program === 'docker' && c.args[0] === 'rm').length,
+      1,
+      `a ${status} refusal must still remove the container exactly once, after the job exits`,
+    );
+    assert.equal(
+      calls.filter((c) => c.program === 'gh' && c.args.includes('DELETE'))
+        .length,
+      2,
+      `a ${status} refusal must be retried by cleanup after the job exits`,
+    );
+    assert.deepEqual(
+      f.runnerList(),
+      [],
+      `the registration must end up deleted after the ${status} episode`,
+    );
+  }
+});
+
+test('drain retires the registration before removing the container', async (t) => {
+  const { f, clock } = await drainHarness(t);
+  f.config.drainTimeoutSeconds = 600;
+  const order = [];
+  let deletes = 0;
+  let manager;
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'start') manager.stop();
+    if (program === 'docker' && args[0] === 'wait')
+      return new Promise(() => {});
+    if (program === 'docker' && args[0] === 'top') return 'sh\n';
+    if (program === 'docker' && args[0] === 'rm') order.push('rm');
+    if (program === 'gh' && args.includes('DELETE')) {
+      deletes += 1;
+      if (deletes === 1) {
+        order.push('delete-gate');
+        // The gate is accepted; the registration stays listed (GitHub's
+        // listing lag), so cleanup's delete hits 404 and must be tolerated
+        // rather than failing the cycle after the container is already gone.
+        return '';
+      }
+      order.push('delete-cleanup');
+      const error = Object.assign(new Error('gh failed (exit 1, HTTP 404)'), {
+        status: 404,
+      });
+      return Promise.reject(error);
+    }
+    return f.command(program, args, options);
+  };
+  manager = createManager(f.config, {
+    command,
+    sleep: async (ms) => {
+      clock.now += ms;
+    },
+  });
+  await manager.start();
+  assert.ok(
+    order.indexOf('delete-gate') < order.indexOf('rm'),
+    'the registration must be retired before the container is removed',
+  );
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'rm').length,
+    1,
+    'the container must be removed exactly once',
+  );
+  assert.ok(
+    order.includes('delete-gate') && order.includes('delete-cleanup'),
+    'cleanup must retry the registration and tolerate its 404',
+  );
+});
+
+test('a rate-limited retirement backs off instead of polling every five seconds', async (t) => {
+  const { f, clock } = await drainHarness(t);
+  f.config.drainTimeoutSeconds = 600;
+  f.setRejectFirstDelete(429);
+  const deleteTimes = [];
+  let manager;
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'start') manager.stop();
+    if (program === 'docker' && args[0] === 'wait')
+      return new Promise(() => {});
+    if (program === 'docker' && args[0] === 'top') return '';
+    if (program === 'gh' && args.includes('DELETE'))
+      deleteTimes.push(clock.now);
+    return f.command(program, args, options);
+  };
+  manager = createManager(f.config, {
+    command,
+    sleep: async (ms) => {
+      clock.now += ms;
+    },
+  });
+  await manager.start();
+  assert.equal(deleteTimes.length, 2, 'the gate is retried after the refusal');
+  // The 429 pushes the next drain decision onto the rate-limit ladder
+  // (15-30 s), plus the fresh two-poll idle window, so it cannot come back at
+  // the five-second poll cadence.
+  const gap = deleteTimes[1] - deleteTimes[0];
+  assert.ok(
+    gap >= 20_000,
+    `a rate-limited retirement must back off, but retried after ${gap}ms`,
+  );
+});
+
+test('drain lets an assigned job exit before stopping the runner', async (t) => {
+  const { f, clock } = await drainHarness(t);
+  f.config.drainTimeoutSeconds = 600;
+  const jobEndsAt = clock.now + 120_000;
+  let releaseWait;
+  let manager;
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'start') manager.stop();
+    if (program === 'docker' && args[0] === 'wait')
+      return new Promise((resolveWait) => {
+        releaseWait = () => resolveWait('0\n');
+      });
+    if (program === 'docker' && args[0] === 'top')
+      return clock.now < jobEndsAt ? 'Runner.Worker\n' : '';
+    return f.command(program, args, options);
+  };
+  manager = createManager(f.config, {
+    command,
+    sleep: async (ms) => {
+      clock.now += ms;
+      if (clock.now >= jobEndsAt) releaseWait?.();
+    },
+  });
+  await manager.start();
+  assert.ok(
+    clock.now - 1_000_000 <= 125_000,
+    `drain stopped a running job early at ${clock.now - 1_000_000}ms`,
+  );
+  assert.equal(
+    f.calls.filter((c) => c.program === 'docker' && c.args[0] === 'rm').length,
+    1,
+  );
+});
+
+test('drain deadline stops a job that outlives the window', async (t) => {
+  const { f, clock } = await drainHarness(t);
+  f.config.drainTimeoutSeconds = 60;
+  f.config.shutdownGraceSeconds = 30;
+  const messages = [];
+  const previousLog = console.log;
+  console.log = (message) => messages.push(String(message));
+  t.after(() => {
+    console.log = previousLog;
+  });
+  let manager;
+  const command = (program, args, options) => {
+    if (program === 'docker' && args[0] === 'start') manager.stop();
+    if (program === 'docker' && args[0] === 'wait')
+      return new Promise(() => {});
+    if (program === 'docker' && args[0] === 'top') return 'Runner.Worker\n';
+    return f.command(program, args, options);
+  };
+  manager = createManager(f.config, {
+    command,
+    sleep: async (ms) => {
+      clock.now += ms;
+      if (clock.now > 1_300_000)
+        throw new Error('the drain window never expired');
+    },
+  });
+  await manager.start();
+  const elapsed = clock.now - 1_000_000;
+  assert.ok(
+    elapsed >= 90_000 && elapsed <= 95_000,
+    `drain deadline fired at ${elapsed}ms`,
+  );
+  assert.ok(
+    messages.some((message) => message.includes('drain window elapsed')),
+    'the forced stop must be visible in the journal',
+  );
+});
+
+test('the shipped unit allows the example drain window to finish', async () => {
+  const example = JSON.parse(
+    await readFile(new URL('./config.example.json', import.meta.url), 'utf8'),
+  );
+  const unit = await readFile(
+    new URL('./qwen-ephemeral-runner.service', import.meta.url),
+    'utf8',
+  );
+  const timeout = Number(unit.match(/^TimeoutStopSec=(\d+)$/m)?.[1]);
+  assert.ok(
+    Number.isFinite(timeout),
+    'the shipped unit must set a numeric TimeoutStopSec',
+  );
+  const budget = example.drainTimeoutSeconds + example.shutdownGraceSeconds;
+  assert.ok(
+    budget < timeout,
+    `drain + grace (${budget}s) must finish before TimeoutStopSec (${timeout}s)`,
+  );
+});
+
 test('a rate-limited runner deletion backs off on the 15-300 s ladder', async (t) => {
   const { f, clock } = await stallHarness(t);
   // A persisted slot makes the preflight cleanup the first and only failure:

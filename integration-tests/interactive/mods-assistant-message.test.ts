@@ -60,8 +60,7 @@ const text = (content: unknown): string =>
       ? content.map((part) => (part as { text?: string }).text ?? '').join('\n')
       : '';
 
-// Only Ink draws reply rows so far.
-describe.skipIf(renderer !== 'ink')('Reply rows in the Ink terminal', () => {
+describe(`Reply rows in the ${renderer} terminal`, () => {
   let server: FakeOpenAIServer | undefined;
   let session: InteractiveSession | undefined;
   let scratch: string | undefined;
@@ -76,7 +75,9 @@ describe.skipIf(renderer !== 'ink')('Reply rows in the Ink terminal', () => {
   });
 
   async function start(plugins: Record<string, string>) {
-    scratch = mkdtempSync(join(tmpdir(), 'qwen-mods-assistant-message-'));
+    scratch = mkdtempSync(
+      join(tmpdir(), `qwen-mods-assistant-message-${renderer}-`),
+    );
     const workspace = join(scratch, 'workspace');
     const qwenHome = join(scratch, 'home');
     const env = {
@@ -193,25 +194,28 @@ describe.skipIf(renderer !== 'ink')('Reply rows in the Ink terminal', () => {
         on('model.complete', ($, e) => ({ value: { isAnswered: true,
           text: e.prompt.toUpperCase(), usage: { input_tokens: 0, output_tokens: 0,
           cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } }));`,
+      // Marks each row with the session that drew it: s1, s2, ...
       'shout-rows': `
-        const sessionsByText = new Map();
-        let firstSession;
-        let sawOldRowInNewSession = false;
+        const sessions = [];
+        const rowsBySession = new Map();
         on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
           const session = await $.session.id();
-          firstSession ??= session;
-          const previous = sessionsByText.get(e.props.text);
-          if (previous && previous !== session) sawOldRowInNewSession = true;
-          sessionsByText.set(e.props.text, session);
+          if (!sessions.includes(session)) sessions.push(session);
+          const rows = rowsBySession.get(session) ?? [];
+          rows.push(e.props.text);
+          rowsBySession.set(session, rows);
           const r = await $.model.complete({ model: 'haiku', prompt: e.props.text });
           if (!r.isAnswered) return next(e);
           const text = r.text.includes('ANSWER 1')
             ? r.text + '\\n\\nExtra line A.\\n\\nExtra line B.'
             : r.text.split('\\n\\n')[0];
+          // The session after /clear draws only its own transcript.
           const afterClear = r.text.includes('ANSWER 3')
-            ? (session !== firstSession && !sawOldRowInNewSession ? ' Clean switch.' : ' Stale switch.')
+            ? (rows.every((row) => row.includes('Answer 3')) ? ' Clean switch.' : ' Stale switch.')
             : '';
-          return next({ ...e, props: { ...e.props, text: 'Shouted ${nonce}: ' + text + afterClear } });
+          const mark = 's' + (sessions.indexOf(session) + 1);
+          return next({ ...e, props: { ...e.props,
+            text: 'Shouted ${nonce} ' + mark + ': ' + text + afterClear } });
         });`,
     });
 
@@ -222,7 +226,7 @@ describe.skipIf(renderer !== 'ink')('Reply rows in the Ink terminal', () => {
       60_000,
     );
     const first = await terminal.screen();
-    expect(first).toContain(`Shouted ${nonce}: ANSWER 1 READS PLAINLY.`);
+    expect(first).toContain(`Shouted ${nonce} s1: ANSWER 1 READS PLAINLY.`);
     expect(first).toContain('ECHO 1');
     expect(first).not.toContain('Answer 1 reads plainly.');
 
@@ -231,7 +235,7 @@ describe.skipIf(renderer !== 'ink')('Reply rows in the Ink terminal', () => {
     await terminal.send(`Again ${nonce}`);
     await terminal.waitForScreen(
       (screen) =>
-        screen.includes(`Shouted ${nonce}: ANSWER 2 READS PLAINLY.`) &&
+        screen.includes(`Shouted ${nonce} s1: ANSWER 2 READS PLAINLY.`) &&
         !screen.includes('Second paragraph 2.'),
       'the second rewritten row',
       60_000,
@@ -240,13 +244,13 @@ describe.skipIf(renderer !== 'ink')('Reply rows in the Ink terminal', () => {
     const screen = await terminal.screen();
     const order = [
       `Look ${nonce}`,
-      `Shouted ${nonce}: ANSWER 1 READS PLAINLY.`,
+      `Shouted ${nonce} s1: ANSWER 1 READS PLAINLY.`,
       'SECOND PARAGRAPH 1.',
       'ECHO 1',
       'Extra line A.',
       'Extra line B.',
       `Again ${nonce}`,
-      `Shouted ${nonce}: ANSWER 2 READS PLAINLY.`,
+      `Shouted ${nonce} s1: ANSWER 2 READS PLAINLY.`,
     ];
     for (const line of order)
       expect(screen.split(line).length - 1, line).toBe(1);
@@ -260,6 +264,19 @@ describe.skipIf(renderer !== 'ink')('Reply rows in the Ink terminal', () => {
     expect(storedReplies().join('\n')).toContain('Answer 1 reads plainly.');
     expect(storedReplies().join('\n')).not.toContain('Shouted');
 
+    // The branch's transcript carries both replies, and each is drawn again
+    // for the branch's session even where the transcript switched first.
+    await terminal.idle(300, 20_000);
+    await terminal.send('/branch');
+    const branched = await terminal.waitForScreen(
+      (screen) =>
+        screen.includes(`Shouted ${nonce} s2: ANSWER 1 READS PLAINLY.`) &&
+        screen.includes(`Shouted ${nonce} s2: ANSWER 2 READS PLAINLY.`),
+      'the inherited rows drawn for the branch',
+      60_000,
+    );
+    expect(branched).not.toContain(`Shouted ${nonce} s1:`);
+
     await terminal.idle(300, 20_000);
     await terminal.send('/clear');
     await terminal.waitForScreen(
@@ -272,7 +289,8 @@ describe.skipIf(renderer !== 'ink')('Reply rows in the Ink terminal', () => {
     await terminal.idle(300, 20_000);
     await terminal.send(`After clear ${nonce}`);
     const afterClear = await terminal.waitForScreen(
-      (screen) => screen.includes(`Shouted ${nonce}: ANSWER 3 READS PLAINLY.`),
+      (screen) =>
+        screen.includes(`Shouted ${nonce} s3: ANSWER 3 READS PLAINLY.`),
       'the new session reply',
       60_000,
     );

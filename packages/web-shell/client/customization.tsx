@@ -28,6 +28,7 @@ import type { ACPToolCall } from './adapters/types';
 import type { WelcomeHeaderProps } from './components/WelcomeHeader';
 import type { WebShellTheme } from './themeContext';
 import type { ComposerPlaceholderState } from './utils/composerInputState';
+import type { WebShellModelPickerOptions } from './model-picker';
 
 export type MarkdownContentSource = 'assistant' | 'thinking';
 
@@ -716,6 +717,7 @@ export type LoadingPhrasesResolver = (
 ) => readonly string[] | undefined | null;
 
 export interface WebShellCustomization {
+  modelPicker?: WebShellModelPickerOptions;
   onRefreshModels?: Parameters<DaemonSessionActions['refreshModels']>[0];
   allowedApprovalModes?: readonly WebShellApprovalMode[];
   filterArtifact?: ArtifactFilter;

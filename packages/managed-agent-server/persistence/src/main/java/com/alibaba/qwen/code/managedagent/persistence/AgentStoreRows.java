@@ -40,14 +40,15 @@ final class AgentStoreRows {
                 throw new IllegalStateException("Session stream is unavailable.");
             }
             return readSession(result, new StreamCounters(result.getLong("list_last_sequence"),
-                    result.getLong("list_floor_sequence")));
+                    result.getLong("list_floor_sequence"), optionalLong(result, "list_last_activity")));
         };
         this.sessionListMapper = (result, row) ->
                         readSession(
                                 result,
                                 new StreamCounters(
                                         result.getLong("list_last_sequence"),
-                                        result.getLong("list_floor_sequence")));
+                                        result.getLong("list_floor_sequence"),
+                                        optionalLong(result, "list_last_activity")));
         this.turnSummaryMapper = (result, row) ->
                         new TurnSummary(
                                 result.getString("session_id"),
@@ -96,7 +97,7 @@ final class AgentStoreRows {
             "ACCEPTED", "RUNNING", "CANCELLING");
 
     static final String SESSION_WITH_STREAM =
-            "SELECT " + ManagedSchemaProjection.SESSION.columns("ma_session") + ", es.last_sequence AS list_last_sequence, es.replay_floor_sequence AS list_floor_sequence FROM ma_session LEFT JOIN ma_event_stream es ON es.tenant_id = ma_session.tenant_id AND es.session_id = ma_session.session_id AND es.stream_kind = 'SESSION' AND es.stream_id = X''";
+            "SELECT " + ManagedSchemaProjection.SESSION.columns("ma_session") + ", es.last_sequence AS list_last_sequence, es.replay_floor_sequence AS list_floor_sequence, es.gmt_modified AS list_last_activity FROM ma_session LEFT JOIN ma_event_stream es ON es.tenant_id = ma_session.tenant_id AND es.session_id = ma_session.session_id AND es.stream_kind = 'SESSION' AND es.stream_id = X''";
 
     final RowMapper<SessionRecord> sessionMapper;
 
@@ -123,17 +124,24 @@ final class AgentStoreRows {
                 result.getString("approval_mode"),
                 result.getString("tool_profile"),
                 result.getString("agent_definition_digest"), result.getInt("public_child_agents_version"),
-                result.getString("model_config_digest"), result.getString("memory_store_id"), result.getBoolean("owner_only"));
+                result.getString("model_config_digest"), result.getString("memory_store_id"), result.getBoolean("owner_only"),
+                result.getString("preview"), counters.lastActivity());
+    }
+
+    private static Long optionalLong(java.sql.ResultSet result, String column)
+            throws java.sql.SQLException {
+        java.sql.ResultSetMetaData meta = result.getMetaData();
+        for (int index = 1; index <= meta.getColumnCount(); index++) {
+            if (meta.getColumnLabel(index).equalsIgnoreCase(column)) {
+                return nullableLong(result, column);
+            }
+        }
+        return null;
     }
 
     final RowMapper<TurnSummary> turnSummaryMapper;
 
     final RowMapper<TurnRecord> turnMapper;
-
-    static String renameTarget(String tenant, String session) {
-        return com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(
-                "SESSION", tenant, session);
-    }
 
     static final String SESSION_OPERATION_KINDS =
             "('CLOSE', 'ARCHIVE', 'DELETE', 'ACTION_RESPONSE', 'CWD_CHANGE', 'TASK_CANCEL', 'CONTEXT_COMPRESSION')";
@@ -214,11 +222,12 @@ final class AgentStoreRows {
                         // H2 can retain pre-wait outer-join values after locking the Session.
                         // Read its stream only after acquiring that lock.
                         List<StreamCounters> streams = jdbc.query(
-                                "SELECT last_sequence, replay_floor_sequence FROM ma_event_stream"
+                                "SELECT last_sequence, replay_floor_sequence, gmt_modified FROM ma_event_stream"
                                         + " WHERE tenant_id = ? AND session_id = ? AND stream_kind ="
                                         + " 'SESSION' AND stream_id = X'' FOR UPDATE",
                                 (stream, index) -> new StreamCounters(stream.getLong("last_sequence"),
-                                        stream.getLong("replay_floor_sequence")),
+                                        stream.getLong("replay_floor_sequence"),
+                                        nullableLong(stream, "gmt_modified")),
                                 tenantId, sessionId);
                         if (streams.isEmpty()) {
                             throw new IllegalStateException("Session stream is unavailable.");
@@ -354,7 +363,7 @@ final class AgentStoreRows {
                 .replace("-", "");
     }
 
-    record StreamCounters(long lastSequence, long floorSequence) {}
+    record StreamCounters(long lastSequence, long floorSequence, Long lastActivity) {}
 
     static String placeholders(int count) {
         return String.join(", ", Collections.nCopies(count, "?"));
