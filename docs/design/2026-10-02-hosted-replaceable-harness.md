@@ -242,11 +242,23 @@ public-child Session persisted under the shell topology now served by a
 Harness without public child agents, or a saved approval continuation
 whose public-child profile no longer matches the active topology.
 Unlike the journal-state declines no settlement route can pay on this
-Harness, so the connector raises the typed decline for it locally and
-the coordinator abandons the recovery on the first drive — cancellation
-included — settling the Turn FAILED as `managed_runtime_recovery_blocked`
-without the reconcile/park detour, which removes it from both recovery
-sweeps permanently.
+Harness, so the coordinator abandons the recovery on the first drive —
+cancellation included — settling the Turn FAILED as
+`managed_runtime_recovery_blocked` without the reconcile/park detour,
+which removes it from both recovery sweeps permanently. The recorded
+message follows what was established: a Session with a bound harness boot
+reports the abandoned park, while a boot-less Session — driven through
+`createOrLoad`, where nothing was parked and nothing was replayed — reports
+the Turn settled without dispatch.
+
+The verdict reaches the coordinator by two routes. The connector raises it
+locally from its capability probe, and the daemon answers the same typed
+decline on the wire when the saved continuation's own profile is what
+mismatches — a shape the probe never sees. Every connector entry point that
+drives a load therefore maps the `hosted_turn_recovery_declined` body code
+onto the typed exception, the plain open/load route included. The mapping
+keys on the code, never the 409 status alone: a bare 409 still means "the
+Harness already holds the Session" for the attachment fallbacks.
 
 Like `checkpoint_blocked`, this reason fires only on positive durable
 evidence: the connector's admission-shaped capability probe folds an

@@ -339,7 +339,7 @@ public class HarnessCoordinator {
                     .REASON_PUBLIC_CHILD_UNSUPPORTED.equals(
                             error.getReason())) {
                 terminal = abandonUnsupportedRecovery(claimed, leaseLost,
-                        error);
+                        recoveryPath.get(), error);
             } else if ("await_action".equals(error.getReason())) {
                 // An approval wait is not a durable verdict: the decision
                 // is still deliverable through the attached Session, so
@@ -1566,6 +1566,7 @@ public class HarnessCoordinator {
     // re-offers it.
     private boolean abandonUnsupportedRecovery(TurnRecord turn,
             AtomicBoolean leaseLost,
+            boolean recoveryPath,
             HostedHarnessRecoveryDeclinedException error) {
         requireLease(leaseLost);
         // The durable verdict is already decided, so only the terminal
@@ -1573,11 +1574,18 @@ public class HarnessCoordinator {
         // terminal back: the next process drops the attachment anyway,
         // and the terminal row keeps every sweep from re-offering the
         // Turn meanwhile.
+        // The wording follows what was actually established: a boot-less
+        // Session drives createOrLoad, where nothing was parked and the
+        // Turn may never have been submitted. Claiming an abandoned park
+        // there sends an on-call engineer after a row that never existed.
         store.failTurn(turn.tenantId(), turn.sessionId(), turn.turnId(),
                 owner, "managed_runtime_recovery_blocked",
                 "The Hosted Harness can no longer open this Session's"
-                        + " public child topology; the parked Turn was"
-                        + " abandoned without replay.");
+                        + " public child topology; "
+                        + (recoveryPath
+                                ? "the parked Turn was abandoned without"
+                                        + " replay."
+                                : "the Turn was settled without dispatch."));
         try {
             harness.discardManagedRecovery(turn.tenantId(), turn.sessionId());
         } catch (RuntimeException unavailable) {

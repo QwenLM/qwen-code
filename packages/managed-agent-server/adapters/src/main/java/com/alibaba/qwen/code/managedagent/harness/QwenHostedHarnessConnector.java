@@ -472,10 +472,31 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         try {
             return doCreateOrLoad(tenantId, sessionId, loadExisting,
                     passiveManagedRuntimeRecovery, false);
+        } catch (DaemonHttpException error) {
+            // The daemon decides this decline from the saved continuation's
+            // own profile, which the capability probe above cannot see, so
+            // the open/load route needs the same code-keyed mapping the
+            // recovery loads carry. Keyed on the code, not the status: a
+            // bare 409 still means "the Harness already holds the Session"
+            // for the attachment fallbacks.
+            throw recoveryDecline(error);
         } catch (HostedHarnessGenerationException error) {
             adoptGeneration(error);
             throw error;
         }
+    }
+
+    // The one translation of the daemon's terminal decline: a takeover
+    // refusal that can never change under retry is terminal, not retriable.
+    // Every other failure keeps its own classification.
+    private static RuntimeException recoveryDecline(DaemonHttpException error) {
+        if (error.getStatusCode() == 409
+                && HostedHarnessRecoveryDeclinedException.CODE.equals(
+                        error.getErrorCode())) {
+            return new HostedHarnessRecoveryDeclinedException(
+                    error.getBodyField("reason"));
+        }
+        return error;
     }
 
     private Attachment doCreateOrLoad(String tenantId, String sessionId,
@@ -1848,15 +1869,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             return doRecoverManagedRuntime(tenantId, sessionId,
                     cancellation);
         } catch (DaemonHttpException error) {
-            // The one place a daemon error code is read: a takeover refusal
-            // that can never change under retry is terminal, not retriable.
-            if (error.getStatusCode() == 409
-                    && HostedHarnessRecoveryDeclinedException.CODE.equals(
-                            error.getErrorCode())) {
-                throw new HostedHarnessRecoveryDeclinedException(
-                        error.getBodyField("reason"));
-            }
-            throw error;
+            throw recoveryDecline(error);
         } catch (HostedHarnessGenerationException error) {
             adoptGeneration(error);
             throw error;
@@ -1881,14 +1894,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         try {
             return doRecoverManagedCancellation(tenantId, sessionId, promptId);
         } catch (DaemonHttpException error) {
-            // The same takeover-refusal mapping as recoverManagedRuntime.
-            if (error.getStatusCode() == 409
-                    && HostedHarnessRecoveryDeclinedException.CODE.equals(
-                            error.getErrorCode())) {
-                throw new HostedHarnessRecoveryDeclinedException(
-                        error.getBodyField("reason"));
-            }
-            throw error;
+            throw recoveryDecline(error);
         } catch (HostedHarnessGenerationException error) {
             adoptGeneration(error);
             throw error;
@@ -1921,11 +1927,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         try {
             return loadCancellationTakeover(session, promptId);
         } catch (DaemonHttpException error) {
-            if (error.getStatusCode() == 409
-                    && HostedHarnessRecoveryDeclinedException.CODE.equals(error.getErrorCode())) {
-                throw new HostedHarnessRecoveryDeclinedException(error.getBodyField("reason"));
-            }
-            throw error;
+            throw recoveryDecline(error);
         } catch (HostedHarnessGenerationException error) {
             adoptGeneration(error);
             throw error;
