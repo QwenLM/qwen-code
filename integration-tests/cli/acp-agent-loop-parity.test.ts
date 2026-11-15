@@ -30,7 +30,6 @@ import {
   CONTAINER_SANDBOX_NO_PROXY,
   fakeServerHostOptions,
   IS_CONTAINER_SANDBOX,
-  readDebugLogs,
   TestRig,
 } from '../test-helper.js';
 import {
@@ -41,6 +40,7 @@ import {
 } from '../fake-openai-server.js';
 import { ACP_HOME_PREFIX, removeScratchDir } from '../scratch-dir.js';
 import { approveProjectHooks } from '../project-hook-approval.js';
+import { readSettledDebugLog } from './settled-debug-log.js';
 
 // The agent trusts a client that presents the capability it was started with.
 const PRIVATE_ACP_CAPABILITY_ENV = 'QWEN_CODE_PRIVATE_ACP_CAPABILITY';
@@ -134,38 +134,6 @@ function countKernelRounds(debugLog: string): number {
       /\[EVENT_BUS\][^\n]* runAgentLoopOnBus started \S+ \(prompt ([^)]+)\)/g,
     ),
   ).filter(([, promptId]) => promptIds.has(promptId)).length;
-}
-
-/** The debug logs a run wrote under its runtime directory. */
-function readDebugLog(runtimeDir: string): string {
-  return readDebugLogs(runtimeDir);
-}
-
-/** How long the debug log must stop growing before its writes have landed. */
-const DEBUG_LOG_QUIET_MS = 250;
-
-/**
- * The CLI runs ACP behind a relaunch supervisor, so the process this test
- * signals is not the agent: the supervised child sees its input close and
- * spends its shutdown writing the debug log. Its lines are appended
- * fire-and-forget, and a round's marker can still be in flight when the
- * supervisor exits. Read the log once it has stopped growing.
- */
-async function readSettledDebugLog(runtimeDir: string): Promise<string> {
-  const deadline = Date.now() + 5_000;
-  let quietSince = Date.now();
-  let log = readDebugLog(runtimeDir);
-  while (Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    const next = readDebugLog(runtimeDir);
-    if (next !== log) {
-      log = next;
-      quietSince = Date.now();
-    } else if (Date.now() - quietSince >= DEBUG_LOG_QUIET_MS) {
-      break;
-    }
-  }
-  return log;
 }
 
 // A Goal's id and the record ids it cites are random in each run.
@@ -590,7 +558,7 @@ const allowOnce = () => ({
         ) {
           await new Promise((resolve) => setTimeout(resolve, 50));
         }
-        // Every round has logged its marker; let those writes land first.
+        // Sample before the kill below: a killed process drops queued appends.
         debugLog = await readSettledDebugLog(qwenHome);
       } finally {
         agent.kill();
