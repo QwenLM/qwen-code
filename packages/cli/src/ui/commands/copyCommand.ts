@@ -367,14 +367,19 @@ export const copyCommand: SlashCommand = {
   action: async (context, args): Promise<SlashCommandActionReturn | void> => {
     const chat = await context.services.config?.getLlmClient()?.getChat();
     const history = chat?.getHistoryShallow();
-    // A tool-call-only model turn shows no reply on screen, so it must not
-    // shift the N in `/copy N`.
+    // A tool-call-only or thinking-only model turn shows no reply on screen,
+    // so it must not shift the N in `/copy N`; counting the extracted text
+    // keeps the counted set and the copyable set the same.
     const aiMessages =
-      history?.filter(
-        (item) =>
-          item.role === 'model' &&
-          item.parts?.some((part) => part.text && !part.thought),
-      ) ?? [];
+      history
+        ?.filter((item) => item.role === 'model')
+        .map((item) =>
+          (item.parts ?? [])
+            .filter((part) => part.text && !part.thought)
+            .map((part) => part.text)
+            .join(''),
+        )
+        .filter((text) => text.length > 0) ?? [];
 
     if (aiMessages.length === 0) {
       return {
@@ -386,7 +391,7 @@ export const copyCommand: SlashCommand = {
 
     const { messageIndex, subArgs } = parseLeadingMessageIndex(args);
 
-    let selectedAiMessage;
+    let aiOutput;
     if (messageIndex !== null) {
       if (messageIndex < 1) {
         return {
@@ -405,92 +410,75 @@ export const copyCommand: SlashCommand = {
           content: `Only ${aiMessages.length} ${turnLabel} in this session.`,
         };
       }
-      selectedAiMessage = aiMessages[aiMessages.length - messageIndex];
+      aiOutput = aiMessages[aiMessages.length - messageIndex];
     } else {
-      selectedAiMessage = aiMessages[aiMessages.length - 1];
+      aiOutput = aiMessages[aiMessages.length - 1];
     }
 
     const isIndexed = messageIndex !== null && messageIndex > 1;
     const sourceLabel = isIndexed
       ? `AI message ${messageIndex}`
       : 'the last AI output';
-    const sourceLabelCapitalized = isIndexed
-      ? `AI message ${messageIndex}`
-      : 'Last AI output';
 
-    // Extract text from the parts
-    const aiOutput = selectedAiMessage.parts
-      ?.filter((part) => part.text && !part.thought)
-      .map((part) => part.text)
-      .join('');
-
-    if (aiOutput) {
-      try {
-        const selectedLatexBlock = selectLatexBlock(aiOutput, subArgs);
-        if (selectedLatexBlock === null) {
-          return {
-            type: 'message',
-            messageType: 'info',
-            content:
-              subArgs
-                .trim()
-                .split(/\s+/)
-                .some((token) => token === 'inline') ||
-              subArgs.trim().toLowerCase().startsWith('inline-latex')
-                ? `No matching inline LaTeX expression found in ${sourceLabel}.`
-                : `No matching LaTeX block found in ${sourceLabel}.`,
-          };
-        }
-        if (selectedLatexBlock !== undefined) {
-          const copiedLatex =
-            'expression' in selectedLatexBlock
-              ? selectedLatexBlock.expression.content
-              : selectedLatexBlock.block.content;
-          await copyToClipboard(copiedLatex);
-
-          return {
-            type: 'message',
-            messageType: 'info',
-            content: `${selectedLatexBlock.label} copied to the clipboard`,
-          };
-        }
-
-        const selectedCodeBlock = selectCodeBlock(aiOutput, subArgs);
-        if (selectedCodeBlock === null) {
-          return {
-            type: 'message',
-            messageType: 'info',
-            content: `No matching code block found in ${sourceLabel}.`,
-          };
-        }
-
-        const copiedText = selectedCodeBlock?.block.content ?? aiOutput;
-        await copyToClipboard(copiedText);
+    try {
+      const selectedLatexBlock = selectLatexBlock(aiOutput, subArgs);
+      if (selectedLatexBlock === null) {
+        return {
+          type: 'message',
+          messageType: 'info',
+          content:
+            subArgs
+              .trim()
+              .split(/\s+/)
+              .some((token) => token === 'inline') ||
+            subArgs.trim().toLowerCase().startsWith('inline-latex')
+              ? `No matching inline LaTeX expression found in ${sourceLabel}.`
+              : `No matching LaTeX block found in ${sourceLabel}.`,
+        };
+      }
+      if (selectedLatexBlock !== undefined) {
+        const copiedLatex =
+          'expression' in selectedLatexBlock
+            ? selectedLatexBlock.expression.content
+            : selectedLatexBlock.block.content;
+        await copyToClipboard(copiedLatex);
 
         return {
           type: 'message',
           messageType: 'info',
-          content: selectedCodeBlock
-            ? `${selectedCodeBlock.label} copied to the clipboard`
-            : isIndexed
-              ? `AI message ${messageIndex} copied to the clipboard`
-              : 'Last output copied to the clipboard',
-        };
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        context.services.config?.getDebugLogger().debug(message);
-
-        return {
-          type: 'message',
-          messageType: 'error',
-          content: `Failed to copy to the clipboard. ${message}`,
+          content: `${selectedLatexBlock.label} copied to the clipboard`,
         };
       }
-    } else {
+
+      const selectedCodeBlock = selectCodeBlock(aiOutput, subArgs);
+      if (selectedCodeBlock === null) {
+        return {
+          type: 'message',
+          messageType: 'info',
+          content: `No matching code block found in ${sourceLabel}.`,
+        };
+      }
+
+      const copiedText = selectedCodeBlock?.block.content ?? aiOutput;
+      await copyToClipboard(copiedText);
+
       return {
         type: 'message',
         messageType: 'info',
-        content: `${sourceLabelCapitalized} contains no text to copy.`,
+        content: selectedCodeBlock
+          ? `${selectedCodeBlock.label} copied to the clipboard`
+          : isIndexed
+            ? `AI message ${messageIndex} copied to the clipboard`
+            : 'Last output copied to the clipboard',
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      context.services.config?.getDebugLogger().debug(message);
+
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: `Failed to copy to the clipboard. ${message}`,
       };
     }
   },

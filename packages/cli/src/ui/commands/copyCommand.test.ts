@@ -1011,6 +1011,75 @@ math then literal: $x^2\$$`,
     expect(mockCopyToClipboard).not.toHaveBeenCalled();
   });
 
+  it('should count a model turn with preamble text and a tool call', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    const history = [
+      { role: 'model', parts: [{ text: 'older reply' }] },
+      { role: 'user', parts: [{ text: 'question' }] },
+      {
+        role: 'model',
+        parts: [
+          { text: 'Let me check.' },
+          { functionCall: { name: 'glob', args: { pattern: '*' } } },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [{ functionResponse: { name: 'glob', response: {} } }],
+      },
+      { role: 'model', parts: [{ text: 'final reply' }] },
+    ];
+
+    mockGetHistoryShallow.mockReturnValue(history);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    expect(await copyCommand.action(mockContext, '2')).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'AI message 2 copied to the clipboard',
+    });
+    expect(mockCopyToClipboard).toHaveBeenLastCalledWith('Let me check.');
+
+    expect(await copyCommand.action(mockContext, '3')).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'AI message 3 copied to the clipboard',
+    });
+    expect(mockCopyToClipboard).toHaveBeenLastCalledWith('older reply');
+
+    expect(await copyCommand.action(mockContext, '4')).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Only 3 AI messages in this session.',
+    });
+  });
+
+  it('should copy the last reply with text when the newest turn only called a tool', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    // e.g. the turn was interrupted after the tool call, before any reply.
+    const history = [
+      { role: 'user', parts: [{ text: 'question' }] },
+      { role: 'model', parts: [{ text: 'earlier reply' }] },
+      { role: 'user', parts: [{ text: 'follow-up' }] },
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'glob', args: { pattern: '*' } } }],
+      },
+    ];
+
+    mockGetHistoryShallow.mockReturnValue(history);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    expect(await copyCommand.action(mockContext, '')).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Last output copied to the clipboard',
+    });
+    expect(mockCopyToClipboard).toHaveBeenLastCalledWith('earlier reply');
+  });
+
   it('should label the error with AI message N when /copy N <selector> misses', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
 
