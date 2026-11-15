@@ -141,6 +141,33 @@ function readDebugLog(runtimeDir: string): string {
   return readDebugLogs(runtimeDir);
 }
 
+/** How long the debug log must stop growing before its writes have landed. */
+const DEBUG_LOG_QUIET_MS = 250;
+
+/**
+ * The CLI runs ACP behind a relaunch supervisor, so the process this test
+ * signals is not the agent: the supervised child sees its input close and
+ * spends its shutdown writing the debug log. Its lines are appended
+ * fire-and-forget, and a round's marker can still be in flight when the
+ * supervisor exits. Read the log once it has stopped growing.
+ */
+async function readSettledDebugLog(runtimeDir: string): Promise<string> {
+  const deadline = Date.now() + 5_000;
+  let quietSince = Date.now();
+  let log = readDebugLog(runtimeDir);
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const next = readDebugLog(runtimeDir);
+    if (next !== log) {
+      log = next;
+      quietSince = Date.now();
+    } else if (Date.now() - quietSince >= DEBUG_LOG_QUIET_MS) {
+      break;
+    }
+  }
+  return log;
+}
+
 // A Goal's id and the record ids it cites are random in each run.
 const RANDOM_ID =
   /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
@@ -563,13 +590,14 @@ const allowOnce = () => ({
         ) {
           await new Promise((resolve) => setTimeout(resolve, 50));
         }
+        // Every round has logged its marker; let those writes land first.
+        debugLog = await readSettledDebugLog(qwenHome);
       } finally {
         agent.kill();
         await new Promise((resolve) => {
           if (agent.exitCode !== null || agent.signalCode) resolve(undefined);
           else agent.once('exit', resolve);
         });
-        debugLog = readDebugLog(qwenHome);
         // Keep the runtime state for post-mortem whenever TestRig.cleanup()
         // keeps the test directory, which it decides by truthiness.
         if (!process.env['KEEP_OUTPUT']) {
