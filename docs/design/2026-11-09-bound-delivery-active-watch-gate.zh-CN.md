@@ -251,7 +251,8 @@ watch 能在下一轮投递该评论；第二轮跳过并推进。两种情形�
 - **D5 — opt-in。** `requireBoundWatch` 默认关闭；既有部署行为字节级不变。
   要求 `deliverToBoundSessions`。
 - **D6 — 轮询集合不变。** 不合格绑定保留 watch 基线与终态观察；事件在 drain
-  退役。成本受 `prWatchLimit` 约束；优化轮询集合是后续工作。
+  退役。成本受该 pass 的内建预算约束——`prWatchLimit` 已弃用且被忽略；
+  优化轮询集合是后续工作。
 - **D7 — 退役要呈现，且点名门。** 每条新退役路径都写既有的 stderr 行 +
   channel-event 日志行（带 reason 的 skip/retire），被门控掉的事件绝不静默。
   凡排除来自 `watchGateExcludes`——两种模式的 dispatch 退役、评论监视跳过、
@@ -285,9 +286,10 @@ watch 能在下一轮投递该评论；第二轮跳过并推进。两种情形�
   （10s 超时）+ cron 文件读取，verify-pr watch 需要建键时再加一次
   `git remote get-url origin`。与 Web Shell watches 页面按需使用的机制相同。
   绑定扫描还有第二个消费者 `runPrWatchObservationTick`，每 5 分钟 tick 付出
-  同样的每 workspace 成本却不读 `watching`；它已不再惰性：该常量在 #17214 中移除、启用即 deps 存在性，因此只要
-  `serve.sessionPrWatch` 订阅了事件，该 tick 就会跑。这里要求的守卫改由实测
-  回答——[配置与渠道迁移](2026-11-14-daemon-pr-watch-config-migration.zh-CN.md)
+  同样的每 workspace 成本却不读 `watching`；它已不再惰性。该常量在 #17214 中
+  移除、启用即 deps 存在性，因此只要生效的订阅带有事件，该 tick 就会跑：订阅取
+  `serve.sessionPrWatch`、其环境变量覆盖，两者都未配置时取弃用的 per-host
+  channel 别名。这里要求的守卫改由实测回答——[配置与渠道迁移](2026-11-14-daemon-pr-watch-config-migration.zh-CN.md)
   §9 实测整次扫描后定案保留三次扫描。
 - **partial 快照下 `watching` 陈旧。** 保留行上次盖上的 `watching` 是陈旧
   证据——能刷新它的那次扫描读不到该会话的 sidecar——因此保留时**剥掉**该

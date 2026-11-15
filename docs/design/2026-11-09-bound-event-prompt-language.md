@@ -22,14 +22,14 @@ language, but the product-authored event text itself does not follow the UI.
 
 ## Current state
 
-| Surface                                                                         | Location                                                                                                                                                      | Language today                                  |
-| ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
-| Envelope prose (header, notices, workflow sentence, truncation marker)          | `packages/channels/base/src/bound-session-prompt.ts`, `buildBoundEventPrompt`                                                                                 | hardcoded English                               |
-| Built-in role guidance                                                          | same file, `DEFAULT_BOUND_ROLE_GUIDANCE`                                                                                                                      | hardcoded English                               |
-| Provenance, instruction source, aggregate-comment header                        | `packages/channels/github/src/GithubAdapter.ts`, `buildBoundSessionPrompt`                                                                                    | hardcoded English                               |
-| Watch summaries (`head_change`, `ci_failure`, `merge_conflict`, `state_change`) | same file, `watchOnePr`                                                                                                                                       | hardcoded English                               |
-| Daemon drain prompt                                                             | `packages/cli/src/serve/server/pr-watch-drain.ts`, `buildDrainPrompt`                                                                                         | hardcoded English; producer inert in production |
-| Locale wiring                                                                   | `packages/cli/src/commands/channel/daemon-worker.ts` and `start.ts` → `resolveChannelLocale(settings.merged.general?.language)` → `ChannelBaseOptions.locale` | exists, unused by `GithubAdapter`               |
+| Surface                                                                         | Location                                                                                                                                                      | Language today                           |
+| ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| Envelope prose (header, notices, workflow sentence, truncation marker)          | `packages/channels/base/src/bound-session-prompt.ts`, `buildBoundEventPrompt`                                                                                 | hardcoded English                        |
+| Built-in role guidance                                                          | same file, `DEFAULT_BOUND_ROLE_GUIDANCE`                                                                                                                      | hardcoded English                        |
+| Provenance, instruction source, aggregate-comment header                        | `packages/channels/github/src/GithubAdapter.ts`, `buildBoundSessionPrompt`                                                                                    | hardcoded English                        |
+| Watch summaries (`head_change`, `ci_failure`, `merge_conflict`, `state_change`) | same file, `watchOnePr`                                                                                                                                       | hardcoded English                        |
+| Daemon drain prompt                                                             | `packages/cli/src/serve/server/pr-watch-drain.ts`, `buildDrainPrompt`                                                                                         | hardcoded English; language not threaded |
+| Locale wiring                                                                   | `packages/cli/src/commands/channel/daemon-worker.ts` and `start.ts` → `resolveChannelLocale(settings.merged.general?.language)` → `ChannelBaseOptions.locale` | exists, unused by `GithubAdapter`        |
 
 Constraints established by the existing contracts
 (`2026-11-02-github-channel-bound-session-events.md`,
@@ -47,12 +47,14 @@ Constraints established by the existing contracts
   64 code points; the header and the trusted label must stay within that window
   so a copy at the start of untrusted text loses its brackets.
 
-The daemon PR-state watch (observation + drain) is live whenever
-`serve.sessionPrWatch` subscribes an event: enablement is deps presence, and
+The daemon PR-state watch (observation + drain) is live whenever the
+effective PR-watch subscription has an event: `serve.sessionPrWatch` (or its
+`QWEN_SESSION_PR_WATCH_EVENTS` override), or, when neither is configured, the
+deprecated per-host channel alias. Enablement is deps presence, and
 `run-qwen-serve.ts` populates `getPrWatchDeps` / `getPrDrainDeps` from that
 subscription. The internal constant that gated it off was removed in #17214.
-The channel no longer detects PR state, so alongside the channel's comment lane
-the daemon is now a producer of bound event prompts too.
+The channel no longer detects PR state, so alongside the channel's comment
+lane the daemon is now a producer of bound event prompts too.
 
 ## Goals
 
@@ -88,9 +90,9 @@ the daemon is now a producer of bound event prompts too.
   every other consumer of that locale — it does not follow the OS locale.
 - **The public channel lane is unchanged**: publication instructions, trigger
   guidance, and channel-owned session prompts keep their current text.
-- **The daemon drain producer stays English**: it is inert pre-enablement;
-  threading a language through its deps belongs to its enablement increment.
-  It is unchanged by this change.
+- **The daemon drain producer stays English**: its language is not threaded
+  yet (decision 7), not because the producer is inert — it runs once the
+  effective subscription has an event. It is unchanged by this change.
 - **No live language switching**: the locale is read at channel worker startup,
   exactly like the existing permission-copy locale. Changing `general.language`
   takes effect on the next channel start. Watch summaries are rendered at

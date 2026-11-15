@@ -20,14 +20,14 @@
 
 ## 现状
 
-| 表面                                                                        | 位置                                                                                                                                                         | 今天的语言                       |
-| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------- |
-| 信封措辞（头部、告示、工作流句、截断标记）                                  | `packages/channels/base/src/bound-session-prompt.ts`，`buildBoundEventPrompt`                                                                                | 硬编码英文                       |
-| 内置角色指引                                                                | 同文件，`DEFAULT_BOUND_ROLE_GUIDANCE`                                                                                                                        | 硬编码英文                       |
-| 来源说明、指令来源、聚合评论头部                                            | `packages/channels/github/src/GithubAdapter.ts`，`buildBoundSessionPrompt`                                                                                   | 硬编码英文                       |
-| watch 摘要（`head_change`、`ci_failure`、`merge_conflict`、`state_change`） | 同文件，`watchOnePr`                                                                                                                                         | 硬编码英文                       |
-| daemon drain 提示词                                                         | `packages/cli/src/serve/server/pr-watch-drain.ts`，`buildDrainPrompt`                                                                                        | 硬编码英文；该生产方在生产中惰性 |
-| locale 接线                                                                 | `packages/cli/src/commands/channel/daemon-worker.ts` 与 `start.ts` → `resolveChannelLocale(settings.merged.general?.language)` → `ChannelBaseOptions.locale` | 已存在，`GithubAdapter` 未使用   |
+| 表面                                                                        | 位置                                                                                                                                                         | 今天的语言                     |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------ |
+| 信封措辞（头部、告示、工作流句、截断标记）                                  | `packages/channels/base/src/bound-session-prompt.ts`，`buildBoundEventPrompt`                                                                                | 硬编码英文                     |
+| 内置角色指引                                                                | 同文件，`DEFAULT_BOUND_ROLE_GUIDANCE`                                                                                                                        | 硬编码英文                     |
+| 来源说明、指令来源、聚合评论头部                                            | `packages/channels/github/src/GithubAdapter.ts`，`buildBoundSessionPrompt`                                                                                   | 硬编码英文                     |
+| watch 摘要（`head_change`、`ci_failure`、`merge_conflict`、`state_change`） | 同文件，`watchOnePr`                                                                                                                                         | 硬编码英文                     |
+| daemon drain 提示词                                                         | `packages/cli/src/serve/server/pr-watch-drain.ts`，`buildDrainPrompt`                                                                                        | 硬编码英文；语言尚未穿线       |
+| locale 接线                                                                 | `packages/cli/src/commands/channel/daemon-worker.ts` 与 `start.ts` → `resolveChannelLocale(settings.merged.general?.language)` → `ChannelBaseOptions.locale` | 已存在，`GithubAdapter` 未使用 |
 
 既有契约（`2026-11-02-github-channel-bound-session-events.md`、
 `2026-11-04-github-channel-bound-session-action-templates.md`、
@@ -40,8 +40,10 @@
 - `sanitizePromptText` 会剥掉内容不超过 64 码点的行首 `[tag]`；头部与
   trusted 标签必须保持在该窗口内，使不可信文本开头的副本失去方括号。
 
-只要 `serve.sessionPrWatch` 订阅了事件，daemon PR-state watch（观测 + drain）
-就是活跃的：启用即 deps 存在性，`run-qwen-serve.ts` 依该订阅填充
+只要生效的 PR-watch 订阅带有事件，daemon PR-state watch（观测 + drain）就是
+活跃的：该订阅取 `serve.sessionPrWatch`（或其 `QWEN_SESSION_PR_WATCH_EVENTS`
+覆盖），两者都未配置时取弃用的 per-host channel 别名。启用即 deps 存在性，
+`run-qwen-serve.ts` 依该订阅填充
 `getPrWatchDeps` / `getPrDrainDeps`。当初把它关掉的内部常量已在 #17214 中移除。
 channel 不再检测 PR 状态，因此除 channel 的评论车道外，daemon 现在也是绑定事件
 提示词的生产方。
@@ -75,8 +77,8 @@ channel 不再检测 PR 状态，因此除 channel 的评论车道外，daemon �
   操作系统 locale。
 - **公开 channel 通道不变**：发布指令、trigger 指引、channel 自有会话的
   提示词保持现有文本。
-- **daemon drain 生产方保持英文**：它在启用前是惰性的；把语言穿过它的
-  deps 属于其启用增量。本次改动不涉及它。
+- **daemon drain 生产方保持英文**：它的语言尚未穿线（决策 7），而不是因为
+  生产方惰性——生效的订阅带有事件时它就会跑。本次改动不涉及它。
 - **不做运行时语言切换**：locale 在 channel worker 启动时读取，与既有
   权限文案 locale 完全一致。修改 `general.language` 在下次 channel 启动
   时生效。watch 摘要在检测时渲染并持久化在 pending 信封里，因此 pending
