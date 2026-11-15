@@ -13,24 +13,43 @@ import { createWorkspaceRuntimeSessionService } from '../serve/workspace-runtime
 
 export function setupManagedWorktreeFixture() {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'managed-git-cwd-'));
-  const runtimeBase = fs.mkdtempSync(
-    path.join(os.tmpdir(), 'managed-git-runtime-'),
-  );
-  execFileSync('git', ['init', '-q'], { cwd: repo });
-  execFileSync('git', ['config', 'user.email', 'test@example.com'], {
-    cwd: repo,
-  });
-  execFileSync('git', ['config', 'user.name', 'Test'], { cwd: repo });
-  execFileSync('git', ['config', 'commit.gpgsign', 'false'], { cwd: repo });
-  execFileSync(
-    'git',
-    ['config', 'core.hooksPath', path.join(runtimeBase, 'empty-hooks')],
-    { cwd: repo },
-  );
-  fs.writeFileSync(path.join(repo, 'base.txt'), 'base\n');
-  execFileSync('git', ['add', '.'], { cwd: repo });
-  execFileSync('git', ['commit', '-q', '-m', 'base'], { cwd: repo });
-  return { repo, runtimeBase };
+  let runtimeBase: string | undefined;
+  try {
+    runtimeBase = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'managed-git-runtime-'),
+    );
+    execFileSync('git', ['init', '-q'], { cwd: repo });
+    execFileSync('git', ['config', 'user.email', 'test@example.com'], {
+      cwd: repo,
+    });
+    execFileSync('git', ['config', 'user.name', 'Test'], { cwd: repo });
+    execFileSync('git', ['config', 'commit.gpgsign', 'false'], { cwd: repo });
+    execFileSync(
+      'git',
+      ['config', 'core.hooksPath', path.join(runtimeBase, 'empty-hooks')],
+      { cwd: repo },
+    );
+    fs.writeFileSync(path.join(repo, 'base.txt'), 'base\n');
+    execFileSync('git', ['add', '.'], { cwd: repo });
+    execFileSync('git', ['commit', '-q', '-m', 'base'], { cwd: repo });
+    return { repo, runtimeBase };
+  } catch (error) {
+    // Setup is atomic: on failure, best-effort remove what this helper
+    // already created before rethrowing. Callers bind repo/runtimeBase only
+    // from the return value, so nothing else would clean these up; a
+    // cleanup failure must not mask the original setup error.
+    for (const dir of [repo, runtimeBase]) {
+      if (dir === undefined) {
+        continue;
+      }
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch {
+        // Best effort only — the original error is what matters.
+      }
+    }
+    throw error;
+  }
 }
 
 export function createManagedWorktreeSession(

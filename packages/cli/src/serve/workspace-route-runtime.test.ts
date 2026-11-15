@@ -168,8 +168,8 @@ describe('resolveContainedCwdOrFail', () => {
 });
 
 describe('resolveSessionManagedGitCwd', () => {
-  let repo: string;
-  let runtimeBase: string;
+  let repo = '';
+  let runtimeBase = '';
   const sessionId = '11111111-1111-4111-8111-111111111111';
 
   beforeEach(() => {
@@ -177,6 +177,11 @@ describe('resolveSessionManagedGitCwd', () => {
   });
 
   afterEach(() => {
+    // Skip teardown when the fixture failed: it cleans up after its own
+    // failed setup, and these bindings were never assigned.
+    if (repo === '' || runtimeBase === '') {
+      return;
+    }
     fs.rmSync(repo, { recursive: true, force: true });
     fs.rmSync(runtimeBase, { recursive: true, force: true });
   });

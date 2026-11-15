@@ -25,12 +25,13 @@ import {
 } from './branch-worktree-preparation.js';
 import { recordedExecFileCalls } from '../test-utils/exec-file-recorder.js';
 
-// The module under test has exactly four direct child-process spawns — the
-// four `execFileAsync('git', …)` call sites below (audited: this file uses no
-// `execFileSync`/`spawn`/`exec` of its own; everything else goes through
-// simple-git, which already spawns with `windowsHide: true`). Each of them
-// must pass `windowsHide: true`: a detached daemon on Windows raises a
-// visible console window per console-subsystem child otherwise (#17266).
+// The module under test (`branch-worktree-preparation.ts`) has exactly four
+// direct child-process spawns — the four `execFileAsync('git', …)` call sites
+// in it (audited: it uses no `execFileSync`/`spawn`/`exec` of its own;
+// everything else goes through simple-git, which already spawns with
+// `windowsHide: true`). Each of them must pass `windowsHide: true`: a
+// detached daemon on Windows raises a visible console window per
+// console-subsystem child otherwise (#17266).
 // The shared recorder mock delegates to the real implementation, so the
 // real-git fixtures in this file keep running unchanged.
 vi.mock('node:child_process', () =>
