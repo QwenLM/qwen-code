@@ -419,14 +419,81 @@ function isInvisibleOrFormat(code: number): boolean {
   return DEFAULT_IGNORABLE_OR_FORMAT_REGEX.test(String.fromCodePoint(code));
 }
 
+// Whether sanitizeTerminalLineLosslessWithFlag will itself turn the code
+// point at codePoints[i] into a marker (so a literal backslash immediately
+// before it, in the source text, must be doubled or the backslash fuses
+// with the generated marker into something a different, clean rule could
+// also produce).
+function willBeReplaced(codePoints: string[], i: number): boolean {
+  const code = codePoints[i]?.codePointAt(0);
+  if (code === undefined) return false;
+  return (
+    (code >= 0x00 && code <= 0x1f) ||
+    code === 0x7f ||
+    isC1Control(code) ||
+    isInvisibleOrFormat(code)
+  );
+}
+
+// The exact alphabet caretNotation can produce as the character after `^`:
+// code ^ 0x40 for code in 0x00-0x1f lands on '@'-'_' (0x40-0x5f), and DEL
+// (0x7f) is the special case '?'. Deliberately narrower than "any letter"
+// -- `\^foo` in a clean rule must stay untouched, and lowercase 'f' is not
+// a shape caretNotation ever emits.
+const CARET_MARKER_SECOND_CHAR_REGEX = /^[@A-Z[\\\]^_?]$/;
+
+// Whether the literal text starting at codePoints[i] already spells out
+// something indistinguishable from a marker this function generates, even
+// though none of it is itself a code point this function would replace:
+// a caret pair using caretNotation's real output alphabet (`\^G`, not
+// `\^foo`), or an UPPERCASE `\uXXXX` / `\u{X...}` hex run (hexNotation
+// always uppercases; `\u00e9` in a clean rule must stay untouched).
+function looksLikeGeneratedMarker(codePoints: string[], i: number): boolean {
+  const first = codePoints[i];
+  if (first === undefined) return false;
+  if (first === '^') {
+    const second = codePoints[i + 1];
+    return second !== undefined && CARET_MARKER_SECOND_CHAR_REGEX.test(second);
+  }
+  if (first === 'u') {
+    const four = codePoints.slice(i + 1, i + 5).join('');
+    if (/^[0-9A-F]{4}$/.test(four)) return true;
+    if (codePoints[i + 1] === '{') {
+      let j = i + 2;
+      let hexDigits = 0;
+      while (codePoints[j] !== undefined && /^[0-9A-F]$/.test(codePoints[j])) {
+        j++;
+        hexDigits++;
+      }
+      return hexDigits > 0 && codePoints[j] === '}';
+    }
+  }
+  return false;
+}
+
 // A backslash is doubled only where leaving it alone could make clean,
 // legitimate input (a Windows path, a regex) collide with a marker this
-// function generates: immediately before a caret-notation letter (`\^X`) or
-// a hex-notation run (`\uXXXX` / `\u{X...}`). Any other backslash -- in
-// `C:\tools\x.exe`, in `grep \.ts$` -- renders byte-identical, so "clean
-// input renders identically before and after this function" stays true.
-const MARKER_COLLIDING_BACKSLASH_REGEX =
-  /\\(?=\^|u[0-9A-Fa-f]{4}\b|u\{[0-9A-Fa-f]+\})/g;
+// function generates: immediately before a code point this function is
+// about to replace (so the generated marker that follows can't fuse with
+// an un-doubled backslash already there), or immediately before literal
+// text that already spells out this function's own marker alphabet (so a
+// real control byte's marker can't collide with a user who typed the same
+// characters as plain text). Checked structurally against what the rest of
+// this function actually does, not by guessing at surrounding word
+// boundaries -- a boundary-based guess previously let a literal `\u2063`
+// run into a following digit without doubling, while a real U+2063 in the
+// same position rendered identically (R2-4). Any other backslash -- in
+// `C:\tools\x.exe`, in `grep \.ts$`, in `grep \^foo`, in `grep \u00e9` (the
+// marker alphabet is uppercase-only, so lowercase hex and a non-marker
+// letter after `^` both fall through untouched) -- renders byte-identical,
+// so "clean input renders identically before and after this function"
+// stays true.
+function mustDoubleBackslash(codePoints: string[], backslashIndex: number): boolean {
+  const next = backslashIndex + 1;
+  return (
+    willBeReplaced(codePoints, next) || looksLikeGeneratedMarker(codePoints, next)
+  );
+}
 
 /**
  * Sanitizes a single-row label that stands for a *persisted* decision (an
@@ -478,15 +545,17 @@ export function sanitizeTerminalLineLosslessWithFlag(value: string): {
   text: string;
   replaced: boolean;
 } {
-  const backslashesEscaped = value.replace(
-    MARKER_COLLIDING_BACKSLASH_REGEX,
-    '\\\\',
-  );
+  const codePoints = toCodePoints(value);
   let result = '';
   let replaced = false;
-  for (const char of toCodePoints(backslashesEscaped)) {
+  for (let i = 0; i < codePoints.length; i++) {
+    const char = codePoints[i];
     const code = char.codePointAt(0);
     if (code === undefined) continue;
+    if (char === '\\' && mustDoubleBackslash(codePoints, i)) {
+      result += '\\\\';
+      continue;
+    }
     if ((code >= 0x00 && code <= 0x1f) || code === 0x7f) {
       result += '\\' + caretNotation(code);
       replaced = true;
