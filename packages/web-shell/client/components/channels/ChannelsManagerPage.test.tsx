@@ -125,6 +125,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
 
 const { ChannelsManagerPage } = await import('./ChannelsManagerPage');
 const { I18nProvider } = await import('../../i18n');
+const { CHANNEL_METHOD_PLATFORMS } = await import('./channel-platform');
 
 let container: HTMLDivElement;
 let root: Root;
@@ -290,7 +291,9 @@ describe('ChannelsManagerPage', () => {
         )
         ?.click();
     });
-    expect(document.body.textContent).toContain('Choose a DingTalk connection');
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+      'Choose a DingTalk connection',
+    );
     expect(document.body.textContent).toContain('Application bot');
     const webhookMethod = Array.from(document.querySelectorAll('button')).find(
       (button) => button.textContent?.includes('Webhook (send only)'),
@@ -357,6 +360,277 @@ describe('ChannelsManagerPage', () => {
     expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
       'Access control',
     );
+  });
+
+  it.each([false, true])(
+    'groups Feishu methods and preserves the application editor (webhook first: %s)',
+    async (webhookFirst) => {
+      const feishu = channelState.current.catalog.find(
+        (entry) => entry.type === 'feishu',
+      )!;
+      feishu.displayName = 'Feishu application bot';
+      feishu.fields = [
+        { key: 'clientId', label: 'App ID', kind: 'string', required: true },
+        {
+          key: 'clientSecret',
+          label: 'App Secret',
+          kind: 'secret',
+          required: true,
+        },
+      ];
+      const webhook = {
+        ...webhookType,
+        type: 'feishu-webhook',
+        displayName: 'Feishu Webhook',
+      };
+      if (webhookFirst) {
+        channelState.current.catalog.unshift(webhook);
+      } else {
+        channelState.current.catalog.push(webhook);
+      }
+      channelState.current.channels = {
+        notices: channel('Feishu notices', 'feishu-webhook', 'connected'),
+      };
+      await renderPage();
+      expect(container.textContent).toContain('Feishu notices');
+      expect(container.textContent).toContain('Ready to send');
+      expect(container.textContent).toContain(
+        'Remote credentials are checked when sending',
+      );
+      expect(
+        container.querySelectorAll('[data-testid="channel-platform-feishu"]'),
+      ).toHaveLength(1);
+      expect(
+        container.querySelector(
+          '[data-testid="channel-platform-feishu-webhook"]',
+        ),
+      ).toBeNull();
+      const platform = container.querySelector<HTMLButtonElement>(
+        '[data-testid="channel-platform-feishu"]',
+      )!;
+      expect(platform.getAttribute('aria-label')).toBe('Configure Feishu');
+      await act(async () => platform.click());
+      const dialog = document.querySelector('[role="dialog"]')!;
+      expect(
+        document.getElementById(dialog.getAttribute('aria-labelledby')!)
+          ?.textContent,
+      ).toBe('Choose a Feishu connection');
+      expect(dialog.textContent).toContain(
+        'Choose how this Channel connects to Feishu.',
+      );
+      expect(dialog.textContent).not.toContain('DingTalk');
+      const appMethod = Array.from(dialog.querySelectorAll('button')).find(
+        (button) => button.textContent?.includes('Application bot'),
+      )!;
+      await act(async () => appMethod.click());
+      expect(inputByLabel('App ID')).not.toBeNull();
+      expect(inputByLabel('App Secret')).not.toBeNull();
+      expect(inputByLabel('Webhook URL')).toBeNull();
+      expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+        'Access control',
+      );
+    },
+  );
+
+  it.each([false, true])(
+    'groups WeCom methods and keeps Callback independent (webhook first: %s)',
+    async (webhookFirst) => {
+      const wecom = channelState.current.catalog.find(
+        (entry) => entry.type === 'wecom',
+      )!;
+      wecom.fields = [
+        { key: 'botId', label: 'Bot ID', kind: 'string', required: true },
+        { key: 'secret', label: 'Bot Secret', kind: 'secret', required: true },
+      ];
+      const webhook = {
+        ...webhookType,
+        type: 'wecom-webhook',
+        displayName: 'WeCom Webhook',
+      };
+      if (webhookFirst) {
+        channelState.current.catalog.unshift(webhook);
+      } else {
+        channelState.current.catalog.push(webhook);
+      }
+      channelState.current.catalog.push({
+        type: 'wecom-callback',
+        displayName: 'WeCom Callback',
+        manageable: true,
+        fields: [
+          { key: 'corpId', label: 'Corp ID', kind: 'string', required: true },
+        ],
+      });
+      channelState.current.channels = {
+        notices: channel('WeCom notices', 'wecom-webhook', 'connected'),
+      };
+      await renderPage();
+      expect(container.textContent).toContain('WeCom notices');
+      expect(container.textContent).toContain('Ready to send');
+      expect(
+        container.querySelectorAll('[data-testid="channel-platform-wecom"]'),
+      ).toHaveLength(1);
+      expect(
+        container.querySelector(
+          '[data-testid="channel-platform-wecom-webhook"]',
+        ),
+      ).toBeNull();
+      const callback = container.querySelector<HTMLButtonElement>(
+        '[data-testid="channel-platform-wecom-callback"]',
+      )!;
+      expect(callback).not.toBeNull();
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(
+            '[data-testid="channel-platform-wecom"]',
+          )!
+          .click();
+      });
+      const dialog = document.querySelector('[role="dialog"]')!;
+      expect(dialog.textContent).toContain('Choose a WeCom connection');
+      expect(dialog.textContent).not.toContain('Application bot');
+      expect(dialog.textContent).not.toContain('Callback');
+      const intelligentBot = Array.from(dialog.querySelectorAll('button')).find(
+        (button) => button.textContent?.includes('Intelligent bot'),
+      )!;
+      await act(async () => intelligentBot.click());
+      expect(inputByLabel('Bot ID')).not.toBeNull();
+      expect(inputByLabel('Bot Secret')).not.toBeNull();
+      expect(inputByLabel('Webhook URL')).toBeNull();
+      expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+        'Access control',
+      );
+      await act(async () => {
+        Array.from(document.querySelectorAll<HTMLButtonElement>('button'))
+          .find((button) => button.textContent?.trim() === 'Cancel')!
+          .click();
+      });
+      await act(async () => callback.click());
+      expect(inputByLabel('Corp ID')).not.toBeNull();
+      expect(inputByLabel('Webhook URL')).toBeNull();
+    },
+  );
+
+  it.each([
+    { type: 'dingtalk', english: 'DingTalk', chinese: '钉钉' },
+    { type: 'feishu', english: 'Feishu', chinese: '飞书' },
+    { type: 'wecom', english: 'WeCom', chinese: '企业微信' },
+  ])(
+    'localizes the open $type chooser when language changes',
+    async (platform) => {
+      channelState.current.catalog.push({
+        ...webhookType,
+        type: `${platform.type}-webhook`,
+        displayName: `${platform.english} Webhook`,
+      });
+      await renderPage('zh-CN');
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>(
+            `[data-testid="channel-platform-${platform.type}"]`,
+          )!
+          .click();
+      });
+      const dialog = document.querySelector('[role="dialog"]')!;
+      for (const language of ['zh-CN', 'en', 'zh-CN'] as const) {
+        await renderPage(language);
+        const card = container.querySelector<HTMLButtonElement>(
+          `[data-testid="channel-platform-${platform.type}"]`,
+        )!;
+        expect(card.textContent).toContain(
+          language === 'zh-CN' ? platform.chinese : platform.english,
+        );
+        expect(card.getAttribute('aria-label')).toBe(
+          language === 'zh-CN'
+            ? `配置${platform.chinese}`
+            : `Configure ${platform.english}`,
+        );
+        expect(document.querySelector('[role="dialog"]')).toBe(dialog);
+        if (platform.type === 'wecom') {
+          expect(dialog.textContent).toContain(
+            language === 'zh-CN' ? '智能机器人' : 'Intelligent bot',
+          );
+          expect(dialog.textContent).toContain(
+            language === 'zh-CN'
+              ? '通过智能机器人接收消息并回复。'
+              : 'Receive messages and reply using an intelligent bot.',
+          );
+        }
+        expect(
+          document.getElementById(dialog.getAttribute('aria-labelledby')!)
+            ?.textContent,
+        ).toBe(
+          language === 'zh-CN'
+            ? `选择${platform.chinese}的连接方式`
+            : `Choose a ${platform.english} connection`,
+        );
+        expect(
+          document.getElementById(dialog.getAttribute('aria-describedby')!)
+            ?.textContent,
+        ).toBe(
+          language === 'zh-CN'
+            ? `选择此频道连接${platform.chinese}的方式。`
+            : `Choose how this Channel connects to ${platform.english}.`,
+        );
+      }
+    },
+  );
+
+  it('uses the group name when a platform translation is missing', async () => {
+    const previous = { ...CHANNEL_METHOD_PLATFORMS };
+    const platform = {
+      type: 'test-untranslated-platform',
+      displayName: 'Example platform',
+    };
+    try {
+      CHANNEL_METHOD_PLATFORMS['wecom'] = platform;
+      CHANNEL_METHOD_PLATFORMS['wecom-callback'] = platform;
+      channelState.current.catalog.unshift({
+        type: 'wecom-callback',
+        displayName: 'Example callback',
+        manageable: true,
+        fields: [],
+      });
+      await renderPage('zh-CN');
+      const card = container.querySelector<HTMLButtonElement>(
+        '[data-testid="channel-platform-test-untranslated-platform"]',
+      )!;
+      await act(async () => card.click());
+      const dialog = document.querySelector('[role="dialog"]')!;
+      for (const language of ['zh-CN', 'en'] as const) {
+        await renderPage(language);
+        expect(card.textContent).toContain('Example platform');
+        expect(card.getAttribute('aria-label')).toBe(
+          language === 'zh-CN'
+            ? '配置Example platform'
+            : 'Configure Example platform',
+        );
+        expect(document.querySelector('[role="dialog"]')).toBe(dialog);
+        expect(
+          document.getElementById(dialog.getAttribute('aria-labelledby')!)
+            ?.textContent,
+        ).toBe(
+          language === 'zh-CN'
+            ? '选择Example platform的连接方式'
+            : 'Choose a Example platform connection',
+        );
+        expect(
+          document.getElementById(dialog.getAttribute('aria-describedby')!)
+            ?.textContent,
+        ).toBe(
+          language === 'zh-CN'
+            ? '选择此频道连接Example platform的方式。'
+            : 'Choose how this Channel connects to Example platform.',
+        );
+      }
+    } finally {
+      for (const type of ['wecom', 'wecom-callback']) {
+        if (previous[type]) {
+          CHANNEL_METHOD_PLATFORMS[type] = previous[type];
+        } else {
+          delete CHANNEL_METHOD_PLATFORMS[type];
+        }
+      }
+    }
   });
 
   it('shows only the three enabled platforms and configured instances', async () => {

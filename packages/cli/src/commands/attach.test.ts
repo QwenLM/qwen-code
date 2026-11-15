@@ -13,6 +13,8 @@ import type {
   DaemonDiscoveryRecord,
 } from '../serve/daemon-discovery.js';
 import { writeDaemonToken } from '../serve/daemon-discovery.js';
+import * as daemonDiscovery from '../serve/daemon-discovery.js';
+import * as stdio from '../utils/stdioHelpers.js';
 import {
   attachCommand,
   formatAttachError,
@@ -203,5 +205,121 @@ describe('qwen attach command', () => {
     builder(mockYargs as never);
     const options = mockYargs.option.mock.calls.map((call) => call[0]);
     expect(options).toEqual(['port', 'session', 'workspace', 'token']);
+  });
+});
+
+describe('qwen attach client startup', () => {
+  let exitCode: typeof process.exitCode;
+  let earlyShutdown: (() => void) | undefined;
+
+  beforeEach(() => {
+    exitCode = process.exitCode;
+    earlyShutdown = undefined;
+    vi.useFakeTimers();
+    vi.spyOn(stdio, 'ignoreBrokenPipe').mockImplementation(() => {});
+    vi.spyOn(stdio, 'writeStderrLine').mockImplementation(() => {});
+    vi.spyOn(process, 'once').mockImplementation((event, listener) => {
+      if (event === 'SIGINT') earlyShutdown = () => listener();
+      return process;
+    });
+    vi.spyOn(daemonDiscovery, 'readDaemonDiscoveries').mockReturnValue({
+      entries: [
+        {
+          ...entry(4170),
+          record: { ...entry(4170).record, pidNamespace: 'another-namespace' },
+        },
+      ],
+      invalid: [],
+    });
+  });
+
+  afterEach(() => {
+    process.exitCode = exitCode;
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    vi.doUnmock('@qwen-code/sdk/daemon');
+  });
+
+  it('does not connect when interrupted while the client module is loading', async () => {
+    const createClient = vi.fn();
+    const load = vi.fn();
+    let finishImport!: () => void;
+    let markImportStarted!: () => void;
+    const importStarted = new Promise<void>((resolve) => {
+      markImportStarted = resolve;
+    });
+    const importReady = new Promise<void>((resolve) => {
+      finishImport = resolve;
+    });
+    vi.doMock('@qwen-code/sdk/daemon', async () => {
+      markImportStarted();
+      await importReady;
+      return {
+        DaemonClient: createClient,
+        DaemonSessionClient: { load },
+      };
+    });
+
+    const attached = attachCommand.handler({
+      _: ['attach'],
+      $0: 'qwen',
+      session: 'session-id',
+    });
+    await importStarted;
+    expect(earlyShutdown).toBeDefined();
+    earlyShutdown!();
+    finishImport();
+    await attached;
+
+    expect(process.exitCode).toBe(130);
+    expect(createClient).not.toHaveBeenCalled();
+    expect(load).not.toHaveBeenCalled();
+  });
+
+  it('reports client import failures through the existing load error', async () => {
+    vi.doMock('@qwen-code/sdk/daemon', () => {
+      throw new Error('\x1b[2Jclient\nload failed');
+    });
+
+    await attachCommand.handler({
+      _: ['attach'],
+      $0: 'qwen',
+      session: 'session-id',
+    });
+
+    expect(process.exitCode).toBe(1);
+    expect(stdio.writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('qwen attach: could not load session: '),
+    );
+  });
+
+  it('keeps client options, workspace selection and load errors unchanged', async () => {
+    const createClient = vi.fn(() => ({}));
+    const load = vi.fn().mockRejectedValue(new Error('\x1b[2Jload\nfailed'));
+    vi.doMock('@qwen-code/sdk/daemon', () => ({
+      DaemonClient: createClient,
+      DaemonSessionClient: { load },
+    }));
+
+    await attachCommand.handler({
+      _: ['attach'],
+      $0: 'qwen',
+      session: 'session-id',
+      workspace: '/tmp/selected-workspace',
+    });
+
+    expect(createClient).toHaveBeenCalledWith({
+      baseUrl: 'http://127.0.0.1:4170',
+      token: '',
+    });
+    expect(load).toHaveBeenCalledWith(expect.anything(), 'session-id', {
+      workspaceCwd: path.resolve('/tmp/selected-workspace'),
+      signal: expect.any(AbortSignal),
+    });
+    expect(process.exitCode).toBe(1);
+    expect(stdio.writeStderrLine).toHaveBeenCalledWith(
+      'qwen attach: could not load session: loadfailed',
+    );
   });
 });

@@ -212,6 +212,66 @@ class ManagedAgentSessionCapabilitiesTest {
         });
     }
 
+    @Test
+    void terminalCapabilityComposesOptInGrantShellAndPlacement() {
+        var store = mock(AgentStateStore.class);
+        var workspaces = mock(JdbcManagedWorkspaceRegistry.class);
+        var harness = mock(HarnessConnector.class);
+        var warmer = mock(RuntimeWarmer.class);
+        var service = new ManagedAgentService(store, new RequestDigests(),
+                mock(HarnessCoordinator.class), harness, workspaces,
+                new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        service.setRuntimeWarmer(warmer);
+        var workspace = new ContextBinding("tenant", "workspace", 1,
+                "storage", ".", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
+        var session = new SessionRecord("tenant", "session", "qwen-code", "1", "title",
+                "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1, workspace, "default",
+                WorkspaceToolProfiles.SHELL, null, 1);
+        when(store.workspaceFilesEnabled()).thenReturn(true);
+        when(store.workspaceShellEnabled()).thenReturn(true);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(harness.isAvailable()).thenReturn(true);
+        when(harness.supportsApprovalSelection()).thenReturn(true);
+        when(harness.supportsPlanMode()).thenReturn(true);
+        when(harness.supportsLifecycle(anyString())).thenReturn(true);
+        when(workspaces.canRead("tenant", "actor", "workspace")).thenReturn(true);
+        when(workspaces.findReadable(eq("tenant"), eq("actor"), anyCollection()))
+                .thenReturn(Map.of("workspace",
+                        new JdbcManagedWorkspaceRegistry.ReadableGrant("workspace", 1, "storage", true)));
+        when(store.sessionsWithExecutionRegistryFacts(eq("tenant"), any()))
+                .thenReturn(Set.of("session"));
+        when(store.findApprovalOwners("tenant", "actor", List.of("session")))
+                .thenReturn(Set.of("session"));
+        when(store.requireSession("tenant", "session")).thenReturn(session);
+        when(store.listSessions("tenant", "actor", null, null, 10, "all"))
+                .thenReturn(new SessionPage(List.of(session), false));
+
+        var properties = mock(com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.class);
+        var brokerSettings = mock(com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings.RuntimeBroker.class);
+        when(properties.getRuntimeBroker()).thenReturn(brokerSettings);
+        when(brokerSettings.isWebTerminal()).thenReturn(true);
+        service.configureTerminal(properties);
+        var resolver = mock(com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRuntimeResolver.class);
+        when(resolver.terminalCapable(session)).thenReturn(true);
+        var factory = new StaticListableBeanFactory(Map.of("resolver", resolver));
+        service.configureTerminalPlacement(factory.getBeanProvider(
+                com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRuntimeResolver.class));
+
+        // Opt-in + OPERATOR grant + foreground Shell + attachable placement.
+        assertThat(service.getWebShellSession("tenant", "actor", "session")
+                .capabilities().terminal()).isTrue();
+
+        // A placement that can never attach must not advertise the terminal.
+        when(resolver.terminalCapable(session)).thenReturn(false);
+        assertThat(service.getWebShellSession("tenant", "actor", "session")
+                .capabilities().terminal()).isFalse();
+
+        // With the opt-in off the capability is omitted entirely (null).
+        when(brokerSettings.isWebTerminal()).thenReturn(false);
+        assertThat(service.getWebShellSession("tenant", "actor", "session")
+                .capabilities().terminal()).isNull();
+    }
+
     @ParameterizedTest
     @CsvSource({
         "true,true,ACTIVE,true,true,true",

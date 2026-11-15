@@ -657,6 +657,8 @@ export type {
   DaemonSessionTurnIndexEntry,
   DaemonSessionTurnIndexPage,
   DaemonSessionTurnIndexPageOptions,
+  DaemonSessionTurnHooksPageOptions,
+  DaemonSessionTurnHooksPage,
   DaemonAuthProviderId,
   DaemonAuthProviderBaseUrlOption,
   DaemonAuthProviderCatalog,
@@ -978,6 +980,24 @@ export type {
   SessionSquadOutcome,
   SessionSquadView,
 } from './session-agents.js';
+
+export {
+  parseHookLifecycle,
+  extractHookLifecycle,
+  createHookLifecycleState,
+  reduceHookLifecycle,
+  summarizeHookExecutions,
+} from './ui/hook-lifecycle.js';
+export type {
+  HookLifecycleOutcome,
+  HookLifecycleSource,
+  HookLifecycleBase,
+  HookLifecycleEvent,
+  HookExecutionEntry,
+  HookLifecycleState,
+  HookLifecycleSummary,
+  HookTurnPage,
+} from './ui/hook-lifecycle.js';
 
 export {
   createExecutionLifecycleState,

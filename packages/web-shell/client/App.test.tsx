@@ -1143,8 +1143,11 @@ const {
         onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
       } | null,
       latestGoalsProps: null as {
-        onCreateGoal?: (condition: string) => Promise<void>;
-        onOpenSession?: (sessionId: string) => void;
+        onCreateGoal?: (
+          condition: string,
+          workspaceCwd?: string,
+        ) => boolean | void | Promise<boolean | void>;
+        onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
       } | null,
       latestWorkflowRunsProps: null as {
         onCreateViaChat?: () => void;
@@ -1926,9 +1929,12 @@ vi.mock('./components/dialogs/GitDiffDialog', async () => {
 // sub-dialog (model picker, approval-mode picker) via [data-testid="dialog-shell"].
 // It also carries the real component's [data-web-shell-dialog] marker, which
 // the drawer's touch-scroll blocker keys its dialog exemption off.
-vi.mock('./components/dialogs/DialogShell', async () => {
+vi.mock('./components/dialogs/DialogShell', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./components/dialogs/DialogShell')>();
   const React = await import('react');
   return {
+    ...actual,
     DialogShell: (props: {
       children?: React.ReactNode;
       title?: React.ReactNode;
@@ -2880,8 +2886,11 @@ vi.doMock('./components/dialogs/GoalsDialog', async () => {
   const React = await import('react');
   return {
     GoalsDialog: (props: {
-      onCreateGoal?: (condition: string) => Promise<void>;
-      onOpenSession?: (sessionId: string) => void;
+      onCreateGoal?: (
+        condition: string,
+        workspaceCwd?: string,
+      ) => boolean | void | Promise<boolean | void>;
+      onOpenSession?: (sessionId: string, workspaceCwd?: string) => void;
     }) => {
       testState.latestGoalsProps = props;
       return React.createElement('div');
@@ -3120,6 +3129,9 @@ const { McpStatusMessage } = await import(
   './components/messages/McpStatusMessage'
 );
 const { I18nProvider } = await import('./i18n');
+const { SessionSearchDialog } = await import(
+  './components/sidebar/SessionSearchDialog'
+);
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -19594,6 +19606,53 @@ describe('App session callbacks', () => {
       );
       expect(stored['draft\0/tmp/other']?.tabs).toContainEqual(
         expect.objectContaining({ kind: 'files', workspaceCwd: '/tmp/other' }),
+      );
+    });
+
+    it('opens a terminal tab when crypto.randomUUID is unavailable (non-secure context)', async () => {
+      setupDraft();
+      mockConnection.capabilities.features = ['web_terminal'];
+      testState.captureArtifactPanelOnly = true;
+      const { container } = renderApp({
+        rightPanel: { items: ['files', 'terminal'] },
+      });
+      await flush();
+      act(() =>
+        container
+          .querySelector<HTMLButtonElement>(
+            'button[aria-label="Toggle right panel"]',
+          )
+          ?.click(),
+      );
+      // Plain-HTTP remote origins are not secure contexts: randomUUID is
+      // simply not exposed there, and opening a tab must still work.
+      const cryptoObject = globalThis.crypto;
+      const descriptor = Object.getOwnPropertyDescriptor(
+        cryptoObject,
+        'randomUUID',
+      );
+      Object.defineProperty(cryptoObject, 'randomUUID', {
+        value: undefined,
+        configurable: true,
+      });
+      try {
+        expect(typeof cryptoObject.randomUUID).toBe('undefined');
+        act(() => testState.latestArtifactPanelProps?.onOpenTerminal?.());
+        await flush();
+      } finally {
+        if (descriptor) {
+          Object.defineProperty(cryptoObject, 'randomUUID', descriptor);
+        } else {
+          delete (cryptoObject as { randomUUID?: unknown }).randomUUID;
+        }
+      }
+      expect(testState.latestArtifactPanelProps?.tabs).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: 'terminal',
+            id: expect.stringMatching(/^terminal:/),
+          }),
+        ]),
       );
     });
 
@@ -43029,6 +43088,109 @@ describe('App session callbacks', () => {
     expect(swipe(document.body)).toBe(true);
   });
 
+  it('keeps the real session search scrollable and dismissible over the drawer', async () => {
+    const shellRef = createRef<WebShellApi>();
+    const { container } = renderApp({ sidebar: true, shellRef });
+    await flush();
+
+    await act(async () => {
+      shellRef.current?.openSessionDrawer();
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-sidebar-shell]')).not.toBeNull();
+
+    // The sidebar is mocked in this harness, so mount the real dialog beside
+    // it: the App drawer guards are document-level and apply to any focusable
+    // node outside the shell, exactly like the portaled dialog in production.
+    const searchContainer = document.createElement('div');
+    document.body.appendChild(searchContainer);
+    const searchRoot = createRoot(searchContainer);
+    mounted.push({ root: searchRoot, container: searchContainer });
+    const onClose = vi.fn();
+    await act(async () => {
+      searchRoot.render(
+        <I18nProvider language="en">
+          <SessionSearchDialog
+            client={undefined}
+            workspaces={[{ cwd: '/workspace', displayName: 'Workspace' }]}
+            initialSessions={[
+              {
+                sessionId: 'drawer-search',
+                displayName: 'Drawer search',
+                workspaceCwd: '/workspace',
+              } as DaemonSessionSummary,
+            ]}
+            primaryWorkspaceCwd="/workspace"
+            includeStandalone={false}
+            organizationEnabled={false}
+            qualified={false}
+            catalogKey=""
+            restoreFocus={null}
+            onClose={onClose}
+            onSelect={vi.fn()}
+            onQueryChange={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const dialog = document
+      .querySelector<HTMLElement>('[role="listbox"]')
+      ?.closest<HTMLElement>('[role="dialog"]');
+    expect(dialog).not.toBeNull();
+    const row = dialog!.querySelector<HTMLElement>('[role="option"]');
+    expect(row).not.toBeNull();
+
+    // jsdom has no layout: give the result list real scroll geometry so
+    // Radix's scroll lock sees a scrollable ancestor instead of cancelling
+    // every touch gesture targeting it.
+    const list =
+      dialog!.querySelector<HTMLElement>('[role="listbox"]')!.parentElement!;
+    list.style.overflowY = 'auto';
+    Object.defineProperty(list, 'scrollHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(list, 'clientHeight', {
+      configurable: true,
+      value: 200,
+    });
+    const touch = (type: string, clientY: number, target: EventTarget) => {
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      const point = [{ clientX: 10, clientY }];
+      for (const property of ['touches', 'changedTouches']) {
+        Object.defineProperty(event, property, { value: point });
+      }
+      target.dispatchEvent(event);
+      return event;
+    };
+    act(() => {
+      touch('touchstart', 300, row!);
+    });
+    let swipeEvent!: Event;
+    act(() => {
+      swipeEvent = touch('touchmove', 200, row!);
+    });
+    expect(swipeEvent.defaultPrevented).toBe(false);
+
+    const close = dialog!.querySelector<HTMLButtonElement>(
+      'button[aria-label="close"]',
+    )!;
+    act(() => {
+      close.focus();
+      close.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Escape',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    // Escape belongs to the dialog; the drawer behind it stays open.
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(container.querySelector('[data-sidebar-shell]')).not.toBeNull();
+  });
+
   it('starts a new session from the external shell ref and returns to chat', async () => {
     const shellRef = createRef<WebShellApi>();
     const { container } = renderApp({ sidebar: true, shellRef });
@@ -52011,6 +52173,34 @@ describe('App /goal command', () => {
     );
     // It must leave the Goals page, or the user loads a transcript they cannot see.
     expect(container.querySelector('[data-testid="goals-page"]')).toBeNull();
+  });
+
+  it("opens a goal's session in the goal's own workspace context", async () => {
+    // The dialog tags each goal with its workspace cwd; dropping the second
+    // argument here would load a secondary goal's transcript in the previously
+    // selected workspace, landing follow-up prompts in the wrong project.
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal';
+    await clickSubmit(container);
+    await flush();
+
+    const onOpenSession = testState.latestGoalsProps?.onOpenSession;
+    if (!onOpenSession) throw new Error('onOpenSession was not captured');
+    mockSessionActions.loadSession.mockClear();
+
+    await act(async () => {
+      onOpenSession('goal-session-9', '/tmp/secondary-workspace');
+    });
+    await flush();
+
+    expect(mockSessionActions.loadSession.mock.calls[0][0]).toBe(
+      'goal-session-9',
+    );
+    expect(mockSessionActions.loadSession.mock.calls[0][1]).toMatchObject({
+      workspaceCwd: '/tmp/secondary-workspace',
+    });
   });
 
   it("reports a failure to open a goal's session instead of swallowing it", async () => {

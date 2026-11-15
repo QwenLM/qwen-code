@@ -3758,7 +3758,8 @@ export const useLlmStream = (
       dualOutput?.startAssistantMessage();
       try {
         if (sharedRound) {
-          const useEventBus = config.isEventBusAgentLoopEnabled?.() === true;
+          const useEventBus =
+            config.isEventBusAgentLoopEnabled?.('ink') === true;
           debugLogger.debug(
             `[processLlmStreamEvents] model round on the shared agent loop (prompt ${source.round.promptId})`,
           );
@@ -3768,6 +3769,8 @@ export const useLlmStream = (
             // The batch's tools run under the turn's signal, as the
             // scheduler's do.
             toolSignal: signal,
+            // The TUI records only the results it sends, in its own session.
+            deferRecording: true,
             useEventBus,
             onModelEvent: (event) => {
               const ended = handleStreamEvent(event);
@@ -5085,7 +5088,7 @@ export const useLlmStream = (
                 : {}),
           };
           const sharedSource: SharedModelRound | undefined =
-            config.isUnifiedAgentLoopEnabled?.()
+            config.isUnifiedAgentLoopEnabled?.('ink')
               ? {
                   client: llmClient,
                   signal: providerSignal,
