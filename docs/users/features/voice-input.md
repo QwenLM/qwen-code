@@ -19,11 +19,13 @@ prompt. For a realtime spoken conversation with the agent, see
   Supported ASR model ids, by transport:
   - `qwen3-asr-flash` (with optional dated snapshots) — batch transcription
     over an OpenAI-compatible Chat Completions endpoint such as DashScope.
-  - `qwen3-asr-flash-realtime`, `fun-asr-realtime`, and `paraformer-realtime` —
-    streaming transcription over a DashScope-style WebSocket derived from the
-    route's `baseUrl` (`/api-ws/v1/realtime` or `/api-ws/v1/inference`). The
-    endpoint must serve these WebSocket paths; a generic OpenAI-compatible
-    HTTP gateway cannot serve them.
+  - `qwen3-asr-flash-realtime`, the `fun-asr-*realtime` family, and the
+    `paraformer-realtime-*` family (for example `fun-asr-realtime`,
+    `fun-asr-flash-8k-realtime`, `paraformer-realtime-v2`) — streaming
+    transcription over a DashScope-style WebSocket derived from the route's
+    `baseUrl` (`/api-ws/v1/realtime` or `/api-ws/v1/inference`). The endpoint
+    must serve these WebSocket paths; a generic OpenAI-compatible HTTP
+    gateway cannot serve them.
 - Voice dictation enabled with `general.voice.enabled: true`.
 - A [secure context](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts):
   open the Web Shell via `localhost` / `127.0.0.1` or over HTTPS. Browsers block
@@ -96,8 +98,10 @@ action.
 
 In the interactive terminal, hold mode likewise inserts the transcript without
 sending. Tap mode behaves differently: it stops and **submits** the prompt —
-on the second `Space` press, or automatically after sustained silence — so
-tool execution and permission prompts can start right away.
+on the second `Space` press, or automatically after sustained silence when the
+audio backend supports silence detection (the native recorder and SoX do; the
+`arecord` fallback does not, so there tap mode records until you press `Space`
+again) — so tool execution and permission prompts can start right away.
 
 ## Tuning transcription
 

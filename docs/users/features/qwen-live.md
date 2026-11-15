@@ -39,13 +39,17 @@ the **Qwen Live** card (marked Experimental):
    or dedicated domain, for example
    `https://dashscope-intl.aliyuncs.com/compatible-mode/v1`. Left empty, Live
    uses Beijing (`https://dashscope.aliyuncs.com/compatible-mode/v1`); a key
-   from another region is rejected with `401`.
-3. **DashScope Realtime API key** — paste a key, or select a configured
-   Realtime model route instead; the route then supplies both the endpoint
-   (derived from its `baseUrl`) and the key (read from its `envKey`). A key
-   pasted here is saved in clear text in your user settings file; to keep it
-   out of settings, configure a `realtimeOnly` route whose `envKey` names an
-   environment variable and select that route instead.
+   from another region is rejected with `401`. When a `realtimeOnly` route is
+   selected as the Realtime model, this field follows the route's `baseUrl`
+   instead.
+3. **DashScope Realtime API key** — paste a key, or skip this field by
+   picking a configured `realtimeOnly` route as the **Realtime model** in
+   step 4; the route then supplies both the endpoint (derived from its
+   `baseUrl`) and the key (read from its `envKey`), and this row shows that
+   the key comes from the selected model. A key pasted here is saved in clear
+   text in your user settings file; to keep it out of settings, configure a
+   `realtimeOnly` route whose `envKey` names an environment variable and
+   select it as the Realtime model instead.
 4. **Realtime model** — pick one of your configured `realtimeOnly` routes, or
    choose **Other model id…** to enter any Realtime model id. The default is
    `qwen3.5-omni-plus-realtime`.

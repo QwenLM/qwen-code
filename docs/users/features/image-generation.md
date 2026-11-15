@@ -1,12 +1,13 @@
 # Image Generation
 
 Qwen Code ships with a built-in `image_gen` tool that turns a text prompt into
-a PNG image using a configured image model. Ask for an image in any session —
-"draw a poster for our release party" — and the agent calls the tool, saves the
-result into the workspace, and shows it to you. In the Web Shell, generated
+a PNG image using a configured image model. Ask for an image in a conversation
+— "draw a poster for our release party" — and the agent calls the tool, saves
+the result into the workspace, and shows it to you. In the Web Shell, generated
 images appear as artifacts in the Artifacts panel.
 
-The tool stays unavailable until an image model is selected.
+The tool requires a selected image model; it is also unavailable in `--bare`
+or `--safe-mode` sessions and when `tools.executionSandbox` is configured.
 
 ## Setup
 
@@ -68,9 +69,11 @@ Each generated image is:
 
 ## Troubleshooting
 
-- **"Image generation is not configured with a valid endpoint"** — no
-  `imageModel` is selected, or the selected route lacks a valid HTTPS
-  `baseUrl`.
+- **"Image generation is not configured with a valid endpoint"** — the
+  `imageModel` selector is empty or unparsable, matches zero or several
+  image-capable routes, or the matched route lacks an `envKey`, lacks a
+  `baseUrl`, or declares a non-HTTPS `baseUrl`. A missing `envKey` produces
+  this message too, not the environment-variable message below.
 - **"Image generation requires the … environment variable"** — the route's
   `envKey` is not set in the daemon's environment (or the `env` block of
   `settings.json`).
