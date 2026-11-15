@@ -476,6 +476,7 @@ describe('ToolConfirmationMessage', () => {
   it('renders a clean permission rule with an unmarked label', () => {
     const { frame } = renderAlwaysAllowLabel(['Bash(probe *)']);
     expect(frame).toContain("run 'probe *' commands");
+    expect(frame).not.toContain('⚠');
   });
 
   it('renders a rule containing a real BEL byte as a visible \\^G marker, distinct from the clean label', () => {
@@ -487,6 +488,10 @@ describe('ToolConfirmationMessage', () => {
     expect(frame).not.toContain("run 'probe *' commands");
     expect(frame).toContain('No, suggest changes');
     expect(frame).not.toContain('\x07');
+    // A fixed, start-of-label marker in addition to the in-place \^G: see
+    // the long-rule truncation test below for why the in-place marker alone
+    // is not enough.
+    expect(frame).toContain('⚠ Always allow');
 
     // The rule string itself is untouched after rendering: an implementation
     // that sanitized permissionRules in place (instead of only the label)
@@ -512,12 +517,14 @@ describe('ToolConfirmationMessage', () => {
     // sanitizeTerminalLine deletes it outright, which would make this rule's
     // label collapse onto the clean 'probe *' label like the BEL case above.
     const { frame, confirmationDetails } = renderAlwaysAllowLabel([
-      'Bash(probe‮ *)',
+      'Bash(probe\u202e *)',
     ]);
     expect(frame).toContain("run 'probe\\u202E *' commands");
     expect(frame).not.toContain("run 'probe *' commands");
-    expect(frame).not.toContain('‮');
-    expect(confirmationDetails.permissionRules).toEqual(['Bash(probe‮ *)']);
+    expect(frame).not.toContain('\u202e');
+    expect(confirmationDetails.permissionRules).toEqual([
+      'Bash(probe\u202e *)',
+    ]);
   });
 
   it('renders the literal text "\\u202E" differently from a real bidi override character', () => {
@@ -537,13 +544,59 @@ describe('ToolConfirmationMessage', () => {
     expect(frame).toContain("run 'probe\\u009B *' commands");
     expect(frame).not.toContain("run 'probe *' commands");
     expect(frame).not.toContain('\u009b');
-    expect(confirmationDetails.permissionRules).toEqual(['Bash(probe\u009b *)']);
+    expect(confirmationDetails.permissionRules).toEqual([
+      'Bash(probe\u009b *)',
+    ]);
   });
 
   it('shows the same distinguishing marker for both the project and the user Always-allow scopes', () => {
     const { frame } = renderAlwaysAllowLabel(['Bash(probe\x07 *)']);
     const matches = frame.split("run 'probe\\^G *' commands").length - 1;
     expect(matches).toBe(2);
+  });
+
+  it('renders a rule containing a default-ignorable format character (U+2063) as a visible \\uXXXX marker', () => {
+    // U+2063 (INVISIBLE SEPARATOR) is neither in the old hand-picked
+    // zero-width list nor in the bidi range: it only falls under the
+    // Unicode Cf / Default_Ignorable_Code_Point class the current
+    // implementation checks instead of a fixed list.
+    const { frame, confirmationDetails } = renderAlwaysAllowLabel([
+      'Bash(probe\u2063 *)',
+    ]);
+    expect(frame).toContain("run 'probe\\u2063 *' commands");
+    expect(frame).not.toContain("run 'probe *' commands");
+    expect(frame).not.toContain('\u2063');
+    expect(confirmationDetails.permissionRules).toEqual([
+      'Bash(probe\u2063 *)',
+    ]);
+  });
+
+  it('does not rewrite a clean rule containing an ordinary backslash (a Windows path)', () => {
+    // A backslash that cannot be mistaken for a generated \^X or \uXXXX
+    // marker must render byte-identical, or "clean input renders
+    // identically" would be false for every Windows path and regex rule.
+    const { frame } = renderAlwaysAllowLabel(['Bash(C:\\tools\\x.exe *)']);
+    expect(frame).toContain("run 'C:\\tools\\x.exe *' commands");
+    expect(frame).not.toContain('⚠');
+  });
+
+  it('keeps the distinguishing marker visible even when the rule is long enough to be truncated', () => {
+    // RadioButtonSelect renders each option with wrap="truncate". A long
+    // specifier can push the in-place \^G marker past the point where the
+    // label is cut, silently recreating the exact collision this sanitizer
+    // exists to prevent. The fixed marker at the start of the label must
+    // still distinguish a dirty rule from a clean one of the same length.
+    const longClean = 'probe' + 'k'.repeat(70);
+    const longDirty = 'probe' + 'k'.repeat(70) + '\x07';
+    const { frame: cleanFrame } = renderAlwaysAllowLabel([
+      `Bash(${longClean} *)`,
+    ]);
+    const { frame: dirtyFrame } = renderAlwaysAllowLabel([
+      `Bash(${longDirty} *)`,
+    ]);
+    expect(cleanFrame).not.toContain('⚠');
+    expect(dirtyFrame).toContain('⚠ Always allow');
+    expect(dirtyFrame).not.toBe(cleanFrame);
   });
 
   it('renders classifier fallback guidance and the Default Mode option', async () => {

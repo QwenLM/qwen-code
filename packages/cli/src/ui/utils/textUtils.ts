@@ -383,76 +383,123 @@ function caretNotation(code: number): string {
   return code === 0x7f ? '^?' : '^' + String.fromCharCode(code ^ 0x40);
 }
 
-/** `\uXXXX` notation (4 uppercase hex digits) for a code point with no caret form. */
+/**
+ * `\uXXXX` (4 uppercase hex digits) for a code point on the Basic
+ * Multilingual Plane, or `\u{X...}` for one beyond it (astral code points,
+ * e.g. U+1D173 MUSICAL SYMBOL BEGIN BEAM, need more than 4 hex digits and
+ * have no 4-digit form).
+ */
 function hexNotation(code: number): string {
-  return '\\u' + code.toString(16).toUpperCase().padStart(4, '0');
+  const hex = code.toString(16).toUpperCase();
+  return code > 0xffff ? '\\u{' + hex + '}' : '\\u' + hex.padStart(4, '0');
 }
 
-/** C1 control bytes (0x80-0x9f, e.g. U+009B, CSI as a single code point). */
+/** C1 control bytes (0x80-0x9f, e.g. U+009B, CSI as a single code point):
+ * not Default_Ignorable_Code_Point or Cf by Unicode's own classification
+ * (they are Cc, Control), so {@link isInvisibleOrFormat} does not see them
+ * and this stays a separate, explicit check. */
 function isC1Control(code: number): boolean {
   return code >= 0x80 && code <= 0x9f;
 }
 
-/** Same set as {@link BIDI_OVERRIDE_CHARS_REGEX}, checked per code point. */
-function isBidiOverrideOrIsolate(code: number): boolean {
-  return (
-    code === 0x200e ||
-    code === 0x200f ||
-    (code >= 0x202a && code <= 0x202e) ||
-    (code >= 0x2066 && code <= 0x2069)
-  );
+// Any code point Unicode itself classifies as format (general category Cf)
+// or marks Default_Ignorable_Code_Point: bidi overrides/isolates, zero-width
+// joiners/spaces, variation selectors, soft hyphen, the tag block, and every
+// other "invisible or near-invisible" code point in the standard -- not a
+// hand-kept list of the ones a particular review happened to name. A list
+// like that is always incomplete (a prior version of this function listed
+// five zero-width code points and the bidi range by hand, and still let
+// U+2063, U+061C, U+00AD and others straight through). Checked per code
+// point without the `g` flag, since the caller already iterates one code
+// point at a time.
+const DEFAULT_IGNORABLE_OR_FORMAT_REGEX =
+  /[\p{Cf}\p{Default_Ignorable_Code_Point}]/u;
+
+function isInvisibleOrFormat(code: number): boolean {
+  return DEFAULT_IGNORABLE_OR_FORMAT_REGEX.test(String.fromCodePoint(code));
 }
 
-/**
- * Zero-width characters: not silently discarded elsewhere in this file, but
- * still invisible once rendered, so two different persisted values differing
- * only by one of these would still look identical to the human approving the
- * label. Does not cover every zero-width code point in Unicode (combining
- * marks and variation selectors are left alone: both require a preceding
- * base character to do anything, so an isolated one is inert, not collidable).
- */
-function isZeroWidth(code: number): boolean {
-  return code === 0x200b || code === 0x200c || code === 0x200d || code === 0x2060 || code === 0xfeff;
-}
+// A backslash is doubled only where leaving it alone could make clean,
+// legitimate input (a Windows path, a regex) collide with a marker this
+// function generates: immediately before a caret-notation letter (`\^X`) or
+// a hex-notation run (`\uXXXX` / `\u{X...}`). Any other backslash -- in
+// `C:\tools\x.exe`, in `grep \.ts$` -- renders byte-identical, so "clean
+// input renders identically before and after this function" stays true.
+const MARKER_COLLIDING_BACKSLASH_REGEX =
+  /\\(?=\^|u[0-9A-Fa-f]{4}\b|u\{[0-9A-Fa-f]+\})/g;
 
 /**
  * Sanitizes a single-row label that stands for a *persisted* decision (an
  * "Always allow" rule), where two different underlying values must never
  * render identically — a human approving one grant must not be shown the
  * same text a different, already-approved grant would show. `sanitizeTerminalLine`
- * is wrong here: it deletes bare C0 bytes, C1 bytes, bidi override/isolate
- * characters, and leaves zero-width characters untouched, so e.g. a rule
- * carrying a BEL (U+0007), a bidi override (U+202E), or a zero-width space
- * (U+200B) can each collapse onto the same visible label as the clean rule
- * even though they are different stored authorizations.
+ * is wrong here: it deletes bare C0 bytes and C1 bytes, strips bidi
+ * override/isolate characters, and leaves other invisible or format code
+ * points untouched, so e.g. a rule carrying a BEL (U+0007), a bidi override
+ * (U+202E, which renders as the text "U+202E" below, not the live character
+ * itself), or a zero-width space (U+200B) can each collapse onto the same
+ * visible label as the clean rule even though they are different stored
+ * authorizations.
  *
- * Every such code point is replaced with a visible, terminal-inert stand-in
- * (caret notation for C0/DEL, `\uXXXX` for C1/bidi/zero-width) instead of
- * being dropped or passed through, and every literal backslash already in
- * the text is doubled first — so a real control byte's `\^G` (or a real
- * bidi character's `‮`) can never collide with a user who typed the
- * same characters as plain text (which becomes `\\^G` / `\\u202E`, a
- * different string). The result is a lossless, single-row, terminal-safe
- * stand-in for the raw value: no code point is silently discarded or passed
- * through unexamined, so a different grant always reads differently.
+ * Every C0/DEL/C1 control byte and every code point Unicode classifies as
+ * format (Cf) or Default_Ignorable_Code_Point (bidi overrides, zero-width
+ * joiners, variation selectors, the tag block, and the rest of that class,
+ * not a hand-picked subset of it) is replaced with a visible, terminal-inert
+ * stand-in (caret notation for C0/DEL, `\uXXXX` / `\u{X...}` for everything
+ * else) instead of being dropped or passed through. Every literal backslash
+ * already in the text that could otherwise be mistaken for part of a
+ * generated marker is doubled first — so a real control byte's `\^G` (or a
+ * real "U+202E" character) can never collide with a user who typed the same
+ * characters as plain text (which becomes `\\^G` / `\\u202E`, a different
+ * string) — while a backslash anywhere else (a Windows path, a regex) is
+ * left alone, so clean input with no control bytes still renders identically
+ * before and after this function. The result is a lossless, single-row,
+ * terminal-safe stand-in for the raw value: no code point in either class is
+ * silently discarded or passed through unexamined, so a different grant
+ * always reads differently.
  */
 export function sanitizeTerminalLineLossless(value: string): string {
-  const backslashesEscaped = value.replace(/\\/g, '\\\\');
+  return sanitizeTerminalLineLosslessWithFlag(value).text;
+}
+
+/**
+ * Same sanitizer as {@link sanitizeTerminalLineLossless}, but also reports
+ * whether anything was replaced. A caller that renders this text into a
+ * truncating, single-line UI slot (a `RadioButtonSelect` option with
+ * `wrap="truncate"`, for instance) needs that boolean: the in-place marker
+ * this function writes can itself fall past the truncation point on a long
+ * value, which would silently recreate the exact collision this function
+ * exists to prevent. Such a caller should prefix the *whole* label with a
+ * fixed, always-visible marker when `replaced` is true, at the position
+ * truncation can never reach (the very start), in addition to the in-place
+ * marker for anyone who sees the untruncated text.
+ */
+export function sanitizeTerminalLineLosslessWithFlag(value: string): {
+  text: string;
+  replaced: boolean;
+} {
+  const backslashesEscaped = value.replace(
+    MARKER_COLLIDING_BACKSLASH_REGEX,
+    '\\\\',
+  );
   let result = '';
+  let replaced = false;
   for (const char of toCodePoints(backslashesEscaped)) {
     const code = char.codePointAt(0);
     if (code === undefined) continue;
     if ((code >= 0x00 && code <= 0x1f) || code === 0x7f) {
       result += '\\' + caretNotation(code);
+      replaced = true;
       continue;
     }
-    if (isC1Control(code) || isBidiOverrideOrIsolate(code) || isZeroWidth(code)) {
+    if (isC1Control(code) || isInvisibleOrFormat(code)) {
       result += hexNotation(code);
+      replaced = true;
       continue;
     }
     result += char;
   }
-  return result;
+  return { text: result, replaced };
 }
 
 /* Recursively traverses a JSON-like structure (objects, arrays, primitives)
