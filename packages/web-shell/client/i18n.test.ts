@@ -293,6 +293,13 @@ describe('web-shell i18n catalog', () => {
   it('keeps every local files translation in both locales (R1-11)', () => {
     const en = getTranslator('en');
     const zh = getTranslator('zh-CN');
+    // The enumeration itself is load-bearing: the loop below cannot observe
+    // its own source being replaced by the old hardcoded subset, so pin keys
+    // outside that subset here.
+    expect(LOCAL_FILES_MESSAGE_KEYS).toContain('localFiles.status.connected');
+    expect(LOCAL_FILES_MESSAGE_KEYS).toContain(
+      'localFiles.blocker.unsupportedDaemon',
+    );
     // Derived from the EN catalog, not a hardcoded subset: a new localFiles
     // key enters the parity check automatically. The vars bag feeds the
     // function-valued entries (tools/gestureToast/insecureContext); string
