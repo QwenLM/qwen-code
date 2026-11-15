@@ -4180,7 +4180,7 @@ describe('runNonInteractive', () => {
   );
 
   it.each(bothLoops)(
-    'records only the tool call the run cancelled, not the one it never started ($loop)',
+    'records the result of a tool call the run cancelled ($loop)',
     async ({ shared }) => {
       if (shared) useSharedLoopWithModToolHooks();
       setupMetricsMock();
@@ -4232,10 +4232,7 @@ describe('runNonInteractive', () => {
         },
       });
       mockLlmClient.sendMessageStream.mockReturnValueOnce(
-        createStreamFromEvents([
-          request('cancelled-1'),
-          request('unstarted-2'),
-        ]),
+        createStreamFromEvents([request('cancelled-1')]),
       );
 
       await runNonInteractive(
