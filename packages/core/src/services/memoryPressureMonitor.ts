@@ -748,6 +748,11 @@ export class MemoryPressureMonitor extends EventEmitter {
             // the subsequent clear_file_cache step. This removes the
             // implicit coupling between step ordering.
             this.coreConfig.getFileReadCache().clear();
+            // compact_history evicts tool results via chat.setHistory()
+            // directly, bypassing LlmClient.setHistory() which normally
+            // resets conditional-rule markers. Reset them here so rules
+            // whose reminder was on an evicted tool result can fire again.
+            this.coreConfig.getConditionalRulesRegistry()?.resetInjected();
             const m = result.meta;
             debugLogger.debug(
               `[COMPACT_HISTORY] cleared ${m.toolsCleared} tool result(s) ` +

@@ -47,6 +47,7 @@ import {
   EVENT_BUS_SURFACE_DEFAULTS,
 } from './agent-loop-rollout.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
+import { ConditionalRulesRegistry } from './rulesDiscovery.js';
 import { Storage } from './storage.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { SshExecutionEnvironment } from '../services/ssh-execution-environment.js';
@@ -3428,6 +3429,20 @@ describe('Server Config (config.ts)', () => {
       await oldFileHistoryService.trackEdit(trackedFile);
 
       expect(record).not.toHaveBeenCalled();
+    }));
+
+  it('resets the conditional rule injection markers on session switch', () =>
+    withFileHistory({}, async ({ config }) => {
+      const registry = new ConditionalRulesRegistry([], os.tmpdir());
+      const resetInjected = vi.spyOn(registry, 'resetInjected');
+      config.setConditionalRulesRegistry(registry);
+
+      config.startNewSession('rotated-session-id');
+
+      // The new session starts with no history, so no conditional-rule
+      // reminder survives it; a stale marker would suppress the rule for the
+      // rest of the session, since this path does not rebuild the registry.
+      expect(resetInjected).toHaveBeenCalledTimes(1);
     }));
 
   describe('tool sandbox initialization', () => {
