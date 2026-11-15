@@ -1,5 +1,6 @@
-import { Fragment, useRef, useState } from 'react';
+import { Fragment, useEffect, useId, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
+import { useFilterInput } from '../hooks/useFilterInput';
 import {
   CircleDashedIcon,
   FolderClosedIcon,
@@ -96,7 +97,13 @@ export function WorkspaceSelector({
   const { t } = useI18n();
   const [menuOpen, setMenuOpen] = useState(false);
   const [tooltipOpen, setTooltipOpen] = useState(false);
-  const [filterQuery, setFilterQuery] = useState('');
+  // Committed filter: intermediate IME preedit never refilters the list.
+  const {
+    filterValue,
+    inputProps: filterInputProps,
+    reset: resetFilter,
+  } = useFilterInput();
+  const radioGroupId = useId();
   const menuOpenRef = useRef(false);
   const suppressTooltipRef = useRef(false);
   const pointerDismissedRef = useRef(false);
@@ -110,6 +117,37 @@ export function WorkspaceSelector({
   const standaloneSelectable = Boolean(
     standaloneSupported && onSelectStandalone,
   );
+  useEffect(() => {
+    if (!menuOpen) return;
+    // Radix dismisses on document capture and prevents the native IME
+    // cancellation. Hide a composing Escape from that listener only, then
+    // restore it before the event reaches the focused input (the same shape as
+    // DialogShell's preserveImeEscape).
+    const preserveImeEscape = (event: KeyboardEvent) => {
+      if (
+        event.key !== 'Escape' ||
+        (!event.isComposing && event.keyCode !== 229)
+      ) {
+        return;
+      }
+      Object.defineProperty(event, 'key', {
+        configurable: true,
+        value: 'Process',
+      });
+      document.addEventListener(
+        'keydown',
+        (currentEvent) => {
+          if (currentEvent === event) Reflect.deleteProperty(event, 'key');
+        },
+        { capture: true, once: true },
+      );
+    };
+    window.addEventListener('keydown', preserveImeEscape, { capture: true });
+    return () =>
+      window.removeEventListener('keydown', preserveImeEscape, {
+        capture: true,
+      });
+  }, [menuOpen]);
   if (
     !alwaysVisible &&
     !menuItems &&
@@ -125,7 +163,24 @@ export function WorkspaceSelector({
     typeof window === 'undefined' ? '' : window.location.origin;
   const groups: { hostOrigin: string; items: WorkspaceSelectorOption[] }[] = [];
   for (const workspace of workspaces) {
-    if (!matchesWorkspaceQuery([workspace.label], filterQuery)) continue;
+    // Match every string the row shows: the label, the path in its title,
+    // and the host chip for remote rows.
+    let hostText: string | undefined;
+    if (workspace.hostOrigin) {
+      try {
+        hostText = new URL(workspace.hostOrigin).host;
+      } catch {
+        hostText = undefined;
+      }
+    }
+    if (
+      !matchesWorkspaceQuery(
+        [workspace.label, workspace.cwd, hostText],
+        filterValue,
+      )
+    ) {
+      continue;
+    }
     const hostOrigin = workspace.hostOrigin ?? pageOrigin;
     const group = groups.find((entry) => entry.hostOrigin === hostOrigin);
     if (group) {
@@ -135,7 +190,7 @@ export function WorkspaceSelector({
     }
   }
   const groupedByHost = groups.length > 1;
-  const noWorkspaceMatches = filterQuery.trim() !== '' && groups.length === 0;
+  const noWorkspaceMatches = filterValue.trim() !== '' && groups.length === 0;
   const triggerLabel = selectedStandalone
     ? t('sidebar.noWorkspace')
     : (selected?.label ?? t('sidebar.workspaceSelectLabel'));
@@ -147,8 +202,12 @@ export function WorkspaceSelector({
         onOpenChange={(open) => {
           if (open) {
             pointerDismissedRef.current = false;
-          } else {
-            setFilterQuery('');
+            // Reset on open, not close: Radix keeps the content mounted for
+            // the exit animation, and clearing here would re-render the full
+            // list into the still-visible popup (height jump) on every close.
+            // The content unmounts after the animation, so the next open
+            // starts empty anyway.
+            resetFilter();
           }
           menuOpenRef.current = open;
           setMenuOpen(open);
@@ -204,11 +263,29 @@ export function WorkspaceSelector({
           onPointerDownCapture={() => {
             pointerDismissedRef.current = true;
           }}
+          // Radix focuses the hovered row on pointermove; while the filter
+          // owns focus that would pull typing out of the field. Keep the
+          // pointer event local so the row is not focused instead.
+          onPointerMoveCapture={(event) => {
+            if (document.activeElement === filterInputRef.current) {
+              event.stopPropagation();
+            }
+          }}
           onKeyDownCapture={(event) => {
             pointerDismissedRef.current = false;
             // There is no item above the first one, so ArrowUp on the first
-            // enabled item goes back to the filter field.
-            if (event.key === 'ArrowUp') {
+            // enabled item goes back to the filter field. Modified combos
+            // (Cmd/Ctrl/Alt/Shift+arrow) are text gestures and stay with the
+            // focused element, as does an IME composition.
+            if (
+              event.key === 'ArrowUp' &&
+              !event.nativeEvent.isComposing &&
+              event.keyCode !== 229 &&
+              !event.metaKey &&
+              !event.ctrlKey &&
+              !event.altKey &&
+              !event.shiftKey
+            ) {
               const content = event.currentTarget;
               const items = Array.from(
                 content.querySelectorAll<HTMLElement>(
@@ -240,11 +317,23 @@ export function WorkspaceSelector({
             <input
               type="text"
               ref={filterInputRef}
-              value={filterQuery}
-              onChange={(event) => setFilterQuery(event.target.value)}
+              role="combobox"
+              aria-expanded="true"
+              aria-controls={radioGroupId}
               onPointerDown={(event) => event.stopPropagation()}
               onKeyDown={(event) => {
-                if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                // Plain, non-composing arrows hand focus into the list.
+                // Modified combos and IME composition are text gestures and
+                // must reach the input untouched.
+                const plainArrow =
+                  (event.key === 'ArrowDown' || event.key === 'ArrowUp') &&
+                  !event.nativeEvent.isComposing &&
+                  event.keyCode !== 229 &&
+                  !event.metaKey &&
+                  !event.ctrlKey &&
+                  !event.altKey &&
+                  !event.shiftKey;
+                if (plainArrow) {
                   const content = event.currentTarget.closest(
                     '[data-radix-menu-content]',
                   );
@@ -270,15 +359,21 @@ export function WorkspaceSelector({
               placeholder={t('sidebar.filterWorkspaces')}
               aria-label={t('sidebar.filterWorkspaces')}
               autoFocus
+              {...filterInputProps}
               className="w-full rounded-md border border-input bg-transparent px-2 py-1 text-sm outline-none"
             />
           </div>
           {noWorkspaceMatches && (
-            <div className="px-2 py-1.5 text-xs text-muted-foreground">
+            <div
+              role="status"
+              aria-live="polite"
+              className="px-2 py-1.5 text-xs text-muted-foreground"
+            >
               {t('sidebar.noWorkspacesMatch')}
             </div>
           )}
           <DropdownMenuRadioGroup
+            id={radioGroupId}
             value={selectedStandalone ? STANDALONE_OPTION_ID : selected?.id}
             onValueChange={(id) => {
               if (standaloneSelectable && id === STANDALONE_OPTION_ID) {
@@ -315,6 +410,10 @@ export function WorkspaceSelector({
                       key={workspace.id}
                       value={workspace.id}
                       disabled={!workspace.trusted}
+                      // Row highlight is focus-based (no hover variant in the
+                      // base item); while the filter input owns focus, hover
+                      // is the only cue left for the row under the pointer.
+                      className="hover:bg-accent/60"
                       title={
                         remoteHost
                           ? `${remoteHost} — ${workspace.cwd}`
@@ -358,7 +457,10 @@ export function WorkspaceSelector({
               </Fragment>
             ))}
             {standaloneSelectable && (
-              <DropdownMenuRadioItem value={STANDALONE_OPTION_ID}>
+              <DropdownMenuRadioItem
+                value={STANDALONE_OPTION_ID}
+                className="hover:bg-accent/60"
+              >
                 <span className="min-w-0 flex-1 truncate">
                   {t('sidebar.noWorkspace')}
                 </span>

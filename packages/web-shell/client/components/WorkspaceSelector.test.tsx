@@ -731,7 +731,117 @@ describe('WorkspaceSelector', () => {
     expect(items.length).toBe(2);
   });
 
-  it('resets the filter when the menu closes', async () => {
+  it('auto-focuses the filter when the menu opens', async () => {
+    const element = renderSelector();
+    await openMenu(element);
+    const filter = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-ws-filter] input',
+    )!;
+    expect(filter).not.toBeNull();
+    expect(document.activeElement).toBe(filter);
+  });
+
+  it('keeps modified arrow gestures on the filter input', async () => {
+    const element = renderSelector();
+    await openMenu(element);
+    const filter = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-ws-filter] input',
+    )!;
+    act(() => {
+      filter.focus();
+    });
+    // Cmd/Ctrl/Alt/Shift+arrow are text gestures: the list must not
+    // intercept them, so they reach the focused input untouched.
+    for (const modifiers of [{ metaKey: true }, { shiftKey: true }]) {
+      const event = new KeyboardEvent('keydown', {
+        key: 'ArrowDown',
+        bubbles: true,
+        cancelable: true,
+        ...modifiers,
+      });
+      act(() => {
+        filter.dispatchEvent(event);
+      });
+      expect(document.activeElement).toBe(filter);
+      expect(event.defaultPrevented).toBe(false);
+    }
+  });
+
+  it('does not move focus to a hovered row while the filter owns focus', async () => {
+    const element = renderSelector();
+    await openMenu(element);
+    const filter = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-ws-filter] input',
+    )!;
+    act(() => {
+      filter.focus();
+    });
+    const primary = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+    ].find((entry) => entry.textContent?.includes('primary'))!;
+    const move = new MouseEvent('pointermove', {
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(move, 'pointerType', { value: 'mouse' });
+    act(() => {
+      primary.dispatchEvent(move);
+    });
+    expect(document.activeElement).toBe(filter);
+  });
+
+  it('filters remote workspaces by their host', async () => {
+    const element = renderSelector({
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/primary',
+          label: 'qwen-code',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'remote',
+          cwd: '/srv/remote',
+          label: 'other',
+          primary: false,
+          trusted: true,
+          hostOrigin: 'https://b.example:4170',
+        },
+      ],
+    });
+    await openMenu(element);
+    const filter = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-ws-filter] input',
+    )!;
+    setFilterInput(filter, 'b.example');
+    const items = [...document.querySelectorAll('[role="menuitemradio"]')];
+    expect(items.length).toBe(1);
+    expect(items[0]!.textContent).toContain('b.example:4170');
+  });
+
+  it('commits the filter only when the IME composition ends', async () => {
+    const element = renderSelector();
+    await openMenu(element);
+    const filter = document.querySelector<HTMLInputElement>(
+      '[data-web-shell-ws-filter] input',
+    )!;
+    act(() => {
+      filter.dispatchEvent(new Event('compositionstart', { bubbles: true }));
+    });
+    setFilterInput(filter, 'pri');
+    // The preedit is displayed but must not refilter the list yet.
+    expect(filter.value).toBe('pri');
+    expect(document.querySelectorAll('[role="menuitemradio"]').length).toBe(2);
+    act(() => {
+      filter.dispatchEvent(new Event('compositionend', { bubbles: true }));
+    });
+    const items = [...document.querySelectorAll('[role="menuitemradio"]')];
+    expect(items.length).toBe(1);
+    expect(items[0]!.textContent).toContain('primary');
+  });
+
+  it('resets the filter when the menu reopens after a filtered close', async () => {
     const element = renderSelector();
     const trigger = element.querySelector('button')!;
     await openMenu(element);
@@ -739,13 +849,23 @@ describe('WorkspaceSelector', () => {
       '[data-web-shell-ws-filter] input',
     )!;
     setFilterInput(filter, 'PRI');
+    expect(document.querySelectorAll('[role="menuitemradio"]').length).toBe(1);
     await act(async () => {
       trigger.dispatchEvent(new MouseEvent('pointerleave', { bubbles: true }));
       document.body.dispatchEvent(
         new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
       );
       trigger.dispatchEvent(new FocusEvent('focusin', { bubbles: true }));
-      await new Promise((resolve) => setTimeout(resolve, 350));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    });
+    // While the content is still mounted for the exit animation, the
+    // filtered list must not snap back to the full one.
+    const exiting = document.querySelector('[role="menu"]');
+    if (exiting) {
+      expect(exiting.querySelectorAll('[role="menuitemradio"]').length).toBe(1);
+    }
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 400));
     });
     expect(document.querySelector('[role="menu"]')).toBeNull();
 

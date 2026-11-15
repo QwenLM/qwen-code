@@ -36,4 +36,14 @@ describe('matchesWorkspaceQuery', () => {
       true,
     );
   });
+
+  // macOS filesystems store decomposed (NFD) names while text inputs yield
+  // composed (NFC) form; both spellings of the same name must match.
+  it('matches decomposed (NFD) candidates against a composed (NFC) query', () => {
+    const nfdName = 'cafe\u0301'; // c a f e + combining acute
+    const nfcQuery = 'caf\u00e9'; // c a f é
+    expect(matchesWorkspaceQuery([nfdName], nfcQuery)).toBe(true);
+    expect(matchesWorkspaceQuery([nfcQuery], nfdName)).toBe(true);
+    expect(matchesWorkspaceQuery(['Cafe\u0301'], 'CAF\u00C9')).toBe(true);
+  });
 });
