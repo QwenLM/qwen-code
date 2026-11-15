@@ -27587,6 +27587,10 @@ describe('App session callbacks', () => {
   });
 
   it('does not fire an automatic recap while general.showSessionRecap is unset', async () => {
+    // The capability must be advertised, or the effect returns at the
+    // capability guard and this case never reaches the setting gate it is
+    // named for — the default-off contract every upgrade lands in.
+    mockConnection.capabilities.features = ['session_recap'];
     const recap = deferred<{ sessionId: string; recap: string | null }>();
     mockSessionActions.recapSession.mockReturnValueOnce(recap.promise);
     testState.blocks = [{}, {}, {}, {}];
