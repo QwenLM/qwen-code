@@ -736,6 +736,62 @@ describe('resolveBranchWorktreeBaseCheckout', () => {
       await fs.rm(decoyParent, { recursive: true, force: true });
     }
   });
+
+  it('resolves the source checkout HEAD when it diverges from the repo top (R5-4)', async () => {
+    // The branch worktree must be created at the SOURCE checkout's HEAD
+    // (base.headCommit), not the repo top's: the two differ when the
+    // session lives in a sibling managed worktree that committed ahead.
+    const sourceSessionId = '33333333-3333-4333-8333-333333333333';
+    const service = new GitWorktreeService(root);
+    const created = await service.createUserWorktree('source', baseCommit, {
+      detached: true,
+    });
+    if (!created.success || !created.worktree) {
+      throw new Error(created.error ?? 'worktree creation failed');
+    }
+    const sourcePath = created.worktree.path;
+    await fs.writeFile(path.join(sourcePath, 'ahead.txt'), 'ahead\n');
+    execFileSync('git', ['add', 'ahead.txt'], { cwd: sourcePath });
+    execFileSync('git', ['commit', '-qm', 'source work', '--no-verify'], {
+      cwd: sourcePath,
+    });
+    const sourceHead = execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: sourcePath,
+      encoding: 'utf8',
+    }).trim();
+    expect(sourceHead).not.toBe(baseCommit);
+    await createWorktreeSessionMarker(sourcePath, sourceSessionId);
+    await fs.mkdir(path.dirname(sidecarPath), { recursive: true });
+    await fs.writeFile(
+      sidecarPath,
+      `${JSON.stringify({
+        slug: 'source',
+        worktreePath: sourcePath,
+        worktreeBranch: '',
+        originalCwd: root,
+        originalBranch: 'main',
+        originalHeadCommit: baseCommit,
+      })}\n`,
+      'utf8',
+    );
+
+    const resolved = await resolveBranchWorktreeBaseCheckout({
+      workspaceCwd: root,
+      sessionId: sourceSessionId,
+      snapshot: {
+        workspaceCwd: root,
+        effectiveCwd: sourcePath,
+        worktree: { slug: 'source', path: sourcePath, branch: '' },
+      },
+      sidecarPath,
+    });
+
+    expect(resolved).toMatchObject({
+      repoTop: await fs.realpath(root),
+      checkoutCwd: await fs.realpath(sourcePath),
+      headCommit: sourceHead,
+    });
+  });
 });
 
 describe('isBranchWorktreeCreationSupported', () => {

@@ -1532,8 +1532,10 @@ export class GitWorktreeService {
   /**
    * Copy this checkout's untracked files into another checkout of the
    * same repository at the same repository-relative offset (the target
-   * may be rooted at a subdirectory). Fail-open per file. Returns the
-   * paths actually copied so a caller can undo the overlay on rollback.
+   * may be rooted at a subdirectory). Fail-open per file; a pre-existing
+   * destination is never overwritten. Returns the paths actually CREATED
+   * so a caller can undo the overlay on rollback without deleting files
+   * that were already there.
    */
   async carryUntrackedFilesTo(targetCwd: string): Promise<string[]> {
     const repoTop = await this.getRepoTopLevel().catch(() => null);
@@ -1553,6 +1555,15 @@ export class GitWorktreeService {
     for (const rel of files) {
       try {
         const dst = path.join(targetTop, rel);
+        // Never overwrite a pre-existing destination: the caller's rollback
+        // removes the paths returned here, and a pre-existing file (e.g. a
+        // git-ignored .env.local the clean gate cannot see) must survive the
+        // carry. Only files this call CREATES are recorded for undo.
+        const exists = await fs
+          .lstat(dst)
+          .then(() => true)
+          .catch(() => false);
+        if (exists) continue;
         await fs.mkdir(path.dirname(dst), { recursive: true });
         await this.copyOverlayEntry(path.join(repoTop, rel), dst);
         copied.push(rel);
@@ -1565,8 +1576,10 @@ export class GitWorktreeService {
 
   /**
    * Overlay a captured dirty state onto a worktree: apply the tracked
-   * changes, then copy untracked files. Fail-open per step — the worktree
-   * stays usable with whatever applied.
+   * changes, then copy untracked files. A tracked apply that conflicts or
+   * fails for an environment reason throws WorktreeDirtyCarryConflictError
+   * so creation is refused rather than relocating the session without the
+   * user's work; the per-file untracked copy stays fail-open.
    */
   private async applyDirtyState(
     worktreePath: string,
@@ -1590,9 +1603,8 @@ export class GitWorktreeService {
       // non-zero exit, so detect by the index state, not the throw.
       // Swallowing it would relocate the session into a poisoned tree (the
       // markers get committed by the first `git add -A`). Restore committed
-      // state and fail closed; a clean refusal (no unmerged entries) stays
-      // fail-open. The rollback gate exempts the carried overlay as a plain
-      // copy, so a half-merged tree must never survive this call.
+      // state and fail closed. The rollback gate exempts the carried overlay
+      // as a plain copy, so a half-merged tree must never survive this call.
       const unmerged = (
         await wtGit.raw(['ls-files', '-u']).catch(() => '')
       ).trim();
@@ -1602,6 +1614,19 @@ export class GitWorktreeService {
         throw new WorktreeDirtyCarryConflictError(
           `Dirty carry conflicted with the worktree base: ${
             applyError instanceof Error ? applyError.message : 'merge conflict'
+          }`,
+        );
+      }
+      if (applyError) {
+        // A non-conflict apply failure (e.g. an unwritable index) means the
+        // tracked carry did not land. Surface it rather than record a carry
+        // that never happened; the per-file untracked copy below stays
+        // fail-open, and an empty snapshot attempts no apply at all.
+        throw new WorktreeDirtyCarryConflictError(
+          `Dirty carry failed to apply: ${
+            applyError instanceof Error
+              ? applyError.message
+              : String(applyError)
           }`,
         );
       }
@@ -2916,7 +2941,9 @@ export class GitWorktreeService {
    * Throws WorktreeDirtyCarryConflictError when the 3-way apply conflicts
    * (detected by unmerged index entries — simple-git's raw mode may resolve
    * even on the non-zero exit), restoring the checkout to committed state
-   * first so no conflict markers survive.
+   * first so no conflict markers survive. Any other apply failure (e.g. an
+   * unwritable index) also throws: the handoff must never move the session
+   * without the user's work, so there is no fail-open here.
    */
   async applyStashSnapshot(
     checkoutPath: string,
@@ -2930,12 +2957,29 @@ export class GitWorktreeService {
     } catch (error) {
       applyError = error;
     }
-    const unmerged = (await git.raw(['ls-files', '-u']).catch(() => '')).trim();
+    let unmergedRaw: string | null = null;
+    try {
+      unmergedRaw = await git.raw(['ls-files', '-u']);
+    } catch {
+      unmergedRaw = null;
+    }
+    const unmerged = (unmergedRaw ?? '').trim();
     if (unmerged.length > 0) {
       await git.raw(['reset', '--hard', 'HEAD']).catch(() => undefined);
       throw new WorktreeDirtyCarryConflictError(
         `Stash snapshot conflicted with the checkout: ${
           applyError instanceof Error ? applyError.message : 'merge conflict'
+        }`,
+      );
+    }
+    if (applyError) {
+      // A non-conflict apply failure (e.g. an unwritable index), or an index
+      // state that could not be read to confirm a clean apply: the handoff
+      // must not move the session without the user's work. Fail closed —
+      // unlike the worktree-creation path, there is no fail-open here.
+      throw new WorktreeDirtyCarryConflictError(
+        `Stash snapshot failed to apply: ${
+          applyError instanceof Error ? applyError.message : String(applyError)
         }`,
       );
     }

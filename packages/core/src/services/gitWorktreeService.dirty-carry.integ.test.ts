@@ -20,6 +20,7 @@ import * as path from 'node:path';
 import {
   CARRIED_PATHS_MAX_BYTES,
   GitWorktreeService,
+  WorktreeDirtyCarryConflictError,
 } from './gitWorktreeService.js';
 
 function git(cwd: string, ...args: string[]): string {
@@ -723,4 +724,115 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
       ),
     ).toBe('bulk\n');
   });
+
+  it('applyStashSnapshot fails closed when the target index is locked (R6-2)', async () => {
+    // A non-conflict apply failure (unwritable index) must not resolve:
+    // the handoff would otherwise report a dirty carry that never landed.
+    await fs.writeFile(path.join(repoRoot, 'f.txt'), 'one\n');
+    git(repoRoot, 'add', 'f.txt');
+    git(repoRoot, 'commit', '-qm', 'f', '--no-verify');
+    const service = new GitWorktreeService(repoRoot);
+    const target = await service.createUserWorktree('snap-lock', 'main', {
+      detached: true,
+    });
+    expect(target.success).toBe(true);
+    const targetPath = target.worktree!.path;
+    await fs.writeFile(path.join(targetPath, 'f.txt'), 'two\n');
+    const snapshot = await service.createStashSnapshot(targetPath);
+    expect(snapshot).not.toBe('');
+    git(targetPath, 'checkout', '--', 'f.txt');
+    const gitDir = git(targetPath, 'rev-parse', '--absolute-git-dir');
+    await fs.writeFile(path.join(gitDir, 'index.lock'), '');
+
+    await expect(
+      service.applyStashSnapshot(targetPath, snapshot),
+    ).rejects.toThrow('failed to apply');
+    // The dirty change never landed.
+    expect(await read(path.join(targetPath, 'f.txt'))).toBe('one\n');
+  });
+
+  it('applyStashSnapshot refuses a conflicting apply and restores committed state (R6-2)', async () => {
+    await fs.writeFile(path.join(repoRoot, 'f.txt'), 'line1\nBASE\nline3\n');
+    git(repoRoot, 'add', 'f.txt');
+    git(repoRoot, 'commit', '-qm', 'f base', '--no-verify');
+    const service = new GitWorktreeService(repoRoot);
+    const sibling = await service.createUserWorktree('snap-src', 'main', {
+      detached: true,
+    });
+    expect(sibling.success).toBe(true);
+    const siblingPath = sibling.worktree!.path;
+    await fs.writeFile(
+      path.join(siblingPath, 'f.txt'),
+      'line1\nDIRTY\nline3\n',
+    );
+    const snapshot = await service.createStashSnapshot(siblingPath);
+    expect(snapshot).not.toBe('');
+    // Advance the target on the same lines: the 3-way apply conflicts.
+    await fs.writeFile(path.join(repoRoot, 'f.txt'), 'line1\nOTHER\nline3\n');
+    git(repoRoot, 'add', 'f.txt');
+    git(repoRoot, 'commit', '-qm', 'f other', '--no-verify');
+
+    await expect(
+      service.applyStashSnapshot(repoRoot, snapshot),
+    ).rejects.toBeInstanceOf(WorktreeDirtyCarryConflictError);
+    // No conflict markers survive; the checkout is at committed state.
+    expect(await read(path.join(repoRoot, 'f.txt'))).toBe(
+      'line1\nOTHER\nline3\n',
+    );
+    expect(git(repoRoot, 'status', '--porcelain')).toBe('');
+  });
+
+  it('carryUntrackedFilesTo skips pre-existing destinations and records only created paths (R6-1)', async () => {
+    const service = new GitWorktreeService(repoRoot);
+    const target = await service.createUserWorktree('carry-skip', 'main', {
+      detached: true,
+    });
+    expect(target.success).toBe(true);
+    const targetPath = target.worktree!.path;
+    // secret.env exists in BOTH checkouts; fresh.txt only in the source.
+    // The caller's rollback removes the returned paths, so a pre-existing
+    // destination must neither be overwritten nor recorded.
+    await fs.writeFile(path.join(repoRoot, 'secret.env'), 'REAL-LOCAL\n');
+    await fs.writeFile(path.join(targetPath, 'secret.env'), 'FROM-WORKTREE\n');
+    await fs.writeFile(path.join(targetPath, 'fresh.txt'), 'new\n');
+
+    const created = await new GitWorktreeService(
+      targetPath,
+    ).carryUntrackedFilesTo(repoRoot);
+
+    expect(created).toContain('fresh.txt');
+    expect(created).not.toContain('secret.env');
+    expect(await read(path.join(repoRoot, 'secret.env'))).toBe('REAL-LOCAL\n');
+    expect(await read(path.join(repoRoot, 'fresh.txt'))).toBe('new\n');
+  });
+
+  // The post-checkout hook is a POSIX shell script; Windows has no sh.
+  it.skipIf(process.platform === 'win32')(
+    'createUserWorktree surfaces a non-conflict carry failure (R5-5)',
+    async () => {
+      // Hold the NEW worktree's index.lock from a post-checkout hook (it
+      // runs during `git worktree add`, after the index exists): the
+      // tracked stash apply then fails for an environment reason, with no
+      // unmerged entries. Creation must refuse rather than record a carry
+      // that never landed.
+      const hooksDir = path.join(repoParent, 'hooks');
+      await fs.mkdir(hooksDir);
+      await fs.writeFile(
+        path.join(hooksDir, 'post-checkout'),
+        '#!/bin/sh\ngd=$(git rev-parse --absolute-git-dir)\ntouch "$gd/index.lock"\n',
+        { mode: 0o755 },
+      );
+      git(repoRoot, 'config', 'core.hooksPath', hooksDir);
+      await makeDirty(repoRoot);
+
+      const service = new GitWorktreeService(repoRoot);
+      const created = await service.createUserWorktree('locked', 'main', {
+        detached: true,
+        carryDirtyState: true,
+      });
+
+      expect(created.success).toBe(false);
+      expect(created.error).toContain('failed to apply');
+    },
+  );
 });

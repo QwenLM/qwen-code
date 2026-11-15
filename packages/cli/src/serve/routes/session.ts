@@ -3762,6 +3762,7 @@ export function registerSessionRoutes(
               workspaceCwd,
               originalBranch: worktreeBaseBranch ?? '',
               originalHeadCommit: worktreeBaseCommit ?? '',
+              worktreeBase: worktreeBaseCommit,
             },
           );
           assertRuntimeGenerationOpen?.();
@@ -3826,7 +3827,10 @@ export function registerSessionRoutes(
       // user-named worktrees).
       if (worktreeMeta && !worktreeDurablyAttached && !spawnCompleted) {
         await new GitWorktreeService(workspaceCwd)
-          .removeUserWorktree(worktreeMeta.slug, { deleteBranch: true })
+          .removeUserWorktree(worktreeMeta.slug, {
+            deleteBranch: true,
+            baseCommit: worktreeBaseCommit,
+          })
           .catch(() => {});
       }
       // Roll back the branch if spawn failed — switch back to the base
@@ -5167,19 +5171,28 @@ export function registerSessionRoutes(
               }
               const wtService = new GitWorktreeService(workspaceCwd);
               const wtCheckoutService = new GitWorktreeService(realTarget);
-              const base = sidecar.originalHeadCommit;
+              // gateBase describes originalCwd's checkout (the local HEAD
+              // the gate compares against); base is the commit the worktree
+              // was created at (the promotion test). They differ when a
+              // branch worktree was created from a sibling managed worktree.
+              const gateBase = sidecar.originalHeadCommit;
+              const base = sidecar.worktreeBase ?? sidecar.originalHeadCommit;
               // The local checkout may have moved ahead of the recorded
               // base — committing locally while the agent works in the
               // worktree is the normal reason to use one. A descendant is
-              // reconcilable: the snapshot applies on top of it (and a
-              // conflicting apply is refused below, never left as
-              // markers). Only a divergent or unreadable HEAD is terminal.
-              if (base) {
+              // reconcilable for the snapshot-only path (the snapshot
+              // applies on top; a conflicting apply is refused below). A
+              // divergent or unreadable HEAD is terminal. The descendant
+              // case is re-checked below once we know whether a branch will
+              // be checked out — checking out a branch would drop the user's
+              // own ahead-of-base commit from the working tree.
+              let localMovedAhead = false;
+              if (gateBase) {
                 const localHead = await getHeadCommit(localCwd);
                 if (
                   !localHead ||
-                  (localHead !== base &&
-                    !(await isCommitAncestor(base, localHead, localCwd)))
+                  (localHead !== gateBase &&
+                    !(await isCommitAncestor(gateBase, localHead, localCwd)))
                 ) {
                   res.status(409).json({
                     error:
@@ -5189,6 +5202,7 @@ export function registerSessionRoutes(
                   });
                   return;
                 }
+                localMovedAhead = localHead !== gateBase;
               }
               // Carry the work before moving the session: branch checkout
               // first, then the tracked dirty snapshot, then the untracked
@@ -5219,6 +5233,21 @@ export function registerSessionRoutes(
                   error:
                     'Cannot verify the worktree HEAD against its recorded base',
                   code: 'worktree_handoff_base_unavailable',
+                  sessionId: storageSessionId,
+                });
+                return;
+              }
+              // A descendant local HEAD is reconcilable only when no branch
+              // is checked out (the snapshot applies on top of the local
+              // HEAD). Checking out a branch — recorded, or promoted at the
+              // worktree HEAD — would remove the user's own ahead-of-base
+              // commit from the working tree, so refuse that combination.
+              const willCheckoutBranch = branch !== '' || head !== base;
+              if (localMovedAhead && willCheckoutBranch) {
+                res.status(409).json({
+                  error:
+                    'Local checkout HEAD moved past the recorded handoff base',
+                  code: 'local_head_moved',
                   sessionId: storageSessionId,
                 });
                 return;
@@ -5458,7 +5487,8 @@ export function registerSessionRoutes(
             // A session cd'd into a sibling checkout with a divergent HEAD
             // therefore starts its worktree at the workspace HEAD (the
             // sibling's own commits stay in the sibling); its dirty files
-            // are still carried from sourceCwd below, fail-open on conflict.
+            // are still carried from sourceCwd below, and a carry conflict
+            // fails the handoff closed rather than relocating without them.
             const baseCommit = await getHeadCommit(workspaceCwd);
             if (!baseCommit) {
               res.status(409).json({
@@ -5496,7 +5526,13 @@ export function registerSessionRoutes(
               return;
             }
             const worktree = created.worktree;
+            // The bridge reports the canonical (realpath'd) cwd while the
+            // service returns the raw join; a symlinked workspace root
+            // (macOS /var → /private/var) must not roll back the checkout
+            // the session now lives in.
+            let canonicalWorktreePath = worktree.path;
             try {
+              canonicalWorktreePath = fs.realpathSync(worktree.path);
               await createWorktreeSessionMarkerExclusive(
                 worktree.path,
                 storageSessionId,
@@ -5513,6 +5549,7 @@ export function registerSessionRoutes(
                 workspaceCwd,
                 originalBranch: currentBranch ?? '',
                 originalHeadCommit: baseCommit,
+                worktreeBase: baseCommit,
               });
               assertRuntimeGenerationOpen?.();
               const changed = await runtime.bridge.changeSessionCwd(
@@ -5524,7 +5561,7 @@ export function registerSessionRoutes(
                   allowWhileResetPending: true,
                 },
               );
-              if (changed.newCwd !== worktree.path) {
+              if (changed.newCwd !== canonicalWorktreePath) {
                 throw new Error('Handoff relocation was rejected');
               }
               runtime.bridge.setSessionWorktree?.(storageSessionId, {
@@ -5547,7 +5584,7 @@ export function registerSessionRoutes(
                 runtime.bridge.getSessionExecutionSnapshot(
                   storageSessionId,
                 ).effectiveCwd;
-              if (observedCwd === worktree.path) {
+              if (observedCwd === canonicalWorktreePath) {
                 runtime.bridge.setSessionWorktree?.(storageSessionId, {
                   slug,
                   path: worktree.path,
@@ -6025,6 +6062,20 @@ export function registerSessionRoutes(
                   'marker-created',
                 );
                 runtime.generationGuard?.assertOpen();
+                // originalHeadCommit must describe originalCwd's checkout
+                // (the repo top) for the handoff's local_head_moved gate;
+                // an unreadable HEAD fails closed rather than disabling the
+                // gate with an empty base.
+                const repoTopHead = await getHeadCommit(base.repoTop);
+                if (!repoTopHead) {
+                  await cleanupPrepared();
+                  res.status(500).json({
+                    error:
+                      'Cannot read the workspace HEAD to record the handoff base',
+                    code: 'worktree_create_failed',
+                  });
+                  return;
+                }
                 await createWorktreeSession(sidecarPath, {
                   slug,
                   worktreePath: worktree.path,
@@ -6032,13 +6083,12 @@ export function registerSessionRoutes(
                   originalCwd: base.repoTop,
                   workspaceCwd: runtime.workspaceCwd,
                   originalBranch: base.branch,
-                  // The base must describe the SAME checkout as
-                  // originalCwd (the repo top): the handoff's
-                  // local_head_moved gate compares originalCwd's HEAD
-                  // against it. base.headCommit is the source worktree's
-                  // commit — a different checkout — and would 409 every
-                  // return handoff even though the local never moved.
-                  originalHeadCommit: (await getHeadCommit(base.repoTop)) ?? '',
+                  originalHeadCommit: repoTopHead,
+                  // The worktree was created at the source checkout's HEAD,
+                  // which may differ from the repo top's HEAD (a session
+                  // living in a sibling managed worktree). The promotion
+                  // test, exit_worktree and the orphan reaper read this.
+                  worktreeBase: base.headCommit,
                 });
                 journal = await updateBranchWorktreeJournal(
                   journalPath,

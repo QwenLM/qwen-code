@@ -397,6 +397,23 @@ describe('writeWorktreeSession', () => {
     await writeJson({ ...sample, supersedes: null });
     await expectStrictInvalid();
   });
+
+  it('round-trips the worktreeBase creation-base field (R5-4)', async () => {
+    const withBase: WorktreeSession = {
+      ...sample,
+      worktreeBase: 'c'.repeat(40),
+    };
+    await writeWorktreeSession(filePath, withBase);
+    await expect(strictRead()).resolves.toEqual({
+      state: 'valid',
+      session: withBase,
+    });
+  });
+
+  it('rejects a sidecar with a non-string worktreeBase', async () => {
+    await writeJson({ ...sample, worktreeBase: 42 });
+    await expectStrictInvalid();
+  });
 });
 
 describe('createWorktreeSession', () => {

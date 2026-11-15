@@ -136,7 +136,12 @@ marker 与其 staged `.tmp` 兄弟）从 untracked 列表过滤，绝不能作�
 冲突的三方 `stash apply`（捕获检出的 HEAD 与工作树 base 在同几行分叉）
 会写入冲突标记与未合并索引条目；按索引状态检测——simple-git 的 raw 模式
 即使非零退出也可能 resolve——并 fail-closed：工作树复位到已提交状态、
-创建返回失败，绝不把会话迁进被污染的树。干净拒绝仍 fail-open。
+创建返回失败，绝不把会话迁进被污染的树。其他任何 apply 失败（如索引不可
+写）同样 fail-closed：未落盘的携带绝不能按已携带记录。成文的 fail-open
+只保留给干净拒绝——逐文件 untracked 复制跳过无法复制的文件，超 journal
+界限的 overlay 整体跳过。untracked 复制绝不覆盖已存在的目标，且只记录
+真正新建的路径，回滚只删除携带所添加的——干净门看不到的、预先存在的
+git-ignored 文件在携带与其撤销中都存活。
 
 携带界限按调用方而非全局。只有 branch-preparation 路由持久化
 `carriedPaths`（journal 读取端拒绝超 64 KiB 的记录），故传入
@@ -230,7 +235,10 @@ worktree-branch 路由带繁忙门（`branch_while_prompt_active`）。能力标
   不干净时拒绝（`local_checkout_dirty`）。记录 base（`originalHeadCommit`）
   必须与 `originalCwd` 描述同一检出：本地 HEAD 可等于它或为其后代（用户在
   agent 工作期间于本地提交——这正是用 worktree 的常态），以快照叠加其上
-  调和；分叉或不可读的本地 HEAD 以 `local_head_moved` 拒绝。与本地检出冲突
+  调和；分叉或不可读的本地 HEAD 以 `local_head_moved` 拒绝。后代仅对
+  纯快照路径可接受：当要 checkout 分支时（记录的，或在 worktree HEAD 提升
+  的），已前移的本地 HEAD 以 `local_head_moved` 拒绝——checkout 会把用户
+  自己超出 base 的提交从工作树中删掉。与本地检出冲突
   的快照在还原本地检出后以 `handoff_snapshot_conflict` 拒绝——绝不留下冲突
   标记。先携带工作：命名 worktree 分支在本地检出 checkout；detached 且有
   超出 base 的 commit 时先建分支（`name`，否则 `worktree-<slug>`）；detached
@@ -239,8 +247,12 @@ worktree-branch 路由带繁忙门（`branch_while_prompt_active`）。能力标
   快照在 checkout 后应用于本地检出。然后把会话 cwd 迁回本地检出，清除
   sidecar 与 bridge worktree 关联，worktree 目录（连同 marker）留给保留清理
   （P6）或手动删除。每条 worktree 创建路径都把 base 分支与 HEAD commit 记入
-  sidecar（`originalBranch` / `originalHeadCommit`）；超出 base 的提升判定
-  读取该记录 base。晚期失败回滚：自动分支仅在删除成功时删（否则 sidecar
+  sidecar（`originalBranch` / `originalHeadCommit`），并记录 worktree 自身
+  创建于哪个 commit（`worktreeBase`；该字段出现前写入的 sidecar 回退读
+  `originalHeadCommit`）。当 branch worktree 从住在兄弟托管 worktree 的会话
+  创建时两者不同：`originalHeadCommit` 继续描述 `originalCwd` 的检出供
+  `local_head_moved` 门使用，而超出 base 的提升判定、`exit_worktree` 与
+  孤儿清扫读取 `worktreeBase`。晚期失败回滚：自动分支仅在删除成功时删（否则 sidecar
   继续命名它并重挂 worktree），使重试始终与检出匹配，而非卡死在
   `worktree_branch_mismatch`。worktree HEAD 或记录 base 无法核实时，移交以
   `worktree_handoff_base_unavailable` 拒绝，而不是在工作留在原处时报告成功。
@@ -254,7 +266,9 @@ worktree-branch 路由带繁忙门（`branch_while_prompt_active`）。能力标
   起点（兄弟自己的提交留在兄弟中），dirty 文件仍从会话检出携带。HEAD 不可读
   时以 `worktree_handoff_base_unavailable` 拒绝。迁移失败时回滚按观测状态
   决定：bridge 超时是 caller-facing，排队的 cd 仍可能把会话落入 worktree，
-  故路由重读 effective cwd，会话已住在其中时保留检出 + sidecar；仅当 cwd
+  故路由重读 effective cwd，会话已住在其中时保留检出 + sidecar（按规范
+  realpath 路径比较——bridge 报告 realpath 而服务返回原始拼接，符号链接
+  的 workspace 根绝不能回滚会话正住在其中的检出）；仅当 cwd
   仍是移交前检出时才删除新建 worktree、sidecar、marker。自动创建的分支名与
   显式名字一样获得类型化 `branch_already_exists` 拒绝；「移入 worktree」动作
   带提示：本地检出保留其 dirty 状态，移交回本地需要本地检出干净。
@@ -477,7 +491,10 @@ E. 钉住分支契约的测试（P3 更新）
   P6 的「先快照再删除」解决它。见 D3。
 - **dirty overlay 冲突**：`stash apply` 在 worktree base 与源 HEAD 不同
   时可能冲突（实际相同——同一 commit——但本地 index 状态仍可能不同）。
-  按现有模式 fail-open；会话以已提交状态启动并暴露失败。
+  按未合并索引状态检测并 fail-closed（D3）：创建复位到已提交状态并拒绝；
+  handoff 还原本地检出并以 `handoff_snapshot_conflict` 拒绝。非冲突的
+  apply 失败（如索引不可写）同样 fail-closed——未落盘的携带绝不按已携带
+  报告。
 - **本地检出 dirty 时的 Handoff**：拒绝（D6）。Codex 此处行为未见文档；
   拒绝是安全解读。
 - **快照体积**：排除可再生目录使归档保持小，但含大 tracked 二进制的仓库

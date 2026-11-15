@@ -355,6 +355,64 @@ describe('ExitWorktreeTool', () => {
       await expect(fs.access(wtPath)).resolves.toBeUndefined();
     });
 
+    it('judges unmerged commits against worktreeBase, not originalHeadCommit (R5-4)', async () => {
+      // The branch-route shape: a detached worktree created at a sibling
+      // checkout's HEAD records originalHeadCommit = repo top HEAD. With
+      // no commits of its own it is clean at its CREATION base; judging
+      // against originalHeadCommit would read the sibling's commit as
+      // unmerged work and refuse removal of a clean worktree forever.
+      const service = new GitWorktreeService(repoRoot);
+      const rootHead = execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: repoRoot,
+        encoding: 'utf8',
+      }).trim();
+      const sibling = await service.createUserWorktree('sibling', 'main', {
+        detached: true,
+      });
+      expect(sibling.success).toBe(true);
+      const siblingPath = sibling.worktree!.path;
+      await fs.writeFile(path.join(siblingPath, 'ahead.txt'), 'ahead\n');
+      execFileSync('git', ['add', 'ahead.txt'], { cwd: siblingPath });
+      execFileSync('git', ['commit', '-qm', 'sibling work', '--no-verify'], {
+        cwd: siblingPath,
+      });
+      const siblingHead = execFileSync('git', ['rev-parse', 'HEAD'], {
+        cwd: siblingPath,
+        encoding: 'utf8',
+      }).trim();
+      expect(siblingHead).not.toBe(rootHead);
+      const created = await service.createUserWorktree('task', siblingHead, {
+        detached: true,
+      });
+      expect(created.success).toBe(true);
+      const wtPath = created.worktree!.path;
+      await writeWorktreeSessionMarker(wtPath, 'session-creator');
+      await writeWorktreeSession(
+        new SessionService(repoRoot).getWorktreeSessionPath('session-creator'),
+        {
+          slug: 'task',
+          worktreePath: wtPath,
+          worktreeBranch: '',
+          originalCwd: repoRoot,
+          originalBranch: 'main',
+          originalHeadCommit: rootHead,
+          worktreeBase: siblingHead,
+        },
+      );
+
+      const result = await exitWith(
+        {
+          getTargetDir: () => repoRoot,
+          getSessionId: () => 'session-creator',
+          getSessionService: () => new SessionService(repoRoot),
+        } as unknown as Config,
+        { name: 'task', action: 'remove' },
+      );
+
+      expect(result.error).toBeUndefined();
+      await expect(fs.access(wtPath)).rejects.toBeDefined();
+    });
+
     it('keeps the marker owner stable across legacy writer calls', async () => {
       const wtPath = await provisionWorktree('roundtrip');
       await expect(

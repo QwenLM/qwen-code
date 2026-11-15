@@ -155,8 +155,15 @@ from the worktree base on the same lines) writes conflict markers and
 unmerged index entries; it is detected by the index state — simple-git's
 raw mode may resolve even on the non-zero exit — and fails closed: the
 worktree is restored to committed state and creation returns failure, so
-a session is never relocated into a poisoned tree. A clean refusal stays
-fail-open.
+a session is never relocated into a poisoned tree. Any other apply
+failure (e.g. an unwritable index) fails closed the same way: a carry
+that did not land must never be recorded as carried. The documented
+fail-open survives only for the clean refusals — the per-file untracked
+copy skips files it cannot copy, and an oversized journal-bound overlay
+is skipped whole. The untracked copy never overwrites a pre-existing
+destination and records only the paths it actually CREATED, so a
+rollback removes only what the carry added — a pre-existing git-ignored
+file the clean gate cannot see survives both the carry and its undo.
 
 The carry bound is per call site, not universal. Only the branch-
 preparation route persists `carriedPaths` (in a journal whose reader
@@ -276,7 +283,11 @@ Capability: `session_worktree_handoff_v1`.
   `originalCwd`: the local HEAD may equal it or be a descendant (the user
   committed locally while the agent worked — the normal reason to use a
   worktree), reconciled by applying the snapshot on top; a divergent or
-  unreadable local HEAD refuses with `local_head_moved`. A snapshot that
+  unreadable local HEAD refuses with `local_head_moved`. A descendant is
+  acceptable only for the snapshot-only path: when a branch will be
+  checked out (recorded, or promoted at the worktree HEAD), a moved-ahead
+  local HEAD refuses with `local_head_moved` — the checkout would drop
+  the user's own ahead-of-base commit from the working tree. A snapshot that
   conflicts with the local checkout is refused with
   `handoff_snapshot_conflict` after restoring the local checkout — never
   left as conflict markers. Carry the work first: a named worktree branch
@@ -290,8 +301,14 @@ Capability: `session_worktree_handoff_v1`.
   sidecar and the bridge worktree association, and leave the worktree
   directory (with its marker) for retention cleanup (P6) or manual removal.
   Every worktree creation path records the base branch and HEAD commit in
-  the sidecar (`originalBranch` / `originalHeadCommit`); the beyond-base
-  promotion test reads that recorded base. A late failure rolls back: the
+  the sidecar (`originalBranch` / `originalHeadCommit`), plus the commit
+  the worktree itself was created at (`worktreeBase`, falling back to
+  `originalHeadCommit` for sidecars written before the field existed).
+  The two differ when a branch worktree is created from a session living
+  in a sibling managed worktree: `originalHeadCommit` keeps describing
+  `originalCwd`'s checkout for the `local_head_moved` gate, while the
+  beyond-base promotion test, `exit_worktree` and the orphan reaper read
+  `worktreeBase`. A late failure rolls back: the
   auto branch is deleted only when the delete succeeds (otherwise the
   sidecar keeps naming it and the worktree is re-attached), so a retry
   always matches the checkout instead of wedging in
@@ -315,8 +332,11 @@ Capability: `session_worktree_handoff_v1`.
   decides by OBSERVED state: a bridge timeout is caller-facing and the
   queued cd may still land the session in the worktree, so the route re-reads
   the effective cwd and keeps the checkout + sidecar when the session already
-  lives there; only when the cwd is still the pre-handoff checkout are the
-  fresh worktree, sidecar, and marker removed. The auto-created branch name
+  lives there (comparing canonical realpath'd paths — the bridge reports the
+  realpath while the service returns the raw join, and a symlinked workspace
+  root must not roll back the checkout the session lives in); only when the
+  cwd is still the pre-handoff checkout are the fresh worktree, sidecar, and
+  marker removed. The auto-created branch name
   receives the same typed `branch_already_exists` refusal as an explicit
   name, and the "Move to worktree" action carries a hint that the local
   checkout keeps its dirty state and handing back requires a clean local
@@ -576,8 +596,12 @@ that property for a custom root.
   resolves it. Documented in D3.
 - **Dirty overlay conflicts**: `stash apply` can conflict when the worktree
   base differs from the source HEAD (it does not — same commit — but local
-  index state can still differ). Fail-open per the existing pattern; the
-  session starts with committed state and the failure is surfaced.
+  index state can still differ). Detected by the unmerged index state and
+  failed closed (D3): creation restores committed state and refuses; the
+  handoff restores the local checkout and refuses with
+  `handoff_snapshot_conflict`. Non-conflict apply failures (e.g. an
+  unwritable index) fail closed the same way — a carry that did not land
+  is never reported as carried.
 - **Handoff with a dirty local checkout**: refused (D6). Codex's exact
   behavior here is undocumented; refusal is the safe reading.
 - **Snapshot size**: excluding regenerable dirs keeps archives small, but a

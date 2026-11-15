@@ -345,7 +345,8 @@ class ExitWorktreeInvocation extends BaseToolInvocation<
     const branchOwned =
       sidecarForThis?.worktreeBranch === slugBranch &&
       sidecarForThis?.worktreeBranch !== '';
-    const creationBase = sidecarForThis?.originalHeadCommit;
+    const creationBase =
+      sidecarForThis?.worktreeBase ?? sidecarForThis?.originalHeadCommit;
 
     let hasUnmerged = true;
     try {

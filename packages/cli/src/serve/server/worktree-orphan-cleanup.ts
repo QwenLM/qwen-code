@@ -453,7 +453,7 @@ export async function executeWorktreeCleanup(
     branchOwned:
       sidecar.worktreeBranch !== '' &&
       sidecar.worktreeBranch === worktreeBranchForSlug(sidecar.slug),
-    baseCommit: sidecar.originalHeadCommit,
+    baseCommit: sidecar.worktreeBase ?? sidecar.originalHeadCommit,
   });
   if (!result.success) {
     const errorText = result.error ?? 'unknown error';

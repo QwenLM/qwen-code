@@ -257,7 +257,7 @@ const execFileAsync = promisify(execFile);
 // the class with a controllable mock; each worktree test sets
 // `mockWt.impl` to control instance behaviour.
 const mockWt = vi.hoisted(() => ({
-  impl: undefined as (() => Record<string, unknown>) | undefined,
+  impl: undefined as ((cwd?: string) => Record<string, unknown>) | undefined,
   createMarker: undefined as
     | ((...args: unknown[]) => Promise<unknown>)
     | undefined,
@@ -336,9 +336,9 @@ vi.mock(
         static validateUserWorktreeSlug =
           original.GitWorktreeService.validateUserWorktreeSlug;
         static generateAutoSlug = original.GitWorktreeService.generateAutoSlug;
-        constructor() {
+        constructor(cwd?: string) {
           if (mockWt.impl) {
-            Object.assign(this, mockWt.impl());
+            Object.assign(this, mockWt.impl(cwd));
           }
         }
       },
@@ -15816,6 +15816,7 @@ describe('createServeApp', () => {
             workspaceCwd: WS_BOUND,
             originalBranch: 'main',
             originalHeadCommit: baseCommit,
+            worktreeBase: baseCommit,
           },
         );
       } finally {
@@ -29598,14 +29599,16 @@ describe('createServeApp', () => {
         });
         // The dirty capture must target the session's own checkout, not
         // the placement root; dropping dirtyStateSource silently captures
-        // the main checkout's edits for a session living elsewhere.
+        // the main checkout's edits for a session living elsewhere. The
+        // route realpaths the field, so mirror that here (macOS tmpdir is
+        // symlinked: /var → /private/var).
         expect(createWorktreeCalls[0]).toEqual([
           slug,
           baseCommit,
           expect.objectContaining({
             carryDirtyState: true,
             detached: true,
-            dirtyStateSource: repo,
+            dirtyStateSource: realpathSync(repo),
             // The branch route persists carriedPaths in the journal, so it
             // bounds the carry (CARRIED_PATHS_MAX_BYTES = 32 KiB).
             maxCarriedPathsBytes: 32 * 1024,
@@ -29640,10 +29643,16 @@ describe('createServeApp', () => {
         expect(existsSync(sidecarPath)).toBe(true);
         // The detached convention: the sidecar must record '', not the
         // slug-derived branch — a named record would surface much later as
-        // a permanent 409 worktree_branch_mismatch on handoff.
+        // a permanent 409 worktree_branch_mismatch on handoff. worktreeBase
+        // records the creation base (here equal to the repo top's HEAD).
         expect(
           JSON.parse(await fsp.readFile(sidecarPath, 'utf8')),
-        ).toMatchObject({ workspaceCwd: repo, worktreeBranch: '' });
+        ).toMatchObject({
+          workspaceCwd: repo,
+          worktreeBranch: '',
+          originalHeadCommit: baseCommit,
+          worktreeBase: baseCommit,
+        });
         expect(
           existsSync(
             path.join(chatsDir, `.branch-worktree-${res.body.sessionId}.json`),
@@ -29666,6 +29675,214 @@ describe('createServeApp', () => {
         ).toEqual([]);
       } finally {
         mockWt.impl = undefined;
+        mockBranchOps.getHeadCommit = undefined;
+        await fsp.rm(repo, { recursive: true, force: true });
+        await fsp.rm(runtimeDir, { recursive: true, force: true });
+      }
+    });
+
+    it('records the source checkout HEAD as worktreeBase when it diverges from the repo top (R5-4)', async () => {
+      const repo = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-branch-diverge-repo-'),
+      );
+      const runtimeDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-branch-diverge-runtime-'),
+      );
+      const slug = 'branch-diverge';
+      const worktreePath = path.join(repo, '.qwen', 'worktrees', slug);
+      const siblingPath = path.join(repo, '.qwen', 'worktrees', 'sibling');
+      try {
+        await execFileAsync('git', ['init', '-b', 'main'], { cwd: repo });
+        await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        await execFileAsync(
+          'git',
+          ['config', 'core.hooksPath', path.join(repo, '.git', 'empty-hooks')],
+          { cwd: repo },
+        );
+        await fsp.writeFile(path.join(repo, 'README.md'), 'base\n', 'utf8');
+        await execFileAsync('git', ['add', 'README.md'], { cwd: repo });
+        await execFileAsync(
+          'git',
+          [
+            '-c',
+            'user.name=Qwen Test',
+            '-c',
+            'user.email=qwen@example.com',
+            'commit',
+            '-m',
+            'base',
+          ],
+          { cwd: repo },
+        );
+        const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], {
+          cwd: repo,
+        });
+        const rootHead = stdout.trim();
+        // The source session lives in a sibling managed worktree that
+        // committed ahead of the repo top. The branch worktree is created
+        // at the SIBLING's HEAD, while originalHeadCommit must keep
+        // describing the repo top for the handoff's local_head_moved gate.
+        await execFileAsync(
+          'git',
+          ['worktree', 'add', '--detach', siblingPath, rootHead],
+          { cwd: repo },
+        );
+        await fsp.writeFile(path.join(siblingPath, 'ahead.txt'), 'ahead\n');
+        await execFileAsync('git', ['add', 'ahead.txt'], { cwd: siblingPath });
+        await execFileAsync(
+          'git',
+          [
+            '-c',
+            'user.name=Qwen Test',
+            '-c',
+            'user.email=qwen@example.com',
+            'commit',
+            '-m',
+            'sibling work',
+          ],
+          { cwd: siblingPath },
+        );
+        const { stdout: siblingStdout } = await execFileAsync(
+          'git',
+          ['rev-parse', 'HEAD'],
+          { cwd: siblingPath },
+        );
+        const siblingHead = siblingStdout.trim();
+        expect(siblingHead).not.toBe(rootHead);
+        await fsp.writeFile(
+          path.join(siblingPath, '.qwen-session'),
+          'source-session',
+          'utf8',
+        );
+        const chatsDir = path.join(
+          new Storage(repo, runtimeDir).getProjectDir(),
+          'chats',
+        );
+        await fsp.mkdir(chatsDir, { recursive: true });
+        await fsp.writeFile(
+          path.join(chatsDir, 'source-session.worktree.json'),
+          JSON.stringify({
+            slug: 'sibling',
+            worktreePath: siblingPath,
+            worktreeBranch: '',
+            originalCwd: repo,
+            workspaceCwd: repo,
+            originalBranch: 'main',
+            originalHeadCommit: rootHead,
+          }),
+          'utf8',
+        );
+        // The repo-top HEAD read (the handoff gate base) stays the root's.
+        mockBranchOps.getHeadCommit = async () => rootHead;
+        mockWt.readSidecar = async (filePath: unknown) => {
+          try {
+            return JSON.parse(await fsp.readFile(String(filePath), 'utf8'));
+          } catch {
+            return null;
+          }
+        };
+        const createWorktreeCalls: unknown[][] = [];
+        mockWt.impl = (cwd?: string) => ({
+          isGitRepository: async () => true,
+          // The mock must distinguish the two checkouts: flattening them
+          // would hide the very divergence under test.
+          getRepoTopLevel: async () =>
+            cwd !== undefined && realpathSync(cwd) === siblingPath
+              ? siblingPath
+              : repo,
+          getCurrentBranch: async () => 'main',
+          getUserWorktreePath: () => worktreePath,
+          createUserWorktree: async (...args: unknown[]) => {
+            createWorktreeCalls.push(args);
+            await fsp.mkdir(path.dirname(worktreePath), { recursive: true });
+            await execFileAsync(
+              'git',
+              ['worktree', 'add', '--detach', worktreePath, String(args[1])],
+              { cwd: repo },
+            );
+            return {
+              success: true,
+              worktree: { slug, path: worktreePath, branch: '' },
+            };
+          },
+        });
+        const bridge = fakeBridge({
+          summaryImpl: (sessionId) => {
+            if (sessionId !== 'source-session') {
+              throw new SessionNotFoundError(sessionId);
+            }
+            return {
+              sessionId,
+              workspaceCwd: repo,
+              createdAt: '2026-08-16T00:00:00.000Z',
+              clientCount: 1,
+              hasActivePrompt: false,
+            };
+          },
+        });
+        bridge.getSessionExecutionSnapshot = () => ({
+          workspaceCwd: repo,
+          effectiveCwd: siblingPath,
+          worktree: { slug: 'sibling', path: siblingPath, branch: '' },
+        });
+        bridge.branchSession = vi.fn(
+          async (
+            _sourceSessionId: string,
+            branchRequest: { targetSessionId?: string },
+          ) => ({
+            sessionId: branchRequest.targetSessionId!,
+            displayName: 'Worktree branch',
+            forkedFrom: {
+              sessionId: 'source-session',
+              displayName: 'Source',
+            },
+            sourceWarnings: [],
+          }),
+        );
+        const runtime = makeWorkspaceRuntimeForTest({
+          workspaceId: 'branch-worktree-primary',
+          workspaceCwd: repo,
+          sessionRuntimeBaseDir: runtimeDir,
+          primary: true,
+          bridge,
+        });
+        const app = createServeApp(
+          { ...baseOpts, workspace: repo },
+          undefined,
+          { workspaceRegistry: createWorkspaceRegistry([runtime]) },
+        );
+
+        const res = await request(app)
+          .post('/session/source-session/branch')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ worktree: { slug } });
+
+        expect(res.status).toBe(201);
+        // The worktree was created at the source checkout's HEAD.
+        expect(createWorktreeCalls[0]?.[1]).toBe(siblingHead);
+        const { stdout: wtHead } = await execFileAsync(
+          'git',
+          ['rev-parse', 'HEAD'],
+          { cwd: worktreePath },
+        );
+        expect(wtHead.trim()).toBe(siblingHead);
+        const sidecar = JSON.parse(
+          await fsp.readFile(
+            path.join(chatsDir, `${res.body.sessionId}.worktree.json`),
+            'utf8',
+          ),
+        );
+        // originalHeadCommit keeps describing originalCwd's checkout (the
+        // repo top); worktreeBase records the creation base. Swapping the
+        // two re-breaks the return handoff, exit_worktree and the reaper.
+        expect(sidecar.originalHeadCommit).toBe(rootHead);
+        expect(sidecar.worktreeBase).toBe(siblingHead);
+        expect(sidecar.originalCwd).toBe(repo);
+      } finally {
+        mockWt.impl = undefined;
+        mockWt.readSidecar = undefined;
         mockBranchOps.getHeadCommit = undefined;
         await fsp.rm(repo, { recursive: true, force: true });
         await fsp.rm(runtimeDir, { recursive: true, force: true });
