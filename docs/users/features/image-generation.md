@@ -26,10 +26,12 @@ The tool appends the generation path itself, so enter the API root as the
 HTTP 404. For MiniMax use `https://api.minimax.io/v1` (or
 `https://api.minimaxi.com/v1`).
 
-The easiest path in the Web Shell is **Settings → Models → + Add Model** with
-**Model purpose** set to **Image generation**: enter the endpoint and API key,
-then the model id. Adding an image model keeps your current conversation
-model.
+The easiest path in the Web Shell is **Settings → Models → + Add Model →
+Custom Provider**, with **Model purpose** set to **Image generation**: enter
+the endpoint and API key, then the model id. The Model purpose field exists
+only for the Custom Provider preset; the Alibaba/DashScope preset does not
+offer it, and the MiniMax preset ships image routes directly. Adding an image
+model keeps your current conversation model.
 
 ### 2. Select the image model
 
@@ -75,9 +77,11 @@ Each generated image is:
   `envKey` and a plain HTTPS `baseUrl` — no credentials, query, or
   fragment. An empty or unparsable selector, zero or several matching
   routes, or any missing or invalid field leaves the tool unregistered,
-  with no error message. If the model was valid when the session started
-  and is invalidated afterwards, the tool call instead fails with "Image
-  generation is not configured with a valid endpoint".
+  with no error message. A whole-tool deny rule (including
+  `tools.excludeTools`) also removes the tool before registration. If the
+  model was valid when the session started and is invalidated afterwards,
+  the tool call instead fails with "Image generation is not configured with
+  a valid endpoint".
 - **"Image generation requires the … environment variable"** — the route's
   `envKey` is not set in the daemon's environment (or the `env` block of
   `settings.json`).
@@ -85,9 +89,19 @@ Each generated image is:
   the API root the tool expects. For DashScope use
   `https://dashscope.aliyuncs.com/api/v1`, not the `compatible-mode/v1` chat
   endpoint.
+- **"Image generation returned an image URL that is not a safe public HTTPS
+  URL"** — the generation request succeeded, but the download URL the
+  endpoint returned is refused: it must be HTTPS, carry no credentials, and
+  resolve to a public address (localhost and private-network hosts are
+  refused). This check is unconditional; self-hosted or VPC-internal
+  gateways must return a public HTTPS image URL.
 - **The model is missing from the picker** — the route needs
   `supportsImageGeneration: true` (or `imageOnly: true`); image input support
-  (`capabilities.vision`) alone does not qualify a route.
+  (`capabilities.vision`) alone does not qualify a route. The picker also
+  lists only routes in a writable settings scope (user, or workspace when
+  trusted) whose auth-type/id/base-URL combination is unique, so a
+  System-scoped or duplicated route is absent even when image-capable;
+  `/model --image` in the terminal still resolves it from the registry.
 
 ## Related
 

@@ -43,10 +43,11 @@ terminal runs locally and does not need a daemon.
 
 Any of these paths selects the transcription model:
 
-- **Settings → Models → + Add Model**, with **Model purpose** set to
-  **Voice transcription**. Enter the provider's OpenAI-compatible base URL and
-  API key, then the ASR model id. Adding a voice model keeps your current
-  conversation model.
+- **Settings → Models → + Add Model → Custom Provider**, with **Model
+  purpose** set to **Voice transcription** (the Model purpose field exists
+  only for the Custom Provider preset). Enter the provider's OpenAI-compatible
+  base URL and API key, then the ASR model id. Adding a voice model keeps your
+  current conversation model.
 - Type `/model --voice` in the composer to open the voice model picker, or
   `/model --voice <model-id>` to set one directly.
 - The **Voice Model** row in Settings opens the same picker.
