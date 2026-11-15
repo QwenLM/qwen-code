@@ -1620,8 +1620,36 @@ describe('applyMcpServerAction (real server actions)', () => {
       'reconnect',
     );
     expect(discoverToolsForServer).toHaveBeenCalledWith('srv');
-    expect(result.message).toContain('status: disconnected');
-    expect(result.message).toContain('initialize request refused');
+    expect(result.message).toBe(
+      "Reconnect to 'srv' finished without a live connection (status: disconnected): initialize request refused",
+    );
+    expect(result.changed).toBe(true);
+  });
+
+  it('sanitizes terminal controls in a recorded reconnect error', async () => {
+    const config = stubConfig({
+      getToolRegistry: (() => ({
+        discoverToolsForServer: async () => {
+          updateMCPServerStatus('srv', MCPServerStatus.DISCONNECTED);
+          recordMCPServerLastError(
+            'srv',
+            '\x1b]52;c;cHduZWQ=\x07boom\nsecond row',
+          );
+        },
+      })) as unknown as Config['getToolRegistry'],
+    } as Partial<Config>);
+    const { settings } = createFakeSettings();
+    const result = await applyMcpServerAction(
+      config,
+      settings,
+      serverInfo({}),
+      'reconnect',
+    );
+    expect(result.message).toContain('boom second row');
+    expect(result.message).not.toContain('\x1b');
+    expect(result.message).not.toContain('\x07');
+    expect(result.message).not.toContain('\n');
+    expect(result.message).not.toContain('\r');
     expect(result.changed).toBe(true);
   });
 

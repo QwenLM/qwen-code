@@ -74,6 +74,7 @@ import {
   sortModelEntriesForDisplay,
 } from '../../utils/model-display-order.js';
 import { getErrorMessage } from '../../utils/errors.js';
+import { sanitizeTerminalLine } from '../utils/textUtils.js';
 import { getMCPServerLastError } from '@qwen-code/qwen-code-core/tools/mcp-status.js';
 import { getToolInvalidReasons, isToolValid } from '../components/mcp/utils.js';
 import { themeManager, AUTO_THEME_NAME } from '../themes/theme-manager.js';
@@ -1049,7 +1050,8 @@ export async function applyMcpServerAction(
         if (status === MCPServerStatus.CONNECTED) {
           return { message: `Reconnected '${server.name}'.`, changed: true };
         }
-        const lastError = getMCPServerLastError(server.name);
+        const rawError = getMCPServerLastError(server.name);
+        const lastError = rawError ? sanitizeTerminalLine(rawError) : undefined;
         return {
           message:
             `Reconnect to '${server.name}' finished without a live connection (status: ${status})` +
