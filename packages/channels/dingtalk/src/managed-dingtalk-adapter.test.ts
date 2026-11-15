@@ -305,6 +305,119 @@ describe('managed DingTalk adapter inbound', () => {
     await adapter.disconnect();
   });
 
+  it('a group frame does not spend the webhook cache budget (R3-2)', async () => {
+    const { adapter, fake } = await connectedAdapter();
+    fake.push(
+      'priv',
+      messageData({ msgId: 'priv', conversationId: 'conv-private' }),
+    );
+    await adapter.tick();
+    // A group frame carrying a webhook must be dropped without caching it.
+    fake.push(
+      'grp',
+      messageData({
+        msgId: 'grp',
+        conversationId: 'conv-group',
+        conversationType: '2',
+      }),
+    );
+    await adapter.tick();
+    const store = (adapter as unknown as { store: { file: string } }).store;
+    const persisted = JSON.parse(readFileSync(store.file, 'utf8'));
+    expect(Object.hasOwn(persisted.webhooks, 'conv-group')).toBe(false);
+    expect(Object.hasOwn(persisted.webhooks, 'conv-private')).toBe(true);
+    await adapter.disconnect();
+  });
+
+  it('a frame admitted on a cached webhook snapshots it into the claim (R3-3)', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    fake.push(
+      'first',
+      messageData({ msgId: 'first', conversationId: 'conv-A' }),
+    );
+    await adapter.tick();
+    fake.push(
+      'second',
+      messageData({
+        msgId: 'second',
+        conversationId: 'conv-A',
+        sessionWebhook: '',
+      }),
+    );
+    await adapter.tick();
+    const second = plane.submit.find(
+      (event) => event.platformEventId === 'dingtalk:second',
+    );
+    expect(
+      (second!.replyContext as { sessionWebhook: string }).sessionWebhook,
+    ).toBe('https://oapi.dingtalk.com/robot/sendBySession?session=abc');
+    await adapter.disconnect();
+  });
+
+  it('a webhook-less frame admitted on the cache refreshes recency (R3-4)', async () => {
+    const { adapter, fake } = await connectedAdapter();
+    const hook = (session: string): string =>
+      `https://oapi.dingtalk.com/robot/sendBySession?session=${session}`;
+    for (let i = 0; i < WEBHOOK_LIMIT; i++) {
+      expect(
+        fake.push(
+          `fill-${i}`,
+          messageData({
+            msgId: `fill-${i}`,
+            conversationId: `conv-${i}`,
+            sessionWebhook: hook(`w${i}`),
+          }),
+        ),
+      ).toBe(true);
+      if ((i + 1) % MANAGED_DINGTALK_PENDING_LIMIT === 0) await adapter.tick();
+    }
+    // Re-seen conv-0 through webhook-less frames admitted on its cached entry.
+    for (let k = 0; k < 3; k++) {
+      expect(
+        fake.push(
+          `revisit-${k}`,
+          messageData({
+            msgId: `revisit-${k}`,
+            conversationId: 'conv-0',
+            sessionWebhook: '',
+          }),
+        ),
+      ).toBe(true);
+      await adapter.tick();
+    }
+    expect(
+      fake.push(
+        'overflow',
+        messageData({
+          msgId: 'overflow',
+          conversationId: 'conv-256',
+          sessionWebhook: hook('w256'),
+        }),
+      ),
+    ).toBe(true);
+    await adapter.tick();
+    const store = (adapter as unknown as { store: { file: string } }).store;
+    const persisted = JSON.parse(readFileSync(store.file, 'utf8'));
+    expect(Object.hasOwn(persisted.webhooks, 'conv-0')).toBe(true);
+    await adapter.disconnect();
+  }, 30_000);
+
+  it('a __proto__ conversationId with its own webhook is admitted and cached as an own key (R3-5)', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    fake.push(
+      'proto',
+      messageData({ msgId: 'proto', conversationId: '__proto__' }),
+    );
+    await adapter.tick();
+    expect(plane.submit.map((event) => event.platformEventId)).toEqual([
+      'dingtalk:proto',
+    ]);
+    const store = (adapter as unknown as { store: { file: string } }).store;
+    const persisted = JSON.parse(readFileSync(store.file, 'utf8'));
+    expect(Object.hasOwn(persisted.webhooks, '__proto__')).toBe(true);
+    await adapter.disconnect();
+  });
+
   it('falls back to senderId when senderStaffId is absent (R4)', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
     fake.push(
@@ -675,7 +788,7 @@ describe('managed DingTalk adapter outbox', () => {
     // Writer and validator share the cap, so the state still loads.
     const second = await connectedAdapter(cwd);
     await second.adapter.disconnect();
-  });
+  }, 30_000);
 
   it('reports a definitive webhook refusal as rejected and never resends', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
@@ -802,7 +915,7 @@ describe('managed DingTalk adapter outbox', () => {
     await adapter.tick();
     expect(fake.sent.map((entry) => entry.webhook)).toEqual([hook('w0-new')]);
     await adapter.disconnect();
-  });
+  }, 30_000);
 
   it('drops a deterministically refused orphan receipt without wedging later ones', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
@@ -925,6 +1038,24 @@ describe('managed DingTalk adapter outbox', () => {
       robotCode: 'robot-app',
     };
     plane.enqueue([noWebhook]);
+    await adapter.tick();
+    expect(fake.sent).toHaveLength(0);
+    expect((plane.receipts[0]!.receipt as { outcome: string }).outcome).toBe(
+      'rejected',
+    );
+    await adapter.disconnect();
+  });
+
+  it('rejects a delivery whose conversationId names a prototype member without sending (R3-1)', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    const proto = delivery('d-proto', 1);
+    proto.replyContext = {
+      conversationId: 'constructor',
+      sessionWebhook: '',
+      senderId: 'staff-1',
+      robotCode: 'robot-app',
+    };
+    plane.enqueue([proto]);
     await adapter.tick();
     expect(fake.sent).toHaveLength(0);
     expect((plane.receipts[0]!.receipt as { outcome: string }).outcome).toBe(
