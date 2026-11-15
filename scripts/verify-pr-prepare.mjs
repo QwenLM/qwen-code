@@ -29,7 +29,7 @@
  *
  * Usage:
  *   node scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo>
- *   node scripts/verify-pr-prepare.mjs --require-isolation
+ *   node scripts/verify-pr-prepare.mjs --require-isolation [--artifact-dir <round-dir>]
  *
  * Options:
  *   --repo <owner>/<repo>  required for the coordinate path: never inferred
@@ -37,11 +37,14 @@
  *                          same PR number to an unrelated PR
  *   --require-isolation    check the process this runs in and exit 4 when no
  *                          boundary is detected; run it inside the boundary
+ *   --artifact-dir <dir>   with --require-isolation, a pass writes boundary-gate.json
+ *                          into the round's artifact directory — the record the
+ *                          checker requires beside a mode:"container" declaration
  *
  * Exit codes:
  *   0  coordinates resolved, or the boundary check passed
  *   2  usage error
- *   3  metadata, OID, tree-state, or filesystem failure
+ *   3  metadata, OID, tree-state, or filesystem failure (incl. writing the gate record)
  *   4  --require-isolation found no boundary — do not run PR code here
  */
 
@@ -203,18 +206,33 @@ export function detectCredentialSignals(
  */
 export function detectIsolation(env = process.env, exists = existsSync) {
   const signals = [];
+  // Observed markers are filesystem facts the process can check, not strings
+  // an operator chooses. A self-chosen `container=<name>` is a DECLARATION;
+  // on its own it cannot distinguish a boundary from a bare host, so the
+  // gate and the checker treat it as insufficient for a container claim.
+  const observed = [];
   if (env.container) signals.push(`container=${env.container}`);
-  if (exists('/.dockerenv')) signals.push('/.dockerenv');
-  if (exists('/run/.containerenv')) signals.push('/run/.containerenv');
+  if (exists('/.dockerenv')) {
+    signals.push('/.dockerenv');
+    observed.push('/.dockerenv');
+  }
+  if (exists('/run/.containerenv')) {
+    signals.push('/run/.containerenv');
+    observed.push('/run/.containerenv');
+  }
   // A boolean-looking value reads as "sandbox disabled"; the CLI's transport
   // writes a container name or `sandbox-exec`, neither of which is a marker.
   const sandbox = (env.SANDBOX ?? '').trim();
-  if (sandbox && !['false', 'true', '0', '1'].includes(sandbox)) {
-    if (sandbox !== SEATBELT) signals.push(`SANDBOX=${sandbox}`);
-  }
+  const sandboxRuntime =
+    sandbox &&
+    !['false', 'true', '0', '1'].includes(sandbox) &&
+    sandbox !== SEATBELT;
+  if (sandboxRuntime) signals.push(`SANDBOX=${sandbox}`);
   return {
     isolated: signals.length > 0,
     signals,
+    observed,
+    sandboxRuntime: sandboxRuntime ? sandbox : null,
     seatbelt: sandbox === SEATBELT,
   };
 }
@@ -785,6 +803,11 @@ function requireBoundary(artifactDir = null) {
   const credentials = detectCredentialSignals();
   const attested = process.env[CREDENTIAL_FREE_ATTESTATION] === '1';
 
+  // A refusal from OUTSIDE any boundary does not contradict a record minted
+  // INSIDE one: a host-side sanity re-run must not destroy the in-container
+  // gate record (R10-30). Only a refusal that contradicts the record — an
+  // attested boundary leaking credentials, or a failed record write —
+  // invalidates it (below).
   if (!isolation.isolated) {
     const detail = isolation.seatbelt
       ? 'SANDBOX=sandbox-exec is the built-in macOS sandbox, whose default profile still reads host files'
@@ -792,7 +815,17 @@ function requireBoundary(artifactDir = null) {
     process.stderr.write(
       `verify-pr boundary: ${detail} — do not execute PR code in this process\n`,
     );
-    invalidateRecord();
+    return 4;
+  }
+
+  // A self-chosen `container=<name>` string is a declaration, not an observed
+  // boundary: on a bare host it would mint a container claim with no
+  // isolation. The gate needs an observed filesystem marker or the CLI
+  // launcher's runtime sandbox; an attested VM uses mode:"vm" with approval.
+  if (isolation.observed.length === 0 && !isolation.sandboxRuntime) {
+    process.stderr.write(
+      `verify-pr boundary: only a declared marker (${isolation.signals.join(', ')}) — a self-chosen container= string is not an observed boundary; run inside a real container, or use mode:"vm" with the maintainer's approval\n`,
+    );
     return 4;
   }
 
@@ -820,6 +853,9 @@ function requireBoundary(artifactDir = null) {
       passed: true,
       at: new Date().toISOString(),
       signals: isolation.signals,
+      // Observed filesystem markers, kept apart from the declared strings:
+      // the checker requires one to back a container claim.
+      observed: isolation.observed,
       credentialFree: true,
     };
     const tmp = `${recordPath}.${process.pid}.tmp`;

@@ -747,7 +747,7 @@ describe('local container recipe pins', () => {
     // path, so a single positive assertion cannot detect step 7 reverting to
     // <pr-clone>/scripts.
     const checkerCalls = [
-      ...skill.matchAll(/node (\S+)\/scripts\/verify-pr-check\.mjs/g),
+      ...skill.matchAll(/node "?([^"\s]+)\/scripts\/verify-pr-check\.mjs/g),
     ].map((match) => match[1]);
     expect(checkerCalls.length).toBeGreaterThanOrEqual(3);
     for (const prefix of checkerCalls) expect(prefix).toBe('<trusted-clone>');
@@ -861,9 +861,10 @@ describe('local container recipe pins', () => {
     ];
     expect(contextCalls.length).toBeGreaterThanOrEqual(2);
     // The prose occurrences alone cannot catch step 7 dropping the flag on
-    // its continuation line — pin the executable call too.
+    // its continuation line — pin the executable call too (the round-dir
+    // expansion is quoted so a space-bearing path stays one argument).
     expect(skill).toContain(
-      '--context ~/.cache/qwen-verify/pr<n>/pr.json <round-dir>',
+      '--context ~/.cache/qwen-verify/pr<n>/pr.json "<round-dir>"',
     );
   });
 

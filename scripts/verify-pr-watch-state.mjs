@@ -39,10 +39,11 @@
  * per-PR concurrency group. A head refused while another round runs is
  * recorded in `deferredHeads`: the watch gate's cursor already advanced
  * past it, so no second event arrives, and `--complete` names the deferred
- * heads so the caller can start the latest one. Each start and first
- * deferral consumes a monotonic `seq` in push order (legacy seq-less
- * entries excepted — they stay seq-less); the list is kept in
- * seq order and the supersede filter keys on it, never on the write clock.
+ * heads so the caller can start the newest (last) one. A start of a genuinely
+ * new head and each first deferral consume a monotonic `seq` in push order; a
+ * start answering an already-deferred head (or a released-head restart) keeps
+ * that entry's `seq` (legacy seq-less entries stay seq-less); the list is kept
+ * in seq order and the supersede filter keys on it, never on the write clock.
  * `--complete` removes only its own round's in-flight entry (matched by
  * head and round) and upserts its verified entry, except for
  * `inconclusive`, which releases the marker without filing the head as
@@ -162,14 +163,19 @@ function inFlightEntries(existing) {
   if (Array.isArray(existing?.inFlightHeads)) {
     return existing.inFlightHeads.filter(hasHead);
   }
-  if (
-    existing?.inFlight &&
-    typeof existing?.inFlightHead === 'string' &&
-    existing.inFlightHead !== ''
-  ) {
+  // A hand-written legacy marker may name the head in `inFlight` itself
+  // (a string) rather than `inFlightHead`; accept either spelling so it
+  // still blocks a second round instead of reading as "no round in flight".
+  const legacyHead =
+    typeof existing?.inFlightHead === 'string' && existing.inFlightHead !== ''
+      ? existing.inFlightHead
+      : typeof existing?.inFlight === 'string' && existing.inFlight !== ''
+        ? existing.inFlight
+        : null;
+  if (existing?.inFlight && legacyHead) {
     return [
       {
-        head: existing.inFlightHead,
+        head: legacyHead,
         // The pre-list top-level round is ambiguous — it names whichever
         // operation wrote last, verified or in-flight — so the migrated
         // marker matches completion by head alone (round null).
@@ -315,6 +321,16 @@ export function duplicateHead(existing, head) {
     return 'verified';
   }
   if (inFlightEntries(existing).length > 0) return 'in-flight';
+  // A terminal deferred head (repeated inconclusive) must not re-open the
+  // retry loop the cap exists to close: a redelivered event for it is
+  // refused, not started. A live round above still wins.
+  if (
+    deferredEntries(existing).some(
+      (entry) => sameCommit(entry.head, head) && isNotCovered(entry),
+    )
+  ) {
+    return 'not-covered';
+  }
   return null;
 }
 
@@ -326,13 +342,41 @@ function deferredEntries(existing) {
 }
 
 /**
- * Monotonic event sequence: every start and every first deferral consumes
- * one, in arrival (push) order. The supersede filter and the "latest one"
- * naming key on it — never on the write clock, which would let a head
- * re-deferred by an inconclusive completion outrank heads pushed after it.
- * The high-water mark persists in the state so a completed round's seq is
- * never reused. Legacy entries carry no seq; they sort first and are never
- * superseded.
+ * Push-order hints for released heads. A release removes the head from both
+ * lists, so a recovery restart would otherwise find no entry and mint a fresh
+ * maximum seq — superseding heads pushed AFTER the released one. The hint
+ * preserves the released head's original seq so the restart keeps its place.
+ * It is NOT a deferred entry: the released head is not named as awaiting.
+ */
+function releasedEntries(existing) {
+  return Array.isArray(existing?.releasedHeads)
+    ? existing.releasedHeads.filter(hasHead)
+    : [];
+}
+
+/**
+ * The push-order seq of a head the supersede filter retired. A redelivery
+ * of a retired head must restore its original position, not mint a new
+ * maximum that would present it as the newest push (R10-34).
+ */
+function retiredSeq(existing, head) {
+  const map = existing?.retiredSeqs;
+  if (!map || typeof map !== 'object') return null;
+  for (const [h, s] of Object.entries(map)) {
+    if (sameCommit(h, head)) return s;
+  }
+  return null;
+}
+
+/**
+ * Monotonic event sequence: a start of a genuinely new head and every first
+ * deferral consume one, in arrival (push) order; a start answering an
+ * already-deferred head (or a released-head restart) keeps that entry's seq
+ * instead. The supersede filter and the "newest one" naming key on it — never
+ * on the write clock, which would let a head re-deferred by an inconclusive
+ * completion outrank heads pushed after it. The high-water mark persists in
+ * the state so a completed round's seq is never reused. Legacy entries carry
+ * no seq; they sort first and are never superseded.
  */
 function nextSeq(existing) {
   const seqs = [
@@ -391,7 +435,10 @@ export function startRound(
             at >= 0
               ? (prior[at].deferredAt ?? now.toISOString())
               : now.toISOString(),
-          seq: at >= 0 ? prior[at].seq : nextSeq(existing),
+          seq:
+            at >= 0
+              ? prior[at].seq
+              : (retiredSeq(existing, head) ?? nextSeq(existing)),
           retries: at >= 0 ? (prior[at].retries ?? 0) : 0,
         };
         const deferred = (
@@ -427,7 +474,18 @@ export function startRound(
     // re-defer the head at its original push-order position.
     const priorDeferred = deferredEntries(existing);
     const own = priorDeferred.find((entry) => sameCommit(entry.head, head));
-    const seq = own ? (own.seq ?? null) : nextSeq(existing);
+    // A recovery restart of a released head keeps its original push-order
+    // position (the release hint); minting a fresh maximum here would
+    // supersede heads pushed after the released one. A genuinely new head
+    // consumes the next seq.
+    const releasedHint = releasedEntries(existing).find((entry) =>
+      sameCommit(entry.head, head),
+    );
+    const seq = own
+      ? (own.seq ?? null)
+      : releasedHint
+        ? (releasedHint.seq ?? null)
+        : nextSeq(existing);
     const deferredHeads = priorDeferred
       .filter(
         (entry) =>
@@ -435,6 +493,24 @@ export function startRound(
           (entry.seq == null || entry.seq > (seq ?? 0)),
       )
       .sort(bySeq);
+    // Remember the push-order seq of every head this start retires, so a
+    // later redelivery restores its position instead of minting a new
+    // maximum (R10-34). The started head's own tombstone is consumed.
+    const retiredSeqs = {};
+    for (const [h, s] of Object.entries(existing?.retiredSeqs ?? {})) {
+      if (!sameCommit(h, head)) retiredSeqs[h] = s;
+    }
+    if (seq != null) {
+      for (const entry of priorDeferred) {
+        if (
+          !sameCommit(entry.head, head) &&
+          entry.seq != null &&
+          entry.seq <= seq
+        ) {
+          retiredSeqs[entry.head] = entry.seq;
+        }
+      }
+    }
     const state = deriveView({
       pr,
       repo: repo ?? existing?.repo ?? null,
@@ -446,10 +522,15 @@ export function startRound(
           artifactDir,
           startedAt,
           seq,
-          retries: own?.retries ?? 0,
+          retries: own?.retries ?? releasedHint?.retries ?? 0,
         },
       ],
       deferredHeads,
+      // The hint is consumed by the restart it informed.
+      releasedHeads: releasedEntries(existing).filter(
+        (entry) => !sameCommit(entry.head, head),
+      ),
+      retiredSeqs,
       round,
       artifactDir,
       startedAt,
@@ -522,7 +603,11 @@ export function completeRound(
     if (!ownFlight && !prior) {
       return { unregistered: true, path: statePath(stateRoot, pr) };
     }
-    const dir = artifactDir ?? ownFlight?.artifactDir ?? null;
+    // A replayed completion has no in-flight marker left; fall back to the
+    // head's own prior verdict so the retry preserves the recorded artifact
+    // directory and comment link instead of nulling them.
+    const dir =
+      artifactDir ?? ownFlight?.artifactDir ?? prior?.artifactDir ?? null;
     // An inconclusive round reached no verdict: it releases its marker but
     // is not filed as verified, so the head stays startable.
     const verified =
@@ -536,7 +621,7 @@ export function completeRound(
               head,
               round,
               verdict,
-              commentId: commentId ?? null,
+              commentId: commentId ?? prior?.commentId ?? null,
               artifactDir: dir,
               completedAt,
             },
@@ -655,6 +740,18 @@ export function releaseRound(stateRoot, { pr, head, round, repo }) {
         (candidate) => !sameCommit(candidate.head, head),
       ),
       deferredHeads: deferred,
+      // Preserve the released head's push-order position so a recovery
+      // restart keeps its place instead of superseding newer deferrals.
+      releasedHeads: [
+        ...releasedEntries(existing).filter(
+          (candidate) => !sameCommit(candidate.head, head),
+        ),
+        {
+          head: entry.head,
+          seq: entry.seq ?? null,
+          retries: entry.retries ?? 0,
+        },
+      ],
     });
     writeState(stateRoot, pr, state);
     return {
@@ -773,13 +870,27 @@ function parseArgs(argv) {
   if (out.stateRoot !== null && !isAbsolute(out.stateRoot)) {
     throw new Error(`--state-root must be an absolute path\n\n${HELP}`);
   }
-  // An unset REPO shell variable expands to --repo '': persisting the
-  // empty value would disarm the cross-repository guard.
+  // --repo is persisted as the PR's permanent identity and compared by exact
+  // string equality on every later verb, so it must be the canonical
+  // owner/repo spelling, trimmed: a URL or case variant recorded at --start
+  // would refuse every later --complete/--release for the PR.
+  if (out.repo !== null) {
+    const repo = typeof out.repo === 'string' ? out.repo.trim() : '';
+    if (repo === '') {
+      throw new Error(`--repo must not be empty\n\n${HELP}`);
+    }
+    if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(repo)) {
+      throw new Error(`--repo must be <owner>/<repo>\n\n${HELP}`);
+    }
+    out.repo = repo;
+  }
+  // A valueless --comment-id (an empty shell variable) would silently drop
+  // the verdict's comment link; reject it like every sibling flag.
   if (
-    out.repo !== null &&
-    (typeof out.repo !== 'string' || out.repo.trim() === '')
+    out.commentId !== null &&
+    (typeof out.commentId !== 'string' || out.commentId.trim() === '')
   ) {
-    throw new Error(`--repo must not be empty\n\n${HELP}`);
+    throw new Error(`--comment-id must not be empty\n\n${HELP}`);
   }
   return out;
 }
@@ -835,7 +946,7 @@ function main(argv) {
     const notCovered = deferred.filter(isNotCovered);
     if (awaiting.length > 0) {
       process.stdout.write(
-        `verify-pr watch-state: PR ${pr} deferred heads awaiting a round: ${awaiting.map((entry) => entry.head).join(', ')} — start the latest one\n`,
+        `verify-pr watch-state: PR ${pr} deferred heads awaiting a round: ${awaiting.map((entry) => entry.head).join(', ')} — start the last one (the list is in push order, newest last)\n`,
       );
     }
     if (notCovered.length > 0) {
@@ -851,11 +962,13 @@ function main(argv) {
       if (result.repoMismatch) return repoMismatch(args.pr, result, args.repo);
       if (result.duplicate) {
         process.stderr.write(
-          result.duplicate === 'in-flight' &&
-            result.blockedBy &&
-            !sameCommit(result.blockedBy, args.head)
-            ? `verify-pr watch-state: PR ${args.pr} has a round in flight for ${result.blockedBy}; one round per PR — ${args.head} is recorded as deferred and will be named by --complete\n`
-            : `verify-pr watch-state: PR ${args.pr} head ${args.head} is already ${result.duplicate}; let that round answer\n`,
+          result.duplicate === 'not-covered'
+            ? `verify-pr watch-state: PR ${args.pr} head ${args.head} is not covered after repeated inconclusive rounds; do not start it again without a new head move\n`
+            : result.duplicate === 'in-flight' &&
+                result.blockedBy &&
+                !sameCommit(result.blockedBy, args.head)
+              ? `verify-pr watch-state: PR ${args.pr} has a round in flight for ${result.blockedBy}; one round per PR — ${args.head} is recorded as deferred and will be named by --complete\n`
+              : `verify-pr watch-state: PR ${args.pr} head ${args.head} is already ${result.duplicate}; let that round answer\n`,
         );
         return 3;
       }
@@ -884,11 +997,16 @@ function main(argv) {
         );
         return 3;
       }
+      const terminal = result.deferred.some(
+        (entry) => sameCommit(entry.head, args.head) && isNotCovered(entry),
+      );
       process.stdout.write(
         args.verdict === 'inconclusive'
           ? result.keptVerdict
             ? `verify-pr watch-state: PR ${args.pr} round ${args.round} recorded inconclusive for ${args.head} (the head keeps its earlier verdict; not re-deferred) at ${result.path}\n`
-            : `verify-pr watch-state: PR ${args.pr} round ${args.round} recorded inconclusive for ${args.head} (not verified; the head stays startable and is re-deferred for the next round) at ${result.path}\n`
+            : terminal
+              ? `verify-pr watch-state: PR ${args.pr} round ${args.round} recorded inconclusive for ${args.head} (not verified; the head is now terminal — not covered, do not start it again) at ${result.path}\n`
+              : `verify-pr watch-state: PR ${args.pr} round ${args.round} recorded inconclusive for ${args.head} (not verified; the head stays startable and is re-deferred for the next round) at ${result.path}\n`
           : `verify-pr watch-state: PR ${args.pr} round ${args.round} verified ${args.head} (${args.verdict}) at ${result.path}\n`,
       );
       printDeferred(args.pr, result.deferred);

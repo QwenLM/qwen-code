@@ -72,15 +72,16 @@ probe stays a CLI command and the trigger stays a gated scheduled task.
   that emits the transition, so no second event will arrive; the deferred
   list is that head's only delivery. `--complete` and `--release` print
   the deferred heads, and the watch prompt starts the latest one as the
-  next round. Push order is a monotonic `seq`, not the write clock: every
-  start and every first deferral consumes the next sequence number (the
-  high-water mark persists in the state, so a completed round's seq is
-  never reused), the
-  list is kept in `seq` order (the tail is the newest push), and a start
-  supersedes every entry with a lower `seq` — whether or not the started
-  head was itself deferred: events arrive in push order, so an older
-  deferred head would spend a full round on a commit the started one
-  already contains. Legacy entries without a `seq` sort first and are
+  next round. Push order is a monotonic `seq`, not the write clock: a start
+  of a genuinely new head, and every first deferral, consumes the next
+  sequence number (the high-water mark persists in the state, so a completed
+  round's seq is never reused); a start that answers an already-deferred
+  head keeps that entry's `seq` — as does a recovery restart of a released
+  head — so the newer pushes behind it are not superseded. The list is kept
+  in `seq` order (the tail is the newest push), and a start supersedes every
+  entry with a lower `seq` — whether or not the started head was itself
+  deferred: events arrive in push order, so an older deferred head would
+  spend a full round on a commit the started one already contains. Legacy entries without a `seq` sort first and are
   never superseded, and a seq-less entry stays seq-less through
   redelivery, start and re-defer — handing it the highest seq would
   present an older head as the newest push. A redelivery updates the

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { spawnSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   mkdirSync,
   mkdtempSync,
@@ -31,7 +31,8 @@ const GATE_RECORD = JSON.stringify({
   gate: 'require-isolation',
   passed: true,
   at: '2026-11-14T02:00:00.000Z',
-  signals: ['container=qwen-verify'],
+  signals: ['container=qwen-verify', '/.dockerenv'],
+  observed: ['/.dockerenv'],
   credentialFree: true,
 });
 const APPROVAL =
@@ -572,6 +573,70 @@ describe('checkBoundary', () => {
     ).toEqual([]);
   });
 
+  // R10-20: a gate record whose only marker is a self-chosen container=
+  // string carries no observed boundary, so it cannot back a container claim.
+  it('refuses a container declaration backed by a declared-only record', () => {
+    const declaredOnly = JSON.stringify({
+      gate: 'require-isolation',
+      passed: true,
+      signals: ['container=my-laptop'],
+      observed: [],
+      credentialFree: true,
+    });
+    expect(
+      checkBoundary(
+        JSON.stringify({ mode: 'container', detail: 'my-laptop' }),
+        declaredOnly,
+      ).errors.join('\n'),
+    ).toMatch(/no observed boundary marker/);
+    // A record with no observed field at all is refused too.
+    expect(
+      checkBoundary(
+        JSON.stringify({ mode: 'container', detail: 'x' }),
+        JSON.stringify({ gate: 'require-isolation', passed: true }),
+      ).errors.join('\n'),
+    ).toMatch(/no observed boundary marker/);
+  });
+
+  // R10-20: an attested VM uses its own mode behind the same maintainer
+  // approval the waiver requires, plus an attestation of what was confirmed.
+  it('accepts a vm declaration with approval and attestation', () => {
+    expect(
+      checkBoundary(
+        JSON.stringify({
+          mode: 'vm',
+          by: 'maintainer',
+          approval: APPROVAL,
+          attestation: 'nothing mounted, no host credentials',
+          reason: 'Java battery needs a VM',
+        }),
+      ).errors,
+    ).toEqual([]);
+  });
+
+  it('refuses a vm declaration missing attestation or approval', () => {
+    expect(
+      checkBoundary(
+        JSON.stringify({
+          mode: 'vm',
+          by: 'maintainer',
+          approval: APPROVAL,
+          reason: 'why',
+        }),
+      ).errors.join('\n'),
+    ).toMatch(/mode vm needs a non-empty attestation/);
+    expect(
+      checkBoundary(
+        JSON.stringify({
+          mode: 'vm',
+          by: 'maintainer',
+          attestation: 'nothing mounted',
+          reason: 'why',
+        }),
+      ).errors.join('\n'),
+    ).toMatch(/mode vm needs approval/);
+  });
+
   // The declaration is a value the round can mint for itself; the gate
   // record ties it to a gate run. Without one, container mode is refused.
   it('refuses a container declaration with no gate record', () => {
@@ -682,7 +747,7 @@ describe('checkBoundary', () => {
   it('refuses an unknown mode', () => {
     expect(
       checkBoundary(JSON.stringify({ mode: 'host' })).errors.join('\n'),
-    ).toMatch(/mode must be one of container \| waived/);
+    ).toMatch(/mode must be one of container \| vm \| waived/);
   });
 
   it('refuses a container declaration without a detail', () => {
@@ -758,7 +823,7 @@ describe('checkBoundary', () => {
           reason: 'approved in words',
         }),
       ).errors.join('\n'),
-    ).toMatch(/waiver still carries a <placeholder>/);
+    ).toMatch(/waived declaration still carries a <placeholder>/);
     expect(
       checkBoundary(
         JSON.stringify({
@@ -767,7 +832,7 @@ describe('checkBoundary', () => {
           reason: '<why this round may run outside a boundary>',
         }),
       ).errors.join('\n'),
-    ).toMatch(/waiver still carries a <placeholder>/);
+    ).toMatch(/waived declaration still carries a <placeholder>/);
   });
 });
 
@@ -1092,11 +1157,8 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
   // unreadable mutations.json is an error, not a free pass.
   it('refuses an unreadable mutations.json instead of dropping its check', () => {
     const dir = makeArtifactDir(validFiles(), ['01-ab-cells.png']);
-    writeFileSync(
-      join(dir, 'mutations.json'),
-      '{"productionCommits":["' + HEAD + '"],"rows":[]}',
-    );
-    unlinkSync(join(dir, 'mutations.json'));
+    // A directory at the reserved name is unreadable; the file's content
+    // is irrelevant to this case, so plant the directory directly.
     mkdirSync(join(dir, 'mutations.json'));
     const result = run(dir);
     expect(result.status).toBe(1);
@@ -1491,7 +1553,7 @@ describe('Boundary disclosure content', () => {
     });
     expect(result.errors).toEqual([]);
     expect(result.warnings.join('\n')).toMatch(
-      /records a waiver but the \*\*Boundary\.\*\* line does not mention it/,
+      /records a waived but the \*\*Boundary\.\*\* line names a container runtime/,
     );
   });
   it('warns when a container declaration ships waiver prose', () => {
@@ -1503,14 +1565,36 @@ describe('Boundary disclosure content', () => {
     );
   });
   it('stays quiet when the waiver prose matches the declaration', () => {
-    const result = check({
-      boundary: JSON.stringify({
-        mode: 'waived',
-        by: 'maintainer',
-        approval: APPROVAL,
-        reason: 'why',
+    const result = checkArtifacts({
+      files: validFiles({
+        boundary: JSON.stringify({
+          mode: 'waived',
+          by: 'maintainer',
+          approval: APPROVAL,
+          reason: 'why',
+        }),
+        report: `${lead}## Methodology\n\n**Boundary.** host, maintainer-approved waiver.\n`,
       }),
-      report: `${lead}## Methodology\n\n**Boundary.** host, maintainer-approved waiver.\n`,
+      evidence: ['01-ab-cells.png'],
+      coordinates: { owner: 'QwenLM', repo: 'qwen-code', number: 17185 },
+    });
+    expect(result.warnings).toEqual([]);
+  });
+  // R10-8: a truthful waiver phrased without the "waiv" stem is not accused
+  // of contradicting its own declaration; the recorded mode is authoritative.
+  it('does not flag a truthful waiver prose lacking the waiv stem', () => {
+    const result = checkArtifacts({
+      files: validFiles({
+        boundary: JSON.stringify({
+          mode: 'waived',
+          by: 'maintainer',
+          approval: APPROVAL,
+          reason: 'why',
+        }),
+        report: `${lead}## Methodology\n\n**Boundary.** Host execution approved by the maintainer in the linked approval comment; no container was used.\n`,
+      }),
+      evidence: ['01-ab-cells.png'],
+      coordinates: { owner: 'QwenLM', repo: 'qwen-code', number: 17185 },
     });
     expect(result.warnings).toEqual([]);
   });
@@ -1592,6 +1676,240 @@ describe('generic placeholder arm', () => {
           reason: 'why',
         }),
       ).errors.join('\n'),
-    ).toMatch(/waiver still carries a <placeholder>/);
+    ).toMatch(/waived declaration still carries a <placeholder>/);
+  });
+});
+
+describe('round-10 witnesses', () => {
+  // R10-28: a two-key gate record (no observed marker, no attestation, no
+  // signals) cannot back a container claim.
+  it('refuses a minimal two-key gate record', () => {
+    expect(
+      checkBoundary(
+        JSON.stringify({ mode: 'container', detail: 'node:22-bookworm' }),
+        JSON.stringify({ gate: 'require-isolation', passed: true }),
+      ).errors.join('\n'),
+    ).toMatch(/no observed boundary marker/);
+    expect(
+      checkBoundary(
+        JSON.stringify({ mode: 'container', detail: 'node:22-bookworm' }),
+        JSON.stringify({
+          gate: 'require-isolation',
+          passed: true,
+          observed: ['/.dockerenv'],
+          signals: ['/.dockerenv'],
+        }),
+      ).errors.join('\n'),
+    ).toMatch(/credential-free attestation/);
+  });
+
+  // R10-27: a surviving template token inside an otherwise filled value is
+  // still a placeholder.
+  it('flags a surviving template token in a filled detail', () => {
+    expect(
+      checkBoundary(
+        JSON.stringify({
+          mode: 'container',
+          detail: 'node:22-bookworm, <network policy>, credential-free mount',
+        }),
+        GATE_RECORD,
+      ).errors.join('\n'),
+    ).toMatch(/detail still carries a <placeholder>/);
+  });
+
+  // R10-22/R10-24: a waiver/vm with no trusted coordinates discloses that
+  // the approval target was only shape-checked.
+  it('discloses the coordinate-check downgrade for a waiver', () => {
+    const result = checkArtifacts({
+      files: validFiles({
+        boundary: JSON.stringify({
+          mode: 'waived',
+          by: 'maintainer',
+          approval: APPROVAL,
+          reason: 'why',
+        }),
+      }),
+      evidence: ['01-ab-cells.png'],
+    });
+    expect(result.errors).toEqual([]);
+    expect(result.warnings.join('\n')).toMatch(
+      /approval target was not compared against this PR/,
+    );
+  });
+
+  // R10-13: an unreadable artifact is reported as unreadable, not also missing.
+  it('does not also call an unreadable artifact missing', () => {
+    const result = checkArtifacts({
+      files: {
+        report: null,
+        verdict: 'merge-ready\n',
+        assertions: '{"pass":1,"fail":0,"total":1}',
+        boundary: null,
+        boundaryGate: null,
+      },
+      evidence: ['01-ab-cells.png'],
+      unreadableKeys: new Set(['report', 'boundary']),
+    });
+    expect(result.errors.join('\n')).not.toMatch(/report\.md is missing/);
+    expect(result.errors.join('\n')).not.toMatch(/boundary\.json is missing/);
+  });
+
+  // R10-2: the directory name no longer supplies the PR number; a snapshot
+  // without a number yields null coordinates even in a pr999-verify dir.
+  it('does not take the PR number from the artifact directory name', () => {
+    const root = mkdtempSync(join(tmpdir(), 'verify-pr-r10-'));
+    tmpDirs.push(root);
+    const dir = join(root, 'pr999-verify-x');
+    mkdirSync(join(dir, 'evidence'), { recursive: true });
+    writeFileSync(
+      join(dir, 'report.md'),
+      `merge-ready · 1 passed · 0 failed · 1 total · ${HEAD}\n\n## Methodology\n\n**Boundary.** host, maintainer-approved waiver.\n`,
+    );
+    writeFileSync(join(dir, 'verdict.txt'), 'merge-ready\n');
+    writeFileSync(
+      join(dir, 'assertions.json'),
+      '{"pass":1,"fail":0,"total":1}',
+    );
+    writeFileSync(
+      join(dir, 'boundary.json'),
+      JSON.stringify({
+        mode: 'waived',
+        by: 'maintainer',
+        approval:
+          'https://github.com/QwenLM/qwen-code/pull/999#issuecomment-123',
+        reason: 'why',
+      }),
+    );
+    writeFileSync(join(dir, 'evidence/01-x.png'), 'png');
+    const snap = join(root, 'snap.json');
+    writeFileSync(
+      snap,
+      JSON.stringify({ repo: 'QwenLM/qwen-code', headRefOid: HEAD }),
+    );
+    const res = spawnSync(process.execPath, [SCRIPT, '--context', snap, dir], {
+      encoding: 'utf8',
+      env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+    });
+    // No number in the snapshot → shape-only, with the downgrade disclosed;
+    // the directory name pr999 must NOT satisfy the comparison.
+    expect(res.status).toBe(0);
+    expect(res.stdout).toMatch(
+      /approval target was not compared against this PR/,
+    );
+    expect(res.stdout).not.toMatch(/approval permalink cites/);
+  });
+
+  // R10-49 (false negative): a Methodology heading and Boundary disclosure
+  // that live only inside a code fence are a copied template, not the round's
+  // own declaration — the prose says the battery ran on the host.
+  it('does not accept a fenced-only Methodology and Boundary disclosure', () => {
+    const report = `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n# Report\n\nThe declaration format:\n\n\`\`\`\n## Methodology\n\n**Boundary.** node:22-bookworm, --network none.\n\`\`\`\n\nWe ran the battery on the host.\n`;
+    const result = checkArtifacts({
+      files: validFiles({ report }),
+      evidence: ['01-ab-cells.png'],
+    });
+    expect(result.warnings.join('\n')).toMatch(/has no Methodology section/);
+  });
+
+  // R10-49 (false positive): a fenced template example preceding the real
+  // Methodology must not accuse the round of shipping a placeholder it does
+  // not have — the real disclosure is filled in.
+  it('does not accuse a real Methodology preceded by a fenced example', () => {
+    const report = `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n# Report\n\nThe declaration now reads:\n\n\`\`\`\n## Methodology\n\n**Boundary.** <image, network policy, credential-free mount>\n\`\`\`\n\n## Methodology\n\n**Boundary.** node:22-bookworm, --network none, credential-free.\n`;
+    const result = checkArtifacts({
+      files: validFiles({ report }),
+      evidence: ['01-ab-cells.png'],
+    });
+    const warnings = result.warnings.join('\n');
+    expect(warnings).not.toMatch(/placeholder/);
+    expect(warnings).not.toMatch(/has no Methodology section/);
+    expect(warnings).not.toMatch(/first line after the Methodology opening/);
+  });
+
+  // A10-1: a Setext Methodology's underline (=== / ---) belongs to the
+  // heading, not the body — it must not be read as the first line after the
+  // opening and accused of missing the Boundary line.
+  it('does not accuse a Setext Methodology of missing its Boundary line', () => {
+    for (const underline of ['===', '---']) {
+      const report = `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\nMethodology\n${underline}\n\n**Boundary.** node:22-bookworm, --network none, credential-free.\n`;
+      const result = checkArtifacts({
+        files: validFiles({ report }),
+        evidence: ['01-ab-cells.png'],
+      });
+      const warnings = result.warnings.join('\n');
+      expect(warnings).not.toMatch(/has no Methodology section/);
+      expect(warnings).not.toMatch(/first line after the Methodology opening/);
+    }
+  });
+
+  // R10-51: the publisher owns the gate record too — a round-authored
+  // container declaration whose gate run has not happened is the same
+  // expected gap as an absent declaration on the CI entry path, not a
+  // refusal pointing at a prepare step this lane never runs.
+  it('downgrades a container declaration with no gate record on the CI entry path', () => {
+    const dir = makeArtifactDir(validFiles({ boundaryGate: undefined }), [
+      '01-ab-cells.png',
+    ]);
+    const ci = spawnSync(process.execPath, [SCRIPT, dir], {
+      encoding: 'utf8',
+      env: { ...process.env, QWEN_VERIFY_CONTEXT: '/verify-context/pr.json' },
+    });
+    expect(ci.status).toBe(0);
+    expect(ci.stdout).toMatch(
+      /warn.*boundary-gate\.json is absent on the CI entry path/,
+    );
+    const local = spawnSync(process.execPath, [SCRIPT, dir], {
+      encoding: 'utf8',
+      env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+    });
+    expect(local.status).toBe(1);
+    expect(local.stdout).toMatch(/boundary-gate\.json is missing/);
+  });
+
+  // R10-50: a FIFO in place of an artifact blocks open(2) forever with no
+  // writer; the checker must refuse it, not hang. The spawnSync timeout is
+  // what turns the pre-fix hang into a failure rather than a hung suite.
+  it.skipIf(process.platform === 'win32')(
+    'refuses a FIFO in place of report.md instead of hanging',
+    () => {
+      const dir = makeArtifactDir(validFiles({}), ['01-ab-cells.png']);
+      unlinkSync(join(dir, 'report.md'));
+      execFileSync('mkfifo', [join(dir, 'report.md')]);
+      const res = spawnSync(process.execPath, [SCRIPT, dir], {
+        encoding: 'utf8',
+        timeout: 5000,
+        env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+      });
+      expect(res.status).toBe(1);
+      expect(res.stdout).toMatch(/report\.md is unreadable/);
+    },
+  );
+
+  // R10-23: spelling the round's own PR-writable context.json as --context
+  // is shape-identical to the prescribed invocation; it must be refused, not
+  // allowed to supply the coordinates that judge the round's own waiver.
+  it('refuses a --context snapshot inside the artifact directory', () => {
+    const dir = makeArtifactDir(
+      validFiles({
+        boundary: JSON.stringify({
+          mode: 'waived',
+          by: 'maintainer',
+          approval: APPROVAL,
+          reason: 'why',
+        }),
+      }),
+      ['01-ab-cells.png'],
+    );
+    writeFileSync(
+      join(dir, 'context.json'),
+      JSON.stringify({ repo: 'QwenLM/qwen-code', pr: 17185, headRefOid: HEAD }),
+    );
+    const res = spawnSync(
+      process.execPath,
+      [SCRIPT, '--context', join(dir, 'context.json'), dir],
+      { encoding: 'utf8', env: { ...process.env, QWEN_VERIFY_CONTEXT: '' } },
+    );
+    expect(res.status).toBe(1);
+    expect(res.stderr).toMatch(/must not point inside the artifact directory/);
   });
 });

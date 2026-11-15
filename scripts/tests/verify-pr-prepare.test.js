@@ -255,21 +255,30 @@ describe('detectIsolation', () => {
     expect(detectIsolation({}, () => false)).toEqual({
       isolated: false,
       signals: [],
+      observed: [],
+      sandboxRuntime: null,
       seatbelt: false,
     });
+    // A self-chosen container= string is a declaration, not an observed mark.
     expect(detectIsolation({ container: 'podman' }, () => false)).toEqual({
       isolated: true,
       signals: ['container=podman'],
+      observed: [],
+      sandboxRuntime: null,
       seatbelt: false,
     });
     expect(detectIsolation({ SANDBOX: 'docker' }, () => false)).toEqual({
       isolated: true,
       signals: ['SANDBOX=docker'],
+      observed: [],
+      sandboxRuntime: 'docker',
       seatbelt: false,
     });
     expect(detectIsolation({}, (path) => path === '/.dockerenv')).toEqual({
       isolated: true,
       signals: ['/.dockerenv'],
+      observed: ['/.dockerenv'],
+      sandboxRuntime: null,
       seatbelt: false,
     });
     expect(
@@ -277,6 +286,8 @@ describe('detectIsolation', () => {
     ).toEqual({
       isolated: true,
       signals: ['/run/.containerenv'],
+      observed: ['/run/.containerenv'],
+      sandboxRuntime: null,
       seatbelt: false,
     });
   });
@@ -288,12 +299,16 @@ describe('detectIsolation', () => {
     expect(detectIsolation({ SANDBOX: 'sandbox-exec' }, () => false)).toEqual({
       isolated: false,
       signals: [],
+      observed: [],
+      sandboxRuntime: null,
       seatbelt: true,
     });
     // A boolean-looking value reads as "disabled", not as a container name.
     expect(detectIsolation({ SANDBOX: 'false' }, () => false)).toEqual({
       isolated: false,
       signals: [],
+      observed: [],
+      sandboxRuntime: null,
       seatbelt: false,
     });
   });
@@ -628,6 +643,11 @@ describe('parseArgs', () => {
     expect(
       parseArgs(['42', '--repo', REPO, '--artifact-dir', 'd']).error,
     ).toMatch(/--artifact-dir only applies with --require-isolation/);
+    // R10-9: a valueless --artifact-dir is a usage error, not a silent pass
+    // that writes no gate record.
+    expect(parseArgs(['--require-isolation', '--artifact-dir']).error).toMatch(
+      /--artifact-dir needs <round-dir>/,
+    );
   });
 
   it('rejects a missing PR, a missing repo, and a stray argument', () => {
@@ -894,7 +914,13 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     );
     writeFileSync(
       join(artifacts, 'boundary-gate.json'),
-      JSON.stringify({ gate: 'require-isolation', passed: true }),
+      JSON.stringify({
+        gate: 'require-isolation',
+        passed: true,
+        observed: ['/.dockerenv'],
+        signals: ['/.dockerenv'],
+        credentialFree: true,
+      }),
     );
     const writeReport = (oid) =>
       writeFileSync(join(artifacts, 'report.md'), `merge-ready · ${oid}\n`);
@@ -1030,6 +1056,27 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     expect(noDir.status).toBe(0);
   });
 
+  // R10-20: a self-chosen container= string is a declaration, not an observed
+  // boundary. On a bare host it must not mint a passing gate record.
+  it('refuses a declared-only container marker with no observed boundary', () => {
+    const { dir } = makeRepo();
+    const art = makeTmpDir();
+    const env = {
+      PATH: process.env.PATH ?? '',
+      HOME: makeTmpDir(),
+      container: 'my-laptop',
+      QWEN_VERIFY_CREDENTIAL_FREE: '1',
+    };
+    const result = runPrepare(
+      dir,
+      ['--require-isolation', '--artifact-dir', art],
+      env,
+    );
+    expect(result.status).toBe(4);
+    expect(result.stderr).toMatch(/declared marker/);
+    expect(existsSync(join(art, 'boundary-gate.json'))).toBe(false);
+  });
+
   // A failed re-run must not leave an earlier pass's record behind: the
   // checker would still accept the container declaration against evidence
   // that predates the refusal.
@@ -1057,8 +1104,9 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     );
     expect(failed.status).toBe(4);
     expect(existsSync(join(art, 'boundary-gate.json'))).toBe(false);
-    // The no-marker refusal invalidates too (skip on an ambiently
-    // isolated host, where removing SANDBOX still leaves a marker).
+    // R10-30: a no-marker refusal from OUTSIDE any boundary does NOT
+    // destroy a record minted inside one (skip on an ambiently isolated
+    // host, where removing SANDBOX still leaves a marker).
     if (!detectIsolation({ ...env, SANDBOX: '' }).isolated) {
       const passedAgain = runPrepare(
         dir,
@@ -1072,7 +1120,7 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
         { ...env, SANDBOX: '' },
       );
       expect(noMarker.status).toBe(4);
-      expect(existsSync(join(art, 'boundary-gate.json'))).toBe(false);
+      expect(existsSync(join(art, 'boundary-gate.json'))).toBe(true);
     }
   });
 

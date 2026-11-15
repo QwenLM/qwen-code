@@ -110,9 +110,16 @@ silent:
 "container"` with a non-empty `detail`, or `mode: "waived"` naming the
   approving maintainer (`by`), a permalink to the approval comment
   (`approval`), and the `reason`. Unlike the three above, a merely absent
-  file is an error: the isolation rule existed only as prose until two local
-  rounds on PR #16866 ran the whole battery on the host with no gate and no
-  waiver. A container declaration must also be backed by `boundary-gate.json`
+  file is an error on the authoritative check: the isolation rule existed
+  only as prose until two local rounds on PR #16866 ran the whole battery on
+  the host with no gate and no waiver. The one exception is the CI entry
+  path (`$QWEN_VERIFY_CONTEXT` set), where the inner round does not write the
+  declaration itself, so an absent file — or a container declaration whose
+  gate record is absent — is only a warning in the round's own self-check;
+  the operator writes both later (the publish job on the CI lane, step 7's
+  host block on the container recipe). That host block runs the checker
+  without the variable set, so absence there is again an error. A container
+  declaration must also be backed by `boundary-gate.json`
   — the record a passing `verify-pr-prepare.mjs --require-isolation
   --artifact-dir <round-dir>` writes, corroborating the gate run behind the
   declaration; the waiver's `approval` must be a GitHub comment

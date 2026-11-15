@@ -309,7 +309,8 @@ describe('startRound', () => {
         head: PREV,
         round: 13,
         artifactDir: 'r13',
-        // The original push-order timestamp is kept, not the redelivery's.
+        // The original deferredAt is kept as the first-deferral time
+        // (audit only; ordering is keyed on seq, not on this timestamp).
         deferredAt: '2026-11-14T02:30:00.000Z',
         // The redelivery keeps the original seq and retry count too.
         seq: 2,
@@ -593,12 +594,14 @@ describe('completeRound', () => {
     expect(state.verifiedHeads).toEqual([]);
     expect(state.deferredHeads.map((entry) => entry.head)).toEqual([HEAD]);
     expect(state.inFlightHead).toBe(PREV);
-    // The legitimate path still works: start clears the entry, then the
-    // completion matches the marker.
+    // The refused completion must not make the head verified: a start
+    // attempt is still refused as in-flight (PREV's round runs), and HEAD
+    // keeps its deferred entry.
     expect(
       startRound(root, { pr: 1, head: HEAD, round: 12, artifactDir: 'r12' })
         .duplicate,
     ).toBe('in-flight');
+    expect(readState(root, 1).deferredHeads.map((e) => e.head)).toEqual([HEAD]);
   });
 
   // The bound-delivery design dedupes redelivered head-change events against
@@ -1256,10 +1259,8 @@ describe('CLI', () => {
     );
     const completed = run(root, [...COMPLETE]);
     expect(completed.status).toBe(0);
-    expect(completed.stdout).toMatch(
-      new RegExp(
-        `deferred heads awaiting a round: ${PREV} — start the latest one`,
-      ),
+    expect(completed.stdout).toContain(
+      `deferred heads awaiting a round: ${PREV} — start the last one (the list is in push order, newest last)`,
     );
     expect(
       run(root, [
@@ -1871,6 +1872,36 @@ describe('seq push order', () => {
     expect(readState(root, 1).deferredHeads).toEqual([]);
   });
 
+  // R10-1: a recovery restart of a released head must keep its original
+  // push-order position, not mint a fresh maximum that supersedes heads
+  // pushed AFTER it. The released head is not re-added as a deferral.
+  it('a recovery restart keeps newer deferred heads', () => {
+    const root = makeRoot();
+    startRound(root, { pr: 1, head: HEAD, round: 1, artifactDir: 'r1' });
+    startRound(root, { pr: 1, head: PREV, round: 2, artifactDir: 'r2' });
+    releaseRound(root, { pr: 1, head: HEAD });
+    // The documented recovery: restart the released (older) head.
+    const restart = startRound(root, {
+      pr: 1,
+      head: HEAD,
+      round: 3,
+      artifactDir: 'r3',
+    });
+    expect(restart.duplicate).toBeUndefined();
+    const state = readState(root, 1);
+    // PREV is the newer push and its deferral is its only delivery.
+    expect(state.deferredHeads.map((entry) => entry.head)).toEqual([PREV]);
+    // The released head is not named as awaiting a round.
+    expect(state.releasedHeads).toEqual([]);
+    const completed = completeRound(root, {
+      pr: 1,
+      head: HEAD,
+      round: 3,
+      verdict: 'merge-ready',
+    });
+    expect(completed.deferred.map((entry) => entry.head)).toEqual([PREV]);
+  });
+
   it('a second inconclusive makes the head terminal in the state', () => {
     const root = makeRoot();
     startRound(root, { pr: 1, head: HEAD, round: 11, artifactDir: 'r11' });
@@ -1890,9 +1921,16 @@ describe('seq push order', () => {
     });
     const entry = readState(root, 1).deferredHeads[0];
     expect(entry.retries).toBe(2);
-    // The retry count survives the start that answers the re-deferral.
-    startRound(root, { pr: 1, head: HEAD, round: 13, artifactDir: 'r13' });
-    expect(readState(root, 1).inFlightHeads[0].retries).toBe(2);
+    // R10-32: a terminal head is refused, not started again — the retry
+    // loop the cap exists to close stays closed.
+    const third = startRound(root, {
+      pr: 1,
+      head: HEAD,
+      round: 13,
+      artifactDir: 'r13',
+    });
+    expect(third.duplicate).toBe('not-covered');
+    expect(readState(root, 1).inFlightHeads).toEqual([]);
   });
 
   // A fresh start consumes the newest seq, so every older deferred head
@@ -2130,14 +2168,22 @@ describe('withStateLock contention', () => {
     writeFileSync(lock, '99999:holder\n');
     // The holder must be another process: Atomics.wait blocks this event
     // loop, so an in-process timer could never fire during the retry.
-    // It releases inside the retry budget (~1s): a single-attempt loop
-    // would report the lock held instead of acquiring it.
-    const holder = spawn(process.execPath, [
-      '-e',
-      `setTimeout(() => require('node:fs').unlinkSync(${JSON.stringify(lock)}), 150)`,
-    ]);
+    // Handshake first (R10-7): the 150ms deletion timer starts only after
+    // the child is up, so the test does not race Node's spawn latency
+    // against the ~1s retry budget. A single-attempt loop would still
+    // report the lock held instead of acquiring it.
+    const holder = spawn(
+      process.execPath,
+      [
+        '-e',
+        `process.send('ready'); setTimeout(() => require('node:fs').unlinkSync(${JSON.stringify(lock)}), 150)`,
+      ],
+      { stdio: ['ignore', 'ignore', 'ignore', 'ipc'] },
+    );
+    const ready = new Promise((resolve) => holder.on('message', resolve));
     const exited = new Promise((resolve) => holder.on('exit', resolve));
     try {
+      await ready;
       expect(withStateLock(root, 1, () => 'ran')).toBe('ran');
     } finally {
       await exited;
@@ -2444,5 +2490,198 @@ describe.skipIf(process.platform === 'win32')('default root git-ness', () => {
     expect(res.status).toBe(2);
     expect(res.stderr).toMatch(/not a git worktree/);
     expect(existsSync(statePath(copy, 16866))).toBe(false);
+  });
+});
+
+describe('round-10 witnesses', () => {
+  // R10-25: the deferral write path carries over repo and the prior retry
+  // count; dropping either disarms the repo guard or resets the retry cap.
+  it('a cross-head deferral carries over repo and retries', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    // A newer head (PREV, seq 5) is in flight; HEAD was re-deferred at
+    // retries 1 (seq 3). Redelivering HEAD updates its entry in place.
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({
+        pr: 1,
+        repo: 'QwenLM/qwen-code',
+        verifiedHeads: [],
+        inFlightHeads: [
+          {
+            head: PREV,
+            round: 12,
+            artifactDir: 'r12',
+            startedAt: null,
+            seq: 5,
+            retries: 0,
+          },
+        ],
+        deferredHeads: [
+          {
+            head: HEAD,
+            round: 11,
+            artifactDir: 'r11',
+            deferredAt: 'x',
+            seq: 3,
+            retries: 1,
+          },
+        ],
+        seqCounter: 5,
+      }),
+    );
+    startRound(root, {
+      pr: 1,
+      head: HEAD,
+      round: 13,
+      artifactDir: 'r13',
+      repo: 'QwenLM/qwen-code',
+    });
+    const state = readState(root, 1);
+    expect(state.repo).toBe('QwenLM/qwen-code');
+    expect(state.deferredHeads.find((e) => e.head === HEAD).retries).toBe(1);
+    // The carried-over repo still guards a foreign verb.
+    expect(
+      startRound(root, {
+        pr: 1,
+        head: OLDER,
+        round: 14,
+        artifactDir: 'r14',
+        repo: 'other/repo',
+      }).repoMismatch,
+    ).toBe(true);
+  });
+
+  // R10-33/R10-26: a replayed completion preserves the recorded artifact
+  // directory and comment link instead of nulling them.
+  it('a replayed completion preserves artifactDir and commentId', () => {
+    const root = makeRoot();
+    startRound(root, {
+      pr: 1,
+      head: HEAD,
+      round: 5,
+      artifactDir: 'tmp/pr1-verify-5',
+    });
+    completeRound(root, {
+      pr: 1,
+      head: HEAD,
+      round: 5,
+      verdict: 'findings',
+      commentId: '12345',
+    });
+    // The documented completion shape omits --artifact-dir; the replay must
+    // keep what the first write recorded.
+    completeRound(root, { pr: 1, head: HEAD, round: 5, verdict: 'findings' });
+    const entry = readState(root, 1).verifiedHeads.find((e) => e.head === HEAD);
+    expect(entry.artifactDir).toBe('tmp/pr1-verify-5');
+    expect(entry.commentId).toBe('12345');
+    expect(readState(root, 1).artifactDir).toBe('tmp/pr1-verify-5');
+  });
+
+  // R10-35: --repo is persisted as the PR's identity, so it must be the
+  // canonical owner/repo spelling, trimmed.
+  it('rejects a non-canonical --repo and trims whitespace', () => {
+    const root = makeRoot();
+    for (const bad of [
+      'https://github.com/QwenLM/qwen-code',
+      'no-slash',
+      'a/b/c',
+    ]) {
+      const res = run(root, [...START, '--artifact-dir', 'r11', '--repo', bad]);
+      expect(res.status, bad).toBe(2);
+      expect(res.stderr).toMatch(/--repo must be <owner>\/<repo>/);
+    }
+    const ok = run(root, [
+      ...START,
+      '--artifact-dir',
+      'r11',
+      '--repo',
+      '  QwenLM/qwen-code  ',
+    ]);
+    expect(ok.status).toBe(0);
+    expect(readState(root, 16866).repo).toBe('QwenLM/qwen-code');
+  });
+
+  // R10-32: a terminal deferred head is refused by --start (CLI), not started.
+  it('refuses a terminal head through the CLI', () => {
+    const root = makeRoot();
+    const inc = [
+      '16866',
+      '--complete',
+      '--head',
+      HEAD,
+      '--verdict',
+      'inconclusive',
+    ];
+    run(root, [...START, '--artifact-dir', 'r11']);
+    run(root, [...inc, '--round', '11']);
+    run(root, [
+      ...START,
+      '--head',
+      HEAD,
+      '--round',
+      '12',
+      '--artifact-dir',
+      'r12',
+    ]);
+    const second = run(root, [...inc, '--round', '12']);
+    expect(second.stdout).toMatch(/now terminal/);
+    const third = run(root, [
+      ...START,
+      '--head',
+      HEAD,
+      '--round',
+      '13',
+      '--artifact-dir',
+      'r13',
+    ]);
+    expect(third.status).toBe(3);
+    expect(third.stderr).toMatch(
+      /not covered after repeated inconclusive rounds/,
+    );
+    expect(readState(root, 16866).inFlightHeads).toEqual([]);
+  });
+
+  // R10-34: a redelivery of a head the supersede retired restores its
+  // original push-order seq, not a new maximum.
+  it('a redelivered retired head restores its original seq', () => {
+    const root = makeRoot();
+    startRound(root, { pr: 1, head: HEAD, round: 1, artifactDir: 'r1' });
+    startRound(root, { pr: 1, head: PREV, round: 2, artifactDir: 'r2' });
+    startRound(root, { pr: 1, head: OLDER, round: 3, artifactDir: 'r3' });
+    completeRound(root, { pr: 1, head: HEAD, round: 1, verdict: 'findings' });
+    // Starting OLDER (seq 3) retires PREV (seq 2).
+    startRound(root, { pr: 1, head: OLDER, round: 4, artifactDir: 'r4' });
+    expect(readState(root, 1).deferredHeads).toEqual([]);
+    // Redeliver the retired PREV while OLDER is in flight.
+    startRound(root, { pr: 1, head: PREV, round: 5, artifactDir: 'r5' });
+    const entry = readState(root, 1).deferredHeads.find((e) => e.head === PREV);
+    expect(entry.seq).toBe(2);
+  });
+
+  // R10-19: a legacy marker naming the head in `inFlight` itself still
+  // blocks a second round.
+  it('a legacy inFlight string marker blocks a second round', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({ pr: 1, inFlight: HEAD }),
+    );
+    expect(duplicateHead(readState(root, 1), PREV)).toBe('in-flight');
+    expect(
+      startRound(root, { pr: 1, head: PREV, round: 2, artifactDir: 'r2' })
+        .duplicate,
+    ).toBe('in-flight');
+  });
+
+  // R10-18: a valueless --comment-id is a usage error, not a silent null.
+  it('rejects an empty --comment-id', () => {
+    const root = makeRoot();
+    run(root, [...START, '--artifact-dir', 'r11']);
+    // An empty shell variable expands to --comment-id ''.
+    const res = run(root, [...COMPLETE, '--comment-id', '']);
+    expect(res.status).toBe(2);
+    expect(res.stderr).toMatch(/--comment-id must not be empty/);
   });
 });

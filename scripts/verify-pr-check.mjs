@@ -22,8 +22,8 @@
  * error, 2 on a usage error.
  */
 
-import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { isEntryPoint } from './lib/entry-point.js';
 
 export const VERDICTS = ['merge-ready', 'findings', 'blocked', 'inconclusive'];
@@ -34,7 +34,7 @@ export const VERDICTS = ['merge-ready', 'findings', 'blocked', 'inconclusive'];
  * maintainer's explicit decision to run on the host, recorded so a host
  * round is a visible exception instead of a silent default.
  */
-export const BOUNDARY_MODES = ['container', 'waived'];
+export const BOUNDARY_MODES = ['container', 'vm', 'waived'];
 
 /**
  * Who caused a failed assertion. `pr` is the only one that can stamp a defect
@@ -88,10 +88,12 @@ Checks a local round against the rules the CI publisher enforces:
     The CI publish job's own ci-lane record is honored only under
     --publish-lane, the flag the publish job passes (an argv claim, not an
     authenticated identity). On the CI entry path ($QWEN_VERIFY_CONTEXT
-    set) an absent declaration is only a warning: the publish job writes the
-    CI lane's own before trusting the verdict
-  - an unreadable artifact (a directory or permission-denied file in its
-    place) is reported as unreadable, not silently treated as absent
+    set) an absent declaration — or a container declaration whose gate record
+    is absent — is only a warning: the publish job (CI lane) or the host check
+    step (container recipe) writes both before the verdict is trusted
+  - an unreadable artifact (a directory, a non-regular file such as a FIFO or
+    symlink, or a permission-denied file in its place) is reported as
+    unreadable, not silently treated as absent
 
 and warns (without failing) when the report does not lead with its verdict and
 head OID, when the verdict line is a heading (GitHub renders the whole
@@ -105,7 +107,8 @@ heading shape or lacks the attribution footer.
 
 With --context <snapshot>, the head-OID check reads that file instead of the
 round's own context.json. Pass a copy the round never saw: the artifact
-directory is writable by the PR code the round executed.
+directory is writable by the PR code the round executed, so a --context path
+inside it is refused — it cannot supply the coordinates that judge its waiver.
 
 Exit codes: 0 no errors, 1 errors found, 2 usage.
 `;
@@ -117,7 +120,18 @@ Exit codes: 0 no errors, 1 errors found, 2 usage.
 // mutations.json or comment.md cannot silently drop its check.
 const UNREADABLE = '\u0000unreadable';
 function readIfExists(path) {
-  if (!existsSync(path)) return null;
+  // lstat, not existsSync + readFileSync: a FIFO blocks open(2) forever with
+  // no writer, and a symlink to /dev/zero reads without end — neither raises
+  // the synchronous error the catch below relies on. A non-regular file in
+  // this PR-writable tree is a refusal, not a hang. A symlink is non-regular
+  // too: it can point outside the tree, so it is refused rather than followed.
+  let st;
+  try {
+    st = lstatSync(path);
+  } catch {
+    return null;
+  }
+  if (!st.isFile()) return UNREADABLE;
   try {
     return readFileSync(path, 'utf8');
   } catch {
@@ -235,6 +249,28 @@ function gateRecordErrors(gateText, { publishLane = false } = {}) {
       `boundary-gate.json does not record a passed isolation gate (gate: ${values.join(' | ')}, passed: true)`,
     ];
   }
+  // A container claim needs the facts the gate itself established, not a
+  // two-key file PR content can leave behind: an OBSERVED boundary marker
+  // (a self-chosen container= string cannot distinguish a real container
+  // from a bare host), the credential-free attestation, and the signal list.
+  // The CI publisher's ci-lane record is exempt — the publish job writes it
+  // inside the lane it owns.
+  if (gate.gate !== 'ci-lane') {
+    const observed = Array.isArray(gate.observed) ? gate.observed : [];
+    if (observed.length === 0) {
+      return [
+        'boundary-gate.json records no observed boundary marker (/.dockerenv or /run/.containerenv): a declared container= string alone is not an observed boundary — an attested VM uses mode:"vm" with the maintainer\'s approval',
+      ];
+    }
+    if (gate.credentialFree !== true) {
+      return [
+        'boundary-gate.json does not record the credential-free attestation (credentialFree: true)',
+      ];
+    }
+    if (!Array.isArray(gate.signals) || gate.signals.length === 0) {
+      return ['boundary-gate.json records no isolation signals'];
+    }
+  }
   return [];
 }
 
@@ -257,10 +293,16 @@ const TEMPLATE_TOKENS = [
   '<owner>/<repo>',
   '<round-dir>',
 ];
+// A surviving template token inside an otherwise filled value is still a
+// placeholder: "node:22-bookworm, <network policy>, credential-free mount"
+// leaves the egress policy unstated even though the image was edited.
+const TEMPLATE_TOKEN_RE =
+  /<(?:image|network(?: policy)?|credential-free mount|maintainer|permalink|why|round-dir|owner|repo)\b[^>]*>/i;
 const placeholder = (value) =>
   typeof value === 'string' &&
   (/^<[^>]+>$/.test(value.trim()) ||
-    TEMPLATE_TOKENS.some((token) => value.includes(token)));
+    TEMPLATE_TOKENS.some((token) => value.includes(token)) ||
+    TEMPLATE_TOKEN_RE.test(value));
 
 export function checkBoundary(
   text,
@@ -309,36 +351,48 @@ export function checkBoundary(
     const gateErrors = gateRecordErrors(gateText, { publishLane });
     if (gateErrors.length > 0) return { errors: gateErrors };
   }
-  if (
-    parsed.mode === 'waived' &&
-    (!nonEmpty(parsed.by) || !nonEmpty(parsed.reason))
-  ) {
+  // A waived host round and an attested VM both run outside an observed
+  // container boundary, so both need the maintainer's recorded approval.
+  // The VM additionally records what the operator attested (nothing mounted).
+  const approvalMode = parsed.mode === 'waived' || parsed.mode === 'vm';
+  if (approvalMode && (!nonEmpty(parsed.by) || !nonEmpty(parsed.reason))) {
     return {
       errors: [
-        'boundary.json mode waived needs non-empty by (the maintainer who approved host execution) and reason (why this round may run outside a boundary)',
+        `boundary.json mode ${parsed.mode} needs non-empty by (the maintainer who approved execution outside an observed container) and reason (why this round may run outside a boundary)`,
       ],
     };
   }
-  if (
-    parsed.mode === 'waived' &&
-    (placeholder(parsed.by) || placeholder(parsed.reason))
-  ) {
+  if (approvalMode && (placeholder(parsed.by) || placeholder(parsed.reason))) {
     return {
       errors: [
-        'boundary.json waiver still carries a <placeholder>: record the actual maintainer and reason',
+        `boundary.json ${parsed.mode} declaration still carries a <placeholder>: record the actual maintainer and reason`,
       ],
     };
   }
-  if (parsed.mode === 'waived') {
+  if (parsed.mode === 'vm' && !nonEmpty(parsed.attestation)) {
+    return {
+      errors: [
+        'boundary.json mode vm needs a non-empty attestation: what the operator confirmed before declaring the VM credential-free (nothing mounted, no host credentials)',
+      ],
+    };
+  }
+  if (parsed.mode === 'vm' && placeholder(parsed.attestation)) {
+    return {
+      errors: [
+        'boundary.json vm attestation still carries a <placeholder>: record what the operator actually confirmed',
+      ],
+    };
+  }
+  if (approvalMode) {
     const match = APPROVAL_PERMALINK.exec(parsed.approval ?? '');
     if (!match) {
       return {
         errors: [
-          `boundary.json mode waived needs approval: a permalink to the maintainer's approval comment (https://github.com/<owner>/<repo>/pull/<n>#issuecomment-<id>) — free-text by is a claim, not a verifiable reference${coordinates ? '' : ' (no round coordinates available, so only the URL shape is checked)'}`,
+          `boundary.json mode ${parsed.mode} needs approval: a permalink to the maintainer's approval comment (https://github.com/<owner>/<repo>/pull/<n>#issuecomment-<id>) — free-text by is a claim, not a verifiable reference${coordinates ? '' : ' (no round coordinates available, so only the URL shape is checked)'}`,
         ],
       };
     }
-    // The permalink is the waiver's only machine-checkable element: it
+    // The permalink is the declaration's only machine-checkable element: it
     // must cite this round's PR, not any comment on any repository.
     if (
       coordinates &&
@@ -388,64 +442,129 @@ function leadShapeWarnings(text, verdict, label) {
  */
 function boundaryLineWarnings(text, label, boundaryMode = null) {
   const lines = text.split('\n');
-  // The Methodology opens as a heading of any level or as the report
-  // structure's numbered label ("8. **Methodology** — …"); the Boundary
-  // line must follow whichever shape the round used.
-  const idx = lines.findIndex((line) =>
-    /^(?:#{1,6}\s+|\d+\.\s+)\*{0,2}Methodology\b/.test(line.trim()),
-  );
-  if (idx === -1) {
-    return [
-      `${label} has no Methodology section (a Methodology heading or the numbered **Methodology** label): it opens with a **Boundary.** line naming where the untrusted PR code ran (the image and network policy, or the recorded waiver)`,
-    ];
-  }
-  // The label line may carry the Boundary line on the same line
-  // ("8. **Methodology** — **Boundary.** …", "## Methodology —
-  // **Boundary.** …"); otherwise the first non-empty line after it must
-  // be the Boundary line. The Boundary token must OPEN the text after the
-  // label — a prose mention ("we discuss the **Boundary.** rule") is not
-  // a declaration.
-  const opening = lines[idx].trim();
-  let boundaryLine;
-  if (
-    /^(?:#{1,6}\s+|\d+\.\s+)\*{0,2}Methodology\b\*{0,2}\s*(?:[—:-]\s*)?\*\*Boundary\.\*\*/.test(
-      opening,
-    )
-  ) {
-    boundaryLine = opening;
-  } else {
-    const first = lines.slice(idx + 1).find((line) => line.trim() !== '');
-    if (!first || !first.trim().startsWith('**Boundary.**')) {
-      return [
-        `${label}: the first line after the Methodology opening must be the **Boundary.** line — a prose mention of the rule elsewhere does not declare where the untrusted PR code ran`,
-      ];
-    }
-    boundaryLine = first.trim();
-  }
-  // The disclosure must say something and must not contradict the
-  // recorded declaration: an empty or template Boundary line ships a
-  // placeholder as the round's boundary statement, and a waived round
-  // must not publish container prose (or the reverse). The content is
-  // what follows the token — on the same-line form the label precedes it.
   const token = '**Boundary.**';
-  const content = boundaryLine
-    .slice(boundaryLine.indexOf(token) + token.length)
-    .trim();
+  // A Methodology heading or Boundary disclosure inside a code fence is a
+  // copied template, not the round's own declaration: scan prose only, so a
+  // fenced example neither satisfies the disclosure nor accuses a real
+  // Methodology that follows it. Track ``` / ~~~ fences (a closing run is the
+  // same character, at least as long, with nothing after it).
+  const prose = [];
+  let fence = null;
+  for (const line of lines) {
+    const run = /^(\s*)(`{3,}|~{3,})(.*)$/.exec(line);
+    if (run) {
+      const [, , marks, rest] = run;
+      if (fence === null) {
+        fence = { char: marks[0], len: marks.length };
+        continue;
+      }
+      if (
+        marks[0] === fence.char &&
+        marks.length >= fence.len &&
+        rest.trim() === ''
+      ) {
+        fence = null;
+        continue;
+      }
+    }
+    if (fence === null) prose.push(line);
+  }
+  // Locate the Methodology label by its first word after stripping the
+  // shapes a report may wrap it in — blockquote, list marker, ATX hashes,
+  // bold/italic wrapping — so a bold-only "**Methodology**" or a Setext
+  // heading is found, not just the hand-listed ATX/numbered forms.
+  const normalize = (line) =>
+    line
+      .trim()
+      .replace(/^(?:>\s*)+/, '')
+      .replace(/^(?:[-*]\s+|\d+\.\s+)+/, '')
+      .replace(/^#{1,6}\s+/, '')
+      .replace(/^(\*{1,2}|_{1,2})/, '')
+      .replace(/(\*{1,2}|_{1,2})$/, '')
+      .trim();
+  const isMethodology = (line) => /^Methodology\b/i.test(normalize(line));
+  let idx = prose.findIndex((line) => isMethodology(line));
+  if (idx === -1) {
+    // Setext form: a "Methodology" line underlined by === or ---.
+    idx = prose.findIndex(
+      (line, i) =>
+        /^Methodology\s*$/i.test(line.trim()) &&
+        /^(?:={3,}|-{3,})\s*$/.test((prose[i + 1] ?? '').trim()),
+    );
+  }
+  // A Setext underline (=== / ---) belongs to the heading, not the body:
+  // skip it when looking for the first line after the Methodology opening,
+  // or a valid Setext heading is accused of missing its Boundary line.
+  const setext =
+    idx !== -1 && /^(?:={3,}|-{3,})\s*$/.test((prose[idx + 1] ?? '').trim());
   const warnings = [];
-  if (content === '' || placeholder(content)) {
+  let boundaryLine = null;
+  if (idx === -1) {
     warnings.push(
-      `${label}: the **Boundary.** line carries ${content === '' ? 'no disclosure' : 'a <placeholder> disclosure'} — name the image and network policy, or the recorded waiver`,
+      `${label} has no Methodology section (a Methodology heading or the numbered **Methodology** label): it opens with a **Boundary.** line naming where the untrusted PR code ran (the image and network policy, or the recorded waiver)`,
     );
+    // Still police the disclosure: fall back to the first Boundary line so
+    // an empty or template disclosure is reported even without the section.
+    boundaryLine =
+      prose.find((line) => line.trim().startsWith(token))?.trim() ?? null;
+  } else {
+    // The label line may carry the Boundary line on the same line, with only
+    // a separator between ("8. **Methodology** — **Boundary.** …"); a prose
+    // mention ("we discuss the **Boundary.** rule") is not a declaration.
+    const opening = prose[idx].trim();
+    if (
+      /(?:#{1,6}\s+|\d+\.\s+)?\*{0,2}Methodology\*{0,2}\s*(?:[—:-]\s*)?\*\*Boundary\.\*\*/i.test(
+        opening,
+      )
+    ) {
+      boundaryLine = opening;
+    } else {
+      const first = prose
+        .slice(setext ? idx + 2 : idx + 1)
+        .find((line) => line.trim() !== '');
+      if (first && first.trim().startsWith(token)) {
+        boundaryLine = first.trim();
+      } else {
+        warnings.push(
+          `${label}: the first line after the Methodology opening must be the **Boundary.** line — a prose mention of the rule elsewhere does not declare where the untrusted PR code ran`,
+        );
+      }
+    }
   }
-  if (boundaryMode === 'waived' && !/waiv/i.test(content)) {
-    warnings.push(
-      `${label}: boundary.json records a waiver but the **Boundary.** line does not mention it — the prose names a boundary the declaration contradicts`,
-    );
-  }
-  if (boundaryMode === 'container' && /\bwaived\b/i.test(content)) {
-    warnings.push(
-      `${label}: boundary.json records a container but the **Boundary.** line claims a waiver — the prose names a boundary the declaration contradicts`,
-    );
+  if (boundaryLine !== null) {
+    // The disclosure must say something and must not contradict the recorded
+    // declaration. The content is what follows the token — on the same-line
+    // form the label precedes it. The recorded mode is authoritative: a
+    // container claim contradicted by waiver/VM prose is flagged, but a
+    // truthful waiver phrased without the "waiv" stem is not accused.
+    const content = boundaryLine
+      .slice(boundaryLine.indexOf(token) + token.length)
+      .trim();
+    if (content === '' || placeholder(content)) {
+      warnings.push(
+        `${label}: the **Boundary.** line carries ${content === '' ? 'no disclosure' : 'a <placeholder> disclosure'} — name the image and network policy, or the recorded waiver`,
+      );
+    }
+    if (
+      boundaryMode === 'container' &&
+      (/\bwaived\b/i.test(content) || /\bvm\b|virtual machine/i.test(content))
+    ) {
+      warnings.push(
+        `${label}: boundary.json records a container but the **Boundary.** line claims a waiver or VM — the prose names a boundary the declaration contradicts`,
+      );
+    }
+    // A waiver/VM is contradicted by prose naming a container runtime. Probe
+    // for a positive container signal (an image, a network policy), not the
+    // bare word "container": a truthful "no container was used" must not be
+    // accused, and a waiver phrased without the "waiv" stem is not flagged.
+    if (
+      (boundaryMode === 'waived' || boundaryMode === 'vm') &&
+      /node:\d|--network none/i.test(content)
+    ) {
+      warnings.push(
+        `${label}: boundary.json records a ${boundaryMode} but the **Boundary.** line names a container runtime — the prose names a boundary the declaration contradicts`,
+      );
+    }
   }
   return warnings;
 }
@@ -466,12 +585,15 @@ export function checkArtifacts({
   publishLane = false,
   coordinates = null,
   evidenceUnreadable = false,
+  unreadableKeys = new Set(),
 }) {
   const errors = [];
   const warnings = [];
 
   for (const name of ['report.md', 'verdict.txt', 'assertions.json']) {
     const key = name.split('.')[0];
+    // An unreadable artifact is reported as unreadable, not also as missing.
+    if (unreadableKeys.has(key)) continue;
     const text = files[key];
     if (text === null || text === undefined) {
       errors.push(`${name} is missing`);
@@ -636,17 +758,38 @@ export function checkArtifacts({
     files.boundary === null ||
     files.boundary === undefined ||
     files.boundary.trim() === '';
-  if (publisherOwnsBoundary && boundaryAbsent) {
+  if (unreadableKeys.has('boundary') || unreadableKeys.has('boundaryGate')) {
+    // Already reported as unreadable; do not also call it missing.
+  } else if (publisherOwnsBoundary && boundaryAbsent) {
     warnings.push(
-      'boundary.json is absent on the CI entry path ($QWEN_VERIFY_CONTEXT): the publish job writes the CI lane declaration before it trusts the verdict',
+      'boundary.json is absent on the CI entry path ($QWEN_VERIFY_CONTEXT): the publish job (CI lane) or the host check step (container recipe) writes the declaration before the verdict is trusted',
     );
   } else {
-    errors.push(
-      ...checkBoundary(files.boundary, files.boundaryGate, {
-        publishLane,
-        coordinates,
-      }).errors,
-    );
+    const boundaryErrors = checkBoundary(files.boundary, files.boundaryGate, {
+      publishLane,
+      coordinates,
+    }).errors;
+    // The publisher owns the gate record too: on the CI entry path a
+    // round-authored container declaration whose gate run has not happened
+    // yet is the same expected gap as an absent declaration, not a refusal
+    // the round can clear — the publish job writes its own ci-lane record.
+    const gateAbsent =
+      files.boundaryGate === null ||
+      files.boundaryGate === undefined ||
+      files.boundaryGate.trim() === '';
+    for (const error of boundaryErrors) {
+      if (
+        publisherOwnsBoundary &&
+        gateAbsent &&
+        error.startsWith('boundary-gate.json is missing')
+      ) {
+        warnings.push(
+          'boundary-gate.json is absent on the CI entry path ($QWEN_VERIFY_CONTEXT): the publish job writes its ci-lane record before it trusts the verdict',
+        );
+      } else {
+        errors.push(error);
+      }
+    }
   }
 
   // The report's Boundary disclosure is compared against the recorded
@@ -666,6 +809,19 @@ export function checkArtifacts({
     } catch {
       // checkBoundary already reports the invalid JSON.
     }
+  }
+
+  // Disclose the coordinate-check downgrade: a waiver/vm whose approval
+  // permalink was only shape-checked (no trusted repo/pr coordinates) must
+  // not read as "the approval was compared against this PR".
+  if (
+    !publisherOwnsBoundary &&
+    (boundaryMode === 'waived' || boundaryMode === 'vm') &&
+    !coordinates
+  ) {
+    warnings.push(
+      "the waiver's approval target was not compared against this PR: no trusted repo/pr coordinates were available, so only the approval permalink's URL shape was checked",
+    );
   }
 
   if (files.report && files.report.trim() !== '') {
@@ -791,11 +947,16 @@ function main(argv) {
     boundaryGate: 'boundary-gate.json',
   };
   const unreadableErrors = [];
+  const unreadableKeys = new Set();
   for (const [key, name] of Object.entries(ARTIFACT_NAMES)) {
     if (files[key] === UNREADABLE) {
       unreadableErrors.push(
-        `${name} is unreadable (a directory or permission-denied file is not an absent artifact)`,
+        `${name} is unreadable (a directory, non-regular file, or permission-denied file is not an absent artifact)`,
       );
+      // Keep the key out of the "is missing" branch downstream: the file is
+      // present but unreadable, and telling the author to write a file that
+      // is already there conflates the two cases the sentinel separates.
+      unreadableKeys.add(key);
       files[key] = null;
     }
   }
@@ -813,7 +974,7 @@ function main(argv) {
     } catch {
       evidenceUnreadable = true;
       unreadableErrors.push(
-        'evidence/ is unreadable (a directory or permission-denied file is not an absent artifact)',
+        'evidence/ is unreadable (a directory, non-regular file, or permission-denied file is not an absent artifact)',
       );
     }
   }
@@ -835,11 +996,15 @@ function main(argv) {
     const repoMatch = /^([\w.-]+)\/([\w.-]+)$/.exec(snapshot?.repo ?? '');
     const pr =
       Number.isInteger(snapshot?.pr) && snapshot.pr > 0 ? snapshot.pr : null;
+    // The number must come from the trusted snapshot, never the artifact
+    // directory's basename: the round controls that name, so a fallback to
+    // it would let the round satisfy "this PR" by naming its directory after
+    // the PR whose comment it cites.
     const number =
       pr ??
       (Number.isInteger(snapshot?.number) && snapshot.number > 0
         ? snapshot.number
-        : Number(dirPrNumber) || null);
+        : null);
     return repoMatch && number
       ? { owner: repoMatch[1], repo: repoMatch[2], number }
       : null;
@@ -848,7 +1013,16 @@ function main(argv) {
   if (contextPath) {
     // A host-held snapshot: the artifact directory is writable by the PR code
     // the round just executed, so its own context.json cannot pin the head
-    // when the maintainer supplies a copy that code never saw.
+    // when the maintainer supplies a copy that code never saw. Spelling the
+    // path as --context <round-dir>/context.json is shape-identical to the
+    // prescribed invocation, so refuse it explicitly rather than let the
+    // round supply the coordinates that judge its own waiver.
+    if (resolve(contextPath).startsWith(resolve(dir) + sep)) {
+      process.stderr.write(
+        `verify-pr check: --context must not point inside the artifact directory (${contextPath}): it is PR-writable and cannot judge its own waiver — pass a host-held copy the round never saw\n`,
+      );
+      return 1;
+    }
     try {
       const snapshot = JSON.parse(readFileSync(contextPath, 'utf8'));
       if (/^[0-9a-f]{40}$/.test(snapshot?.headRefOid ?? '')) {
@@ -901,6 +1075,7 @@ function main(argv) {
     publishLane,
     coordinates,
     evidenceUnreadable,
+    unreadableKeys,
   });
   result.errors.unshift(...unreadableErrors);
   if (snapshotWarning) result.warnings.unshift(snapshotWarning);

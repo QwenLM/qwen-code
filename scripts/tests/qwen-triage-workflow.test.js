@@ -6634,7 +6634,7 @@ describe('qwen-triage verify hardening round 2', () => {
     // head: recovery releases the head the error names, not `H` itself.
     // Both forms carry --repo: the guard refuses them without it (D9-1).
     expect(flat).toContain(
-      'verify-pr-watch-state.mjs <n> --release --head <blocking head> --repo <owner>/<repo>',
+      'verify-pr-watch-state.mjs <n> --release --head <blocking head> [--round <r>] --repo <owner>/<repo>',
     );
     expect(flat).toContain('the head the exit-3 message names as in flight');
     expect(flat).toContain(
@@ -6738,7 +6738,10 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('recorded as deferred');
     expect(flat).toContain('no second event will arrive');
     expect(flat).toContain('deferred heads awaiting a round');
-    expect(flat).toContain('start the latest one as the next round');
+    expect(flat).toContain(
+      'start the **last** head it names as the next round',
+    );
+    expect(flat).toContain('the list is in push order, newest last');
     // inconclusive releases the marker without deduping the head away.
     expect(flat).toContain(
       '`inconclusive` releases the marker without filing the head as verified',
@@ -6888,7 +6891,13 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain(
       "the **operator's attestation**, never set by the round itself",
     );
-    expect(flat).toContain('unset both when the round ends');
+    expect(flat).toContain('unset it when the round ends');
+    // R10-20: a self-chosen container= string is not an observed boundary;
+    // an attested VM uses mode:"vm" with the maintainer's approval.
+    expect(flat).toContain(
+      'a self-chosen `container=<name>` string is a _declaration_, not an observed boundary',
+    );
+    expect(flat).toContain('"mode":"vm"');
     expect(flat).toContain('explicitly approves host execution for this round');
     expect(flat).toContain('The invocation itself is not that approval');
     expect(flat).toContain(
@@ -6901,21 +6910,21 @@ describe('qwen-triage verify hardening round 2', () => {
     // it built — after stopping the container, refusing a symlinked round
     // dir, and clearing any planted boundary.json (any node type), before
     // the checker runs on the round dir.
-    expect(flat).toContain('> <round-dir>/boundary.json');
-    expect(flat).toContain('rm -rf -- <round-dir>/boundary.json');
-    expect(flat).toContain('[ -L <round-dir> ]');
+    expect(flat).toContain('> "<round-dir>/boundary.json"');
+    expect(flat).toContain('rm -rf -- "<round-dir>/boundary.json"');
+    expect(flat).toContain('[ -L "<round-dir>" ]');
     // Presence guards first: indexOf returns -1 for a deleted line, and -1
     // is less than any positive index, so the ordering alone is vacuous.
     expect(flat).toContain('docker rm -f qwen-verify-<n>');
     const stop = flat.indexOf('docker rm -f qwen-verify-<n>');
-    const symlinkGuard = flat.indexOf('[ -L <round-dir> ]');
-    const clear = flat.indexOf('rm -rf -- <round-dir>/boundary.json');
-    const write = flat.indexOf('> <round-dir>/boundary.json');
+    const symlinkGuard = flat.indexOf('[ -L "<round-dir>" ]');
+    const clear = flat.indexOf('rm -rf -- "<round-dir>/boundary.json"');
+    const write = flat.indexOf('> "<round-dir>/boundary.json"');
     // The step-7 checker call, not the earlier generic mentions of the
     // script: this exact context path appears only in the cleanup block.
     // Whitespace flattening keeps the line-continuation backslash.
     const checker = flat.indexOf(
-      'verify-pr-check.mjs \\ --context ~/.cache/qwen-verify/pr<n>/pr.json <round-dir>',
+      'verify-pr-check.mjs" \\ --context ~/.cache/qwen-verify/pr<n>/pr.json "<round-dir>"',
     );
     expect(stop).toBeGreaterThan(-1);
     expect(symlinkGuard).toBeGreaterThan(-1);
@@ -6931,16 +6940,16 @@ describe('qwen-triage verify hardening round 2', () => {
     // The symlink refusal records rc instead of exiting early, and checks
     // the parent as well as the round dir itself.
     expect(flat).toContain(
-      'if [ -L <round-dir> ] || [ -L "$(dirname <round-dir>)" ]; then echo "round dir is a symlink" >&2; rc=1 fi',
+      'if [ -L "<round-dir>" ] || [ -L "$(dirname "<round-dir>")" ]; then echo "round dir is a symlink" >&2; rc=1 fi',
     );
     // Every write's status is captured: a planted chmod 444/555 declaration
     // that resists removal must fail the block, not feed the checker.
     expect(flat).toContain('docker rm -f qwen-verify-<n> || rc=1');
     expect(flat).toContain(
-      'rm -rf -- <round-dir>/boundary.json || { echo "cannot clear boundary.json" >&2; rc=1; }',
+      'rm -rf -- "<round-dir>/boundary.json" || { echo "cannot clear boundary.json" >&2; rc=1; }',
     );
-    expect(flat).toContain('> <round-dir>/boundary.json || rc=1');
-    expect(flat).toContain('<round-dir> || rc=$?');
+    expect(flat).toContain('> "<round-dir>/boundary.json" || rc=1');
+    expect(flat).toContain('"<round-dir>" || rc=$?');
     // Control flow, not just text: the clear/write/checker sit behind the
     // rc gate, the teardown is unconditional (fi immediately before kill),
     // and unset precedes the final exit.
@@ -6954,7 +6963,9 @@ describe('qwen-triage verify hardening round 2', () => {
     );
     expect(flat.indexOf('rc=1')).toBeLessThan(teardown);
     expect(checker).toBeLessThan(teardown);
-    expect(flat).toContain('unset QWEN_VERIFY_PROXY_TOKEN exit "$rc"');
+    expect(flat).toContain(
+      'unset QWEN_VERIFY_PROXY_TOKEN QWEN_VERIFY_CREDENTIAL_FREE container exit "$rc"',
+    );
     // The report carries the boundary for human readers too.
     expect(flat).toContain('Open it with a `**Boundary.**` line');
   });
@@ -6972,14 +6983,26 @@ describe('qwen-triage verify hardening round 2', () => {
       readOnlyRound = false,
       checkerFails = false,
       killFails = false,
+      symlinkRound = false,
+      spacesInPath = false,
     } = {}) => {
       const root = mkdtempSync(join(tmpdir(), 'verify-step7-'));
-      const round = join(root, 'round');
+      // R10-48: a round path with a space exercises the quoted expansions.
+      const round = join(root, spacesInPath ? 'round dir' : 'round');
       const home = join(root, 'home');
       const trusted = join(root, 'trusted');
       const shim = join(root, 'shim');
       const proxyDir = join(home, '.cache', 'qwen-verify', 'pr16866');
-      mkdirSync(round, { recursive: true });
+      let victim = null;
+      if (symlinkRound) {
+        // R10-47: a PR-planted symlink at the round dir must be refused.
+        victim = join(root, 'victim');
+        mkdirSync(victim, { recursive: true });
+        writeFileSync(join(victim, 'victim.txt'), 'host data');
+        symlinkSync(victim, round);
+      } else {
+        mkdirSync(round, { recursive: true });
+      }
       mkdirSync(proxyDir, { recursive: true });
       mkdirSync(trusted, { recursive: true });
       mkdirSync(shim, { recursive: true });
@@ -7042,7 +7065,7 @@ describe('qwen-triage verify hardening round 2', () => {
       );
       if (planted || readOnlyRound) chmodSync(round, 0o755);
       const log = existsSync(calls) ? readFileSync(calls, 'utf8') : '';
-      return { res, log, round, root, proxyDir };
+      return { res, log, round, root, proxyDir, victim };
     };
 
     it('runs the checker and tears the proxy down on the normal path', () => {
@@ -7055,6 +7078,51 @@ describe('qwen-triage verify hardening round 2', () => {
           '"mode":"container"',
         );
         // The token-bearing files are gone, not just the process killed.
+        for (const f of ['proxy.pid', 'proxy.json', 'proxy.err']) {
+          expect(existsSync(join(proxyDir, f))).toBe(false);
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    // R10-47: a PR-planted symlink at the round dir is refused, the victim
+    // is untouched, and the proxy is still torn down.
+    it('refuses a symlinked round dir without touching the victim', () => {
+      const { res, log, root, proxyDir, victim } = replay({
+        symlinkRound: true,
+      });
+      try {
+        expect(res.status).toBe(1);
+        expect(res.stderr).toMatch(/round dir is a symlink/);
+        expect(log).not.toMatch(/^node /m);
+        expect(readFileSync(join(victim, 'victim.txt'), 'utf8')).toBe(
+          'host data',
+        );
+        expect(existsSync(join(victim, 'boundary.json'))).toBe(false);
+        expect(log).toMatch(/kill 424242/);
+        for (const f of ['proxy.pid', 'proxy.json', 'proxy.err']) {
+          expect(existsSync(join(proxyDir, f))).toBe(false);
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    // R10-48: a round path containing a space works because the block quotes
+    // its <round-dir> expansions.
+    it('handles a round path containing a space', () => {
+      const { res, log, round, root, proxyDir } = replay({
+        spacesInPath: true,
+      });
+      try {
+        expect(round).toContain(' ');
+        expect(res.status).toBe(0);
+        expect(log).toMatch(/^node /m);
+        expect(readFileSync(join(round, 'boundary.json'), 'utf8')).toContain(
+          '"mode":"container"',
+        );
+        expect(log).toMatch(/kill 424242/);
         for (const f of ['proxy.pid', 'proxy.json', 'proxy.err']) {
           expect(existsSync(join(proxyDir, f))).toBe(false);
         }
@@ -8736,6 +8804,9 @@ describe('qwen-triage verify publish fidelity', () => {
             boundaryGate: JSON.stringify({
               gate: 'require-isolation',
               passed: true,
+              observed: ['/.dockerenv'],
+              signals: ['/.dockerenv'],
+              credentialFree: true,
             }),
           },
         });
