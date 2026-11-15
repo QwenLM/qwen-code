@@ -9,7 +9,7 @@
 
 ## 问题
 
-main 的模型 fallback（`core/llm-chat.ts`「Model fallback chain」）是**每请求无状态**的：主模型在容量错误（429/503/529，`isFallbackEligible`）上耗尽重试预算后，链上逐个以全新预算试 fallback。没有任何东西记住某个模型刚被耗尽，于是**同一轮的下一个请求又从头重试同样不健康的主模型**，在再次 fallback 前白白消耗时延与配额。
+main 的模型 fallback（`core/llm-chat.ts`「Model fallback chain」）是**每请求无状态**的：主模型在容量错误（429/503/529，`isFallbackEligible`）上耗尽重试预算后，链上逐个以全新预算试 fallback。没有任何东西记住某个 fallback 刚被耗尽，于是**同一轮的下一个请求又从头重试同样已耗尽的 fallback**，在再次到达健康模型前白白消耗时延与配额。本移植给链上提供**fallback 选择**的跨请求记忆：已耗尽的 fallback 在本轮剩余被跳过、下一轮重探一次。primary 仍每个请求都被尝试（它可能已恢复）；在链入口跳过不健康 primary 是另一项设计改动，不在本次范围。
 
 ## 现状（已在分支基点核实）
 
@@ -26,17 +26,18 @@ main 的模型 fallback（`core/llm-chat.ts`「Model fallback chain」）是**�
 `packages/core/src/core/model-availability-service.ts`（按 main 约定用 kebab-case；preview 文件为 `modelAvailabilityService.ts`）。纯状态机，无 zod、无外部依赖，故无需 zod-4 改造：
 
 - 状态：`terminal`（reason `quota`|`capacity`）与 `sticky_retry`（`retry_once_per_turn`，带 `consumed` 标志）。
-- API：`markTerminal`、`markHealthy`、`markRetryOncePerTurn`、`consumeStickyAttempt`、`snapshot`、`selectFirstAvailable`、`resetTurn`、`reset`。
+- API：`markTerminal`、`markHealthy`、`markRetryOncePerTurn`、`consumeStickyAttempt`、`snapshot`、`selectFirstAvailable`、`resetTurn`、`reset`，另加 main 特有的 `beginTurn(turnKey)`——仅当轮键（用户 prompt id）变化时重置 consumed 状态；main 没有显式轮边界钩子，故用 prompt id 作轮键。
 - 保留 preview 的不变量：terminal 失败绝不降级为 transient；`markRetryOncePerTurn` 在已 sticky 时保持 `consumed`（避免同轮死循环）；`snapshot` 对 terminal 或已消费的 sticky 报不可用。
 
 ### 归属与接线
 
 - `Config` 持有一个实例（会话级），经懒加载 `getModelAvailabilityService()` getter 暴露，与 preview 的 Config 归属一致。
 - 在 fallback 链中、设置门控之下：
+  - `beginTurn(prompt_id)`，让新一轮对 sticky 模型重探一次。只有 fallback 模型被写入/读取台账；primary 仍每请求被尝试、不被标记（标记它是死写——链上两处同模型守卫把它排除在跳过之外）。
   - 尝试某 fallback 模型前查 `snapshot(model)`；跳过报不可用的模型（记入既有 skip/debug 路径）。
-  - 某模型在 fallback-eligible 容量错误上耗尽重试时，调 `markRetryOncePerTurn(model)` 再 `consumeStickyAttempt(model)`，使其在本轮剩余被跳过。
-  - 响应成功时 `markHealthy(model)`。
-  - 轮首 `resetTurn()`，让新一轮对 sticky 模型重新探测一次。
+  - 某 fallback 在 fallback-eligible 容量错误上耗尽重试时，调 `markRetryOncePerTurn(model)` 再 `consumeStickyAttempt(model)`，使其在本轮剩余被跳过。
+  - fallback 响应成功时 `markHealthy(model)`。
+  - 显式用户 Retry（`SendMessageType.Retry`，经 `LlmClient` → `Turn` → `LlmChatSendOptions` 穿为 `isExplicitRetry`）是一个轮边界：调 `resetTurn()`，使 Retry 重探失败尝试已消费的 fallback——尽管 Retry 复用 prompt id。
 - 本次移植的错误映射刻意收窄：只有 `isFallbackEligible` 已放行的容量状态喂台账（`sticky_retry`）。terminal/quota 标记延后到 follow-up，首个 PR 不改 auth/billing 行为。
 
 ### 功能门
@@ -56,9 +57,10 @@ main 的模型 fallback（`core/llm-chat.ts`「Model fallback chain」）是**�
 ## 涉及文件
 
 - `packages/core/src/core/model-availability-service.ts`（新）+ 同址测试。
-- `packages/core/src/config/config.ts` — 持有服务的懒加载 getter。
-- `packages/core/src/core/llm-chat.ts` — 门控下的 fallback 链查询/标记。
-- `packages/core/src/config/settingsSchema.ts`（或设置定义处）— `experimental.modelAvailabilityTracking`。
+- `packages/core/src/config/config.ts` — 持有服务的懒加载 getter + `modelAvailabilityTracking` 参数。
+- `packages/core/src/core/llm-chat.ts` — 门控下的 fallback 链查询/标记；`LlmChatSendOptions` 上的 `isExplicitRetry`。
+- `packages/core/src/core/turn.ts` + `packages/core/src/core/client.ts` — 把显式 Retry 标志从 `SendMessageType.Retry` 穿到 send options。
+- `packages/cli/src/config/settingsSchema.ts` + `packages/cli/src/config/config.ts` — `experimental.modelAvailabilityTracking`（默认 false）+ 透传，CLI 接线测试镜像 `unifiedAgentLoop` 的 opt-in/opt-out/unset 形状。
 
 ## 验收标准
 
@@ -69,6 +71,7 @@ main 的模型 fallback（`core/llm-chat.ts`「Model fallback chain」）是**�
 
 ## 范围外（follow-up）
 
-- terminal/quota 标记与 `modelPolicy` 动作映射（prompt vs silent）。
+- 在链入口跳过不健康的 **primary**（本移植只跳过 fallback；primary 仍每请求被尝试）。
+- terminal/quota 标记与 `modelPolicy` 动作映射（prompt vs silent）。`markHealthy` 刻意保留——尽管在 terminal 标记落地前它无可观测效果。
 - 跨会话 / 账号级健康共享。
 - 翻设置默认值。

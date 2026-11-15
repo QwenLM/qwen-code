@@ -15,10 +15,14 @@
 main's model fallback (`core/llm-chat.ts`, "Model fallback chain") is
 **stateless per request**: when the primary model exhausts its retry budget on
 a capacity error (429/503/529, `isFallbackEligible`), the chain tries each
-configured fallback with a fresh budget. Nothing remembers that a model was
+configured fallback with a fresh budget. Nothing remembers that a fallback was
 just exhausted, so the **next request in the same turn re-tries the same
-unhealthy primary from scratch**, wasting latency and quota before falling
-back again.
+exhausted fallbacks from scratch**, wasting latency and quota before reaching a
+healthy model again. This port gives the chain cross-request memory for
+**fallback selection**: an exhausted fallback is skipped for the rest of the
+turn and re-probed once on the next turn. The primary is still attempted on
+every request (it may have recovered); skipping an unhealthy primary at the
+chain's entry point is a separate design change, out of scope here.
 
 ## Current behavior (verified at branch base)
 
@@ -45,7 +49,9 @@ no zod / no external deps, so no zod-4 migration is needed for it:
   (`retry_once_per_turn`, with a `consumed` flag).
 - API: `markTerminal`, `markHealthy`, `markRetryOncePerTurn`,
   `consumeStickyAttempt`, `snapshot`, `selectFirstAvailable`, `resetTurn`,
-  `reset`.
+  `reset`, plus a main-specific `beginTurn(turnKey)` that resets consumed state
+  only when the turn key (the user prompt id) changes — main has no explicit
+  turn-boundary hook, so the prompt id serves as the turn key.
 - Invariants preserved from preview: a terminal failure is never downgraded to
   transient; `markRetryOncePerTurn` keeps `consumed` if already sticky (no
   infinite same-turn loop); `snapshot` reports unavailable for terminal or
@@ -57,13 +63,20 @@ no zod / no external deps, so no zod-4 migration is needed for it:
   `getModelAvailabilityService()` getter, mirroring how preview's Config owns
   it.
 - In the fallback chain, behind a setting gate:
+  - `beginTurn(prompt_id)` so a new turn re-probes sticky models once. Only
+    fallback models are written to and read from the ledger; the primary is
+    still attempted each request and is not marked (marking it would be a dead
+    write, since the chain's two same-model guards exclude it from the skip).
   - Before attempting a fallback model, consult `snapshot(model)`; skip models
     reported unavailable (record them in the existing skip/debug path).
-  - When a model exhausts retries on a fallback-eligible capacity error, call
-    `markRetryOncePerTurn(model)` then `consumeStickyAttempt(model)` so it is
-    skipped for the remainder of the turn.
-  - On a successful response, `markHealthy(model)`.
-  - `resetTurn()` at turn start so a new turn re-probes sticky models once.
+  - When a fallback exhausts retries on a fallback-eligible capacity error,
+    call `markRetryOncePerTurn(model)` then `consumeStickyAttempt(model)` so it
+    is skipped for the remainder of the turn.
+  - On a successful fallback response, `markHealthy(model)`.
+  - An explicit user Retry (`SendMessageType.Retry`, threaded as
+    `isExplicitRetry` through `LlmClient` → `Turn` → `LlmChatSendOptions`) is a
+    turn boundary: it calls `resetTurn()` so a retry re-probes fallbacks the
+    failed attempt consumed, even though a retry reuses the prompt id.
 - Error mapping for this first port is deliberately narrow: only the
   capacity statuses already admitted by `isFallbackEligible` feed the ledger
   (`sticky_retry`). Terminal/quota marking is deferred to a follow-up so the
@@ -89,11 +102,15 @@ reversible; a later PR can flip the default once nightly evidence is in.
 ## Files affected
 
 - `packages/core/src/core/model-availability-service.ts` (new) + collocated test.
-- `packages/core/src/config/config.ts` — lazy getter owning the service.
+- `packages/core/src/config/config.ts` — lazy getter owning the service + the
+  `modelAvailabilityTracking` parameter.
 - `packages/core/src/core/llm-chat.ts` — fallback-chain consultation/marking
-  behind the gate.
-- `packages/core/src/config/settingsSchema.ts` (or the settings definition
-  site) — `experimental.modelAvailabilityTracking`.
+  behind the gate; `isExplicitRetry` on `LlmChatSendOptions`.
+- `packages/core/src/core/turn.ts` + `packages/core/src/core/client.ts` — thread
+  the explicit-Retry flag from `SendMessageType.Retry` to the send options.
+- `packages/cli/src/config/settingsSchema.ts` + `packages/cli/src/config/config.ts`
+  — `experimental.modelAvailabilityTracking` (default false) + propagation, with
+  CLI wiring tests mirroring the `unifiedAgentLoop` opt-in/opt-out/unset shape.
 
 ## Acceptance criteria
 
@@ -107,6 +124,10 @@ reversible; a later PR can flip the default once nightly evidence is in.
 
 ## Out of scope (follow-ups)
 
+- Skipping an unhealthy **primary** at the chain's entry point (this port only
+  skips fallbacks; the primary is still attempted each request).
 - Terminal/quota marking and the `modelPolicy` action map (prompt vs silent).
+  `markHealthy` is kept deliberately even though it has no observable effect
+  until terminal marking lands.
 - Cross-session / account-wide health sharing.
 - Flipping the setting default.

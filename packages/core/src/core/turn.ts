@@ -790,6 +790,7 @@ export class Turn {
     private readonly yieldsToolCallPreparations?: boolean,
     private readonly suppressedHookContext?: string,
     private readonly onModelRequestDispatched?: () => void,
+    private readonly isExplicitRetry?: boolean,
   ) {
     this.goalContext = goalContext ? { ...goalContext } : undefined;
   }
@@ -811,7 +812,8 @@ export class Turn {
         this.retractDeliveredOutputOnRetry === true ||
         this.onPreparedRequest !== undefined ||
         this.onModelRequestDispatched !== undefined ||
-        this.suppressedHookContext !== undefined
+        this.suppressedHookContext !== undefined ||
+        this.isExplicitRetry === true
           ? {
               ...(this.onPreparedRequest
                 ? { onPreparedRequest: this.onPreparedRequest }
@@ -826,6 +828,7 @@ export class Turn {
               ...(this.retractDeliveredOutputOnRetry
                 ? { retractDeliveredOutputOnRetry: true }
                 : {}),
+              ...(this.isExplicitRetry ? { isExplicitRetry: true } : {}),
             }
           : undefined;
       const responseStream = prepared

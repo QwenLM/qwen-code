@@ -738,6 +738,12 @@ export interface LlmChatSendOptions {
   preparedRequest?: LlmPreparedRequest;
   /** Skip only the configured model fallback chain for this request. */
   disableModelFallbacks?: boolean;
+  /**
+   * This send is an explicit user Retry. The model-availability ledger treats
+   * it as a turn boundary so a retry re-probes fallbacks the failed attempt
+   * consumed, instead of inheriting their skipped state.
+   */
+  isExplicitRetry?: boolean;
   /** Internal identity for the user prompt added to model history. */
   promptId?: string;
   /**
@@ -5831,17 +5837,21 @@ export class LlmChat {
               let currentResolvedModel = cgConfig?.model ?? model;
               let fallbackStreamYieldedAnyChunk = false;
 
-              // Model health ledger (experimental, opt-in): remember that the
-              // primary just exhausted on a capacity error so the rest of this
-              // turn skips it, and re-probe once on the next turn.
+              // Model health ledger (experimental, opt-in): fallback models
+              // exhausted on a capacity error are skipped for the rest of this
+              // turn and re-probed once on the next turn. The primary is still
+              // attempted each request (it may have recovered); only fallback
+              // selection consults the ledger. An explicit Retry is a turn
+              // boundary so it re-probes fallbacks the failed attempt consumed.
               const availability =
                 self.config.isModelAvailabilityTrackingEnabled?.()
                   ? self.config.getModelAvailabilityService()
                   : undefined;
               if (availability) {
                 availability.beginTurn(prompt_id);
-                availability.markRetryOncePerTurn(currentResolvedModel);
-                availability.consumeStickyAttempt(currentResolvedModel);
+                if (options?.isExplicitRetry) {
+                  availability.resetTurn();
+                }
               }
 
               for (const fallbackModelId of fallbackModels) {

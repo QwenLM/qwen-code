@@ -5181,6 +5181,7 @@ export class LlmClient {
         options?.toolCallPreparations,
         suppressedHookContext,
         workflowModeEligible ? () => onModelRequestDispatched?.() : undefined,
+        messageType === SendMessageType.Retry,
       );
 
       // Assemble the outgoing request. IDE context is merged into the

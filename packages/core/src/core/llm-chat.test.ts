@@ -8527,6 +8527,53 @@ describe('LlmChat', async () => {
       expect(fallbackB).toHaveBeenCalledTimes(3);
     });
 
+    it('an explicit Retry re-probes fallbacks consumed earlier in the turn', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      streamMock().mockRejectedValue(capacityError);
+      fallbackA.mockRejectedValue(capacityError);
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      // Request 1: fallback-a exhausts and is marked unavailable for the turn.
+      const events1 = await sendCollect('test', 'prompt-retry');
+      expect(hasChunkText(events1, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+      expect(fallbackB).toHaveBeenCalledTimes(1);
+
+      // Request 2 reuses the prompt id but is an explicit Retry: it is a turn
+      // boundary, so fallback-a is re-probed instead of staying skipped.
+      const retryStream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-retry',
+        undefined,
+        { isExplicitRetry: true },
+      );
+      const events2 = await collect(retryStream);
+      expect(hasChunkText(events2, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(2);
+      expect(fallbackB).toHaveBeenCalledTimes(2);
+    });
+
     it('does not try the next fallback after a fallback emits output', async () => {
       const { fallbackA, fallbackB, resolveForModel } = wireTwoFallbacks();
       const capacityError = tpmCapacityError();
