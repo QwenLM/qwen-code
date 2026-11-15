@@ -25,6 +25,7 @@ vi.mock('./debugLogger.js', () => ({
 import {
   fetchGitBranches,
   gitCheckout,
+  GitCheckoutFailure,
   gitCommit,
   gitCreateBranch,
   gitEnv,
@@ -677,6 +678,433 @@ describe('gitCheckout', () => {
 
     await expect(gitCheckout(dir, 'a.txt')).rejects.toThrow();
     expect(read(dir, 'a.txt')).toBe('LOCAL EDIT\n');
+  });
+});
+
+/** master with a dirty a.txt; feature carries a conflicting a.txt. */
+function dirtyCheckoutFixture(): string {
+  const dir = makeRepo();
+  git(dir, 'checkout', '-q', '-b', 'feature');
+  commitFile(dir, 'a.txt', 'feature\n');
+  git(dir, 'checkout', '-q', 'master');
+  write(dir, { 'a.txt': 'local edit\n' });
+  return dir;
+}
+
+async function checkoutFails(
+  dir: string,
+  ref: string,
+  options: Parameters<typeof gitCheckout>[2],
+  code: GitCheckoutFailure['code'],
+  env: Env = hermeticEnv(),
+): Promise<GitCheckoutFailure> {
+  let caught: unknown;
+  try {
+    await gitCheckout(dir, ref, options, env);
+  } catch (err) {
+    caught = err;
+  }
+  expect(caught).toBeInstanceOf(GitCheckoutFailure);
+  expect((caught as GitCheckoutFailure).code).toBe(code);
+  return caught as GitCheckoutFailure;
+}
+
+describe('gitCheckout with a dirty working tree', () => {
+  it('plain checkout still refuses and keeps the changes', async () => {
+    const dir = dirtyCheckoutFixture();
+
+    await expect(
+      gitCheckout(dir, 'feature', undefined, hermeticEnv()),
+    ).rejects.toThrow(/overwritten/);
+    expect(read(dir, 'a.txt')).toBe('local edit\n');
+    expect(currentBranch(dir)).toBe('master');
+    expect(stashList(dir)).toHaveLength(0);
+  });
+
+  it('rejects stash and force together', async () => {
+    const dir = makeRepo();
+    await expect(
+      gitCheckout(dir, 'master', { stash: true, force: true }),
+    ).rejects.toThrow(/mutually exclusive/);
+  });
+
+  it('stash checkout keeps the entry and reports its SHA', async () => {
+    const dir = dirtyCheckoutFixture();
+    write(dir, { 'new.txt': 'untracked\n' });
+
+    const result = await gitCheckout(
+      dir,
+      'feature',
+      { stash: true },
+      hermeticEnv(),
+    );
+
+    expect(result.branch).toBe('feature');
+    expect(result.detached).toBe(false);
+    expect(result.stashSha).toMatch(/^[0-9a-f]{40}$/);
+    expect(currentBranch(dir)).toBe('feature');
+    expect(read(dir, 'a.txt')).toBe('feature\n');
+    expect(has(dir, 'new.txt')).toBe(false);
+    expectSoleStash(dir, 'qwen-code: auto-stash before checkout');
+    // The entry holds both the tracked edit and the untracked file.
+    expect(git(dir, 'stash', 'show', '-p', result.stashSha!)).toContain(
+      'local edit',
+    );
+    expect(git(dir, 'show', `${result.stashSha!}^3:new.txt`)).toBe(
+      'untracked\n',
+    );
+  });
+
+  it('stash checkout on a clean tree keeps no entry', async () => {
+    const dir = makeRepo();
+    git(dir, 'branch', 'feature');
+
+    const result = await gitCheckout(
+      dir,
+      'feature',
+      { stash: true },
+      hermeticEnv(),
+    );
+
+    expect(result.branch).toBe('feature');
+    expect(result.stashSha).toBeUndefined();
+    expect(stashList(dir)).toHaveLength(0);
+  });
+
+  it('a failed stash checkout restores the changes', async () => {
+    const dir = dirtyCheckoutFixture();
+
+    const failure = await checkoutFails(
+      dir,
+      'missing-branch',
+      { stash: true },
+      'checkout_failed',
+    );
+
+    expect(failure.message).toContain('your local changes were restored');
+    expect(failure.message).not.toContain('could not be restored');
+    expect(failure.stashSha).toBeUndefined();
+    expect(read(dir, 'a.txt')).toBe('local edit\n');
+    expect(currentBranch(dir)).toBe('master');
+    expect(stashList(dir)).toHaveLength(0);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'reports the kept entry when a failed checkout cannot restore the stash',
+    async () => {
+      const dir = dirtyCheckoutFixture();
+      write(dir, { 'new.txt': 'untracked\n' });
+      const env = gitShim(hermeticEnv(), [
+        // After the doomed checkout, a file appears at a path the stash
+        // holds untracked, so `stash apply` refuses to overwrite it.
+        { match: '"checkout missing-branch"*', after: 'echo clash > new.txt' },
+      ]);
+
+      const failure = await checkoutFails(
+        dir,
+        'missing-branch',
+        { stash: true },
+        'checkout_failed',
+        env,
+      );
+
+      expect(failure.message).toContain('could not be restored automatically');
+      const entries = stashList(dir);
+      expect(entries).toHaveLength(1);
+      const sha = git(dir, 'rev-parse', 'refs/stash').trim();
+      expect(failure.message).toContain(sha);
+      expect(failure.stashSha).toBe(sha);
+      expect(currentBranch(dir)).toBe('master');
+    },
+  );
+
+  it('stash checkout types the refusal when git cannot stash an intent-to-add entry', async () => {
+    const dir = dirtyCheckoutFixture();
+    write(dir, { 'new.txt': 'new\n' });
+    git(dir, 'add', '-N', 'new.txt');
+
+    const failure = await checkoutFails(
+      dir,
+      'feature',
+      { stash: true },
+      'checkout_failed',
+    );
+
+    expect(failure.message).toContain('cannot stash the local changes');
+    expect(failure.message).toContain('checkout was not attempted');
+    expect(read(dir, 'a.txt')).toBe('local edit\n');
+    expect(read(dir, 'new.txt')).toBe('new\n');
+    expect(currentBranch(dir)).toBe('master');
+    expect(stashList(dir)).toHaveLength(0);
+  });
+
+  it('a failed stash checkout with nothing stashed reports git’s reason', async () => {
+    const dir = makeRepo();
+
+    const failure = await checkoutFails(
+      dir,
+      'missing-branch',
+      { stash: true },
+      'checkout_failed',
+    );
+
+    expect(failure.message).toContain('checkout failed');
+    expect(failure.message).not.toContain('restored');
+  });
+
+  it('force checkout discards tracked and untracked, keeps ignored', async () => {
+    const dir = makeRepo();
+    // The ignore rule lives on BOTH branches: the post-switch clean reads
+    // the target branch's ignore rules.
+    commitFile(dir, '.gitignore', 'ign.txt\n');
+    git(dir, 'checkout', '-q', '-b', 'feature');
+    commitFile(dir, 'a.txt', 'feature\n');
+    git(dir, 'checkout', '-q', 'master');
+    write(dir, {
+      'a.txt': 'local edit\n',
+      'new.txt': 'untracked\n',
+      'nested/new.txt': 'untracked dir\n',
+      'ign.txt': 'ignored\n',
+    });
+
+    const result = await gitCheckout(
+      dir,
+      'feature',
+      { force: true },
+      hermeticEnv(),
+    );
+
+    expect(result.branch).toBe('feature');
+    expect(result.stashSha).toBeUndefined();
+    expect(read(dir, 'a.txt')).toBe('feature\n');
+    expect(has(dir, 'new.txt')).toBe(false);
+    expect(has(dir, 'nested')).toBe(false);
+    expect(read(dir, 'ign.txt')).toBe('ignored\n');
+    expect(stashList(dir)).toHaveLength(0);
+  });
+
+  it('force checkout refuses an unresolvable target without discarding', async () => {
+    const dir = dirtyCheckoutFixture();
+
+    const failure = await checkoutFails(
+      dir,
+      'missing-branch',
+      { force: true },
+      'checkout_failed',
+    );
+
+    expect(failure.message).toContain('cannot discard and switch');
+    expect(read(dir, 'a.txt')).toBe('local edit\n');
+    expect(currentBranch(dir)).toBe('master');
+  });
+
+  it('force checkout refuses an ambiguous DWIM name without discarding', async () => {
+    const dir = dirtyCheckoutFixture();
+    addRemote(dir, 'origin');
+    addRemote(dir, 'upstream');
+    git(dir, 'update-ref', 'refs/remotes/origin/shared', headSha(dir));
+    git(dir, 'update-ref', 'refs/remotes/upstream/shared', headSha(dir));
+
+    await checkoutFails(dir, 'shared', { force: true }, 'checkout_failed');
+
+    expect(read(dir, 'a.txt')).toBe('local edit\n');
+    expect(currentBranch(dir)).toBe('master');
+  });
+
+  it('force checkout accepts a bare name exactly one remote carries', async () => {
+    const dir = dirtyCheckoutFixture();
+    addRemote(dir, 'origin');
+    git(dir, 'update-ref', 'refs/remotes/origin/solo', headSha(dir));
+
+    const result = await gitCheckout(
+      dir,
+      'solo',
+      { force: true },
+      hermeticEnv(),
+    );
+
+    expect(result.branch).toBe('solo');
+    expect(currentBranch(dir)).toBe('solo');
+    expect(read(dir, 'a.txt')).toBe('one\n');
+  });
+
+  it('force checkout accepts a slash DWIM name one remote carries', async () => {
+    const dir = dirtyCheckoutFixture();
+    addRemote(dir, 'origin');
+    git(dir, 'update-ref', 'refs/remotes/origin/topic/sub', headSha(dir));
+
+    const result = await gitCheckout(
+      dir,
+      'topic/sub',
+      { force: true },
+      hermeticEnv(),
+    );
+
+    expect(result.branch).toBe('topic/sub');
+    expect(currentBranch(dir)).toBe('topic/sub');
+  });
+
+  it('force checkout of a remote-tracking ref creates the local branch', async () => {
+    const dir = dirtyCheckoutFixture();
+    addRemote(dir, 'origin');
+    git(dir, 'update-ref', 'refs/remotes/origin/topic', headSha(dir));
+
+    const result = await gitCheckout(
+      dir,
+      'origin/topic',
+      { force: true },
+      hermeticEnv(),
+    );
+
+    expect(result.branch).toBe('topic');
+    expect(result.detached).toBe(false);
+    expect(currentBranch(dir)).toBe('topic');
+    expect(read(dir, 'a.txt')).toBe('one\n');
+  });
+
+  it('force checkout refuses a DWIM name git cannot resolve, without discarding', async () => {
+    const dir = dirtyCheckoutFixture();
+    // The tracking ref exists but no remote named origin is configured, so
+    // git's own DWIM refuses the bare name. The discard must not run for a
+    // switch git will not perform.
+    git(dir, 'update-ref', 'refs/remotes/origin/solo', headSha(dir));
+    write(dir, { 'new.txt': 'untracked\n' });
+
+    const failure = await checkoutFails(
+      dir,
+      'solo',
+      { force: true },
+      'checkout_failed',
+    );
+
+    expect(failure.message).toContain('cannot discard and switch');
+    expect(read(dir, 'a.txt')).toBe('local edit\n');
+    expect(read(dir, 'new.txt')).toBe('untracked\n');
+    expect(currentBranch(dir)).toBe('master');
+  });
+
+  it('force checkout refuses when checkout.guess disables DWIM, without discarding', async () => {
+    const dir = dirtyCheckoutFixture();
+    addRemote(dir, 'origin');
+    git(dir, 'update-ref', 'refs/remotes/origin/solo', headSha(dir));
+    git(dir, 'config', 'checkout.guess', 'false');
+
+    await checkoutFails(dir, 'solo', { force: true }, 'checkout_failed');
+
+    expect(read(dir, 'a.txt')).toBe('local edit\n');
+    expect(currentBranch(dir)).toBe('master');
+  });
+
+  it('force checkout refuses a branch occupied by another worktree, without discarding', async () => {
+    const dir = dirtyCheckoutFixture();
+    const worktree = tmpDir('qwen-gitcheckout-wt-');
+    git(dir, 'worktree', 'add', '-q', worktree, 'feature');
+    write(dir, { 'new.txt': 'untracked\n' });
+
+    const failure = await checkoutFails(
+      dir,
+      'feature',
+      { force: true },
+      'checkout_failed',
+    );
+
+    expect(failure.message).toContain('cannot discard and switch');
+    expect(read(dir, 'a.txt')).toBe('local edit\n');
+    expect(read(dir, 'new.txt')).toBe('untracked\n');
+    expect(currentBranch(dir)).toBe('master');
+  });
+
+  it('force checkout refuses from a subdirectory of the repository', async () => {
+    const dir = dirtyCheckoutFixture();
+    const sub = path.join(dir, 'sub');
+    fs.mkdirSync(sub);
+
+    await checkoutFails(sub, 'feature', { force: true }, 'force_unsupported');
+
+    expect(read(dir, 'a.txt')).toBe('local edit\n');
+    expect(currentBranch(dir)).toBe('master');
+  });
+
+  it('force checkout of a tag detaches HEAD', async () => {
+    const dir = dirtyCheckoutFixture();
+    git(dir, 'tag', 'v1.0');
+
+    const result = await gitCheckout(
+      dir,
+      'v1.0',
+      { force: true },
+      hermeticEnv(),
+    );
+
+    expect(result.detached).toBe(true);
+    expect(read(dir, 'a.txt')).toBe('one\n');
+  });
+
+  it('force checkout refuses a skip-worktree conflict without discarding', async () => {
+    const dir = dirtyCheckoutFixture();
+    // A skip-worktree edit blocks even a forced checkout; git refuses
+    // before touching the tree, so the local edit must survive.
+    git(dir, 'update-index', '--skip-worktree', 'a.txt');
+
+    const failure = await checkoutFails(
+      dir,
+      'feature',
+      { force: true },
+      'checkout_failed',
+    );
+
+    expect(failure.message).toContain('cannot discard and switch');
+    expect(read(dir, 'a.txt')).toBe('local edit\n');
+    expect(currentBranch(dir)).toBe('master');
+  });
+
+  it('force checkout reports the completed switch when a post-checkout hook refuses', async () => {
+    const dir = dirtyCheckoutFixture();
+    installHook(dir, 'post-checkout', 'exit 1');
+
+    const failure = await checkoutFails(
+      dir,
+      'feature',
+      { force: true },
+      'checkout_failed',
+    );
+
+    // The hook refused after HEAD moved: the message must say the switch
+    // completed, not claim nothing happened.
+    expect(failure.message).toContain(
+      'switched, but the checkout reported a failure',
+    );
+    expect(currentBranch(dir)).toBe('feature');
+    expect(read(dir, 'a.txt')).toBe('feature\n');
+  });
+
+  it('both resolutions refuse while a merge is parked', async () => {
+    const dir = makeRepo();
+    git(dir, 'checkout', '-q', '-b', 'other');
+    commitFile(dir, 'a.txt', 'other\n');
+    git(dir, 'checkout', '-q', 'master');
+    commitFile(dir, 'a.txt', 'master\n');
+    expect(() => git(dir, 'merge', 'other')).toThrow();
+    expect(fs.existsSync(path.join(dir, '.git', 'MERGE_HEAD'))).toBe(true);
+
+    const stashFailure = await checkoutFails(
+      dir,
+      'other',
+      { stash: true },
+      'operation_in_progress',
+    );
+    const forceFailure = await checkoutFails(
+      dir,
+      'other',
+      { force: true },
+      'operation_in_progress',
+    );
+
+    expect(stashFailure.message).toContain('cannot checkout');
+    expect(forceFailure.message).toContain('cannot checkout');
+    // The parked merge is untouched.
+    expect(fs.existsSync(path.join(dir, '.git', 'MERGE_HEAD'))).toBe(true);
+    expect(stashList(dir)).toHaveLength(0);
   });
 });
 

@@ -602,6 +602,12 @@ export interface DaemonGitWorktreeRemoveResult {
 export interface DaemonGitCheckoutResult {
   branch: string;
   detached: boolean;
+  /**
+   * SHA of the auto-stash entry kept by a successful `stash` checkout.
+   * The entry holds the pre-switch changes; restore it manually with
+   * `git stash apply` when wanted.
+   */
+  stashSha?: string;
 }
 
 /** Response from `POST /workspaces/:workspace/git/push`. */

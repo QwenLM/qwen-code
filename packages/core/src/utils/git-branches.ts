@@ -492,20 +492,93 @@ export function isValidCheckoutRef(value: string): boolean {
 export interface GitCheckoutResult {
   branch: string;
   detached: boolean;
+  /**
+   * SHA of the auto-stash entry kept by a successful `stash` checkout.
+   * The entry holds the user's pre-switch changes; it is never restored
+   * automatically, because switching branches is deliberate.
+   */
+  stashSha?: string;
+}
+
+export interface GitCheckoutOptions {
+  /**
+   * Stash local changes (including untracked files) before checking out.
+   * The entry is kept after a successful switch and reported by SHA; a
+   * failed checkout restores it. Mutually exclusive with `force`.
+   */
+  stash?: boolean;
+  /**
+   * Discard all local changes (tracked modifications and untracked files;
+   * ignored files are kept) before checking out. Destructive, so the
+   * target is validated first: nothing is discarded for a checkout that
+   * could not resolve its ref. Mutually exclusive with `stash`.
+   */
+  force?: boolean;
+}
+
+export type GitCheckoutFailureCode =
+  | 'operation_in_progress'
+  | 'force_unsupported'
+  | 'checkout_failed';
+
+/**
+ * A stash or force checkout that was refused, or failed after the
+ * repository was put back into a known state. `code` is stable for
+ * clients; `message` carries git's own detail and, when the auto-stash
+ * could not be restored, the entry that still holds the user's changes.
+ * `stashSha` names that kept entry as data, so clients can render its
+ * whereabouts as a standing warning rather than a dismissible error.
+ */
+export class GitCheckoutFailure extends Error {
+  readonly code: GitCheckoutFailureCode;
+  readonly stashSha?: string;
+
+  constructor(
+    code: GitCheckoutFailureCode,
+    message: string,
+    stashSha?: string,
+  ) {
+    super(message);
+    this.name = 'GitCheckoutFailure';
+    this.code = code;
+    this.stashSha = stashSha;
+  }
 }
 
 /**
  * Checkout a branch, tag, or revision. Returns the resulting HEAD state.
- * Throws on dirty tree or invalid ref.
+ * Throws on dirty tree or invalid ref. With `stash` or `force`, resolves
+ * a dirty working tree the way a user would in a terminal — stash around
+ * the switch, or discard and switch — mirroring the pull resolutions.
  */
 export async function gitCheckout(
   cwd: string,
   ref: string,
+  opts?: GitCheckoutOptions,
   env?: Readonly<Record<string, string | undefined>>,
 ): Promise<GitCheckoutResult> {
   if (!isValidCheckoutRef(ref)) {
     throw new Error(`invalid checkout ref: ${ref}`);
   }
+  if (opts?.stash && opts?.force) {
+    throw new Error('stash and force are mutually exclusive');
+  }
+  if (opts?.force) return forceCheckout(cwd, ref, env);
+  if (opts?.stash) return stashCheckout(cwd, ref, env);
+  return runCheckout(cwd, ref, env);
+}
+
+async function runCheckout(
+  cwd: string,
+  ref: string,
+  env?: Readonly<Record<string, string | undefined>>,
+  force = false,
+): Promise<GitCheckoutResult> {
+  // `-f` lets git itself validate the ref and discard tracked changes in
+  // one atomic step: a checkout it refuses (unresolvable ref, a branch
+  // occupied by another worktree, a skip-worktree conflict) leaves the
+  // tree untouched, and untracked files in the way are overwritten.
+  const forceFlag = force ? ['-f'] : [];
   // A remote-tracking ref (remote/branch) needs more than a bare
   // `git checkout <branch>`: with two remotes carrying the same branch name
   // the bare name is ambiguous ("matched multiple remote tracking branches"),
@@ -534,11 +607,11 @@ export async function gitCheckout(
       .then(() => true)
       .catch(() => false);
     if (hasLocal) {
-      await runGit(cwd, ['checkout', localName, '--'], env);
+      await runGit(cwd, ['checkout', ...forceFlag, localName, '--'], env);
     } else {
       // `--track` forces commit-ish interpretation of the verified
       // remote-tracking ref, so no pathspec terminator is needed.
-      await runGit(cwd, ['checkout', '--track', ref], env);
+      await runGit(cwd, ['checkout', ...forceFlag, '--track', ref], env);
     }
     const head = (
       await runGit(cwd, ['symbolic-ref', '--short', 'HEAD'], env)
@@ -547,7 +620,7 @@ export async function gitCheckout(
   }
   // `--` terminates options/pathspecs so a validated ref can never be
   // reinterpreted as a path (e.g. `.` wiping the working tree).
-  await runGit(cwd, ['checkout', ref, '--'], env);
+  await runGit(cwd, ['checkout', ...forceFlag, ref, '--'], env);
   const headRaw = await runGit(
     cwd,
     ['symbolic-ref', '--short', 'HEAD'],
@@ -873,17 +946,19 @@ async function operationInProgress(
  * Refuse while an operation is parked. Called immediately before every
  * command that would absorb or destroy that state (`stash push`, `reset
  * --hard`), so the window in which a terminal can park one unseen is the
- * command itself.
+ * command itself. `action` names the blocked operation in the message;
+ * the checkout flows convert the typed failure to their own class.
  */
 async function refuseOperationInProgress(
   cwd: string,
   env?: Readonly<Record<string, string | undefined>>,
+  action = 'update',
 ): Promise<void> {
   const operation = await operationInProgress(cwd, env);
   if (operation) {
     throw new GitPullFailure(
       'operation_in_progress',
-      `cannot update: a ${operation} is in progress; finish or abort it from a terminal first`,
+      `cannot ${action}: a ${operation} is in progress; finish or abort it from a terminal first`,
     );
   }
 }
@@ -1129,18 +1204,22 @@ async function validatedUpstream(
  * entry absent from the pre-push listing whose subject carries the
  * auto-stash message. A terminal push landing between ours and the
  * re-listing sits above it and is left alone. Returns undefined when there
- * was nothing to stash.
+ * was nothing to stash. `action` and `label` adapt the wording and the
+ * entry subject to the calling flow (pull or checkout).
  */
 async function pushAutoStash(
   cwd: string,
   env?: Readonly<Record<string, string | undefined>>,
+  opts?: { action?: string; label?: string },
 ): Promise<string | undefined> {
+  const action = opts?.action ?? 'update';
+  const label = opts?.label ?? AUTO_STASH_MESSAGE;
   const before = new Set((await stashEntries(cwd, env)).map((e) => e.sha));
-  await refuseOperationInProgress(cwd, env);
+  await refuseOperationInProgress(cwd, env, action);
   try {
     await runGit(
       cwd,
-      ['stash', 'push', '--include-untracked', '-m', AUTO_STASH_MESSAGE],
+      ['stash', 'push', '--include-untracked', '-m', label],
       env,
     );
   } catch (err) {
@@ -1148,7 +1227,7 @@ async function pushAutoStash(
     // intent-to-add entry); report why the update was not attempted.
     throw new GitPullFailure(
       'pull_failed',
-      `cannot stash the local changes, so the update was not attempted:\n${gitDetail(err)}`,
+      `cannot stash the local changes, so the ${action} was not attempted:\n${gitDetail(err)}`,
     );
   }
   let after: StashEntry[];
@@ -1159,11 +1238,11 @@ async function pushAutoStash(
     // point at it by its message and stop before pulling.
     throw new GitPullFailure(
       'pull_failed',
-      `cannot identify the auto-stash entry, so the update was not attempted; your changes are in the entry labelled "${AUTO_STASH_MESSAGE}" in git stash list:\n${gitDetail(err)}`,
+      `cannot identify the auto-stash entry, so the ${action} was not attempted; your changes are in the entry labelled "${label}" in git stash list:\n${gitDetail(err)}`,
     );
   }
   const created = after.filter(
-    (e) => !before.has(e.sha) && e.subject.endsWith(AUTO_STASH_MESSAGE),
+    (e) => !before.has(e.sha) && e.subject.endsWith(label),
   );
   // Listing is newest-first; ours is the oldest of the new entries.
   return created.length > 0 ? created[created.length - 1]!.sha : undefined;
@@ -1318,6 +1397,145 @@ export async function gitPull(
   if (opts?.stash) return stashPull(cwd, opts, env);
   const output = await runGit(cwd, pullArgs(opts), env);
   return { success: true, output: output.trim() };
+}
+
+const CHECKOUT_AUTO_STASH_MESSAGE = 'qwen-code: auto-stash before checkout';
+
+/**
+ * The shared stash helpers type their refusals as GitPullFailure; the
+ * checkout flows surface the same codes under their own class so the
+ * route's contract stays checkout-specific.
+ */
+function asCheckoutFailure(err: unknown): GitCheckoutFailure {
+  if (err instanceof GitPullFailure) {
+    // The shared helpers only emit operation_in_progress and pull_failed;
+    // map the pull-specific code onto the checkout contract instead of
+    // widening it with codes a checkout can never produce.
+    const code: GitCheckoutFailureCode =
+      err.code === 'operation_in_progress'
+        ? 'operation_in_progress'
+        : 'checkout_failed';
+    return new GitCheckoutFailure(code, err.message);
+  }
+  throw err;
+}
+
+async function refuseCheckoutOperationInProgress(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<void> {
+  try {
+    await refuseOperationInProgress(cwd, env, 'checkout');
+  } catch (err) {
+    throw asCheckoutFailure(err);
+  }
+}
+
+async function forceCheckout(
+  cwd: string,
+  ref: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<GitCheckoutResult> {
+  await refuseCheckoutOperationInProgress(cwd, env);
+  const toplevel = (
+    await runGit(cwd, ['rev-parse', '--show-toplevel'], env)
+  ).trim();
+  if (
+    (await fs.promises.realpath(cwd)) !== (await fs.promises.realpath(toplevel))
+  ) {
+    // A forced checkout acts on the whole repository, so a discard issued
+    // from a workspace below the root would also erase changes outside it.
+    throw new GitCheckoutFailure(
+      'force_unsupported',
+      'cannot discard changes: the workspace is a subdirectory of its repository, so discarding would also reset changes outside the workspace; resolve them from a terminal',
+    );
+  }
+  await refuseCheckoutOperationInProgress(cwd, env);
+  // git validates the ref and discards tracked changes in one atomic step
+  // (`checkout -f`): a switch it refuses — an unresolvable ref, a branch
+  // occupied by another worktree, a skip-worktree conflict, DWIM disabled
+  // by checkout.guess — leaves the tree untouched, so nothing is ever
+  // discarded for a doomed switch. No hand-written ref preflight: git's
+  // own resolution (remote config, refspecs, DWIM) is the authority.
+  const headBefore = (
+    await runGit(cwd, ['rev-parse', 'HEAD'], env).catch(() => '')
+  ).trim();
+  let result: GitCheckoutResult;
+  try {
+    result = await runCheckout(cwd, ref, env, true);
+  } catch (err) {
+    // A post-checkout hook can refuse AFTER git moved HEAD and discarded
+    // the changes; tell that apart from a pre-touch refusal by the state,
+    // not by git's text, so the message never claims nothing happened
+    // when the switch actually completed.
+    const headAfter = (
+      await runGit(cwd, ['rev-parse', 'HEAD'], env).catch(() => '')
+    ).trim();
+    if (headBefore && headAfter && headBefore !== headAfter) {
+      await runGit(cwd, ['clean', '-fd'], env).catch(() => undefined);
+      throw new GitCheckoutFailure(
+        'checkout_failed',
+        `switched, but the checkout reported a failure (a post-checkout hook may have refused):\n${gitDetail(err)}`,
+      );
+    }
+    throw new GitCheckoutFailure(
+      'checkout_failed',
+      `cannot discard and switch:\n${gitDetail(err)}`,
+    );
+  }
+  // The forced checkout overwrites untracked files in its way but leaves
+  // other untracked residue behind; remove it (ignored files are kept).
+  try {
+    await runGit(cwd, ['clean', '-fd'], env);
+  } catch (err) {
+    throw new GitCheckoutFailure(
+      'checkout_failed',
+      `switched, but removing untracked files failed:\n${gitDetail(err)}`,
+    );
+  }
+  return result;
+}
+
+async function stashCheckout(
+  cwd: string,
+  ref: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<GitCheckoutResult> {
+  await refuseCheckoutOperationInProgress(cwd, env);
+  let stashed: string | undefined;
+  try {
+    stashed = await pushAutoStash(cwd, env, {
+      action: 'checkout',
+      label: CHECKOUT_AUTO_STASH_MESSAGE,
+    });
+  } catch (err) {
+    throw asCheckoutFailure(err);
+  }
+  let result: GitCheckoutResult;
+  try {
+    result = await runCheckout(cwd, ref, env);
+  } catch (err) {
+    const detail = gitDetail(err);
+    if (stashed === undefined) {
+      // Nothing to restore, but the checkout still failed under the stash
+      // flow — report git's reason instead of re-offering the resolution.
+      throw new GitCheckoutFailure(
+        'checkout_failed',
+        `checkout failed:\n${detail}`,
+      );
+    }
+    const restore = await restoreStash(cwd, stashed, env);
+    throw new GitCheckoutFailure(
+      'checkout_failed',
+      restore.restored
+        ? `checkout failed; your local changes were restored${restore.output ? ` (${restore.output})` : ''}:\n${detail}`
+        : `checkout failed and your local changes could not be restored automatically; they are kept in stash entry ${stashed}:\n${restore.output}\n${detail}`,
+      restore.restored ? undefined : stashed,
+    );
+  }
+  // The entry is kept: restoring the old branch's changes onto the new one
+  // is the user's call, not a side effect of switching.
+  return stashed === undefined ? result : { ...result, stashSha: stashed };
 }
 
 export interface GitCommitResult {

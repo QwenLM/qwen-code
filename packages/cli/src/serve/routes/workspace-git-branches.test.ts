@@ -138,6 +138,33 @@ describe('workspace Git branch routes', () => {
     expect(response.body.error).toBe('invalid_ref');
   });
 
+  it('rejects a wrong-typed checkout stash with 400', async () => {
+    const response = await request(app())
+      .post('/workspace/git/checkout')
+      .send({ ref: 'main', stash: 'yes' });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_stash');
+  });
+
+  it('rejects a wrong-typed checkout force with 400', async () => {
+    const response = await request(app())
+      .post('/workspace/git/checkout')
+      .send({ ref: 'main', force: 1 });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_force');
+  });
+
+  it('rejects combining checkout stash and force with 400', async () => {
+    const response = await request(app())
+      .post('/workspace/git/checkout')
+      .send({ ref: 'main', stash: true, force: true });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('invalid_stash_force');
+  });
+
   it('rejects a wrong-typed setUpstream with 400', async () => {
     const response = await request(app())
       .post('/workspace/git/push')
@@ -1334,6 +1361,160 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
 
     expect(response.status).toBe(500);
     expect(response.body.error).not.toBe('dirty_working_tree');
+  });
+});
+
+describe('checkout resolutions against a real repo', () => {
+  /** The main branch with a dirty a.txt; feature carries a conflicting one. */
+  function dirtyCheckoutRepo(): string {
+    const dir = makeRepo();
+    const mainBranch = git(dir, 'branch', '--show-current').trim();
+    git(dir, 'checkout', '-q', '-b', 'feature');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'feature\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'feature');
+    git(dir, 'checkout', '-q', mainBranch);
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local edit\n');
+    return dir;
+  }
+
+  it('classifies a plain dirty checkout as 409 dirty_working_tree', async () => {
+    const dir = dirtyCheckoutRepo();
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/checkout')
+      .send({ ref: 'feature' });
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('dirty_working_tree');
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      'local edit\n',
+    );
+  });
+
+  it('stash checkout switches and reports the kept entry', async () => {
+    const dir = dirtyCheckoutRepo();
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'untracked\n');
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/checkout')
+      .send({ ref: 'feature', stash: true });
+
+    expect(response.status).toBe(200);
+    expect(response.body.branch).toBe('feature');
+    expect(response.body.detached).toBe(false);
+    expect(response.body.stashSha).toMatch(/^[0-9a-f]{40}$/);
+    expect(git(dir, 'stash', 'list')).toContain('auto-stash before checkout');
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe('feature\n');
+    expect(fs.existsSync(path.join(dir, 'b.txt'))).toBe(false);
+  });
+
+  it('force checkout discards the local changes and switches', async () => {
+    const dir = dirtyCheckoutRepo();
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'untracked\n');
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/checkout')
+      .send({ ref: 'feature', force: true });
+
+    expect(response.status).toBe(200);
+    expect(response.body.branch).toBe('feature');
+    expect(response.body.stashSha).toBeUndefined();
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe('feature\n');
+    expect(fs.existsSync(path.join(dir, 'b.txt'))).toBe(false);
+  });
+
+  it('maps a failed stash checkout to 409 checkout_failed with the changes restored', async () => {
+    const dir = dirtyCheckoutRepo();
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/checkout')
+      .send({ ref: 'missing-branch', stash: true });
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('checkout_failed');
+    expect(response.body.message).toContain('restored');
+    expect(JSON.stringify(response.body)).not.toContain(dir);
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      'local edit\n',
+    );
+    expect(git(dir, 'stash', 'list').trim()).toBe('');
+  });
+
+  it('force checkout refuses an unresolvable ref without discarding', async () => {
+    const dir = dirtyCheckoutRepo();
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/checkout')
+      .send({ ref: 'missing-branch', force: true });
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('checkout_failed');
+    expect(response.body.message).toContain('cannot discard and switch');
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      'local edit\n',
+    );
+  });
+
+  it('forwards the kept stash entry when a failed checkout cannot restore it', async () => {
+    const dir = dirtyCheckoutRepo();
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'untracked\n');
+    git(dir, 'config', 'core.hooksPath', path.join(dir, '.git', 'hooks'));
+    // The hook fails the checkout after HEAD moved AND recreates the
+    // untracked path the stash holds, so the restore's apply refuses.
+    const hook = path.join(dir, '.git', 'hooks', 'post-checkout');
+    fs.writeFileSync(hook, '#!/bin/sh\necho clash > b.txt\nexit 1\n');
+    fs.chmodSync(hook, 0o755);
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/checkout')
+      .send({ ref: 'feature', stash: true });
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('checkout_failed');
+    expect(response.body.message).toContain('could not be restored');
+    expect(response.body.stashSha).toMatch(/^[0-9a-f]{40}$/);
+    expect(git(dir, 'stash', 'list')).toContain('auto-stash before checkout');
+  });
+
+  it('maps the subdirectory force refusal to 409 force_unsupported without discarding', async () => {
+    const dir = dirtyCheckoutRepo();
+    const sub = path.join(dir, 'packages', 'app');
+    fs.mkdirSync(sub, { recursive: true });
+
+    const response = await request(appWithWorkspace(sub))
+      .post('/workspace/git/checkout')
+      .send({ ref: 'feature', force: true });
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('force_unsupported');
+    expect(JSON.stringify(response.body)).not.toContain(dir);
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      'local edit\n',
+    );
+  });
+
+  it('maps an in-progress merge to 409 operation_in_progress', async () => {
+    const dir = makeRepo();
+    const mainBranch = git(dir, 'branch', '--show-current').trim();
+    git(dir, 'checkout', '-q', '-b', 'feature');
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'feature\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'feature');
+    git(dir, 'checkout', '-q', mainBranch);
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'main\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'main');
+    expect(() => git(dir, 'merge', 'feature')).toThrow();
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/checkout')
+      .send({ ref: 'feature', stash: true });
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('operation_in_progress');
+    expect(response.body.message).toContain('merge');
+    expect(fs.existsSync(path.join(dir, '.git', 'MERGE_HEAD'))).toBe(true);
   });
 });
 
