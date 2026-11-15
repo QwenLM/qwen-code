@@ -285,9 +285,10 @@ watch 能在下一轮投递该评论；第二轮跳过并推进。两种情形�
   （10s 超时）+ cron 文件读取，verify-pr watch 需要建键时再加一次
   `git remote get-url origin`。与 Web Shell watches 页面按需使用的机制相同。
   绑定扫描还有第二个消费者 `runPrWatchObservationTick`，每 5 分钟 tick 付出
-  同样的每 workspace 成本却不读 `watching`；它目前是惰性的
-  （`SESSION_PR_WATCH_OBSERVATION_ENABLED` 为 false），该开关翻开前需要先加
-  守卫。
+  同样的每 workspace 成本却不读 `watching`；它已不再惰性：该常量在 #17214 中移除、启用即 deps 存在性，因此只要
+  `serve.sessionPrWatch` 订阅了事件，该 tick 就会跑。这里要求的守卫改由实测
+  回答——[配置与渠道迁移](2026-11-14-daemon-pr-watch-config-migration.zh-CN.md)
+  §9 实测整次扫描后定案保留三次扫描。
 - **partial 快照下 `watching` 陈旧。** 保留行上次盖上的 `watching` 是陈旧
   证据——能刷新它的那次扫描读不到该会话的 sidecar——因此保留时**剥掉**该
   标志（行仍命名其 PR、仍按新旧竞争）。门随后对保留行 fail-open：永久

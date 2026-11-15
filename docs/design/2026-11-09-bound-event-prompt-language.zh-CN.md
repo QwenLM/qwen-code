@@ -40,10 +40,11 @@
 - `sanitizePromptText` 会剥掉内容不超过 64 码点的行首 `[tag]`；头部与
   trusted 标签必须保持在该窗口内，使不可信文本开头的副本失去方括号。
 
-daemon PR-state watch（观测 + drain）在生产中关闭：
-`SESSION_PR_WATCH_OBSERVATION_ENABLED` 为 `false`，且 `run-qwen-serve.ts`
-从未填充 `getPrWatchDeps` / `getPrDrainDeps`。GitHub channel 是今天唯一
-活跃的绑定事件提示词生产方。
+只要 `serve.sessionPrWatch` 订阅了事件，daemon PR-state watch（观测 + drain）
+就是活跃的：启用即 deps 存在性，`run-qwen-serve.ts` 依该订阅填充
+`getPrWatchDeps` / `getPrDrainDeps`。当初把它关掉的内部常量已在 #17214 中移除。
+channel 不再检测 PR 状态，因此除 channel 的评论车道外，daemon 现在也是绑定事件
+提示词的生产方。
 
 ## 目标
 
@@ -195,9 +196,10 @@ channel 撰写的字符串：
 6. **zh 标签保持在剥壳窗口内。** zh 头部内容约 21 码点加平台名，zh 截断
    标记比英文更短；两者都 ≤ 64 码点，因此 `sanitizePromptText` 剥它们的
    副本与剥英文标签完全一致。副本测试扩展到 zh 信封。
-7. **惰性的 daemon 生产方不接线。** 给 `PrWatchDrainDeps` 加一个没有
-   生产调用方设置的 language 字段会是死开关。drain 保持英文缺省；其启用
-   增量届时再穿语言。共享构造器已经支持。
+7. **daemon 生产方的语言不接线。** 给 `PrWatchDrainDeps` 加一个没有
+   生产调用方设置的 language 字段会是死开关。drain 保持英文缺省。启用增量
+   此后已落地（#17032）但未穿语言——`PrWatchDrainDeps` 仍未声明 language
+   字段——因此这项穿线仍欠着，而不是已排到别处。共享构造器已经支持。
 
 ## 受影响文件
 

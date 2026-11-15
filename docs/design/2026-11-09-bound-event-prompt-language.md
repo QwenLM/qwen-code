@@ -47,10 +47,12 @@ Constraints established by the existing contracts
   64 code points; the header and the trusted label must stay within that window
   so a copy at the start of untrusted text loses its brackets.
 
-The daemon PR-state watch (observation + drain) is gated off in production:
-`SESSION_PR_WATCH_OBSERVATION_ENABLED` is `false` and `run-qwen-serve.ts` never
-populates `getPrWatchDeps` / `getPrDrainDeps`. The GitHub channel is the only
-live producer of bound event prompts today.
+The daemon PR-state watch (observation + drain) is live whenever
+`serve.sessionPrWatch` subscribes an event: enablement is deps presence, and
+`run-qwen-serve.ts` populates `getPrWatchDeps` / `getPrDrainDeps` from that
+subscription. The internal constant that gated it off was removed in #17214.
+The channel no longer detects PR state, so alongside the channel's comment lane
+the daemon is now a producer of bound event prompts too.
 
 ## Goals
 
@@ -231,10 +233,12 @@ Check names keep their `, ` join in both languages; they are platform data.
    than the English one; both stay ≤ 64 code points, so `sanitizePromptText`
    peels copies of them exactly like the English tags. The copy tests are
    extended to run against the zh envelope as well.
-7. **The inert daemon producer is not wired.** Adding a language field to
-   `PrWatchDrainDeps` that no production caller sets would be a dead switch.
-   The drain keeps the English default; its enablement increment threads the
-   language then. The shared builder already supports it.
+7. **The daemon producer's language is not wired.** Adding a language field
+   to `PrWatchDrainDeps` that no production caller sets would be a dead switch.
+   The drain keeps the English default. The enablement increment has since
+   landed (#17032) without threading it — `PrWatchDrainDeps` still declares no
+   language field — so the threading is still owed rather than scheduled
+   elsewhere. The shared builder already supports it.
 
 ## Files affected
 
