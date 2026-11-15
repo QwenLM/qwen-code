@@ -3943,7 +3943,10 @@ export function createServeApp(
   });
   // The qualified listing lets a multi-workspace Web Shell aggregate every
   // registered project's goals, not just the primary's.
-  registerWorkspaceQualifiedGoalsRoutes(app, { workspaceRegistry });
+  registerWorkspaceQualifiedGoalsRoutes(app, {
+    workspaceRegistry,
+    conversationRuntimeActivity,
+  });
 
   // The primary workspace's /autofix-pr watches, read from the clone's files
   // (as `qwen autofix-pr status` lists them). Read-only.

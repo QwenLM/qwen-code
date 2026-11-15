@@ -2,9 +2,11 @@
 
 [English](2026-11-14-web-shell-goals-multi-workspace.md) | [简体中文](2026-11-14-web-shell-goals-multi-workspace.zh-CN.md)
 
-Status: implemented, pending review (2026-11-14). Current-state claims
-verified against `origin/main` `114694062b`; implementation based on
-`23ccf4d0b7` (the goals surfaces are unchanged between the two).
+Status: merged to main (`8161b9f91f`, 2026-11-14); post-merge review
+revisions (activity-gate wrap, picker reconciliation, catalog wording) in
+this follow-up. Current-state claims verified against `origin/main`
+`114694062b`; implementation based on `23ccf4d0b7` (the goals surfaces are
+unchanged between the two).
 
 ## Problem
 
@@ -46,12 +48,18 @@ lookup.) This design preserves each surface's existing gate.
 - The Goals page lists non-terminal goals from every operable workspace
   (the primary plus every trusted secondary), each card tagged with its
   workspace when more than one workspace is present.
-- The create form can target any operable workspace; the default stays the
-  currently selected workspace.
+- The create form can target any trusted local workspace; the default
+  stays the currently selected workspace when it is creatable, else a
+  creatable primary, else the first creatable entry. The untrusted primary
+  stays in the aggregated listing so its failure is visible, but is never
+  a create target.
 - Pause / resume / edit / clear keep working for goals in any workspace
   (the per-session control routes already resolve the owner).
 - Single-workspace deployments keep today's behavior and chrome (no
-  badges, no picker). A deployment locked to the primary keeps the
+  badges, no picker) — except a deployment whose only workspace is
+  untrusted or remote, where the New form now reports
+  `goals.error.workspaceUnavailable` instead of silently doing nothing.
+  A deployment locked to the primary keeps the
   unqualified route; one locked to a secondary lists through that
   workspace's qualified route, still without badges or a picker.
 
@@ -79,8 +87,9 @@ add a second registration:
 
 - `registerGoalsRoutes` keeps the exact primary contract (path, trust gate,
   generation assertion, response shape `{ v: 1, goals, droppedCount }`).
-- New `registerWorkspaceQualifiedGoalsRoutes(app, { workspaceRegistry })`
-  registers `GET /workspaces/:workspace/goals`. Per request it:
+- New `registerWorkspaceQualifiedGoalsRoutes(app, { workspaceRegistry,
+conversationRuntimeActivity })` registers
+  `GET /workspaces/:workspace/goals`. Per request it:
   1. Resolves the runtime with
      `resolveWorkspaceRuntimeWithLiveCompatibilityFromParam` (unknown or
      malformed selector → 400 `workspace_mismatch`; inactive runtime → 503
@@ -91,6 +100,12 @@ add a second registration:
   3. Runs the shared listing against `runtime.bridge` and
      `runtime.workspaceCwd`, with the runtime's `generationGuard` as the
      generation assertion when present.
+  4. For a `live-conversation` runtime, runs the listing inside
+     `conversationRuntimeActivity.run(…)` exactly like the qualified
+     scheduled-tasks surface, so a drain's `sealAndWait()` counts the
+     in-flight listing: a sealed gate answers 503 `daemon_draining`
+     instead of a partial probe page, and a daemon that wired no gate
+     answers 503 `conversation_runtime_unavailable`.
 - The shared listing keeps today's semantics: agent-host sessions filtered
   out, probe concurrency 10, failed probes dropped and counted, newest-first
   sort, read-only.
@@ -119,11 +134,11 @@ Mirror `ScheduledTasksDialog`'s multi-workspace shape:
   `lockedWorkspace?: DaemonWorkspaceCapability`, passed by App exactly as
   for scheduled tasks (`lockedWorkspaceCwd ? visibleWorkspaces :
 ordinaryWorkspaces`, and `lockedWorkspaceCapability`).
-- Derived state: `isMultiWorkspace = !lockedWorkspace && workspaceList.length > 1`; `operableWorkspaces = workspaceList.filter(ws => ws.primary || ws.trusted)`; `workspaceActionId(ws) = ws.primary ? undefined : ws.id`.
+- Derived state: `isMultiWorkspace = !lockedWorkspace && workspaceList.length > 1`; `operableWorkspaces = workspaceList.filter(ws => ws.primary || (ws.trusted && !ws.ssh))`; `skippedWorkspaces = workspaceList.filter(ws => !ws.primary && (!ws.trusted || ws.ssh))`; `creatableWorkspaces = operableWorkspaces.filter(ws => ws.trusted !== false)`; `workspaceActionId(ws) = ws.primary ? undefined : ws.id`.
 - Reload: locked → single qualified (or primary) fetch, tagged with the
   locked workspace's cwd; multi → fan out over `operableWorkspaces` with
-  `Promise.all`, tag each goal with its workspace, sum `droppedCount`, keep
-  the first error while retaining the other workspaces' goals; single →
+  `Promise.all`, tag each goal with its workspace, sum `droppedCount`,
+  retaining the other workspaces' goals when one fails; single →
   today's unqualified fetch, tagged with the sole primary's cwd when the
   daemon advertises exactly one workspace (daemons with no workspace list
   keep the untagged legacy shape). Tagging in all three branches mirrors
@@ -142,13 +157,27 @@ ordinaryWorkspaces`, and `lockedWorkspaceCapability`).
   listing can never load); the aggregated view shows a count notice
   (`goals.workspacesSkipped`, "untrusted or remote") instead of a bare
   "no goals" empty state for workspaces it never read.
-- Create form: in multi-workspace view, a workspace picker defaulting to
-  the currently selected workspace when it is operable, else the primary.
-  The App supplies that default through a `defaultWorkspaceCwd` prop.
-  Picker and badge labels go through `disambiguateWorkspaceLabels` so two
-  checkouts sharing a basename stay distinguishable in a native `<select>`
-  (which cannot carry tooltips). Edit form: no picker — the goal's session
-  already owns its workspace.
+- Create form: in multi-workspace view, a workspace picker whose options
+  and default come from `creatableWorkspaces` — the trusted subset of
+  `operableWorkspaces` — so the untrusted primary that the fan-out
+  deliberately keeps (to surface its listing failure) is never a create
+  target the App would refuse. The default is the currently selected
+  workspace when it is creatable, else the primary (else the first
+  creatable entry); the App supplies it through a `defaultWorkspaceCwd`
+  prop. The submitted target is `effectiveFormWorkspaceCwd`: the selection
+  when it is still creatable, else the default — a capabilities refresh
+  that removes or untrusts the selected workspace reconciles both the
+  rendered `<select>` and the submit (without it, the control falls back
+  to its first option while the submit still sends the vanished cwd).
+  When the daemon advertises workspaces but none is creatable, the form
+  shows the translated `goals.error.workspaceUnavailable` both as an
+  inline hint under the empty picker and on submit, instead of a silent
+  no-op; the refusal retires once a creatable target reappears. A daemon
+  advertising no workspace list keeps the legacy submit-undefined shape.
+  Picker and badge labels go through
+  `disambiguateWorkspaceLabels` so two checkouts sharing a basename stay
+  distinguishable in a native `<select>` (which cannot carry tooltips).
+  Edit form: no picker — the goal's session already owns its workspace.
 - `onCreateGoal` becomes `(condition: string, workspaceCwd?: string)`.
   `onOpenSession` becomes `(sessionId: string, workspaceCwd?: string)` and
   the App loads the session in the goal's own workspace, exactly as the
@@ -273,7 +302,9 @@ display names come from the existing `workspaceLabel` /
 - One workspace failing to list does not blank the others; the error and
   dropped counts surface.
 - Single-workspace views are unchanged (no badges, no picker, unqualified
-  route). A deployment locked to the primary keeps the unqualified route;
+  route), except that an only-untrusted-or-remote workspace now gets the
+  `goals.error.workspaceUnavailable` refusal on submit instead of a silent
+  no-op. A deployment locked to the primary keeps the unqualified route;
   one locked to a secondary uses that workspace's qualified route, with no
   badges and no picker.
 - The primary `GET /goals` response contract is unchanged.

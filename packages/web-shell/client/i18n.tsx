@@ -3600,7 +3600,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'memory.contentEmpty': 'Memory content is empty.',
   'memory.file': 'Memory file',
   'memory.fileOpen': 'Memory file opened.',
-  'memory.fileTruncated': 'Memory file opened. Content is truncated.',
+  'memory.fileTruncated':
+    'The complete memory file text is unavailable. Editing is disabled.',
   'memory.files': 'Memory Files',
   'memory.footer': 'Enter to confirm · Esc to cancel',
   'memory.footer.back': 'Esc to go back',
@@ -8600,14 +8601,14 @@ const ZH: Messages = {
   'goals.dropped': (v) =>
     `有 ${v?.count ?? 0} 个会话无法访问——它们正在运行的目标未显示在此列表中。`,
   'goals.workspacesSkipped': (v) =>
-    `有 ${v?.count ?? 0} 个工作区未显示（未受信或远程）。`,
+    `有 ${v?.count ?? 0} 个工作区未显示（不受信任或远程）。`,
   'goals.notYetEvaluated': '尚未判定',
   'goals.openSessionHint': '打开该目标所在的会话',
   'goals.error.emptyCondition': '请输入目标条件。',
   'goals.error.clearKeyword': (v) =>
     `“${v?.word ?? ''}”是清除目标的指令，不是一个条件。请描述要达成的条件。`,
   'goals.error.createFailed': '启动目标失败',
-  'goals.error.workspaceUnavailable': '所选工作区不可用或未受信。',
+  'goals.error.workspaceUnavailable': '所选工作区不可用或不受信任。',
   'goals.error.saveFailed': '保存目标失败',
   'goals.error.goalUnavailable': '该目标已不可用。',
   'goals.error.requiresObjective': (v) =>
@@ -8635,7 +8636,7 @@ const ZH: Messages = {
   'memory.contentEmpty': 'Memory 内容为空。',
   'memory.file': 'Memory 文件',
   'memory.fileOpen': 'Memory 文件已打开。',
-  'memory.fileTruncated': 'Memory 文件已打开，内容已截断。',
+  'memory.fileTruncated': '无法获取完整的 Memory 文件内容，已禁用编辑。',
   'memory.files': 'Memory 文件',
   'memory.footer': 'Enter 确认 · Esc 取消',
   'memory.footer.back': 'Esc 返回',
@@ -10293,7 +10294,7 @@ const RU: Messages = {
   'goals.dropped': (v) =>
     `не удалось связаться с ${v?.count ?? 0} ${ruPlural(v?.count, 'сессией', 'сессиями', 'сессиями')} — цели, которые они выполняли, отсутствуют в этом списке.`,
   'goals.workspacesSkipped': (v) =>
-    `${v?.count ?? 0} ${ruPlural(v?.count, 'рабочая область', 'рабочие области', 'рабочих областей')} не показано (нет доверия или удалённый доступ).`,
+    `Не показано: ${v?.count ?? 0} ${ruPlural(v?.count, 'рабочая область', 'рабочие области', 'рабочих областей')} (нет доверия или удалённый доступ).`,
   'goals.notYetEvaluated': 'ещё не оценено',
   'goals.openSessionHint': 'Открыть сессию этой цели',
   'goals.error.emptyCondition': 'Введите условие для цели.',

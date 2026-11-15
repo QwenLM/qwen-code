@@ -174,14 +174,25 @@ describe('web-shell i18n catalog', () => {
         getTranslator(language)('goals.workspacesSkipped', { count: 2 }),
       ).not.toBe(enSkipped);
     }
-    // The ru noun must agree with the count (1 → singular), not hard-code
-    // the genitive plural for every count.
-    expect(
-      getTranslator('ru')('goals.workspacesSkipped', { count: 1 }),
-    ).toContain('рабочая область');
-    expect(
-      getTranslator('ru')('goals.workspacesSkipped', { count: 5 }),
-    ).toContain('рабочих областей');
+    // Full-string pins: the noun must agree with the count AND the predicate
+    // must be grammatical for every count. The impersonal "Не показано: N …"
+    // form avoids the neuter-vs-feminine clash a quantified singular subject
+    // would create ("1 рабочая область не показано" is ungrammatical).
+    expect(getTranslator('ru')('goals.workspacesSkipped', { count: 1 })).toBe(
+      'Не показано: 1 рабочая область (нет доверия или удалённый доступ).',
+    );
+    expect(getTranslator('ru')('goals.workspacesSkipped', { count: 5 })).toBe(
+      'Не показано: 5 рабочих областей (нет доверия или удалённый доступ).',
+    );
+    // zh terminology must match the catalog: the sibling scheduled-task
+    // error spells the same condition 不受信任, not the clipped 未受信.
+    const zh = getTranslator('zh-CN');
+    expect(zh('goals.workspacesSkipped', { count: 2 })).toBe(
+      '有 2 个工作区未显示（不受信任或远程）。',
+    );
+    expect(zh('goals.error.workspaceUnavailable')).toBe(
+      '所选工作区不可用或不受信任。',
+    );
     const enUnavailable = getTranslator('en')(
       'goals.error.workspaceUnavailable',
     );
