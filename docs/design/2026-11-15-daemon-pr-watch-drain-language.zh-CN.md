@@ -60,14 +60,19 @@
 
 ## 涉及文件
 
-| 文件                                                              | 改动                                                         |
-| ----------------------------------------------------------------- | ------------------------------------------------------------ |
-| `packages/cli/src/serve/server/pr-watch-observation.ts`（+ 测试） | tick deps 增加 `language`；按语言渲染摘要                    |
-| `packages/cli/src/serve/server/pr-watch-drain.ts`（+ 测试）       | drain deps 增加 `language`；信封、指引与来源说明的选择       |
-| `packages/cli/src/serve/server/pr-watch-deps.ts`（+ 测试）        | sources 增加 `language`，带进两个接缝                        |
-| `packages/cli/src/serve/run-qwen-serve.ts`                        | 启动时解析 locale 并传进 sources                             |
-| `packages/cli/src/serve/server/session-pr-refresh.test.ts`        | 两个 no-deps 用例断言其声称的效果；退役陈旧的「switch」措辞  |
-| `packages/channels/github/src/GithubAdapter.ts`（+ 测试）         | 弃用谓词的 JSDoc 点名全部四个键；告警测试断言 `prWatchLimit` |
+| 文件                                                              | 改动                                                                              |
+| ----------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| `packages/cli/src/utils/channel-locale.ts`（新增）                | 零导入的 locale 解析器，从 channel runtime 移出                                   |
+| `packages/cli/src/commands/channel/runtime.ts`                    | 再导出该解析器，其两个既有导入方不变                                              |
+| `packages/cli/src/serve/fast-path-settings.ts`                    | 启动设置面携带 `general.language`；读取器校验并复制它                             |
+| `packages/cli/src/serve/fast-path.test.ts`                        | 三个读取器用例：值被带出、非字符串被拒、chatRecording 与之共存                    |
+| `packages/cli/src/serve/run-qwen-serve.ts`                        | 启动时解析 locale 并传进 sources                                                  |
+| `packages/cli/src/serve/server/pr-watch-deps.ts`                  | sources 增加 `language`，带进两个接缝                                             |
+| `packages/cli/src/serve/server/pr-watch-observation.ts`（+ 测试） | tick 与 sweep deps 增加 `language`；按语言渲染摘要                                |
+| `packages/cli/src/serve/server/pr-watch-drain.ts`（+ 测试）       | drain deps 增加 `language`；信封、指引与来源说明的选择                            |
+| `packages/cli/src/serve/server/pr-watch-drain.scenario.test.ts`   | 两个端到端语言场景，经真实 gh 子进程与真实 admission                              |
+| `packages/cli/src/serve/server/session-pr-refresh.ts`（+ 测试）   | listing write 携带语言；两个 no-deps 用例断言其声称的效果；退役陈旧「switch」措辞 |
+| `packages/channels/github/src/GithubAdapter.ts`（+ 测试）         | 弃用谓词的 JSDoc 点名全部四个键；告警测试断言两个 limit 旋钮                      |
 
 ## 关键设计决策
 

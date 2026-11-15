@@ -60,14 +60,19 @@ Every new field is optional and defaults to `en`. A caller that does not set it 
 
 ## Files affected
 
-| File                                                             | Change                                                                                         |
-| ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `packages/cli/src/serve/server/pr-watch-observation.ts` (+ test) | `language` on the tick deps; per-language summary render                                       |
-| `packages/cli/src/serve/server/pr-watch-drain.ts` (+ test)       | `language` on the drain deps; envelope, guidance and provenance selection                      |
-| `packages/cli/src/serve/server/pr-watch-deps.ts` (+ test)        | `language` on the sources, carried into both seams                                             |
-| `packages/cli/src/serve/run-qwen-serve.ts`                       | resolve the locale at boot and pass it into the sources                                        |
-| `packages/cli/src/serve/server/session-pr-refresh.test.ts`       | the two no-deps cases assert their stated effects; stale "switch" wording retired              |
-| `packages/channels/github/src/GithubAdapter.ts` (+ test)         | the deprecation predicate's JSDoc names all four keys; the warning test asserts `prWatchLimit` |
+| File                                                             | Change                                                                                                                    |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `packages/cli/src/utils/channel-locale.ts` (new)                 | the import-free locale resolver, moved out of the channel runtime                                                         |
+| `packages/cli/src/commands/channel/runtime.ts`                   | re-exports the resolver so its two existing importers are unchanged                                                       |
+| `packages/cli/src/serve/fast-path-settings.ts`                   | the boot settings surface carries `general.language`; the reader validates and copies it                                  |
+| `packages/cli/src/serve/fast-path.test.ts`                       | three reader cases: the value is carried, a non-string is rejected, chatRecording survives alongside it                   |
+| `packages/cli/src/serve/run-qwen-serve.ts`                       | resolve the locale at boot and pass it into the sources                                                                   |
+| `packages/cli/src/serve/server/pr-watch-deps.ts`                 | `language` on the sources, carried into both seams                                                                        |
+| `packages/cli/src/serve/server/pr-watch-observation.ts` (+ test) | `language` on the tick and sweep deps; per-language summary render                                                        |
+| `packages/cli/src/serve/server/pr-watch-drain.ts` (+ test)       | `language` on the drain deps; envelope, guidance and provenance selection                                                 |
+| `packages/cli/src/serve/server/pr-watch-drain.scenario.test.ts`  | two end-to-end language scenarios through the real gh child and the real admission                                        |
+| `packages/cli/src/serve/server/session-pr-refresh.ts` (+ test)   | the listing write carries the language; the two no-deps cases assert their stated effects; stale "switch" wording retired |
+| `packages/channels/github/src/GithubAdapter.ts` (+ test)         | the deprecation predicate's JSDoc names all four keys; the warning test asserts both limit knobs                          |
 
 ## Key design decisions
 
