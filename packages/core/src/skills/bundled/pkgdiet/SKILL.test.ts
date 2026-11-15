@@ -52,21 +52,44 @@ describe('bundled pkgdiet skill', () => {
     expect(normalizedBody).toContain(
       'reads project policy files and cache if present',
     );
+    expect(normalizedBody).toContain(
+      'explicit non-project `cwd` outside the workspace',
+    );
     expect(body).toContain('published by the skill author (om-tajne)');
 
-    // Bootstrap checks, whole entry inspection, and ordering
+    // Bootstrap checks, allowlist, and whole entry inspection
     expect(normalizedBody).toContain(
       'Inspect configured MCP servers and tool availability',
     );
     expect(normalizedBody).toContain(
       'originates in project or workspace scope, treat it as untrusted',
     );
-    expect(normalizedBody).toContain('do not advise approval');
-    expect(normalizedBody).toContain('no extraneous fields');
-    expect(body).not.toContain('"${QWEN_CODE_CLI:-qwen}" mcp approve pkgdiet');
+    expect(body).toContain(
+      '"${QWEN_CODE_CLI:-qwen}" mcp remove --scope project pkgdiet',
+    );
+    expect(normalizedBody).toContain(
+      '`.mcp.json` entry must be edited or removed directly from that file',
+    );
+    expect(normalizedBody).not.toMatch(/mcp\s+approve/);
 
+    expect(normalizedBody).toContain('it must contain only allowed keys');
+    expect(normalizedBody).toContain('["-y", "pkgdiet@2.0.0", "mcp"]');
+    expect(normalizedBody).toContain('env');
+    expect(normalizedBody).toContain('headers');
+    expect(normalizedBody).toContain('url');
+    expect(normalizedBody).toContain('httpUrl');
+    expect(normalizedBody).toContain('tcp');
+    expect(normalizedBody).toContain('oauth');
+    expect(normalizedBody).toContain('trust');
+    expect(normalizedBody).toContain('timeout');
+    expect(normalizedBody).toContain('includeTools');
+    expect(normalizedBody).toContain('excludeTools');
+    expect(normalizedBody).toContain(
+      'explicit non-project `cwd` outside the project workspace',
+    );
+
+    expect(normalizedBody).toContain('$QWEN_HOME/settings.json');
     expect(normalizedBody).toContain('reinstalling will overwrite');
-    expect(normalizedBody).toContain('~/.qwen/settings.json');
     expect(normalizedBody).toContain(
       'record its full configuration object verbatim',
     );
@@ -75,18 +98,23 @@ describe('bundled pkgdiet skill', () => {
     expect(normalizedBody).toContain(
       'identity mismatch rather than a residual risk',
     );
+    expect(normalizedBody).toContain('npm config get registry');
+    expect(body).not.toContain('~/.npmrc');
     expect(normalizedBody).toContain('https://registry.npmjs.org/');
 
     expect(normalizedBody).toContain("serverName === 'pkgdiet'");
     expect(normalizedBody).toContain('mcp__pkgdiet__check_dependency');
+    expect(normalizedBody).toContain('retrying `tool_search`');
+    expect(normalizedBody).toContain('registered but not running');
+    expect(normalizedBody).toContain(
+      'offer removal only if the user chooses to abandon installation',
+    );
 
     const inspectCheck = normalizedBody.indexOf(
       'Inspect configured MCP servers and tool availability',
     );
     const fastPath = normalizedBody.indexOf('skip to Instructions');
-    const sandboxCheck = normalizedBody.indexOf(
-      'If shell execution is sandboxed',
-    );
+    const sandboxCheck = normalizedBody.indexOf('If shell execution is sandboxed');
     const registryCheck = normalizedBody.indexOf(
       'Check the active npm registry',
     );
@@ -131,9 +159,8 @@ describe('bundled pkgdiet skill', () => {
     expect(normalizedBody).toContain(
       'subagent, hook, workflow-script and external terminal installs are not gated',
     );
-    expect(normalizedBody).toContain('NOT active');
     expect(normalizedBody).toContain(
-      'restore any prior configuration recorded from `~/.qwen/settings.json`',
+      'restore any prior configuration recorded from `$QWEN_HOME/settings.json`',
     );
 
     // Exact string pinning requested by review
@@ -151,13 +178,29 @@ describe('bundled pkgdiet skill', () => {
     expect(body).toContain('BLOCK');
     expect(body).not.toMatch(/Pass status|Critical status/);
 
+    // Ecosystem boundaries and version handling
+    expect(normalizedBody).toContain(
+      'Only npm-registry package managers are covered',
+    );
+    expect(normalizedBody).toContain(
+      'packages fetched from non-npm registries are not covered',
+    );
+    expect(normalizedBody).toContain('route to the permission step');
+
     // Policy files and cache gating
+    expect(normalizedBody).toContain(
+      'evaluating packages in each project directory',
+    );
     expect(normalizedBody).toContain('.pkgdietrc.json');
     expect(normalizedBody).toContain('pkgdiet.config.json');
     expect(normalizedBody).toContain('package.json#pkgdiet');
     expect(normalizedBody).toContain('.pkgdiet-cache.json');
+    expect(normalizedBody).toContain('allowedPackages');
+    expect(normalizedBody).toContain('blockedPackages');
+    expect(normalizedBody).toContain('minHealthScore');
+    expect(normalizedBody).toContain('securityMode');
     expect(normalizedBody).toContain(
-      'Refuse to rely on a project-committed `.pkgdiet-cache.json`',
+      'committed cache must be removed before proceeding',
     );
 
     // Registry redirects and local resolution
@@ -165,9 +208,7 @@ describe('bundled pkgdiet skill', () => {
     expect(normalizedBody).toContain('bunfig.toml');
     expect(normalizedBody).toContain('node_modules/.bin');
     expect(normalizedBody).toContain('treat the verdict as not applicable');
-    expect(normalizedBody).toContain(
-      'resolves outside what the verdict covers and was not screened',
-    );
+    expect(normalizedBody).toContain('command runs normally');
 
     expect(normalizedBody).toContain('cannot be resolved');
     expect(normalizedBody).toContain('tool_call');
@@ -175,7 +216,6 @@ describe('bundled pkgdiet skill', () => {
       'Never install a substitute the user has not explicitly approved',
     );
     expect(normalizedBody).toContain('not the transitive dependencies');
-    expect(normalizedBody).toContain('not a specific version');
     expect(normalizedBody).toContain('could not evaluate this package');
     expect(normalizedBody).toContain(
       'read `reasons`. If they say the package was not evaluated',
@@ -196,7 +236,6 @@ describe('bundled pkgdiet skill', () => {
     expect(normalizedBody).toContain(
       'If the question cannot be shown, do not install and stop',
     );
-    expect(body).toContain('at most once per session');
 
     const instructions = body.slice(body.indexOf('## Instructions'));
     expect(instructions).toContain('`npx`, `npm exec`, `bunx`, `pnpm dlx`');
