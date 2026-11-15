@@ -294,7 +294,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         this.executionRecovery = new RuntimeExecutionRecovery(bindingRegistry, executionState, executionRepository,
                 sessionRepository, transport, executionReconciler, closed);
         this.executionCancellation = new RuntimeExecutionCancellation(bindingRegistry, executionState, executionRepository,
-                transport, executionDispatcher, scheduler, this.operationLeaseDuration, closed);
+                transport, publicationVerifier, executionDispatcher, scheduler, this.operationLeaseDuration, closed);
         this.sessionRelease = new RuntimeSessionRelease(bindingRepository, sessionRepository, executionRepository,
                 provisioner, transport, bindingRegistry, executionRecovery);
         this.drainCoordinator = new RuntimeDrainCoordinator(bindingRegistry, bindingRepository, sessionRepository,
@@ -1085,7 +1085,29 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                         // hashing and parsing the same bytes a second time.
                         VerifiedDispatchPayload verifiedPayload =
                                 VerifiedDispatchPayload.of(digest, toolName);
-                        if (WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
+                        if (WorkspaceExecutionProfile.isExternalShellRequest(context.binding().getRequest())) {
+                            // The external foreground-Shell lane admits exactly one
+                            // Tool v3 family member. Background Shell and Monitor
+                            // keep their own ledgers and holds, which this
+                            // placement's single-worker drain cannot prove.
+                            Map<?, ?> shellInput = payload.get("input") instanceof Map<?, ?> value
+                                    ? value : Map.of();
+                            if (!v3 || record.getReference().containsKey("runtimeProtocol")
+                                    || !"run_shell_command".equals(toolName)
+                                    || shellInput.containsKey("is_background")
+                                    || shellInput.containsKey("is_monitor")
+                                    || publicationVerifier == null
+                                    || publicationVerifier.externalShell() == null) {
+                                executionRepository.settlePrepared(record, Map.of(
+                                        "executionStatus", "not_started", "responseParts", List.of(),
+                                        "capture", null,
+                                        "error", Map.of("type", "workspace_tool_unsupported",
+                                                "message", "External Shell requires a foreground Tool v3 Shell payload")),
+                                        clock.instant());
+                                throw invalid("runtime_payload_invalid",
+                                        "External Shell requires a foreground Tool v3 Shell payload");
+                            }
+                        } else if (WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
                                 && (v3 || record.getReference().containsKey("runtimeProtocol")
                                         || !Set.of("read_file", "write_file", "edit", "glob").contains(toolName))) {
                             executionRepository.settlePrepared(record, Map.of(
@@ -1121,10 +1143,20 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                                 return CompletableFuture.completedFuture(record);
                             }
                             bindingRegistry.requireUsableLease(context);
-                            return mapFailure(safeStage(() -> transport.installPublication(
-                                    context.lease(), context.session(), grant)),
+                            var externalShell = WorkspaceExecutionProfile.isExternalShellRequest(
+                                    context.binding().getRequest())
+                                            ? publicationVerifier.externalShell() : null;
+                            // The external worker holds no control-plane credential:
+                            // the Broker opens its own capture channel and becomes
+                            // the producer, so no grant is installed there.
+                            CompletionStage<?> installed = externalShell == null
+                                    ? safeStage(() -> transport.installPublication(
+                                            context.lease(), context.session(), grant))
+                                    : safeStage(() -> externalShell.begin(context.lease(),
+                                            context.binding(), record, grant));
+                            return mapFailure(installed,
                                     "runtime_publication_install_failed", "Publication installation failed")
-                                    .thenApply(ignored -> {
+                                    .thenApply(channel -> {
                                         context.lock();
                                         try {
                                             ToolExecutionRecord current = executionRepository
@@ -1152,7 +1184,8 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                                                 admitBackgroundProcess(context, current, family);
                                             }
                                             executionDispatcher.beginDispatch(context, current, payload,
-                                                    grant, verifiedPayload);
+                                                    grant, verifiedPayload,
+                                                    channel instanceof String id ? id : null);
                                             ToolExecutionRecord latest = executionRepository
                                                     .findByExecutionCallId(executionId);
                                             return latest == null ? current : latest;
@@ -1397,6 +1430,18 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                             throw conflict("runtime_execution_conflict", "Session receipt conflicts with publication");
                         }
                         bindingRegistry.requireUsableLease(context);
+                        if (WorkspaceExecutionProfile.isExternalShellRequest(
+                                context.binding().getRequest())) {
+                            // The worker holds no control-plane credential and
+                            // never saw this publication: its settled envelope
+                            // names its own local manifest, so asking it to
+                            // acknowledge the control plane's could only ever
+                            // conflict. The saved receipt above is the whole
+                            // proof on this lane, and the worker's own sequences
+                            // were acknowledged before the execution settled.
+                            return CompletableFuture.completedFuture(
+                                    Map.<String, Object>of("state", "settled"));
+                        }
                         return RuntimeToolMeasurements.selected(original.getReference())
                                 ? executionReconciler.acknowledgeMeasured(context, original, saved)
                                 : transport.acknowledgeV3(context.lease(), context.session(),

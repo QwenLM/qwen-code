@@ -76,7 +76,8 @@ public final class ApiModels {
             @Size(max = 256) List<@NotNull Map<String, Object>> skills,
             @Size(max = 32) List<@NotNull @Valid Pin> extensionPins, JsonNode worktree,
             @JsonProperty("model_config") JsonNode modelConfig,
-            @JsonProperty("memory_store_id") @Size(min = 1, max = 128) String memoryStoreId) {
+            @JsonProperty("memory_store_id") @Size(min = 1, max = 128) String memoryStoreId,
+            @JsonProperty("tool_profile") @Size(max = 128) String toolProfile) {
     }
 
     public record SessionEventRequest(@NotBlank String type,
@@ -380,7 +381,8 @@ public final class ApiModels {
             JsonNode workspace, String approvalMode, Boolean planMode, String modelId,
             @Size(max = 256) List<@NotNull Map<String, Object>> skills,
             @Size(max = 32) List<@NotNull @Valid Pin> extensionPins, JsonNode worktree, JsonNode modelConfig,
-            @Size(min = 1, max = 128) String memoryStoreId) {
+            @Size(min = 1, max = 128) String memoryStoreId,
+            @Size(max = 128) String toolProfile) {
         public WebShellCreateRequest(String requestId, String idempotencyKey, String agentId, String title,
                 List<InputBlock> input, Map<String, Object> metadata, JsonNode workspace, String approvalMode,
                 Boolean planMode, String modelId, List<Map<String, Object>> skills, List<Pin> extensionPins,

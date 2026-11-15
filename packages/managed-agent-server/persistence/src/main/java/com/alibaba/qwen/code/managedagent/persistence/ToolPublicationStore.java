@@ -69,7 +69,7 @@ public final class ToolPublicationStore {
         DISPATCH, PRODUCE, CLAIM, SETTLE
     }
 
-    record ProducerBinding(JsonNode binding, ToolExecutionRecord execution) {
+    public record ProducerBinding(JsonNode binding, ToolExecutionRecord execution, long expiresAt) {
     }
 
     private record PublicationTarget(Row row, JsonNode binding, RuntimeBindingRecord runtime, boolean placement) {
@@ -126,6 +126,18 @@ public final class ToolPublicationStore {
     /** Rechecks the saved grant and original execution before installing it on a worker. */
     public JsonNode verifyDispatch(ToolExecutionRecord execution,
             String publicationId, String publicationToken) {
+        return verifyDispatchGrant(execution, publicationId, publicationToken).binding();
+    }
+
+    /**
+     * The same dispatch recheck, also answering the grant's own horizon. A
+     * worker that keeps its capture store locally never sees the control-plane
+     * grant, so the Broker needs that horizon to bound the channel it opens
+     * there. It comes from the read this method already locks and validates,
+     * so a second unlocked read could only be weaker.
+     */
+    public ProducerBinding verifyDispatchGrant(ToolExecutionRecord execution,
+            String publicationId, String publicationToken) {
         RuntimeBindingRecord runtime = bindings.findById(execution.getBindingId());
         require(runtime != null, "Original Runtime binding is missing");
         require(!TransactionSynchronizationManager.isActualTransactionActive()
@@ -138,19 +150,26 @@ public final class ToolPublicationStore {
         String scope = hash(JSON.createArrayNode().add(tenant).add(workspace)
                 .add(session).toString());
         return transactions.execute(status -> {
-            JsonNode binding = producerBindingLocked(scope, publicationId, publicationToken);
+            ProducerBinding grant = producerGrantLocked(scope, publicationId, publicationToken);
+            JsonNode binding = grant.binding();
             require(publicationId.equals(text(binding, "publicationId"))
                     && execution.getExecutionCallId().equals(text(binding, "executionCallId"))
                     && execution.getRequestDigest().equals(text(binding, "requestDigest"))
                     && execution.getReference().get("argsDigest").equals(
                             text(binding.path("reference"), "argsDigest")),
                     "Original publication execution conflicts");
-            return binding;
+            return grant;
         });
     }
 
     JsonNode producerBindingLocked(String scope, String publicationId, String publicationToken) {
         return producerBindingLocked(scope, publicationId, publicationToken, Access.DISPATCH).binding();
+    }
+
+    private ProducerBinding producerGrantLocked(String scope, String publicationId,
+            String publicationToken) {
+        return producerBindingWithHashLocked(scope, publicationId,
+                ToolPublicationContract.tokenHash(publicationToken), null, Access.DISPATCH);
     }
 
     JsonNode producerMutationBindingLocked(String scope, String publicationId, String publicationToken) {
@@ -308,7 +327,9 @@ public final class ToolPublicationStore {
             require(((Number) current.get("expires_at")).longValue() > nowEpoch, "Publication grant expired");
         }
         requireAccess(original, access);
-        return new ProducerBinding(binding, original.execution());
+        Object horizon = current.get("expires_at");
+        return new ProducerBinding(binding, original.execution(),
+                horizon instanceof Number expiry ? expiry.longValue() : 0L);
     }
 
     private JsonNode applyLocked(JsonNode request, String writerToken, String tokenHash) {

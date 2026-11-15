@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.SessionContext;
 
 import java.time.Clock;
@@ -283,6 +284,21 @@ final class RuntimeExecutionReconciler {
             // original Runtime is gone, so no answer can come.
             bindingRegistry.invalidateBinding(context.binding());
             throw evidenceUnavailable();
+        }
+        if (isPublicationV3(unknown.getReference())
+                && WorkspaceExecutionProfile.isExternalShellRequest(
+                        context.binding().getRequest())
+                && (publicationVerifier == null
+                        || publicationVerifier.finished(unknown) == null)) {
+            // Only the Broker moves this lane's bytes, and it does so before
+            // settling, so an unfinished publication proves the drain never
+            // completed. The worker's own settled envelope names its *local*
+            // manifest: absorbing it would settle a result whose bytes never
+            // reached the control plane and let the close release storage.
+            // Recovery of the original worker re-runs the idempotent begin and
+            // the drain, and is the only exit.
+            throw conflict("workspace_close_identity_unverified",
+                    "External Shell capture has not been drained into its publication");
         }
         // Adoption can re-register the binding at a different endpoint than
         // the one this Session was acquired with; that stale route must not be

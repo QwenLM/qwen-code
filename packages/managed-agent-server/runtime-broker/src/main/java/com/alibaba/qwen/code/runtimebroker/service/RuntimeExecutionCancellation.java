@@ -4,11 +4,13 @@ import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.RuntimePublicationVerifier;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.SessionContext;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeExecutionState.OwnedExecution;
@@ -39,6 +41,7 @@ final class RuntimeExecutionCancellation {
     private final RuntimeExecutionState executionState;
     private final ToolExecutionRepository executionRepository;
     private final RuntimeTransport transport;
+    private final RuntimePublicationVerifier publicationVerifier;
     private final RuntimeExecutionDispatcher dispatcher;
     private final ScheduledExecutorService scheduler;
     private final Duration operationLeaseDuration;
@@ -48,6 +51,7 @@ final class RuntimeExecutionCancellation {
             RuntimeExecutionState executionState,
             ToolExecutionRepository executionRepository,
             RuntimeTransport transport,
+            RuntimePublicationVerifier publicationVerifier,
             RuntimeExecutionDispatcher dispatcher,
             ScheduledExecutorService scheduler,
             Duration operationLeaseDuration,
@@ -56,6 +60,7 @@ final class RuntimeExecutionCancellation {
         this.executionState = executionState;
         this.executionRepository = executionRepository;
         this.transport = transport;
+        this.publicationVerifier = publicationVerifier;
         this.dispatcher = dispatcher;
         this.scheduler = scheduler;
         this.operationLeaseDuration = operationLeaseDuration;
@@ -108,6 +113,7 @@ final class RuntimeExecutionCancellation {
                     .thenCompose(context -> {
                         ToolExecutionRecord requested;
                         boolean publicationV3;
+                        boolean drainProofLane;
                         context.lock();
                         try {
                             bindingRegistry.requireReadySessionRecord(context);
@@ -133,6 +139,9 @@ final class RuntimeExecutionCancellation {
                                 return cancelPreparedProvider(context, requested);
                             }
                             publicationV3 = isPublicationV3(requested.getReference());
+                            drainProofLane = publicationV3
+                                    && WorkspaceExecutionProfile.isExternalShellRequest(
+                                            context.binding().getRequest());
                             // An UNKNOWN record may still have an invocation
                             // running in this process, or be one its original
                             // Runtime can still answer for; it gets the
@@ -204,7 +213,8 @@ final class RuntimeExecutionCancellation {
                                 "runtime_execution_cancel_failed",
                                 "Runtime execution cancellation failed")
                                 .thenApply(status -> {
-                                    absorbCancellationStatus(requested, status);
+                                    absorbCancellationStatus(requested, status,
+                                            drainProofLane);
                                     ToolExecutionRecord latest =
                                             executionRepository
                                                     .findByExecutionCallId(
@@ -305,8 +315,22 @@ final class RuntimeExecutionCancellation {
                 "Runtime execution changed while requesting cancellation");
     }
 
+    /**
+     * Absorbs the cancel answer as the execution's outcome. The physical cancel
+     * above always runs; only the settle is fenced.
+     *
+     * <p>On the external foreground-Shell lane the worker's settled envelope
+     * names its <em>local</em> manifest, and a cancelled call is no exception:
+     * the process may have written output before the abort. Settling from that
+     * answer would record a result whose bytes never reached the control plane,
+     * make the publication permanently unproducible and let the close release
+     * storage — the same reason reconciliation refuses this lane while its
+     * publication is unfinished. Only the drain's own finished publication may
+     * settle it, so the record keeps its CANCEL_REQUESTED claim and the
+     * dispatcher's move is what finishes the turn.
+     */
     private void absorbCancellationStatus(ToolExecutionRecord requested,
-            Map<String, Object> status) {
+            Map<String, Object> status, boolean drainProofLane) {
         Object state = status == null ? null : status.get("state");
         if (!(state instanceof String)
                 || !RUNTIME_EXECUTION_STATES.contains(state)) {
@@ -314,6 +338,11 @@ final class RuntimeExecutionCancellation {
                     "Runtime cancellation returned an invalid status");
         }
         if (!"settled".equals(state)) {
+            return;
+        }
+        if (drainProofLane
+                && (publicationVerifier == null
+                        || publicationVerifier.finished(requested) == null)) {
             return;
         }
         Map<String, Object> result = runtimeMap(status.get("result"),

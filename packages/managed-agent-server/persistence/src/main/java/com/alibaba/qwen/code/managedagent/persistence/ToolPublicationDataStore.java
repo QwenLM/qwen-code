@@ -2025,6 +2025,37 @@ public final class ToolPublicationDataStore {
 
     public ToolPublicationRetentionStore.ReadLease readLease(JsonNode key) { return retention.read(key); }
 
+    /**
+     * Reads back one verified segment. The external Shell producer rebuilds its
+     * manifest and pages over the bytes this store actually holds, so it must
+     * hash the same bytes the seal and the finish will verify.
+     */
+    public byte[] readSegment(JsonNode key, String publicationId, String streamId, int ordinal) {
+        require("stdout".equals(streamId) || "stderr".equals(streamId), "Invalid stream ID");
+        require(ordinal >= 0 && ordinal < 65536, "Invalid ordinal");
+        String scope = scope(key);
+        String slot = "segment:" + streamId + ":" + ordinal;
+        List<Stored> rows = stored(scope, publicationId, slot);
+        requireContract(!rows.isEmpty(), 404, "managed_tool_result_segment_unknown",
+                "Publication segment is unknown");
+        Stored row = rows.get(0);
+        require("VERIFIED".equals(row.state()) && row.length() > 0 && row.length() <= MAX_SEGMENT
+                && row.objectKey() != null, "Publication segment is unavailable");
+        byte[] bytes;
+        try (var lease = retention.read(key);
+                InputStream stream = retention.open(row.objectKey(), objects, lease, lease::check)) {
+            bytes = stream.readNBytes((int) row.length() + 1);
+            lease.check();
+        } catch (IOException error) {
+            throw new IllegalStateException("Publication segment read failed", error);
+        }
+        if (bytes.length != row.length()
+                || !ToolPublicationContract.sha256(bytes).equals(row.digest())) {
+            throw corruptPublication(scope, publicationId, slot, "Publication segment digest changed");
+        }
+        return bytes;
+    }
+
     public byte[] readResource(JsonNode key, String publicationId, String resourceId) {
         try (var lease = retention.read(key)) {
             return readResource(key, publicationId, resourceId, lease, () -> {});

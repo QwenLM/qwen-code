@@ -85,6 +85,11 @@ final class RuntimeExecutionDispatcher {
     // Executions whose transport.execute call is in flight in this process,
     // as opposed to dispatches, which also covers a claim being fenced.
     private final Set<String> invocations = ConcurrentHashMap.newKeySet();
+    // The external channel's horizon renewal is a guarded repository read plus
+    // an attested HTTP exchange; it must not run on the tick thread that renews
+    // every other claim. Virtual threads need no shutdown of their own.
+    private final Thread.Builder.OfVirtual channelRenewals =
+            Thread.ofVirtual().name("external-shell-renew-", 0);
 
     RuntimeExecutionDispatcher(RuntimeBindingRegistry bindingRegistry,
             RuntimeExecutionState executionState,
@@ -155,7 +160,30 @@ final class RuntimeExecutionDispatcher {
             ToolExecutionRecord prepared, Map<String, Object> payload,
             RuntimePublicationGrant grant,
             VerifiedDispatchPayload verifiedPayload) {
-        if (com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
+        beginDispatch(context, prepared, payload, grant, verifiedPayload, null);
+    }
+
+    void beginDispatch(SessionContext context,
+            ToolExecutionRecord prepared, Map<String, Object> payload,
+            RuntimePublicationGrant grant,
+            VerifiedDispatchPayload verifiedPayload, String externalChannelId) {
+        if (com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalShellRequest(
+                context.binding().getRequest())
+                && (!isPublicationV3(prepared.getReference())
+                        || prepared.getReference().containsKey("runtimeProtocol")
+                        || !prepared.isCancelRequested() && (grant == null
+                                || publicationVerifier == null
+                                || publicationVerifier.externalShell() == null
+                                || payload == null
+                                || !"run_shell_command".equals(String.valueOf(payload.get("toolName")))
+                                || !(payload.get("input") instanceof Map<?, ?> input)
+                                || input.containsKey("is_background") || input.containsKey("is_monitor")))) {
+            throw invalid("runtime_payload_invalid",
+                    "External Shell requires a foreground Tool v3 Shell payload");
+        }
+        if (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalShellRequest(
+                context.binding().getRequest())
+                && com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
                 && (!"deferred".equals(prepared.getReference().get("dispatchMode"))
                         || prepared.getReference().containsKey("runtimeProtocol") || grant != null
                         || !prepared.isCancelRequested() && (payload == null
@@ -186,7 +214,7 @@ final class RuntimeExecutionDispatcher {
         }
         CompletionStage<Void> operation;
         try {
-            operation = dispatch(context, prepared, payload, grant, verifiedPayload);
+            operation = dispatch(context, prepared, payload, grant, verifiedPayload, externalChannelId);
         } catch (RuntimeException | Error exception) {
             dispatches.remove(prepared.getExecutionCallId(), created);
             created.completeExceptionally(exception);
@@ -209,7 +237,7 @@ final class RuntimeExecutionDispatcher {
     private CompletionStage<Void> dispatch(SessionContext context,
             ToolExecutionRecord prepared, Map<String, Object> payload,
             RuntimePublicationGrant grant,
-            VerifiedDispatchPayload verifiedPayload) {
+            VerifiedDispatchPayload verifiedPayload, String externalChannelId) {
         ToolExecutionRecord claimed = claimDispatchForPayload(
                 context, prepared, verifiedPayload);
         if (claimed == null
@@ -219,9 +247,9 @@ final class RuntimeExecutionDispatcher {
                 && HarnessOwnership.sharesRuntimeSessions(
                         context.binding().getRequest())) {
             return awaitSharedDispatch(context, prepared, payload, grant,
-                    verifiedPayload);
+                    verifiedPayload, externalChannelId);
         }
-        return dispatchClaimed(context, claimed, payload, grant);
+        return dispatchClaimed(context, claimed, payload, grant, externalChannelId);
     }
 
     private ToolExecutionRecord claimDispatchForPayload(
@@ -244,7 +272,7 @@ final class RuntimeExecutionDispatcher {
     private CompletionStage<Void> awaitSharedDispatch(
             SessionContext context, ToolExecutionRecord prepared,
             Map<String, Object> payload, RuntimePublicationGrant grant,
-            VerifiedDispatchPayload verifiedPayload) {
+            VerifiedDispatchPayload verifiedPayload, String externalChannelId) {
         // Keep a single Future per waiting request; a long-lived UNKNOWN
         // occupant must not build a recursive chain. The wait is bounded like
         // the v3 result poll: backoff between attempts and a deadline, so an
@@ -309,7 +337,7 @@ final class RuntimeExecutionDispatcher {
                                 TimeUnit.MILLISECONDS);
                     } else {
                         dispatchClaimed(
-                                context, next, payload, grant)
+                                context, next, payload, grant, externalChannelId)
                                 .whenComplete((ignored, error) -> {
                                     if (error == null) {
                                         queued.complete(null);
@@ -371,7 +399,7 @@ final class RuntimeExecutionDispatcher {
     private CompletionStage<Void> dispatchClaimed(
             SessionContext context, ToolExecutionRecord claimed,
             Map<String, Object> payload,
-            RuntimePublicationGrant grant) {
+            RuntimePublicationGrant grant, String externalChannelId) {
         if (claimed == null
                 || claimed.getState()
                         != ToolExecutionRecord.State.DISPATCHING) {
@@ -389,7 +417,16 @@ final class RuntimeExecutionDispatcher {
             executionState.markUnknown(executing);
             return CompletableFuture.completedFuture(null);
         }
-        DispatchRenewal renewal = new DispatchRenewal(executing);
+        // A dispatch this process did not start (the recovery arm) arrives
+        // without a channel. `begin` is idempotent per execution, so opening it
+        // here gets the same channel the original dispatch used. It runs on the
+        // invocation's own stage, never under the session lock, and it must
+        // complete before the Shell starts: the worker prepares against a
+        // channel that already exists.
+        CompletionStage<String> channel = externalChannelId != null
+                ? CompletableFuture.completedFuture(externalChannelId)
+                : externalChannel(context, executing, grant);
+        DispatchRenewal renewal = new DispatchRenewal(executing, context, grant, channel);
         try {
             renewal.start();
         } catch (RuntimeException | Error exception) {
@@ -397,47 +434,13 @@ final class RuntimeExecutionDispatcher {
             throw exception;
         }
         invocations.add(executing.getExecutionCallId());
-        CompletionStage<Map<String, Object>> invocation =
-                RuntimeToolMeasurements.selected(executing.getReference())
-                        ? safeStage(() -> transport.executeV4(
-                                context.lease(), context.session(),
-                                dispatchReference(executing, context.binding().getRequest().getScope()),
-                                payload, grant == null ? null : capture(grant)))
-                                .thenCompose(answer -> {
-                                    if ("settled".equals(answer.get("state"))
-                                            && answer.get("result") instanceof Map<?, ?> raw) {
-                                        @SuppressWarnings("unchecked")
-                                        Map<String, Object> result = (Map<String, Object>) raw;
-                                        return CompletableFuture.completedFuture(result);
-                                    }
-                                    return awaitV3Result(context, executing, clock.instant().plus(v3ResultWindow));
-                                })
-                        : grant == null
-                ? safeStage(() -> payload == null
-                        ? transport.execute(context.lease(), context.session(), executing.getReference())
-                        : transport.execute(context.lease(), context.session(),
-                                dispatchReference(executing, context.binding().getRequest().getScope()), payload))
-                : safeStage(() -> transport.executeV3(context.lease(), context.session(),
-                        executing.getReference(), payload, capture(grant)))
-                        .handle((answer, error) -> {
-                            if (nonRetryableToolV3(error)) {
-                                throw new CompletionException(unwrap(error));
-                            }
-                            if (error == null && answer != null
-                                    && "settled".equals(answer.get("state"))
-                                    && answer.get("result") instanceof Map<?, ?> result
-                                    && "not_started".equals(result.get("executionStatus"))) {
-                                @SuppressWarnings("unchecked")
-                                Map<String, Object> notStarted = (Map<String, Object>) result;
-                                return notStarted;
-                            }
-                            return null;
-                        })
-                        .thenCompose(notStarted -> notStarted != null
-                                ? CompletableFuture.completedFuture(notStarted)
-                                : awaitV3Result(context, executing,
-                                        clock.instant().plus(v3ResultWindow)));
+        CompletionStage<Map<String, Object>> invocation = channel.thenCompose(id ->
+                invoke(context, executing, payload, grant));
         return invocation
+                .thenCompose(result -> result == null
+                        ? CompletableFuture.<Map<String, Object>>completedFuture(null)
+                        : channel.thenCompose(id -> moveExternalShell(
+                                context, executing, grant, id, result)))
                 .<Void>handle((result, error) -> {
                     // Stop counting as running before the outcome is
                     // written, so a cancel that reads that outcome does not
@@ -468,6 +471,87 @@ final class RuntimeExecutionDispatcher {
                 }).whenComplete((ignored, error) -> renewal.close());
     }
 
+    private CompletionStage<Map<String, Object>> invoke(SessionContext context,
+            ToolExecutionRecord executing, Map<String, Object> payload,
+            RuntimePublicationGrant grant) {
+        boolean externalShell = externalShellLane(context, executing);
+        return RuntimeToolMeasurements.selected(executing.getReference())
+                ? safeStage(() -> transport.executeV4(
+                        context.lease(), context.session(),
+                        dispatchReference(executing, context.binding().getRequest().getScope()),
+                        payload, grant == null ? null : capture(grant)))
+                        .thenCompose(answer -> {
+                            if ("settled".equals(answer.get("state"))
+                                    && answer.get("result") instanceof Map<?, ?> raw) {
+                                @SuppressWarnings("unchecked")
+                                Map<String, Object> result = (Map<String, Object>) raw;
+                                return CompletableFuture.completedFuture(result);
+                            }
+                            return awaitV3Result(context, executing, clock.instant().plus(v3ResultWindow));
+                        })
+                : grant == null
+                ? safeStage(() -> payload == null
+                        ? transport.execute(context.lease(), context.session(), executing.getReference())
+                        : transport.execute(context.lease(), context.session(),
+                                dispatchReference(executing, context.binding().getRequest().getScope()), payload))
+                : safeStage(() -> transport.executeV3(context.lease(), context.session(),
+                        executing.getReference(), payload, capture(grant)))
+                        .handle((answer, error) -> {
+                            if (nonRetryableToolV3(error)) {
+                                throw new CompletionException(unwrap(error));
+                            }
+                            if (error == null && answer != null
+                                    && "settled".equals(answer.get("state"))
+                                    && answer.get("result") instanceof Map<?, ?> result
+                                    && (externalShell
+                                            || "not_started".equals(result.get("executionStatus")))) {
+                                @SuppressWarnings("unchecked")
+                                Map<String, Object> settled = (Map<String, Object>) result;
+                                return settled;
+                            }
+                            return null;
+                        })
+                        .thenCompose(notStarted -> notStarted != null
+                                ? CompletableFuture.completedFuture(notStarted)
+                                : awaitV3Result(context, executing,
+                                        clock.instant().plus(v3ResultWindow)));
+    }
+
+    /**
+     * The external foreground-Shell lane, whose worker publishes nothing to the
+     * control plane: the Broker moves its bytes itself. Every other v3
+     * placement has its worker finish its own publication before it settles, so
+     * only the durable envelope may answer there; this lane's worker settles on
+     * its local capture, and the move below is what makes that result durable.
+     */
+    private static boolean externalShellLane(SessionContext context,
+            ToolExecutionRecord execution) {
+        return WorkspaceExecutionProfile.isExternalShellRequest(context.binding().getRequest())
+                && isPublicationV3(execution.getReference());
+    }
+
+    /**
+     * Re-opens the external worker's channel for a dispatch this process did
+     * not start. {@code begin} is idempotent per execution, so the recovery arm
+     * gets the channel the original dispatch opened.
+     *
+     * <p>Every other placement, and a cancel-requested record — which carries
+     * no grant and can only settle as not-started — needs no channel at all.
+     */
+    private CompletionStage<String> externalChannel(SessionContext context,
+            ToolExecutionRecord executing, RuntimePublicationGrant grant) {
+        if (!WorkspaceExecutionProfile.isExternalShellRequest(context.binding().getRequest())
+                || executing.isCancelRequested()) {
+            return CompletableFuture.completedFuture(null);
+        }
+        var producer = publicationVerifier == null ? null : publicationVerifier.externalShell();
+        if (producer == null || grant == null) {
+            return CompletableFuture.failedFuture(invalid("runtime_payload_invalid",
+                    "External Shell requires its original publication grant"));
+        }
+        return safeStage(() -> producer.begin(context.lease(), context.binding(), executing, grant));
+    }
+
     @SuppressWarnings("unchecked")
     private static Map<String, Object> capture(RuntimePublicationGrant grant) {
         Map<String, Object> binding = grant.binding();
@@ -476,6 +560,77 @@ final class RuntimeExecutionDispatcher {
                 "turnId", binding.get("turnId"), "executionCallId", binding.get("executionCallId"),
                 "bindingGeneration", binding.get("bindingGeneration"),
                 "capturePolicy", "complete_required");
+    }
+
+    /**
+     * Moves the external worker's capture into the original publication before
+     * the execution settles: the producer lane requires a live, non-draining
+     * binding and an unsettled execution, so a later attempt could never
+     * publish these bytes. A refusal or a lost answer marks the execution
+     * UNKNOWN and leaves the worker channel unacknowledged, which keeps the
+     * close refusing instead of releasing storage whose bytes never arrived.
+     */
+    private CompletionStage<Map<String, Object>> moveExternalShell(SessionContext context,
+            ToolExecutionRecord executing, RuntimePublicationGrant grant,
+            String externalChannelId, Map<String, Object> result) {
+        if (!WorkspaceExecutionProfile.isExternalShellRequest(context.binding().getRequest())) {
+            return CompletableFuture.completedFuture(result);
+        }
+        var producer = publicationVerifier == null ? null : publicationVerifier.externalShell();
+        boolean started = !"not_started".equals(result.get("executionStatus"));
+        boolean captured = started
+                && result.get("capture") instanceof Map<?, ?> capture
+                && "complete".equals(capture.get("captureStatus"));
+        if (!started) {
+            // The process never ran, so no channel holds bytes. This is the one
+            // started-less outcome the Harness can record as not-started.
+            return CompletableFuture.completedFuture(result);
+        }
+        if (!captured) {
+            // A started call with an incomplete capture cannot be published:
+            // `finish` admits only a complete capture, so no retry ever moves
+            // these bytes. Settling it would be worse than a refusal — the
+            // worker's own drain proof would still report `capture_incomplete`
+            // forever, while the settled row would let the close reach the stop
+            // and then wedge with no exit. Keep the record recoverable instead.
+            return CompletableFuture.failedFuture(conflict("workspace_close_identity_unverified",
+                    "External Shell capture did not complete"));
+        }
+        Map<String, Object> alreadyPublished = publicationVerifier == null
+                ? null : publicationVerifier.finished(executing);
+        if (alreadyPublished != null) {
+            // A recovered dispatch whose drain already finished but whose settle
+            // did not land. Re-running the move would publish over a FINISHED
+            // lane and refuse; the durable envelope is already the outcome.
+            return CompletableFuture.completedFuture(alreadyPublished);
+        }
+        if (producer == null || grant == null || externalChannelId == null) {
+            // A complete capture with no lane to move it must not settle: its
+            // bytes would be unreachable and the close could never be proven.
+            return CompletableFuture.failedFuture(conflict("workspace_close_identity_unverified",
+                    "External Shell capture has no original publication channel"));
+        }
+        ToolExecutionRecord current = executionRepository.findByExecutionCallId(
+                executing.getExecutionCallId());
+        if (current == null || !ownsDispatch(current, executing)) {
+            return CompletableFuture.completedFuture(null);
+        }
+        return safeStage(() -> producer.drain(context.lease(), context.binding(), current,
+                grant, externalChannelId, result))
+                .thenApply(ignored -> {
+                    // The drain rebuilt the manifest over the bytes it moved and
+                    // finished the publication with it, so that envelope — not
+                    // the worker's, which names its own local manifest — is the
+                    // result this execution owns. The Harness compares the
+                    // settled result against `/finished` verbatim, and a later
+                    // reconcile answers from the same durable envelope.
+                    Map<String, Object> published = publicationVerifier.finished(current);
+                    if (published == null) {
+                        throw conflict("workspace_close_identity_unverified",
+                                "External Shell drain did not finish its publication");
+                    }
+                    return published;
+                });
     }
 
     private CompletionStage<Map<String, Object>> awaitV3Result(SessionContext context,
@@ -505,6 +660,7 @@ final class RuntimeExecutionDispatcher {
             boolean measured =
                     RuntimeToolMeasurements.selected(
                             original.getReference());
+            boolean externalShell = externalShellLane(context, original);
             Map<String, Object> finished =
                     publicationVerifier == null ? null : publicationVerifier.finished(original);
             if (finished != null && !measured) {
@@ -530,7 +686,12 @@ final class RuntimeExecutionDispatcher {
                             answer.completeExceptionally(unwrap(error));
                             return;
                         }
-                        if (measured && error == null && status != null
+                        // The external lane's worker settles on its own local
+                        // capture and publishes nothing, so its status is the
+                        // result the drain below moves. A foreground Shell may
+                        // outlive the execute call's own request timeout, and
+                        // this poll is then the only way its outcome arrives.
+                        if ((measured || externalShell) && error == null && status != null
                                 && "settled".equals(status.get("state"))
                                 && status.get("result") instanceof Map<?, ?> raw) {
                             @SuppressWarnings("unchecked")
@@ -636,12 +797,18 @@ final class RuntimeExecutionDispatcher {
 
     CompletionStage<Void> acknowledgePersistedTools(RuntimeBindingRecord binding, ToolExecutionRecord execution) {
         boolean external = WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest());
-        if (external && (!execution.isSettled() || execution.getResult() == null
+        boolean externalShell = WorkspaceExecutionProfile.isExternalShellRequest(binding.getRequest());
+        if (external && !externalShell && (!execution.isSettled() || execution.getResult() == null
                 || execution.getResult().containsKey("capture")
                 || !execution.getReference().keySet().equals(
                         Set.of("sessionId", "promptId", "callId", "argsDigest", "dispatchMode"))
                 || !"deferred".equals(execution.getReference().get("dispatchMode")))) {
             return failed(conflict("workspace_close_identity_unverified", "External drain requires settled file Tool v2 results"));
+        }
+        if (externalShell && (!execution.isSettled() || execution.getResult() == null
+                || !isPublicationV3(execution.getReference()))) {
+            return failed(conflict("workspace_close_identity_unverified",
+                    "External Shell drain requires a settled Tool v3 result"));
         }
         if ((!RuntimeProviderKinds.SSH_PROCESS.equals(binding.getRequest().getProvisionerKind())
                         && !RuntimeToolMeasurements.selected(execution.getReference()) && !external)
@@ -707,10 +874,17 @@ final class RuntimeExecutionDispatcher {
         // calls must not pin the caller's carrier while they block.
         private final ReentrantLock monitor = new ReentrantLock();
         private final ToolExecutionRecord original;
+        private final SessionContext context;
+        private final RuntimePublicationGrant grant;
+        private final CompletionStage<String> externalChannel;
         private ScheduledFuture<?> task;
 
-        DispatchRenewal(ToolExecutionRecord original) {
+        DispatchRenewal(ToolExecutionRecord original, SessionContext context,
+                RuntimePublicationGrant grant, CompletionStage<String> externalChannel) {
             this.original = original;
+            this.context = context;
+            this.grant = grant;
+            this.externalChannel = externalChannel;
         }
 
         void start() {
@@ -743,6 +917,8 @@ final class RuntimeExecutionDispatcher {
                     } else if (!renewed.sameIdentity(original) || !renewed.sameAuthorization(original)
                             || !ownsDispatch(renewed, original)) {
                         closeLocked();
+                    } else {
+                        renewExternalChannel();
                     }
                 } catch (RuntimeException exception) {
                     if (exception instanceof RuntimeBrokerException failure && !failure.isRetryable()
@@ -755,6 +931,47 @@ final class RuntimeExecutionDispatcher {
             } finally {
                 monitor.unlock();
             }
+        }
+
+        /**
+         * The worker channel is bounded by the publication grant, whose horizon
+         * is the writer lease the Harness keeps renewing. A foreground Shell may
+         * outlive one lease, so each dispatch renewal pushes the grant's current
+         * horizon there too; without it the capture would close mid-command and
+         * the drain could never finish. A refusal is not claim loss: the drain
+         * itself re-reads the channel and refuses honestly if it really closed.
+         */
+        private void renewExternalChannel() {
+            if (closed.get() || grant == null || publicationVerifier == null
+                    || !WorkspaceExecutionProfile.isExternalShellRequest(
+                            context.binding().getRequest())) {
+                return;
+            }
+            var producer = publicationVerifier.externalShell();
+            if (producer == null) {
+                return;
+            }
+            var pending = externalChannel.toCompletableFuture();
+            String channelId = pending.isCompletedExceptionally() ? null : pending.getNow(null);
+            if (channelId == null) {
+                return;
+            }
+            // The grant recheck takes the publication row's FOR UPDATE and the
+            // renewal itself is an attested HTTP exchange. The tick thread also
+            // renews every other claim, so neither may run on it: hand the pair
+            // to a virtual thread and let the next tick start on time.
+            channelRenewals.start(() -> {
+                try {
+                    var current = publicationVerifier.verify(original,
+                            grant.publicationId(), grant.token());
+                    producer.renew(context.lease(), context.binding(), current, channelId)
+                            .toCompletableFuture().join();
+                } catch (RuntimeException unavailable) {
+                    // The grant is fenced or the channel is gone. The drain
+                    // observes the same refusal, so this must not settle or
+                    // abandon anything here.
+                }
+            });
         }
 
         @Override

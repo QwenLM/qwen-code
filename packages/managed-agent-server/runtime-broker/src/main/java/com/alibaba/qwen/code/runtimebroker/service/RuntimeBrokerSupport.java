@@ -454,6 +454,17 @@ final class RuntimeBrokerSupport {
     }
 
     /**
+     * The external foreground-Shell lane retires only on the worker's own drain
+     * proof. A vanished sandbox or a crashed worker proves the process is gone,
+     * not that its captured bytes reached the control plane, so an absence or
+     * LOST observation must never release this placement's storage: recovery of
+     * the original worker is the only exit.
+     */
+    static boolean requiresExternalShellDrainProof(RuntimeBindingRecord claimed) {
+        return WorkspaceExecutionProfile.isExternalShellRequest(claimed.getRequest());
+    }
+
+    /**
      * Verifies that a drain receipt matches the claimed binding's identity,
      * including the external-workspace seed/lease/handle chain.
      */

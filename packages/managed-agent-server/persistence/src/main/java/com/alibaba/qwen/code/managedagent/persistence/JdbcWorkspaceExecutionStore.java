@@ -86,7 +86,7 @@ public class JdbcWorkspaceExecutionStore
 
     public void requireExternalExecution(ContextBinding binding) {
         if (isExternal(binding) && (externalAdmission == null
-                || !externalAdmission.externalFilesAllowed(binding))) {
+                || !externalAdmission.externalExecutionAllowed(binding))) {
             throw unavailable();
         }
     }
@@ -95,7 +95,7 @@ public class JdbcWorkspaceExecutionStore
         requireExternalExecution(session.workspace());
         authorizePassiveAttachment(session);
         if (storageGuard != null && residents.find(session.workspace()) == null
-                && !(WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) && isExternal(session.workspace()))) {
+                && !(WorkspaceToolProfiles.isExternal(session.toolProfile()) && isExternal(session.workspace()))) {
             storageGuard.verify(session.workspace());
         }
     }
@@ -108,7 +108,7 @@ public class JdbcWorkspaceExecutionStore
         }
         authorizePassiveAttachment(session, authority);
         if (storageGuard != null && residents.find(session.workspace()) == null
-                && !(WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) && isExternal(session.workspace()))) {
+                && !(WorkspaceToolProfiles.isExternal(session.toolProfile()) && isExternal(session.workspace()))) {
             storageGuard.verify(session.workspace());
         }
     }
@@ -119,7 +119,7 @@ public class JdbcWorkspaceExecutionStore
         }
         authorizePassiveAttachment(session, null, true);
         if (storageGuard != null && residents.find(session.workspace()) == null
-                && !(WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) && isExternal(session.workspace()))) {
+                && !(WorkspaceToolProfiles.isExternal(session.toolProfile()) && isExternal(session.workspace()))) {
             storageGuard.verify(session.workspace());
         }
     }
@@ -191,7 +191,7 @@ public class JdbcWorkspaceExecutionStore
 
     public void authorizeExternal(SessionRecord session,
             com.alibaba.qwen.code.runtimebroker.RuntimeLifecycleAuthority authority) {
-        if (!isExternal(session.workspace()) || !"hosted-workspace-external-files/1".equals(session.toolProfile())
+        if (!isExternal(session.workspace()) || !WorkspaceToolProfiles.isExternal(session.toolProfile())
                 || !"qwen-code".equals(session.agentId()) || session.agentDefinitionDigest() != null) {
             throw unavailable();
         }
