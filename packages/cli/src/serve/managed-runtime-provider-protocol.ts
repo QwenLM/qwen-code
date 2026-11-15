@@ -69,7 +69,11 @@ export interface ManagedWorkspaceContextFile {
 export interface ManagedRuntimeProviderSession {
   readonly harnessSessionId: string;
   readonly runtimeSessionId: string;
-  readonly turnKind: 'bootstrap' | 'continuation';
+  // 'terminal' is the web terminal's derived Runtime Session. It carries no
+  // provider runtime; the Session-close drain still releases it through this
+  // envelope, so the worker must accept the turn kind rather than reject the
+  // release and wedge the Harness Session close.
+  readonly turnKind: 'bootstrap' | 'continuation' | 'terminal';
 }
 
 export type ManagedRuntimeProviderControl =
@@ -358,7 +362,7 @@ export function parseManagedRuntimeProviderRequest(
   keys(session, ['harnessSessionId', 'runtimeSessionId', 'turnKind']);
   envelopeSessionId(session['harnessSessionId']);
   envelopeSessionId(session['runtimeSessionId']);
-  if (!oneOf(session['turnKind'], ['bootstrap', 'continuation']))
+  if (!oneOf(session['turnKind'], ['bootstrap', 'continuation', 'terminal']))
     throw new ManagedRuntimeProviderProtocolError();
   const parsedSession = session as unknown as ManagedRuntimeProviderSession;
   const parsed: ManagedRuntimeProviderRequest = {
