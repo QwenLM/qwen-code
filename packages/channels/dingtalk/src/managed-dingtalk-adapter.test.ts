@@ -280,6 +280,21 @@ describe('managed DingTalk adapter inbound', () => {
     await adapter.disconnect();
   });
 
+  it('falls back to senderId when senderStaffId is absent (R4)', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    fake.push(
+      'fallback',
+      messageData({
+        msgId: 'fallback',
+        senderStaffId: undefined,
+        senderId: 'staff-1',
+      }),
+    );
+    await adapter.tick();
+    expect(plane.submit.map((event) => event.senderId)).toEqual(['staff-1']);
+    await adapter.disconnect();
+  });
+
   it('skips a sender outside the allowlist', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
     fake.push(
