@@ -81,7 +81,7 @@ export function sortFileEntries(
  */
 export interface GlobToolParams {
   /**
-   * The glob pattern to match files against
+   * The glob pattern to match file and directory paths against
    */
   pattern: string;
 
@@ -396,7 +396,7 @@ export class GlobTool extends BaseDeclarativeTool<GlobToolParams, ToolResult> {
       {
         properties: {
           pattern: {
-            description: 'The glob pattern to match files against',
+            description: 'The glob pattern to match file and directory paths against',
             type: 'string',
           },
           path: {
