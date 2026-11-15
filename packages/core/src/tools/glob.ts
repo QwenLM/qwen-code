@@ -396,7 +396,7 @@ export class GlobTool extends BaseDeclarativeTool<GlobToolParams, ToolResult> {
       {
         properties: {
           pattern: {
-            description: 'The glob pattern to match file and directory paths against',
+            description: 'The glob pattern to match files and directories',
             type: 'string',
           },
           path: {
