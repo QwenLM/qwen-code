@@ -58218,7 +58218,6 @@ describe('Session', () => {
         duplicatePart.functionCall!,
       ]);
 
-      expect(mockToolRegistry.getTool).not.toHaveBeenCalled();
       const { parts } = result;
       expect(result.stopAfterPermissionCancel).toBe(false);
       expect(parts[0].functionResponse?.id).toBe('todo_1__qwen_dup_2');
@@ -58233,6 +58232,9 @@ describe('Session', () => {
             sessionUpdate: 'tool_call_update',
             toolCallId: 'todo_1__qwen_dup_2',
             status: 'failed',
+            // A todo_write never emits a start frame, so the duplicate update
+            // must carry its own kind or channel transports drop it.
+            kind: 'think',
           }),
         }),
       );
