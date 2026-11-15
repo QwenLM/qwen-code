@@ -6,6 +6,7 @@ import { I18nProvider } from '../i18n';
 import { WebShellPortalRootContext } from '../portalRoot';
 import type { ContextCompressionControls } from '../hooks/useContextUsageControls';
 import { ContextUsagePopover } from './ContextUsagePopover';
+import { ContextCompressionAnnouncementContext } from './ContextCompressionAnnouncer';
 import { Button } from './ui/button';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -23,6 +24,7 @@ async function mount({
   withDetails = true,
   readOnly = false,
   known,
+  centralized = true,
   tokenCount = 60_000,
   contextWindow = 100_000,
 }: {
@@ -30,6 +32,7 @@ async function mount({
   withDetails?: boolean;
   readOnly?: boolean;
   known?: boolean;
+  centralized?: boolean;
   tokenCount?: number;
   contextWindow?: number;
 } = {}) {
@@ -63,26 +66,30 @@ async function mount({
       root.render(
         <div onClick={ancestorClick}>
           <I18nProvider language="en">
-            <WebShellPortalRootContext.Provider value={portal}>
-              <ContextUsagePopover
-                key={sessionId}
-                tokenCount={tokenCount}
-                contextWindow={contextWindow}
-                known={known}
-                controls={readOnly ? undefined : controls}
-                onOpenDetails={withDetails ? details : undefined}
-                showSnapshotHint={!readOnly}
-              >
-                <Button
-                  ref={triggerRef}
-                  onClick={
-                    readOnly ? (event) => event.stopPropagation() : snapshot
-                  }
+            <ContextCompressionAnnouncementContext.Provider
+              value={centralized ? compress : undefined}
+            >
+              <WebShellPortalRootContext.Provider value={portal}>
+                <ContextUsagePopover
+                  key={sessionId}
+                  tokenCount={tokenCount}
+                  contextWindow={contextWindow}
+                  known={known}
+                  controls={readOnly ? undefined : controls}
+                  onOpenDetails={withDetails ? details : undefined}
+                  showSnapshotHint={!readOnly}
                 >
-                  Context ring
-                </Button>
-              </ContextUsagePopover>
-            </WebShellPortalRootContext.Provider>
+                  <Button
+                    ref={triggerRef}
+                    onClick={
+                      readOnly ? (event) => event.stopPropagation() : snapshot
+                    }
+                  >
+                    Context ring
+                  </Button>
+                </ContextUsagePopover>
+              </WebShellPortalRootContext.Provider>
+            </ContextCompressionAnnouncementContext.Provider>
           </I18nProvider>
         </div>,
       ),
@@ -192,7 +199,9 @@ describe('ContextUsagePopover', () => {
     await advance(1);
     expect(h.card?.getAttribute('role')).toBe('dialog');
     expect(h.card?.textContent).toContain('Remaining40,000 tokens');
-    expect(h.card?.querySelector('[role="status"], [role="alert"]')).toBeNull();
+    expect(
+      h.card?.querySelector('[data-web-shell-compression-feedback]'),
+    ).toBeNull();
     expect(document.activeElement).toBe(h.draft);
     pointer(h.trigger, 'pointerout', document.body);
     await advance(100);
@@ -400,9 +409,11 @@ describe('ContextUsagePopover', () => {
       }
       expect(h.card).toBeNull();
       await act(async () => h.trigger.focus());
-      expect(h.card!.querySelector('[role="alert"]')?.textContent).toBe(
-        'Compression failed. You can try again.',
-      );
+      expect(
+        h.card!.querySelector(
+          '[data-web-shell-compression-feedback][data-tone="error"]',
+        )?.textContent,
+      ).toBe('Compression failed. You can try again.');
     },
   );
 
@@ -411,11 +422,17 @@ describe('ContextUsagePopover', () => {
     await h.update({ result: { kind: 'failed' } });
     await h.switchSession();
     await act(async () => h.trigger.focus());
-    expect(h.card!.querySelector('[role="alert"]')).toBeNull();
+    expect(
+      h.card!.querySelector(
+        '[data-web-shell-compression-feedback][data-tone="error"]',
+      ),
+    ).toBeNull();
     await h.update({ result: { kind: 'failed' } });
-    expect(h.card!.querySelector('[role="alert"]')?.textContent).toBe(
-      'Compression failed. You can try again.',
-    );
+    expect(
+      h.card!.querySelector(
+        '[data-web-shell-compression-feedback][data-tone="error"]',
+      )?.textContent,
+    ).toBe('Compression failed. You can try again.');
   });
 
   it('preserves editor focus when Escape dismisses a pointer-only hover', async () => {
@@ -629,9 +646,11 @@ describe('ContextUsagePopover', () => {
     const compress = h.card!.querySelector<HTMLButtonElement>('button')!;
     expect(compress.disabled).toBe(true);
     expect(compress.parentElement?.title).toBe('');
-    expect(h.card!.querySelector('[role="status"]')?.textContent).toBe(
-      'Compressing…',
-    );
+    expect(
+      h.card!.querySelector(
+        '[data-web-shell-compression-feedback][data-tone="info"]',
+      )?.textContent,
+    ).toBe('Compressing…');
     await act(async () => compress.click());
     expect(h.compress).not.toHaveBeenCalled();
     await h.update({ compressing: false, result: { kind: 'interrupted' } });
@@ -639,20 +658,34 @@ describe('ContextUsagePopover', () => {
     expect(compress.parentElement?.title).toBe(
       'Requires an idle, connected session with permission to compress context.',
     );
-    expect(h.card!.querySelector('[role="status"]')?.textContent).toBe(
+    expect(
+      h.card!.querySelector(
+        '[data-web-shell-compression-feedback][data-tone="info"]',
+      )?.textContent,
+    ).toBe(
       'Connection changed during compression. Refresh to check current usage.',
     );
     await h.update({ canCompress: true, result: { kind: 'failed' } });
     expect(compress.disabled).toBe(false);
-    expect(h.card!.querySelector('[role="alert"]')?.textContent).toBe(
-      'Compression failed. You can try again.',
-    );
+    expect(
+      h.card!.querySelector(
+        '[data-web-shell-compression-feedback][data-tone="error"]',
+      )?.textContent,
+    ).toBe('Compression failed. You can try again.');
   });
 
   it('reports Managed completion with unknown usage and a noop without daemon readings', async () => {
-    const h = await mount({ known: false, withDetails: false });
+    const h = await mount({
+      known: false,
+      withDetails: false,
+      centralized: false,
+    });
     await act(async () => h.trigger.focus());
-    await h.update({ result: { kind: 'compressed' } });
+    await h.update({ compressing: true });
+    expect(h.card!.querySelector('[role="status"]')?.textContent).toBe(
+      'Compressing…',
+    );
+    await h.update({ compressing: false, result: { kind: 'compressed' } });
     expect(h.card!.querySelector('[role="status"]')?.textContent).toBe(
       'Compression completed. Context usage will be observed on the next turn.',
     );
@@ -663,17 +696,29 @@ describe('ContextUsagePopover', () => {
     expect(h.card!.querySelector('[role="status"]')?.textContent).toBe(
       'No compression needed.',
     );
+    await h.update({ result: { kind: 'failed' } });
+    expect(h.card!.querySelector('[role="alert"]')?.textContent).toBe(
+      'Compression failed. You can try again.',
+    );
   });
 
   it('dismisses a settled result on close without losing an operation that finishes later', async () => {
     const h = await mount();
     await act(async () => h.trigger.focus());
     await h.update({ result: { kind: 'failed' } });
-    expect(h.card!.querySelector('[role="alert"]')).not.toBeNull();
+    expect(
+      h.card!.querySelector(
+        '[data-web-shell-compression-feedback][data-tone="error"]',
+      ),
+    ).not.toBeNull();
     key(h.trigger, 'Escape');
     await advance(1);
     key(h.trigger, 'ArrowDown');
-    expect(h.card!.querySelector('[role="alert"]')).toBeNull();
+    expect(
+      h.card!.querySelector(
+        '[data-web-shell-compression-feedback][data-tone="error"]',
+      ),
+    ).toBeNull();
     await h.update({
       canCompress: false,
       compressing: true,
@@ -687,9 +732,11 @@ describe('ContextUsagePopover', () => {
       result: { kind: 'cancelled' },
     });
     key(h.trigger, 'ArrowDown');
-    expect(h.card!.querySelector('[role="status"]')?.textContent).toBe(
-      'Cancellation requested. Refresh to check current usage.',
-    );
+    expect(
+      h.card!.querySelector(
+        '[data-web-shell-compression-feedback][data-tone="info"]',
+      )?.textContent,
+    ).toBe('Cancellation requested. Refresh to check current usage.');
   });
 
   it('dismisses on focus leaving and discards a delayed hover when the session changes', async () => {

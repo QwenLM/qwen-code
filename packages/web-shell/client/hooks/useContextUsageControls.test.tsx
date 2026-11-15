@@ -11,6 +11,7 @@ import {
   useContextUsageControls,
   type ContextUsageControls,
 } from './useContextUsageControls';
+import { ContextCompressionAnnouncementContext } from '../components/ContextCompressionAnnouncer';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 const roots: Root[] = [];
@@ -55,10 +56,12 @@ function usage(sessionId = 'session-a'): DaemonSessionContextUsageStatus {
   };
 }
 
-function mount() {
+function mount({ inheritAnnouncement = false } = {}) {
   const command = deferred<{ stopReason: 'end_turn' | 'cancelled' }>();
   const read = deferred<DaemonSessionContextUsageStatus>();
   const onBeforeCompress = vi.fn();
+  const onAnnouncement = vi.fn();
+  const inheritedAnnouncement = vi.fn();
   const sendPrompt = vi.fn().mockReturnValue(command.promise);
   const getContextUsage = vi.fn().mockReturnValue(read.promise);
   const actions = {
@@ -97,6 +100,7 @@ function mount() {
       busy,
       writeBlocked,
       onBeforeCompress,
+      onAnnouncement: inheritAnnouncement ? undefined : onAnnouncement,
     });
     return null;
   }
@@ -106,7 +110,11 @@ function mount() {
     act(() =>
       root.render(
         <StrictMode>
-          <Probe />
+          <ContextCompressionAnnouncementContext.Provider
+            value={inheritAnnouncement ? inheritedAnnouncement : undefined}
+          >
+            <Probe />
+          </ContextCompressionAnnouncementContext.Provider>
         </StrictMode>,
       ),
     );
@@ -117,6 +125,8 @@ function mount() {
     sendPrompt,
     getContextUsage,
     onBeforeCompress,
+    onAnnouncement,
+    inheritedAnnouncement,
     captureOwner,
     get controls() {
       return latest!;
@@ -152,6 +162,40 @@ function mount() {
 }
 
 describe('useContextUsageControls', () => {
+  it('announces each real operation transition once and gives retries a new identity', async () => {
+    const h = mount();
+    let operation!: Promise<void>;
+    act(() => {
+      operation = h.controls.compress();
+      void h.controls.compress();
+    });
+    expect(h.onAnnouncement).toHaveBeenCalledExactlyOnceWith({
+      operation: expect.any(Object),
+      sessionId: 'session-a',
+      workspaceCwd: '/workspace',
+      phase: 'pending',
+    });
+    const first = h.onAnnouncement.mock.calls[0][0].operation;
+    h.update({});
+    expect(h.onAnnouncement).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      h.command.reject(new Error('failed'));
+      await operation;
+    });
+    expect(h.onAnnouncement.mock.calls[1][0]).toMatchObject({
+      operation: first,
+      phase: 'failed',
+    });
+    h.sendPrompt.mockResolvedValueOnce({ stopReason: 'cancelled' });
+    await act(async () => h.controls.compress());
+    expect(h.onAnnouncement).toHaveBeenCalledTimes(4);
+    expect(h.onAnnouncement.mock.calls[2][0].operation).not.toBe(first);
+    expect(h.onAnnouncement.mock.calls[3][0]).toMatchObject({
+      operation: h.onAnnouncement.mock.calls[2][0].operation,
+      phase: 'cancelled',
+    });
+  });
+
   it('captures recovery-aware owners for retained counter reconciliation', () => {
     const h = mount();
     const original = h.controls.captureOwner();
@@ -223,6 +267,9 @@ describe('useContextUsageControls', () => {
       expect(h.controls.compressing).toBe(false);
       expect(h.controls.canCompress).toBe(true);
       expect(h.controls.result).toEqual({ kind: 'interrupted' });
+      expect(h.onAnnouncement.mock.calls[1][0]).toMatchObject({
+        phase: 'interrupted',
+      });
       expect(h.getContextUsage).toHaveBeenCalledTimes(
         phase === 'command' ? 0 : 1,
       );
@@ -284,6 +331,27 @@ describe('useContextUsageControls', () => {
     });
     expect(h.controls.result).toEqual({ kind: 'completed', usage: usage() });
     expect(h.controls.canCompress).toBe(true);
+  });
+
+  it('uses the inherited announcement callback when no owner callback is provided', async () => {
+    const h = mount({ inheritAnnouncement: true });
+    const initialControls = h.controls;
+    h.update({});
+    expect(h.controls).toBe(initialControls);
+    let operation!: Promise<void>;
+    act(() => {
+      operation = h.controls.compress();
+    });
+    expect(h.inheritedAnnouncement).toHaveBeenCalledWith(
+      expect.objectContaining({ phase: 'pending' }),
+    );
+    await act(async () => {
+      h.command.reject(new Error('failed'));
+      await operation;
+    });
+    expect(h.inheritedAnnouncement).toHaveBeenLastCalledWith(
+      expect.objectContaining({ phase: 'failed' }),
+    );
   });
 
   it.each([
@@ -411,6 +479,7 @@ describe('useContextUsageControls', () => {
         await operation;
       });
       expect(h.getContextUsage).not.toHaveBeenCalled();
+      expect(h.onAnnouncement).toHaveBeenCalledTimes(1);
       if (change === 'switch') expect(h.controls.result).toBeUndefined();
     },
   );

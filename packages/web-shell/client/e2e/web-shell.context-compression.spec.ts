@@ -267,8 +267,15 @@ for (const theme of ['light', 'dark']) {
       panel.getByRole('button', { name: 'Refresh', exact: true }),
     ).toBeDisabled();
     await expect(editor).toHaveText('Keep this draft while compressing');
-    await expect(panel.getByRole('status')).toHaveCSS('color', feedbackColor);
-    await expect(hover.getByRole('status')).toHaveCSS('color', feedbackColor);
+    await expect(
+      page.getByRole('status').filter({ hasText: 'Compressing…' }),
+    ).toHaveCount(1);
+    await expect(
+      panel.locator('[data-web-shell-compression-feedback]'),
+    ).toHaveCSS('color', feedbackColor);
+    await expect(
+      hover.locator('[data-web-shell-compression-feedback]'),
+    ).toHaveCSS('color', feedbackColor);
     await page.screenshot({
       path: testInfo.outputPath(`context-compressing-${theme}.png`),
     });
@@ -285,8 +292,17 @@ for (const theme of ['light', 'dark']) {
     await expect(panel).toContainText(
       'Compression completed. Context usage refreshed.',
     );
-    await expect(panel.getByRole('status')).toHaveCSS('color', feedbackColor);
-    await expect(hover.getByRole('status')).toHaveCSS('color', feedbackColor);
+    await expect(
+      page
+        .getByRole('status')
+        .filter({ hasText: 'Compression completed. Context usage refreshed.' }),
+    ).toHaveCount(1);
+    await expect(
+      panel.locator('[data-web-shell-compression-feedback]'),
+    ).toHaveCSS('color', feedbackColor);
+    await expect(
+      hover.locator('[data-web-shell-compression-feedback]'),
+    ).toHaveCSS('color', feedbackColor);
     await expect.poll(() => reads).toBeGreaterThan(readsBeforeCompletion);
     await expect(ring).toHaveAttribute('aria-label', '20.0% context used');
     await expect(hover).toContainText('20,000 tokens');
@@ -324,14 +340,23 @@ for (const theme of ['light', 'dark']) {
         code: 'internal_error',
       },
     });
-    await expect(panel.getByRole('alert')).toHaveText(
-      'Compression failed. You can try again.',
-    );
-    await expect(panel.getByRole('alert')).toHaveCSS('color', errorColor);
-    await expect(hover.getByRole('alert')).toHaveText(
-      'Compression failed. You can try again.',
-    );
-    await expect(hover.getByRole('alert')).toHaveCSS('color', errorColor);
+    await expect(
+      page
+        .getByRole('alert')
+        .filter({ hasText: 'Compression failed. You can try again.' }),
+    ).toHaveCount(1);
+    await expect(
+      panel.locator('[data-web-shell-compression-feedback][data-tone=error]'),
+    ).toHaveText('Compression failed. You can try again.');
+    await expect(
+      panel.locator('[data-web-shell-compression-feedback][data-tone=error]'),
+    ).toHaveCSS('color', errorColor);
+    await expect(
+      hover.locator('[data-web-shell-compression-feedback][data-tone=error]'),
+    ).toHaveText('Compression failed. You can try again.');
+    await expect(
+      hover.locator('[data-web-shell-compression-feedback][data-tone=error]'),
+    ).toHaveCSS('color', errorColor);
     await hover
       .getByRole('button', { name: 'View details', exact: true })
       .click();
@@ -348,15 +373,20 @@ for (const theme of ['light', 'dark']) {
         sessionId: scenario.sessionId,
       }),
     );
-    await expect(panel.getByRole('alert')).toContainText(
-      'Compression completed, but usage could not be refreshed.',
-    );
-    await expect(panel.getByRole('alert')).toHaveCSS('color', errorColor);
+    await expect(
+      panel.locator('[data-web-shell-compression-feedback][data-tone=error]'),
+    ).toContainText('Compression completed, but usage could not be refreshed.');
+    await expect(
+      panel.locator('[data-web-shell-compression-feedback][data-tone=error]'),
+    ).toHaveCSS('color', errorColor);
     await expect(ring).toHaveAttribute('aria-label', '20.0% context used');
     readFails = false;
     await panel.getByRole('button', { name: 'Refresh', exact: true }).click();
     await expect(ring).toHaveAttribute('aria-label', '15.0% context used');
     await expect(panel).toContainText('Remaining 85.0k');
+    await expect(
+      panel.locator('[data-web-shell-compression-feedback]'),
+    ).toHaveCount(0);
     expect(submitted).toHaveLength(3);
     await expect(historical.locator('[class*="percentage"]')).toHaveText(
       '64.0%',
@@ -654,4 +684,132 @@ test('@smoke a compression outcome replaces the daemon sentence and refreshes th
   await page.screenshot({
     path: testInfo.outputPath('context-compression-transcript.png'),
   });
+});
+
+test('@smoke split-pane compression announces only in its own session', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  const scenario = createWebShellDaemonScenario({
+    supportedCommands: {
+      availableCommands: [
+        {
+          name: 'compress',
+          description: 'Compress context',
+          input: null,
+          _meta: { source: 'builtin-command' },
+        },
+      ],
+    },
+    state: {
+      models: {
+        currentModelId: 'qwen-test',
+        availableModels: [
+          { modelId: 'qwen-test', name: 'Qwen Test', contextLimit: 100_000 },
+        ],
+      },
+    },
+  });
+  const paneSessionId = 'compression-pane-session';
+  scenario.sessions.push({
+    ...scenario.sessions[0],
+    sessionId: paneSessionId,
+    displayName: 'Compression pane',
+    clientCount: 0,
+  });
+  const daemon = await installMockDaemon(page, scenario, {
+    baseURL: String(testInfo.project.use.baseURL),
+  });
+  await page.route(/\/session\/[^/]+\/context-usage(?:\?|$)/, (route) =>
+    route.fulfill({
+      json: {
+        v: 1,
+        sessionId: decodeURIComponent(
+          new URL(route.request().url()).pathname.split('/')[2],
+        ),
+        workspaceCwd: scenario.workspaceCwd,
+        formattedText: '',
+        usage: {
+          modelName: 'Qwen Test',
+          totalTokens: 64_000,
+          contextWindowSize: 100_000,
+          breakdown: {
+            systemPrompt: 5_000,
+            builtinTools: 5_000,
+            mcpTools: 0,
+            memoryFiles: 0,
+            skills: 0,
+            messages: 54_000,
+            freeSpace: 26_000,
+            autocompactBuffer: 10_000,
+          },
+          builtinTools: [],
+          mcpTools: [],
+          memoryFiles: [],
+          skills: [],
+          showDetails: true,
+        },
+      },
+    }),
+  );
+  const submitted: string[] = [];
+  await page.route(/\/session\/[^/]+\/prompt$/, (route) => {
+    submitted.push(new URL(route.request().url()).pathname.split('/')[2]);
+    return route.fulfill({
+      status: 202,
+      json: { promptId: 'pane-compression', lastEventId: 20 },
+    });
+  });
+  await page.goto(
+    `/session/${scenario.sessionId}?split=${paneSessionId}&language=en`,
+  );
+  await daemon.sse.waitForConnection(scenario.sessionId);
+  await daemon.sse.waitForConnection(paneSessionId);
+  await daemon.sendEvent(
+    replayCompleteEvent({ sessionId: scenario.sessionId }),
+  );
+  await daemon.sendEvent(replayCompleteEvent({ sessionId: paneSessionId }));
+  await daemon.sendEvent({
+    id: 21,
+    v: 1,
+    type: 'session_update',
+    data: {
+      sessionId: paneSessionId,
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: { usage: { inputTokens: 64_000 } },
+      },
+    },
+  });
+  const ring = page
+    .getByTestId('chat-pane')
+    .locator('[data-web-shell-context-usage]');
+  await expect(ring).toBeVisible();
+  await ring.focus();
+  await ring.press('ArrowDown');
+  const popover = page.locator(
+    '[data-web-shell-context-popover][data-state="open"]',
+  );
+  const announcers = page.locator('[data-web-shell-compression-announcer]');
+  await expect(announcers).toHaveCount(2);
+  const primary = announcers.nth(0);
+  const pane = announcers.nth(1);
+  await expect(primary).toHaveText('');
+  await expect(pane).toHaveText('');
+  await popover
+    .getByRole('button', { name: 'Compress context', exact: true })
+    .click();
+  await expect.poll(() => submitted).toEqual([paneSessionId]);
+  await expect(pane.getByRole('status')).toHaveText('Compressing…');
+  await expect(pane.getByRole('alert')).toBeEmpty();
+  await expect(primary).toBeEmpty();
+  await daemon.sendEvent(
+    turnCompleteEvent('pane-compression', { id: 30, sessionId: paneSessionId }),
+  );
+  await expect(pane.getByRole('status')).toHaveText(
+    'Compression completed. Context usage refreshed.',
+  );
+  await expect(pane.getByRole('alert')).toBeEmpty();
+  await expect(primary).toBeEmpty();
 });

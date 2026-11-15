@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import type {
   DaemonConnectionState,
   DaemonSessionActions,
@@ -7,6 +14,10 @@ import type {
   DaemonSessionOwnerSnapshot,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { isGoalGateBlocked } from '../utils/goalGate';
+import {
+  ContextCompressionAnnouncementContext,
+  type CompressionAnnouncement,
+} from '../components/ContextCompressionAnnouncer';
 
 type CompressionResult =
   | { kind: 'completed'; usage: DaemonSessionContextUsageStatus }
@@ -21,6 +32,7 @@ export interface ContextCompressionControls {
 
 export interface ContextUsageControls extends ContextCompressionControls {
   sessionId: string;
+  workspaceCwd?: string;
   result?: CompressionResult;
   captureOwner(): DaemonSessionOwnerSnapshot;
   getContextUsage: DaemonSessionActions['getContextUsage'];
@@ -37,6 +49,7 @@ export function useContextUsageControls({
   busy,
   writeBlocked,
   onBeforeCompress,
+  onAnnouncement,
 }: {
   connection: DaemonConnectionState;
   actions: DaemonSessionActions;
@@ -44,7 +57,10 @@ export function useContextUsageControls({
   busy: boolean;
   writeBlocked: boolean;
   onBeforeCompress: () => void;
+  onAnnouncement?: (announcement: CompressionAnnouncement) => void;
 }): ContextUsageControls | undefined {
+  const inheritedAnnounce = useContext(ContextCompressionAnnouncementContext);
+  const announce = onAnnouncement ?? inheritedAnnounce;
   const available =
     Boolean(connection.sessionId) &&
     connection.status === 'connected' &&
@@ -90,13 +106,22 @@ export function useContextUsageControls({
     const owner = ownerGuard.capture();
     pending.current = scope;
     setOperation({ scope });
+    const operation = {};
+    const notify = (phase: CompressionAnnouncement['phase']) => {
+      if (sessionId) announce?.({ operation, sessionId, workspaceCwd, phase });
+    };
+    notify('pending');
     const isCurrent = () => mounted.current && latest.current.scope === scope;
     const settle = (result: CompressionResult) => {
       if (isCurrent()) {
+        const settled = owner.isCurrent()
+          ? result
+          : { kind: 'interrupted' as const };
         setOperation({
           scope,
-          result: owner.isCurrent() ? result : { kind: 'interrupted' },
+          result: settled,
         });
+        notify(settled.kind);
       }
     };
     try {
@@ -130,7 +155,15 @@ export function useContextUsageControls({
     } finally {
       if (pending.current === scope) pending.current = undefined;
     }
-  }, [actions, onBeforeCompress, ownerGuard, sessionId, scope]);
+  }, [
+    actions,
+    onBeforeCompress,
+    ownerGuard,
+    sessionId,
+    scope,
+    workspaceCwd,
+    announce,
+  ]);
 
   const compressing = Boolean(currentOperation && !currentOperation.result);
   const result = currentOperation?.result;
@@ -139,6 +172,7 @@ export function useContextUsageControls({
       sessionId
         ? {
             sessionId,
+            workspaceCwd,
             canCompress: available && !compressing,
             compressing,
             result,
@@ -147,6 +181,15 @@ export function useContextUsageControls({
             captureOwner: () => ownerGuard.capture({ includeRecovery: true }),
           }
         : undefined,
-    [sessionId, available, compressing, result, compress, actions, ownerGuard],
+    [
+      sessionId,
+      workspaceCwd,
+      available,
+      compressing,
+      result,
+      compress,
+      actions,
+      ownerGuard,
+    ],
   );
 }
