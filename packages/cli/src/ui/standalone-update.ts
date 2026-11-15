@@ -453,7 +453,7 @@ async function extractArchive(
           resolve();
           return;
         }
-        const detail = stderr.trim();
+        const detail = stderr.replace(/[\uD800-\uDBFF]$/, '').trim();
         reject(
           new Error(
             `Expand-Archive exited with code ${code}${detail ? `: ${detail}` : ''}`,

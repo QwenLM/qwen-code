@@ -9,7 +9,10 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import * as tar from 'tar';
 import {
   acquireLock,
@@ -48,14 +51,14 @@ vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
   return {
     ...actual,
-    spawn: (...args: Parameters<typeof actual.spawn>) => {
+    spawn: vi.fn((...args: Parameters<typeof actual.spawn>) => {
       spawnCalls.push({
         command: args[0],
         args: args[1] as string[],
         options: args[2],
       });
       return actual.spawn(...args);
-    },
+    }),
   };
 });
 const allocations = vi.hoisted(() => ({ prefixes: [] as string[] }));
@@ -98,6 +101,7 @@ describe('standalone-update', () => {
     vi.stubEnv('QWEN_REQUIRE_SIGNATURE', undefined);
     mockFetch.mockReset();
     spawnCalls.length = 0;
+    vi.mocked(spawn).mockClear();
   });
 
   afterEach(() => {
@@ -2899,74 +2903,193 @@ describe('standalone-update', () => {
     });
   });
 
-  describe.skipIf(process.platform !== 'win32')(
-    'extractArchive on Windows',
-    () => {
-      // Minimal ZIP holding only qwen-code/manifest.json for the win-x64
-      // node flavor. The update flow rejects at the standalone-layout check
-      // only after extraction succeeded and the manifest content was parsed
-      // and validated, so reaching that error proves the archive was really
-      // extracted — not just that the child exited 0.
-      const WIN_MANIFEST_ZIP = Buffer.from(
-        'UEsDBBQAAAAIAOQFbl1lyDVTRQAAAFUAAAAXAAAAcXdlbi1jb2RlL21hbmlmZXN0Lmpzb26rVspLzE1VslJyKCxPzdNNzk9J1YezlHSUShKL0lNLgPLlmXm6FWYmQKGi0rySTLCePIiastSi4sz8PKCAoZ6RnrFSLQBQSwECFAAUAAAACADkBW5dZcg1U0UAAABVAAAAFwAAAAAAAAAAAAAAAAAAAAAAcXdlbi1jb2RlL21hbmlmZXN0Lmpzb25QSwUGAAAAAAEAAQBFAAAAegAAAAAA',
-        'base64',
-      );
-      // The Microsoft Store PowerShell 7.7 module root from the field report:
-      // a PowerShell 7 terminal passes it down via PSModulePath, steering
-      // Windows PowerShell 5.1 to a PS7 Archive module that fails to load.
-      const STORE_PS7_MODULE_PATH =
-        'C:\\Program Files\\WindowsApps\\Microsoft.PowerShell_7.7.0.0_x64__8wekyb3d8bbwe\\Modules';
+  describe('extractArchive on Windows', () => {
+    // Minimal ZIP holding only qwen-code/manifest.json for the win-x64
+    // node flavor. The update flow rejects at the standalone-layout check
+    // only after extraction succeeded and the manifest content was parsed
+    // and validated, so reaching that error proves the archive was really
+    // extracted — not just that the child exited 0.
+    const WIN_MANIFEST_ZIP = Buffer.from(
+      'UEsDBBQAAAAIAOQFbl1lyDVTRQAAAFUAAAAXAAAAcXdlbi1jb2RlL21hbmlmZXN0Lmpzb26rVspLzE1VslJyKCxPzdNNzk9J1YezlHSUShKL0lNLgPLlmXm6FWYmQKGi0rySTLCePIiastSi4sz8PKCAoZ6RnrFSLQBQSwECFAAUAAAACADkBW5dZcg1U0UAAABVAAAAFwAAAAAAAAAAAAAAAAAAAAAAcXdlbi1jb2RlL21hbmlmZXN0Lmpzb25QSwUGAAAAAAEAAQBFAAAAegAAAAAA',
+      'base64',
+    );
+    // The Microsoft Store PowerShell 7.7 module root from the field report:
+    // a PowerShell 7 terminal passes it down via PSModulePath, steering
+    // Windows PowerShell 5.1 to a PS7 Archive module that fails to load.
+    const STORE_PS7_MODULE_PATH =
+      'C:\\Program Files\\WindowsApps\\Microsoft.PowerShell_7.7.0.0_x64__8wekyb3d8bbwe\\Modules';
 
-      const winManifest = JSON.stringify({
-        name: '@qwen-code/qwen-code',
-        target: 'win-x64',
-        runtime: 'node',
-        version: '0.1.0',
+    const winManifest = JSON.stringify({
+      name: '@qwen-code/qwen-code',
+      target: 'win-x64',
+      runtime: 'node',
+      version: '0.1.0',
+    });
+
+    let standaloneDir: string;
+
+    const psmodulePathKeys = (env: object) =>
+      Object.keys(env).filter((key) => /^psmodulepath$/i.test(key));
+
+    const expectExtractionSucceeded = async () => {
+      // The manifest is deliberately incomplete: extraction must succeed
+      // and the flow must fail at the later layout check.
+      await expect(
+        performStandaloneUpdate(standaloneDir, '1.2.3'),
+      ).rejects.toThrow('missing the standalone executable layout');
+      expect(spawnCalls).toHaveLength(1);
+    };
+
+    beforeEach(() => {
+      standaloneDir = path.join(tempDir, 'installed');
+      fs.mkdirSync(standaloneDir);
+      fs.writeFileSync(path.join(standaloneDir, 'manifest.json'), winManifest);
+    });
+
+    function serveWinArchive(archive: Buffer) {
+      const checksum = createHash('sha256').update(archive).digest('hex');
+      mockFetch.mockImplementation(async (url: string) => {
+        if (url.endsWith('/qwen-code-win-x64.zip')) {
+          return new Response(new Uint8Array(archive));
+        }
+        if (url.endsWith('/SHA256SUMS')) {
+          return new Response(`${checksum}  qwen-code-win-x64.zip\n`);
+        }
+        return new Response('', { status: 404 });
       });
+    }
 
-      let standaloneDir: string;
+    function mockExtraction(chunks: Buffer[]) {
+      vi.mocked(spawn).mockImplementationOnce(() => {
+        const stderr = new PassThrough();
+        const child = Object.assign(new EventEmitter(), { stderr });
+        queueMicrotask(() => {
+          for (const chunk of chunks) stderr.write(chunk);
+          stderr.end();
+          child.emit('close', 1);
+        });
+        return child as unknown as ChildProcess;
+      });
+    }
 
-      const psmodulePathKeys = (env: object) =>
-        Object.keys(env).filter((key) => /^psmodulepath$/i.test(key));
+    it.each(['PSModulePath', 'psmodulepath', undefined])(
+      'pins the PowerShell child contract with module path key %s',
+      async (requestedKey) => {
+        // Vitest tracks stubbed keys case-sensitively; reuse the Windows
+        // environment's existing casing so unstubbing restores it correctly.
+        const modulePathKey =
+          requestedKey && process.platform === 'win32'
+            ? (psmodulePathKeys(process.env)[0] ?? requestedKey)
+            : requestedKey;
+        for (const key of psmodulePathKeys(process.env)) {
+          vi.stubEnv(key, undefined);
+        }
+        if (modulePathKey) vi.stubEnv(modulePathKey, STORE_PS7_MODULE_PATH);
+        vi.stubEnv('QWEN_TEST_RETAINED', 'retained');
+        serveWinArchive(Buffer.from('mock archive'));
+        mockExtraction([Buffer.from('extraction failed')]);
 
-      const expectExtractionSucceeded = async () => {
-        // The manifest is deliberately incomplete: extraction must succeed
-        // and the flow must fail at the later layout check.
         await expect(
           performStandaloneUpdate(standaloneDir, '1.2.3'),
-        ).rejects.toThrow('missing the standalone executable layout');
-        expect(spawnCalls).toHaveLength(1);
-      };
-
-      beforeEach(() => {
-        standaloneDir = path.join(tempDir, 'installed');
-        fs.mkdirSync(standaloneDir);
-        fs.writeFileSync(
-          path.join(standaloneDir, 'manifest.json'),
-          winManifest,
+        ).rejects.toThrow(
+          'Expand-Archive exited with code 1: extraction failed',
         );
-      });
 
-      function serveWinArchive(archive: Buffer) {
-        const checksum = createHash('sha256').update(archive).digest('hex');
-        mockFetch.mockImplementation(async (url: string) => {
-          if (url.endsWith('/qwen-code-win-x64.zip')) {
-            return new Response(new Uint8Array(archive));
-          }
-          if (url.endsWith('/SHA256SUMS')) {
-            return new Response(`${checksum}  qwen-code-win-x64.zip\n`);
-          }
-          return new Response('', { status: 404 });
+        expect(spawn).toHaveBeenCalledTimes(1);
+        const [binary, args, options] = vi.mocked(spawn).mock.calls[0]!;
+        expect(binary).toBe('powershell.exe');
+        expect(args).toEqual(['-NoProfile', '-Command', expect.any(String)]);
+        const command = (args as string[])[2]!;
+        expect(command).toContain(
+          'try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8 } catch {}',
+        );
+        expect(command).toContain("$ErrorActionPreference = 'Stop'");
+        expect(command).toContain('Expand-Archive -Path ');
+        expect(command).toContain("-DestinationPath '");
+        expect(command).toContain('-Force');
+        expect(options).toMatchObject({
+          stdio: ['ignore', 'ignore', 'pipe'],
+          windowsHide: true,
+          env: { QWEN_TEST_RETAINED: 'retained' },
         });
-      }
+        const childEnv = (options as { env: NodeJS.ProcessEnv }).env;
+        expect(psmodulePathKeys(childEnv)).toEqual([]);
+        expect(childEnv).not.toBe(process.env);
+        if (modulePathKey) {
+          expect(process.env[modulePathKey]).toBe(STORE_PS7_MODULE_PATH);
+        }
+        expect(process.env['QWEN_TEST_RETAINED']).toBe('retained');
+      },
+    );
 
-      it('extracts a valid archive with an inherited PS7 module path', async () => {
+    it.each([
+      {
+        name: 'ordinary text',
+        chunks: [Buffer.from('diagnostic')],
+        expected: 'diagnostic',
+      },
+      {
+        name: 'split UTF-8',
+        chunks: [Buffer.from([0xe4]), Buffer.from([0xb8, 0xad])],
+        expected: '中',
+      },
+      {
+        name: 'ASCII limit',
+        chunks: [Buffer.from('A'.repeat(4097))],
+        expected: 'A'.repeat(4096),
+      },
+      {
+        name: 'astral character at the limit',
+        chunks: [Buffer.from('A'.repeat(4095) + '😀')],
+        expected: 'A'.repeat(4095),
+      },
+      {
+        name: 'split astral character at the limit',
+        chunks: [
+          Buffer.from('A'.repeat(4095)),
+          Buffer.from([0xf0, 0x9f]),
+          Buffer.from([0x98, 0x80]),
+          Buffer.from('tail'),
+        ],
+        expected: 'A'.repeat(4095),
+      },
+      {
+        name: 'complete astral character within the limit',
+        chunks: [Buffer.from('A'.repeat(4094) + '😀tail')],
+        expected: 'A'.repeat(4094) + '😀',
+      },
+    ])('preserves bounded diagnostics: $name', async ({ chunks, expected }) => {
+      serveWinArchive(Buffer.from('mock archive'));
+      mockExtraction(chunks);
+
+      await expect(
+        performStandaloneUpdate(standaloneDir, '1.2.3'),
+      ).rejects.toMatchObject({
+        message: `Expand-Archive exited with code 1: ${expected}`,
+      });
+      expect(
+        fs.readFileSync(path.join(standaloneDir, 'manifest.json'), 'utf8'),
+      ).toBe(winManifest);
+      expect(fs.existsSync(path.join(tempDir, '.qwen-update.lock'))).toBe(
+        false,
+      );
+      expect(
+        fs
+          .readdirSync(tempDir)
+          .some((entry) => entry.startsWith('.qwen-code-update-')),
+      ).toBe(false);
+    });
+
+    it.skipIf(process.platform !== 'win32')(
+      'extracts a valid archive with an inherited PS7 module path',
+      async () => {
         serveWinArchive(WIN_MANIFEST_ZIP);
         vi.stubEnv('PSModulePath', STORE_PS7_MODULE_PATH);
 
         await expectExtractionSucceeded();
 
         // The child must run without the parent's PSModulePath.
+        expect(spawnCalls[0]!.command).toBe('powershell.exe');
         const { env: childEnv } = spawnCalls[0]!.options as {
           env: Record<string, string | undefined>;
         };
@@ -2992,21 +3115,28 @@ describe('standalone-update', () => {
         expect(
           (spawnCalls[0]!.options as { windowsHide?: boolean }).windowsHide,
         ).toBe(true);
-      });
+      },
+    );
 
-      it('extracts a valid archive in a normal PowerShell environment', async () => {
+    it.skipIf(process.platform !== 'win32')(
+      'extracts a valid archive in a normal PowerShell environment',
+      async () => {
         serveWinArchive(WIN_MANIFEST_ZIP);
         vi.stubEnv('PSModulePath', undefined);
+        vi.stubEnv('QWEN_TEST_RETAINED', 'retained');
 
         await expectExtractionSucceeded();
 
         const { env: childEnv } = spawnCalls[0]!.options as {
           env: Record<string, string | undefined>;
         };
-        expect(psmodulePathKeys(childEnv)).toEqual([]);
-      });
+        expect(childEnv['QWEN_TEST_RETAINED']).toBe('retained');
+      },
+    );
 
-      it('surfaces the PowerShell diagnostic when extraction fails', async () => {
+    it.skipIf(process.platform !== 'win32')(
+      'surfaces the PowerShell diagnostic when extraction fails',
+      async () => {
         serveWinArchive(Buffer.from('this is not a zip archive'));
 
         const err: unknown = await performStandaloneUpdate(
@@ -3040,7 +3170,7 @@ describe('standalone-update', () => {
             .readdirSync(tempDir)
             .some((entry) => entry.startsWith('.qwen-code-update-')),
         ).toBe(false);
-      });
-    },
-  );
+      },
+    );
+  });
 });
