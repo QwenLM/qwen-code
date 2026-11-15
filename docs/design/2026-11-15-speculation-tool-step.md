@@ -5,7 +5,7 @@
 - **Status**: decision recorded for #17045 block "Speculation PR 6b": speculation keeps its own tool step and its own speculative loop; only its model round runs on the shared loop (PR 6a, #17029). No code change and no setting in this slice.
 - **Date**: 2026-11-15. Line citations verified on `main` `5f5035772b54`.
 - **Source of the behavior**: `packages/core/src/followup/speculation.ts` (847 lines).
-- **Related**: [Unified agent loop](2026-10-23-unified-agent-loop.md) (#15327); [Event-bus agent loop](2026-11-11-event-bus-agent-loop.md); tracking issue #17045; the Hosted Harness evaluation ([2026-11-14](2026-11-14-hosted-harness-loop-evaluation.md)) is the analogous "keep its own" decision for the Hosted tool step.
+- **Related**: [Unified agent loop](2026-10-23-unified-agent-loop.md) (#15327); [Event-bus agent loop](2026-11-11-event-bus-agent-loop.md); [Speculation engine design](prompt-suggestion/speculation-design.md) (the tool gate, path rewrite and boundary handling restated below); tracking issue #17045; the Hosted Harness evaluation ([2026-11-14](2026-11-14-hosted-harness-loop-evaluation.md)) is the analogous "keep its own" decision for the Hosted tool step.
 
 ## The question
 
@@ -13,7 +13,7 @@
 
 ## What the code actually requires (verified)
 
-Speculation runs ahead of the user in the background with read-only tools and copy-on-write overlay writes, and its tool step is built around that:
+Speculation runs ahead of the user in the background with read-only tools and copy-on-write overlay writes, and its tool step is built around that. The [speculation engine design](prompt-suggestion/speculation-design.md) specifies the tool gate, path rewrite and boundary handling restated below; the line citations are verified against the code.
 
 1. **Direct execution, bypassing the scheduler.** Each call is run through `tool.build(args)` and `invocation.execute(signal)` directly (`speculation.ts:456-517`), not through `CoreToolScheduler`. Permission-deferred calls bail to the normal flow instead (`:410-414`).
 2. **Overlay writes, not the real filesystem.** A `redirect` gate rewrites path arguments into the overlay (`rewritePathArgs`, `:446-454`); the overlay is copied to the real filesystem only on accept, and discarded on reject.

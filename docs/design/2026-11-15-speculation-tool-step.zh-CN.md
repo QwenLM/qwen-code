@@ -5,7 +5,7 @@
 - **状态**：为 #17045 的「Speculation PR 6b」块记录决策：speculation 保留自有工具步与自有投机循环；仅其模型轮运行在共享 loop 上（PR 6a，#17029）。本切片不改代码、不引入开关。
 - **日期**：2026-11-15。行号引用已在 `main` `5f5035772b54` 上核实。
 - **行为来源**：`packages/core/src/followup/speculation.ts`（847 行）。
-- **相关**：[统一代理循环](2026-10-23-unified-agent-loop.md)（#15327）；[Event-bus 代理循环](2026-11-11-event-bus-agent-loop.md)；跟踪 issue #17045；Hosted Harness 评估（[2026-11-14](2026-11-14-hosted-harness-loop-evaluation.md)）是 Hosted 工具步「保留自有」的同类决策。
+- **相关**：[统一代理循环](2026-10-23-unified-agent-loop.md)（#15327）；[Event-bus 代理循环](2026-11-11-event-bus-agent-loop.md)；[Speculation 引擎设计](prompt-suggestion/speculation-design.md)（下文复述的工具门、路径重写与 boundary 处理）；跟踪 issue #17045；Hosted Harness 评估（[2026-11-14](2026-11-14-hosted-harness-loop-evaluation.md)）是 Hosted 工具步「保留自有」的同类决策。
 
 ## 问题
 
@@ -13,7 +13,7 @@
 
 ## 代码实际要求（已核实）
 
-Speculation 在后台以只读工具与 copy-on-write overlay 写跑在用户之前，其工具步正围绕此构建：
+Speculation 在后台以只读工具与 copy-on-write overlay 写跑在用户之前，其工具步正围绕此构建。[Speculation 引擎设计](prompt-suggestion/speculation-design.md)规定了下文复述的工具门、路径重写与 boundary 处理；以下行号引用已对代码核实。
 
 1. **直接执行，绕过调度器。** 每个调用经 `tool.build(args)` 与 `invocation.execute(signal)` 直接运行（`speculation.ts:456-517`），不走 `CoreToolScheduler`。permission-deferred 调用则 bail 回正常流（`:410-414`）。
 2. **overlay 写，而非真实文件系统。** `redirect` 门把路径实参重写入 overlay（`rewritePathArgs`，`:446-454`）；overlay 仅在 accept 时拷回真实文件系统，reject 时丢弃。
@@ -37,7 +37,7 @@ Speculation 在后台以只读工具与 copy-on-write overlay 写跑在用户之
 
 ## 集成门禁决策
 
-今天没有集成测试运行 speculation。**记录决策：speculation 的单元 parity 套件即其门禁。** 该套件已对比共享轮 off/on（`speculation.test.ts` 的「speculation model round on the shared agent loop」与「speculation shared-round event semantics」），含一个分支标记钉住共享轮仅在开关开启时运行。确定性的端到端投机轮不是可行的集成门禁：speculation 是后台、依赖时序的优化，其 accept/boundary 结果取决于运行中途到达的用户输入。把关共享轮迁移的是单元 parity 套件，而非集成场景。off/on 对比覆盖的是共享模型轮。boundary 交回是 speculation 自有且不变的工具步：现有 boundary 测试只在 raw-chunk 臂上覆盖它的零执行 bail，而部分批次交回（第 3 项）——包括它与共享轮 parts 的组合——在两臂都没有测试。这部分部分批次覆盖是应在 6c 默认翻转前补齐的项（该路径经 opt-in 设置已可达），而非本决策引入的缺口。
+今天没有集成测试运行 speculation。**记录决策：speculation 的单元 parity 套件即其门禁。** 该套件已对比共享轮 off/on（`speculation.test.ts` 的「speculation model round on the shared agent loop」与「speculation shared-round event semantics」），含一个分支标记钉住共享轮仅在开关开启时运行。确定性的端到端投机轮不是可行的集成门禁：speculation 是后台、依赖时序的优化，其 accept/boundary 结果取决于运行中途到达的用户输入。把关共享轮迁移的是单元 parity 套件，而非集成场景。off/on 对比覆盖的是共享模型轮。boundary 交回是 speculation 自有且不变的工具步：现有 boundary 测试只在 raw-chunk 臂上覆盖它的零执行 bail，而部分批次交回（第 3 项）——包括它与共享轮 parts 的组合——在两臂都没有测试。该部分批次覆盖是应在 6c 默认翻转前补齐的项（该路径经 opt-in 设置已可达），而非本决策引入的缺口。
 
 本决定把关的是共享轮迁移（PR 6a），而非 PR 6c 的默认翻转。父设计的集成条目（「该运行在其准备默认开启时加入」）与其默认变更判据（在设置开启下运行该入口集成测试的定时任务已在 main 上连续通过两周，见[统一代理循环](2026-10-23-unified-agent-loop.md)），以及 #17045 的连续 14 夜规则，对 6c 仍然有效。由于确定性端到端投机轮因上述时序原因不可行，6c 作者必须调和这一要求：点名一个满足该规则的 nightly 集成信号，或经 #17045 的 Plan changes 记录「单元 parity 套件对默认翻转亦足够」。本记录把这个问题留给 6c，而不预先替代它。
 
