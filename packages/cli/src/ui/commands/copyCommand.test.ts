@@ -935,6 +935,31 @@ math then literal: $x^2\$$`,
     expect(mockCopyToClipboard).not.toHaveBeenCalled();
   });
 
+  it('should validate N before the no-text check when no AI turn has text', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    mockGetHistoryShallow.mockReturnValue([
+      { role: 'user', parts: [{ text: 'question' }] },
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'glob', args: {} } }],
+      },
+    ]);
+
+    expect(await copyCommand.action(mockContext, '0')).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Message index must be a positive integer (1 = last AI message).',
+    });
+    expect(await copyCommand.action(mockContext, '3')).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Only 0 AI messages in this session.',
+    });
+    expect(mockCopyToClipboard).not.toHaveBeenCalled();
+  });
+
   it('should not count a whitespace-only model turn as an AI message', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
 

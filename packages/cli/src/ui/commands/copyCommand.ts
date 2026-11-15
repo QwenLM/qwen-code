@@ -379,17 +379,24 @@ export const copyCommand: SlashCommand = {
           item.parts?.some((part) => !part.thought && part.text?.trim()),
       ) ?? [];
 
-    if (aiMessages.length === 0) {
+    if (!history?.some((item) => item.role === 'model')) {
       return {
         type: 'message',
         messageType: 'info',
-        content: history?.some((item) => item.role === 'model')
-          ? 'Last AI output contains no text to copy.'
-          : 'No output in history',
+        content: 'No output in history',
       };
     }
 
     const { messageIndex, subArgs } = parseLeadingMessageIndex(args);
+
+    // An indexed call falls through to the argument and range checks below.
+    if (messageIndex === null && aiMessages.length === 0) {
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: 'Last AI output contains no text to copy.',
+      };
+    }
 
     let selectedAiMessage;
     if (messageIndex !== null) {
