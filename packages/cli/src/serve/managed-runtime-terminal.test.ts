@@ -28,11 +28,17 @@ const WORKSPACE_CWD = process.cwd();
 const WAIT_TIMEOUT_MS = slowHostBudgetMs(15_000, 45_000);
 // The heaviest case chains MAX_MANAGED_SESSION_TERMINALS attaches for one
 // Session, one attach for another Session, and one replacement after release
-// (a connect wait and an echo wait each), plus the refused extra attach.
-const MAX_CHAIN_WINDOWS = (MAX_MANAGED_SESSION_TERMINALS + 2) * 2 + 1;
-// One extra window absorbs setup outside those waits, so vitest never decides
-// before a watchdog on a slow host.
+// (a connect wait and an echo wait each), plus the refused extra attach and
+// the close wait after a release.
+const MAX_CHAIN_WINDOWS = (MAX_MANAGED_SESSION_TERMINALS + 2) * 2 + 2;
+// One extra window absorbs setup outside those waits. File-wide so vitest
+// never decides before a watchdog, whichever test owns the chain.
 const TEST_TIMEOUT_MS = WAIT_TIMEOUT_MS * (MAX_CHAIN_WINDOWS + 1);
+vi.setConfig({ testTimeout: TEST_TIMEOUT_MS });
+
+// Counts the watchdog timers a test starts, so the heaviest body can prove it
+// fits inside the declared chain.
+let watchdogCount = 0;
 
 const AUTH_HEADERS = {
   Authorization: 'Bearer test-token',
@@ -98,6 +104,7 @@ function open(
   });
   sockets.push(ws);
   const opened = new Promise<WebSocket>((resolve, reject) => {
+    watchdogCount += 1;
     const timer = setTimeout(() => {
       ws.terminate();
       reject(new Error('terminal attach timed out'));
@@ -132,6 +139,7 @@ function connect(
 /** Waits until the terminal echoed the marker text. */
 function waitForOutput(ws: WebSocket, marker: string): Promise<string> {
   return new Promise((resolve, reject) => {
+    watchdogCount += 1;
     let buffer = '';
     const timer = setTimeout(() => {
       ws.off('message', onMessage);
@@ -151,6 +159,22 @@ function waitForOutput(ws: WebSocket, marker: string): Promise<string> {
   });
 }
 
+/** Waits for the server to close the socket after a release control frame. */
+function waitForClose(ws: WebSocket): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    watchdogCount += 1;
+    const timer = setTimeout(() => {
+      ws.off('close', onClose);
+      reject(new Error('terminal release close timed out'));
+    }, WAIT_TIMEOUT_MS);
+    const onClose = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    ws.once('close', onClose);
+  });
+}
+
 async function attachAndEcho(
   port: number,
   terminalId: string,
@@ -164,10 +188,13 @@ async function attachAndEcho(
 }
 
 describe('ManagedRuntimeTerminals', () => {
-  it('sizes the ceiling above the heaviest wait chain', () => {
-    // Deliberately independent of MAX_CHAIN_WINDOWS' own formula: a dropped
-    // window must red here instead of moving the ceiling with it.
-    expect(MAX_CHAIN_WINDOWS).toBe(MAX_MANAGED_SESSION_TERMINALS * 2 + 5);
+  it('applies a per-test ceiling above the heaviest wait chain', (ctx) => {
+    // File-wide, so no test is killed by the pool ceiling before one of its
+    // own watchdogs reports.
+    expect(ctx.task.timeout).toBe(TEST_TIMEOUT_MS);
+    expect(TEST_TIMEOUT_MS).toBeGreaterThanOrEqual(
+      WAIT_TIMEOUT_MS * MAX_CHAIN_WINDOWS,
+    );
   });
 
   it('refuses upgrades without the worker bearer/lease identity', async () => {
@@ -255,32 +282,27 @@ describe('ManagedRuntimeTerminals', () => {
     expect(ws.readyState).toBe(WebSocket.OPEN);
   });
 
-  it(
-    'caps live terminals per Session and frees the slot on release',
-    { timeout: TEST_TIMEOUT_MS },
-    async () => {
-      const port = await start();
-      const attached: WebSocket[] = [];
-      for (let i = 0; i < MAX_MANAGED_SESSION_TERMINALS; i += 1) {
-        attached.push(await attachAndEcho(port, `cap-${i}`, 'session-a'));
-      }
-      await expect(
-        connect(port, 'cap-over', 'session-a'),
-      ).rejects.toMatchObject({
-        status: 429,
-      });
-      // Another Session keeps its own budget within the worker-wide limit.
-      const other = await attachAndEcho(port, 'cap-other', 'session-b');
-      expect(other.readyState).toBe(WebSocket.OPEN);
-      // Releasing one terminal frees the Session's slot.
-      attached[0].send('\x00{"type":"release"}');
-      await new Promise<void>((resolve) =>
-        attached[0].once('close', () => resolve()),
-      );
-      const replacement = await attachAndEcho(port, 'cap-new', 'session-a');
-      expect(replacement.readyState).toBe(WebSocket.OPEN);
-    },
-  );
+  it('caps live terminals per Session and frees the slot on release', async () => {
+    watchdogCount = 0;
+    const port = await start();
+    const attached: WebSocket[] = [];
+    for (let i = 0; i < MAX_MANAGED_SESSION_TERMINALS; i += 1) {
+      attached.push(await attachAndEcho(port, `cap-${i}`, 'session-a'));
+    }
+    await expect(connect(port, 'cap-over', 'session-a')).rejects.toMatchObject({
+      status: 429,
+    });
+    // Another Session keeps its own budget within the worker-wide limit.
+    const other = await attachAndEcho(port, 'cap-other', 'session-b');
+    expect(other.readyState).toBe(WebSocket.OPEN);
+    // Releasing one terminal frees the Session's slot.
+    attached[0].send('\x00{"type":"release"}');
+    await waitForClose(attached[0]);
+    const replacement = await attachAndEcho(port, 'cap-new', 'session-a');
+    expect(replacement.readyState).toBe(WebSocket.OPEN);
+    // Every watchdog this body starts must fit inside the declared chain.
+    expect(watchdogCount).toBe(MAX_CHAIN_WINDOWS);
+  });
 
   it("refuses attaching to another Session's terminal", async () => {
     const port = await start();
@@ -295,7 +317,7 @@ describe('ManagedRuntimeTerminals', () => {
     const first = await attachAndEcho(port, 'retained', 'session-a');
     // Release removes the snapshot but retains the owner record.
     first.send('\x00{"type":"release"}');
-    await new Promise<void>((resolve) => first.once('close', () => resolve()));
+    await waitForClose(first);
     // A second Session must not claim the released id even though no live
     // snapshot exists.
     await expect(connect(port, 'retained', 'session-b')).rejects.toMatchObject({
