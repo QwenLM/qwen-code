@@ -7438,28 +7438,34 @@ describe('Server Config (config.ts)', () => {
       });
       afterEach(() => vi.unstubAllEnvs());
 
-      it('defaults to on for headless and off for every other surface', () => {
+      it('defaults to on for headless and the Ink TUI and off for every other surface', () => {
         for (const surface of AGENT_LOOP_SURFACES) {
           expect(makeConfig().isUnifiedAgentLoopEnabled(surface)).toBe(
-            surface === 'headless',
+            surface === 'headless' || surface === 'ink',
           );
         }
       });
 
-      it('keeps headless on its own loop when the setting is false', () => {
-        expect(
-          makeConfig({
-            unifiedAgentLoopEnabled: false,
-          }).isUnifiedAgentLoopEnabled('headless'),
-        ).toBe(false);
-      });
+      it.each(['headless', 'ink'] as const)(
+        'keeps %s on its own loop when the setting is false',
+        (surface) => {
+          expect(
+            makeConfig({
+              unifiedAgentLoopEnabled: false,
+            }).isUnifiedAgentLoopEnabled(surface),
+          ).toBe(false);
+        },
+      );
 
-      it('keeps headless on its own loop when the environment turns it off', () => {
-        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'headless=0');
-        expect(makeConfig().isUnifiedAgentLoopEnabled('headless')).toBe(false);
-        vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', '0');
-        expect(makeConfig().isUnifiedAgentLoopEnabled('headless')).toBe(false);
-      });
+      it.each(['headless', 'ink'] as const)(
+        'keeps %s on its own loop when the environment turns it off',
+        (surface) => {
+          vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', `${surface}=0`);
+          expect(makeConfig().isUnifiedAgentLoopEnabled(surface)).toBe(false);
+          vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', '0');
+          expect(makeConfig().isUnifiedAgentLoopEnabled(surface)).toBe(false);
+        },
+      );
 
       it('honors the constructor parameter', () => {
         expect(
@@ -7499,6 +7505,7 @@ describe('Server Config (config.ts)', () => {
         expect(config.isUnifiedAgentLoopEnabled('ink')).toBe(false);
         // An unnamed surface falls back to its default, on for headless.
         expect(config.isUnifiedAgentLoopEnabled('headless')).toBe(true);
+        expect(config.isUnifiedAgentLoopEnabled('opentui')).toBe(false);
       });
 
       it('resolves each surface independently', () => {

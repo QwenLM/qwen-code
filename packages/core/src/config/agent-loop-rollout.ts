@@ -40,7 +40,7 @@ export const AGENT_LOOP_SURFACES: readonly AgentLoopSurface[] = [
 export const UNIFIED_SURFACE_DEFAULTS: Record<AgentLoopSurface, boolean> = {
   headless: true,
   acp: false,
-  ink: false,
+  ink: true,
   opentui: false,
   'agent-core': false,
   speculation: false,
