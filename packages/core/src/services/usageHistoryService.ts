@@ -351,10 +351,9 @@ async function summarizeTranscriptFile(
     fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0),
   );
   // Own the fd explicitly (autoClose: false + finally close), matching
-  // sessionService's open-revalidate-stream shape: letting the stream close the
-  // raw fd leaves the FileHandle finalizer to close a possibly-recycled
-  // descriptor at GC time, and a stat() failure before the stream exists leaks
-  // the fd outright.
+  // sessionService's open-revalidate-stream shape. The finally is what closes
+  // the descriptor on every exit — including a stat() that rejects before any
+  // stream exists to close it, which would otherwise leak the fd on each retry.
   try {
     if (!(await handle.stat()).isFile()) {
       throw new Error(`non-regular transcript: ${filePath}`);
