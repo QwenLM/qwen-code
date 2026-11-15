@@ -2445,6 +2445,34 @@ describe('DiscoveredMCPTool', () => {
       expect(result.llmContent).toEqual([{ text: 'Success after reconnect' }]);
     });
 
+    it('does not reconnect a server the owner stopped while a call was in flight', async () => {
+      // `McpClient.disconnect()` marks the intent, then writes DISCONNECTED,
+      // then closes the transport. The in-flight call rejects with a
+      // connection error rather than an AbortError, so the non-abort path
+      // reaches `shouldAttemptReconnect` with the marker already set.
+      const toolName = 'literature.search_pubmed';
+      const { config, discoverToolsForServer, ensureTool } = registry({
+        ensured: safeTool({ toolName, client: okClient() }),
+        extra: noTruncation,
+      });
+      const mockMcpClient = failing(new Error('Connection closed'));
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      const reconnectTool = safeTool({
+        toolName,
+        config,
+        client: mockMcpClient,
+      });
+
+      const executePromise = exec(reconnectTool);
+      markMCPServerTeardownIntent(serverName);
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+
+      await expect(executePromise).rejects.toThrow('Connection closed');
+      expect(mockMcpClient.callTool).toHaveBeenCalledTimes(1);
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+      expect(ensureTool).not.toHaveBeenCalled();
+    });
+
     it('keeps configured App resource limits across a reconnect replay', async () => {
       const params = { param: 'test' };
       // 1 MiB + 1 byte: over the default limit, under the configured one.

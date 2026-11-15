@@ -726,6 +726,12 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       return false;
     }
 
+    // The owner is tearing this server down on purpose: reconnecting would
+    // resurrect a transport the operator just stopped.
+    if (isMCPServerTeardownIntent(this.serverName)) {
+      return false;
+    }
+
     // An executor-boundary guard authorizes one concrete invocation attempt.
     // A transport error is ambiguous: the MCP server may have applied the
     // side effect before its response was lost. Reusing the original allow
