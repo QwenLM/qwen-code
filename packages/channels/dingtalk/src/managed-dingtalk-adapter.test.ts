@@ -235,6 +235,23 @@ describe('managed DingTalk adapter inbound', () => {
     await adapter.disconnect();
   });
 
+  it('registers the dingtalk platform, clientId account and resolved policy (R1-19)', async () => {
+    const { adapter, plane } = await connectedAdapter();
+    expect(plane.register).toHaveLength(1);
+    expect(plane.register[0]).toEqual({
+      platform: 'dingtalk',
+      accountId: 'robot-app',
+      accountGeneration: 1,
+      policy: {
+        adapter: 'dingtalk',
+        senderPolicy: 'allowlist',
+        allowedSenders: ['staff-1'],
+        dispatchMode: 'followup',
+      },
+    });
+    await adapter.disconnect();
+  });
+
   it('skips a sender outside the allowlist', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
     fake.push(
