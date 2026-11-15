@@ -357,4 +357,8 @@ Keeping the published boot contract means slice C inherits the shipped binding p
 
 ### Not done
 
-Background Shell and `monitor` are out of this slice and remain #15512 goals, not silently dropped requirements. §6's boot-v2 document, marker and nonce are not implemented. No local or CI verification has run for any of the above: the full-tier MySQL 8.4 scenarios this needs — close with a Shell in flight, worker generation change, `LOST`/restart recovery, real concurrent ownership — are **unwritten and unrun**. Real-provider acceptance, UI verification, human review and deployment gates are all pending. This section records an implementation boundary, not a passing result.
+Background Shell and `monitor` are out of this slice and remain #15512 goals, not silently dropped requirements. §6's boot-v2 document, marker and nonce are not implemented.
+
+Locally verified so far: the dispatch lane's sequencing, the cancel and reconciliation fences, and the close/recovery arms — the last over the real JDBC repositories on both H2 and a disposable **MySQL 8.4** database (close with a Shell in flight, a `LOST` worker as insufficient proof, lost-recovery abandonment, worker generation change, and restart recovery). Each fence was mutation-checked against its own cases. The Checkstyle gate passes over the whole module.
+
+Still unrun: SpotBugs, the TypeScript consumer tests, real concurrent ownership on MySQL, the full `mysql-integration` and Hosted/fault profiles (CI owns those), and the producer's own byte-moving path against a real worker over HTTP — the close/recovery cases stand in for the publication verifier rather than exercising `begin`/`read`/`renew` end to end. Real-provider acceptance, UI verification, human review and deployment gates are all pending. This section records an implementation boundary and the evidence above, not full acceptance.

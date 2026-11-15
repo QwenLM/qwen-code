@@ -333,4 +333,8 @@ worker 的 status 同时也是本通道长命令唯一的结果来路：它自�
 
 ### 未做的部分
 
-后台 Shell 与 `monitor` 不在本切片内，它们仍是 #15512 的目标，不是被悄悄删掉的需求。§6 的 boot-v2 文档、marker 与 nonce 没有实现。以上任何一项都没有跑过本地或 CI 验证：它需要的 full-tier MySQL 8.4 场景——Shell 在飞时关闭、worker 换代、`LOST`/重启恢复、真实并发归属——**尚未编写、尚未运行**。真实 provider 验收、UI 验证、人工评审与部署门禁全部待定。本节记录的是实现边界，不是通过结果。
+后台 Shell 与 `monitor` 不在本切片内，它们仍是 #15512 的目标，不是被悄悄删掉的需求。§6 的 boot-v2 文档、marker 与 nonce 没有实现。
+
+已完成的本地验证：dispatch 通道的时序、cancel 与 reconciliation 两道 fence，以及关闭/恢复这几条——最后一组跑在真实 JDBC 仓储上，H2 与一次性 **MySQL 8.4** 数据库各跑一遍（Shell 在飞时关闭、`LOST` worker 不构成充分证明、丢失恢复的 abandon、worker 换代、重启恢复）。每道 fence 都用对应用例做过变异验证。整个模块的 Checkstyle 门禁通过。
+
+仍未运行：SpotBugs、TypeScript 消费方测试、MySQL 上的真实并发归属、完整的 `mysql-integration` 与 Hosted/fault profile（这些由 CI 负责），以及 producer 自己搬运字节那条路径对真实 worker 的 HTTP 端到端——关闭/恢复用例是用 publication verifier 的替身，没有真正跑通 `begin`/`read`/`renew`。真实 provider 验收、UI 验证、人工评审与部署门禁全部待定。本节记录的是实现边界与上述证据，不是完整验收。
