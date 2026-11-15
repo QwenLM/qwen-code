@@ -167,37 +167,6 @@ function withinRoot(root, p) {
   );
 }
 
-// The dev:ino identities of the regular files under the artifact dir. A hard
-// link gives one inode two names, so a --context path outside the trust root
-// can still be a file the round wrote inside it; realpath cannot see the
-// second name, but the inode matches (R17-1). lstat only and never following
-// a symlink, so a planted link cannot drag the walk outside the tree or cycle.
-function collectRegularFileIds(dir) {
-  const ids = new Set();
-  const stack = [dir];
-  while (stack.length > 0) {
-    const d = stack.pop();
-    let entries;
-    try {
-      entries = readdirSync(d);
-    } catch {
-      continue;
-    }
-    for (const name of entries) {
-      const p = join(d, name);
-      let st;
-      try {
-        st = lstatSync(p);
-      } catch {
-        continue;
-      }
-      if (st.isFile()) ids.add(`${st.dev}:${st.ino}`);
-      else if (st.isDirectory()) stack.push(p);
-    }
-  }
-  return ids;
-}
-
 /** OIDs are quoted at every length from 7 to 40; compare by prefix. */
 function sameCommit(a, b) {
   return a.startsWith(b) || b.startsWith(a);
@@ -1180,26 +1149,38 @@ function main(argv) {
     }
     const insideByPath = withinRoot(trustRoot, realContext);
     // A hard link gives a PR-writable file a second name outside the trust
-    // root; realpath cannot see it, so compare the context's inode against
-    // the artifact dir's regular files (R17-1). Only walk when the path test
-    // did not already refuse.
+    // root; realpath cannot see the source name, but a freshly written host
+    // copy has exactly one link, so a link count above one means the context
+    // shares an inode with another name the round may control (R17-1). This
+    // needs no walk of the PR-writable tree, so an unreadable subdirectory or
+    // a source outside the artifact dir cannot hide the alias (R1-1, R1-2).
+    // Only check when the path test did not already refuse.
     let contextIsAlias = false;
+    let contextLinks = 0;
     if (!insideByPath) {
       try {
         const ctxStat = statSync(realContext);
         if (ctxStat.isFile()) {
-          contextIsAlias = collectRegularFileIds(dir).has(
-            `${ctxStat.dev}:${ctxStat.ino}`,
-          );
+          contextLinks = ctxStat.nlink;
+          contextIsAlias = ctxStat.nlink !== 1;
         }
       } catch {
         // A missing/unreadable context is reported by the head-OID check below.
       }
     }
     if (insideByPath || contextIsAlias) {
-      process.stderr.write(
-        `verify-pr check: --context must not point inside the PR-writable worktree (${contextPath}): it cannot judge its own waiver — pass a host-held copy the round never saw\n`,
-      );
+      // One sentence per cause: for an alias or a '/' trust root the path is
+      // demonstrably outside the worktree, so the path-inside wording would
+      // be false and its remedy unreachable (R1-4).
+      let reason;
+      if (contextIsAlias) {
+        reason = `--context ${contextPath} is a hard link (${contextLinks} names) to a file the round can write; copy it instead of linking it, so the coordinates judging the waiver come from a host-held copy the round never saw`;
+      } else if (trustRoot === sep) {
+        reason = `--context ${contextPath} cannot be trusted: the trust root is '${trustRoot}', which contains every path — pass --context-root <pr-clone> naming the PR clone, or move the artifact dir out of root-level tmp/`;
+      } else {
+        reason = `--context must not point inside the PR-writable worktree (${contextPath}): it cannot judge its own waiver — pass a host-held copy the round never saw`;
+      }
+      process.stderr.write(`verify-pr check: ${reason}\n`);
       return 1;
     }
     const snapshotText = readIfExists(contextPath);

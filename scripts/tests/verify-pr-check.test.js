@@ -6,6 +6,9 @@
 
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
+  accessSync,
+  chmodSync,
+  constants,
   linkSync,
   mkdirSync,
   mkdtempSync,
@@ -2485,10 +2488,11 @@ describe('round-15 witnesses', () => {
 });
 
 describe('R17-1 witnesses', () => {
-  // The trust refusal must fail closed on two entrances the path-string test
-  // missed: a round dir directly under a root-level tmp/ derives trustRoot='/'
-  // (startsWith('//') never matches), and a hard link aliases a PR-writable
-  // file under a path outside the root (realpath cannot see the second name).
+  // The trust refusal must fail closed on the layouts the path-string test
+  // missed, and a hard link must not let a PR-writable snapshot judge its own
+  // waiver. The alias guard is the link count: a freshly written host copy has
+  // exactly one name, so a second name means the round may control the file —
+  // wherever the source lives, readable or not (R1-1, R1-2).
   const populate = (dir) => {
     const files = validFiles({});
     mkdirSync(join(dir, 'evidence'), { recursive: true });
@@ -2509,60 +2513,137 @@ describe('R17-1 witnesses', () => {
       encoding: 'utf8',
       env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
     });
+  // The derived-'/' witnesses need a real, writable root-level /tmp; CI routes
+  // os.tmpdir() elsewhere, so they must not rely on it (R1-3).
+  const rootTmpUsable = (() => {
+    try {
+      accessSync('/tmp', constants.W_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+  const cloneLayout = (prefix) => {
+    const base = mkdtempSync(join(tmpdir(), prefix));
+    tmpDirs.push(base);
+    const clone = join(base, 'clone');
+    const dir = join(clone, 'tmp', 'pr7-verify-20261115-000000');
+    mkdirSync(dir, { recursive: true });
+    populate(dir);
+    return { base, clone, dir };
+  };
 
-  it.skipIf(process.platform === 'win32')(
-    'refuses a context inside a round dir directly under root-level tmp',
+  it.skipIf(process.platform === 'win32' || !rootTmpUsable)(
+    'refuses a host copy when the round dir sits directly under root-level tmp',
     () => {
-      // Directly under tmpdir() (not a mkdtemp subdir): on Linux the tmp
-      // container's parent is '/', so the fallback trustRoot is '/'.
-      const dir = join(
-        tmpdir(),
-        `pr7-verify-r17a-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-      );
-      mkdirSync(dir, { recursive: true });
+      // Literal root-level /tmp so the fallback trustRoot is '/'. The snapshot
+      // is a genuine one-link host copy OUTSIDE the artifact dir, so only the
+      // root-aware path predicate can refuse it — not the link count.
+      const dir = mkdtempSync('/tmp/pr7-verify-r17a-');
       tmpDirs.push(dir);
       populate(dir);
-      writeFileSync(join(dir, 'context.json'), snapshot);
-      const res = run(['--context', join(dir, 'context.json'), dir]);
+      const base = mkdtempSync(join(tmpdir(), 'verify-pr-r17a-host-'));
+      tmpDirs.push(base);
+      const host = join(base, 'host-snapshot.json');
+      writeFileSync(host, snapshot);
+      const res = run(['--context', host, dir]);
       expect(res.status).toBe(1);
-      expect(res.stderr).toMatch(
-        /must not point inside the PR-writable worktree/,
-      );
+      expect(res.stderr).toMatch(/contains every path/);
     },
   );
 
   it.skipIf(process.platform === 'win32')(
     'refuses a hard-link alias of the round context planted outside the root',
     () => {
-      const base = mkdtempSync(join(tmpdir(), 'verify-pr-r17b-'));
-      tmpDirs.push(base);
-      const clone = join(base, 'clone');
-      const dir = join(clone, 'tmp', 'pr7-verify-20261115-000000');
-      mkdirSync(dir, { recursive: true });
-      populate(dir);
+      const { base, clone, dir } = cloneLayout('verify-pr-r17b-');
       writeFileSync(join(dir, 'context.json'), snapshot);
       const outside = join(base, 'host-copy.json');
       linkSync(join(dir, 'context.json'), outside);
       const res = run(['--context', outside, '--context-root', clone, dir]);
       expect(res.status).toBe(1);
-      expect(res.stderr).toMatch(
-        /must not point inside the PR-writable worktree/,
-      );
+      expect(res.stderr).toMatch(/hard link/);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a hard-link alias sourced from the clone verify-context sibling',
+    () => {
+      // R1-1: the source is outside the artifact dir, so a one-directory walk
+      // would miss it; the link count catches it regardless of source path.
+      const { base, clone, dir } = cloneLayout('verify-pr-r17b2-');
+      const siblingDir = join(clone, 'tmp', 'verify-context');
+      mkdirSync(siblingDir, { recursive: true });
+      writeFileSync(join(siblingDir, 'pr7.json'), snapshot);
+      const outside = join(base, 'host-copy.json');
+      linkSync(join(siblingDir, 'pr7.json'), outside);
+      const res = run(['--context', outside, '--context-root', clone, dir]);
+      expect(res.status).toBe(1);
+      expect(res.stderr).toMatch(/hard link/);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a hard-link alias whose in-dir source is unreadable',
+    () => {
+      // R1-2 / F1: the source sits under a chmod-000 subdirectory. The link
+      // count refuses without reading that directory, so hiding it cannot help.
+      const { base, clone, dir } = cloneLayout('verify-pr-r17b3-');
+      const hidden = join(dir, 'hidden');
+      mkdirSync(hidden, { recursive: true });
+      writeFileSync(join(hidden, 'planted.json'), snapshot);
+      const outside = join(base, 'host-copy.json');
+      linkSync(join(hidden, 'planted.json'), outside);
+      chmodSync(hidden, 0o000);
+      try {
+        const res = run(['--context', outside, '--context-root', clone, dir]);
+        expect(res.status).toBe(1);
+        expect(res.stderr).toMatch(/hard link/);
+      } finally {
+        chmodSync(hidden, 0o755);
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a hard-link alias under the fallback trust root',
+    () => {
+      // No --context-root: the alias is refused with the derived root too.
+      const { base, dir } = cloneLayout('verify-pr-r17b4-');
+      writeFileSync(join(dir, 'context.json'), snapshot);
+      const outside = join(base, 'host-copy.json');
+      linkSync(join(dir, 'context.json'), outside);
+      const res = run(['--context', outside, dir]);
+      expect(res.status).toBe(1);
+      expect(res.stderr).toMatch(/hard link/);
     },
   );
 
   it.skipIf(process.platform === 'win32')(
     'accepts a genuine host-held snapshot outside the root (no false alias)',
     () => {
-      const base = mkdtempSync(join(tmpdir(), 'verify-pr-r17c-'));
-      tmpDirs.push(base);
-      const clone = join(base, 'clone');
-      const dir = join(clone, 'tmp', 'pr7-verify-20261115-000000');
-      mkdirSync(dir, { recursive: true });
-      populate(dir);
+      const { base, clone, dir } = cloneLayout('verify-pr-r17c-');
       const outside = join(base, 'host-snapshot.json');
       writeFileSync(outside, snapshot);
       const res = run(['--context', outside, '--context-root', clone, dir]);
+      expect(res.status).toBe(0);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'accepts a host copy that only shares the clone name prefix',
+    () => {
+      // A bare startsWith(root) would falsely refuse this sibling (M7).
+      const base = mkdtempSync(join(tmpdir(), 'verify-pr-r17c2-'));
+      tmpDirs.push(base);
+      const clone = join(base, 'qwen-code');
+      const dir = join(clone, 'tmp', 'pr7-verify-20261115-000000');
+      mkdirSync(dir, { recursive: true });
+      populate(dir);
+      const beside = join(base, 'qwen-code-verify');
+      mkdirSync(beside, { recursive: true });
+      const host = join(beside, 'pr7.json');
+      writeFileSync(host, snapshot);
+      const res = run(['--context', host, '--context-root', clone, dir]);
       expect(res.status).toBe(0);
     },
   );
@@ -2577,9 +2658,7 @@ describe('R17-1 witnesses', () => {
       writeFileSync(host, snapshot);
       const res = run(['--context', host, '--context-root', '/', dir]);
       expect(res.status).toBe(1);
-      expect(res.stderr).toMatch(
-        /must not point inside the PR-writable worktree/,
-      );
+      expect(res.stderr).toMatch(/contains every path/);
     },
   );
 });
