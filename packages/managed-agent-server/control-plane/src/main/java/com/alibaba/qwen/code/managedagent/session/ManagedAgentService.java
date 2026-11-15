@@ -13,12 +13,20 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessRules;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicApprovalChangeResult;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicContentPart;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicEvent;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicItem;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicItemList;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicList;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicModelChangeResult;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicModelOption;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicModelSelection;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicSession;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicSessionApproval;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicSessionModels;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicSessionOptions;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicTranscript;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicTurn;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicWorkspace;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionCapabilities;
@@ -394,6 +402,76 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                 expectedRevision, harness.supportsApprovalSelection(), harness.supportsAgentDefinitionApprovalSelection(),
                 planMode, harness.supportsPlanMode(), harness.supportsLiveApprovalSelection(), rules,
                 harness.supportsPermissionRules(), harness.supportsAutoApproval());
+    }
+
+    public PublicSessionOptions queryPublicSessionOptions(String tenantId, String actorId, String agentId) {
+        WebShellSessionOptions options = queryWebShellSessionOptions(tenantId, actorId, agentId);
+        return new PublicSessionOptions(options.approvalMode(), options.availableApprovalModes(),
+                options.planModeSupported(), options.inputAttachments(), options.skillsSupported(),
+                options.modelSelectionSupported());
+    }
+
+    public PublicSessionModels queryPublicSessionModels(String tenantId, String actorId, String sessionId) {
+        WebShellSessionModels models = queryWebShellSessionModels(tenantId, actorId, sessionId);
+        return new PublicSessionModels(models.models().stream()
+                .map(option -> new PublicModelOption(option.modelId(), option.label())).toList(),
+                publicModelSelection(models.modelSelection()), models.supported());
+    }
+
+    public PublicModelChangeResult changePublicSessionModel(String tenantId, String actorId,
+            String sessionId, String key, String modelId, long expectedRevision) {
+        WebShellModelChangeResult result = changeWebShellSessionModel(tenantId, actorId, sessionId,
+                key, modelId, expectedRevision);
+        return new PublicModelChangeResult(result.sessionId(),
+                publicModelSelection(result.modelSelection()), result.replayed());
+    }
+
+    public PublicSessionApproval queryPublicSessionApproval(String tenantId, String actorId, String sessionId) {
+        WebShellSessionApproval approval = queryWebShellSessionApproval(tenantId, actorId, sessionId);
+        return new PublicSessionApproval(approval.approvalMode(), approval.approvalRevision(),
+                approval.availableApprovalModes(), approval.supported(), approval.planMode(),
+                approval.planModeSupported(), approval.liveSupported(), approval.permissionRulesSupported(),
+                approval.permissionRules());
+    }
+
+    public PublicApprovalChangeResult changePublicSessionApproval(String tenantId, String actorId,
+            String sessionId, String key, String mode, long expectedRevision, Boolean planMode,
+            Map<?, ?> requestedRules) {
+        WebShellApprovalChangeResult result = changeWebShellSessionApproval(tenantId, actorId, sessionId,
+                key, mode, expectedRevision, planMode, requestedRules);
+        return new PublicApprovalChangeResult(result.sessionId(), result.approvalMode(),
+                result.approvalRevision(), result.replayed(), result.planMode(), result.permissionRules());
+    }
+
+    private static PublicModelSelection publicModelSelection(WebShellModelSelection selection) {
+        return selection == null ? null : new PublicModelSelection(selection.modelId(), selection.revision());
+    }
+
+    public PublicTranscript publicTranscript(String tenantId, String actorId,
+            String sessionId, String cursor, int requestedLimit) {
+        requireReadableSession(tenantId, actorId, sessionId);
+        var page = store.findMessagePage(tenantId, sessionId, cursor, requestedLimit, true);
+        return new PublicTranscript(page.items().stream().map(this::publicItem).toList(),
+                page.events().stream().map(this::publicEvent).toList(), page.coveredSequence(),
+                page.nextCursor(), page.hasMore(), page.coveredSequence());
+    }
+
+    public PublicItemList publicRecentTranscriptItems(String tenantId, String actorId,
+            String sessionId, String cursor, int requestedLimit) {
+        return publicMessageExportPage(tenantId, actorId, sessionId, cursor, requestedLimit, true);
+    }
+
+    public PublicItemList publicExportPage(String tenantId, String actorId,
+            String sessionId, String cursor, int requestedLimit) {
+        return publicMessageExportPage(tenantId, actorId, sessionId, cursor, requestedLimit, false);
+    }
+
+    private PublicItemList publicMessageExportPage(String tenantId, String actorId,
+            String sessionId, String cursor, int requestedLimit, boolean backward) {
+        requireReadableSession(tenantId, actorId, sessionId);
+        var page = store.findMessagePage(tenantId, sessionId, cursor, requestedLimit, backward);
+        return new PublicItemList("list", page.items().stream().map(this::publicItem).toList(),
+                page.hasMore(), page.nextCursor(), page.throughSequence());
     }
 
     private static void requireModelActor(String actorId) {

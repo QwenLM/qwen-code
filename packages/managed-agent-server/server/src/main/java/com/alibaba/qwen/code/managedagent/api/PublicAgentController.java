@@ -5,13 +5,20 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.CompressSessionRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.CreateSessionRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicApprovalChangeResult;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicChangeApprovalRequest;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicChangeModelRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicCommandOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicContextCompressionOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicItemList;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicList;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicModelChangeResult;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicSession;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicSessionApproval;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicSessionModels;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicTask;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicTaskEvent;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicTranscript;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicTurn;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.RecoveryRecheckRequest;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionEventRequest;
@@ -329,6 +336,61 @@ public class PublicAgentController {
         return ResponseEntity.accepted().body(taskCancels.cancelPublic(
                 tenant.tenantId(), tenant.actorId(), idempotencyKey,
                 sessionId, taskId));
+    }
+
+    @GetMapping("/{sessionId}/models")
+    public PublicSessionModels models(TenantContext tenant, @PathVariable String sessionId) {
+        return service.queryPublicSessionModels(tenant.tenantId(), tenant.requireActorId(), sessionId);
+    }
+
+    @PostMapping("/{sessionId}/models")
+    public PublicModelChangeResult changeModel(TenantContext tenant, @PathVariable String sessionId,
+            @RequestHeader("Idempotency-Key") String idempotencyKey,
+            @Valid @RequestBody PublicChangeModelRequest request) {
+        return service.changePublicSessionModel(tenant.tenantId(), tenant.requireActorId(), sessionId,
+                idempotencyKey, request.modelId(), request.expectedRevision());
+    }
+
+    @GetMapping("/{sessionId}/approval")
+    public PublicSessionApproval approval(TenantContext tenant, @PathVariable String sessionId) {
+        return service.queryPublicSessionApproval(tenant.tenantId(), tenant.requireActorId(), sessionId);
+    }
+
+    @PostMapping("/{sessionId}/approval")
+    public PublicApprovalChangeResult changeApproval(TenantContext tenant, @PathVariable String sessionId,
+            @RequestHeader("Idempotency-Key") String idempotencyKey,
+            @Valid @RequestBody PublicChangeApprovalRequest request) {
+        return service.changePublicSessionApproval(tenant.tenantId(), tenant.requireActorId(), sessionId,
+                idempotencyKey, request.approvalMode(), request.expectedRevision(), request.planMode(),
+                request.permissionRules());
+    }
+
+    @GetMapping("/{sessionId}/transcript")
+    public PublicTranscript transcript(TenantContext tenant, @PathVariable String sessionId,
+            @RequestParam(required = false) String cursor,
+            @RequestParam(defaultValue = "100") int limit) {
+        return service.publicTranscript(tenant.tenantId(), tenant.actorId(), sessionId, cursor, pageLimit(limit));
+    }
+
+    @GetMapping("/{sessionId}/transcript/items")
+    public PublicItemList transcriptItems(TenantContext tenant, @PathVariable String sessionId,
+            @RequestParam(required = false) String cursor,
+            @RequestParam(defaultValue = "100") int limit) {
+        return service.publicRecentTranscriptItems(tenant.tenantId(), tenant.actorId(), sessionId, cursor, pageLimit(limit));
+    }
+
+    @GetMapping("/{sessionId}/export")
+    public PublicItemList export(TenantContext tenant, @PathVariable String sessionId,
+            @RequestParam(required = false) String cursor,
+            @RequestParam(defaultValue = "100") int limit) {
+        return service.publicExportPage(tenant.tenantId(), tenant.actorId(), sessionId, cursor, pageLimit(limit));
+    }
+
+    private static int pageLimit(int limit) {
+        if (limit < 1 || limit > 100) {
+            throw new ManagedAgentException(400, "invalid_request", "limit must be between 1 and 100.");
+        }
+        return limit;
     }
 
     private static long parseSequence(String header, long fallback) {

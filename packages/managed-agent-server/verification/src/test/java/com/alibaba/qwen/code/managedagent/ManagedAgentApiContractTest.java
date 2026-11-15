@@ -280,6 +280,18 @@ class ManagedAgentApiContractTest {
                             List.of("PublicContentPart")),
                     entry(PublicItem.class, List.of("PublicItem")),
                     entry(PublicItemList.class, List.of("PublicItemList")),
+                    entry(ApiModels.PublicSessionOptions.class, List.of("PublicSessionOptions")),
+                    entry(ApiModels.PublicModelOption.class, List.of("PublicModelOption")),
+                    entry(ApiModels.PublicModelSelection.class, List.of("PublicModelSelection")),
+                    entry(ApiModels.PublicSessionModels.class, List.of("PublicSessionModels")),
+                    entry(ApiModels.PublicModelChangeResult.class, List.of("PublicModelChangeResult")),
+                    entry(ApiModels.PublicSessionApproval.class, List.of("PublicSessionApproval")),
+                    entry(ApiModels.PublicApprovalChangeResult.class, List.of("PublicApprovalChangeResult")),
+                    entry(ApiModels.PublicChangeModelRequest.class, List.of("PublicChangeModelRequest")),
+                    entry(ApiModels.PublicChangeApprovalRequest.class, List.of("PublicChangeApprovalRequest")),
+                    entry(ApiModels.PublicSkill.class, List.of("PublicSkill")),
+                    entry(ApiModels.PublicSessionSkills.class, List.of("PublicSessionSkills")),
+                    entry(ApiModels.PublicTranscript.class, List.of("PublicTranscript")),
                     entry(WebShellListRequest.class,
                             List.of("WebShellListRequest")),
                     entry(WebShellSessionRequest.class,
@@ -1667,6 +1679,64 @@ class ManagedAgentApiContractTest {
         exchange(drift, "changeWebShellSessionModel", 401,
                 post(WEB_SHELL + "/session-models/change").header(TENANT, workspaceTenant),
                 "{\"sessionId\":\"" + webBoundId + "\",\"modelId\":\"model-a\",\"expectedRevision\":0,\"idempotencyKey\":\"model-key\"}");
+        exchange(drift, "queryPublicSessionOptions", 200,
+                get("/v1/agents/session-options").param("agent_id", "qwen-code")
+                        .header(TENANT, workspaceTenant).principal(actor), null);
+        exchange(drift, "queryPublicSessionOptions", 401,
+                get("/v1/agents/session-options").param("agent_id", "qwen-code")
+                        .header(TENANT, workspaceTenant), null);
+        exchange(drift, "getPublicSessionModels", 200,
+                get("/v1/agents/sessions/{sessionId}/models", webBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor), null);
+        exchange(drift, "getPublicSessionModels", 401,
+                get("/v1/agents/sessions/{sessionId}/models", webBoundId)
+                        .header(TENANT, workspaceTenant), null);
+        exchange(drift, "changePublicSessionModel", 409,
+                post("/v1/agents/sessions/{sessionId}/models", webBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor).header(IDEMPOTENCY_KEY, "model-key"),
+                "{\"model_id\":\"model-a\",\"expected_revision\":0}");
+        exchange(drift, "changePublicSessionModel", 401,
+                post("/v1/agents/sessions/{sessionId}/models", webBoundId)
+                        .header(TENANT, workspaceTenant).header(IDEMPOTENCY_KEY, "model-key"),
+                "{\"model_id\":\"model-a\",\"expected_revision\":0}");
+        exchange(drift, "getPublicSessionApproval", 200,
+                get("/v1/agents/sessions/{sessionId}/approval", webBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor), null);
+        exchange(drift, "getPublicSessionApproval", 401,
+                get("/v1/agents/sessions/{sessionId}/approval", webBoundId)
+                        .header(TENANT, workspaceTenant), null);
+        exchange(drift, "changePublicSessionApproval", 409,
+                post("/v1/agents/sessions/{sessionId}/approval", webBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor).header(IDEMPOTENCY_KEY, "approval-key"),
+                "{\"approval_mode\":\"yolo\",\"expected_revision\":0}");
+        exchange(drift, "changePublicSessionApproval", 401,
+                post("/v1/agents/sessions/{sessionId}/approval", webBoundId)
+                        .header(TENANT, workspaceTenant).header(IDEMPOTENCY_KEY, "approval-key"),
+                "{\"approval_mode\":\"yolo\",\"expected_revision\":0}");
+        exchange(drift, "getPublicSessionSkills", 200,
+                get("/v1/agents/sessions/{sessionId}/skills", webBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor), null);
+        exchange(drift, "getPublicSessionSkills", 401,
+                get("/v1/agents/sessions/{sessionId}/skills", webBoundId)
+                        .header(TENANT, workspaceTenant), null);
+        exchange(drift, "getPublicTranscript", 200,
+                get("/v1/agents/sessions/{sessionId}/transcript", webBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor), null);
+        exchange(drift, "getPublicTranscript", 404,
+                get("/v1/agents/sessions/{sessionId}/transcript", webBoundId)
+                        .header(TENANT, otherTenant), null);
+        exchange(drift, "listPublicTranscriptItems", 200,
+                get("/v1/agents/sessions/{sessionId}/transcript/items", webBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor), null);
+        exchange(drift, "listPublicTranscriptItems", 404,
+                get("/v1/agents/sessions/{sessionId}/transcript/items", webBoundId)
+                        .header(TENANT, otherTenant), null);
+        exchange(drift, "exportPublicSession", 200,
+                get("/v1/agents/sessions/{sessionId}/export", webBoundId)
+                        .header(TENANT, workspaceTenant).principal(actor), null);
+        exchange(drift, "exportPublicSession", 404,
+                get("/v1/agents/sessions/{sessionId}/export", webBoundId)
+                        .header(TENANT, otherTenant), null);
         exchangeAutomations(drift, workspaceTenant, otherTenant, actor,
                 publicBoundId);
         exchangeDiagnostics(drift, workspaceTenant, otherTenant, actor, publicBoundId);

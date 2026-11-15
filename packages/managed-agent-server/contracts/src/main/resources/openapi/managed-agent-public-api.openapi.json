@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.119.0",
+    "version": "1.120.0",
     "description": "Canonical first-release contract for the public Managed Agent resources and the WebShell adapter. Implemented routes and fields describe the current matching Server, Broker, Harness and WebShell build. Partial entries have remaining implementation or contract-test work; planned entries are not current server capabilities and must be excluded from production SDKs. Turn submission and cancellation always return the durable operation identifier and its persisted admission and delivery state. Session-list cursors are bound to the normalized archive state and title query. Earlier development API shapes, checkpoints and database catalogs are unsupported; initialize fresh state for this build. Runtime feature capabilities and deployment policy still govern optional execution modes. Public conversation history reads directly from mutable message projections; persisted conversation snapshots and fixed-content paging are no longer provided. Retained removed MCP-management entries stay in the response snapshot: only non-removed entries count toward the 32-server selection capacity, so the servers array may exceed 32 while preserving tombstones."
   },
   "servers": [
@@ -2124,6 +2124,204 @@
               "Cache-Control": { "schema": { "type": "string", "const": "private, no-store" } }
             },
             "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicToolDetails" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/agents/session-options": {
+      "get": {
+        "tags": ["Public Sessions"],
+        "operationId": "queryPublicSessionOptions",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Returns the approval, plan-mode, attachment, skill and model-selection options available when creating a Session for the given agent. Requires a trusted actor.",
+        "parameters": [
+          { "name": "agent_id", "in": "query", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 128 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session creation options for the agent.",
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
+              "Cache-Control": { "schema": { "type": "string", "const": "no-store" } }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicSessionOptions" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/models": {
+      "parameters": [ { "$ref": "#/components/parameters/SessionId" } ],
+      "get": {
+        "tags": ["Public Sessions"],
+        "operationId": "getPublicSessionModels",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Lists the selectable models and the current model selection for a workspace-bound Session. Requires a trusted actor with read access.",
+        "responses": {
+          "200": {
+            "description": "Model options and current selection.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicSessionModels" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "post": {
+        "tags": ["Public Sessions"],
+        "operationId": "changePublicSessionModel",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Idempotently changes the Session model at the expected revision. Requires a trusted actor with operator access.",
+        "parameters": [ { "$ref": "#/components/parameters/IdempotencyKey" } ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicChangeModelRequest" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "The updated model selection.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicModelChangeResult" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/approval": {
+      "parameters": [ { "$ref": "#/components/parameters/SessionId" } ],
+      "get": {
+        "tags": ["Public Sessions"],
+        "operationId": "getPublicSessionApproval",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Reads the approval mode, revision and available modes for a workspace-bound Session. Requires a trusted actor with read access.",
+        "responses": {
+          "200": {
+            "description": "Approval selection and capabilities.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicSessionApproval" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      },
+      "post": {
+        "tags": ["Public Sessions"],
+        "operationId": "changePublicSessionApproval",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Idempotently changes the approval mode, plan mode and permission rules at the expected revision. Requires the Session owner.",
+        "parameters": [ { "$ref": "#/components/parameters/IdempotencyKey" } ],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicChangeApprovalRequest" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "The updated approval selection.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicApprovalChangeResult" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/skills": {
+      "parameters": [ { "$ref": "#/components/parameters/SessionId" } ],
+      "get": {
+        "tags": ["Public Sessions"],
+        "operationId": "getPublicSessionSkills",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Lists the skills available to a workspace-bound Session. Requires a trusted actor with read access.",
+        "responses": {
+          "200": {
+            "description": "Session skills.",
+            "headers": {
+              "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
+              "Cache-Control": { "schema": { "type": "string", "const": "no-store" } }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicSessionSkills" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/transcript": {
+      "parameters": [ { "$ref": "#/components/parameters/SessionId" } ],
+      "get": {
+        "tags": ["Public Sessions"],
+        "operationId": "getPublicTranscript",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Reads a bounded page of transcript items and projected events for the Session, with a cursor for older pages.",
+        "parameters": [
+          { "name": "cursor", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 4096 } },
+          { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 100 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Transcript page.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicTranscript" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/transcript/items": {
+      "parameters": [ { "$ref": "#/components/parameters/SessionId" } ],
+      "get": {
+        "tags": ["Public Sessions"],
+        "operationId": "listPublicTranscriptItems",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Reads a bounded reverse-ordered page of transcript items for the Session.",
+        "parameters": [
+          { "name": "cursor", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 4096 } },
+          { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 100 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Transcript item page.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicItemList" } } }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" }
+        }
+      }
+    },
+    "/v1/agents/sessions/{sessionId}/export": {
+      "parameters": [ { "$ref": "#/components/parameters/SessionId" } ],
+      "get": {
+        "tags": ["Public Sessions"],
+        "operationId": "exportPublicSession",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Reads a bounded forward page of Session items for export, with a snapshot watermark.",
+        "parameters": [
+          { "name": "cursor", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 4096 } },
+          { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 100 } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Export item page.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicItemList" } } }
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
@@ -17995,6 +18193,142 @@
             "$ref": "#/components/schemas/ManagedPermissionRules",
             "description": "Immutable rules snapshot for this Turn; omitted when empty."
           }
+        }
+      },
+      "PublicSessionOptions": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["approval_mode", "available_approval_modes", "plan_mode_supported", "input_attachments", "skills_supported", "model_selection_supported"],
+        "properties": {
+          "approval_mode": { "type": ["string", "null"] },
+          "available_approval_modes": { "type": "array", "items": { "type": "string" } },
+          "plan_mode_supported": { "type": "boolean" },
+          "input_attachments": { "type": "boolean" },
+          "skills_supported": { "type": "boolean" },
+          "model_selection_supported": { "type": "boolean" }
+        }
+      },
+      "PublicModelOption": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["model_id", "label"],
+        "properties": {
+          "model_id": { "type": "string" },
+          "label": { "type": "string" }
+        }
+      },
+      "PublicModelSelection": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["revision"],
+        "properties": {
+          "model_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "revision": { "type": "integer" }
+        }
+      },
+      "PublicSessionModels": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["models", "model_selection", "supported"],
+        "properties": {
+          "models": { "type": "array", "items": { "$ref": "#/components/schemas/PublicModelOption" } },
+          "model_selection": { "$ref": "#/components/schemas/PublicModelSelection" },
+          "supported": { "type": "boolean" }
+        }
+      },
+      "PublicModelChangeResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["session_id", "model_selection", "replayed"],
+        "properties": {
+          "session_id": { "type": "string" },
+          "model_selection": { "$ref": "#/components/schemas/PublicModelSelection" },
+          "replayed": { "type": "boolean" }
+        }
+      },
+      "PublicSessionApproval": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["approval_mode", "approval_revision", "available_approval_modes", "supported", "plan_mode", "plan_mode_supported", "live_supported", "permission_rules_supported"],
+        "properties": {
+          "approval_mode": { "type": ["string", "null"] },
+          "approval_revision": { "type": "integer" },
+          "available_approval_modes": { "type": "array", "items": { "type": "string" } },
+          "supported": { "type": "boolean" },
+          "plan_mode": { "type": "boolean" },
+          "plan_mode_supported": { "type": "boolean" },
+          "live_supported": { "type": "boolean" },
+          "permission_rules_supported": { "type": "boolean" },
+          "permission_rules": {
+            "type": "object",
+            "additionalProperties": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      },
+      "PublicApprovalChangeResult": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["session_id", "approval_mode", "approval_revision", "replayed", "plan_mode"],
+        "properties": {
+          "session_id": { "type": "string" },
+          "approval_mode": { "type": ["string", "null"] },
+          "approval_revision": { "type": "integer" },
+          "replayed": { "type": "boolean" },
+          "plan_mode": { "type": "boolean" },
+          "permission_rules": {
+            "type": "object",
+            "additionalProperties": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      },
+      "PublicChangeModelRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["model_id", "expected_revision"],
+        "properties": {
+          "model_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "expected_revision": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+        }
+      },
+      "PublicChangeApprovalRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["approval_mode", "expected_revision"],
+        "properties": {
+          "approval_mode": { "type": "string", "minLength": 1 },
+          "expected_revision": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+          "plan_mode": { "type": ["boolean", "null"] },
+          "permission_rules": { "type": ["object", "null"], "additionalProperties": true }
+        }
+      },
+      "PublicSkill": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "description"],
+        "properties": {
+          "name": { "type": "string" },
+          "description": { "type": "string" }
+        }
+      },
+      "PublicSessionSkills": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["skills"],
+        "properties": {
+          "skills": { "type": "array", "items": { "$ref": "#/components/schemas/PublicSkill" } }
+        }
+      },
+      "PublicTranscript": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["items", "events", "covered_sequence", "has_more", "last_sequence"],
+        "properties": {
+          "items": { "type": "array", "items": { "$ref": "#/components/schemas/PublicItem" } },
+          "events": { "type": "array", "items": { "$ref": "#/components/schemas/PublicEvent" } },
+          "covered_sequence": { "type": "integer" },
+          "older_cursor": { "type": ["string", "null"] },
+          "has_more": { "type": "boolean" },
+          "last_sequence": { "type": "integer" }
         }
       },
       "PublicFileEntry": {

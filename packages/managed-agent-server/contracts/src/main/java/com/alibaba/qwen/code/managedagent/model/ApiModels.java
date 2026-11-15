@@ -308,6 +308,77 @@ public final class ApiModels {
                     long snapshotThroughSequence) {
     }
 
+    public record PublicSessionOptions(
+            @JsonProperty("approval_mode") String approvalMode,
+            @JsonProperty("available_approval_modes") List<String> availableApprovalModes,
+            @JsonProperty("plan_mode_supported") boolean planModeSupported,
+            @JsonProperty("input_attachments") boolean inputAttachments,
+            @JsonProperty("skills_supported") boolean skillsSupported,
+            @JsonProperty("model_selection_supported") boolean modelSelectionSupported) {
+    }
+
+    public record PublicModelOption(@JsonProperty("model_id") String modelId, String label) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicModelSelection(@JsonProperty("model_id") String modelId, long revision) {
+    }
+
+    public record PublicSessionModels(List<PublicModelOption> models,
+            @JsonProperty("model_selection") PublicModelSelection modelSelection, boolean supported) {
+    }
+
+    public record PublicModelChangeResult(@JsonProperty("session_id") String sessionId,
+            @JsonProperty("model_selection") PublicModelSelection modelSelection, boolean replayed) {
+    }
+
+    public record PublicSessionApproval(
+            @JsonProperty("approval_mode") String approvalMode,
+            @JsonProperty("approval_revision") long approvalRevision,
+            @JsonProperty("available_approval_modes") List<String> availableApprovalModes,
+            boolean supported,
+            @JsonProperty("plan_mode") boolean planMode,
+            @JsonProperty("plan_mode_supported") boolean planModeSupported,
+            @JsonProperty("live_supported") boolean liveSupported,
+            @JsonProperty("permission_rules_supported") boolean permissionRulesSupported,
+            @JsonInclude(JsonInclude.Include.NON_NULL)
+            @JsonProperty("permission_rules") Map<String, List<String>> permissionRules) {
+    }
+
+    public record PublicApprovalChangeResult(@JsonProperty("session_id") String sessionId,
+            @JsonProperty("approval_mode") String approvalMode,
+            @JsonProperty("approval_revision") long approvalRevision, boolean replayed,
+            @JsonProperty("plan_mode") boolean planMode,
+            @JsonInclude(JsonInclude.Include.NON_NULL)
+            @JsonProperty("permission_rules") Map<String, List<String>> permissionRules) {
+    }
+
+    public record PublicChangeModelRequest(
+            @JsonProperty("model_id") @NotBlank @Size(max = 512) String modelId,
+            @JsonProperty("expected_revision") @NotNull @Min(0) @Max(9_007_199_254_740_991L) Long expectedRevision) {
+    }
+
+    public record PublicChangeApprovalRequest(
+            @JsonProperty("approval_mode") @NotBlank String approvalMode,
+            @JsonProperty("expected_revision") @NotNull @Min(0) @Max(9_007_199_254_740_991L) Long expectedRevision,
+            @JsonProperty("plan_mode") Boolean planMode,
+            @JsonProperty("permission_rules") Map<String, Object> permissionRules) {
+    }
+
+    public record PublicSkill(String name, String description) {
+    }
+
+    public record PublicSessionSkills(List<PublicSkill> skills) {
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record PublicTranscript(List<PublicItem> items, List<PublicEvent> events,
+            @JsonProperty("covered_sequence") long coveredSequence,
+            @JsonProperty("older_cursor") String olderCursor,
+            @JsonProperty("has_more") boolean hasMore,
+            @JsonProperty("last_sequence") long lastSequence) {
+    }
+
     public record WebShellListRequest(String cursor, Integer limit, String archiveState,
             String titleQuery) {
         public WebShellListRequest(String cursor, Integer limit, String archiveState) {

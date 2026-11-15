@@ -1584,6 +1584,9 @@ public class SurfaceAdmissionAcceptanceTest {
             query.add("workspace_id=workspace");
             query.add("cwd_relative=.");
         }
+        if (entry.surface() == Surface.PUBLIC && entry.capabilities().contains(Capability.SESSION_OPTIONS)) {
+            query.add("agent_id=qwen-code");
+        }
         if (entry.capabilities().contains(Capability.WORKSPACE_FILES_UPLOAD)) {
             if (entry.surface() == Surface.PUBLIC) {
                 query.add("workspace_id=workspace");
@@ -1858,9 +1861,13 @@ public class SurfaceAdmissionAcceptanceTest {
                 yield "{" + (publicSurface ? "" : "\"sessionId\":\"" + session + "\",\"idempotencyKey\":\"mcp-management\",")
                         + "\"action\":\"restart\",\"serverId\":\"docs\",\"expectedRevision\":0}";
             }
-            case SESSION_APPROVAL_CHANGE -> "{\"sessionId\":\"" + session
+            case SESSION_APPROVAL_CHANGE -> publicSurface
+                    ? "{\"approval_mode\":\"yolo\",\"expected_revision\":0}"
+                    : "{\"sessionId\":\"" + session
                     + "\",\"idempotencyKey\":\"approval-change\",\"approvalMode\":\"yolo\",\"expectedRevision\":0}";
-            case SESSION_MODEL_CHANGE -> "{\"sessionId\":\"" + session
+            case SESSION_MODEL_CHANGE -> publicSurface
+                    ? "{\"model_id\":\"model-a\",\"expected_revision\":0}"
+                    : "{\"sessionId\":\"" + session
                     + "\",\"idempotencyKey\":\"model-change\",\"modelId\":\"model-a\",\"expectedRevision\":0}";
             case WORKSPACE_LIST -> "{}";
             case WORKSPACE_GET -> "{\"workspaceId\":\"ws\"}";
