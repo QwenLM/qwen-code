@@ -13,6 +13,7 @@
  */
 
 import * as path from 'node:path';
+import * as fs from 'node:fs';
 import type { PermissionCheckContext } from '../permissions/types.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
 import type {
@@ -168,7 +169,7 @@ export async function isPathDeniedByReadRule(
     if (
       pm.hasPathScopedAskRule(invocationContext) &&
       invocationContext.filePath &&
-      isPathWithin(invocationContext.filePath, filePath)
+      isPathWithinCanonical(invocationContext.filePath, filePath)
     ) {
       return false;
     }
@@ -176,8 +177,17 @@ export async function isPathDeniedByReadRule(
   return true;
 }
 
-function isPathWithin(root: string, candidate: string): boolean {
-  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+function isPathWithinCanonical(root: string, candidate: string): boolean {
+  let canonicalRoot: string;
+  let canonicalCandidate: string;
+  try {
+    const realpath = fs.realpathSync.native ?? fs.realpathSync;
+    canonicalRoot = realpath(path.resolve(root));
+    canonicalCandidate = realpath(path.resolve(candidate));
+  } catch {
+    return false;
+  }
+  const relative = path.relative(canonicalRoot, canonicalCandidate);
   return (
     relative === '' ||
     (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative))

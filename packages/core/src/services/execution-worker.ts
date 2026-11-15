@@ -6,7 +6,7 @@
 
 import { createInterface } from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
-import { Config, deriveConfig } from '../config/config.js';
+import { Config } from '../config/config.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
 import type {
   ExecutionEnvironment,
@@ -54,13 +54,16 @@ export function createExecutionWorkerEnvironment(
   });
   // The worker is intentionally constructed without the host's full Config
   // lifecycle, but its file tools still need the same permission rules when
-  // filtering search results. Initialise a worker-local manager over the
-  // resolved rules and expose it through a narrow Config overlay.
+  // filtering search results. Keep the concrete Config instance so edit tools
+  // can persist "always allow" approval-mode changes, and inject only the
+  // worker-local permission manager as an own getter.
   const permissionManager = new PermissionManager(baseConfig);
   permissionManager.initialize();
-  const config = deriveConfig(baseConfig, {
-    getPermissionManager: () => permissionManager,
+  Object.defineProperty(baseConfig, 'getPermissionManager', {
+    value: () => permissionManager,
+    configurable: true,
   });
+  const config = baseConfig;
   if (options.outputDirectory) {
     config.storage.getProjectTempDir = () => options.outputDirectory!;
     config.storage.getToolResultsDir = () => options.outputDirectory!;
