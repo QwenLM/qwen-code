@@ -279,6 +279,11 @@ async function fixture(
   // makes a lost CommonJS marker fail in every lane; without it, only lanes
   // that leave QWEN_TUI_ACCEPTANCE_OUT unset (landing under the repo's
   // "type": "module" root) would catch the loss.
+  assert.equal(
+    path.relative(esm, bin).split(path.sep)[0],
+    'bin',
+    'fixture bin must sit inside the ESM-scoped ancestor',
+  );
   writeJSON(path.join(esm, 'package.json'), { type: 'module' });
   writeJSON(path.join(bin, 'package.json'), { type: 'commonjs' });
   for (const name of ['vim', 'open', 'xdg-open'])
