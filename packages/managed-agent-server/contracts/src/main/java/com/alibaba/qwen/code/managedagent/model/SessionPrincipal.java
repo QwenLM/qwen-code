@@ -63,6 +63,46 @@ public record SessionPrincipal(String tenantId, String userId,
         return joined.getBytes(StandardCharsets.UTF_8);
     }
 
+    /**
+     * The user a principal-encoded receipt stamp names, or null when the
+     * bytes are not a principal encoding. A rolling deploy replays through
+     * either recording twin, so the raw actor key of the same user must
+     * still answer a principal-stamped receipt. The flag and subject
+     * members are not re-validated here: the stamp was written by a trusted
+     * boundary, and this match only widens replay admission to the user the
+     * stamp itself recorded.
+     */
+    public static String replayUserId(byte[] stamp) {
+        if (stamp == null || stamp.length == 0) {
+            return null;
+        }
+        int firstNul = -1;
+        int secondNul = -1;
+        for (int index = 0; index < stamp.length; index++) {
+            if (stamp[index] != 0) {
+                continue;
+            }
+            if (firstNul < 0) {
+                firstNul = index;
+            } else {
+                secondNul = index;
+                break;
+            }
+        }
+        if (firstNul <= 0 || secondNul < 0
+                || secondNul - firstNul != 2
+                || (stamp[firstNul + 1] != '0' && stamp[firstNul + 1] != '1')) {
+            return null;
+        }
+        String userId = new String(stamp, 0, firstNul, StandardCharsets.UTF_8);
+        try {
+            new SessionPrincipal("replay", userId, null);
+        } catch (ManagedAgentException invalid) {
+            return null;
+        }
+        return userId;
+    }
+
     private static void checkComponent(String name, String value) {
         for (int index = 0; index < value.length(); index++) {
             char character = value.charAt(index);

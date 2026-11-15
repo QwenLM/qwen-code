@@ -149,15 +149,32 @@ public final class StoreModels {
             if (principal != null && Arrays.equals(actorKey, principal.receiptActorKey())) {
                 return true;
             }
+            // A principal caller also answers a raw-twin stamp, which this
+            // build writes as the raw Workspace actor key of its user.
+            if (principal != null && principal.tenantId().equals(tenantId)) {
+                try {
+                    if (Arrays.equals(actorKey, ManagedWorkspaceRegistry
+                            .actorKey(tenantId, principal.userId()))) {
+                        return true;
+                    }
+                } catch (IllegalArgumentException error) {
+                    // A user id the registry key cannot encode never matches.
+                }
+            }
             if (actorId == null) {
                 return false;
             }
             try {
-                return Arrays.equals(actorKey,
-                        ManagedWorkspaceRegistry.actorKey(tenantId, actorId));
+                if (Arrays.equals(actorKey,
+                        ManagedWorkspaceRegistry.actorKey(tenantId, actorId))) {
+                    return true;
+                }
             } catch (IllegalArgumentException error) {
                 return false;
             }
+            // A raw caller answers a principal-twin stamp through the user
+            // id the stamp itself recorded.
+            return actorId.equals(SessionPrincipal.replayUserId(actorKey));
         }
     }
 

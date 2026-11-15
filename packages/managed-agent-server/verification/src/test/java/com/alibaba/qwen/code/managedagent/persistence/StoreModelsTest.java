@@ -91,6 +91,15 @@ class StoreModelsTest {
         assertThat(command(principalStamp).admitsReplayBy("actor-a", null)).isTrue();
         assertThat(command(principalStamp).admitsReplayBy("actor-b", null)).isFalse();
         assertThat(command(principalStamp).admitsReplayBy(null, null)).isFalse();
+
+        // Only the exact principal encoding admits; a raw caller never
+        // decodes a stamp whose user it does not name, and neither the
+        // raw stamp nor an arbitrary byte string decodes as a principal.
+        assertThat(SessionPrincipal.replayUserId(null)).isNull();
+        assertThat(SessionPrincipal.replayUserId(new byte[0])).isNull();
+        assertThat(SessionPrincipal.replayUserId(rawStamp)).isNull();
+        assertThat(SessionPrincipal.replayUserId(principalStamp))
+                .isEqualTo("actor-a");
     }
 
     // Every command receipt this build writes carries a recorder column: an
