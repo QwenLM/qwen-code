@@ -5831,6 +5831,19 @@ export class LlmChat {
               let currentResolvedModel = cgConfig?.model ?? model;
               let fallbackStreamYieldedAnyChunk = false;
 
+              // Model health ledger (experimental, opt-in): remember that the
+              // primary just exhausted on a capacity error so the rest of this
+              // turn skips it, and re-probe once on the next turn.
+              const availability =
+                self.config.isModelAvailabilityTrackingEnabled?.()
+                  ? self.config.getModelAvailabilityService()
+                  : undefined;
+              if (availability) {
+                availability.beginTurn(prompt_id);
+                availability.markRetryOncePerTurn(currentResolvedModel);
+                availability.consumeStickyAttempt(currentResolvedModel);
+              }
+
               for (const fallbackModelId of fallbackModels) {
                 // Skip fallback models that match the current/primary model
                 if (
@@ -5882,6 +5895,18 @@ export class LlmChat {
                     `[FALLBACK] Skipping fallback model "${fallbackModelId}": ` +
                       `resolved model "${resolvedFallbackModel}" matches ` +
                       `the current model.`,
+                  );
+                  continue;
+                }
+
+                // Skip a fallback the health ledger already exhausted this turn.
+                if (
+                  availability &&
+                  !availability.snapshot(resolvedFallbackModel).available
+                ) {
+                  debugLogger.warn(
+                    `[FALLBACK] Skipping fallback model "${fallbackModelId}": ` +
+                      `marked unavailable for this turn.`,
                   );
                   continue;
                 }
@@ -5962,6 +5987,7 @@ export class LlmChat {
                   // Fallback succeeded
                   lastError = null;
                   fallbackSucceeded = true;
+                  availability?.markHealthy(resolvedFallbackModel);
                   debugLogger.info(
                     `[FALLBACK] Successfully completed request with ` +
                       `fallback model "${resolvedFallbackModel}".`,
@@ -6002,6 +6028,10 @@ export class LlmChat {
                   const canTryNextFallback = isFallbackEligible(
                     fallbackClassification,
                   );
+                  if (availability && canTryNextFallback) {
+                    availability.markRetryOncePerTurn(resolvedFallbackModel);
+                    availability.consumeStickyAttempt(resolvedFallbackModel);
+                  }
                   debugLogger.warn(
                     `[FALLBACK] Fallback model "${resolvedFallbackModel}" also ` +
                       `failed (reason: ${fallbackClassification.reason}, ` +

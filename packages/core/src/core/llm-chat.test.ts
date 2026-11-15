@@ -49,6 +49,7 @@ import {
   StreamEventType,
   type StreamEvent,
 } from './llm-chat.js';
+import { ModelAvailabilityService } from './model-availability-service.js';
 import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
 import { WorkflowModeContext } from './workflow-mode.js';
 import {
@@ -360,6 +361,8 @@ describe('LlmChat', async () => {
       getEffectiveInputModalities: vi.fn().mockReturnValue({ image: true }),
       getBaseLlmClient: vi.fn().mockReturnValue(undefined),
       getModelFallbacks: vi.fn().mockReturnValue([]),
+      isModelAvailabilityTrackingEnabled: vi.fn().mockReturnValue(false),
+      getModelAvailabilityService: vi.fn(),
       getChatCompression: vi.fn().mockReturnValue(undefined),
       getClearContextOnIdle: vi.fn().mockReturnValue({
         toolResultsThresholdMinutes: 30,
@@ -8477,6 +8480,51 @@ describe('LlmChat', async () => {
       expect(fallbackEvents(events)).toHaveLength(1);
       expect(fallbackB).toHaveBeenCalledTimes(1);
       expect(hasChunkText(events, 'fallback-b ok')).toBe(true);
+    });
+
+    it('skips a fallback exhausted earlier in the same turn when tracking is on', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      streamMock().mockRejectedValue(capacityError);
+      fallbackA.mockRejectedValue(capacityError);
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      // Request 1: primary exhausts, fallback-a exhausts, fallback-b serves.
+      const events1 = await sendCollect('test', 'prompt-availability');
+      expect(hasChunkText(events1, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+      expect(fallbackB).toHaveBeenCalledTimes(1);
+
+      // Request 2, same turn: fallback-a is skipped, fallback-b serves again.
+      const events2 = await sendCollect('test', 'prompt-availability');
+      expect(hasChunkText(events2, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+      expect(fallbackB).toHaveBeenCalledTimes(2);
+
+      // Request 3, new turn: fallback-a is re-probed once (and exhausts again).
+      const events3 = await sendCollect('test', 'prompt-availability-turn-2');
+      expect(hasChunkText(events3, 'fallback-b ok')).toBe(true);
+      expect(fallbackA).toHaveBeenCalledTimes(2);
+      expect(fallbackB).toHaveBeenCalledTimes(3);
     });
 
     it('does not try the next fallback after a fallback emits output', async () => {

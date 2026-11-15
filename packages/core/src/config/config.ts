@@ -28,6 +28,7 @@ import {
 } from '../core/reasoning-overrides.js';
 import { getBuiltinDeepSeekReasoning } from '../core/deepseek-reasoning.js';
 import { getRequestModel } from '../core/request-model.js';
+import { ModelAvailabilityService } from '../core/model-availability-service.js';
 
 // Node built-ins
 import type { EventEmitter } from 'node:events';
@@ -1457,6 +1458,8 @@ export interface ConfigParameters {
   unifiedAgentLoopEnabled?: boolean;
   /** Experimental: run the shared agent loop on the event bus. */
   eventBusAgentLoopEnabled?: boolean;
+  /** Experimental: track model health across requests for the fallback chain. */
+  modelAvailabilityTracking?: boolean;
   /**
    * Opt-in for persistent workspace Agents answering @-mentions in chat
    * sessions. Separate from `agentTeamEnabled`: neither implies the other.
@@ -3277,6 +3280,8 @@ export class Config {
   private readonly agentTeamEnabled: boolean = false;
   private readonly unifiedAgentLoopEnabled: boolean | undefined;
   private readonly eventBusAgentLoopEnabled: boolean | undefined;
+  private readonly modelAvailabilityTracking: boolean;
+  private modelAvailabilityService: ModelAvailabilityService | undefined;
   private readonly agentCollaborationEnabled: boolean = false;
   private readonly artifactEnabled: boolean = true;
   private readonly artifactRecordingSupported: boolean = true;
@@ -3750,6 +3755,7 @@ export class Config {
     // from "explicitly off" and block a later per-surface default flip.
     this.unifiedAgentLoopEnabled = params.unifiedAgentLoopEnabled;
     this.eventBusAgentLoopEnabled = params.eventBusAgentLoopEnabled;
+    this.modelAvailabilityTracking = params.modelAvailabilityTracking ?? false;
     this.agentCollaborationEnabled = params.agentCollaborationEnabled ?? false;
     this.artifactEnabled = params.artifactEnabled ?? true;
     this.artifactRecordingSupported = params.artifactRecordingSupported ?? true;
@@ -7603,6 +7609,24 @@ export class Config {
    */
   getModelFallbacks(): readonly string[] {
     return this.modelFallbacks;
+  }
+
+  /**
+   * Whether the model fallback chain should consult the per-session model
+   * health ledger (experimental, opt-in). When false the chain behaves exactly
+   * as it did before the ledger existed.
+   */
+  isModelAvailabilityTrackingEnabled(): boolean {
+    return this.modelAvailabilityTracking;
+  }
+
+  /**
+   * Session-scoped model health ledger, created lazily. Only consulted when
+   * `isModelAvailabilityTrackingEnabled()` is true.
+   */
+  getModelAvailabilityService(): ModelAvailabilityService {
+    this.modelAvailabilityService ??= new ModelAvailabilityService();
+    return this.modelAvailabilityService;
   }
 
   /**
