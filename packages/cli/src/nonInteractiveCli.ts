@@ -705,6 +705,11 @@ export async function runNonInteractive(
     let mainTurnRefusal: ReturnType<
       NonNullable<JsonOutputAdapterInterface['getRefusedTurn']>
     > = null;
+    // The same, for a drain turn. Kept apart from the main turn's so the
+    // exit code still follows the main turn.
+    let drainTurnRefusal: ReturnType<
+      NonNullable<JsonOutputAdapterInterface['getRefusedTurn']>
+    > = null;
     let totalApiDurationMs = 0;
     const startTime = Date.now();
     let activeInteractionPromptId = prompt_id;
@@ -3617,6 +3622,10 @@ export async function runNonInteractive(
             // refusal already recorded for the main turn still ends the run.
             if (mainTurnRefusal) return;
             mainTurnRefusal = null;
+            // The adapter keeps one latch for the whole session, so a refusal
+            // left over from an earlier drain batch would otherwise be sampled
+            // again here and reported against this batch.
+            adapter.clearRefusedTurn?.();
             await enforceSessionTurnLimit(false);
 
             const itemParts = deferredReminder
@@ -3860,6 +3869,14 @@ export async function runNonInteractive(
                 break;
               }
             }
+            // Every exit above (loop stop, structured submission, plain
+            // break) ends this drain turn, so sample the refusal here: the
+            // latch was cleared before the batch ran, which means anything
+            // present now was recorded by this batch. The post-drain emit
+            // reports it as the run's error; leaving it on the adapter would
+            // let it fail the next message as well.
+            drainTurnRefusal ??= adapter.getRefusedTurn?.() ?? null;
+            adapter.clearRefusedTurn?.();
             await itemTurn?.complete();
           };
 
@@ -4112,9 +4129,10 @@ export async function runNonInteractive(
           // session token cap) reaches here with no tool calls and no text,
           // so the success envelope below would hand the consumer the
           // previous answer under `subtype: "success"`. Report the refusal
-          // instead. Drain items run their own loop and end the run through
-          // routeAbort / the holdback below, so only the main turn counts.
-          const refusedTurn = mainTurnRefusal;
+          // instead. A drain item records its own refusal the same way; it is
+          // reported here as the run's error, but it does not take the
+          // main-turn exit code (53 for the turn cap).
+          const refusedTurn = mainTurnRefusal ?? drainTurnRefusal;
           if (refusedTurn) {
             endActiveInteraction('error', {
               errorMessage: refusedTurn.message,
@@ -4130,7 +4148,10 @@ export async function runNonInteractive(
               usage,
               stats,
             });
-            return refusedTurn.subtype === 'error_max_turns' ? 53 : 1;
+            if (mainTurnRefusal) {
+              return mainTurnRefusal.subtype === 'error_max_turns' ? 53 : 1;
+            }
+            return 1;
           }
 
           await emitResult({

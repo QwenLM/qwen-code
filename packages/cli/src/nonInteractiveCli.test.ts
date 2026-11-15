@@ -10658,7 +10658,10 @@ describe('runNonInteractive', () => {
           expect.stringContaining('Reached max session turns'),
         );
       } else {
-        await expect(run).resolves.toBe(0);
+        // The drain turn's refusal used to be dropped, so this run reported
+        // success with the previous answer. It ends as an error now; the exit
+        // code stays the drain arm's (1), not the main turn's 53.
+        await expect(run).resolves.toBe(1);
       }
       expect(mockLlmClient.sendMessageStream).toHaveBeenCalledTimes(3);
       expect(mockCoreExecuteToolCall).toHaveBeenCalledTimes(1);
