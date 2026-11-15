@@ -341,7 +341,19 @@ async function summarizeTranscriptFile(
   let lastLine = '';
   let lastTsFallback: string | undefined;
 
-  const fileStream = fs.createReadStream(filePath);
+  // Recheck on the opened fd, not just the Phase-1 stat: the check-then-use
+  // window spans the whole enumeration, so a path swapped to a writerless FIFO
+  // after Phase 1 would block open() in the libuv threadpool and park the load.
+  // O_NONBLOCK makes the open return immediately; a non-regular fd is rejected.
+  const handle = await fs.promises.open(
+    filePath,
+    fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+  );
+  if (!(await handle.stat()).isFile()) {
+    await handle.close();
+    throw new Error(`non-regular transcript: ${filePath}`);
+  }
+  const fileStream = handle.createReadStream();
   const rl = readline.createInterface({
     input: fileStream,
     crlfDelay: Infinity,

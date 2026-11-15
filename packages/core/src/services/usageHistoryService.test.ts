@@ -9,7 +9,6 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { Readable } from 'node:stream';
 
 const { debugMock } = vi.hoisted(() => ({ debugMock: vi.fn() }));
 
@@ -995,27 +994,23 @@ describe('loadUsageHistoryWithLive — replay cache + selective scan', () => {
 
   it('does not cache a failed scan: a transient read error recovers on the next load', async () => {
     const filePath = plant('sess-transient', 1000);
-    const orig = fs.createReadStream;
+    const orig = fs.promises.open;
     let failedOnce = false;
-    const spy = vi.spyOn(fs, 'createReadStream').mockImplementation(((
+    const spy = vi.spyOn(fs.promises, 'open').mockImplementation(((
       p: fs.PathLike,
-      opts?: Parameters<typeof fs.createReadStream>[1],
+      flags?: string | number,
+      mode?: fs.Mode,
     ) => {
       if (!failedOnce && String(p) === filePath) {
         failedOnce = true;
-        // An asynchronous open/read failure (EACCES-like), not a sync throw:
-        // this is the path that must NOT be memoized as "no usage".
-        const errStream = new Readable({
-          read() {
-            this.destroy(
-              Object.assign(new Error('EACCES: simulated'), { code: 'EACCES' }),
-            );
-          },
-        });
-        return errStream as unknown as fs.ReadStream;
+        // An asynchronous open failure (EACCES-like), not a sync throw: this is
+        // the path that must NOT be memoized as "no usage".
+        return Promise.reject(
+          Object.assign(new Error('EACCES: simulated'), { code: 'EACCES' }),
+        );
       }
-      return orig(p, opts);
-    }) as typeof fs.createReadStream);
+      return orig(p, flags as number, mode);
+    }) as typeof fs.promises.open);
     try {
       const first = await loadUsageHistoryWithLive();
       expect(
@@ -1036,14 +1031,15 @@ describe('loadUsageHistoryWithLive — replay cache + selective scan', () => {
       plant('sess-cache-c', 300),
     ];
     const opened: string[] = [];
-    const orig = fs.createReadStream;
-    const spy = vi.spyOn(fs, 'createReadStream').mockImplementation(((
+    const orig = fs.promises.open;
+    const spy = vi.spyOn(fs.promises, 'open').mockImplementation(((
       p: fs.PathLike,
-      opts?: Parameters<typeof fs.createReadStream>[1],
+      flags?: string | number,
+      mode?: fs.Mode,
     ) => {
       opened.push(String(p));
-      return orig(p, opts);
-    }) as typeof fs.createReadStream);
+      return orig(p, flags as number, mode);
+    }) as typeof fs.promises.open);
     const transcriptOpens = () =>
       opened.filter((p) => paths.includes(p)).length;
     try {
@@ -1420,37 +1416,80 @@ describe('loadUsageHistoryWithLive — replay cache + selective scan', () => {
   it('bounds the replay scan concurrency instead of one worker per candidate', async () => {
     const paths: string[] = [];
     for (let i = 0; i < 12; i++) paths.push(plant(`sess-conc-${i}`, 100));
-    const gated: Readable[] = [];
+    const gated: Array<{
+      path: string;
+      resolve: (h: fs.promises.FileHandle) => void;
+    }> = [];
     let opens = 0;
     let gating = true;
-    const orig = fs.createReadStream;
-    const spy = vi.spyOn(fs, 'createReadStream').mockImplementation(((
+    const orig = fs.promises.open;
+    const spy = vi.spyOn(fs.promises, 'open').mockImplementation(((
       p: fs.PathLike,
-      opts?: Parameters<typeof fs.createReadStream>[1],
+      flags?: string | number,
+      mode?: fs.Mode,
     ) => {
       if (gating && paths.includes(String(p))) {
         opens++;
-        const s = new Readable({ read() {} }); // emits no data: worker blocks
-        gated.push(s);
-        return s as unknown as fs.ReadStream;
+        // A pending open: the worker blocks here, so no further opens occur.
+        return new Promise<fs.promises.FileHandle>((resolve) => {
+          gated.push({ path: String(p), resolve });
+        });
       }
-      return orig(p, opts);
-    }) as typeof fs.createReadStream);
+      return orig(p, flags as number, mode);
+    }) as typeof fs.promises.open);
     try {
       const pending = loadUsageHistoryWithLive();
       // Let the persisted-file read settle and the pool start: each worker
-      // opens one gated stream and blocks, so no further opens can occur.
+      // blocks on its gated open, so no further opens can occur.
       await new Promise((r) => setTimeout(r, 150));
       expect(opens).toBeGreaterThan(0);
       expect(opens).toBeLessThanOrEqual(8); // REBUILD_CONCURRENCY
-      // Release the gates and stop gating so the load can finish.
+      // Release the gates with real handles and stop gating so the load finishes.
       gating = false;
-      for (const s of gated) s.push(null);
+      for (const g of gated) {
+        g.resolve(
+          await orig(g.path, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK),
+        );
+      }
       await pending;
     } finally {
       spy.mockRestore();
     }
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'settles and skips a FIFO swapped in after the Phase-1 stat',
+    async () => {
+      // A real transcript plus a real FIFO. statSync is fooled into reporting
+      // the FIFO as a regular file (Phase 1), so only the fd-level recheck in
+      // summarizeTranscriptFile can reject it; without that recheck the
+      // O_RDONLY open of a writerless FIFO blocks and the load never settles.
+      const real = plant('sess-real', 1000);
+      const fifoPath = path.join(path.dirname(real), 'sess-fifo.jsonl');
+      const mkfifo = spawnSync('mkfifo', [fifoPath]);
+      expect(mkfifo.status).toBe(0);
+      const origStat = fs.statSync;
+      const statSpy = vi.spyOn(fs, 'statSync').mockImplementation(((
+        p: fs.PathLike,
+      ) => {
+        if (String(p) === fifoPath) {
+          return {
+            isFile: () => true,
+            mtimeMs: Date.now(),
+            size: 100,
+          } as unknown as fs.Stats;
+        }
+        return origStat(p);
+      }) as typeof fs.statSync);
+      try {
+        const merged = await loadUsageHistoryWithLive();
+        expect(merged.map((r) => r.sessionId)).toEqual(['sess-real']);
+      } finally {
+        statSpy.mockRestore();
+        fs.rmSync(fifoPath, { force: true });
+      }
+    },
+  );
 });
 
 // Regression for #7384: deleting a session erased its usage from the
