@@ -318,17 +318,17 @@ function estimateInlineImageTokens(
  */
 function isPotentiallyAnimated(bytes: Uint8Array, mime: string): boolean {
   if (mime === 'image/gif') {
-    // Count image descriptors (0x2C) after the logical screen descriptor;
-    // more than one means multi-frame. Header-only scan of the first 4 KiB.
-    let descriptors = 0;
-    const limit = Math.min(bytes.length, 4096);
-    for (let i = 6; i < limit - 1 && descriptors <= 1; i++) {
-      if (bytes[i] === 0x2c) descriptors++;
-    }
-    return descriptors > 1;
+    // GIF is always flat: counting image descriptors (0x2C) by byte scan
+    // is wrong in both directions — 0x2C appears in palette data and
+    // comments (false positive on static GIFs), while compact animated
+    // frames can have descriptors beyond the 4 KiB window (false
+    // negative). Frame counting needs a real parser, not a heuristic
+    // (#17321 R1-1).
+    return true;
   }
   if (mime === 'image/webp' && bytes.length > 16) {
-    // VP8X flags byte at payload offset 0: bit 1 (value 2) is ANIM.
+    // VP8X flags byte at payload offset 0: bit 1 (value 2) is ANIM —
+    // a real bit in the header, not a heuristic.
     const tag = String.fromCharCode(bytes[12], bytes[13], bytes[14], bytes[15]);
     if (tag === 'VP8X' && bytes.length > 20) {
       return (bytes[20] & 0x02) !== 0;

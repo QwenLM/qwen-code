@@ -262,6 +262,57 @@ describe('compactionInputSlimming', () => {
       ).toBe(1013 * 4);
     });
 
+    it('bills GIF at the flat estimate regardless of dimensions (#17321 R1-1)', () => {
+      // GIF always bills flat: the byte-scan heuristic was wrong in both
+      // directions, so static GIFs pay the flat cost too until a real
+      // frame parser lands.
+      const gif = Buffer.from([
+        0x47,
+        0x49,
+        0x46,
+        0x38,
+        0x39,
+        0x61, // 'GIF89a'
+        0x20,
+        0x03,
+        0xe0,
+        0x01, // 800x480 LE
+      ]).toString('base64');
+      expect(
+        estimatePartChars(
+          { inlineData: { mimeType: 'image/gif', data: gif } },
+          1600,
+        ),
+      ).toBe(1600 * 4);
+    });
+
+    it('honors an explicitly configured estimate over the resolution path (#17321 R1-3)', () => {
+      // Real PNG bytes at 1920x1080 with a non-default estimate: the
+      // override must keep having its effect — the resolution path is
+      // default-only.
+      const b = new Uint8Array(33);
+      b.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+      b[8] = 0;
+      b[9] = 0;
+      b[10] = 0;
+      b[11] = 13;
+      b.set([0x49, 0x48, 0x44, 0x52], 12);
+      b[16] = 0;
+      b[17] = 0;
+      b[18] = 0x07;
+      b[19] = 0x80;
+      b[20] = 0;
+      b[21] = 0;
+      b[22] = 0x04;
+      b[23] = 0x38;
+      const data = Buffer.from(b).toString('base64');
+      expect(
+        estimatePartChars(
+          { inlineData: { mimeType: 'image/png', data } },
+          3000,
+        ),
+      ).toBe(3000 * 4); // override, not 1013*4
+    });
     it('keeps the flat budget for non-image inline binary kinds (#17321 F4)', () => {
       // Real parseable PNG bytes under a non-image mime: the mime gate must
       // reject them before the parser runs, proving the gate exists rather
