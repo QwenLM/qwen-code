@@ -5,7 +5,6 @@ import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.ExecutionReconciliation;
 import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
 import com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver;
-import com.alibaba.qwen.code.runtimebroker.JsonCodec;
 import com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.NativeCsiExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.ResidentWorkspaceProfile;
@@ -43,9 +42,7 @@ import com.alibaba.qwen.code.runtimebroker.transport.ManagedHoldFamily;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedHookProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedMcpProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedMonitorProtocol;
-import org.apache.commons.codec.digest.DigestUtils;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.LinkedHashMap;
@@ -121,6 +118,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
     private final RuntimeBindingProvisioning bindingProvisioning;
     private final TerminalHolds terminalHolds;
     private final BackgroundProcessAdmission backgroundProcessAdmission;
+    private final RuntimeDispatchPayloadAdmission payloadAdmission;
     private final RuntimeExecutionState executionState;
     private final RuntimeExecutionDispatcher executionDispatcher;
     private final RuntimeExecutionReconciler executionReconciler;
@@ -282,6 +280,8 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 sessionRepository, executionRepository, clock, closed);
         this.backgroundProcessAdmission = new BackgroundProcessAdmission(bindingRepository,
                 sessionRepository, executionRepository);
+        this.payloadAdmission = new RuntimeDispatchPayloadAdmission(publicationVerifier,
+                executionRepository, clock);
         this.executionState = new RuntimeExecutionState(bindingRepository, sessionRepository, executionRepository,
                 this.brokerOwnerId, this.dispatchLeaseDuration, clock);
         this.executionDispatcher = new RuntimeExecutionDispatcher(bindingRegistry, executionState,
@@ -1056,82 +1056,15 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                         if (!v3 && (publicationId != null || publicationToken != null)) {
                             throw invalid("runtime_reference_invalid", "Tool v2 has no publication grant");
                         }
-                        // The UTF-8 encoder would turn an unpaired surrogate into '?'.
-                        if (payloadJson == null || !BrokerValues.isWellFormedJson(payloadJson)) {
-                            throw invalid("runtime_payload_invalid", "Tool payload is invalid");
+                        RuntimeDispatchPayloadAdmission.Admitted admitted =
+                                payloadAdmission.admit(context, record, v3, payloadJson);
+                        if (admitted.refused()) {
+                            return CompletableFuture.completedFuture(admitted.settled() == null
+                                    ? executionState.requireExecution(context, executionId) : admitted.settled());
                         }
-                        byte[] bytes = payloadJson.getBytes(StandardCharsets.UTF_8);
-                        if (bytes.length > 256 * 1024) {
-                            throw invalid("runtime_payload_invalid", "Tool payload exceeds 256 KiB");
-                        }
-                        String digest = "sha256:" + DigestUtils.sha256Hex(bytes);
-                        if (!digest.equals(record.getRequestDigest())) {
-                            throw conflict("runtime_idempotency_conflict", "Tool payload differs from its reserved digest");
-                        }
-                        Map<String, Object> payload = JsonCodec.parseObject(bytes, "tool payload");
-                        // An escaped unpaired surrogate passes the text check above but
-                        // would still reach the Worker, and run, as '?'.
-                        if (!payload.keySet().equals(Set.of("toolName", "input"))
-                                || !(payload.get("toolName") instanceof String toolName) || toolName.isEmpty()
-                                || !(payload.get("input") instanceof Map)
-                                || !BrokerValues.isWellFormedJson(payload)
-                                || isProtocolV3(record.getReference())
-                                    && !"run_shell_command".equals(toolName) && !"monitor".equals(toolName)) {
-                            throw invalid("runtime_payload_invalid", "Tool payload is invalid");
-                        }
-                        // The digest was just computed and compared to the
-                        // receipt and the payload parsed and shape-checked
-                        // above; classify from those locals instead of
-                        // hashing and parsing the same bytes a second time.
-                        VerifiedDispatchPayload verifiedPayload =
-                                VerifiedDispatchPayload.of(digest, toolName);
-                        if (WorkspaceExecutionProfile.isExternalShellRequest(context.binding().getRequest())) {
-                            // The external foreground-Shell lane admits exactly one
-                            // Tool v3 family member. Background Shell and Monitor
-                            // keep their own ledgers and holds, which this
-                            // placement's single-worker drain cannot prove.
-                            Map<?, ?> shellInput = payload.get("input") instanceof Map<?, ?> value
-                                    ? value : Map.of();
-                            if (!v3 || record.getReference().containsKey("runtimeProtocol")
-                                    || !"run_shell_command".equals(toolName)
-                                    || shellInput.containsKey("is_background")
-                                    || shellInput.containsKey("is_monitor")
-                                    || publicationVerifier == null
-                                    || publicationVerifier.externalShell() == null) {
-                                executionRepository.settlePrepared(record, Map.of(
-                                        "executionStatus", "not_started", "responseParts", List.of(),
-                                        "capture", null,
-                                        "error", Map.of("type", "workspace_tool_unsupported",
-                                                "message", "External Shell requires a foreground Tool v3 Shell payload")),
-                                        clock.instant());
-                                throw invalid("runtime_payload_invalid",
-                                        "External Shell requires a foreground Tool v3 Shell payload");
-                            }
-                        } else if (WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
-                                && (v3 || record.getReference().containsKey("runtimeProtocol")
-                                        || !Set.of("read_file", "write_file", "edit", "glob").contains(toolName))) {
-                            executionRepository.settlePrepared(record, Map.of(
-                                    "executionStatus", "not_started", "responseParts", List.of(),
-                                    "error", Map.of("type", "workspace_tool_unsupported",
-                                            "message", "External Workspace requires a file Tool v2 payload")), clock.instant());
-                            throw invalid("runtime_payload_invalid", "External Workspace requires a file Tool v2 payload");
-                        }
-                        if (CsiFilesRetirementProfile.isProfile(context.binding().getRequest().getScope())
-                                && (v3 || !Set.of("read_file", "write_file", "edit").contains(toolName))) {
-                            throw invalid("runtime_payload_invalid", "The private CSI profile requires a file Tool v2 payload");
-                        }
-                        if (ResidentWorkspaceProfile.selects(context.binding().getRequest().getScope())
-                                && (v3 || !Set.of("read_file", "write_file", "edit").contains(toolName))) {
-                            Map<String, Object> refusal = new LinkedHashMap<>();
-                            refusal.put("executionStatus", "not_started");
-                            refusal.put("responseParts", List.of());
-                            refusal.put("capture", null);
-                            refusal.put("error", Map.of("type", "resident_tool_unsupported",
-                                    "message", "Resident Workspace supports only read_file, write_file and edit."));
-                            ToolExecutionRecord settled = executionRepository.settlePrepared(record, refusal, clock.instant());
-                            return CompletableFuture.completedFuture(settled == null
-                                    ? executionState.requireExecution(context, executionId) : settled);
-                        }
+                        Map<String, Object> payload = admitted.payload();
+                        String toolName = (String) payload.get("toolName");
+                        VerifiedDispatchPayload verifiedPayload = admitted.verified();
                         if (v3) {
                             if (!"run_shell_command".equals(payload.get("toolName"))
                                     && !"monitor".equals(payload.get("toolName"))) {

@@ -57,12 +57,9 @@ final class ExternalWorkspaceSessionPolicies {
                     || command.input().stream().anyMatch(block -> !Set.of("input_text", "text").contains(block.get("type")))) {
                 throw AgentSessionPolicies.workspaceExecutionUnavailable();
             }
-            // Foreground Shell needs an approval policy that actually asks:
-            // the files profile may run yolo, this one may not. The default
-            // comes from the deployment's configured mode, so that value is
-            // refused here too rather than only an explicit selection.
-            if (WorkspaceToolProfiles.isExternalShell(profile)
-                    && !Set.of("default", "auto-edit").contains(resolvedPin.approvalMode())) {
+            // The deployment's configured default reaches this path too, so
+            // the profile's own published modes decide, not just a selection.
+            if (!WorkspaceToolProfiles.admitsExternalApprovalMode(profile, resolvedPin.approvalMode())) {
                 throw AgentSessionPolicies.workspaceExecutionUnavailable();
             }
             effective = new AgentSessionPolicies.AgentPin(resolvedPin.revision(), null, resolvedPin.approvalMode(),
@@ -91,5 +88,18 @@ final class ExternalWorkspaceSessionPolicies {
     /** The legacy v1 close refusal exempts an external-files Session on its registered EXTERNAL Workspace. */
     static boolean admitsLegacyClose(SessionRecord session, JdbcManagedWorkspaceRegistry workspaces) {
         return WorkspaceToolProfiles.isExternal(session.toolProfile()) && workspaces.isExternal(session.workspace());
+    }
+
+    /**
+     * Whether an external Session's own approval selection is refused: its
+     * registered profile stopped allowing it, or the Session became a child
+     * lineage whose policy belongs to its parent. A non-external Session is
+     * never refused here.
+     */
+    static boolean refusesApprovalSelection(SessionRecord session,
+            JdbcManagedWorkspaceRegistry workspaces, AgentSessionQueries sessionQueries) {
+        return WorkspaceToolProfiles.isExternal(session.toolProfile())
+                && (!externalProfileAllowedOrRefuse(workspaces, session.workspace(), session.toolProfile())
+                        || sessionQueries.findChildLineage(session.tenantId(), session.sessionId()) != null);
     }
 }

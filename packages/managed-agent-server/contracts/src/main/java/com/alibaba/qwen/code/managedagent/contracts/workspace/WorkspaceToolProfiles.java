@@ -2,6 +2,8 @@ package com.alibaba.qwen.code.managedagent.contracts.workspace;
 
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 
+import java.util.List;
+
 public final class WorkspaceToolProfiles {
     public static final String FILES = "hosted-workspace-files/1";
     public static final String EXTERNAL_FILES = "hosted-workspace-external-files/1";
@@ -107,5 +109,30 @@ public final class WorkspaceToolProfiles {
 
     public static boolean requiresApproval(String mode) {
         return "default".equals(mode) || "auto".equals(mode) || "auto-edit".equals(mode);
+    }
+
+    /**
+     * The approval modes a profile may publish. Foreground Shell on registered
+     * storage needs a policy that actually asks, so the modes that never prompt
+     * are unavailable to it — including the deployment's configured default,
+     * not only an explicit selection. The files profile keeps every mode.
+     */
+    public static List<String> approvalModes(String profile) {
+        return isPublicShell(profile) || isExternalShell(profile)
+                ? List.of("default", "auto-edit")
+                : List.of("default", "auto-edit", "yolo");
+    }
+
+    /**
+     * Whether an external profile that already holds this mode may keep it.
+     * Foreground Shell must not hold a mode that never prompts; external files
+     * is unconstrained, including the {@code auto} mode a live selection may
+     * install, which {@link #approvalModes} does not offer as a creation choice.
+     *
+     * <p>This is narrower than {@link #approvalModes} on purpose: it gates a
+     * stored mode on the external lane only, not the modes a caller may pick.
+     */
+    public static boolean admitsExternalApprovalMode(String profile, String mode) {
+        return !isExternalShell(profile) || approvalModes(profile).contains(mode);
     }
 }

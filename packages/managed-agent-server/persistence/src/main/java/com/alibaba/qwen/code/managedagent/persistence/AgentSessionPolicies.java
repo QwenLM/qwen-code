@@ -150,10 +150,7 @@ final class AgentSessionPolicies {
 
     static List<String> availableApprovalModes(AgentPin pin) {
         return pin.digest() != null ? List.of(pin.approvalMode())
-                : WorkspaceToolProfiles.isPublicShell(pin.toolProfile())
-                        || WorkspaceToolProfiles.isExternalShell(pin.toolProfile())
-                        ? List.of("default", "auto-edit")
-                        : List.of("default", "auto-edit", "yolo");
+                : WorkspaceToolProfiles.approvalModes(pin.toolProfile());
     }
 
     boolean supportsPlanMode(SessionRecord session) {
@@ -627,10 +624,7 @@ final class AgentSessionPolicies {
         }
         if (!supported || session.agentDefinitionDigest() != null && !agentDefinitionSupported
                 || !workspaceFilesEnabled || !WorkspaceToolProfiles.supportsApprovalSelection(session)
-                || WorkspaceToolProfiles.isExternal(session.toolProfile())
-                        && (!ExternalWorkspaceSessionPolicies.externalProfileAllowedOrRefuse(workspaces,
-                                        session.workspace(), session.toolProfile())
-                                || sessionQueries.findChildLineage(tenantId, sessionId) != null)
+                || ExternalWorkspaceSessionPolicies.refusesApprovalSelection(session, workspaces, sessionQueries)
                 || WorkspaceToolProfiles.isPublicShell(session.toolProfile()) && !workspaceShellEnabled) {
             throw new ManagedAgentException(409, "unsupported_feature", "Approval selection is unavailable");
         }
@@ -700,8 +694,7 @@ final class AgentSessionPolicies {
                 || sessionQueries.findChildLineage(tenantId, sessionId) != null || session.publicChildAgentsVersion() != 0
                 || hasMcpServers(session) || !creationSkills.effective(session).isEmpty()
                 || creationSkills.initialSelection(tenantId, sessionId) != null
-                || WorkspaceToolProfiles.isExternalShell(session.toolProfile())
-                        && !Set.of("default", "auto-edit").contains(session.approvalMode())
+                || !WorkspaceToolProfiles.admitsExternalApprovalMode(session.toolProfile(), session.approvalMode())
                 || Boolean.TRUE.equals(jdbc.queryForObject("SELECT is_plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=?",
                         Boolean.class, tenantId, sessionId))
                 || input.stream().anyMatch(block -> !Set.of("input_text", "text").contains(block.get("type")))) {
