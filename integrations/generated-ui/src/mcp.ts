@@ -20,7 +20,10 @@ const invalidDocument =
 export function createGeneratedUiServer(
   appUri: typeof APP_URI | typeof BUNDLED_APP_URI = APP_URI,
 ): McpServer {
-  const server = new McpServer({ name: 'generated-ui', version: '1.0.0' });
+  const server = new McpServer(
+    { name: 'generated-ui', version: '1.0.0' },
+    { maxToolInputElements: 100_000 },
+  );
   server.registerTool(
     'generated_ui_show',
     {

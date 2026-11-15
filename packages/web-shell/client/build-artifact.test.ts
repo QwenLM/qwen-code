@@ -351,6 +351,15 @@ describe('build artifact — package boundary', () => {
     });
 
     expect(fullscreenRule).toBeDefined();
+    expect(fullscreenRule?.nodes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'decl',
+          prop: '--chat-responsive-content-width',
+          value: '100%',
+        }),
+      ]),
+    );
     expect(fullscreenRule?.selector).toMatch(
       /\._panelFullscreen_[A-Za-z0-9_]+$/,
     );

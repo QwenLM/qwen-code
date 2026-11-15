@@ -2067,6 +2067,115 @@ describe('serve fast path environment bootstrap', () => {
     );
   });
 
+  it('loads serve.sessionPrWatch from user scope but never from workspace scope', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-pr-watch-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    // A workspace file must not spend daemon-wide gh budget or inject
+    // prompts into sessions across workspaces.
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({
+        serve: { sessionPrWatch: { events: ['head_change'] } },
+      }),
+    );
+    const workspaceScoped = loadServeFastPathSettings(tempWorkspace);
+    expect(workspaceScoped.serve?.sessionPrWatch).toBeUndefined();
+    expect(workspaceScoped.ignoredWorkspaceKeys).toEqual([
+      'serve.sessionPrWatch',
+    ]);
+
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({
+        serve: {
+          sessionPrWatch: { events: ['ci_failure'], wakeDormant: false },
+        },
+      }),
+    );
+    const fromUserScope = loadServeFastPathSettings(tempWorkspace);
+    expect(fromUserScope.serve?.sessionPrWatch).toEqual({
+      events: ['ci_failure'],
+      wakeDormant: false,
+    });
+    // A workspace value stays ignored — and reported — even when an
+    // operator scope also sets the key.
+    expect(fromUserScope.ignoredWorkspaceKeys).toEqual([
+      'serve.sessionPrWatch',
+    ]);
+  });
+
+  it('carries serve.sessionPrWatch through every operator scope merge', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-pr-watch-merge-')),
+    );
+    // Each step merges one more scope over the previous answer. The merge
+    // copies serve keys explicitly, so a key the picker carries but the
+    // merge does not is dropped here rather than at the pick.
+    writeFileSync(
+      process.env['QWEN_CODE_SYSTEM_DEFAULTS_PATH']!,
+      JSON.stringify({
+        serve: { sessionPrWatch: { events: ['state_change'] } },
+      }),
+    );
+    expect(
+      loadServeFastPathSettings(tempWorkspace).serve?.sessionPrWatch,
+    ).toEqual({ events: ['state_change'] });
+
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({
+        serve: { sessionPrWatch: { events: ['head_change'] } },
+      }),
+    );
+    expect(
+      loadServeFastPathSettings(tempWorkspace).serve?.sessionPrWatch,
+    ).toEqual({ events: ['head_change'] });
+
+    writeFileSync(
+      process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH']!,
+      JSON.stringify({
+        serve: { sessionPrWatch: { events: ['merge_conflict'] } },
+      }),
+    );
+    expect(
+      loadServeFastPathSettings(tempWorkspace).serve?.sessionPrWatch,
+    ).toEqual({ events: ['merge_conflict'] });
+  });
+
+  it('keeps serve.sessionPrWatch beside the other serve keys in one summary', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-pr-watch-siblings-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({ serve: { channels: ['telegram'] } }),
+    );
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({
+        serve: {
+          maxSessions: 64,
+          sessionPrWatch: { events: ['head_change'], actions: { fix: 'go' } },
+        },
+      }),
+    );
+
+    // The workspace channels and the operator keys reach one summary
+    // together: neither the pick's presence test nor the merge's spread
+    // may clobber a sibling.
+    expect(loadServeFastPathSettings(tempWorkspace).serve).toEqual({
+      channels: ['telegram'],
+      maxSessions: 64,
+      sessionPrWatch: { events: ['head_change'], actions: { fix: 'go' } },
+    });
+  });
+
   it('keeps operator settings when the workspace document cannot be read', () => {
     // A repo-local file must not be able to discard an operator-owned cap.
     // `[]` is valid JSON but not an object; the second case is a parse error.

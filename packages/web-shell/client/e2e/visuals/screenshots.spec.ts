@@ -1092,6 +1092,10 @@ for (const theme of THEMES) {
 
       const messageList = page.locator('[data-web-shell-message-list]');
       await expect(messageList).toContainText('Goal usage limited');
+      await expect(messageList).not.toContainText('Token budget reached');
+      await messageList
+        .getByRole('button', { name: 'Expand details', exact: true })
+        .click();
       await expect(messageList).toContainText('Token budget reached');
       await captureScreenshot(page, `goal-usage-limited-${theme}`);
     });
@@ -1118,6 +1122,10 @@ for (const theme of THEMES) {
 
       const messageList = page.locator('[data-web-shell-message-list]');
       await expect(messageList).toContainText('Goal blocked');
+      await expect(messageList).not.toContainText('User authority is required');
+      await messageList
+        .getByRole('button', { name: 'Expand details', exact: true })
+        .click();
       await expect(messageList).toContainText('User authority is required');
       await expect(messageList).not.toContainText('Goal aborted');
       await captureScreenshot(page, `goal-blocked-${theme}`);
