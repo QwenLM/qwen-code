@@ -11921,6 +11921,7 @@ class QwenAgent implements Agent {
         if (action === 'enable') {
           const settings = loadSettings(config.getTargetDir());
           let settingsChanged = false;
+          const removedPatterns = new Set<string>();
           for (const scope of [SettingScope.User, SettingScope.Workspace]) {
             const scopeSettings = settings.forScope(scope).settings;
             const currentExcluded = scopeSettings.mcp?.excluded || [];
@@ -11929,16 +11930,23 @@ class QwenAgent implements Agent {
                 !matchesAnyServerPattern(serverName, [pattern]),
             );
             if (filtered.length !== currentExcluded.length) {
+              for (const pattern of currentExcluded) {
+                if (!filtered.includes(pattern)) removedPatterns.add(pattern);
+              }
               settings.setValue(scope, 'mcp.excluded', filtered);
               settingsChanged = true;
             }
           }
+          // Only the entries this action removed from a writable scope may
+          // leave a runtime list: it is the merged set across every scope plus
+          // `--disable-mcp-server`, so filtering by name alone would also drop
+          // an operator's System pattern and connect a server whose exclusion
+          // is still on disk.
           let runtimeChanged = false;
           for (const liveConfig of this.getLiveMcpConfigs(serverName)) {
             const currentExcluded = liveConfig.getExcludedMcpServers() || [];
             const runtimeFiltered = currentExcluded.filter(
-              (pattern: string) =>
-                !matchesAnyServerPattern(serverName, [pattern]),
+              (pattern: string) => !removedPatterns.has(pattern),
             );
             if (runtimeFiltered.length !== currentExcluded.length) {
               liveConfig.setExcludedMcpServers(runtimeFiltered);
