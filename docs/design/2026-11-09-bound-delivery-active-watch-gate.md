@@ -2,7 +2,7 @@
 
 [English](2026-11-09-bound-delivery-active-watch-gate.md) | [简体中文](2026-11-09-bound-delivery-active-watch-gate.zh-CN.md)
 
-Status: proposed (2026-11-09)
+Status: implemented as #16772 (proposed 2026-11-09). The body below describes the change as designed. The PR-state-watch part is superseded by [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md), which has landed: the daemon owns state detection and delivery and its drain never reads `requireBoundWatch`, so the gate below filters the channel's comment delivery only. That comment-delivery part is still live.
 
 ## Problem statement
 
@@ -312,7 +312,8 @@ and advances. No public reply in either case.
   keep byte-identical behavior. Requires `deliverToBoundSessions`.
 - **D6 — polling set unchanged.** Ineligible bindings keep their watch
   baselines and terminal observation; events retire at drain. Cost is bounded
-  by `prWatchLimit`; optimizing the poll set is a follow-up.
+  by the pass's built-in budget — `prWatchLimit` is deprecated and ignored;
+  optimizing the poll set is a follow-up.
 - **D7 — retirement is surfaced, and names the gate.** Every new retire path
   writes the existing stderr line + channel-event journal row (skip/retire
   with reason), so a gated-away event is never silent. Wherever the exclusion
@@ -351,9 +352,14 @@ and advances. No public reply in either case.
 origin` when a verify-pr watch needs keying. Same machinery the Web Shell
   watches page already uses on demand. The bindings scan has a second
   consumer, `runPrWatchObservationTick`, which pays the same per-workspace
-  cost per 5-minute tick without reading `watching`; it is inert today
-  (`SESSION_PR_WATCH_OBSERVATION_ENABLED` is false) and would need a guard
-  before that flag flips.
+  cost per 5-minute tick without reading `watching`; it is no longer inert.
+  The constant was removed in #17214 and enablement is deps presence, so the
+  tick runs whenever the effective subscription has an event:
+  `serve.sessionPrWatch`, its environment override, or, when neither is
+  configured, the deprecated per-host channel alias. The guard this called for
+  was answered by measurement instead —
+  [configuration and channel migration](2026-11-14-daemon-pr-watch-config-migration.md)
+  §9 measures the whole scan and decides to keep three scans.
 - **Stale `watching` under partial snapshots.** A retained row's last-stamped
   `watching` is stale evidence — the scan that would refresh it cannot read
   that session's sidecar — so retention DROPS the flag (the row still names

@@ -5,7 +5,8 @@
 - **状态**：已在 #15343 中通过。headless（PR 1，#15369）、ACP（PR 2，#15509–#16190）、Ink TUI（PR 3，#16206–#16704）与 OpenTUI（PR 4，#16743–#16820）的迁移均已合入；各 surface 的默认开启等待 nightly 统一 loop E2E 门控（#16192）。PR 5（AgentCore）正在进行：5a（#16880）和 5b（#17035）已合入。其余步骤在 #17045 中跟踪。PR 6a（speculation 的模型轮，#17029）已合入。
 - **日期**：2026-10-23，基于 upstream `779a4d5d0d`。
 - **相关**：
-  - tracking issue #15327；
+  - 跟踪 issue #15327，以及剩余步骤、灰度和能力台账的跟踪 issue #17045；
+  - [Agent loop 能力台账](2026-11-15-loop-capability-ledger.zh-CN.md) —— 1.0 loop 的每项行为与 main 的对照，以及对 main 没有的部分的决定；
   - 早先的提案 #8775，它从 AgentCore 和 headless 入手；本设计把它的目标扩展到全部七份 loop，其中 AgentCore 这一步是 PR 5；
   - 对比各 loop 时发现的缺陷：#15324、#15325、#15326；
   - [loop protection 设置](2026-10-21-loop-protection-setting.zh-CN.md)；
@@ -585,14 +586,32 @@ speculation 的 `runSpeculativeLoop`（`speculation.ts`）在用户确认前，�
 
 PR 6b 是 speculation 的默认开启与删除步骤。
 
-一个入口在设置开启时通过它的对拍测试，并列出了已知差异，才算完成迁移。之后每个入口各自修改默认值，不必等其他入口。修改默认值需要同时满足：
+一个入口分五步迁移，由 #17045 跟踪：
 
-- 该设置对这个入口已经提供了至少一个版本；
-- 在设置开启的情况下运行该入口集成测试的定时任务，已在 main 上连续通过两周；
+1. 共享模型轮和工具批，opt-in（`experimental.unifiedAgentLoop`）。
+2. 默认开启。
+3. 每一轮及其工具批在一次 `runAgentLoop` 调用中运行，同时开启 `experimental.eventBusAgentLoop` 时跑在事件总线内核上；该入口的对拍测试也比较内核开和关。
+4. 内核默认开启。
+5. 删除现有 loop。
+
+默认值早改，删除晚做。现有 loop 在第 2 到第 4 步期间一直保留，作为切回的退路，所以每次修改默认值都只在该入口对拍测试比较过的两条路径之间切换。每个入口各自修改默认值，每次只改按入口默认值表中的一项；`QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` 和 `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP` 可以对所有入口或列出的入口（例如 `headless=0`）强制开启或关闭，优先于设置（[loop 灰度开关](2026-11-12-loop-rollout-switches.zh-CN.md)）。
+
+第 2 步需要：
+
+- 该设置已在正式版中发布；
+- 在设置开启的情况下运行该入口集成测试的 nightly 组，已在 main 上连续通过 14 晚，其中至少 7 晚在该入口最后一次修改其共享路径（修复除外）之后；
+- 它的对拍测试在不重试的情况下连续通过 20 次，因为 nightly 组会重试失败的测试；
 - 该入口在[宿主自持的发送选项](#宿主自持的发送选项)中没有未关闭的行；
-- release notes 列出了它在[兼容性](#兼容性)中的有意差异。
+- release notes 列出了它在[兼容性](#兼容性)中的有意差异，以及切回的方法；
+- 对 AgentCore 和 ACP，[Managed 任务](2026-11-14-managed-loop-ci.zh-CN.md)在设置开启时通过。
 
-默认值修改发布一个版本之后，再删除该入口的现有 loop。在此之前，把 `experimental.unifiedAgentLoop` 设为 `false` 可以让这个入口回到现有 loop。
+第 4 步需要：
+
+- 在两个设置都开启的情况下运行该入口集成测试的 nightly 组，自它的第 3 步以及内核的取消和有界收尾合入（#17145）以来连续通过 7 晚；
+- 它的对拍测试在比较内核开和关时，不重试连续通过 20 次；
+- 对 AgentCore 和 ACP，Managed 任务在两个设置都开启时通过。
+
+删除要在它所跟随的默认值修改之后等 14 天：一个入口的第 5 步在它的第 2 步之后；所有入口都完成第 5 步、且第 4 步都已开启满 14 天之后，再删除分开调用的模型轮和工具批、`runAgentLoop` 的过程式路径，以及两个设置。有归因于新路径的回归未关闭时，删除不合入。在一个入口完成第 5 步之前，把 `experimental.unifiedAgentLoop` 设为 `false` 可以让它回到现有 loop。
 
 ## 对拍测试
 
