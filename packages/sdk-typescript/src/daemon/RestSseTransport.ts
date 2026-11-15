@@ -171,6 +171,11 @@ export class RestSseTransport implements DaemonTransport {
           await budget.wait(SSE_CATCH_UP_RETRY_DELAY_MS, fetchSignal);
           continue;
         }
+        // The cycle lock bounds the replay request, not the
+        // consumer's drain: it is released as soon as the first frame
+        // is flowing, so a slow consumer (a pane rendering a long
+        // replay) cannot hold up every other over-budget pane.
+        let firstFrame = true;
         try {
           for await (const event of budget.catchUp(
             this._fetch,
@@ -178,11 +183,36 @@ export class RestSseTransport implements DaemonTransport {
             headers,
             fetchSignal,
             catchUpCursor,
+            (epoch) => opts.onEpoch?.(epoch),
           )) {
+            if (firstFrame) {
+              firstFrame = false;
+              budget.endCycle();
+            }
+            // A catch-up cycle's own replay boundary is not a live
+            // replay boundary: forwarding it makes the consumer treat
+            // every catch-up cycle as a reconnect (a turn-index REST
+            // refresh and an assistant-block split per demoted cycle).
+            if (event && event.type === 'replay_complete') continue;
             yield event;
           }
+        } catch (error) {
+          if (fetchSignal.aborted) return;
+          // A transient catch-up failure (5xx, a proxy blip, the
+          // connect timeout) costs one cycle, not the subscription:
+          // back off and probe again, the same shape the denied-slot
+          // path uses. 4xx errors are not transient — they mean the
+          // session is gone, and the subscription teardown that
+          // follows is what surfaces that to the provider.
+          const retryable =
+            !(error instanceof DaemonHttpError) || error.status >= 500;
+          if (retryable) {
+            await budget.wait(SSE_CATCH_UP_RETRY_DELAY_MS, fetchSignal);
+            continue;
+          }
+          throw error;
         } finally {
-          budget.endCycle();
+          if (firstFrame) budget.endCycle();
         }
         await budget.wait(SSE_CATCH_UP_RETRY_DELAY_MS, fetchSignal);
       }

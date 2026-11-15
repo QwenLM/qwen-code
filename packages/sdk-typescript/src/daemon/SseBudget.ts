@@ -26,6 +26,12 @@ import { composeAbortSignals } from './abortSignals.js';
  * buffer plus the consumer-side per-event-id dedupe make catch-up
  * lossless and idempotent. The focused pane has priority: its
  * subscription may evict the least-recently active background holder.
+ *
+ * The cap is opt-in: the module singleton stays dormant until the
+ * first {@link setSseBudgetFocus} call (the web shell's split-view
+ * focus hook). A non-browser host process (serve-bridge, adaptors)
+ * never sets a focus and must not be throttled — the connection-pool
+ * limit the cap protects does not exist outside a browser.
  */
 export const DEFAULT_MAX_LIVE_SSE_STREAMS = 4;
 
@@ -43,10 +49,21 @@ const CATCH_UP_CONNECT_TIMEOUT_MS = 8000;
 const CATCH_UP_FRAME_WINDOW_MS = 5000;
 
 /**
+ * After a same-session takeover demotes a holder, that subscription
+ * may not take the session's slot back for this long. Without the
+ * cooldown the two views of one session (main view + split pane)
+ * would trade the slot on every 2.5 s catch-up probe.
+ */
+const SAME_SESSION_DEDUPE_COOLDOWN_MS = 30_000;
+
+/**
  * Replay cursor carried across catch-up cycles. `value` is the highest
  * event id the subscriber has seen (seeded with the caller's
  * `lastEventId`); `undefined` means "replay from the start of the
- * ring buffer".
+ * ring buffer" (the request sends `Last-Event-ID: 0`, which the
+ * daemon reads as "replay the whole ring" — a MISSING header means
+ * live-only, which would leave a permanent hole in a pane that was
+ * denied a slot before its first live event).
  */
 export interface SseCatchUpCursor {
   value?: number;
@@ -55,8 +72,6 @@ export interface SseCatchUpCursor {
 interface SseBudgetHolder {
   readonly key: string;
   readonly sessionId: string;
-  /** When the holder took its slot. */
-  readonly acquiredAt: number;
   /** Last activity (acquire / touch); the LRU ordering key. */
   lastActiveAt: number;
   /** Abort controller of the holder's live SSE request. */
@@ -74,22 +89,53 @@ export class SseBudgetRegistry {
   /** Session id of the pane that currently has UI focus, or null. */
   focus: string | null = null;
 
+  /**
+   * Whether the cap is enforced. Directly constructed registries (tests)
+   * are active; the module singleton is created dormant and activates
+   * on the first `setFocus` call (see the module doc).
+   */
+  active: boolean;
+
   private cycling = false;
   private readonly holders = new Map<string, SseBudgetHolder>();
+  /**
+   * Key → timestamp until which a subscription demoted by a
+   * same-session takeover may not take that session's slot back
+   * (see `acquire`).
+   */
+  private readonly sameSessionCooldownUntil = new Map<string, number>();
 
-  constructor(max: number = DEFAULT_MAX_LIVE_SSE_STREAMS) {
+  constructor(max: number = DEFAULT_MAX_LIVE_SSE_STREAMS, active = true) {
     this.max = max;
+    this.active = active;
   }
 
   setFocus(sessionId: string | null): void {
+    // The first focus hook call activates the (dormant) module
+    // singleton: from then on the split-view panes share the cap.
+    this.active = true;
     this.focus = sessionId;
+  }
+
+  /** Number of held live slots (the eviction bookkeeping's size). */
+  get holderCount(): number {
+    return this.holders.size;
   }
 
   /**
    * Try to take a live-stream slot for `sessionId` under `key`.
    *
+   *   - A dormant registry (no focus has ever been set in this
+   *     context) grants everything without tracking: the pool limit
+   *     the cap protects does not exist outside a browser.
    *   - The same key is always allowed (the slot is touched, not
    *     re-taken).
+   *   - At most one live holder per session: a session rendered in
+   *     two mounted views at once (main view + split pane) keeps a
+   *     single live stream. A new subscription for an already-held
+   *     session takes the slot over — the previous holder is demoted
+   *     to catch-up — unless it is still inside the same-session
+   *     cooldown from its own recent demotion.
    *   - A slot is granted while fewer than `max` are held.
    *   - A focused session may evict the least-recently active
    *     NON-focused holder (its live request is aborted with an
@@ -104,17 +150,45 @@ export class SseBudgetRegistry {
     focused: boolean,
     controller: AbortController,
   ): boolean {
+    if (!this.active) {
+      return true;
+    }
     const existing = this.holders.get(key);
     if (existing) {
       existing.lastActiveAt = Date.now();
       return true;
     }
+    // Same-session dedupe: the other view of this session already
+    // holds the live stream. Take it over unless this subscription was
+    // just demoted for it (the cooldown stops the two views trading
+    // the slot on every catch-up probe).
+    const now = Date.now();
+    const sameSession = [...this.holders.values()].find(
+      (holder) => holder.sessionId === sessionId,
+    );
+    if (sameSession) {
+      const cooldownUntil = this.sameSessionCooldownUntil.get(key) ?? 0;
+      if (now < cooldownUntil) {
+        return false;
+      }
+      try {
+        sameSession.controller.abort(
+          new DOMException('demoted: session duplicated', 'AbortError'),
+        );
+      } catch {
+        /* holder already gone */
+      }
+      this.holders.delete(sameSession.key);
+      this.sameSessionCooldownUntil.set(
+        sameSession.key,
+        now + SAME_SESSION_DEDUPE_COOLDOWN_MS,
+      );
+    }
     if (this.holders.size < this.max) {
       this.holders.set(key, {
         key,
         sessionId,
-        acquiredAt: Date.now(),
-        lastActiveAt: Date.now(),
+        lastActiveAt: now,
         controller,
       });
       return true;
@@ -143,7 +217,6 @@ export class SseBudgetRegistry {
     this.holders.set(key, {
       key,
       sessionId,
-      acquiredAt: Date.now(),
       lastActiveAt: Date.now(),
       controller,
     });
@@ -161,6 +234,7 @@ export class SseBudgetRegistry {
   /** Give the slot back (subscription teardown). */
   release(key: string): void {
     this.holders.delete(key);
+    this.sameSessionCooldownUntil.delete(key);
   }
 
   /**
@@ -180,23 +254,31 @@ export class SseBudgetRegistry {
     this.cycling = false;
   }
 
-  /** Wait up to `ms`, resolving early when `signal` aborts. */
+  /**
+   * Wait up to `ms`, resolving early when `signal` aborts. A signal
+   * that is ALREADY aborted resolves immediately — the DOM abort event
+   * is not replayed for a listener attached after the fact. The abort
+   * listener is removed on every exit path, so repeated waits on one
+   * subscription-lifetime signal do not accumulate listeners.
+   */
   wait(ms: number, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) {
+      return Promise.resolve();
+    }
     return new Promise<void>((resolve) => {
-      const timer = setTimeout(resolve, ms);
-      if (signal) {
-        signal.addEventListener(
-          'abort',
-          () => {
-            clearTimeout(timer);
-            resolve();
-          },
-          { once: true },
-        );
-      }
+      const timer = setTimeout(() => {
+        if (signal) signal.removeEventListener('abort', onAbort);
+        resolve();
+      }, ms);
+      const onAbort = () => {
+        clearTimeout(timer);
+        if (signal) signal.removeEventListener('abort', onAbort);
+        resolve();
+      };
       if (typeof timer === 'object' && timer !== null && 'unref' in timer) {
         (timer as { unref: () => void }).unref();
       }
+      signal?.addEventListener('abort', onAbort, { once: true });
     });
   }
 
@@ -210,6 +292,18 @@ export class SseBudgetRegistry {
    * content-type validation — so a background pane sees exactly what a
    * live pane would, minus the tail that arrives as live events
    * afterwards.
+   *
+   * The whole cycle is wall-clock bounded by one per-cycle controller:
+   * it fires the connect timeout before headers and the frame window
+   * after them (aborted in the `finally`, which also detaches the
+   * composed signal's fallback listeners from the caller's signal). A
+   * body that goes silent after its headers therefore parks in no
+   * read — `parseSseStream` sees the abort and ends cleanly.
+   *
+   * `onEpoch` receives the response's `x-qwen-event-epoch` header so
+   * a demoted pane keeps its resume cursor paired with the daemon's
+   * current bus epoch (a restart that resets the ids without resetting
+   * the epoch must trigger a resync, like on the live path).
    */
   async *catchUp(
     fetchFn: typeof globalThis.fetch,
@@ -217,82 +311,135 @@ export class SseBudgetRegistry {
     headers: Record<string, string>,
     signal: AbortSignal,
     cursor: SseCatchUpCursor,
+    onEpoch?: (epoch: string) => void,
   ): AsyncGenerator<DaemonEvent> {
     const catchUpHeaders: Record<string, string> = { ...headers };
-    if (cursor.value !== undefined) {
-      catchUpHeaders['Last-Event-ID'] = String(cursor.value);
-    }
+    // A cursorless catch-up replays from the start of the ring: the
+    // daemon reads a MISSING Last-Event-ID as live-only, which would
+    // replay nothing and leave a permanent hole.
+    catchUpHeaders['Last-Event-ID'] = String(cursor.value ?? 0);
 
-    const timeoutCtrl = new AbortController();
+    const cycleCtrl = new AbortController();
     const connectTimer = setTimeout(
-      () =>
-        timeoutCtrl.abort(new DOMException('catch-up timeout', 'TimeoutError')),
+      () => cycleCtrl.abort(new DOMException('catch-up timeout', 'AbortError')),
       CATCH_UP_CONNECT_TIMEOUT_MS,
     );
-    const catchUpSignal = composeAbortSignals([signal, timeoutCtrl.signal]);
+    let windowTimer: ReturnType<typeof setTimeout> | undefined;
+    const catchUpSignal = composeAbortSignals([signal, cycleCtrl.signal]);
 
-    let res: Response;
+    let res: Response | undefined;
     try {
-      res = await fetchFn(url, {
-        headers: catchUpHeaders,
-        signal: catchUpSignal,
-      });
-    } finally {
-      clearTimeout(connectTimer);
-    }
-
-    if (!res.ok) {
-      let body: unknown;
       try {
-        const text = await res.text();
+        res = await fetchFn(url, {
+          headers: catchUpHeaders,
+          signal: catchUpSignal,
+        });
+      } finally {
+        clearTimeout(connectTimer);
+      }
+
+      if (!res.ok) {
+        // Bounded: a proxy that accepts the request and then stalls
+        // the error body would otherwise hang the cycle (and its
+        // context-wide lock) until the TCP layer gives up.
+        let body: unknown;
         try {
-          body = JSON.parse(text);
+          const text = await this.readTextBounded(res);
+          try {
+            body = JSON.parse(text);
+          } catch {
+            body = text;
+          }
         } catch {
-          body = text;
+          /* body unreadable */
         }
-      } catch {
-        /* body unreadable */
+        const detail =
+          body && typeof body === 'object' && 'error' in body
+            ? String((body as { error: unknown }).error)
+            : `HTTP ${res.status}`;
+        throw new DaemonHttpError(
+          res.status,
+          body,
+          `GET /session/:id/events: ${detail}`,
+        );
       }
-      const detail =
-        body && typeof body === 'object' && 'error' in body
-          ? String((body as { error: unknown }).error)
-          : `HTTP ${res.status}`;
-      throw new DaemonHttpError(
-        res.status,
-        body,
-        `GET /session/:id/events: ${detail}`,
-      );
-    }
 
-    // Content-type validation — a misconfigured proxy that swallows
-    // the SSE response would otherwise silently produce zero frames.
-    const contentType = res.headers.get('content-type') ?? '';
-    if (!contentType.toLowerCase().includes('text/event-stream') || !res.body) {
+      // Content-type validation — a misconfigured proxy that swallows
+      // the SSE response would otherwise silently produce zero frames.
+      const contentType = res.headers.get('content-type') ?? '';
+      if (
+        !contentType.toLowerCase().includes('text/event-stream') ||
+        !res.body
+      ) {
+        try {
+          await res.body?.cancel();
+        } catch {
+          /* body already consumed or no body */
+        }
+        throw new DaemonHttpError(
+          res.status,
+          contentType,
+          `GET /session/:id/events: expected content-type text/event-stream, got "${contentType}"`,
+        );
+      }
+
+      // Learn the daemon's current bus epoch (same header the live
+      // path reports) so the next reconnect pairs the cursor with a
+      // live epoch instead of forcing a whole-ring replay per cycle.
+      const responseEpoch = res.headers.get('x-qwen-event-epoch');
+      if (responseEpoch) {
+        onEpoch?.(responseEpoch);
+      }
+
+      // The frame window is now a real deadline, not a between-frames
+      // check: it aborts the cycle's controller, which unparks a
+      // silent body in `reader.read()` the same way caller aborts do.
+      windowTimer = setTimeout(
+        () =>
+          cycleCtrl.abort(
+            new DOMException('catch-up frame window exceeded', 'AbortError'),
+          ),
+        CATCH_UP_FRAME_WINDOW_MS,
+      );
+      for await (const event of parseSseStream(res.body, catchUpSignal)) {
+        if (event && typeof event.id === 'number') {
+          cursor.value = event.id;
+        }
+        yield event;
+        if (event && event.type === 'replay_complete') break;
+      }
+    } finally {
+      if (windowTimer !== undefined) clearTimeout(windowTimer);
+      // Detach the composed signal's fallback listeners from the
+      // caller's signal and stop any read the generator was parked in.
+      cycleCtrl.abort();
       try {
-        await res.body?.cancel();
+        await res?.body?.cancel();
       } catch {
-        /* body already consumed or no body */
+        /* body already consumed or cancelled */
       }
-      throw new DaemonHttpError(
-        res.status,
-        contentType,
-        `GET /session/:id/events: expected content-type text/event-stream, got "${contentType}"`,
-      );
     }
+  }
 
-    const startedAt = Date.now();
-    for await (const event of parseSseStream(res.body, signal)) {
-      if (event && typeof event.id === 'number') {
-        cursor.value = event.id;
-      }
-      yield event;
-      if (event && event.type === 'replay_complete') break;
-      if (Date.now() - startedAt > CATCH_UP_FRAME_WINDOW_MS) break;
-    }
+  /** Read a response body, giving up after the connect-timeout bound. */
+  private async readTextBounded(res: Response): Promise<string> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      await res.body.cancel();
-    } catch {
-      /* body already consumed or cancelled */
+      return await Promise.race([
+        res.text(),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(
+            () =>
+              reject(new DOMException('catch-up body timeout', 'TimeoutError')),
+            CATCH_UP_CONNECT_TIMEOUT_MS,
+          );
+          if (typeof timer === 'object' && timer !== null && 'unref' in timer) {
+            (timer as { unref: () => void }).unref();
+          }
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
   }
 }
@@ -301,15 +448,16 @@ export class SseBudgetRegistry {
  * The budget lives in module state — one per JS context — rather than
  * per transport instance: the web shell creates one `DaemonClient`
  * (and therefore one `RestSseTransport`) per split-view pane, and the
- * cap must hold across all of them. v1 does not expose the registry as
- * a constructor option; the context-wide singleton IS the per-webview
- * registry (each webview / Node process has its own module state).
+ * cap must hold across all of them. The singleton is created DORMANT:
+ * it starts enforcing the cap on the first `setSseBudgetFocus` call,
+ * so a host process that never has a split-view focus concept is never
+ * throttled by a limit that does not apply to it.
  */
 let sseBudgetRegistry: SseBudgetRegistry | undefined;
 
 export function getSseBudgetRegistry(): SseBudgetRegistry {
   if (!sseBudgetRegistry) {
-    sseBudgetRegistry = new SseBudgetRegistry();
+    sseBudgetRegistry = new SseBudgetRegistry(undefined, false);
   }
   return sseBudgetRegistry;
 }
@@ -317,7 +465,8 @@ export function getSseBudgetRegistry(): SseBudgetRegistry {
 /**
  * Tell the budget which pane has UI focus (split-view focus hook).
  * The focused pane's subscription may evict a background holder;
- * passing `null` clears the priority (no pane may evict).
+ * passing `null` clears the priority (no pane may evict). The first
+ * call activates the dormant module registry.
  */
 export function setSseBudgetFocus(sessionId: string | null): void {
   getSseBudgetRegistry().setFocus(sessionId);

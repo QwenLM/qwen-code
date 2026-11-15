@@ -156,6 +156,22 @@ describe('SseBudgetRegistry slot accounting', () => {
     reg.release('kA');
     expect(reg.acquire('kB', 'sB', false, b)).toBe(true);
   });
+
+  it('holderCount reflects the held slots (including eviction reuse)', () => {
+    const reg = new SseBudgetRegistry(4);
+    const ctrl = new AbortController();
+    expect(reg.holderCount).toBe(0);
+    for (let i = 0; i < 4; i++) {
+      reg.acquire(`k${i}`, `s${i}`, false, ctrl);
+    }
+    expect(reg.holderCount).toBe(4);
+    // Focus eviction reuses a slot — the count stays at max.
+    reg.setFocus('s5');
+    expect(reg.acquire('k4', 's5', true, new AbortController())).toBe(true);
+    expect(reg.holderCount).toBe(4);
+    reg.release('k4');
+    expect(reg.holderCount).toBe(3);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -260,6 +276,67 @@ describe('SseBudgetRegistry cycle and wait', () => {
     await done;
     expect(resolved).toBe(true);
   });
+
+  it('wait resolves immediately when the signal is already aborted', async () => {
+    // The DOM abort event is not replayed to a listener attached after
+    // the fact — an already-aborted signal must not start the timer.
+    const reg = new SseBudgetRegistry(4);
+    const ctrl = new AbortController();
+    ctrl.abort();
+    const start = Date.now();
+    await reg.wait(60_000, ctrl.signal);
+    expect(Date.now() - start).toBeLessThan(50);
+  });
+
+  it('wait removes its abort listener on every exit path', () => {
+    // A subscription-lifetime signal outlives many retry waits; a
+    // listener leak here would accumulate one listener per 2.5 s wait.
+    const reg = new SseBudgetRegistry(4);
+    let adds = 0;
+    let removes = 0;
+    const wrap = (sig: AbortSignal): void => {
+      const origAdd = sig.addEventListener.bind(sig);
+      const origRemove = sig.removeEventListener.bind(sig);
+      (sig as unknown as { addEventListener: unknown }).addEventListener = (
+        type: string,
+        listener: EventListener,
+        options?: AddEventListenerOptions | boolean,
+      ) => {
+        adds++;
+        origAdd(type, listener, options);
+      };
+      (sig as unknown as { removeEventListener: unknown }).removeEventListener =
+        (
+          type: string,
+          listener: EventListener,
+          options?: EventListenerOptions | boolean,
+        ) => {
+          removes++;
+          origRemove(type, listener, options);
+        };
+    };
+
+    const signal = new AbortController().signal;
+    wrap(signal);
+    return (async () => {
+      for (let i = 0; i < 50; i++) {
+        await reg.wait(10, signal);
+      }
+      // Timer path: 50 attached, 50 detached.
+      expect(adds).toBe(50);
+      expect(removes).toBe(50);
+
+      // Abort path: the listener is detached when the wait resolves early.
+      const ctrl = new AbortController();
+      wrap(ctrl.signal);
+      const pending = reg.wait(60_000, ctrl.signal);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(adds).toBe(51);
+      ctrl.abort();
+      await pending;
+      expect(removes).toBe(51);
+    })();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -287,6 +364,29 @@ describe('per-context registry singleton', () => {
     resetSseBudgetRegistry();
     const b = getSseBudgetRegistry();
     expect(b).not.toBe(a);
+  });
+
+  it('module registry is dormant until the first focus call', () => {
+    const reg = getSseBudgetRegistry();
+    expect(reg.active).toBe(false);
+    const ctrl = new AbortController();
+    // Dormant: no tracking, no cap — a host without a split-view focus
+    // concept (serve-bridge, adaptors) must never be throttled.
+    for (let i = 0; i < 5; i++) {
+      expect(reg.acquire(`d${i}`, `ds${i}`, false, ctrl)).toBe(true);
+    }
+    expect(reg.holderCount).toBe(0);
+
+    // The first focus hook activates the cap.
+    reg.setFocus('s1');
+    expect(reg.active).toBe(true);
+    for (let i = 0; i < 4; i++) {
+      expect(reg.acquire(`a${i}`, `as${i}`, false, ctrl)).toBe(true);
+    }
+    expect(reg.acquire('a4', 'as4', false, ctrl)).toBe(false);
+    reg.release('a0');
+    expect(reg.acquire('a4', 'as4', false, ctrl)).toBe(true);
+    expect(reg.holderCount).toBe(4);
   });
 });
 
@@ -346,7 +446,7 @@ describe('SseBudgetRegistry.catchUp', () => {
     expect(bodyCancelled).toBe(true);
   });
 
-  it('omits Last-Event-ID when the cursor has no value', async () => {
+  it('sends Last-Event-ID 0 when the cursor has no value', async () => {
     const reg = new SseBudgetRegistry(4);
     let seenLastEventId: string | null = null;
     const fetchFn = (async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -358,6 +458,8 @@ describe('SseBudgetRegistry.catchUp', () => {
 
     // Bounded: after the boundary the stream stays open; a mutant that
     // ignores `replay_complete` must fail the deadline, not hang.
+    // A MISSING Last-Event-ID means live-only for the daemon (a
+    // permanent hole), so a cursorless catch-up must send `0`.
     const ctrl = new AbortController();
     await collectBounded(
       reg.catchUp(
@@ -369,7 +471,7 @@ describe('SseBudgetRegistry.catchUp', () => {
       ),
       () => ctrl.abort(),
     );
-    expect(seenLastEventId).toBeNull();
+    expect(seenLastEventId).toBe('0');
   });
 
   it('throws DaemonHttpError with the daemon error field on non-2xx', async () => {
@@ -418,5 +520,198 @@ describe('SseBudgetRegistry.catchUp', () => {
     await expect(collect(gen)).rejects.toThrow(
       'expected content-type text/event-stream',
     );
+  });
+
+  it('ends a silent body within the frame window (wall-clock bound)', async () => {
+    // A body that never sends another frame must not park the cycle
+    // (and its context-wide lock) forever: the per-cycle controller
+    // aborts after the frame window and the reader unwinds cleanly.
+    vi.useFakeTimers();
+    try {
+      const reg = new SseBudgetRegistry(4);
+      const ctrl = new AbortController();
+      const gen = reg.catchUp(
+        async () => sseResponse([], () => {}),
+        'http://daemon/session/s1/events',
+        {},
+        ctrl.signal,
+        { value: 10 },
+      );
+      const r = await Promise.race([
+        gen.next(),
+        vi.advanceTimersByTimeAsync(6_000).then(() => 'TIMEOUT' as const),
+      ]);
+      expect(r).not.toBe('TIMEOUT');
+      expect((r as IteratorResult<DaemonEvent>).done).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reports the x-qwen-event-epoch header through onEpoch', async () => {
+    const reg = new SseBudgetRegistry(4);
+    let epoch: string | undefined;
+    const encoder = new TextEncoder();
+    const boundary =
+      'data: ' +
+      JSON.stringify({
+        v: 1,
+        type: 'replay_complete',
+        data: { replayedCount: 0 },
+      }) +
+      '\n\n';
+    const fetchFn = (async () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(encoder.encode(boundary));
+            controller.close();
+          },
+        }),
+        {
+          status: 200,
+          headers: {
+            'content-type': 'text/event-stream',
+            'x-qwen-event-epoch': 'epoch-42',
+          },
+        },
+      )) as typeof globalThis.fetch;
+
+    const gen = reg.catchUp(
+      fetchFn,
+      'http://daemon/session/s1/events',
+      {},
+      new AbortController().signal,
+      { value: 0 },
+      (value) => {
+        epoch = value;
+      },
+    );
+    await collect(gen);
+    expect(epoch).toBe('epoch-42');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Abort-signal hygiene (fallback compose path)
+// ---------------------------------------------------------------------------
+
+describe('SseBudgetRegistry signal hygiene', () => {
+  it('detaches fallback compose listeners from the caller signal', async () => {
+    // Without native AbortSignal.any, the composed catch-up signal is
+    // wired with per-input 'abort' listeners. Every catch-up cycle must
+    // detach them again — otherwise a long-lived subscription signal
+    // accumulates one listener per cycle.
+    const nativeAny = (AbortSignal as unknown as { any?: unknown }).any;
+    (AbortSignal as unknown as { any?: unknown }).any = undefined;
+    try {
+      const reg = new SseBudgetRegistry(4);
+      const outer = new AbortController();
+      let adds = 0;
+      let removes = 0;
+      const origAdd = outer.signal.addEventListener.bind(outer.signal);
+      const origRemove = outer.signal.removeEventListener.bind(outer.signal);
+      (
+        outer.signal as unknown as { addEventListener: unknown }
+      ).addEventListener = (
+        type: string,
+        listener: EventListener,
+        options?: AddEventListenerOptions | boolean,
+      ) => {
+        adds++;
+        origAdd(type, listener, options);
+      };
+      (
+        outer.signal as unknown as { removeEventListener: unknown }
+      ).removeEventListener = (
+        type: string,
+        listener: EventListener,
+        options?: EventListenerOptions | boolean,
+      ) => {
+        removes++;
+        origRemove(type, listener, options);
+      };
+
+      const gen = reg.catchUp(
+        async () => sseResponse([], () => {}),
+        'http://daemon/session/s1/events',
+        {},
+        outer.signal,
+        { value: 0 },
+      );
+      void gen.next();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(adds).toBeGreaterThan(0);
+
+      outer.abort();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(removes).toBe(adds);
+    } finally {
+      (AbortSignal as unknown as { any?: unknown }).any = nativeAny;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Same-session takeover
+// ---------------------------------------------------------------------------
+
+describe('SseBudgetRegistry same-session takeover', () => {
+  it('a second view of a held session takes the slot instead of blocking', () => {
+    const reg = new SseBudgetRegistry(4);
+    const mainCtrl = new AbortController();
+    expect(reg.acquire('main', 'S', false, mainCtrl)).toBe(true);
+    for (let i = 1; i <= 3; i++) {
+      reg.acquire(`p${i}`, `s${i}`, false, new AbortController());
+    }
+    expect(reg.holderCount).toBe(4);
+
+    // A split pane rendering the same session S takes over main's
+    // slot; main is demoted with an AbortError the transport treats
+    // as a clean end (it then resumes losslessly via catch-up).
+    const paneCtrl = new AbortController();
+    expect(reg.acquire('pane0', 'S', false, paneCtrl)).toBe(true);
+    expect(mainCtrl.signal.aborted).toBe(true);
+    const reason = mainCtrl.signal.reason as DOMException;
+    expect(reason.name).toBe('AbortError');
+    expect(reason.message).toContain('demoted');
+    expect(reg.holderCount).toBe(4);
+
+    // The budget did not grow: a fifth, different session is still
+    // denied — the extra slot came from removing the duplicate, not
+    // from enlarging the cap.
+    expect(reg.acquire('p5', 's5', false, new AbortController())).toBe(false);
+  });
+
+  it('the per-key cooldown stops two views trading the slot', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(1_000_000));
+    try {
+      const reg = new SseBudgetRegistry(4);
+      const mainCtrl = new AbortController();
+      reg.acquire('main', 'S', false, mainCtrl);
+      for (let i = 2; i <= 4; i++) {
+        reg.acquire(`p${i}`, `s${i}`, false, new AbortController());
+      }
+
+      const paneCtrl = new AbortController();
+      expect(reg.acquire('pane', 'S', false, paneCtrl)).toBe(true);
+      expect(mainCtrl.signal.aborted).toBe(true);
+
+      // main's immediate re-acquire: its key is cooling down, so it
+      // must not take the slot back (the two views would otherwise
+      // trade it on every 2.5 s catch-up probe).
+      expect(reg.acquire('main', 'S', false, new AbortController())).toBe(
+        false,
+      );
+      expect(paneCtrl.signal.aborted).toBe(false);
+      expect(reg.holderCount).toBe(4);
+
+      vi.setSystemTime(new Date(1_031_000));
+      expect(reg.acquire('main', 'S', false, new AbortController())).toBe(true);
+      expect(paneCtrl.signal.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

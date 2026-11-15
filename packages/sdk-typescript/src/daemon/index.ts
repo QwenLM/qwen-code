@@ -45,14 +45,10 @@ export type {
   DaemonTransportType,
 } from './DaemonTransport.js';
 export type { RestSseTransport } from './RestSseTransport.js';
-export {
-  DEFAULT_MAX_LIVE_SSE_STREAMS,
-  SSE_CATCH_UP_RETRY_DELAY_MS,
-  SseBudgetRegistry,
-  getSseBudgetRegistry,
-  resetSseBudgetRegistry,
-  setSseBudgetFocus,
-} from './SseBudget.js';
+// Only the public focus hook is exported: the registry, its constants
+// and the test reset hook are SDK-internal (the transport imports them
+// directly), so they stay out of the public API surface.
+export { setSseBudgetFocus } from './SseBudget.js';
 export type { SseCatchUpCursor } from './SseBudget.js';
 // negotiateTransport + the concrete ACP transport classes are intentionally
 // NOT re-exported here: a static import chain from this barrel would pull
