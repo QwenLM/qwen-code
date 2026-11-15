@@ -1363,6 +1363,184 @@ describe('GoalsDialog multi-workspace', () => {
     expect(document.querySelector('select')!.value).toBe('/w-primary');
   });
 
+  it('never offers an untrusted primary as a create target', async () => {
+    // The fan-out keeps the untrusted primary so its listing failure stays
+    // loud, but the create path refuses it — the picker must not default to
+    // a target every submit would reject. Removing the creatable filter reds
+    // this case (options and default would include the untrusted primary).
+    const onCreateGoal = vi.fn().mockResolvedValue(undefined);
+    await mount([], {
+      workspaces: [{ ...primaryWs, trusted: false }, secondaryWs],
+      onCreateGoal,
+      listGoalsByWorkspace: {},
+    });
+
+    click(findButton('New goal'));
+    const select = document.querySelector('select');
+    expect(Array.from(select!.options).map((o) => o.value)).toEqual([
+      '/w-secondary',
+    ]);
+    expect(select!.value).toBe('/w-secondary');
+
+    setTextarea('ship it');
+    click(findButton('Set goal'));
+    await flush();
+
+    expect(onCreateGoal).toHaveBeenCalledWith('ship it', '/w-secondary');
+  });
+
+  it('refuses the submit with a visible error when no workspace is creatable', async () => {
+    // Every registered workspace is untrusted: the form must not submit
+    // undefined into the App's silent no-target path — the user gets the
+    // declared refusal instead of a dead button. Removing the guard reds
+    // this case (onCreateGoal would be called with undefined).
+    const onCreateGoal = vi.fn().mockResolvedValue(undefined);
+    await mount([], {
+      workspaces: [{ ...primaryWs, trusted: false }, untrustedWs],
+      onCreateGoal,
+      listGoalsByWorkspace: {},
+    });
+
+    click(findButton('New goal'));
+    setTextarea('ship it');
+    click(findButton('Set goal'));
+    await flush();
+
+    expect(onCreateGoal).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'unavailable or untrusted',
+    );
+  });
+
+  it('refuses the submit when the single advertised workspace is untrusted', async () => {
+    // No picker renders in the single-workspace view, but the refusal must
+    // still fire: submitting undefined would reach the App's silent
+    // no-target path. Narrowing the guard back to isMultiWorkspace reds
+    // this case.
+    const onCreateGoal = vi.fn().mockResolvedValue(undefined);
+    await mount([], {
+      workspaces: [{ ...primaryWs, trusted: false }],
+      onCreateGoal,
+      listGoalsByWorkspace: {},
+    });
+
+    click(findButton('New goal'));
+    expect(document.querySelector('select')).toBeNull();
+    setTextarea('ship it');
+    click(findButton('Set goal'));
+    await flush();
+
+    expect(onCreateGoal).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'unavailable or untrusted',
+    );
+  });
+
+  it('retires the no-creatable refusal once a creatable target reappears', async () => {
+    // The refusal must not outlive its condition: a capabilities refresh
+    // that grants trust re-enables the picker, and the stale alert must
+    // clear without another submit. Removing the retirement effect reds
+    // this case.
+    const onCreateGoal = vi.fn().mockResolvedValue(undefined);
+    await mount([], {
+      workspaces: [{ ...primaryWs, trusted: false }, untrustedWs],
+      onCreateGoal,
+      listGoalsByWorkspace: {},
+    });
+
+    click(findButton('New goal'));
+    setTextarea('ship it');
+    click(findButton('Set goal'));
+    await flush();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'unavailable or untrusted',
+    );
+
+    await act(async () => {
+      root!.render(
+        <I18nProvider language="en">
+          <GoalsDialog
+            onCreateGoal={onCreateGoal}
+            onOpenSession={vi.fn()}
+            onError={vi.fn()}
+            workspaces={[{ ...primaryWs, trusted: false }, secondaryWs]}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+    expect(document.querySelector('select')!.value).toBe('/w-secondary');
+  });
+
+  it('explains the empty picker inline when nothing is creatable', async () => {
+    // The disabled empty picker must carry the reason before any submit,
+    // not only after a dead-button click.
+    await mount([], {
+      workspaces: [{ ...primaryWs, trusted: false }, untrustedWs],
+      listGoalsByWorkspace: {},
+    });
+
+    click(findButton('New goal'));
+    const hint = document.querySelector('[data-testid="goals-no-creatable"]');
+    expect(hint).not.toBeNull();
+    expect(hint!.textContent).toContain('unavailable or untrusted');
+    expect(document.querySelector('select')!.disabled).toBe(true);
+  });
+
+  it('reconciles a vanished selection with the creatable set for control and submit', async () => {
+    // A capabilities refresh can drop the selected workspace while the form
+    // stays open. Both the rendered select and the submitted cwd must fall
+    // back to the default; submitting the vanished cwd reds this case.
+    const thirdWs = {
+      id: 'ws-3',
+      cwd: '/w-third',
+      primary: false,
+      trusted: true,
+    };
+    const onCreateGoal = vi.fn().mockResolvedValue(undefined);
+    await mount([], {
+      workspaces: [primaryWs, secondaryWs, thirdWs],
+      defaultWorkspaceCwd: '/w-secondary',
+      onCreateGoal,
+      listGoalsByWorkspace: {},
+    });
+
+    click(findButton('New goal'));
+    expect(document.querySelector('select')!.value).toBe('/w-secondary');
+
+    // The refresh removes the selected workspace; two remain, so the view
+    // stays multi-workspace and the form keeps its state.
+    await act(async () => {
+      root!.render(
+        <I18nProvider language="en">
+          <GoalsDialog
+            onCreateGoal={onCreateGoal}
+            onOpenSession={vi.fn()}
+            onError={vi.fn()}
+            workspaces={[primaryWs, thirdWs]}
+            defaultWorkspaceCwd="/w-secondary"
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    const select = document.querySelector('select');
+    expect(select!.value).toBe('/w-primary');
+    expect(Array.from(select!.options).map((o) => o.value)).toEqual([
+      '/w-primary',
+      '/w-third',
+    ]);
+
+    setTextarea('ship it');
+    click(findButton('Set goal'));
+    await flush();
+
+    expect(onCreateGoal).toHaveBeenCalledWith('ship it', '/w-primary');
+  });
+
   it('shows no picker or badges for a single workspace', async () => {
     const onOpenSession = vi.fn();
     await mount([baseGoal()], { workspaces: [primaryWs], onOpenSession });

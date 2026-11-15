@@ -5,7 +5,8 @@
 - **Status**: accepted in #15343. The headless (PR 1, #15369), ACP (PR 2, #15509–#16190), Ink TUI (PR 3, #16206–#16704) and OpenTUI (PR 4, #16743–#16820) migrations are merged; each surface's default flip waits on the nightly unified-loop E2E gate (#16192). PR 5 (AgentCore) is in progress: 5a (#16880) and 5b (#17035) are merged. The remaining steps are tracked in #17045. PR 6a (speculation's model round, #17029) is merged.
 - **Date**: 2026-10-23, against upstream `779a4d5d0d`.
 - **Related**:
-  - tracking issue #15327;
+  - tracking issue #15327, and #17045 for the remaining steps, the rollout and the capability ledger;
+  - [Agent loop capability ledger](2026-11-15-loop-capability-ledger.md) — each behavior of the 1.0 loop mapped to main, with the decisions on what main does not have;
   - the earlier proposal #8775, which starts with AgentCore and headless; this design extends its goal to all seven loops, and its AgentCore step is PR 5;
   - defects found while comparing the loops: #15324, #15325, #15326;
   - [loop protection setting](2026-10-21-loop-protection-setting.md);
@@ -585,14 +586,32 @@ The unit suite in `speculation.test.ts` runs a text-only round, a single call, a
 
 PR 6b is speculation's default-on and removal step.
 
-A surface counts as moved when it passes its parity suite with the setting on and its known differences are listed. Each surface then changes its default on its own, without waiting for the others. Its default changes when:
+A surface moves in five steps, tracked in #17045:
 
-- the setting has been available for that surface for at least one release;
-- the scheduled job that runs the surface's integration suite with the setting on has passed on main for two weeks;
+1. Shared model round and tool batch, opt-in (`experimental.unifiedAgentLoop`).
+2. On by default.
+3. Each round and its tool batch in one `runAgentLoop` call, on the event-bus kernel when `experimental.eventBusAgentLoop` is also on; the surface's parity suite also compares the kernel off and on.
+4. The kernel on by default.
+5. The current loop removed.
+
+Defaults change early and removals come late. The current loop stays through steps 2 to 4 as the way back, so each default change moves between two paths the surface's parity suite compares. Each surface changes its own defaults, one entry of the per-surface default tables at a time, and `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` and `QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP` force every surface, or the ones they list (`headless=0`, for example), on or off ahead of the setting ([loop rollout switches](2026-11-12-loop-rollout-switches.md)).
+
+Step 2 needs:
+
+- the setting has shipped in a stable release;
+- the nightly leg that runs the surface's integration tests with the setting on has passed 14 nights in a row on main, at least 7 of them after the surface's last change to its shared path other than a fix;
+- its parity suite passes 20 runs in a row with retries off, since the nightly leg retries a failed test;
 - the surface has no open row in [Send options a host owns](#send-options-a-host-owns);
-- the release notes list its intended differences from [Compatibility](#compatibility).
+- the release notes list its intended differences from [Compatibility](#compatibility) and how to switch back;
+- for AgentCore and ACP, the [Managed job](2026-11-14-managed-loop-ci.md) passes with the setting on.
 
-Its current loop is removed one release after its default changed. Until then, setting `experimental.unifiedAgentLoop` to `false` brings the current loop back for that surface.
+Step 4 needs:
+
+- the nightly leg that runs the surface's integration tests with both settings on has passed 7 nights in a row since its step 3 and since the kernel's cancellation and bounded close merged (#17145);
+- its parity suite passes 20 runs in a row comparing the kernel off and on, with retries off;
+- for AgentCore and ACP, the Managed job passes with both settings on.
+
+A removal waits 14 days after the default it follows: a surface's step 5 after its step 2, and, once every surface has done step 5 and has had step 4 on for 14 days, the separate round and batch calls, the procedural path of `runAgentLoop` and both settings. A removal does not land while a regression attributed to the new path is open. Until a surface's step 5, setting `experimental.unifiedAgentLoop` to `false` brings its current loop back.
 
 ## Parity suite
 

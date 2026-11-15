@@ -90,7 +90,12 @@ vi.mock('@xterm/addon-fit', () => ({
   FitAddon: vi.fn(() => ({ fit: vi.fn() })),
 }));
 const localFilesBridge = vi.hoisted(() => ({
-  status: { phase: 'idle', blocker: null },
+  status: { phase: 'idle', blocker: null } as {
+    phase: string;
+    blocker: null;
+    rootName?: string;
+    toolCount?: number;
+  },
   connect: vi.fn(),
   disconnect: vi.fn(),
 }));
@@ -710,6 +715,63 @@ describe('ManagedSessionsPage', () => {
         'button[aria-label="Local files"]',
       );
       expect(button !== null).toBe(enabled);
+    },
+  );
+
+  it.each([
+    { title: 's1', named: false },
+    { title: 'My task', named: true },
+  ])(
+    'suppresses the placeholder session title in the local files panel (title: $title)',
+    async ({ title, named }) => {
+      const previousStatus = localFilesBridge.status;
+      localFilesBridge.status = {
+        phase: 'connected',
+        blocker: null,
+        rootName: 'ai_coding',
+        toolCount: 4,
+      };
+      try {
+        provider = {
+          ...provider,
+          clientFiles: {
+            transport: () => ({
+              baseUrl: 'http://managed-test/api/agent/web-shell/v1',
+              fetch: async () => new Response('{}', { status: 200 }),
+            }),
+          },
+        };
+        mocks.client.getSession.mockImplementation(async (id: string) =>
+          summary(id, {
+            title,
+            capabilities: {
+              canSend: false,
+              canCancel: false,
+              clientFiles: true,
+            },
+          }),
+        );
+        await render('s1');
+        const trigger = container.querySelector<HTMLButtonElement>(
+          'button[aria-label="Local files"]',
+        );
+        expect(trigger).not.toBeNull();
+        await act(async () => {
+          trigger!.click();
+          await flush();
+        });
+        const panel = document.querySelector(
+          '[data-web-shell-local-files-panel]',
+        );
+        expect(panel).not.toBeNull();
+        // Positive control: the connected panel really rendered, so the
+        // absence below is the suppression, not a missing panel.
+        expect(panel!.textContent).toContain('ai_coding');
+        expect(panel!.textContent!.includes('Session')).toBe(named);
+        if (named) expect(panel!.textContent).toContain('My task');
+      } finally {
+        localFilesBridge.status = previousStatus;
+      }
     },
   );
 
