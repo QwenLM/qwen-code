@@ -1429,12 +1429,11 @@ function parseStatusEntries(output: string): Array<{
  * through by following the dead link). `relPath` is repo-root-relative and
  * `/`-separated, matching every other path this module reads from git.
  */
-function pathOccupied(root: string, relPath: string): boolean {
+function lstatOrNull(root: string, relPath: string): fs.Stats | null {
   try {
-    fs.lstatSync(path.join(root, ...relPath.split('/')));
-    return true;
+    return fs.lstatSync(path.join(root, ...relPath.split('/')));
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -1540,12 +1539,19 @@ async function resolveCommitPaths(
     // against the repository root — a workspace bound below the root would
     // never see the occupant through `cwd`. A case-only rename reads as
     // occupied on a case-folding filesystem even though nothing sits at the
-    // old path — the occupant is the rename's own post-image. `lstat` over
-    // `existsSync` keeps a dangling symlink at the old path a squatter too.
-    if (
-      oldPath.toLowerCase() !== newPath.toLowerCase() &&
-      pathOccupied(root || cwd, oldPath)
-    ) {
+    // old path — the occupant is the rename's own post-image. Decide that by
+    // file identity rather than by folding the names: on a case-sensitive
+    // filesystem a squatter at the old spelling is a different file and must
+    // still be refused. `lstat` over `existsSync` keeps a dangling symlink at
+    // the old path a squatter too.
+    const oldStat = lstatOrNull(root || cwd, oldPath);
+    const newStat = lstatOrNull(root || cwd, newPath);
+    const sameIdentity =
+      oldStat !== null &&
+      newStat !== null &&
+      oldStat.dev === newStat.dev &&
+      oldStat.ino === newStat.ino;
+    if (oldStat !== null && !sameIdentity) {
       throw new Error(
         `cannot commit: ${oldPath} was renamed to ${newPath}, but a file now sits at the old path`,
       );
@@ -1664,15 +1670,21 @@ export async function gitCommit(
           env,
         );
         const indexTokens = indexChanges.split('\0');
+        // `--name-status -z` is a flat token stream, so a path is read as a
+        // status unless the loop consumes it with its own record: a path whose
+        // first character is R, C or D would otherwise swallow the next
+        // record's status and drop that record from the sets below.
         for (let i = 0; i < indexTokens.length; i++) {
           const status = indexTokens[i];
-          if (!status) continue;
+          if (!/^[A-Z](?:\d+)?$/.test(status)) continue;
           if (status.startsWith('R') || status.startsWith('C')) {
-            // A rename entry is `R100\0old\0new\0`.
             indexRenamedOld.add(indexTokens[i + 1] ?? '');
-            i++;
+            i += 2;
           } else if (status.startsWith('D')) {
             indexDeleted.add(indexTokens[i + 1] ?? '');
+            i++;
+          } else {
+            i++;
           }
         }
       }

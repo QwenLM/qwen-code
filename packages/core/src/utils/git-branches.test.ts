@@ -1165,6 +1165,24 @@ describe('gitCommit', () => {
   );
 
   it.skipIf(process.platform === 'win32' || process.platform === 'darwin')(
+    'refuses a case-only rename whose old spelling holds a different file',
+    async () => {
+      // The case-fold exemption is decided by file identity, not by folding
+      // the two names: on a case-sensitive filesystem a squatter written at
+      // the old spelling is a different file and must stay out of the commit.
+      const dir = makeRepo();
+      commitFile(dir, 'Foo.tsx', 'component\n', 'add component');
+      git(dir, 'mv', 'Foo.tsx', 'foo.tsx');
+      write(dir, { 'Foo.tsx': 'SQUATTER\n' });
+
+      await expect(
+        gitCommit(dir, 'rename component', { paths: ['foo.tsx'] }),
+      ).rejects.toThrow(/a file now sits at the old path/);
+      expect(git(dir, 'log', '--format=%s').trim()).toBe('add component');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32' || process.platform === 'darwin')(
     'commits a case-only rename without reading the post-image as a squatter',
     async () => {
       // A case-folding filesystem resolves the old spelling to the new file;
