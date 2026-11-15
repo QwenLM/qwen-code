@@ -28,7 +28,7 @@ url = "2.5.4"
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6.2"
 objc2 = { version = "0.6.4", default-features = false, features = ["std"] }
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString", "NSBundle"] }
 objc2-user-notifications = "0.3.2"
 
 [features]

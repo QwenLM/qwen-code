@@ -8,16 +8,33 @@
 
 use block2::RcBlock;
 use objc2::runtime::Bool;
-use objc2_foundation::{NSError, NSString};
+use objc2_foundation::{NSError, NSBundle, NSString};
 use objc2_user_notifications::{
     UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationRequest,
     UNUserNotificationCenter,
 };
 
+/// The unbundled process `tauri dev` launches has no bundle identifier, and
+/// `+[UNUserNotificationCenter currentNotificationCenter]` raises an
+/// uncatchable `NSInternalInconsistencyException` there, so host posting is
+/// attempted only from a bundled app; without an identifier it fails closed.
+fn host_can_notify(bundle_identifier: Option<&str>) -> bool {
+    bundle_identifier.is_some()
+}
+
+fn main_bundle_identifier() -> Option<&'static str> {
+    NSBundle::mainBundle()
+        .bundleIdentifier()
+        .map(AsRef::as_ref)
+}
+
 /// Request system notification authorization. Called when the user turns
 /// task notifications on; shows the OS prompt once and is ignored when the
 /// user already decided.
 pub fn request_authorization() {
+    if !host_can_notify(main_bundle_identifier()) {
+        return;
+    }
     let center = UNUserNotificationCenter::currentNotificationCenter();
     let handler: RcBlock<dyn Fn(Bool, *mut NSError)> =
         RcBlock::new(move |_granted: Bool, _error: *mut NSError| {});
@@ -30,6 +47,9 @@ pub fn request_authorization() {
 /// Post a single system notification. Fire-and-forget: failures are not
 /// surfaced to the web shell.
 pub fn show(title: &str, body: &str) {
+    if !host_can_notify(main_bundle_identifier()) {
+        return;
+    }
     let center = UNUserNotificationCenter::currentNotificationCenter();
     let content = UNMutableNotificationContent::new();
     content.setTitle(&NSString::from_str(title));
@@ -43,4 +63,15 @@ pub fn show(title: &str, body: &str) {
     let request =
         UNNotificationRequest::requestWithIdentifier_content_trigger(&identifier, &content, None);
     center.addNotificationRequest_withCompletionHandler(&request, None);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::host_can_notify;
+
+    #[test]
+    fn rejects_unbundled_processes() {
+        assert!(!host_can_notify(None));
+        assert!(host_can_notify(Some("org.qwencode.desktop")));
+    }
 }
