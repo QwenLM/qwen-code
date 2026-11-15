@@ -27,7 +27,7 @@ Speculation 在后台以只读工具与 copy-on-write overlay 写跑在用户之
 
 ## 决策
 
-**保留 speculation 自有工具步与投机循环——因为把共享接缝组合成 speculation 交回语义的适配器，对一个后台优化来说不值得，而非共享接口无法表达这些机制。** 上述接缝可表达直接、顺序、不记录的执行与部分结果。机械差异在默认输出：批处理对它未运行的每个可执行调用都在 `parts` 里以一个 `skipped` 应答作答（`agent-loop.ts:692`），而 speculation 的交回则从 model message 本身剥离未执行的 `functionCall` parts（`speculation.ts:611-659`）。表面可通过从 `responses`（而非 `parts`）构建下一轮来调和这一点——`use-llm-stream.ts:6710-6714` 已经以这种方式丢弃一个子集——所以这种剥离是表面要写的组合，而非批处理缺乏的能力。在该组合之上，speculation 仍需它的 overlay accept/reject（overlay 作为整体拷回真实文件系统或被丢弃）及其外围的投机循环。对着一个已工作、已测试的工具步去组合并维护这样一个投机适配器，正是本决策为一个后台优化所拒绝承担的成本。这与 Hosted Harness 决策同形：模型轮共享，特化工具步保留。
+**保留 speculation 自有工具步与投机循环——因为把共享接缝组合成 speculation 交回语义的适配器，对一个后台优化来说不值得，而非共享接口无法表达这些机制。** 上述接缝可表达直接、顺序、不记录的执行与部分结果。机械差异在默认输出：批处理对它未运行的每个可执行调用都在 `parts` 里以一个 `skipped` 应答作答（`agent-loop.ts:692`），而 speculation 的交回则从 model message 本身剥离未执行的 `functionCall` parts（`speculation.ts:611-659`）。表面可通过从 `responses`（而非 `parts`）构建下一轮来调和这一点——`use-llm-stream.ts:6710-6714` 已经以这种方式丢弃一个子集——所以这种剥离是表面要写的组合，而非批处理缺乏的能力。在该组合之上，speculation 仍需它的 overlay accept/reject（accept 时 overlay 逐文件 best-effort 拷回真实文件系统；reject 时丢弃）及其外围的投机循环。对着一个已工作、已测试的工具步去组合并维护这样一个投机适配器，正是本决策为一个后台优化所拒绝承担的成本。这与 Hosted Harness 决策同形：模型轮共享，特化工具步保留。
 
 模型轮按 PR 6a 已落地的方式留在共享 loop（`runSpeculationModelRound`，由 `isUnifiedAgentLoopEnabled('speculation')` 门控）；工具门、直接执行、overlay 写与 boundary 处理不变。
 
