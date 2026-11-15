@@ -479,8 +479,8 @@ export interface ToolBatchOptions {
   /**
    * Finish and record a batch `signal` cancelled and return its results,
    * with the stop reason `cancelled`, for a surface that keeps them.
-   * `'launched'` keeps only the calls that started and leaves the rest
-   * unanswered.
+   * `'launched'` keeps only the results of calls the batch started.
+   * The host still sees any replays it was told about before cancellation.
    */
   keepCancelledResults?: boolean | 'launched';
   /**
@@ -682,30 +682,33 @@ export async function runToolBatch(
   if (aborted && !ended && !options.keepCancelledResults) {
     return { parts: [], stop: 'cancelled' };
   }
-  for (const request of executable) {
-    if (results.has(request)) continue;
-    if (aborted && options.keepCancelledResults === 'launched') continue;
-    answer(
-      request,
-      skippedResponse(request, host.skippedOutput?.(request) ?? ''),
-      'skipped',
-    );
-  }
-  for (const request of repeated) {
-    const key = providerKey(request);
-    if (!key) continue;
-    markDuplicateProviderToolCallResponseSent(
-      key,
-      duplicateStateFor(request).responded,
-    );
-    answer(
-      request,
-      createDuplicateProviderToolCallResponse(request),
-      'duplicate',
-    );
+  const keepOnlyLaunched =
+    aborted && options.keepCancelledResults === 'launched';
+  if (!keepOnlyLaunched) {
+    for (const request of executable) {
+      if (results.has(request)) continue;
+      answer(
+        request,
+        skippedResponse(request, host.skippedOutput?.(request) ?? ''),
+        'skipped',
+      );
+    }
+    for (const request of repeated) {
+      const key = providerKey(request);
+      if (!key) continue;
+      markDuplicateProviderToolCallResponseSent(
+        key,
+        duplicateStateFor(request).responded,
+      );
+      answer(
+        request,
+        createDuplicateProviderToolCallResponse(request),
+        'duplicate',
+      );
+    }
   }
 
-  const ordered = calls.flatMap((request) => {
+  const ordered = (keepOnlyLaunched ? toRun : calls).flatMap((request) => {
     const result = results.get(request);
     return result ? [result] : [];
   });
