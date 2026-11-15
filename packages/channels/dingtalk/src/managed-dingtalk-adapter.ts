@@ -385,7 +385,16 @@ export class ManagedDingtalkAdapter {
       skip();
       return;
     }
-    if (!conversationId || !senderId || !text) {
+    // A frame with no usable reply target — neither a committed sessionWebhook
+    // nor one cached for the conversation — can never be answered; drop it at
+    // admission instead of spending a claim slot and control-plane work on a
+    // reply the send path would only reject (#17173 R1-32).
+    if (
+      !conversationId ||
+      !senderId ||
+      !text ||
+      !state.webhooks[conversationId]
+    ) {
       skip();
       return;
     }

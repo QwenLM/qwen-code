@@ -257,6 +257,29 @@ describe('managed DingTalk adapter inbound', () => {
     await adapter.disconnect();
   });
 
+  it('admits only frames with a usable reply target (R1-32)', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    // No committed webhook and none cached: the frame can never be answered,
+    // so it is dropped at admission rather than staged as a claim.
+    fake.push('no-hook', messageData({ msgId: 'no-hook', sessionWebhook: '' }));
+    await adapter.tick();
+    expect(plane.submit).toHaveLength(0);
+    // A later frame commits a webhook for the conversation; a subsequent frame
+    // without its own webhook is admitted against the cached target.
+    fake.push('with-hook', messageData({ msgId: 'with-hook' }));
+    await adapter.tick();
+    fake.push(
+      'cached-hook',
+      messageData({ msgId: 'cached-hook', sessionWebhook: '' }),
+    );
+    await adapter.tick();
+    expect(plane.submit.map((event) => event.platformEventId)).toEqual([
+      'dingtalk:with-hook',
+      'dingtalk:cached-hook',
+    ]);
+    await adapter.disconnect();
+  });
+
   it('skips a sender outside the allowlist', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
     fake.push(
@@ -1333,13 +1356,19 @@ describe('managed DingTalk adapter review fixes', () => {
   it('a failed claim save leaves no in-memory claim, so redelivery re-stages instead of acking SUCCESS (R11-1)', async () => {
     const cwd = tempCwd();
     const first = await connectedAdapter(cwd);
+    // Seed the conversation's webhook and settle the seed claim, so the probe
+    // frame below passes the reply-target gate (R1-32) against the cached
+    // webhook without committing one of its own.
+    first.fake.push('seed', messageData({ msgId: 'seed' }));
+    await first.adapter.tick();
     const store = (
       first.adapter as unknown as { store: { save: (s: unknown) => void } }
     ).store;
     const saveSpy = vi.spyOn(store, 'save').mockImplementation(() => {
       throw new Error('disk full');
     });
-    // No sessionWebhook, so the claim write is the first persist this frame hits.
+    // No sessionWebhook of its own, so the claim write is the first persist
+    // this frame hits.
     const frame = messageData({ msgId: 'm1', sessionWebhook: '' });
     // The claim write fails: ack LATER, and no claim may remain in memory.
     expect(first.fake.push('m1', frame)).toBe(false);
