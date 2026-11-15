@@ -23,6 +23,7 @@ import {
   resolveBranchWorktreeBaseCheckout,
   updateBranchWorktreeJournal,
 } from './branch-worktree-preparation.js';
+import { recordedExecFileCalls } from '../test-utils/exec-file-recorder.js';
 
 // The module under test has exactly four direct child-process spawns — the
 // four `execFileAsync('git', …)` call sites below (audited: this file uses no
@@ -30,72 +31,13 @@ import {
 // simple-git, which already spawns with `windowsHide: true`). Each of them
 // must pass `windowsHide: true`: a detached daemon on Windows raises a
 // visible console window per console-subsystem child otherwise (#17266).
-// The wrapper records the options of each `execFile` call and delegates to
-// the real implementation, so the real-git fixtures in this file keep
-// running unchanged (`execFileSync` stays the real one via the `...actual`
-// spread).
-const { recordedExecFileCalls } = vi.hoisted(() => {
-  const recordedExecFileCalls: Array<{
-    file: string;
-    args: readonly string[];
-    options: Record<string, unknown>;
-  }> = [];
-  return { recordedExecFileCalls };
-});
-vi.mock('node:child_process', async () => {
-  const actual =
-    await vi.importActual<typeof import('node:child_process')>(
-      'node:child_process',
-    );
-  const { promisify: promisifyActual } =
-    await vi.importActual<typeof import('node:util')>('node:util');
-  const wrappedExecFile = ((
-    file: string,
-    args: readonly string[],
-    options: unknown,
-    callback: unknown,
-  ) => {
-    const hasOptions = typeof options === 'object' && options !== null;
-    const callOptions = (hasOptions ? options : {}) as Record<string, unknown>;
-    const callCallback = (hasOptions ? callback : options) as (
-      ...callArgs: never[]
-    ) => void;
-    recordedExecFileCalls.push({ file, args, options: callOptions });
-    return hasOptions
-      ? actual.execFile(
-          file,
-          args,
-          callOptions as Parameters<typeof actual.execFile>[2],
-          callCallback as never,
-        )
-      : actual.execFile(file, args, callCallback as never);
-  }) as unknown as typeof actual.execFile;
-  // The module under test consumes `promisify(execFile)`. Node's real
-  // `execFile` carries a `util.promisify.custom` implementation (rejecting
-  // with the error, resolving `{stdout, stderr}`); a plain wrapper loses it
-  // and generic promisification changes the resolution shape. Keep the real
-  // semantics by delegating the custom path to `promisify(actual.execFile)`
-  // while recording the options of every promisified call too.
-  Object.defineProperty(wrappedExecFile, promisifyActual.custom, {
-    value: (
-      file: string,
-      args: readonly string[],
-      options: Record<string, unknown>,
-    ) => {
-      recordedExecFileCalls.push({
-        file,
-        args,
-        options: options ?? {},
-      });
-      return promisifyActual(actual.execFile)(file, args, options);
-    },
-  });
-  return {
-    ...actual,
-    default: { ...actual, execFile: wrappedExecFile },
-    execFile: wrappedExecFile,
-  };
-});
+// The shared recorder mock delegates to the real implementation, so the
+// real-git fixtures in this file keep running unchanged.
+vi.mock('node:child_process', () =>
+  import('../test-utils/exec-file-recorder.js').then((m) =>
+    m.createExecFileMockModule(),
+  ),
+);
 
 const targetSessionId = '11111111-1111-4111-8111-111111111111';
 const stalePid = 2_147_483_647;
