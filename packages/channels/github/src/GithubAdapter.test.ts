@@ -24237,6 +24237,47 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
           );
         });
 
+        it('a failed poll leaves the heartbeat stale (the real in-process-outage trigger)', async () => {
+          // The in-process trigger is that a FAILED poll skips the heartbeat
+          // stamp, so the gap grows while the process keeps running. Witness
+          // that mechanism directly rather than hand-writing a stale value.
+          await initChannel(commentOnlyConfig, { boundSessions });
+          boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+          seedCommentEntry();
+          mockPull({});
+          routeCommentPaginate();
+          mockOctokit.rest.issues.listComments.mockResolvedValue([]);
+          mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+          await pollOnce(); // successful poll stamps the heartbeat
+          const readHeartbeat = () =>
+            (channel as unknown as { cursor: { lastPollAt?: string } }).cursor
+              .lastPollAt;
+          const stamped = readHeartbeat();
+          expect(stamped).toBeDefined();
+          // Force the next poll to fail: runPollOnce rejects, so pollOnce must
+          // not stamp the heartbeat.
+          const run = channel as unknown as {
+            runPollOnce: () => Promise<void>;
+          };
+          const original = run.runPollOnce.bind(channel);
+          run.runPollOnce = async () => {
+            throw new Error('simulated in-process outage');
+          };
+          const stderr = vi
+            .spyOn(process.stderr, 'write')
+            .mockImplementation(() => true);
+          try {
+            await expect(pollOnce()).rejects.toThrow(
+              'simulated in-process outage',
+            );
+          } finally {
+            stderr.mockRestore();
+            run.runPollOnce = original;
+          }
+          // The failed poll did not advance the heartbeat.
+          expect(readHeartbeat()).toBe(stamped);
+        });
+
         it('the digest carries a content-hash id and dedupes a re-listed window', async () => {
           await initChannel(commentOnlyConfig, { boundSessions });
           boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
@@ -24330,6 +24371,10 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
             stderr.mockRestore();
           }
           expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+          // The budget guard skips the pass BEFORE any fetch: no comment
+          // endpoint is called. This distinguishes the guard from a thrown
+          // per-PR pass (which would fetch and then abort on the rate limit).
+          expect(mockOctokit.rest.issues.listComments).not.toHaveBeenCalled();
           internals.lastRateLimitRemaining = 4999;
           await pollOnce();
           expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
@@ -24459,6 +24504,75 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
           expect(recorded).toEqual(
             expect.arrayContaining(['IC_555', 'IC_556', 'IC_557']),
           );
+        });
+
+        it('a permanently-retired digest is consumed with a trace after the retry bound', async () => {
+          // A digest the route gate keeps rejecting must not hold its cursor
+          // and spend the pass-wide watch budget every poll forever. Below the
+          // bound the hold stays fail-closed; at the bound the backlog is
+          // consumed with a visible journal trace and no further attempt.
+          await initChannel(
+            {
+              ...commentOnlyConfig,
+              messageRoutes: { '/review': 'Review the change.' },
+            },
+            { boundSessions },
+          );
+          boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+          setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
+          seedCommentEntry();
+          mockPull({});
+          routeCommentPaginate();
+          mockOctokit.rest.issues.listComments.mockResolvedValue(
+            gapComments(3),
+          );
+          mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+          const resetFetch = () => {
+            (
+              channel as unknown as {
+                prWatchState: {
+                  entries: Record<string, { commentLastFetchAt?: number }>;
+                };
+              }
+            ).prWatchState.entries['owner/repo#42']!.commentLastFetchAt = 0;
+          };
+          const stderr = vi
+            .spyOn(process.stderr, 'write')
+            .mockImplementation(() => true);
+          try {
+            // Polls 1-2: retired but below the bound -> fail-closed hold.
+            await pollOnce();
+            resetFetch();
+            await pollOnce();
+            expect(
+              readWatchState().entries['owner/repo#42']!['digestPending'],
+            ).toBe(true);
+            expect(
+              readWatchState().entries['owner/repo#42']!['commentSince'],
+            ).toBe('2026-07-01T00:00:00.000Z');
+            expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+            // Poll 3: reaches the bound -> consumed with a visible trace.
+            resetFetch();
+            await pollOnce();
+          } finally {
+            stderr.mockRestore();
+          }
+          expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+          expect(
+            readWatchState().entries['owner/repo#42']!['digestPending'],
+          ).toBe(false);
+          expect(
+            readWatchState().entries['owner/repo#42']!['commentSince'],
+          ).not.toBe('2026-07-01T00:00:00.000Z');
+          // Exactly one journal row names the bound retirement.
+          const retiredRows = readChannelEvents().filter(
+            (event) => event['reason'] === 'comment_digest_retired',
+          );
+          expect(retiredRows).toHaveLength(1);
+          // No further dispatch attempt: the consumed backlog stays consumed.
+          resetFetch();
+          await pollOnce();
+          expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
         });
 
         it('an unreadable delivery ring holds the retired digest cursor', async () => {
@@ -24717,6 +24831,102 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
           expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
             'Offline backlog: 3',
           );
+        });
+
+        it('the gap-detection persist arms the entry even when the watch pass is skipped', async () => {
+          // The immediate persist at gap detection exists for the poll whose
+          // watch pass never runs (here: a failed binding refresh). The arm
+          // must reach disk so a restart still digests instead of flooding.
+          await initChannel(commentOnlyConfig, { boundSessions });
+          boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+          setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
+          seedCommentEntry();
+          mockPull({});
+          routeCommentPaginate();
+          mockOctokit.rest.issues.listComments.mockResolvedValue(
+            gapComments(3),
+          );
+          mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+          // Fail the binding refresh so the watch pass is skipped this poll;
+          // only the gap-detection persist can arm the entry.
+          boundSessions.listPrBindings.mockRejectedValue(
+            new Error('binding refresh failed'),
+          );
+          const stderr = vi
+            .spyOn(process.stderr, 'write')
+            .mockImplementation(() => true);
+          try {
+            await pollOnce();
+          } finally {
+            stderr.mockRestore();
+          }
+          expect(
+            readWatchState().entries['owner/repo#42']!['digestPending'],
+          ).toBe(true);
+          // Genuine restart: a fresh instance reloads the persisted arm; the
+          // heartbeat is now fresh, so only the persisted arm produces the digest.
+          await initChannel(commentOnlyConfig, { boundSessions });
+          boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+          setLastPollAt(new Date(Date.now() - 5000).toISOString());
+          mockPull({});
+          routeCommentPaginate();
+          mockOctokit.rest.issues.listComments.mockResolvedValue(
+            gapComments(3),
+          );
+          mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+          await pollOnce();
+          expect(boundSessions.deliverPrompt).toHaveBeenCalledTimes(1);
+          expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
+            'Offline backlog: 3',
+          );
+        });
+
+        it('isPrWatchEntryShape drops an entry with a malformed digest field and keeps its sibling', async () => {
+          // Each malformed entry carries exactly ONE bad digest field so the
+          // test witnesses each predicate individually: inverting or removing
+          // any one of them keeps that entry and reds the matching assertion.
+          // A rejected shape drops the WHOLE entry (baseline and cursor with
+          // it), so the guard must not silently pass a malformed value.
+          const base = {
+            commentBaseline: '2026-07-01T00:00:00.000Z',
+            commentSince: '2026-07-01T00:00:00.000Z',
+            commentLastFetchAt: 0,
+          };
+          seedWatchState({
+            'owner/repo#42': { ...base, digestPending: 'yes' },
+            'owner/repo#43': {
+              ...base,
+              digestPending: true,
+              digestSizeArmed: 1,
+            },
+            'owner/repo#44': {
+              ...base,
+              digestPending: true,
+              digestRendered: 'IC_555',
+            },
+            'owner/repo#45': { ...base, digestPending: true },
+          });
+          await initChannel(commentOnlyConfig, { boundSessions });
+          // The state loads on the watch pass, not at connect; load it directly.
+          const stderr = vi
+            .spyOn(process.stderr, 'write')
+            .mockImplementation(() => true);
+          try {
+            (
+              channel as unknown as { loadPrWatchState: () => void }
+            ).loadPrWatchState();
+          } finally {
+            stderr.mockRestore();
+          }
+          const entries = (
+            channel as unknown as {
+              prWatchState: { entries: Record<string, unknown> };
+            }
+          ).prWatchState.entries;
+          expect(entries['owner/repo#42']).toBeUndefined();
+          expect(entries['owner/repo#43']).toBeUndefined();
+          expect(entries['owner/repo#44']).toBeUndefined();
+          expect(entries['owner/repo#45']).toBeDefined();
         });
 
         it('exclusion is computed over the rendered slice and the follower set', async () => {

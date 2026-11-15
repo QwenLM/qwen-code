@@ -613,6 +613,18 @@ const STARTUP_DIGEST_MIN_GAP_MS = 10 * 60 * 1000;
 const MAX_WATCH_COMMENTS_PER_PASS = 20;
 
 /**
+ * Bound on consecutive PERMANENT digest retirements (a preflight rejection
+ * returns settled with no delivery). A retired digest is re-listed and retried
+ * — the route/sender gate may be fixed — but not forever: without a bound a
+ * permanently-rejected digest holds its cursor and spends the pass-wide watch
+ * budget every poll for the process lifetime with zero prompts. At this bound
+ * the backlog is consumed with a visible journal trace instead. Transient
+ * deferrals (settled === false) do not count toward it and keep the fail-closed
+ * hold.
+ */
+const MAX_DIGEST_RETIREMENT_RETRIES = 3;
+
+/**
  * Backpressure horizon for bound-session delivery: queue-full and
  * temporarily-unavailable conditions defer without consuming the failure
  * budget, but not forever. After this many consecutive deferrals (~4 hours
@@ -666,10 +678,11 @@ interface PrWatchEntry {
   commentLastFetchAt?: number;
   /**
    * Persisted digest arm: a detected downtime gap (or an over-cap window's
-   * omitted tail) sets it, and only the consumption of this PR's backlog
-   * clears it. It survives degraded first polls, per-PR errors, cap
-   * exclusion, and restarts, so the backlog digests instead of flooding one
-   * prompt per comment.
+   * omitted tail) sets it. Consumption of this PR's backlog clears it; the
+   * watch-disabled gate clears it too (so a restart with watching off cannot
+   * digest non-gap comments), and so does the permanent-retirement bound. It
+   * survives degraded first polls, per-PR errors, cap exclusion, and restarts,
+   * so the backlog digests instead of flooding one prompt per comment.
    */
   digestPending?: boolean;
   /**
@@ -689,6 +702,14 @@ interface PrWatchEntry {
    * cursor is held; cleared when the backlog is consumed.
    */
   digestRendered?: string[];
+  /**
+   * Consecutive PERMANENT digest retirements (preflight rejected the digest:
+   * settled with no delivery). Bounds the retry so a permanently-rejected
+   * digest cannot hold the cursor and spend the watch budget forever; at
+   * MAX_DIGEST_RETIREMENT_RETRIES the backlog is consumed with a journal
+   * trace. A transient deferral or a successful delivery resets it.
+   */
+  digestRetiredCount?: number;
 }
 
 interface PrWatchStateFile {
@@ -723,7 +744,8 @@ function isPrWatchEntryShape(value: unknown): value is PrWatchEntry {
       typeof entry.digestSizeArmed === 'boolean') &&
     (entry.digestRendered === undefined ||
       (Array.isArray(entry.digestRendered) &&
-        entry.digestRendered.every((k) => typeof k === 'string')))
+        entry.digestRendered.every((k) => typeof k === 'string'))) &&
+    numberOrUndef(entry.digestRetiredCount)
   );
 }
 
@@ -1590,9 +1612,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private boundSnapshotTrusted = false;
   /**
    * One-shot flag set when a downtime gap is detected; it arms the per-entry
-   * digestPending flags and clears only after a trusted, non-aborted comment
-   * watch pass has actually watched something. The per-entry flags carry the
-   * digest for individual PRs across errors, cap exclusion, and restarts.
+   * digestPending flags and clears as soon as it has armed them, so a skipped,
+   * aborted or untrusted pass cannot re-arm an entry an earlier pass already
+   * drained. The per-entry flags carry the digest for individual PRs across
+   * errors, cap exclusion, and restarts.
    */
   private startupDigestPending = false;
   /**
@@ -2912,6 +2935,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
               entry.digestPending = false;
               entry.digestSizeArmed = false;
               entry.digestRendered = [];
+              entry.digestRetiredCount = 0;
               cleared = true;
             }
           }
@@ -7616,6 +7640,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         digestPending: false,
         digestSizeArmed: false,
         digestRendered: [],
+        digestRetiredCount: 0,
       };
       this.savePrWatchState();
       return;
@@ -7880,7 +7905,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         // The digest arm clears only when this PR's backlog is consumed;
         // a held cursor (omitted tail, refused dispatch) keeps it armed.
         ...(clearDigest
-          ? { digestPending: false, digestSizeArmed: false, digestRendered: [] }
+          ? {
+              digestPending: false,
+              digestSizeArmed: false,
+              digestRendered: [],
+              digestRetiredCount: 0,
+            }
           : {}),
       };
       this.savePrWatchState();
@@ -8136,6 +8166,39 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
               this.boundDeliveredKeys.has(this.boundEventKey(envelope))
             : this.boundEventAlreadyDelivered(envelope));
         if (!delivered) {
+          const heldEntry = this.prWatchState.entries[key];
+          if (settled) {
+            // Permanent retirement: preflight rejected the digest (settled
+            // with no delivery). Bound the retry — the route/sender gate may
+            // be fixed, but a permanently-rejected digest must not hold the
+            // cursor and spend the pass-wide watch budget every poll for the
+            // process lifetime with zero prompts. A transient deferral
+            // (settled === false) keeps the fail-closed hold below instead.
+            const retiredCount = (heldEntry?.digestRetiredCount ?? 0) + 1;
+            if (heldEntry) heldEntry.digestRetiredCount = retiredCount;
+            if (retiredCount >= MAX_DIGEST_RETIREMENT_RETRIES) {
+              // Consume the backlog with a visible trace rather than retry the
+              // identical rejected attempt forever. The claim-time member keys
+              // stay recorded so the members do not re-list.
+              this.recordChannelEvent({
+                type: 'inbound',
+                outcome: 'skipped',
+                reason: 'comment_digest_retired',
+                repository: chatId,
+                thread: threadId,
+                number,
+                messageId: digestId,
+              });
+              process.stderr.write(
+                `[Channel:${this.name}] comment digest for ${key} retired at preflight ${retiredCount} times; consuming the backlog with a trace instead of retrying\n`,
+              );
+              commitCursor(nowIso, true);
+              return;
+            }
+          } else if (heldEntry) {
+            // Transient deferral, not a permanent retirement: reset the streak.
+            heldEntry.digestRetiredCount = 0;
+          }
           // Undo the claim-time member recording: otherwise the next pass
           // filters every member as already dispatched, the empty candidate
           // set advances the cursor past the whole backlog, and the retired
@@ -8166,6 +8229,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           if (armedEntry) {
             armedEntry.digestPending = true;
             if (!digestMode) armedEntry.digestSizeArmed = true;
+            // A delivered digest breaks any permanent-retirement streak.
+            armedEntry.digestRetiredCount = 0;
             // Persist the rendered frontier so the shared ring's eviction
             // (keyed to the notification cursor, which a healthy poll advances
             // past this held backlog) cannot re-list and re-deliver a rendered

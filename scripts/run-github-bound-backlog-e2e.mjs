@@ -15,10 +15,11 @@
 //   g5 digest-full  full-size backlog -> newest members survive the body budget
 //
 // Usage (build the bundle first: npm run build && npm run bundle):
-//   node packages/channels/github/scripts/run-bound-backlog-e2e.mjs \
+//   node scripts/run-github-bound-backlog-e2e.mjs \
 //     --group g1 --cli "node dist/cli.js" --tag g1-run --expect digest
 //
 // --root overrides the scratch directory (default: <tmpdir>/bound-backlog-e2e).
+// A relative --cli script path is resolved against the invocation directory.
 import { spawn } from 'node:child_process';
 import http from 'node:http';
 import fs from 'node:fs';
@@ -35,6 +36,15 @@ const group = arg('group', 'g1');
 const cli = arg('cli', 'qwen');
 const tag = arg('tag', `${group}-run`);
 const expectMode = arg('expect', 'digest');
+// An unrecognized --expect must fail loudly, not fall through the assertion
+// chain and report PASS having verified nothing.
+const EXPECT_MODES = ['digest', 'individual', 'none', 'digest-full'];
+if (!EXPECT_MODES.includes(expectMode)) {
+  console.error(
+    `[fixture] FAIL: unknown --expect ${expectMode} (want ${EXPECT_MODES.join('|')})`,
+  );
+  process.exit(2);
+}
 const g = Number(group.slice(1));
 const MOCK_PORT = 8790 + 10 * g;
 const DAEMON_PORT = 4199 + 10 * g;
@@ -43,9 +53,21 @@ const API = `http://127.0.0.1:${DAEMON_PORT}`;
 const AUTH = { Authorization: 'Bearer fixture-serve-token' };
 
 const ROOT = arg('root', path.join(os.tmpdir(), 'bound-backlog-e2e'));
-const home = path.join(ROOT, tag, 'home');
-const ws = path.join(ROOT, tag, 'ws');
-fs.rmSync(path.join(ROOT, tag), { recursive: true, force: true });
+// The tag reaches a recursive rmSync: reject anything that could climb out of
+// ROOT (path traversal) before any deletion.
+if (!/^[A-Za-z0-9._-]+$/.test(tag) || tag === '.' || tag === '..') {
+  console.error(`[fixture] FAIL: invalid --tag ${tag}`);
+  process.exit(2);
+}
+const rootResolved = path.resolve(ROOT);
+const tagDir = path.resolve(rootResolved, tag);
+if (!tagDir.startsWith(rootResolved + path.sep)) {
+  console.error(`[fixture] FAIL: --tag ${tag} escapes --root`);
+  process.exit(2);
+}
+const home = path.join(tagDir, 'home');
+const ws = path.join(tagDir, 'ws');
+fs.rmSync(tagDir, { recursive: true, force: true });
 fs.mkdirSync(path.join(ws, '.qwen'), { recursive: true });
 fs.mkdirSync(home, { recursive: true });
 
@@ -234,13 +256,22 @@ for (const key of [
   delete env[key];
 
 function startDaemon(logName) {
-  const logPath = path.join(ROOT, tag, logName);
+  const logPath = path.join(tagDir, logName);
   const logFd = fs.openSync(logPath, 'w');
-  const parts = cli.split(' ');
+  const [bin, ...rest] = cli.split(' ');
+  // A relative CLI script path must resolve against the INVOCATION directory,
+  // not the scratch workspace the daemon runs in (cwd stays ws: the fixture
+  // derives its state scope from realpathSync(ws)).
+  const invocationDir = process.cwd();
+  const resolvedArgs = rest.map((a) =>
+    !a.startsWith('-') && !path.isAbsolute(a) && /\.(js|mjs|cjs)$/.test(a)
+      ? path.resolve(invocationDir, a)
+      : a,
+  );
   const daemon = spawn(
-    parts[0],
+    bin,
     [
-      ...parts.slice(1),
+      ...resolvedArgs,
       'serve',
       '--port',
       String(DAEMON_PORT),
@@ -265,7 +296,13 @@ async function waitDaemon() {
   throw new Error('daemon did not come up in 60s');
 }
 async function stopDaemon(daemon) {
-  const exited = new Promise((r) => daemon.once('exit', r));
+  // A child that already exited fired 'exit' before we subscribe (EventEmitter
+  // does not replay), so awaiting a fresh listener would hang forever.
+  if (daemon.exitCode !== null || daemon.signalCode !== null) return;
+  const exited = new Promise((r) => {
+    daemon.once('exit', r);
+    daemon.once('error', r);
+  });
   try {
     process.kill(-daemon.pid, 'SIGTERM');
   } catch {
@@ -303,28 +340,35 @@ const MARKERS = [
   '[本会话跟进的 PR 的 GitHub 事件]',
 ];
 function boundPrompts(chatsDir) {
-  const found = [];
-  if (!chatsDir || !fs.existsSync(chatsDir)) return found;
+  // One entry per DELIVERY, keyed by the promptId that the queue record and the
+  // transcript message of one delivery share. Deduping by prompt TEXT would
+  // collapse a byte-identical duplicate delivery into the first and hide it;
+  // the promptId still collapses the two records of one delivery but keeps
+  // separate deliveries distinct, so a duplicate delivery is countable.
+  const byDelivery = new Map();
+  if (!chatsDir || !fs.existsSync(chatsDir)) return [];
   for (const file of fs.readdirSync(chatsDir)) {
-    if (!file.endsWith('.jsonl')) continue;
+    if (!file.endsWith('.jsonl') || file.endsWith('.ledger.jsonl')) continue;
     const text = fs.readFileSync(path.join(chatsDir, file), 'utf8');
     if (!MARKERS.some((m) => text.includes(m))) continue;
     for (const line of text.split('\n')) {
       if (!MARKERS.some((m) => line.includes(m))) continue;
       try {
+        const record = JSON.parse(line);
         const strings = [];
-        collectStrings(JSON.parse(line), strings);
+        collectStrings(record, strings);
         const hit = strings
           .filter((s) => MARKERS.some((m) => s.includes(m)))
           .sort((a, b) => b.length - a.length)[0];
-        if (hit) found.push(hit);
+        if (!hit) continue;
+        const key = record.promptId ?? hit;
+        if (!byDelivery.has(key)) byDelivery.set(key, hit);
       } catch {
         // skip malformed transcript line
       }
     }
   }
-  // Each delivery is recorded twice (queue record + transcript message).
-  return [...new Set(found)];
+  return [...byDelivery.values()];
 }
 function readJson(p) {
   try {
@@ -474,7 +518,10 @@ async function main() {
     if (prompts.length !== 1)
       fail(`expected 1 digest prompt, got ${prompts.length}`);
     else {
-      if (!/5/.test(prompts[0])) fail('digest missing total count 5');
+      // Assert the whole lead: a bare /5/ also matches the member body and
+      // URLs, so it could not fail on a wrong total count.
+      if (!prompts[0].includes('Offline backlog: 5'))
+        fail('digest lead missing total count 5');
       if (!prompts[0].includes('gap-comment-5'))
         fail('digest missing newest excerpt');
     }
@@ -503,6 +550,10 @@ async function main() {
     if (prompts.length !== 0) fail(`expected 0 prompts, got ${prompts.length}`);
     if (!watch?.entries?.['owner/repo#42']?.commentBaseline)
       fail('first-observation baseline not written');
+  } else {
+    // Unreachable: expectMode is validated at parse. Guard anyway so the
+    // assertion chain can never fall through and report PASS unverified.
+    fail(`unknown --expect ${expectMode}`);
   }
   if (process.exitCode !== 1) console.log('[fixture] PASS');
   mock.close();

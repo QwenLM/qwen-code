@@ -164,7 +164,15 @@ member keys>` (content-hash identity over what was actually delivered,
   cleared, because the keys lost with the file stay unknown and the public-
   duplicate suppression callers must keep failing closed for them — clearing it
   globally would flip every pre-corruption event from "delivered" to "not
-  delivered" and open an irreversible public-reply window.
+  delivered" and open an irreversible public-reply window. The not-delivered
+  hold is fail-closed for a TRANSIENT cause (a deferral returns unsettled and
+  re-lists next pass), but a PERMANENT retirement (preflight rejects the digest:
+  settled with no delivery) is bounded by a per-entry consecutive-retirement
+  counter (`digestRetiredCount`, `MAX_DIGEST_RETIREMENT_RETRIES`): at the bound
+  the backlog is consumed with a visible journal trace (`comment_digest_retired`)
+  instead of holding the cursor and spending the pass-wide watch budget every
+  poll for the process lifetime. A transient deferral or a successful delivery
+  resets the counter.
 - Cursor: commits `nowIso` (clearing the arm) when the dispatch delivered and
   nothing was omitted; holds before the backlog head (keeping the arm) when
   members were omitted; holds `since` (keeping the arm) when nothing was
@@ -262,7 +270,11 @@ backlog)` suite): gap digest vs per-comment no-gap, legacy cursor, interval
   drained PR not re-armed when a later pass aborts, a held digest deduping
   rendered members the ring evicts, the legacy Gone fallback excluding the
   full-context author, over-budget fall-through, degraded-first-poll restart,
-  persistent fetch failure.
+  persistent fetch failure, a permanently-retired digest consumed with a trace
+  after the retry bound, the gap-detection persist arming the entry when the
+  watch pass is skipped, the entry-shape guard dropping each malformed digest
+  field individually, the budget guard skipping the pass before any fetch, and
+  a failed poll leaving the heartbeat stale.
 - E2E (hermetic mock GitHub + isolated daemon + PR sidecar), reproducible from
   the tree via `scripts/run-github-bound-backlog-e2e.mjs` (build the bundle
   first, then `node scripts/run-github-bound-backlog-e2e.mjs --group g1 --cli
