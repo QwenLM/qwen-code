@@ -7529,22 +7529,22 @@ describe('Server Config (config.ts)', () => {
         // table is flipped — re-merging the two tables reds this case.
         vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
         vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
-        UNIFIED_SURFACE_DEFAULTS.headless = true;
+        UNIFIED_SURFACE_DEFAULTS.opentui = true;
         const config = makeConfig();
-        expect(config.isUnifiedAgentLoopEnabled('headless')).toBe(true);
-        expect(config.isEventBusAgentLoopEnabled('headless')).toBe(
-          savedEventBus.headless,
+        expect(config.isUnifiedAgentLoopEnabled('opentui')).toBe(true);
+        expect(config.isEventBusAgentLoopEnabled('opentui')).toBe(
+          savedEventBus.opentui,
         );
       });
 
       it('flipping an event-bus surface default does not flip the unified default', () => {
         vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
         vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
-        EVENT_BUS_SURFACE_DEFAULTS.headless = true;
+        EVENT_BUS_SURFACE_DEFAULTS.opentui = true;
         const config = makeConfig();
-        expect(config.isEventBusAgentLoopEnabled('headless')).toBe(true);
-        expect(config.isUnifiedAgentLoopEnabled('headless')).toBe(
-          savedUnified.headless,
+        expect(config.isEventBusAgentLoopEnabled('opentui')).toBe(true);
+        expect(config.isUnifiedAgentLoopEnabled('opentui')).toBe(
+          savedUnified.opentui,
         );
       });
     });
