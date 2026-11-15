@@ -203,7 +203,7 @@ ACP 只传入一个策略：Todo Stop Guard。当前轮次的后台结果和中�
 
 ### 设置
 
-`experimental.unifiedAgentLoop` 是布尔值，默认 `false`，重启后生效。`QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` 环境变量按入口覆盖它：`1` 强制所有入口开启，`0` 强制所有入口关闭，逗号分隔的列表（如 `headless,acp=0`）强制指定入口。这便于 CI 和脚本在共享 loop 下运行测试，也让操作者能把某个入口强制关回。它在 `experimental.agentTeam` / `QWEN_CODE_ENABLE_AGENT_TEAM` 只强制开启的写法之上，增加了强制关闭与按入口控制；新增 loop 开关应沿用此文法，而非 agentTeam 的写法。
+`experimental.unifiedAgentLoop` 是布尔值，没有固定的默认值，重启后生效：未设置时，每个入口使用自己的内置默认值。`QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` 环境变量按入口覆盖它：`1` 强制所有入口开启，`0` 强制所有入口关闭，逗号分隔的列表（如 `headless,acp=0`）强制指定入口。这便于 CI 和脚本在共享 loop 下运行测试，也让操作者能把某个入口强制关回。它在 `experimental.agentTeam` / `QWEN_CODE_ENABLE_AGENT_TEAM` 只强制开启的写法之上，增加了强制关闭与按入口控制；新增 loop 开关应沿用此文法，而非 agentTeam 的写法。
 
 由 `Config.isUnifiedAgentLoopEnabled(surface)` 暴露该设置。每个入口在其 loop 的启动处读取它并写明自己的入口（`headless`、`acp`、`ink`、`opentui`、`agent-core`、`speculation`、`hosted`）：
 
@@ -216,7 +216,7 @@ if (config.isUnifiedAgentLoopEnabled('headless')) {
 
 现有 loop 作为 `else` 分支保留，在该设置存在期间不做重构。尚未迁移的入口忽略这个设置，设置的说明会列出它覆盖的入口。`qwen serve` 启动的 ACP 子进程读取同一份设置，所以对已迁移的 ACP 轮次，daemon 和 Web Shell 也会遵循这个设置。从 PR 2a 起，Web Shell 设置面板会列出这个设置。
 
-按入口解析已在 #17045（B 块）落地：环境变量指向该入口时优先，否则用被设置的显式设置，再否则用该入口的内置默认值（今天所有入口都是 `false`）。设置在运行时是三态——未设置与显式关闭不同——而 schema 保留 `default: false` 直到第一个入口默认值翻转。解析规则与灰度阶梯见 `2026-11-12-loop-rollout-switches.md`。
+按入口解析已在 #17045（B 块）落地：环境变量指向该入口时优先，否则用被设置的显式设置，再否则用该入口的内置默认值（headless 是 `true`，其他入口都是 `false`）。设置在运行时是三态——未设置与显式关闭不同——headless 的默认值翻转后，schema 不再有默认值；设置对话框对未设置值的第一次切换写入 `true`。解析规则与灰度阶梯见 `2026-11-12-loop-rollout-switches.md`。
 
 ### Headless 迁到共享 loop（PR 1）
 

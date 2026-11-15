@@ -203,7 +203,7 @@ ACP passes one policy, the Todo Stop Guard. The current turn's background result
 
 ### The setting
 
-`experimental.unifiedAgentLoop` is a boolean, `false` by default, and takes effect after a restart. The `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` environment variable overrides it per surface: `1` forces every surface on, `0` forces every surface off, and a comma-separated list such as `headless,acp=0` forces individual surfaces. This lets CI and scripts run the suites with the shared loop, and lets an operator force a surface back off. It extends the force-on-only pattern of `experimental.agentTeam` / `QWEN_CODE_ENABLE_AGENT_TEAM` with force-off and per-surface control, so a new loop switch should copy this grammar rather than the agentTeam one.
+`experimental.unifiedAgentLoop` is a boolean with no fixed default, and takes effect after a restart: when it is unset, each surface uses its own built-in default. The `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` environment variable overrides it per surface: `1` forces every surface on, `0` forces every surface off, and a comma-separated list such as `headless,acp=0` forces individual surfaces. This lets CI and scripts run the suites with the shared loop, and lets an operator force a surface back off. It extends the force-on-only pattern of `experimental.agentTeam` / `QWEN_CODE_ENABLE_AGENT_TEAM` with force-off and per-surface control, so a new loop switch should copy this grammar rather than the agentTeam one.
 
 `Config.isUnifiedAgentLoopEnabled(surface)` exposes it. Each surface reads it at its loop's entry point, naming itself (`headless`, `acp`, `ink`, `opentui`, `agent-core`, `speculation`, `hosted`):
 
@@ -216,7 +216,7 @@ if (config.isUnifiedAgentLoopEnabled('headless')) {
 
 The current loop stays as the `else` branch and is not refactored while the setting exists. A surface that has not moved yet ignores the setting, and the setting's description names the surfaces it covers. ACP children started by `qwen serve` read the same settings, so the daemon and Web Shell follow the setting for the ACP turns that have moved. The Web Shell settings panel lists the setting from PR 2a on.
 
-Per-surface resolution landed in #17045 (block B): the environment override wins when it addresses the surface, else the explicit setting when set, else the surface's built-in default (`false` everywhere today). The setting is tri-state at runtime — unset is distinct from explicitly off — while the schema keeps `default: false` until the first surface default flips. See `2026-11-12-loop-rollout-switches.md` for the resolution rules and the rollout ladder.
+Per-surface resolution landed in #17045 (block B): the environment override wins when it addresses the surface, else the explicit setting when set, else the surface's built-in default (`true` for headless, `false` for every other surface). The setting is tri-state at runtime — unset is distinct from explicitly off — and its schema has no default since headless's default flipped; a settings dialog's first toggle of the unset value writes `true`. See `2026-11-12-loop-rollout-switches.md` for the resolution rules and the rollout ladder.
 
 ### Headless on the shared loop (PR 1)
 
