@@ -14,7 +14,10 @@ import type { SessionMetrics } from '../telemetry/uiTelemetry.js';
 import type { UiEvent } from '../telemetry/uiTelemetry.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { openNoFollow } from '../utils/no-follow-open.js';
+import {
+  isUnverifiableIdentityError,
+  openNoFollow,
+} from '../utils/no-follow-open.js';
 import {
   extractJsonStringField,
   unescapeJsonString,
@@ -350,7 +353,20 @@ async function summarizeTranscriptFile(
   // policy: the helper refuses a symlinked final component (ELOOP), unlike the
   // symlink-following Phase-1 statSync prefilter, so a symlinked transcript is
   // skipped — the same no-follow posture as the other transcript readers.
-  const handle = await openNoFollow(filePath, { nonBlocking: true });
+  const handle = await openNoFollow(filePath, { nonBlocking: true }).catch(
+    async (error: unknown) => {
+      // A volume with no inode numbers (FAT/exFAT, some SMB) cannot prove
+      // identity, and a usage replay is not identity-sensitive: degrade to the
+      // plain non-blocking open, keeping the fd-level isFile() recheck below as
+      // the type guard (the gitDiff.ts posture). A genuine symlink refusal or
+      // identity race keeps code ELOOP and must still throw.
+      if (!isUnverifiableIdentityError(error)) throw error;
+      return fs.promises.open(
+        filePath,
+        fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0),
+      );
+    },
+  );
   // Own the fd explicitly (autoClose: false + finally close). The finally closes
   // the descriptor on every exit — including a stat() that rejects before any
   // stream exists to close it, which would otherwise leak the fd on each retry.
@@ -414,7 +430,14 @@ async function summarizeTranscriptFile(
       fileStream.destroy();
     }
   } finally {
-    await handle.close();
+    // Closing is best-effort: a close() failure must not discard a scan whose
+    // bytes were fully read, nor mask a pending read error (the no-follow-open
+    // helper guards its own close the same way).
+    await handle.close().catch((closeErr: unknown) => {
+      debugLogger.debug(
+        `summarizeTranscriptFile: close failed for ${filePath}: ${closeErr}`,
+      );
+    });
   }
 
   if (!header) return null;

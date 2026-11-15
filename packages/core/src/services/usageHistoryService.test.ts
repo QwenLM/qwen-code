@@ -717,11 +717,12 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
   it.skipIf(process.platform === 'win32')(
     'withLive: skips and logs non-regular transcript entries',
     async () => {
-      // A FIFO passing the `*.jsonl` name filter must be skipped, not read.
-      // The open uses O_NONBLOCK so it cannot block; the Phase-1 stat here is
-      // only a cheap prefilter, and the fd-level isFile() recheck is what
-      // refuses the non-regular file. Observed in the wild from a test-suite
-      // leftover. The mkfifo call is skipped on Windows, matching storage.test.ts.
+      // Phase 1's statSync refuses this FIFO before any read — the log asserted
+      // below pins that skip. statSync is not mocked here, so the open is never
+      // reached. The fd-level isFile() recheck covers a file swapped in AFTER
+      // Phase 1 — see 'settles and skips a FIFO swapped in after the Phase-1
+      // stat'. Observed in the wild from a test-suite leftover. The mkfifo call
+      // is skipped on Windows, matching storage.test.ts.
       plantChatJsonl('sess-real', 1600);
       const fifoPath = planted('sess-fifo');
       const mkfifo = spawnSync('mkfifo', [fifoPath], { stdio: 'inherit' });
@@ -1092,6 +1093,7 @@ describe('loadUsageHistoryWithLive — replay cache + selective scan', () => {
       const orig = fs.promises.open;
       let failedOnce = false;
       let closeCalls = 0;
+      let readStreamCalls = 0;
       const spy = vi.spyOn(fs.promises, 'open').mockImplementation(((
         p: fs.PathLike,
         flags?: string | number,
@@ -1104,9 +1106,8 @@ describe('loadUsageHistoryWithLive — replay cache + selective scan', () => {
               throw Object.assign(new Error('EIO: simulated'), { code: 'EIO' });
             },
             createReadStream: () => {
-              throw new Error(
-                'createReadStream must not run when stat() rejects',
-              );
+              readStreamCalls++;
+              return new Readable({ read() {} });
             },
             close: async () => {
               closeCalls++;
@@ -1124,6 +1125,10 @@ describe('loadUsageHistoryWithLive — replay cache + selective scan', () => {
           first.find((r) => r.sessionId === 'sess-stat-err'),
         ).toBeUndefined();
         expect(closeCalls).toBe(1);
+        // The recheck must refuse before any stream is created: counting is
+        // discriminating (a createReadStream that throws would be swallowed by
+        // the inner catch and produce the same observables).
+        expect(readStreamCalls).toBe(0);
         const second = await loadUsageHistoryWithLive();
         expect(tokensOf(second, 'sess-stat-err')).toBe(1000);
       } finally {
@@ -1131,6 +1136,94 @@ describe('loadUsageHistoryWithLive — replay cache + selective scan', () => {
       }
     },
   );
+
+  // POSIX-only: fake-handle fd semantics, like the companions above.
+  it.skipIf(process.platform === 'win32')(
+    'a close() failure after a complete read does not discard the scan',
+    async () => {
+      // The bytes are fully read; a best-effort close() that rejects must not
+      // replace the success (nor, on the read-error path, mask the read error).
+      const filePath = plant('sess-close-err', 1000);
+      const orig = fs.promises.open;
+      let failedOnce = false;
+      const spy = vi.spyOn(fs.promises, 'open').mockImplementation(((
+        p: fs.PathLike,
+        flags?: string | number,
+        mode?: fs.Mode,
+      ) => {
+        if (!failedOnce && String(p) === filePath) {
+          failedOnce = true;
+          const content = fs.readFileSync(filePath, 'utf8');
+          const fakeHandle = {
+            stat: async () => ({ isFile: () => true }) as unknown as fs.Stats,
+            createReadStream: () =>
+              new Readable({
+                read() {
+                  this.push(content);
+                  this.push(null);
+                },
+              }),
+            close: async () => {
+              throw Object.assign(new Error('EIO: close failed'), {
+                code: 'EIO',
+              });
+            },
+          };
+          return Promise.resolve(
+            fakeHandle as unknown as fs.promises.FileHandle,
+          );
+        }
+        return orig(p, flags as number, mode);
+      }) as typeof fs.promises.open);
+      try {
+        const first = await loadUsageHistoryWithLive();
+        expect(tokensOf(first, 'sess-close-err')).toBe(1000);
+      } finally {
+        spy.mockRestore();
+      }
+    },
+  );
+
+  it('degrades to a plain open on an inode-0 volume so usage is not silently emptied', async () => {
+    // openNoFollow's no-O_NOFOLLOW fallback refuses an inode-0 volume (FAT/exFAT,
+    // some SMB) as unverifiable. A usage replay is not identity-sensitive, so it
+    // must degrade to the plain non-blocking open and still read the transcript
+    // (the gitDiff.ts posture). Force the fallback: hide O_NOFOLLOW and report
+    // ino 0 from the pre-open lstat, then load through a freshly imported module.
+    const filePath = plant('sess-eunv', 1000);
+    vi.resetModules();
+    vi.doMock('node:fs', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('node:fs')>();
+      const modified = {
+        ...actual,
+        constants: { ...actual.constants, O_NOFOLLOW: undefined },
+        promises: {
+          ...actual.promises,
+          lstat: ((p: fs.PathLike, opts?: unknown) => {
+            if (String(p) === filePath) {
+              return Promise.resolve({
+                isSymbolicLink: () => false,
+                dev: 1n,
+                ino: 0n,
+              });
+            }
+            return actual.promises.lstat(p, opts as never);
+          }) as typeof actual.promises.lstat,
+        },
+      };
+      return { ...modified, default: modified };
+    });
+    try {
+      const { loadUsageHistoryWithLive: load } = await import(
+        './usageHistoryService.js'
+      );
+      const merged = await load();
+      expect(tokensOf(merged, 'sess-eunv')).toBe(1000);
+    } finally {
+      vi.doUnmock('node:fs');
+      vi.resetModules();
+    }
+  });
 
   it('serves unchanged transcripts from the replay cache without re-reading them', async () => {
     const paths = [
