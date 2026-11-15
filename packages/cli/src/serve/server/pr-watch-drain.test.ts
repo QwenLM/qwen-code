@@ -304,6 +304,8 @@ describe('buildDrainPrompt language', () => {
     const zh = buildDrainPrompt(state, entry, recipient, undefined, 'zh');
     expect(zh).toContain('Repo: owner/repo');
     expect(zh).toContain('PR: #42');
+    expect(zh).toContain('Title: My PR');
+    expect(zh).toContain('URL: https://github.com/owner/repo/pull/42');
     expect(zh).toContain('Event: ci_failure');
     expect(zh).toContain('Summary: CI failing');
     expect(zh).toContain('Role: review');
