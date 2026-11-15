@@ -24528,8 +24528,10 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
           seedCommentEntry();
           mockPull({});
           routeCommentPaginate();
+          // An over-cap window (25 > 20) so the digest omits a tail: the bound
+          // must consume the WHOLE deliverable window, not just the rendered 20.
           mockOctokit.rest.issues.listComments.mockResolvedValue(
-            gapComments(3),
+            gapComments(25),
           );
           mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
           const resetFetch = () => {
@@ -24569,15 +24571,76 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
           expect(
             readWatchState().entries['owner/repo#42']!['commentSince'],
           ).not.toBe('2026-07-01T00:00:00.000Z');
-          // Exactly one journal row names the bound retirement.
+          // Exactly one journal row names the bound retirement and records the
+          // WHOLE deliverable window (25), not just the rendered 20.
           const retiredRows = readChannelEvents().filter(
             (event) => event['reason'] === 'comment_digest_retired',
           );
           expect(retiredRows).toHaveLength(1);
+          expect(retiredRows[0]!['detail']).toMatchObject({
+            consumedComments: 25,
+            retirements: 3,
+          });
           // No further dispatch attempt: the consumed backlog stays consumed.
           resetFetch();
           await pollOnce();
           expect(boundSessions.deliverPrompt).not.toHaveBeenCalled();
+        });
+
+        it('a transient deferral resets the permanent-retirement streak', async () => {
+          // A queue-full deferral is transient, not a permanent retirement: it
+          // must reset the streak so a later retirement starts counting anew.
+          await initChannel(
+            {
+              ...commentOnlyConfig,
+              messageRoutes: { '/review': 'Review the change.' },
+            },
+            { boundSessions },
+          );
+          boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+          setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
+          seedCommentEntry();
+          mockPull({});
+          routeCommentPaginate();
+          mockOctokit.rest.issues.listComments.mockResolvedValue(
+            gapComments(3),
+          );
+          mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+          const resetFetch = () => {
+            (
+              channel as unknown as {
+                prWatchState: {
+                  entries: Record<string, { commentLastFetchAt?: number }>;
+                };
+              }
+            ).prWatchState.entries['owner/repo#42']!.commentLastFetchAt = 0;
+          };
+          const stderr = vi
+            .spyOn(process.stderr, 'write')
+            .mockImplementation(() => true);
+          try {
+            // Poll 1: the route gate retires the digest -> streak = 1.
+            await pollOnce();
+            expect(
+              readWatchState().entries['owner/repo#42']!['digestRetiredCount'],
+            ).toBe(1);
+            // Poll 2: the route is cleared but the session queue is full, so the
+            // digest defers (transient) and the streak resets to 0.
+            (
+              channel as unknown as { messageRoutes: Map<string, string> }
+            ).messageRoutes.clear();
+            boundSessions.deliverPrompt.mockRejectedValue(
+              new BoundSessionQueueFullError('bound-session'),
+            );
+            resetFetch();
+            await pollOnce();
+          } finally {
+            stderr.mockRestore();
+          }
+          expect(boundSessions.deliverPrompt).toHaveBeenCalled();
+          expect(
+            readWatchState().entries['owner/repo#42']!['digestRetiredCount'],
+          ).toBe(0);
         });
 
         it('an unreadable delivery ring holds the retired digest cursor', async () => {
@@ -24629,9 +24692,9 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
 
         it('a repaired delivery ring stops re-delivering an accepted digest', async () => {
           // A startup-unreadable ring must not keep the digest's delivered
-          // check false forever: the first accepted delivery repairs the ring
-          // and clears the unreadable flag, so the backlog drains once instead
-          // of re-delivering the same digest every poll.
+          // check false forever: the first accepted delivery rewrites the ring
+          // and latches the repair (the unreadable verdict itself stays set),
+          // so the backlog drains once instead of re-delivering every poll.
           mkdirSync(dirname(boundDeliveredRingPath()), { recursive: true });
           writeFileSync(boundDeliveredRingPath(), '{invalid json', 'utf-8');
           await initChannel(commentOnlyConfig, { boundSessions });
@@ -24844,19 +24907,43 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
           // must reach disk so a restart still digests instead of flooding.
           await initChannel(commentOnlyConfig, { boundSessions });
           boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
-          setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
-          seedCommentEntry();
+          // A recent fetch clock makes the seed poll skip the comment fetch, so
+          // it populates the candidate map without advancing the comment cursor.
+          seedCommentEntry({ commentLastFetchAt: Date.now() });
           mockPull({});
           routeCommentPaginate();
+          mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+          // Poll 1: a SUCCESSFUL binding refresh populates the candidate map; a
+          // fresh heartbeat means no gap. This seeds a real candidate so the
+          // skip control below is not vacuous (with an empty map there is
+          // nothing to skip).
+          boundSessions.listPrBindings.mockResolvedValue({
+            bindings: [makeBinding()],
+            partial: false,
+          });
+          mockOctokit.rest.issues.listComments.mockResolvedValue([]);
+          setLastPollAt(new Date(Date.now() - 5000).toISOString());
+          await pollOnce();
+          // Poll 2: the gap fires, but the binding refresh now FAILS. The
+          // previous candidate map is kept, so the watch pass has a candidate
+          // it must skip; only the gap-detection persist can arm the entry.
+          mockOctokit.rest.issues.listComments.mockClear();
           mockOctokit.rest.issues.listComments.mockResolvedValue(
             gapComments(3),
           );
-          mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
-          // Fail the binding refresh so the watch pass is skipped this poll;
-          // only the gap-detection persist can arm the entry.
           boundSessions.listPrBindings.mockRejectedValue(
             new Error('binding refresh failed'),
           );
+          // Age the fetch clock so the watch pass WOULD fetch if it ran (the
+          // recheck interval must not be what skips it).
+          (
+            channel as unknown as {
+              prWatchState: {
+                entries: Record<string, { commentLastFetchAt?: number }>;
+              };
+            }
+          ).prWatchState.entries['owner/repo#42']!.commentLastFetchAt = 0;
+          setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
           const stderr = vi
             .spyOn(process.stderr, 'write')
             .mockImplementation(() => true);
@@ -24865,16 +24952,27 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
           } finally {
             stderr.mockRestore();
           }
-          // Positive control that the watch pass really was skipped: no comment
-          // fetch happened, so only the gap-detection persist could arm the entry.
+          // Non-vacuous skip control: a candidate binding exists (kept from
+          // poll 1) and the fetch clock is aged, so the watch pass would fetch
+          // if it ran; it is skipped, so no fetch happens. Removing the skip
+          // guards makes this red.
           expect(mockOctokit.rest.issues.listComments).not.toHaveBeenCalled();
           expect(
             readWatchState().entries['owner/repo#42']!['digestPending'],
           ).toBe(true);
           // Genuine restart: a fresh instance reloads the persisted arm; the
-          // heartbeat is now fresh, so only the persisted arm produces the digest.
+          // heartbeat is now fresh, so only the persisted arm produces the
+          // digest. Reset the fetch clock on disk so the restart actually fetches.
+          const persisted = readWatchState().entries['owner/repo#42']!;
+          seedWatchState({
+            'owner/repo#42': { ...persisted, commentLastFetchAt: 0 },
+          });
           await initChannel(commentOnlyConfig, { boundSessions });
           boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+          boundSessions.listPrBindings.mockResolvedValue({
+            bindings: [makeBinding()],
+            partial: false,
+          });
           setLastPollAt(new Date(Date.now() - 5000).toISOString());
           mockPull({});
           routeCommentPaginate();
@@ -24887,6 +24985,50 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
           expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
             'Offline backlog: 3',
           );
+        });
+
+        it('a gap-arm persist write failure is surfaced on stderr', async () => {
+          // The gap-arm persist catch must not swallow a write failure silently.
+          await initChannel(commentOnlyConfig, { boundSessions });
+          boundSessions.postedCommentIds = vi.fn().mockResolvedValue(new Set());
+          setLastPollAt(new Date(Date.now() - 2 * 3600 * 1000).toISOString());
+          seedCommentEntry();
+          mockPull({});
+          routeCommentPaginate();
+          mockOctokit.rest.issues.listComments.mockResolvedValue(
+            gapComments(3),
+          );
+          mockOctokit.rest.pulls.listReviewComments.mockResolvedValue([]);
+          const ch = channel as unknown as { savePrWatchState: () => void };
+          const origSave = ch.savePrWatchState.bind(channel);
+          let saveCalls = 0;
+          const saveSpy = vi
+            .spyOn(ch, 'savePrWatchState')
+            .mockImplementation(() => {
+              saveCalls += 1;
+              if (saveCalls === 1) throw new Error('disk full');
+              origSave();
+            });
+          const stderr = vi
+            .spyOn(process.stderr, 'write')
+            .mockImplementation(() => true);
+          let lines: string[] = [];
+          try {
+            await pollOnce();
+            lines = stderr.mock.calls.map((call) => String(call[0]));
+          } finally {
+            stderr.mockRestore();
+            saveSpy.mockRestore();
+          }
+          // The gap was detected and its arm persist failed on the first save.
+          expect(
+            lines.some((line) => line.includes('downtime gap detected')),
+          ).toBe(true);
+          expect(
+            lines.some((line) =>
+              line.includes('could not persist the downtime-gap digest arm'),
+            ),
+          ).toBe(true);
         });
 
         it('isPrWatchEntryShape drops an entry with a malformed digest field and keeps its sibling', async () => {

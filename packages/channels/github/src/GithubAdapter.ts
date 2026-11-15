@@ -8181,9 +8181,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             const retiredCount = (heldEntry?.digestRetiredCount ?? 0) + 1;
             if (heldEntry) heldEntry.digestRetiredCount = retiredCount;
             if (retiredCount >= MAX_DIGEST_RETIREMENT_RETRIES) {
-              // Consume the backlog with a visible trace rather than retry the
-              // identical rejected attempt forever. The claim-time member keys
-              // stay recorded so the members do not re-list.
+              // Consume the WHOLE deliverable window with a visible trace
+              // rather than retry the identical rejected attempt forever: the
+              // cursor advances past every deliverable member (the rendered
+              // keys stay recorded; the omitted tail is consumed by the cursor
+              // advance), so none of them re-list.
               this.recordChannelEvent({
                 type: 'inbound',
                 outcome: 'skipped',
@@ -8193,12 +8195,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
                 number,
                 messageId: digestId,
                 detail: {
-                  consumedComments: rendered.length,
+                  consumedComments: deliverable.length,
                   retirements: retiredCount,
                 },
               });
               process.stderr.write(
-                `[Channel:${this.name}] comment digest for ${key} retired at preflight ${retiredCount} times; consuming ${rendered.length} comment(s) with a trace instead of retrying\n`,
+                `[Channel:${this.name}] comment digest for ${key} retired at preflight ${retiredCount} times; consuming ${deliverable.length} comment(s) with a trace instead of retrying\n`,
               );
               commitCursor(nowIso, true);
               return;

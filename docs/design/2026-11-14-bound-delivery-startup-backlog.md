@@ -64,7 +64,9 @@ delivered, but it should arrive as a compact summary, not a flood.
   configured poll interval so a long-interval channel does not digest every
   poll. Gap detection is gated on bound delivery AND comment watching being
   enabled: a gap while comment watching is disabled does not arm the digest, so
-  comments accumulated while disabled deliver per comment once re-enabled. A
+  comments accumulated while disabled deliver per comment once re-enabled —
+  within the per-comment cap; an over-cap window still digests via the size
+  trigger, which is flood prevention independent of the gap. An
   arm persisted BEFORE watching was disabled is cleared at the poll loop's
   watch gate (the observable disabled site — the watch pass itself is never
   called while disabled), so a disabled restart cannot carry the arm into a
@@ -258,9 +260,11 @@ for `en`).
 - The permanent-retirement bound consumes a backlog that was never delivered
   (preflight keeps rejecting it). This is deliberate — the alternative is an
   unbounded hold that spends the watch budget every poll — and it is never
-  silent: a `comment_digest_retired` journal row names the consumed digest. The
-  member keys stay recorded, so the comments do not re-list; an operator who
-  fixes the route/sender gate after the bound must re-trigger the backlog.
+  silent: a `comment_digest_retired` journal row names the consumed digest and
+  the consumed count. The member keys stay recorded, so the comments do not
+  re-list: once the bound is reached the backlog is consumed for this cursor,
+  and fixing the route/sender gate afterwards does NOT re-deliver it — recovery
+  is an operator action, not an automatic retry.
 - A startup-unreadable delivery ring keeps the public-fallback suppression
   fail-closed for the process lifetime, even after a successful write repairs
   the ring: the keys lost with the file stay unknown, so a brand-new `pr:` event
