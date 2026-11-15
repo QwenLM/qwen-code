@@ -13,6 +13,7 @@ import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationAdmissionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
+import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationVerifier;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
@@ -40,6 +41,7 @@ import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.boot.web.servlet.context.ServletWebServerApplicationContext;
 import org.springframework.context.support.GenericApplicationContext;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.PlatformTransactionManager;
 
@@ -255,6 +257,10 @@ class HostedWorkspaceToolTurnIT {
                 context.getBean(ToolPublicationStore.class), context.getBean(JdbcManagedSessionStore.class),
                 context.getBean(ToolPublicationObjectStore.class), Duration.ofSeconds(30), Duration.ofSeconds(5),
                 new ToolPublicationDataStore.VerificationBudget(1024 * 1024, Duration.ofMinutes(25))));
+        context.registerBean("managedToolVerificationScheduler", ThreadPoolTaskScheduler.class);
+        context.registerBean("unicodeVerifier", ToolPublicationVerifier.class,
+                () -> new ToolPublicationVerifier(context.getBean(ToolPublicationDataStore.class), 1),
+                definition -> definition.setDestroyMethodName("close"));
         context.registerBean("unicodePublicationController", ToolPublicationController.class, () -> {
             var properties = context.getBean(ManagedAgentProperties.class);
             properties.getToolPublication().setEntryConcurrency(4);
