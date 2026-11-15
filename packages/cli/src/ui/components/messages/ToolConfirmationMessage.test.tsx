@@ -298,7 +298,7 @@ describe('ToolConfirmationMessage', () => {
         </Box>,
       );
       try {
-        const lines = (view.lastFrame() ?? '').split(EOL);
+        const lines = (view.lastFrame() ?? '').split(/\r?\n/u);
         const start = lines.findIndex((line) =>
           line.trimStart().startsWith('printf'),
         );
