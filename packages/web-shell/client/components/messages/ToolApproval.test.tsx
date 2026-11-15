@@ -1191,6 +1191,49 @@ describe('ToolApproval accessibility', () => {
     ).toBe(plan);
   });
 
+  it('points aria-describedby at the plan text, not the markdown controls', () => {
+    // The rendered markdown holds focusable controls — every fenced block
+    // renders a Copy button — and a described-by target's text alternative
+    // includes its descendants' labels. The reference must therefore sit on
+    // a node carrying only the sanitized plan text, or the steps would be
+    // announced with "Copy" spliced in.
+    const plan = [
+      '## Plan',
+      '',
+      '1. Step one',
+      '',
+      '```sh',
+      'npm test',
+      '```',
+      '',
+      '2. Step two',
+    ].join('\n');
+    render(undefined, {
+      ...planRequest,
+      content: [{ type: 'text', text: plan }],
+    });
+
+    const panel = container!.querySelector('[role="alertdialog"]')!;
+    const targetId = panel
+      .getAttribute('aria-describedby')!
+      .split(' ')
+      .find((id) =>
+        document.getElementById(id)?.textContent?.includes('Step one'),
+      );
+    expect(targetId).toBeDefined();
+    const target = document.getElementById(targetId!)!;
+    // The target is the sanitized raw plan — plain text, nothing else.
+    expect(target.textContent).toBe(plan);
+    // …and carries no focusable descendant, while the rendered markdown
+    // sibling keeps its Copy button (the control the reference avoids).
+    expect(target.querySelector('button')).toBeNull();
+    expect(
+      container!
+        .querySelector('[class*="planContent"]')!
+        .querySelector('button'),
+    ).not.toBeNull();
+  });
+
   it('renders the plan inert: links as labels, images as alt text', () => {
     // The approval dialog is a render-only surface: a link or image in the
     // model's plan must not fire navigation or a network request, even for

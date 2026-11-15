@@ -94,8 +94,7 @@ import {
   getArenaSystemReminder,
   getCoreSystemPrompt,
   getCustomSystemPrompt,
-  getPlanModeSystemReminder,
-  isTodoWriteToolAvailable,
+  getPlanModeReminderFor,
   resolveInteractionMode,
   resolveMainSessionOutputStyle,
 } from './prompts.js';
@@ -5102,11 +5101,10 @@ export class LlmClient {
           systemReminders.push(
             // SDK clients do not receive the interactive exit-plan flow, so
             // they need plan-only guidance even outside subagent contexts.
-            getPlanModeSystemReminder(
+            getPlanModeReminderFor(
+              this.config,
               shouldUsePlanOnlyReminderInSubagentContext() ||
                 this.config.getSdkMode(),
-              this.config.isSessionWorkflowTodoContextActive?.() === true,
-              isTodoWriteToolAvailable(this.config),
             ),
           );
         }

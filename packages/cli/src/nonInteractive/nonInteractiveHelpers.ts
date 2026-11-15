@@ -21,9 +21,8 @@ import {
   createDebugLogger,
   getArenaSystemReminder,
   getMCPServerStatus,
-  getPlanModeSystemReminder,
+  getPlanModeReminderFor,
   isShellProgressData,
-  isTodoWriteToolAvailable,
 } from '@qwen-code/qwen-code-core';
 import type { Part, PartListUnion } from '@google/genai';
 import type {
@@ -119,11 +118,7 @@ export function buildInitialSystemReminders(config: Config): Part[] {
 
   if (config.getApprovalMode() === ApprovalMode.PLAN) {
     reminders.push({
-      text: getPlanModeSystemReminder(
-        config.getSdkMode?.(),
-        config.isSessionWorkflowTodoContextActive?.() === true,
-        isTodoWriteToolAvailable(config),
-      ),
+      text: getPlanModeReminderFor(config, config.getSdkMode?.()),
     });
   }
 

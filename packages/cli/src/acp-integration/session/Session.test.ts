@@ -49149,12 +49149,18 @@ describe('Session', () => {
       });
 
       it('keeps the Todo sentence out when todo_write is disabled', async () => {
+        // The tool stays registered and the workflow context stays active:
+        // the opt-in flag is the only suppressor, so this test fails if the
+        // flag guard is deleted and the gate reduces to the registry check.
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
         (
           mockConfig.isSessionWorkflowTodoContextActive as ReturnType<
             typeof vi.fn
           >
         ).mockReturnValue(true);
+        mockToolRegistry.getAllToolNames = vi
+          .fn()
+          .mockReturnValue([core.ToolNames.TODO_WRITE]);
         const capture = captureFirstTurnMessage();
 
         await session.prompt({

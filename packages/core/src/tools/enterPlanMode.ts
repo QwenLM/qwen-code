@@ -17,10 +17,7 @@ import {
   buildSubagentPlanToolBlockedResult,
   isPlanLifecycleToolUnavailableInSubagent,
 } from '../agents/runtime/subagent-plan-tool-policy.js';
-import {
-  getPlanModeSystemReminder,
-  isTodoWriteToolAvailable,
-} from '../core/prompts.js';
+import { getPlanModeReminderFor } from '../core/prompts.js';
 
 const debugLogger = createDebugLogger('ENTER_PLAN_MODE');
 
@@ -188,11 +185,7 @@ class EnterPlanModeToolInvocation extends BaseToolInvocation<
     }
 
     return {
-      llmContent: getPlanModeSystemReminder(
-        this.config.getSdkMode(),
-        this.config.isSessionWorkflowTodoContextActive?.() === true,
-        isTodoWriteToolAvailable(this.config),
-      ),
+      llmContent: getPlanModeReminderFor(this.config, this.config.getSdkMode()),
       returnDisplay: 'Entered plan mode.',
     };
   }

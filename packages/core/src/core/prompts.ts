@@ -8,6 +8,10 @@ import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 import { ToolNames } from '../tools/tool-names.js';
+import {
+  isSubagentLikeExecutionContext,
+  isToolExcludedForCurrentContext,
+} from '../agents/runtime/subagent-plan-tool-policy.js';
 import process from 'node:process';
 import { isGitRepository } from '../utils/gitUtils.js';
 import { QWEN_DIR } from '../config/storage.js';
@@ -1408,19 +1412,68 @@ function getToolCallExamples(model?: string): string {
  *
  * The opt-in flag alone is not sufficient: the core-tools allowlist and deny
  * rules can remove the tool from the registry while the flag stays true, and
- * a reminder that names a tool the model cannot invoke is noise. The registry
- * check uses `getAllToolNames`, which also covers lazy registrations that
- * `getTool` would miss before the factory has run. Uses a structural type to
- * avoid a hard dependency on the full Config class (as
+ * a reminder that names a tool the model cannot invoke is noise. The gate
+ * therefore asks about the surface the model actually sees: the prompt tool
+ * snapshot when one has been recorded (an eager allowlist demotes the tool to
+ * `deferred` without removing it from the registry, so the registry alone
+ * would keep the gate open), falling back to `getAllToolNames` before the
+ * prompt is built (which also covers lazy registrations that `getTool` would
+ * miss before the factory has run). The context exclusion check catches
+ * contexts that strip the tool from their declarations (plan-required
+ * teammates: `EXCLUDED_TOOLS_FOR_TEAMMATES`) even when the registry and
+ * snapshot still list it. Like the tool-call bridge, it is wrapped in
+ * `isSubagentLikeExecutionContext()` so the top-level session never consults
+ * the exclusion sets — for a non-teammate they are the subagent set, which
+ * contains `todo_write` and would wrongly silence the gate. Uses a structural
+ * type to avoid a hard dependency on the full Config class (as
  * {@link resolveInteractionMode} does).
  */
 export function isTodoWriteToolAvailable(config: {
   isTodoWriteEnabled?(): boolean;
   getToolRegistry?(): { getAllToolNames(): string[] } | undefined;
+  getPromptToolSnapshot?(): ReadonlySet<string> | undefined;
 }): boolean {
-  if (config.isTodoWriteEnabled?.() !== true) return false;
+  if (config.isTodoWriteEnabled?.() !== true) {
+    return false;
+  }
+  if (
+    isSubagentLikeExecutionContext() &&
+    isToolExcludedForCurrentContext(ToolNames.TODO_WRITE)
+  ) {
+    return false;
+  }
+  const declared = config.getPromptToolSnapshot?.();
+  if (declared !== undefined) {
+    return declared.has(ToolNames.TODO_WRITE);
+  }
   const names = config.getToolRegistry?.()?.getAllToolNames();
   return names?.includes(ToolNames.TODO_WRITE) === true;
+}
+
+/**
+ * The plan-mode reminder for this session: composes the caller-supplied
+ * `planOnly` flag with the two config-derived booleans so every emitter
+ * passes the same composite (setting on AND declared to the model) instead
+ * of re-deriving it by hand — a fifth site written from the raw
+ * {@link getPlanModeSystemReminder} signature could pass the bare flag and
+ * order the model to call a tool that is not registered. `planOnly` stays
+ * caller-supplied because the client adds the subagent-context term while the
+ * other emitters pass `getSdkMode()` alone.
+ */
+export function getPlanModeReminderFor(
+  config: {
+    isTodoWriteEnabled?(): boolean;
+    getToolRegistry?(): { getAllToolNames(): string[] } | undefined;
+    getPromptToolSnapshot?(): ReadonlySet<string> | undefined;
+    isSessionWorkflowTodoContextActive?(): boolean;
+  },
+  planOnly: boolean,
+): string {
+  return getPlanModeSystemReminder(
+    planOnly,
+    config.isSessionWorkflowTodoContextActive?.() === true,
+    isTodoWriteToolAvailable(config),
+  );
 }
 
 /**

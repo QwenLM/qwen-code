@@ -158,6 +158,7 @@ import {
 } from '../services/session-api-history.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
+import { runWithTeammateIdentity } from '../agents/team/identity.js';
 import {
   clearCacheSafeParams,
   getCacheSafeParams,
@@ -218,13 +219,26 @@ vi.mock('../config/config.js');
 // undefined.
 vi.mock('./prompts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./prompts.js')>();
+  // The composite helper must forward to the spied builder below: the
+  // actual one calls its module-local getPlanModeSystemReminder, which the
+  // gate tests assert on but would never see.
+  const getPlanModeSystemReminderMock = vi.fn();
   return {
     ...actual,
     getCustomSystemPrompt: vi.fn(),
     getCoreSystemPrompt: vi.fn(),
     getCompressionPrompt: vi.fn(),
     getProjectSummaryPrompt: vi.fn(),
-    getPlanModeSystemReminder: vi.fn(),
+    getPlanModeSystemReminder: getPlanModeSystemReminderMock,
+    getPlanModeReminderFor: (
+      config: Parameters<typeof actual.getPlanModeReminderFor>[0],
+      planOnly: Parameters<typeof actual.getPlanModeReminderFor>[1],
+    ) =>
+      getPlanModeSystemReminderMock(
+        planOnly,
+        config.isSessionWorkflowTodoContextActive?.() === true,
+        actual.isTodoWriteToolAvailable(config),
+      ),
     getArenaSystemReminder: vi.fn(),
     getInsightPrompt: vi.fn(),
     resolvePathFromEnv: vi.fn(),
@@ -10994,6 +11008,14 @@ Other open files:
         registryMock().getAllToolNames.mockReturnValue(
           todoRegistered ? [ToolNames.TODO_WRITE] : [],
         );
+        // startChat (driven by initialize() in beforeEach, before this
+        // setup) already recorded the prompt tool snapshot from the
+        // registry's default (empty) declarations, and the gate reads that
+        // snapshot — not the registry — once it exists. Mirror the
+        // declaration surface on the mock config directly.
+        vi.mocked(mockConfig.getPromptToolSnapshot).mockReturnValue(
+          new Set(todoRegistered ? [ToolNames.TODO_WRITE] : []),
+        );
         vi.mocked(getPlanModeSystemReminder).mockReturnValue(
           `<system-reminder>${reminder}</system-reminder>`,
         );
@@ -11013,6 +11035,46 @@ Other open files:
         );
       },
     );
+
+    it('keeps the todo gate off for a plan-required teammate even when the tool is registered', async () => {
+      // A plan-required teammate renders the main-session reminder (the
+      // subagent-only variant is for non-plan teammates), and its todo
+      // dimension must read the context exclusion, not the registry:
+      // teammates share the leader's persisted Todo sidecar, so
+      // todo_write is declared out for them whether or not the flag is on
+      // or the tool is registered.
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.PLAN);
+      vi.mocked(mockConfig.getSdkMode).mockReturnValue(false);
+      vi.mocked(mockConfig.isSessionWorkflowTodoContextActive).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.isTodoWriteEnabled).mockReturnValue(true);
+      registryMock().getAllToolNames.mockReturnValue([ToolNames.TODO_WRITE]);
+      vi.mocked(getPlanModeSystemReminder).mockReturnValue(
+        '<system-reminder>call exit_plan_mode</system-reminder>',
+      );
+      mockTurnRunFn.mockReturnValue(textTurn('Plan ready'));
+      installChat();
+
+      const identity = {
+        agentId: 'planner@demo',
+        agentName: 'planner',
+        teamName: 'demo',
+        isTeamLead: false,
+        planModeRequired: true,
+      };
+      await runWithTeammateIdentity(identity, () =>
+        run([{ text: 'Plan this change' }], 'prompt-id-main-plan-reminder'),
+      );
+
+      // (planOnly, workflowActive, todoAvailable): the third argument must
+      // stay false — the context exclusion beats flag + registration.
+      expect(getPlanModeSystemReminder).toHaveBeenCalledWith(
+        false,
+        true,
+        false,
+      );
+    });
 
     it('tells the date on a Cron turn past midnight', async () => {
       dateSession('2026-06-05T12:00:00Z', [

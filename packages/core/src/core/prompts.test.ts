@@ -11,6 +11,7 @@ import {
   getCustomSystemPrompt,
   getManualPlanExitSystemReminder,
   getPlanModeSystemReminder,
+  isTodoWriteToolAvailable,
   resolvePathFromEnv,
   getCompressionPrompt,
   resolveInteractionMode,
@@ -1826,6 +1827,54 @@ describe('getPlanModeSystemReminder', () => {
     expect(getPlanModeSystemReminder(false, true, true)).toBe(
       base.replace('Present your plan', inserted),
     );
+  });
+});
+
+describe('isTodoWriteToolAvailable', () => {
+  const registered = () => ({
+    getAllToolNames: () => [ToolNames.TODO_WRITE],
+  });
+
+  it('answers from the prompt snapshot when one has been recorded', () => {
+    // An eager allowlist demotes the tool to deferred without removing it
+    // from the registry, so the registry alone would keep the gate open:
+    // the snapshot decides once it exists, in both directions.
+    expect(
+      isTodoWriteToolAvailable({
+        isTodoWriteEnabled: () => true,
+        getToolRegistry: registered,
+        getPromptToolSnapshot: () => new Set<string>(),
+      }),
+    ).toBe(false);
+    expect(
+      isTodoWriteToolAvailable({
+        isTodoWriteEnabled: () => true,
+        getToolRegistry: undefined,
+        getPromptToolSnapshot: () => new Set([ToolNames.TODO_WRITE]),
+      }),
+    ).toBe(true);
+  });
+
+  it('falls back to the registry when no prompt snapshot has been recorded', () => {
+    // Before startChat the snapshot is undefined: dropping the optional
+    // call here would throw on a config that lacks the method instead of
+    // degrading to the registry.
+    expect(
+      isTodoWriteToolAvailable({
+        isTodoWriteEnabled: () => true,
+        getToolRegistry: registered,
+      }),
+    ).toBe(true);
+  });
+
+  it('answers unavailable rather than throwing when no registry is set', () => {
+    // The last arm is the only one that can see nothing at all — a config
+    // without getToolRegistry must degrade to false, not throw.
+    expect(
+      isTodoWriteToolAvailable({
+        isTodoWriteEnabled: () => true,
+      }),
+    ).toBe(false);
   });
 });
 
