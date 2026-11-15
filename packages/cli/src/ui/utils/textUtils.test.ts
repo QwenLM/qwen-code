@@ -520,9 +520,7 @@ describe('textUtils', () => {
       expect(sanitizeTerminalLineLossless('grep \\^foo')).toBe('grep \\^foo');
       // hexNotation always uppercases; lowercase hex digits cannot be a
       // real marker either.
-      expect(sanitizeTerminalLineLossless('grep \\u00e9')).toBe(
-        'grep \\u00e9',
-      );
+      expect(sanitizeTerminalLineLossless('grep \\u00e9')).toBe('grep \\u00e9');
     });
 
     it('distinguishes a real marked code point from literal text shaped like its own marker, even across a following digit or a second code point to mark (R2-4)', () => {

@@ -488,10 +488,14 @@ function looksLikeGeneratedMarker(codePoints: string[], i: number): boolean {
 // letter after `^` both fall through untouched) -- renders byte-identical,
 // so "clean input renders identically before and after this function"
 // stays true.
-function mustDoubleBackslash(codePoints: string[], backslashIndex: number): boolean {
+function mustDoubleBackslash(
+  codePoints: string[],
+  backslashIndex: number,
+): boolean {
   const next = backslashIndex + 1;
   return (
-    willBeReplaced(codePoints, next) || looksLikeGeneratedMarker(codePoints, next)
+    willBeReplaced(codePoints, next) ||
+    looksLikeGeneratedMarker(codePoints, next)
   );
 }
 
