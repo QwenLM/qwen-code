@@ -116,9 +116,10 @@ round's own context.json. Pass a copy the round never saw: the artifact
 directory is writable by the PR code the round executed, so a --context path
 inside the PR-writable tree is refused — it cannot supply the coordinates
 that judge its waiver. Pass --context-root <pr-clone> (the host-held PR clone
-path) to name that tree explicitly; the trust root must come from the host,
-never from git state inside the tree the round controls. Without it, the root
-falls back to the artifact dir's tmp/ container (or the dir itself).
+path, which must contain the artifact dir) to name that tree explicitly; the
+trust root must come from the host, never from git state inside the tree the
+round controls. Without it, a pr<n>-verify-<ts> dir under tmp/ falls back to
+the clone root (the tmp container's parent); a plain dir is its own root.
 
 Exit codes: 0 no errors, 1 errors found, 2 usage.
 `;
@@ -984,6 +985,28 @@ function main(argv) {
     process.stderr.write(`verify-pr check: ${dir} does not exist\n`);
     return 1;
   }
+  // A --context-root must resolve to a directory containing the artifact
+  // dir; a root no path can be inside would disable the refusal entirely
+  // (R15 R14-1). Validate it whenever supplied, not only with --context.
+  if (contextRoot) {
+    let realRoot;
+    let realDir;
+    try {
+      realRoot = realpathSync(contextRoot);
+      realDir = realpathSync(dir);
+    } catch {
+      process.stderr.write(
+        `verify-pr check: --context-root ${contextRoot} must resolve to a directory\n\n${HELP}`,
+      );
+      return 2;
+    }
+    if (realDir !== realRoot && !realDir.startsWith(realRoot + sep)) {
+      process.stderr.write(
+        `verify-pr check: --context-root ${contextRoot} does not contain the artifact directory ${dir}\n\n${HELP}`,
+      );
+      return 2;
+    }
+  }
 
   const files = {
     report: readIfExists(join(dir, 'report.md')),
@@ -1087,12 +1110,19 @@ function main(argv) {
     // the PR-writable tree: the round controls that state (it can `git init`
     // the artifact dir or damage .git), so deriving the root from it lets
     // the round judge its own waiver (R14-1). The host passes the PR clone
-    // path via --context-root. Without it, fall back to a root derived from
-    // the artifact dir's own path — which prepare (host-side) fixed, not the
-    // round: a pr<n>-verify-<ts> dir under tmp/ shares that container with
-    // the verify-context sibling, so the container is the writable root; a
-    // plain fixture dir is its own root. Both sides are real-path resolved
-    // so a symlinked dir (macOS TMPDIR) compares consistently.
+    // path via --context-root, which must resolve to a directory containing
+    // the artifact dir (a root no path can be inside would disable the
+    // refusal). Without the flag, fall back to a root derived from the
+    // artifact dir's own path — which prepare (host-side) fixed, not the
+    // round: a pr<n>-verify-<ts> dir under tmp/ lives in the read-write clone,
+    // so the writable root is the CLONE root (the tmp container's parent),
+    // covering a snapshot planted anywhere in the clone, not just under tmp/
+    // (R15 R14-1); a plain fixture dir is its own root. Both sides are
+    // real-path resolved so a symlinked dir (macOS TMPDIR) compares
+    // consistently.
+    // --context-root was validated above (contains the artifact dir). The
+    // fallback root is the clone root for a pr<n>-verify-<ts> dir under tmp/
+    // (the tmp container's parent), or the dir itself for a plain fixture.
     let trustRoot;
     if (contextRoot) {
       trustRoot = realpathSync(contextRoot);
@@ -1100,7 +1130,7 @@ function main(argv) {
       const container = dirname(resolve(dir));
       trustRoot =
         dirPrNumber && basename(container) === 'tmp'
-          ? realpathSync(container)
+          ? realpathSync(dirname(container))
           : realpathSync(dir);
     }
     if (realContext === trustRoot || realContext.startsWith(trustRoot + sep)) {

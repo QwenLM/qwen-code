@@ -2410,3 +2410,75 @@ describe('round-14 witnesses', () => {
     expect(res.stderr).toMatch(/--context-root requires a path/);
   });
 });
+
+describe('round-15 witnesses', () => {
+  // R15 R14-1: without --context-root the fallback must cover the whole
+  // clone, not just tmp/ — a snapshot planted at the clone root is refused.
+  const setupClone = () => {
+    const root = mkdtempSync(join(tmpdir(), 'verify-pr-r15-'));
+    tmpDirs.push(root);
+    const dir = join(root, 'tmp', 'pr7-verify-20261115-000000');
+    mkdirSync(join(dir, 'evidence'), { recursive: true });
+    writeFileSync(join(dir, 'report.md'), validFiles({}).report);
+    writeFileSync(join(dir, 'verdict.txt'), 'merge-ready\n');
+    writeFileSync(
+      join(dir, 'assertions.json'),
+      '{"pass":1,"fail":0,"total":1}',
+    );
+    writeFileSync(
+      join(dir, 'boundary.json'),
+      JSON.stringify({
+        mode: 'waived',
+        by: 'maintainer',
+        approval: APPROVAL,
+        reason: 'why',
+      }),
+    );
+    writeFileSync(join(dir, 'evidence/01-x.png'), 'png');
+    return { root, dir };
+  };
+
+  it('refuses a snapshot planted at the clone root without --context-root', () => {
+    const { root, dir } = setupClone();
+    const planted = join(root, 'snapshot.json');
+    writeFileSync(
+      planted,
+      JSON.stringify({ repo: 'evil/repo', pr: 9, headRefOid: HEAD }),
+    );
+    const res = spawnSync(
+      process.execPath,
+      [SCRIPT, '--context', planted, dir],
+      { encoding: 'utf8', env: { ...process.env, QWEN_VERIFY_CONTEXT: '' } },
+    );
+    expect(res.status).toBe(1);
+    expect(res.stderr).toMatch(
+      /must not point inside the PR-writable worktree/,
+    );
+  });
+
+  it('rejects a --context-root that does not contain the artifact dir', () => {
+    const { dir } = setupClone();
+    const elsewhere = mkdtempSync(join(tmpdir(), 'verify-pr-r15-other-'));
+    tmpDirs.push(elsewhere);
+    const res = spawnSync(
+      process.execPath,
+      [SCRIPT, '--context-root', elsewhere, dir],
+      { encoding: 'utf8', env: { ...process.env, QWEN_VERIFY_CONTEXT: '' } },
+    );
+    expect(res.status).toBe(2);
+    expect(res.stderr).toMatch(/does not contain the artifact directory/);
+  });
+
+  it('rejects a --context-root that is not a directory', () => {
+    const { root, dir } = setupClone();
+    const file = join(root, 'not-a-dir');
+    writeFileSync(file, 'x');
+    const res = spawnSync(
+      process.execPath,
+      [SCRIPT, '--context-root', file, dir],
+      { encoding: 'utf8', env: { ...process.env, QWEN_VERIFY_CONTEXT: '' } },
+    );
+    expect(res.status).toBe(2);
+    expect(res.stderr).toMatch(/does not contain the artifact directory/);
+  });
+});
