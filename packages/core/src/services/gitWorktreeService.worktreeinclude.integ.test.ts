@@ -101,6 +101,29 @@ describe('listIgnoredFiles', () => {
 
     expect(await listIgnoredFiles(repoRoot)).toEqual(['.env']);
   });
+
+  it('lists an ignored tree larger than the shared capture buffer', async () => {
+    // 10 MB+ of paths is a monorepo with a second `node_modules`; buffering
+    // the listing through `runGitCapture` rejects past its cap and reads as
+    // "nothing is ignored", so the stream has to survive this size. Long
+    // names reach the size in ~30k files instead of ~400k.
+    const long = 'd'.repeat(180);
+    const names: string[] = [];
+    for (let dir = 0; dir < 4; dir += 1) {
+      const relDir = path.join('.local', `${long}${dir}`, long);
+      await fs.mkdir(path.join(repoRoot, relDir), { recursive: true });
+      for (let i = 0; i < 8_000; i += 1) {
+        const rel = path.join(relDir, `${long}${i}.txt`);
+        await fs.writeFile(path.join(repoRoot, rel), '');
+        names.push(rel);
+      }
+    }
+
+    const listed = await listIgnoredFiles(repoRoot);
+
+    expect(Buffer.byteLength(listed.join('\0'))).toBeGreaterThan(10 * 1024 * 1024);
+    expect(listed.length).toBe(names.length);
+  });
 });
 
 describe('GitWorktreeService.setupWorktrees() — .worktreeinclude', () => {

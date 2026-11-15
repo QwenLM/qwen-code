@@ -21,7 +21,7 @@ import { isNodeError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { fileExists, isWithinRoot } from '../utils/fileUtils.js';
 import { NO_EXEC_CONFIG } from '../utils/gitUtils.js';
-import { runGitCapture } from '../utils/git-branches.js';
+import { runGitCapture, streamGitRecords } from '../utils/git-branches.js';
 import { loadSimpleGit } from '../utils/load-simple-git.js';
 import { gitEnv, gitRemoteEnv } from '../utils/git-branches.js';
 import { initRepositoryWithMainBranch } from './gitInit.js';
@@ -231,22 +231,39 @@ export function parseWorktreeInclude(content: string): string[] {
  * `-z` keeps paths verbatim (no quoting of non-ASCII bytes, and a path
  * containing `\n` cannot split into two entries); `core.quotepath=false`
  * is still set so the output is readable when a caller logs it.
+ *
+ * Streamed, not buffered: the listing is the size of everything git ignores,
+ * and a repository with two `node_modules`, a `.venv` or a build cache crosses
+ * `runGitCapture`'s 10 MB cap. That cap makes the call reject, so a caller
+ * reading the throw as "nothing ignored" silently copies nothing at all.
  */
 export async function listIgnoredFiles(cwd: string): Promise<string[]> {
-  const { stdout } = await runGitCapture(cwd, [
-    // `ls-files` can refresh the index, which runs a repository-configured
-    // `core.fsmonitor` program — from a tree obtained as files, that is
-    // arbitrary code on every worktree creation.
-    ...NO_EXEC_CONFIG,
-    '-c',
-    'core.quotepath=false',
-    'ls-files',
-    '--others',
-    '--ignored',
-    '--exclude-standard',
-    '-z',
-  ]);
-  return stdout.split('\0').filter(Boolean);
+  const paths: string[] = [];
+  await streamGitRecords(
+    cwd,
+    [
+      // `ls-files` can refresh the index, which runs a repository-configured
+      // `core.fsmonitor` program — from a tree obtained as files, that is
+      // arbitrary code on every worktree creation.
+      ...NO_EXEC_CONFIG,
+      '-c',
+      'core.quotepath=false',
+      'ls-files',
+      '--others',
+      '--ignored',
+      '--exclude-standard',
+      '-z',
+    ],
+    (record) => {
+      const name = record.toString('utf8');
+      // A path that does not survive decoding names some other file.
+      if (name && Buffer.from(name, 'utf8').equals(record)) {
+        paths.push(name);
+      }
+      return false;
+    },
+  );
+  return paths;
 }
 
 /**
