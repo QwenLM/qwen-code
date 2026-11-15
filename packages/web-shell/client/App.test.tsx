@@ -51529,6 +51529,55 @@ describe('App /goal command', () => {
     expect(mockSessionActions.controlGoal).not.toHaveBeenCalled();
   });
 
+  it('refuses a picker cwd outside the trusted workspace list without touching the session', async () => {
+    // The dialog reconciles stale selections itself; this guard is the
+    // backstop for a capabilities change racing the submit. It must refuse
+    // BEFORE createNewSession, which clears the current session first.
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/tmp/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const onToast = vi.fn();
+    const { container } = renderApp({ onToast });
+    await flush();
+
+    testState.prompt = '/goal';
+    await clickSubmit(container);
+    await flush();
+    const onCreateGoal = testState.latestGoalsProps?.onCreateGoal;
+    if (!onCreateGoal) throw new Error('onCreateGoal was not captured');
+    mockSessionActions.clearSession.mockClear();
+    mockSessionActions.controlGoal.mockClear();
+
+    let result: boolean | void;
+    await act(async () => {
+      result = await onCreateGoal('all tests pass', '/tmp/revoked');
+    });
+
+    expect(result).toBe(false);
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.controlGoal).not.toHaveBeenCalled();
+    // The toast is the only user-visible surface of this refusal; removing
+    // the reportError call must red this assertion.
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      'The selected workspace is unavailable or untrusted.',
+    );
+  });
+
   it.each(['resolve', 'reject'] as const)(
     'ignores a stale Goal edit %s after the session changes',
     async (outcome) => {
