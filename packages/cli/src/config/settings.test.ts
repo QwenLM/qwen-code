@@ -838,6 +838,66 @@ describe('Settings Loading and Merging', () => {
         enabled: false,
       });
       expect(isFolderTrustEnabled(settings.merged as Settings)).toBe(false);
+      // The dead key must be dropped on disk too, not just in memory.
+      expect(getSettingsWarnings(settings)).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining(
+            "Removed the unused 'security.folderTrust.featureEnabled'",
+          ),
+        ]),
+      );
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
+        (call: unknown[]) =>
+          call[0] ===
+          path.join(`${USER_SETTINGS_PATH}.write-test`, 'settings.json.tmp'),
+      );
+      expect(writeCall).toBeDefined();
+      expect(JSON.parse(writeCall![1] as string)['security']).toEqual({
+        folderTrust: { enabled: false },
+      });
+    });
+
+    it('replaces a non-boolean canonical value with the dead-key boolean', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => p === USER_SETTINGS_PATH,
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) =>
+          p === USER_SETTINGS_PATH
+            ? JSON.stringify({
+                [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+                security: {
+                  folderTrust: { enabled: null, featureEnabled: true },
+                },
+              })
+            : '{}',
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      // No consumer honors a non-boolean canonical value (`?? false` or a
+      // policy error), so it must not cost the user their only usable
+      // opt-in: the legacy boolean replaces it.
+      expect(settings.user.settings.security?.folderTrust).toEqual({
+        enabled: true,
+      });
+      expect(isFolderTrustEnabled(settings.merged as Settings)).toBe(true);
+      expect(getSettingsWarnings(settings)).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining(
+            "Migrated 'security.folderTrust.featureEnabled'",
+          ),
+        ]),
+      );
+      const writeCall = (fs.writeFileSync as Mock).mock.calls.find(
+        (call: unknown[]) =>
+          call[0] ===
+          path.join(`${USER_SETTINGS_PATH}.write-test`, 'settings.json.tmp'),
+      );
+      expect(writeCall).toBeDefined();
+      expect(JSON.parse(writeCall![1] as string)['security']).toEqual({
+        folderTrust: { enabled: true },
+      });
     });
 
     it('repairs the dead key that the V1 migration itself still creates', () => {
@@ -885,6 +945,46 @@ describe('Settings Loading and Merging', () => {
         true,
       );
       expect((fs.writeFileSync as Mock).mock.calls).toHaveLength(0);
+    });
+
+    it('repairs a workspace dead key in memory without rewriting the tracked file', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH) {
+            return JSON.stringify({
+              [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+              security: { folderTrust: { featureEnabled: true } },
+            });
+          }
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      // `security.folderTrust` is stripped from workspace settings before the
+      // merge, so a persisted value could never apply from this scope;
+      // rewriting a repository-tracked .qwen/settings.json would only dirty
+      // the checkout.
+      expect(settings.merged.security?.folderTrust).toBeUndefined();
+      const workspaceWrites = (fs.writeFileSync as Mock).mock.calls.filter(
+        (call: unknown[]) =>
+          String(call[0]).startsWith(`${MOCK_WORKSPACE_SETTINGS_PATH}.write-`),
+      );
+      expect(workspaceWrites).toHaveLength(0);
+      // The in-memory repair still runs, so the warning says so without
+      // claiming the file was updated.
+      expect(getSettingsWarnings(settings)).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining(
+            "Migrated 'security.folderTrust.featureEnabled'",
+          ),
+          expect.stringContaining(
+            'repaired in memory for this run; the file could not be updated',
+          ),
+        ]),
+      );
     });
 
     it('does not repair the dead key twice', () => {

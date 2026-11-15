@@ -352,10 +352,16 @@ function repairDeadFolderTrustKey(
     return undefined;
   }
 
-  // An explicit canonical value keeps precedence; the dead key is dropped
+  // A boolean canonical value keeps precedence; the dead key is dropped
   // either way so it does not survive as a second, unread copy of the choice.
+  // A canonical value of any other type (e.g. a null written for "unset")
+  // is not a choice any consumer honors — readers resolve the key as
+  // `boolean ?? false` or reject it — so the usable legacy boolean replaces
+  // it instead of being deleted alongside it.
   delete folderTrust[FOLDER_TRUST_DEAD_KEY];
-  if (getNestedProperty(settings, FOLDER_TRUST_ENABLED_PATH) !== undefined) {
+  if (
+    typeof getNestedProperty(settings, FOLDER_TRUST_ENABLED_PATH) === 'boolean'
+  ) {
     return `Removed the unused 'security.folderTrust.${FOLDER_TRUST_DEAD_KEY}' key; '${FOLDER_TRUST_ENABLED_PATH}' already set the folder-trust choice.`;
   }
 
@@ -1483,9 +1489,11 @@ function readSettingsLayers(
         }
         let migrationWarnings: string[] | undefined;
 
-        const persistSettingsObject = (warningPrefix: string) => {
-          if (snapshot) return;
-          if (operatorSandbox && scope === SettingScope.Workspace) return;
+        // Reports whether the file was actually rewritten, so callers never
+        // claim a disk change the helper skipped or swallowed.
+        const persistSettingsObject = (warningPrefix: string): boolean => {
+          if (snapshot) return false;
+          if (operatorSandbox && scope === SettingScope.Workspace) return false;
           try {
             // Use sync mode to remove deprecated keys (zombie key prevention)
             // while preserving comments and formatting from the original file.
@@ -1501,8 +1509,10 @@ function readSettingsLayers(
                 `${warningPrefix}: updateSettingsFilePreservingFormat returned false for ${filePath}`,
               );
             }
+            return written;
           } catch (e) {
             debugLogger.error(`${warningPrefix}: ${getErrorMessage(e)}`);
+            return false;
           }
         };
 
@@ -1552,13 +1562,22 @@ function readSettingsLayers(
           ? undefined
           : repairDeadFolderTrustKey(settingsObject);
         if (folderTrustRepairWarning !== undefined) {
+          // The repair stays scope-blind in memory, but the persist is gated:
+          // `security.folderTrust` is stripped from workspace settings before
+          // the merge, so rewriting a repository-tracked .qwen/settings.json
+          // would only dirty the checkout for a choice this scope can never
+          // contribute.
+          const persisted =
+            scope !== SettingScope.Workspace &&
+            persistSettingsObject(
+              'Error repairing folder-trust settings on disk',
+            );
           migrationWarnings = [
             ...(migrationWarnings ?? []),
-            folderTrustRepairWarning,
+            persisted
+              ? folderTrustRepairWarning
+              : `${folderTrustRepairWarning} (repaired in memory for this run; the file could not be updated)`,
           ];
-          persistSettingsObject(
-            'Error repairing folder-trust settings on disk',
-          );
         }
 
         if (

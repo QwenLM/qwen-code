@@ -203,11 +203,38 @@ describe('daemon trust policy', () => {
     });
   });
 
-  it('honors the dead folder-trust key on a file the migration already stamped', async () => {
+  it.each([true, false])(
+    'honors the dead folder-trust key on a file the migration already stamped (value %s)',
+    async (choice) => {
+      installFiles({
+        '/config/user.json': JSON.stringify({
+          $version: 4,
+          security: { folderTrust: { featureEnabled: choice } },
+        }),
+        '/config/trusted.json': JSON.stringify({
+          '/work': TrustLevel.TRUST_FOLDER,
+        }),
+      });
+
+      const snapshot = await readDaemonTrustPolicySnapshot();
+      // A boolean false must survive as a real opinion, not fall through the
+      // `??` chain as "no opinion".
+      expect(snapshot.folderTrustEnabled).toBe(choice);
+      expect(
+        evaluateDaemonWorkspaceTrust(snapshot, '/work/project'),
+      ).toMatchObject({
+        state: 'trusted',
+        targetTrusted: true,
+        source: choice ? 'file' : 'disabled',
+      });
+    },
+  );
+
+  it('keeps the canonical folder-trust value ahead of the dead key', async () => {
     installFiles({
       '/config/user.json': JSON.stringify({
         $version: 4,
-        security: { folderTrust: { featureEnabled: true } },
+        security: { folderTrust: { enabled: false, featureEnabled: true } },
       }),
       '/config/trusted.json': JSON.stringify({
         '/work': TrustLevel.TRUST_FOLDER,
@@ -215,13 +242,15 @@ describe('daemon trust policy', () => {
     });
 
     const snapshot = await readDaemonTrustPolicySnapshot();
-    expect(snapshot.folderTrustEnabled).toBe(true);
+    // Explicit canonical wins, mirroring the precedence the load-time repair
+    // enforces; the gate stays off, so the workspace is admitted.
+    expect(snapshot.folderTrustEnabled).toBe(false);
     expect(
       evaluateDaemonWorkspaceTrust(snapshot, '/work/project'),
     ).toMatchObject({
       state: 'trusted',
       targetTrusted: true,
-      source: 'file',
+      source: 'disabled',
     });
   });
 
