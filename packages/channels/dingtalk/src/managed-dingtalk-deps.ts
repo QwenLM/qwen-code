@@ -127,7 +127,12 @@ function createStreamClient(
   // endpoint call or handshake becomes a rejection instead of a pending promise.
   const attempt = (): Promise<void> =>
     new Promise<void>((resolve, reject) => {
+      let timedOut = false;
       const timer = setTimeout(() => {
+        timedOut = true;
+        // Close whatever the attempt has opened so far; if getEndpoint is still
+        // in flight the success branch below closes the socket it opens late.
+        client.disconnect();
         reject(new Error('DingTalk stream connect timed out.'));
       }, CONNECT_TIMEOUT_MS);
       withConnectLoggingSuppressed(sdkConnect)
@@ -135,6 +140,12 @@ function createStreamClient(
         .then(
           () => {
             clearTimeout(timer);
+            if (timedOut) {
+              // The abandoned attempt opened a socket after the timeout; close
+              // it so no zombie keeps the heartbeat armed.
+              client.disconnect();
+              return;
+            }
             resolve();
           },
           (error) => {
@@ -149,6 +160,12 @@ function createStreamClient(
       (result) => {
         everConnected = true;
         loggedReconnectFailure = false;
+        // A stale retry armed by an earlier failure must not fire after the
+        // stream is connected and open a second socket.
+        if (retry !== undefined) {
+          clearTimeout(retry);
+          retry = undefined;
+        }
         // A disconnect may have landed while this attempt was in flight; the
         // attempt then opened a fresh socket and armed the SDK heartbeat. Close
         // it so the process can exit and no zombie keeps acking LATER.

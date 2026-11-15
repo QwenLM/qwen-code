@@ -166,6 +166,29 @@ describe('managed DingTalk stream connect (R1-9)', () => {
     const assertion = expect(connecting).rejects.toThrow('connect failed');
     await vi.advanceTimersByTimeAsync(21_000);
     await assertion;
+    // The timeout must also close the socket the abandoned attempt opened, so
+    // no zombie keeps the heartbeat armed (R11 deps).
+    expect(mockState.disconnects).toBeGreaterThanOrEqual(1);
+    stream.disconnect();
+  });
+
+  it('a successful connect clears a stale retry timer (R11 deps)', async () => {
+    // Keep setImmediate real so the mock socket's async 'open' fires.
+    vi.useFakeTimers({
+      toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'],
+    });
+    const { createStreamClient } = createManagedDingtalkDeps();
+    const stream = createStreamClient(SETTINGS, () => true);
+    await stream.connect(); // call 1 succeeds, everConnected = true
+    mockState.behavior = 'fail';
+    await stream.connect(); // call 2 fails, arms the retry
+    expect(mockState.calls).toBe(2);
+    mockState.behavior = 'ok';
+    await stream.connect(); // call 3 succeeds, must clear the stale retry
+    expect(mockState.calls).toBe(3);
+    // Past the retry interval: the cleared timer must not fire a fourth connect.
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(mockState.calls).toBe(3);
     stream.disconnect();
   });
 

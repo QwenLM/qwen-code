@@ -1194,4 +1194,32 @@ describe('managed DingTalk adapter review fixes', () => {
     expect(plane.submit).toHaveLength(1); // submitted exactly once
     await adapter.disconnect();
   });
+
+  it('a failed claim save leaves no in-memory claim, so redelivery re-stages instead of acking SUCCESS (R11-1)', async () => {
+    const cwd = tempCwd();
+    const first = await connectedAdapter(cwd);
+    const store = (
+      first.adapter as unknown as { store: { save: (s: unknown) => void } }
+    ).store;
+    const saveSpy = vi.spyOn(store, 'save').mockImplementation(() => {
+      throw new Error('disk full');
+    });
+    // No sessionWebhook, so the claim write is the first persist this frame hits.
+    const frame = messageData({ msgId: 'm1', sessionWebhook: '' });
+    // The claim write fails: ack LATER, and no claim may remain in memory.
+    expect(first.fake.push('m1', frame)).toBe(false);
+    // Redelivery while the save still fails must also be LATER, never SUCCESS.
+    expect(first.fake.push('m1', frame)).toBe(false);
+    saveSpy.mockRestore();
+    // The save succeeds now: the redelivery is staged durably and acked.
+    expect(first.fake.push('m1', frame)).toBe(true);
+    // A fresh process on the same cwd re-drives the durable claim.
+    const second = await connectedAdapter(cwd);
+    await second.adapter.tick();
+    expect(second.plane.submit.map((event) => event.text)).toEqual([
+      'hello agent',
+    ]);
+    await second.adapter.disconnect();
+    await first.adapter.disconnect();
+  });
 });

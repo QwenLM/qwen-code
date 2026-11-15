@@ -421,10 +421,20 @@ export class ManagedDingtalkAdapter {
         robotCode: this.settings.clientId,
       } satisfies DingtalkReplyContext,
     };
+    const previousPending = state.pending;
     state.pending = [...state.pending, { eventId, event }].slice(
       -MANAGED_DINGTALK_PENDING_LIMIT,
     );
-    this.persist();
+    try {
+      this.persist();
+    } catch (error) {
+      // A failed save must not leave the claim in memory: the dedupe arm would
+      // then ack a redelivery for a claim the store never accepted, and this
+      // ack-once stream never redelivers a SUCCESS-acked frame. Roll back so the
+      // redelivery re-stages; onMessage turns the throw into LATER.
+      state.pending = previousPending;
+      throw error;
+    }
   }
 
   private async submit(
