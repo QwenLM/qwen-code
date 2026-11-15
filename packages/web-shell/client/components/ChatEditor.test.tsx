@@ -22,6 +22,7 @@ import type {
 } from '../hooks/useComposerCore';
 import type { AtMentionWorkspaceActions } from '../hooks/useAtMentionSources';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
+import type { VoiceButtonHandle } from '../voice/VoiceButton';
 import type {
   WebShellUnavailableModel,
   WebShellUnavailableModelTooltipMount,
@@ -169,6 +170,7 @@ const composerCoreState = vi.hoisted(() => ({
   setShellMode: vi.fn(),
   toggleShellMode: vi.fn(),
   submitText: vi.fn(),
+  submitPreparing: false,
   onFileUploadRequest: undefined as
     | ((targetDir: string, restoreQuery?: () => void) => void)
     | undefined,
@@ -201,6 +203,7 @@ const uploadWorkspaceState = vi.hoisted(() => ({
 
 const voiceButtonState = vi.hoisted(() => ({
   onActiveChange: undefined as ((active: boolean) => void) | undefined,
+  flush: vi.fn(async () => ''),
 }));
 
 Object.defineProperty(window, 'matchMedia', {
@@ -254,6 +257,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
           !options?.disabled &&
           !options?.workspaceUploadBusy &&
           composerCoreState.hasContent,
+        submitPreparing: composerCoreState.submitPreparing,
         pendingImageBatchCount: composerCoreState.pendingImageBatchCount,
         imageDragActive: composerCoreState.imageDragActive,
         clearImageDragState: composerCoreState.clearImageDragState,
@@ -331,16 +335,26 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
   };
 });
 
-vi.mock('../voice/VoiceButton', () => ({
-  VoiceButton: ({
-    onActiveChange,
-  }: {
-    onActiveChange?: (active: boolean) => void;
-  }) => {
-    voiceButtonState.onActiveChange = onActiveChange;
-    return <span data-testid="voice-button" />;
-  },
-}));
+vi.mock('../voice/VoiceButton', async () => {
+  const React = await import('react');
+  return {
+    VoiceButton: ({
+      ref,
+      onActiveChange,
+    }: {
+      ref?: React.Ref<VoiceButtonHandle>;
+      onActiveChange?: (active: boolean) => void;
+    }) => {
+      voiceButtonState.onActiveChange = onActiveChange;
+      React.useImperativeHandle(
+        ref,
+        () => ({ flush: voiceButtonState.flush }),
+        [],
+      );
+      return <span data-testid="voice-button" />;
+    },
+  };
+});
 
 const liveVoiceState = vi.hoisted(() => ({ supported: false }));
 vi.mock('../live/LiveVoiceButton', async () => {
@@ -387,6 +401,7 @@ afterEach(() => {
   composerCoreState.setShellMode.mockReset();
   composerCoreState.toggleShellMode.mockReset();
   composerCoreState.submitText.mockReset();
+  composerCoreState.submitPreparing = false;
   composerCoreState.shellMode = false;
   composerCoreState.hasContent = false;
   composerCoreState.pendingImageBatchCount = 0;
@@ -394,6 +409,7 @@ afterEach(() => {
   composerCoreState.imageDragActive = false;
   composerCoreState.onFileUploadRequest = undefined;
   voiceButtonState.onActiveChange = undefined;
+  voiceButtonState.flush.mockReset().mockResolvedValue('');
   liveVoiceState.supported = false;
   for (const { root, container, portalRoot } of mounted.splice(0)) {
     act(() => root.unmount());
@@ -854,6 +870,76 @@ describe('ChatEditor voice toolbar integration', () => {
     expect(
       hidden.querySelector('[data-testid="live-voice-button"]'),
     ).toBeNull();
+  });
+
+  it('finalizes active dictation into the composer before a submit proceeds', async () => {
+    composerCoreState.hasContent = true;
+    voiceButtonState.flush.mockResolvedValue('  dictated tail  ');
+    renderChatEditor({ visibleToolbarActions: ['voice'] });
+    act(() => voiceButtonState.onActiveChange?.(true));
+
+    const prepareSubmit = latestComposerCoreOptions.current?.prepareSubmit as
+      | (() => Promise<void>)
+      | undefined;
+    expect(prepareSubmit).toBeTypeOf('function');
+    await act(async () => {
+      await prepareSubmit!();
+    });
+    expect(voiceButtonState.flush).toHaveBeenCalledOnce();
+    expect(composerCoreState.insertText).toHaveBeenCalledWith('dictated tail ');
+    expect(composerCoreState.focus).toHaveBeenCalled();
+  });
+
+  it('does not insert anything when the finalized dictation is empty', async () => {
+    composerCoreState.hasContent = true;
+    voiceButtonState.flush.mockResolvedValue('   ');
+    renderChatEditor({ visibleToolbarActions: ['voice'] });
+    act(() => voiceButtonState.onActiveChange?.(true));
+
+    const prepareSubmit = latestComposerCoreOptions.current?.prepareSubmit as
+      | (() => Promise<void>)
+      | undefined;
+    expect(prepareSubmit).toBeTypeOf('function');
+    await act(async () => {
+      await prepareSubmit!();
+    });
+    expect(voiceButtonState.flush).toHaveBeenCalledOnce();
+    expect(composerCoreState.insertText).not.toHaveBeenCalled();
+  });
+
+  it('shows the send button as preparing while a submit finalizes dictation', () => {
+    composerCoreState.hasContent = true;
+    composerCoreState.submitPreparing = true;
+    const container = renderChatEditor({ visibleToolbarActions: ['voice'] });
+    const submit = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-submit]',
+    )!;
+    expect(submit.disabled).toBe(true);
+    expect(submit.getAttribute('aria-label')).toBe('Loading...');
+    act(() => submit.click());
+    expect(composerCoreState.submitText).not.toHaveBeenCalled();
+  });
+
+  it('keeps the running-agent stop button usable while a submit finalizes dictation', () => {
+    composerCoreState.hasContent = true;
+    composerCoreState.submitPreparing = true;
+    const onCancel = vi.fn();
+    const container = renderChatEditor({
+      customization: { composerVariant: 'simple' },
+      visibleToolbarActions: ['voice'],
+      isRunning: true,
+      onCancel,
+    });
+    const stop = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-stop]',
+    )!;
+    expect(stop.disabled).toBe(false);
+    act(() => stop.click());
+    expect(onCancel).toHaveBeenCalledOnce();
+    const submit = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-submit]',
+    )!;
+    expect(submit.disabled).toBe(true);
   });
 });
 

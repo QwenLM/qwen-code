@@ -104,7 +104,7 @@ import type {
   WebShellUnavailableModelTooltipMount,
 } from '../unavailableModels';
 import { appendUnavailableComposerModels } from '../utils/composerModels';
-import { VoiceButton } from '../voice/VoiceButton';
+import { VoiceButton, type VoiceButtonHandle } from '../voice/VoiceButton';
 import { LiveVoiceButton } from '../live/LiveVoiceButton';
 import type {
   VoiceStatusRevision,
@@ -1973,8 +1973,13 @@ export const ChatEditor = memo(
       [onAttachmentPreview, onComposerTagClick],
     );
 
+    const voiceButtonRef = useRef<VoiceButtonHandle>(null);
+    // Assigned below once insertVoiceText exists; useComposerCore awaits it
+    // before a user-initiated submit so dictation lands in the sent message.
+    const prepareVoiceSubmitRef = useRef<() => Promise<void>>(async () => {});
     const core = useComposerCore({
       onSubmit,
+      prepareSubmit: () => prepareVoiceSubmitRef.current(),
       onInputTextChange,
       onCycleMode,
       cycleModeOnTab,
@@ -2537,6 +2542,16 @@ export const ChatEditor = memo(
         insertVoiceText(text);
       }
     };
+    // A send must include the active dictation: finalize the capture and
+    // insert its transcript before the submit reads the draft. Insert
+    // directly rather than through the deferred simple-mode path — the
+    // submit follows in the same continuation, so there is no review step
+    // that needs the editor revealed first.
+    prepareVoiceSubmitRef.current = async () => {
+      const text = await voiceButtonRef.current?.flush();
+      const trimmed = text?.trim();
+      if (trimmed) insertVoiceText(trimmed);
+    };
     useLayoutEffect(() => {
       const pending = pendingVoiceInsertRef.current;
       if (voiceActive || !pending) return;
@@ -2760,7 +2775,11 @@ export const ChatEditor = memo(
       [onSelectModel, core, modelControlsDisabled, modelItems],
     );
     const showCancelButton = isRunning && !core.hasContent;
-    const composerPreparing = isPreparing || core.pendingImageBatchCount > 0;
+    // Stopping a running agent is unrelated to submit finalization: a voice
+    // flush may hold submitPreparing for up to a minute, and the stop buttons
+    // must stay usable throughout (mobile/simple have no other composer exit).
+    const cancelPreparing = isPreparing || core.pendingImageBatchCount > 0;
+    const composerPreparing = cancelPreparing || core.submitPreparing;
 
     const {
       searchMode,
@@ -3982,6 +4001,7 @@ export const ChatEditor = memo(
                   }}
                 >
                   <VoiceButton
+                    ref={voiceButtonRef}
                     disabled={disabled}
                     onActiveChange={setVoiceActive}
                     target={voiceTarget}
@@ -3995,7 +4015,7 @@ export const ChatEditor = memo(
               <button
                 type="button"
                 className={`${styles.sendBtn} ${styles.sendBtnRunning}`}
-                disabled={composerPreparing || !onCancel}
+                disabled={cancelPreparing || !onCancel}
                 data-web-shell-composer-stop
                 aria-label={t('composerMobile.stop')}
                 onClick={(event) => {
@@ -4989,7 +5009,7 @@ export const ChatEditor = memo(
                 <Button
                   variant="outline"
                   className="min-h-11"
-                  disabled={composerPreparing || !onCancel}
+                  disabled={cancelPreparing || !onCancel}
                   onClick={onCancel}
                 >
                   {t('composerMobile.stop')}

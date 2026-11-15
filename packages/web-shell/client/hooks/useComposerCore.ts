@@ -1186,6 +1186,14 @@ export interface UseComposerCoreOptions {
     commitAccepted?: ComposerSubmitCommit,
     metadata?: ComposerSubmitMetadata,
   ) => boolean | void;
+  /**
+   * Awaited before a user-initiated submit (Send button or Enter) reads the
+   * draft, so the host can finalize pending input first — e.g. stop voice
+   * dictation and insert its final transcript. Submits stay synchronous when
+   * it is absent. While it runs, further user submits are ignored and
+   * `submitPreparing` is true; a session switch or unmount cancels the submit.
+   */
+  prepareSubmit?: () => Promise<void>;
   onInputTextChange?: (text: string) => void;
   onCycleMode?: () => void;
   cycleModeOnTab?: boolean;
@@ -1563,6 +1571,8 @@ export interface UseComposerCoreReturn {
   hasAttachments: boolean;
   hasContent: boolean;
   canSubmit: boolean;
+  /** True while `prepareSubmit` is running ahead of a user-initiated submit. */
+  submitPreparing: boolean;
   pendingImageBatchCount: number;
   imageDragActive: boolean;
   clearImageDragState: () => void;
@@ -1618,6 +1628,7 @@ export function useComposerCore(
 ): UseComposerCoreReturn {
   const {
     onSubmit,
+    prepareSubmit,
     onInputTextChange,
     onCycleMode,
     cycleModeOnTab = false,
@@ -2726,6 +2737,43 @@ export function useComposerCore(
       suppressFollowupCompletion?: boolean,
     ) => boolean
   >(() => true);
+  const prepareSubmitRef = useRef(prepareSubmit);
+  prepareSubmitRef.current = prepareSubmit;
+  const submitPreparingRef = useRef(false);
+  const [submitPreparing, setSubmitPreparing] = useState(false);
+  // Runs the host's pre-submit finalization once at a time; a second user
+  // submit while it is in flight is dropped, not queued.
+  const prepareForSubmit = useCallback(async (): Promise<boolean> => {
+    if (submitPreparingRef.current) return false;
+    const prepare = prepareSubmitRef.current;
+    if (!prepare) return true;
+    submitPreparingRef.current = true;
+    setSubmitPreparing(true);
+    try {
+      await prepare();
+    } catch {
+      // A failed finalization cancels the submit, like a session switch or
+      // unmount would; the fire-and-forget callers must not see a rejection.
+      return false;
+    } finally {
+      submitPreparingRef.current = false;
+      setSubmitPreparing(false);
+    }
+    return true;
+  }, []);
+  // The draft read after the await must still belong to the composer the
+  // user submitted from: a session switch during finalization swaps the doc.
+  const submitIdentityMatches = useCallback(
+    (identity: typeof composerIdentityRef.current) => {
+      const current = composerIdentityRef.current;
+      return (
+        current.sessionId === identity.sessionId &&
+        current.draftStorageKey === identity.draftStorageKey &&
+        current.promptHistoryStorageKey === identity.promptHistoryStorageKey
+      );
+    },
+    [],
+  );
   const autoTriggerRef = useRef<{ text: string; from: number } | null>(null);
   const [slashMenu, setSlashMenuState] = useState<SlashMenuState | null>(null);
   const slashMenuRef = useRef<SlashMenuState | null>(null);
@@ -3747,19 +3795,40 @@ export function useComposerCore(
             });
             return true;
           }
-          const followup = followupStateRef.current;
-          const hasInlineTags = hasInlineComposerTags(view);
-          const followupCompletion = hasInlineTags
-            ? null
-            : getFollowupCompletion(
-                view.state.doc.toString(),
-                followup?.suggestion,
-              );
-          if (followup?.isVisible && followupCompletion) {
-            onAcceptFollowupRef.current?.('enter', { skipOnAccept: true });
-            return submitText(view, followupCompletion);
-          }
-          return submitText(view);
+          const submitDraft = (target: EditorView) => {
+            const followup = followupStateRef.current;
+            const hasInlineTags = hasInlineComposerTags(target);
+            const followupCompletion = hasInlineTags
+              ? null
+              : getFollowupCompletion(
+                  target.state.doc.toString(),
+                  followup?.suggestion,
+                );
+            if (followup?.isVisible && followupCompletion) {
+              onAcceptFollowupRef.current?.('enter', { skipOnAccept: true });
+              return submitText(target, followupCompletion);
+            }
+            return submitText(target);
+          };
+          if (!prepareSubmitRef.current) return submitDraft(view);
+          const identity = composerIdentityRef.current;
+          // CodeMirror commands are synchronous; the finalization runs in the
+          // background and the key is consumed so no newline is inserted.
+          void (async () => {
+            if (!(await prepareForSubmit())) return;
+            const currentView = viewRef.current;
+            if (
+              !composerMountedRef.current ||
+              !currentView ||
+              !submitIdentityMatches(identity)
+            ) {
+              return;
+            }
+            // Finalization may have inserted text (e.g. a voice transcript),
+            // so the follow-up completion is recomputed from the new draft.
+            submitDraft(currentView);
+          })();
+          return true;
         },
       },
       {
@@ -5576,8 +5645,24 @@ export function useComposerCore(
     submitText: useCallback(() => {
       const view = viewRef.current;
       if (!view && !isTouchComposer) return;
-      submitTextRef.current(view);
-    }, [isTouchComposer]),
+      if (!prepareSubmitRef.current) {
+        submitTextRef.current(view);
+        return;
+      }
+      const identity = composerIdentityRef.current;
+      void (async () => {
+        if (!(await prepareForSubmit())) return;
+        const currentView = viewRef.current;
+        if (
+          !composerMountedRef.current ||
+          !submitIdentityMatches(identity) ||
+          (!currentView && !isTouchComposer)
+        ) {
+          return;
+        }
+        submitTextRef.current(currentView);
+      })();
+    }, [isTouchComposer, prepareForSubmit, submitIdentityMatches]),
     clearText,
     getText,
     hasInput,
@@ -5588,6 +5673,7 @@ export function useComposerCore(
       pastedFiles.length > 0,
     hasContent,
     canSubmit,
+    submitPreparing,
     pendingImageBatchCount,
     imageDragActive,
     clearImageDragState,
