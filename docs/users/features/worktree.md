@@ -236,11 +236,11 @@ config/*.json
 - **Committed, so it is shared.** Everyone with push access can change which files a clone copies into its worktrees. Keep it to files you would be comfortable seeing in a colleague's worktree.
 - **Read at creation time.** A worktree created before you added a line does not retroactively receive the file.
 
-|                | `.worktreeinclude`                          | `worktree.symlinkDirectories`  |
-| -------------- | ------------------------------------------- | ------------------------------ |
-| **Configured** | `.worktreeinclude`, committed to the repo   | `settings.json`, per developer |
-| **Effect**     | copy (independent file)                     | symlink (shared file)          |
-| **Applies to** | worktrees created by the CLI and the daemon | same                           |
+|                | `.worktreeinclude`                                                     | `worktree.symlinkDirectories`                   |
+| -------------- | ---------------------------------------------------------------------- | ----------------------------------------------- |
+| **Configured** | `.worktreeinclude`, committed to the repo                              | `settings.json`, per developer                  |
+| **Effect**     | copy (independent file)                                                | symlink (shared file)                           |
+| **Applies to** | every worktree the CLI creates, Agent Arena included, and the daemon's | general-purpose worktrees only, not Agent Arena |
 
 Reach for a copy when an agent editing the file inside the worktree must not touch your main checkout — which is exactly the case for `.env`. Reach for a symlink when the content is large and read-mostly: copying `node_modules` costs gigabytes per worktree.
 

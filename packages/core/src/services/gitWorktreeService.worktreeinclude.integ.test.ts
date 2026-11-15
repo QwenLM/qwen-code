@@ -234,8 +234,39 @@ describe('GitWorktreeService.setupWorktrees() — .worktreeinclude', () => {
     expect(await exists(path.join(wt, 'secrets', 'other.json'))).toBe(false);
   });
 
-  it('never copies a tracked file named by a pattern', async () => {
+  it('matches case the way git does on a case-sensitive checkout', async () => {
+    // `ignore` defaults to case-insensitive matching, which would select
+    // `secrets/id.json` for an upper-case line that git does not match. The
+    // setting is pinned because `git init` turns `core.ignorecase` on for
+    // repositories created on a case-insensitive filesystem.
+    gitIn(repoRoot, 'config', 'core.ignorecase', 'false');
+    await fs.mkdir(path.join(repoRoot, 'secrets'), { recursive: true });
+    await fs.writeFile(path.join(repoRoot, 'secrets', 'id.json'), '{}\n');
     await fs.writeFile(
+      path.join(repoRoot, WORKTREE_INCLUDE_FILE),
+      'secrets/ID.json\n',
+    );
+
+    const wt = await setup();
+
+    expect(await exists(path.join(wt, 'secrets', 'id.json'))).toBe(false);
+  });
+
+  it('copies a path whose case matches on a case-sensitive checkout', async () => {
+    gitIn(repoRoot, 'config', 'core.ignorecase', 'false');
+    await fs.mkdir(path.join(repoRoot, 'secrets'), { recursive: true });
+    await fs.writeFile(path.join(repoRoot, 'secrets', 'id.json'), '{}\n');
+    await fs.writeFile(
+      path.join(repoRoot, WORKTREE_INCLUDE_FILE),
+      'secrets/id.json\n',
+    );
+
+    const wt = await setup();
+
+    expect(await exists(path.join(wt, 'secrets', 'id.json'))).toBe(true);
+  });
+
+  it('never copies a tracked file named by a pattern', async () => {    await fs.writeFile(
       path.join(repoRoot, WORKTREE_INCLUDE_FILE),
       'README.md\n',
     );

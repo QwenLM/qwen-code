@@ -3006,12 +3006,13 @@ export class GitWorktreeService {
 
   /**
    * Resolves the repository's `.worktreeinclude` file and copies everything
-   * it selects into `worktreePath`.
+   * it selects into a worktree created by `createUserWorktree`
+   * (`--worktree`, `enter_worktree`, agent isolation).
    *
-   * The single entry point for both creation paths — `createUserWorktree`
-   * (`--worktree`, `enter_worktree`, agent isolation) and `setupWorktrees`
-   * (Agent Arena) — so a repository's list applies to every worktree the
-   * CLI creates, not just one family of them.
+   * `setupWorktrees` (Agent Arena) runs the same two steps from
+   * {@link resolveWorktreeIncludePaths} and {@link copyWorktreeIncludePaths}
+   * directly, because it copies for every worktree it creates from one
+   * resolved list.
    */
   private async copyIncludedPathsFromRepo(worktreePath: string): Promise<void> {
     const includedPaths = await this.resolveWorktreeIncludePaths();
@@ -3106,7 +3107,12 @@ export class GitWorktreeService {
     // and count caps bound the file, not a line — so this has to stay inside
     // the non-fatal contract like every other failure here.
     try {
-      const matcher = ignore();
+      // `ignore` defaults to case-insensitive matching while git follows
+      // `core.ignorecase` (off on Linux), so the default would select
+      // `secrets/ID.json` for a `secrets/id.json` line that git does not match.
+      const matcher = ignore({
+        ignorecase: await this.destinationFoldsCase(repoRoot),
+      });
       matcher.add(patterns);
       return {
         paths: ignored
@@ -3196,15 +3202,18 @@ export class GitWorktreeService {
   }
 
   /**
-   * Whether `worktreePath`'s git folds case when matching paths
-   * (`core.ignorecase`), or `false` when the setting cannot be read. The
-   * ignore check goes through git and folds with it, so the tracked-set
-   * comparison has to fold the same way — byte-exact spellings would let a
-   * case-variant local file overwrite a tracked one on macOS or Windows.
+   * Whether the git repository at `repoPath` folds case when matching paths
+   * (`core.ignorecase`), or `false` when the setting cannot be read. Both
+   * path-matching steps have to agree with git: `.worktreeinclude` selection
+   * runs through `ignore`, whose default is case-insensitive, and the
+   * tracked-set comparison in {@link copyWorktreeIncludePaths} is byte-exact
+   * while `git check-ignore` folds — either mismatch copies a path git does
+   * not match, or lets a case-variant local file overwrite a tracked one on
+   * macOS or Windows.
    */
-  private async destinationFoldsCase(worktreePath: string): Promise<boolean> {
+  private async destinationFoldsCase(repoPath: string): Promise<boolean> {
     try {
-      const { stdout } = await runGitCapture(worktreePath, [
+      const { stdout } = await runGitCapture(repoPath, [
         ...NO_EXEC_CONFIG,
         'config',
         '--get',
@@ -3213,7 +3222,7 @@ export class GitWorktreeService {
       return stdout.trim().toLowerCase() === 'true';
     } catch (error) {
       debugLogger.debug(
-        `copyWorktreeIncludePaths: cannot read core.ignorecase in ${worktreePath}: ${error}`,
+        `cannot read core.ignorecase in ${repoPath}: ${error}`,
       );
       return false;
     }
