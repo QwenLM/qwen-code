@@ -6910,24 +6910,29 @@ describe('qwen-triage verify hardening round 2', () => {
     // it built — after stopping the container, refusing a symlinked round
     // dir, and clearing any planted boundary.json (any node type), before
     // the checker runs on the round dir.
-    expect(flat).toContain('> "<round-dir>/boundary.json"');
-    expect(flat).toContain('rm -rf -- "<round-dir>/boundary.json"');
+    expect(flat).toContain('> "$rd/boundary.json"');
+    expect(flat).toContain('rm -rf -- "$rd/boundary.json"');
     // The symlink check runs on the trailing-slash-normalised spelling, or
-    // `test -L` dereferences the link and the refusal fails open (R11-4).
-    expect(flat).toContain('rd="<round-dir>"; rd="${rd%/}"');
+    // `test -L` dereferences the link and the refusal fails open. EVERY
+    // trailing slash is stripped (a single ${rd%/} leaves a doubled one)
+    // and the guards and the writes share the normalised path (R11-4/R14-2).
+    expect(flat).toContain(
+      'while [ "$rd" != "${rd%/}" ]; do rd="${rd%/}"; done',
+    );
     expect(flat).toContain('[ -L "$rd" ]');
     // Presence guards first: indexOf returns -1 for a deleted line, and -1
     // is less than any positive index, so the ordering alone is vacuous.
     expect(flat).toContain('docker rm -f qwen-verify-<n>');
     const stop = flat.indexOf('docker rm -f qwen-verify-<n>');
     const symlinkGuard = flat.indexOf('[ -L "$rd" ]');
-    const clear = flat.indexOf('rm -rf -- "<round-dir>/boundary.json"');
-    const write = flat.indexOf('> "<round-dir>/boundary.json"');
+    const clear = flat.indexOf('rm -rf -- "$rd/boundary.json"');
+    const write = flat.indexOf('> "$rd/boundary.json"');
     // The step-7 checker call, not the earlier generic mentions of the
     // script: this exact context path appears only in the cleanup block.
-    // Whitespace flattening keeps the line-continuation backslash.
+    // Whitespace flattening keeps the line-continuation backslash. The trust
+    // root is host-provided (--context-root), not derived from git (R14-1).
     const checker = flat.indexOf(
-      'verify-pr-check.mjs" \\ --context ~/.cache/qwen-verify/pr<n>/pr.json "<round-dir>"',
+      'verify-pr-check.mjs" \\ --context ~/.cache/qwen-verify/pr<n>/pr.json \\ --context-root "<pr-clone>" "$rd"',
     );
     expect(stop).toBeGreaterThan(-1);
     expect(symlinkGuard).toBeGreaterThan(-1);
@@ -6949,10 +6954,10 @@ describe('qwen-triage verify hardening round 2', () => {
     // that resists removal must fail the block, not feed the checker.
     expect(flat).toContain('docker rm -f qwen-verify-<n> || rc=1');
     expect(flat).toContain(
-      'rm -rf -- "<round-dir>/boundary.json" || { echo "cannot clear boundary.json" >&2; rc=1; }',
+      'rm -rf -- "$rd/boundary.json" || { echo "cannot clear boundary.json" >&2; rc=1; }',
     );
-    expect(flat).toContain('> "<round-dir>/boundary.json" || rc=1');
-    expect(flat).toContain('"<round-dir>" || rc=$?');
+    expect(flat).toContain('> "$rd/boundary.json" || rc=1');
+    expect(flat).toContain('"$rd" || rc=$?');
     // Control flow, not just text: the clear/write/checker sit behind the
     // rc gate, the teardown is unconditional (fi immediately before kill),
     // and unset precedes the final exit.
@@ -6988,7 +6993,7 @@ describe('qwen-triage verify hardening round 2', () => {
       killFails = false,
       symlinkRound = false,
       spacesInPath = false,
-      trailingSlash = false,
+      slashSuffix = '',
     } = {}) => {
       const root = mkdtempSync(join(tmpdir(), 'verify-step7-'));
       // R10-48: a round path with a space exercises the quoted expansions.
@@ -7053,7 +7058,7 @@ describe('qwen-triage verify hardening round 2', () => {
         'enable -n kill\n' +
         block
           .replaceAll('<n>', '16866')
-          .replaceAll('<round-dir>', trailingSlash ? `${round}/` : round)
+          .replaceAll('<round-dir>', `${round}${slashSuffix}`)
           .replaceAll('<trusted-clone>', trusted);
       const res = spawnSync(
         'bash',
@@ -7119,7 +7124,28 @@ describe('qwen-triage verify hardening round 2', () => {
     it('refuses a symlinked round dir written with a trailing slash', () => {
       const { res, log, root, victim } = replay({
         symlinkRound: true,
-        trailingSlash: true,
+        slashSuffix: '/',
+      });
+      try {
+        expect(res.status).toBe(1);
+        expect(res.stderr).toMatch(/round dir is a symlink/);
+        expect(log).not.toMatch(/^node /m);
+        expect(readFileSync(join(victim, 'victim.txt'), 'utf8')).toBe(
+          'host data',
+        );
+        expect(existsSync(join(victim, 'boundary.json'))).toBe(false);
+        expect(log).toMatch(/kill 424242/);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    // R14-2: a doubled trailing slash survives a single ${rd%/}; the loop
+    // strips every slash so the refusal still fires and the victim is safe.
+    it('refuses a symlinked round dir written with a doubled trailing slash', () => {
+      const { res, log, root, victim } = replay({
+        symlinkRound: true,
+        slashSuffix: '//',
       });
       try {
         expect(res.status).toBe(1);

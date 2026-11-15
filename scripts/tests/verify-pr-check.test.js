@@ -2258,7 +2258,7 @@ describe('round-13 witnesses', () => {
   );
 
   it.skipIf(process.platform === 'win32')(
-    'refuses to judge a waiver when the git root is unresolvable',
+    'refuses the sibling regardless of damaged git state (root is not git-derived)',
     () => {
       const { root, dir, sibling } = setupClone();
       writeFileSync(
@@ -2267,7 +2267,146 @@ describe('round-13 witnesses', () => {
       );
       const res = runContext(dir, sibling);
       expect(res.status).toBe(1);
-      expect(res.stderr).toMatch(/cannot establish the PR-writable root/);
+      expect(res.stderr).toMatch(
+        /must not point inside the PR-writable worktree/,
+      );
     },
   );
+});
+
+describe('round-14 witnesses', () => {
+  // R14-1: the trust root is host-provided (--context-root) or derived from
+  // the artifact dir's path, never from git state the round controls. A
+  // `git init` inside the artifact dir must not shrink the root to the dir.
+  const setup = () => {
+    const root = mkdtempSync(join(tmpdir(), 'verify-pr-r14-'));
+    tmpDirs.push(root);
+    const dir = join(root, 'tmp', 'pr7-verify-20261115-000000');
+    mkdirSync(join(dir, 'evidence'), { recursive: true });
+    writeFileSync(join(dir, 'report.md'), validFiles({}).report);
+    writeFileSync(join(dir, 'verdict.txt'), 'merge-ready\n');
+    writeFileSync(
+      join(dir, 'assertions.json'),
+      '{"pass":1,"fail":0,"total":1}',
+    );
+    writeFileSync(
+      join(dir, 'boundary.json'),
+      JSON.stringify({
+        mode: 'waived',
+        by: 'maintainer',
+        approval: APPROVAL,
+        reason: 'why',
+      }),
+    );
+    writeFileSync(join(dir, 'evidence/01-x.png'), 'png');
+    const sibling = join(root, 'tmp', 'verify-context', 'pr7.json');
+    mkdirSync(join(root, 'tmp', 'verify-context'), { recursive: true });
+    writeFileSync(
+      sibling,
+      JSON.stringify({ repo: 'evil/repo', pr: 9, headRefOid: HEAD }),
+    );
+    return { root, dir, sibling };
+  };
+
+  it.skipIf(process.platform === 'win32')(
+    'a git init inside the artifact dir does not shrink the trust root',
+    () => {
+      const { dir, sibling } = setup();
+      execFileSync('git', ['init', '--quiet', dir], {
+        env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1' },
+      });
+      const res = spawnSync(
+        process.execPath,
+        [SCRIPT, '--context', sibling, dir],
+        { encoding: 'utf8', env: { ...process.env, QWEN_VERIFY_CONTEXT: '' } },
+      );
+      expect(res.status).toBe(1);
+      expect(res.stderr).toMatch(
+        /must not point inside the PR-writable worktree/,
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'a host-provided --context-root refuses the sibling and accepts an outside copy',
+    () => {
+      const { root, dir, sibling } = setup();
+      const refused = spawnSync(
+        process.execPath,
+        [SCRIPT, '--context', sibling, '--context-root', root, dir],
+        { encoding: 'utf8', env: { ...process.env, QWEN_VERIFY_CONTEXT: '' } },
+      );
+      expect(refused.status).toBe(1);
+      expect(refused.stderr).toMatch(
+        /must not point inside the PR-writable worktree/,
+      );
+      // A host-held copy outside the named root is accepted (shape-only).
+      const outside = join(root, '..', `host-snap-${Date.now()}.json`);
+      writeFileSync(
+        outside,
+        JSON.stringify({
+          repo: 'QwenLM/qwen-code',
+          pr: 17185,
+          headRefOid: HEAD,
+        }),
+      );
+      const accepted = spawnSync(
+        process.execPath,
+        [SCRIPT, '--context', outside, '--context-root', root, dir],
+        { encoding: 'utf8', env: { ...process.env, QWEN_VERIFY_CONTEXT: '' } },
+      );
+      expect(accepted.status).toBe(0);
+    },
+  );
+
+  it('a host-provided root covers a sibling the structural fallback would miss', () => {
+    // A plain (non pr-verify) artifact dir is its own structural root, so a
+    // sibling outside it is only refused because --context-root names the
+    // wider host-held tree. Ignoring --context-root would accept the sibling.
+    const root = mkdtempSync(join(tmpdir(), 'verify-pr-r14b-'));
+    tmpDirs.push(root);
+    const dir = join(root, 'plain-round');
+    mkdirSync(join(dir, 'evidence'), { recursive: true });
+    writeFileSync(join(dir, 'report.md'), validFiles({}).report);
+    writeFileSync(join(dir, 'verdict.txt'), 'merge-ready\n');
+    writeFileSync(
+      join(dir, 'assertions.json'),
+      '{"pass":1,"fail":0,"total":1}',
+    );
+    writeFileSync(
+      join(dir, 'boundary.json'),
+      JSON.stringify({
+        mode: 'waived',
+        by: 'maintainer',
+        approval: APPROVAL,
+        reason: 'why',
+      }),
+    );
+    writeFileSync(join(dir, 'evidence/01-x.png'), 'png');
+    const sibling = join(root, 'planted-snapshot.json');
+    writeFileSync(
+      sibling,
+      JSON.stringify({ repo: 'evil/repo', pr: 9, headRefOid: HEAD }),
+    );
+    const res = spawnSync(
+      process.execPath,
+      [SCRIPT, '--context', sibling, '--context-root', root, dir],
+      { encoding: 'utf8', env: { ...process.env, QWEN_VERIFY_CONTEXT: '' } },
+    );
+    expect(res.status).toBe(1);
+    expect(res.stderr).toMatch(
+      /must not point inside the PR-writable worktree/,
+    );
+  });
+
+  it('rejects a valueless --context-root', () => {
+    const dir = makeArtifactDir(validFiles({}), ['01-ab-cells.png']);
+    const res = spawnSync(
+      process.execPath,
+      [SCRIPT, '--context-root', '', dir],
+      { encoding: 'utf8', env: { ...process.env, QWEN_VERIFY_CONTEXT: '' } },
+    );
+    expect(res.status).toBe(2);
+    expect(res.stderr).toMatch(/--context-root requires a path/);
+  });
 });

@@ -589,24 +589,30 @@ authority to certify the round.
    rc=0
    docker rm -f qwen-verify-<n> || rc=1
    # A trailing slash makes `test -L` dereference the link and `dirname`
-   # return the grandparent, so the refusal would fail open; normalise the
-   # spelling before the symlink check (the clear/write below tolerate a
-   # doubled slash, and the file stays at <round-dir>/boundary.json).
-   rd="<round-dir>"; rd="${rd%/}"
+   # return the grandparent, so the refusal would fail open. Strip EVERY
+   # trailing slash (one ${rd%/} leaves a doubled spelling) and use the same
+   # normalised path for the guards AND the clear/write/checker, so they
+   # inspect and act on one path (R14-2).
+   rd="<round-dir>"
+   while [ "$rd" != "${rd%/}" ]; do rd="${rd%/}"; done
    if [ -L "$rd" ] || [ -L "$(dirname "$rd")" ]; then
      echo "round dir is a symlink" >&2; rc=1
    fi
    if [ "$rc" -eq 0 ]; then
-     rm -rf -- "<round-dir>/boundary.json" || { echo "cannot clear boundary.json" >&2; rc=1; }
+     rm -rf -- "$rd/boundary.json" || { echo "cannot clear boundary.json" >&2; rc=1; }
    fi
    if [ "$rc" -eq 0 ]; then
      # Fill in the detail with the image and network policy you used — the
      # checker refuses the skill's <placeholder> template strings.
-     printf '%s\n' '{"mode":"container","detail":"<image, network policy, credential-free mount>"}' > "<round-dir>/boundary.json" || rc=1
+     printf '%s\n' '{"mode":"container","detail":"<image, network policy, credential-free mount>"}' > "$rd/boundary.json" || rc=1
    fi
    if [ "$rc" -eq 0 ]; then
+     # --context-root names the PR-writable tree from the host side; the
+     # checker must not derive it from git state inside the tree the round
+     # controls (R14-1). <pr-clone> is the clone step 3 mounted read-write.
      node "<trusted-clone>/scripts/verify-pr-check.mjs" \
-       --context ~/.cache/qwen-verify/pr<n>/pr.json "<round-dir>" || rc=$?
+       --context ~/.cache/qwen-verify/pr<n>/pr.json \
+       --context-root "<pr-clone>" "$rd" || rc=$?
    fi
    kill "$(cat ~/.cache/qwen-verify/pr<n>/proxy.pid)" 2>/dev/null || true
    rm -f ~/.cache/qwen-verify/pr<n>/proxy.json ~/.cache/qwen-verify/pr<n>/proxy.err ~/.cache/qwen-verify/pr<n>/proxy.pid || true

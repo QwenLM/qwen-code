@@ -861,11 +861,11 @@ describe('local container recipe pins', () => {
     ];
     expect(contextCalls.length).toBeGreaterThanOrEqual(2);
     // The prose occurrences alone cannot catch step 7 dropping the flag on
-    // its continuation line — pin the executable call too (the round-dir
-    // expansion is quoted so a space-bearing path stays one argument).
-    expect(skill).toContain(
-      '--context ~/.cache/qwen-verify/pr<n>/pr.json "<round-dir>"',
-    );
+    // its continuation line — pin the executable call too. The trust root is
+    // host-provided (--context-root) and the round-dir expansion is the
+    // normalised $rd, quoted so a space-bearing path stays one argument.
+    expect(skill).toContain('--context ~/.cache/qwen-verify/pr<n>/pr.json');
+    expect(skill).toContain('--context-root "<pr-clone>" "$rd"');
   });
 
   it('writes previous-report.md only when a report exists', () => {

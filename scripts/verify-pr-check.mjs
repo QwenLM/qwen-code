@@ -22,7 +22,6 @@
  * error, 2 on a usage error.
  */
 
-import { execFileSync } from 'node:child_process';
 import {
   existsSync,
   lstatSync,
@@ -71,7 +70,7 @@ const HEADING_TITLE_MAX = 120;
 const FOOTER =
   /^_— .+ via Qwen Code \/verify-pr \(v[^;]+; skill [0-9a-f]{12}\)_$/;
 
-const HELP = `Usage: node scripts/verify-pr-check.mjs [--context <snapshot>] [--publish-lane] <artifact-dir>
+const HELP = `Usage: node scripts/verify-pr-check.mjs [--context <snapshot>] [--context-root <pr-clone>] [--publish-lane] <artifact-dir>
 
 Checks a local round against the rules the CI publisher enforces:
 
@@ -115,7 +114,11 @@ heading shape or lacks the attribution footer.
 With --context <snapshot>, the head-OID check reads that file instead of the
 round's own context.json. Pass a copy the round never saw: the artifact
 directory is writable by the PR code the round executed, so a --context path
-inside it is refused — it cannot supply the coordinates that judge its waiver.
+inside the PR-writable tree is refused — it cannot supply the coordinates
+that judge its waiver. Pass --context-root <pr-clone> (the host-held PR clone
+path) to name that tree explicitly; the trust root must come from the host,
+never from git state inside the tree the round controls. Without it, the root
+falls back to the artifact dir's tmp/ container (or the dir itself).
 
 Exit codes: 0 no errors, 1 errors found, 2 usage.
 `;
@@ -937,6 +940,7 @@ function main(argv) {
     return 0;
   }
   let contextPath = null;
+  let contextRoot = null;
   let publishLane = false;
   const positional = [];
   for (let index = 0; index < argv.length; index++) {
@@ -946,6 +950,14 @@ function main(argv) {
       if (!contextPath) {
         process.stderr.write(
           `verify-pr check: --context requires a snapshot path\n\n${HELP}`,
+        );
+        return 2;
+      }
+    } else if (arg === '--context-root') {
+      contextRoot = argv[++index];
+      if (!contextRoot) {
+        process.stderr.write(
+          `verify-pr check: --context-root requires a path\n\n${HELP}`,
         );
         return 2;
       }
@@ -1071,33 +1083,20 @@ function main(argv) {
     } catch {
       realContext = resolve(contextPath);
     }
-    // Classify the git probe instead of collapsing every failure into a
-    // round-dir fallback: a damaged .git (bad format version, safe.directory
-    // refusal) must NOT widen the trust root to the round dir, or the round
-    // could judge its own waiver from the verify-context sibling (R13 R12-1).
-    // Only git's clean "not a git repository" answer falls back, and the
-    // fallback root is real-path resolved so both sides of the comparison
-    // agree even when the dir is reached through a symlink (macOS TMPDIR).
+    // The trust root must come from the HOST, never from git state inside
+    // the PR-writable tree: the round controls that state (it can `git init`
+    // the artifact dir or damage .git), so deriving the root from it lets
+    // the round judge its own waiver (R14-1). The host passes the PR clone
+    // path via --context-root. Without it, fall back to a root derived from
+    // the artifact dir's own path — which prepare (host-side) fixed, not the
+    // round: a pr<n>-verify-<ts> dir under tmp/ shares that container with
+    // the verify-context sibling, so the container is the writable root; a
+    // plain fixture dir is its own root. Both sides are real-path resolved
+    // so a symlinked dir (macOS TMPDIR) compares consistently.
     let trustRoot;
-    try {
-      trustRoot = realpathSync(
-        execFileSync('git', ['-C', dir, 'rev-parse', '--show-toplevel'], {
-          encoding: 'utf8',
-          stdio: ['ignore', 'pipe', 'pipe'],
-        }).trim(),
-      );
-    } catch (error) {
-      const gitStderr = typeof error?.stderr === 'string' ? error.stderr : '';
-      if (!/not a git repository/i.test(gitStderr)) {
-        process.stderr.write(
-          `verify-pr check: cannot establish the PR-writable root for ${dir} (git: ${gitStderr.trim() || 'unknown failure'}) — refusing to judge a waiver without a trusted root\n`,
-        );
-        return 1;
-      }
-      // A legitimate non-repo artifact dir. A pr<n>-verify-<ts> dir inside a
-      // tmp/ container sits alongside the verify-context sibling prepare
-      // writes, so the writable root is that container; a plain mkdtemp
-      // fixture (or a pr-verify dir not under tmp/) is its own root.
+    if (contextRoot) {
+      trustRoot = realpathSync(contextRoot);
+    } else {
       const container = dirname(resolve(dir));
       trustRoot =
         dirPrNumber && basename(container) === 'tmp'
