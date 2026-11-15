@@ -24570,6 +24570,57 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('starts a cold draft in the workspace the picker displays, not the leftover connection workspace', async () => {
+    // A terminated session left the connection on the secondary workspace
+    // with no session id; the draft has no selection yet, so the picker
+    // spells the primary. The first prompt must create the session in the
+    // workspace the picker shows.
+    mockConnection.sessionId = undefined;
+    mockConnection.workspaceCwd = '/work/secondary';
+    mockConnection.sessionContext = {
+      kind: 'workspace',
+      cwd: '/work/secondary',
+    };
+    mockWorkspace.capabilities = {
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    renderApp();
+    await flush();
+
+    expect(testState.latestChatEditorProps).toMatchObject({
+      selectedWorkspaceCwd: undefined,
+    });
+
+    act(() => {
+      testState.latestChatEditorProps?.onSubmit('cold draft prompt');
+    });
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceCwd: '/tmp/project',
+        sessionContext: { kind: 'workspace', cwd: '/tmp/project' },
+      }),
+    );
+  });
+
   it('rejects an untrusted draft workspace before its cleanup effect runs', async () => {
     const onToast = vi.fn();
     mockConnection.sessionId = undefined;

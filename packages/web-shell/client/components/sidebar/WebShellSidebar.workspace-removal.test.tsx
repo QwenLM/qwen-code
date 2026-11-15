@@ -4394,6 +4394,27 @@ describe('WebShellSidebar workspace removal', () => {
     expect(workspace.refreshCapabilities).toHaveBeenCalled();
   });
 
+  it('resets a cold draft when the workspace it is connected to is removed', async () => {
+    // A terminated session left the connection on the secondary workspace.
+    // The cold draft never writes the selection (the #16992 fix), so the
+    // removed cwd is only visible through the connection state — the reset
+    // must fire from there or the next prompt targets the removed cwd.
+    connection.sessionId = null;
+    connection.sessionContext = { kind: 'workspace', cwd: '/tmp/other' };
+    connection.workspaceCwd = '/tmp/other';
+    const onSelectWorkspace = vi.fn();
+    renderSidebar({ onSelectWorkspace });
+
+    openRemoval('/tmp/other');
+
+    await act(async () => click(dialogButton('Remove workspace')));
+
+    expect(workspaceActions.removeWorkspace).toHaveBeenCalledWith('secondary', {
+      force: false,
+    });
+    expect(onSelectWorkspace).toHaveBeenCalledWith(undefined);
+  });
+
   it('shows activity and blocks force for the current session workspace', async () => {
     connection.sessionId = 'active-session';
     connection.workspaceCwd = '/tmp/other';
@@ -5040,6 +5061,49 @@ describe('WebShellSidebar workflows entry', () => {
   it('hides workflows when the current session has not enabled them', () => {
     renderSidebar();
 
+    expect(
+      container.querySelector('button[aria-label="Workflows"]'),
+    ).toBeNull();
+  });
+
+  it('gates a cold draft on the workspace the draft starts in, not the leftover connection workspace', () => {
+    // A terminated session left the connection on the secondary workspace.
+    // The draft starts in the primary (where its first session is created),
+    // so the entry follows the primary's capability.
+    workspace.capabilities = {
+      ...capabilities,
+      workspaces: capabilities.workspaces.map((entry) =>
+        entry.primary ? { ...entry, workflowsEnabled: true } : entry,
+      ),
+    };
+    connection.capabilities = workspace.capabilities;
+    connection.sessionId = null;
+    connection.sessionContext = { kind: 'workspace', cwd: '/tmp/other' };
+    connection.workspaceCwd = '/tmp/other';
+    const onOpenWorkflows = vi.fn();
+    renderSidebar({ onOpenWorkflows });
+    const button = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Workflows"]',
+    );
+    expect(button).not.toBeNull();
+    click(button!);
+    expect(onOpenWorkflows).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the cold draft entry hidden when only the leftover connection workspace has workflows', () => {
+    // The mirror: gating the draft on the connection workspace (instead of
+    // the primary the draft starts in) would turn this red.
+    workspace.capabilities = {
+      ...capabilities,
+      workspaces: capabilities.workspaces.map((entry) =>
+        entry.primary ? entry : { ...entry, workflowsEnabled: true },
+      ),
+    };
+    connection.capabilities = workspace.capabilities;
+    connection.sessionId = null;
+    connection.sessionContext = { kind: 'workspace', cwd: '/tmp/other' };
+    connection.workspaceCwd = '/tmp/other';
+    renderSidebar();
     expect(
       container.querySelector('button[aria-label="Workflows"]'),
     ).toBeNull();

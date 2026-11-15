@@ -3553,7 +3553,14 @@ export function WebShellSidebar({
   const reconcileRemovedWorkspace = useCallback(
     async (removed: DaemonWorkspaceCapability) => {
       if (!sidebarMountedRef.current) return;
-      if (selectedWorkspaceCwd === removed.cwd) {
+      // A cold draft never writes the selection (the #16992 fix), so a
+      // removed workspace it is pointed at is only visible through the
+      // connection state; reset the draft to the primary so the next
+      // prompt does not target the removed cwd.
+      if (
+        selectedWorkspaceCwd === removed.cwd ||
+        (!connection.sessionId && connection.workspaceCwd === removed.cwd)
+      ) {
         onSelectWorkspace?.(undefined);
       }
       sessionCatalogController.invalidateWorkspace(removed.cwd);
@@ -3568,6 +3575,7 @@ export function WebShellSidebar({
       void reloadArchived().catch(() => undefined);
     },
     [
+      connection,
       onSelectWorkspace,
       reload,
       reloadArchived,

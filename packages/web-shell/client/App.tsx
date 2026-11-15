@@ -4976,7 +4976,15 @@ export function App({
   // their target separately and standalone sessions never borrow that repo.
   const activeWorkspaceCwd = useMemo(() => {
     if (!workspaceContextActive) return undefined;
-    const explicitContext = pendingSessionContext ?? connection.sessionContext;
+    // A session-less draft does not inherit the leftover workspace context
+    // of a terminated session (see ensureSessionForPrompt): it resolves to
+    // the pending selection or the primary like the picker does.
+    const inheritedContext = connection.sessionContext;
+    const explicitContext =
+      pendingSessionContext ??
+      (connection.sessionId || inheritedContext?.kind !== 'workspace'
+        ? inheritedContext
+        : undefined);
     if (explicitContext?.kind === 'workspace') {
       return explicitContext.cwd;
     }
@@ -12547,9 +12555,20 @@ export function App({
             : undefined;
         const modeId = executionModeRef.current;
         const planMode = currentModeRef.current === 'plan';
+        // A leftover workspace sessionContext of a terminated session is
+        // not inherited into a session-less draft: the draft starts in the
+        // workspace the picker displays (the pending selection, else the
+        // primary), so the displayed and the created workspace can never
+        // disagree (#16992 follow-up). Non-workspace contexts (e.g.
+        // standalone) name the draft's own mode and are inherited as
+        // before; live sessions always inherit.
+        const inheritedSessionContext = connectionRef.current.sessionContext;
         const requestedSessionContext =
           pendingSessionContextRef.current ??
-          connectionRef.current.sessionContext;
+          (connectionRef.current.sessionId ||
+          inheritedSessionContext?.kind !== 'workspace'
+            ? inheritedSessionContext
+            : undefined);
         const availableWorkspaces = workspacesRef.current;
         const primaryWorkspaceCwd = availableWorkspaces.find(
           (entry) => entry.primary && entry.trusted !== false,
