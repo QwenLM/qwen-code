@@ -81,9 +81,14 @@ const mockBatchHandler = vi.hoisted(() => vi.fn());
 const mockMemoryHandler = vi.hoisted(() => vi.fn());
 vi.mock('../commands/memory.js', () => ({
   memoryCommand: {
-    command: 'memory <subcommand> <source>',
-    builder: { 'dry-run': { type: 'boolean' }, json: { type: 'boolean' } },
-    handler: mockMemoryHandler,
+    command: 'memory',
+    builder: (parser: import('yargs').Argv) =>
+      parser.command({
+        command: 'import <source>',
+        builder: { 'dry-run': { type: 'boolean' }, json: { type: 'boolean' } },
+        handler: mockMemoryHandler,
+      }),
+    handler: () => {},
   },
 }));
 const mockSessionServiceInstance = vi.hoisted(() => ({
@@ -119,11 +124,11 @@ vi.mock('../commands/update.js', () => ({
 // any machine with OPENAI_API_KEY + model + base URL set.
 vi.mock('../commands/batch.js', () => ({
   batchCommand: {
-    // Positionals must be declared: parseArguments runs yargs in strict mode,
-    // so a bare `batch` would reject `status batch_x` before the handler runs.
-    command: 'batch <subcommand> [id]',
+    command: 'batch',
     describe: 'mock batch command',
-    handler: mockBatchHandler,
+    builder: (parser: import('yargs').Argv) =>
+      parser.command({ command: 'status [id]', handler: mockBatchHandler }),
+    handler: () => {},
   },
 }));
 

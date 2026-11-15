@@ -115,7 +115,7 @@ export const DEFAULT_DEADLINE_SECONDS: Readonly<Record<SizeTier, number>> = {
 };
 
 /**
- * The reserve a PLAN-recorded wall implies — the rule the review workflow
+ * The reserve a finite review wall implies — the rule the review workflow
  * applies to the budget it exports (`attempt_timeout / 3`, capped at 4800),
  * so a wall the plan carries and one the environment carries price their
  * tails alike. The floor differs on purpose: the workflow floors at 600, but
@@ -125,9 +125,10 @@ export const DEFAULT_DEADLINE_SECONDS: Readonly<Record<SizeTier, number>> = {
  * default (a disabled or lowered floor never shrinks the reserve below
  * 1200). Equal at the floor, inside above it; the round gate still fires
  * first either way, because it prices the round on top of the reserve.
- * Only for a plan-sourced deadline: an environment deadline keeps
- * `RESERVE_ENV` / `DEFAULT_RESERVE_SECONDS`, which the workflow already
- * scales. Without `env` the default floor applies — the up-front
+ * Used for plan-sourced deadlines and explicit `review run` budgets. The
+ * latter exports the result as `RESERVE_ENV`; other environment deadlines
+ * keep `RESERVE_ENV` / `DEFAULT_RESERVE_SECONDS`, which CI already scales.
+ * Without `env` the default floor applies — the up-front
  * `--deadline` check prices that way, so a capture's ruling does not move
  * with the shell it happens to run in.
  */
