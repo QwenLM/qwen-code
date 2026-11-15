@@ -143,7 +143,12 @@ function loopMdFireProse(section: string): string {
   }
   const prose = section.slice(idx);
   const cut = prose.indexOf(' If `.qwen/loop.md` is absent at fire time');
-  return (cut < 0 ? prose : prose.slice(0, cut)).trimEnd();
+  if (cut < 0) {
+    throw new Error(
+      'Bundled loop.md section is missing the absent-file fallback marker.',
+    );
+  }
+  return prose.slice(0, cut).trimEnd();
 }
 
 /** The shared steward prose, derived from the source Autonomous section. The
@@ -159,12 +164,22 @@ function stewardProse(section: string, dropReminder: boolean): string {
   }
   let prose = section.slice(idx);
   const cut = prose.indexOf(' In self-paced mode re-arm');
-  prose = cut < 0 ? prose : prose.slice(0, cut);
+  if (cut < 0) {
+    throw new Error(
+      'Bundled Autonomous section is missing the self-paced re-arm marker.',
+    );
+  }
+  prose = prose.slice(0, cut);
   if (dropReminder) {
     const reminder = prose.indexOf(
       ' The first fire (and the first after a compaction) delivers fuller guidance',
     );
-    if (reminder >= 0) prose = prose.slice(0, reminder);
+    if (reminder < 0) {
+      throw new Error(
+        'Bundled Autonomous section is missing the short-reminder marker.',
+      );
+    }
+    prose = prose.slice(0, reminder);
   }
   return prose.trimEnd();
 }
@@ -197,6 +212,31 @@ function parsingEveryGrammar(parsing: string): string {
     throw new Error('Bundled Parsing is missing the trailing-"every" rule.');
   }
   return parsing.slice(start, end);
+}
+
+/** The union body keeps the source Parsing's rule titles and example inputs, so
+ * a rule or example added to SKILL.md that the hand-composed union shell does
+ * not carry reddens the generator instead of silently stale-ing the body. */
+function assertParsingDriftCovered(
+  parsingSource: string,
+  unionBody: string,
+): void {
+  for (const match of parsingSource.matchAll(/\*\*([^*]+)\*\*/g)) {
+    if (!unionBody.includes(`**${match[1]}**`)) {
+      throw new Error(
+        `Bundled Parsing rule not carried into the union body: ${match[1]}`,
+      );
+    }
+  }
+  for (const line of parsingSource.split('\n')) {
+    if (!line.startsWith('- ')) continue;
+    const input = line.slice(2).split('→')[0].trim();
+    if (input && !unionBody.includes(input)) {
+      throw new Error(
+        `Bundled Parsing example not carried into the union body: ${input}`,
+      );
+    }
+  }
 }
 
 /**
@@ -338,6 +378,9 @@ export function buildManagedLoopSkill(
   if (sections.has('Input')) parts.push(get('Input'));
 
   const body = parts.join('\n').replace(/^\n+/, '');
+  if (profile === 'union') {
+    assertParsingDriftCovered(parsingSource, body);
+  }
   const absent =
     profile === 'cron' ? /loop_wakeup|LoopWakeup/ : /cron_create|CronCreate/;
   if (profile !== 'union' && absent.test(body)) {

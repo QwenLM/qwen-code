@@ -83,7 +83,7 @@ skill 发布有两个生产者、一个消费者；Harness 只是消费者。
 - `packages/core/src/managed-runtime/contracts/` — 三个生成的 managed loop JSON sidecar（description + body；union / cron-only / wakeup-only），拷贝到 Java。
 - `packages/core/src/skills/bundled/loop/managed-loop-skill.ts` — `buildManagedLoopSkill(profile, bundledBody, frontmatterDescription)` 生成器（措辞替换 + 章节选择）；同址一致性测试把生成 sidecar 绑回 `SKILL.md` 并在每个 profile 间钉住共享 steward 段（不改 `SKILL.md` 本身）。`regenerate-managed-loop-assets.ts` 是提交的再生成入口。
 - `packages/managed-agent-server/persistence/.../ManagedLoopSkill.java` — 纯 profile-到-sidecar 选择器、`mergeInto`（覆盖 + 能力门 + 容量跳过）与子会话 `reselectForProfile`；读 classpath sidecar，不做字符串组合。
-- `packages/managed-agent-server/persistence/.../AgentSessionAdmissions.java` — 合并 pinned definition 的 skills、调用 `mergeInto`、在 effective 目录非空时写行，并在保存子会话目录前按子 profile 重选继承的 loop 项。
+- `packages/managed-agent-server/persistence/.../AgentSessionAdmissions.java` — 合并 pinned definition 的 skills、调用 `mergeInto`（复用其已校验目录）、仅在 effective 目录非空且有 caller 贡献或注入了变体时写行，并在保存子会话目录前按子 profile 重选继承的 loop 项（空的解析结果不写行）。
 - `packages/managed-agent-server/contracts/.../SessionCreationCommand.java` 与 `control-plane/.../ManagedAgentService.java` — 从协商的 Harness 传入 `sessionSkillsSupported` 能力标志。
 - `packages/managed-agent-server/contracts/pom.xml` — 把生成 sidecar 拷贝到 Java classpath。
 - `packages/managed-agent-server/Dockerfile` — 把生成 sidecar COPY 进镜像构建；scripts 测试把 COPY 集钉回 contracts pom includes，缺资产拷贝即红。
@@ -119,7 +119,7 @@ skill 发布有两个生产者、一个消费者；Harness 只是消费者。
 
 - 携带 creator 的 profile 上的 Managed Session，其发布目录中有 `loop` skill，body 用 Managed durable/expiry/UTC 措辞、只点名该 profile 声明的 creator、不教不可展开的 cron 哨兵、只声明 home `~/.qwen/loop.md` 文件。
 - pinned 到携带 creator profile 且无 caller skills 的 definition 收到变体；内置 `qwen-code` agent（shell/1 / files/1）不得到。
-- READ profile 与无 creator profile 不发布 loop skill，只读 snapshot 子会话不继承。
+- READ profile 与无 creator profile 不发布服务端 loop 变体，只读 snapshot 子会话不继承；definition 自带的 `loop` 项在任何 profile 上保留，并原样继承给子会话。
 - 重放的创建产生相同目录快照。
 - managed sidecar 无法在不使一致性测试变红的情况下偏离 bundled 源。
 - 无新 wire 字段、资源 kind 或 journal 变更。
@@ -130,7 +130,7 @@ skill 发布有两个生产者、一个消费者；Harness 只是消费者。
 
 - **组合位置。** TypeScript 生成器为每个 profile 形状派生一个提交 sidecar（union / cron-only / wakeup-only，含 description + body），Java 按 profile 选择；一致性测试把资产绑回 bundled 源。在发现两条路径于 body 中深度交织、使 Java 字符串外科手术脆弱后，从纯 Java 组合 refine 而来。已定：TypeScript 生成 + Java 选择。
 - **门关闭粒度。** 部署门是保留工具声明的操作门（`hosted-workspace-tool-turn.ts:2488-2513` 不咨询门），故 body 按 profile 驱动、与门无关；门在运行时拒绝调用。已定：门不影响 body。
-- **与 caller 导入的本地 `loop` 共存。** Web Shell 从 daemon 快照原样导入 bundled `loop`，拒绝重名会使所有携带 loop 的 profile 创建 409。服务端变体为权威，替换任何同名项；无 creator profile 上丢弃 caller 的 `loop`。已定：替换 + 文档化（在发现默认路径 409 后从最初的拒绝提案 refine）。
-- **cron 触发机制。** Managed cron 触发不展开 loop 哨兵（仅自定步调 wakeup 触发展开），故 cron 路径教自然语言 prompt 由模型每次触发自行执行（自己读 home `~/.qwen/loop.md`）；仅 wakeup 路径用哨兵。已定：自然语言 cron prompt（不改生产触发路径）。
+- **与 caller 导入的本地 `loop` 共存。** Web Shell 从 daemon 快照原样导入 bundled `loop`，拒绝重名会使所有携带 loop 的 profile 创建 409。服务端变体替换 caller 的同名项（并沿用其调用标记）；无 creator profile 上丢弃 caller 的 `loop`。definition 自带的 `loop` 予以保留并抑制服务端变体，故与之冲突的 caller `loop` 是被取代而非被拒——这是合并目录重名规则的唯一例外。已定：替换 + 文档化（在发现默认路径 409 后从最初的拒绝提案 refine）。
+- **cron 触发机制。** Managed cron 触发不展开 loop 哨兵（仅自定步调 wakeup 触发展开），且模型无法打开 Harness 主机的 home 文件（读取被限制在会话工作目录内），故 cron body 不带 loop.md 任务文件模式、也不带任何哨兵；cron 自主循环是自然语言 steward 指令，由模型每次触发自行执行。仅 wakeup 路径用哨兵与 loop.md 文件模式。已定：cron 不带 loop.md 模式（不改生产触发路径）。
 
 实现阶段无遗留开放问题。

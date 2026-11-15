@@ -213,4 +213,37 @@ describe('managed loop skill parity', () => {
       /non-expanding sentinel/,
     );
   });
+
+  it('throws when the loop.md fallback sentence drifts (fail-closed cut)', () => {
+    const mutated = body.replace(
+      'is absent at fire time',
+      'is missing at fire time',
+    );
+    expect(mutated).not.toBe(body);
+    expect(() => buildManagedLoopSkill('union', mutated, description)).toThrow(
+      /absent-file fallback marker/,
+    );
+  });
+
+  it('throws when the steward re-arm sentence drifts (fail-closed cut)', () => {
+    const mutated = body.replace(
+      'In self-paced mode re-arm',
+      'In self-paced mode rearm',
+    );
+    expect(mutated).not.toBe(body);
+    expect(() => buildManagedLoopSkill('union', mutated, description)).toThrow(
+      /self-paced re-arm marker/,
+    );
+  });
+
+  it('throws when a Parsing rule is added that the union shell does not carry', () => {
+    const mutated = body.replace(
+      'Examples:',
+      '5. **Stop keyword**: a new rule.\n\nExamples:',
+    );
+    expect(mutated).not.toBe(body);
+    expect(() => buildManagedLoopSkill('union', mutated, description)).toThrow(
+      /Parsing rule not carried into the union body: Stop keyword/,
+    );
+  });
 });

@@ -59,13 +59,17 @@ final class ManagedLoopSkill {
 
     /**
      * Append the caller skills and the profile's loop variant to the admission
-     * catalog, returning whether the variant was injected. {@code merged} already
-     * holds the pinned definition's skills; the caller skills are appended after
-     * them. The variant is a server contribution added even when the caller
-     * supplies no skills. It replaces a caller-imported "loop" skill (the Web
-     * Shell imports the bundled one verbatim from the daemon snapshot), not
-     * refuses it, so the default creation path is not broken by a duplicate name.
-     * A definition-authored "loop" is the definition author's artifact and is
+     * catalog, returning the validated catalog when the variant was injected, or
+     * null when it was not (so the caller validates {@code merged} itself). The
+     * returned catalog is the single validated/serialized pass — the admission
+     * reuses it instead of re-validating. {@code merged} already holds the pinned
+     * definition's skills; the caller skills are appended after them. The variant
+     * is a server contribution added even when the caller supplies no skills. It
+     * replaces a caller-imported "loop" skill (the Web Shell imports the bundled
+     * one verbatim from the daemon snapshot), not refuses it, so the default
+     * creation path is not broken by a duplicate name; the replaced entry's
+     * model_invocable / user_invocable flags carry over to the variant. A
+     * definition-authored "loop" is the definition author's artifact and is
      * preserved: the server neither replaces it nor injects a rival entry. On a
      * profile with no loop creator the caller's "loop" entry is still dropped, so
      * a creator-less Session never publishes a body naming tools it lacks. The
@@ -74,54 +78,86 @@ final class ManagedLoopSkill {
      * / 2 MiB limits it is skipped rather than refusing the creation. Kept here
      * so the admission class does not grow.
      */
-    static boolean mergeInto(List<Map<String, Object>> merged,
+    static List<Map<String, Object>> mergeInto(List<Map<String, Object>> merged,
             List<Map<String, Object>> callerSkills, String profile,
             boolean sessionSkillsSupported) {
         int definitionCount = merged.size();
         merged.addAll(callerSkills);
         if (!sessionSkillsSupported) {
-            return false;
+            return null;
         }
         boolean definitionHasLoop = merged.subList(0, definitionCount).stream()
                 .anyMatch(skill -> NAME.equals(skill.get("name")));
-        // Only the caller segment's "loop" is the server's to replace.
+        // Only the caller segment's "loop" is the server's to replace; keep its
+        // invocation flags so a manual-only loop stays manual-only.
+        Map<String, Object> callerLoop = merged.subList(definitionCount, merged.size()).stream()
+                .filter(skill -> NAME.equals(skill.get("name"))).findFirst().orElse(null);
         merged.subList(definitionCount, merged.size())
                 .removeIf(skill -> NAME.equals(skill.get("name")));
         if (definitionHasLoop) {
-            return false;
+            return null;
         }
         Map<String, Object> loop = forProfile(profile);
         if (loop == null) {
-            return false;
+            return null;
+        }
+        if (callerLoop != null) {
+            for (String field : List.of("model_invocable", "user_invocable")) {
+                if (callerLoop.containsKey(field)) {
+                    loop.put(field, callerLoop.get(field));
+                }
+            }
         }
         List<Map<String, Object>> candidate = new ArrayList<>(merged);
         candidate.add(loop);
+        List<Map<String, Object>> validated;
         try {
-            AgentDefinitionExtensions.sessionSkills(candidate);
+            validated = AgentDefinitionExtensions.sessionSkills(candidate);
         } catch (ManagedAgentException overCapacity) {
-            return false;
+            return null;
         }
         merged.add(loop);
-        return true;
+        return validated;
     }
 
     /**
      * Re-select the loop entry for a child whose tool profile differs from the
-     * parent's (a snapshot child is read-only). The inherited server variant is
-     * dropped and replaced by the child profile's own variant, or by nothing
+     * parent's (a snapshot child is read-only). Only the server-injected variant
+     * is dropped and replaced by the child profile's own variant, or by nothing
      * when the child declares no loop creator, so a read-only child never
-     * publishes a body naming tools it lacks. Caller/definition skills inherit
-     * unchanged.
+     * publishes a body naming tools it lacks. A definition-authored "loop" is not
+     * the server's to remove: it inherits unchanged (and suppresses a rival server
+     * variant, keeping names unique), mirroring mergeInto's provenance split.
      */
     static List<Map<String, Object>> reselectForProfile(
             List<Map<String, Object>> inherited, String childProfile) {
         List<Map<String, Object>> result = new ArrayList<>(inherited);
-        result.removeIf(skill -> NAME.equals(skill.get("name")));
-        Map<String, Object> loop = forProfile(childProfile);
-        if (loop != null) {
-            result.add(loop);
+        List<Object> serverBodies = serverLoopBodies();
+        boolean hasDefinitionLoop = result.stream()
+                .anyMatch(skill -> NAME.equals(skill.get("name"))
+                        && !serverBodies.contains(skill.get("body")));
+        result.removeIf(skill -> NAME.equals(skill.get("name"))
+                && serverBodies.contains(skill.get("body")));
+        if (!hasDefinitionLoop) {
+            Map<String, Object> loop = forProfile(childProfile);
+            if (loop != null) {
+                result.add(loop);
+            }
         }
         return result;
+    }
+
+    /** The committed sidecar bodies: a loop entry whose body is one of these is
+     * the server variant, not a definition-authored skill. */
+    private static List<Object> serverLoopBodies() {
+        List<Object> bodies = new ArrayList<>();
+        for (String asset : new String[] {
+                "managed-loop-skill-union.json",
+                "managed-loop-skill-cron.json",
+                "managed-loop-skill-wakeup.json"}) {
+            bodies.add(readSidecar(asset).get("body"));
+        }
+        return bodies;
     }
 
     /**

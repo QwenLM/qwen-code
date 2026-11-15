@@ -249,9 +249,11 @@ than an empty row that every later snapshot read would reject.
   capacity skip), and `reselectForProfile` for children; reads the classpath
   sidecar, no string composition.
 - `packages/managed-agent-server/persistence/.../AgentSessionAdmissions.java` —
-  merge the pinned definition's skills, call `mergeInto`, write the row when the
-  effective catalog is non-empty, and re-select the inherited loop entry by the
-  child's profile before saving a child catalog.
+  merge the pinned definition's skills, call `mergeInto` (reusing its validated
+  catalog), write the row only when the effective catalog is non-empty AND there
+  is a caller contribution or the variant was injected, and re-select the
+  inherited loop entry by the child's profile before saving a child catalog (an
+  empty resolved child catalog saves nothing).
 - `packages/managed-agent-server/contracts/.../SessionCreationCommand.java` and
   `control-plane/.../ManagedAgentService.java` — thread the
   `sessionSkillsSupported` capability flag from the negotiated Harness.
@@ -330,8 +332,9 @@ clear` retires it.
 - A definition pinned to a creator-bearing profile with no caller skills
   receives the variant; the built-in `qwen-code` agent (shell/1 / files/1)
   receives none.
-- The READ profile and no-creator profiles publish no loop skill, and a
-  read-only snapshot child does not inherit one.
+- The READ profile and no-creator profiles publish no server loop variant, and a
+  read-only snapshot child inherits none; a definition-authored `loop` entry is
+  preserved on any profile and inherits to children unchanged.
 - A replayed creation produces the identical catalog snapshot.
 - The managed sidecar cannot drift from the bundled source without a red parity
   test.
@@ -353,14 +356,19 @@ Resolved during design (kept here for the record):
   refuses the call at runtime. Decided: gates do not affect the body.
 - **Coexistence with a caller-imported local `loop`.** The Web Shell imports the
   bundled `loop` verbatim from the daemon snapshot, so rejecting the duplicate
-  would 409 every creation on a loop-bearing profile. The server variant is
-  authoritative and replaces any same-named entry; on a creator-less profile the
-  caller's `loop` is dropped. Decided: replace + document (refined from the
+  would 409 every creation on a loop-bearing profile. The server variant
+  replaces the caller's same-named entry (carrying over its invocation flags);
+  on a creator-less profile the caller's `loop` is dropped. A definition-authored
+  `loop` is preserved and suppresses the server variant, so a caller `loop` that
+  collides with it is superseded, not rejected — the one carve-out from the
+  merged-catalog duplicate rule. Decided: replace + document (refined from the
   initial reject proposal after the default-path 409 was found).
 - **Cron fire mechanics.** A Managed cron fire does not expand loop sentinels
-  (only the self-paced wakeup fire does), so the cron path teaches
-  natural-language prompts the model executes each fire (reading the home
-  `~/.qwen/loop.md` itself); only the wakeup path uses sentinels. Decided:
-  natural-language cron prompts (no production fire-path change).
+  (only the self-paced wakeup fire does), and the model cannot open the
+  Harness-host home file (reads are confined to the Session working directory),
+  so the cron body carries no loop.md task-file mode and no sentinel at all; the
+  cron autonomous loop is a natural-language steward instruction the model
+  executes each fire. Only the wakeup path uses sentinels and the loop.md file
+  mode. Decided: no loop.md mode on cron (no production fire-path change).
 
 No open questions remain for implementation.
