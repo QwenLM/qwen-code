@@ -1,4 +1,4 @@
-package com.alibaba.qwen.code.managedagent.workspace.runtime;
+package com.alibaba.qwen.code.managedagent.config.runtime;
 
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ToolPublicationContract;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;

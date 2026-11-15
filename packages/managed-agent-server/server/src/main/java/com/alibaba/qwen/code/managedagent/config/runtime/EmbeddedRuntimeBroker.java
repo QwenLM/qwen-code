@@ -69,7 +69,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
     private final HttpRuntimeTransport extensionTransport;
     private final ManagedAgentProperties.RuntimeBroker brokerSettings;
     private final ExternalStorageRegistrationStore externalRegistrations;
-    private final com.alibaba.qwen.code.managedagent.workspace.runtime.ExternalShellPublicationProducer externalShellProducer;
+    private final ExternalShellPublicationProducer externalShellProducer;
     private final org.springframework.jdbc.core.JdbcTemplate jdbc;
 
     public EmbeddedRuntimeBroker(SessionQueryStore store,
@@ -304,7 +304,7 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
         this.externalShellProducer = publicationData == null || externalRegistrations == null
                 || !RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(broker.getProvisioner())
                         ? null
-                        : new com.alibaba.qwen.code.managedagent.workspace.runtime.ExternalShellPublicationProducer(
+                        : new ExternalShellPublicationProducer(
                                 new HttpRuntimeTransport(), publicationData, externalRegistrations);
         com.alibaba.qwen.code.runtimebroker.spi.ExternalShellPublication externalShell =
                 externalShellProducer;
