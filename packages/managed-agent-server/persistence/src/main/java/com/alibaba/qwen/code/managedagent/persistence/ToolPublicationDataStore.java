@@ -1774,7 +1774,7 @@ public final class ToolPublicationDataStore {
 
     private JsonNode receipt(JsonNode binding, String slot, String resourceId, String kind, int length, String digest) {
         ObjectNode result = JSON.createObjectNode();
-        if (kind != null) {
+        if (!slot.startsWith("segment:")) {
             return result.put("resourceId", resourceId).put("kind", kind)
                     .put("schemaVersion", 1).put("byteLength", length).put("digest", digest);
         }
