@@ -2564,10 +2564,13 @@ export class LlmChat {
     outputTokens: number;
     contextWindowTokens: number;
   } {
+    // Compose the existing accessors rather than reading the private slots
+    // directly: they run adoptTokenCountsForRoute() so the counts match the
+    // current route's window instead of whichever route last reported.
     return {
-      promptTokens: this.lastPromptTokenCount,
-      promptTokensIsEstimated: this.lastPromptTokenCountIsEstimated,
-      outputTokens: this.lastOutputTokenCount,
+      promptTokens: this.getLastPromptTokenCount(),
+      promptTokensIsEstimated: this.isLastPromptTokenCountEstimated(),
+      outputTokens: this.getLastOutputTokenCount(),
       contextWindowTokens:
         this.config.getContentGeneratorConfig()?.contextWindowSize ??
         DEFAULT_TOKEN_LIMIT,
@@ -2577,11 +2580,6 @@ export class LlmChat {
   /** Marks a model-requested compaction for the next model-round boundary. */
   requestModelCompaction(): void {
     this.modelCompactionRequested = true;
-  }
-
-  /** Whether a model-requested compaction is pending (test/inspection use). */
-  isModelCompactionRequested(): boolean {
-    return this.modelCompactionRequested;
   }
 
   /**
