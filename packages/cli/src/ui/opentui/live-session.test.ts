@@ -4382,6 +4382,9 @@ describe.each([false, true])(
       const runs = [];
       let sharedConfig: Config | undefined;
       for (const onShared of [false, true]) {
+        // Assert per arm so the legacy arm losing its entry log is caught,
+        // not masked by the shared arm's call in an accumulated spy.
+        entrySpy.mockClear();
         const send = oneToolBatchStream({
           callId: 't1',
           name: 'test_tool',
@@ -4395,6 +4398,7 @@ describe.each([false, true])(
             promptId: 'p1',
           }),
         );
+        expect(entrySpy).toHaveBeenCalledWith(expect.anything(), 'opentui');
         runs.push({
           events,
           requests: send.mock.calls.map(([parts, , promptId, options]) => ({
@@ -4421,8 +4425,6 @@ describe.each([false, true])(
       expect(kernelCalls.every(([surface]) => surface === 'opentui')).toBe(
         true,
       );
-      // Both arms must log the opentui loop entry marker (legacy included).
-      expect(entrySpy).toHaveBeenCalledWith(expect.anything(), 'opentui');
       entrySpy.mockRestore();
     });
 

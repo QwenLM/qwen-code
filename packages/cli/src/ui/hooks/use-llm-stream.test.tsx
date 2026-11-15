@@ -25320,6 +25320,36 @@ describe('useLlmStream', () => {
     expect(event.turnCount).toBe(3);
   });
 
+  describe('legacy agent loop round (unified off)', () => {
+    it('still logs the ink loop entry marker on the legacy path', async () => {
+      // The marker is unconditional, one line above the sharedSource ternary;
+      // the legacy arm (the behaviour this slice adds) must log it too, so a
+      // move behind the unified switch is caught here rather than staying green.
+      Object.assign(mockConfig, {
+        isUnifiedAgentLoopEnabled: vi.fn(() => false),
+        isEventBusAgentLoopEnabled: vi.fn(() => false),
+      });
+      mockRunAgentLoop.mockClear();
+      const entrySpy = vi.spyOn(agentLoopRollout, 'logAgentLoopEntry');
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield { type: ServerLlmEventType.Content, value: 'Hello.' };
+        })(),
+      );
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery(
+          'Say hello.',
+          SendMessageType.UserQuery,
+          'prompt-legacy',
+        );
+      });
+      expect(entrySpy).toHaveBeenCalledWith(expect.anything(), 'ink');
+      expect(mockRunAgentLoop).not.toHaveBeenCalled();
+      entrySpy.mockRestore();
+    });
+  });
+
   describe.each([false, true])(
     'shared agent loop round (eventBusAgentLoop=%s)',
     (kernel) => {

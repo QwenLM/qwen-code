@@ -88,17 +88,6 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   };
 });
 
-const { mockSelectTuiRenderer } = vi.hoisted(() => ({
-  mockSelectTuiRenderer: vi.fn(() => ({
-    renderer: 'ink',
-    reason: 'test',
-    strict: false,
-  })),
-}));
-vi.mock('./opentui/renderer-selection.js', () => ({
-  selectTuiRenderer: mockSelectTuiRenderer,
-}));
-
 const { mockGetTuiRendererOfRecord } = vi.hoisted(() => ({
   mockGetTuiRendererOfRecord: vi.fn(
     (): 'ink' | 'opentui' | undefined => undefined,
@@ -608,35 +597,27 @@ describe('systemInfo', () => {
 
     it('reports the renderer of record for interactive mode', async () => {
       mockContext.executionMode = 'interactive';
-      mockSelectTuiRenderer.mockReturnValueOnce({
-        renderer: 'opentui',
-        reason: 'test',
-        strict: false,
-      });
+      mockGetTuiRendererOfRecord.mockReturnValue('opentui');
       const info = await getExtendedSystemInfo(mockContext);
       expect(info.agentLoop).toBe('opentui: legacy');
     });
 
-    it('falls back to ink when renderer selection throws', async () => {
+    it('omits the line when no renderer has been recorded', async () => {
+      // The entry records the renderer on both the OpenTUI success path and
+      // the ink fallback; with nothing recorded the line is omitted rather
+      // than re-deriving the selection gate.
       mockContext.executionMode = 'interactive';
-      mockSelectTuiRenderer.mockImplementationOnce(() => {
-        throw new Error('strict mode forbids the fallback');
-      });
+      mockGetTuiRendererOfRecord.mockReturnValue(undefined);
       const info = await getExtendedSystemInfo(mockContext);
-      expect(info.agentLoop).toBe('ink: legacy');
+      expect(info.agentLoop).toBeUndefined();
     });
 
     it('reports the mounted renderer after an OpenTUI-to-ink boot fallback', async () => {
-      // A requested OpenTUI failed to boot and ink is serving; the env still
-      // requests opentui and the per-surface switches differ, so re-deriving
-      // the gate would name the wrong renderer and the wrong loop.
+      // A requested OpenTUI failed to boot and ink is serving; the per-surface
+      // switches differ, so re-deriving the gate would name the wrong renderer
+      // and the wrong loop. The recorded renderer (ink) must win.
       mockContext.executionMode = 'interactive';
       mockGetTuiRendererOfRecord.mockReturnValue('ink');
-      mockSelectTuiRenderer.mockReturnValue({
-        renderer: 'opentui',
-        reason: 'test',
-        strict: false,
-      });
       (mockContext.services.config as unknown as Record<string, unknown>)[
         'getAgentLoopPath'
       ] = vi.fn((surface: string) => (surface === 'ink' ? 'legacy' : 'kernel'));

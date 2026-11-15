@@ -20,7 +20,6 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { AgentLoopSurface } from '@qwen-code/qwen-code-core/config/agent-loop-rollout.js';
 import { GIT_COMMIT_INFO } from '../generated/git-commit.js';
-import { selectTuiRenderer } from './opentui/renderer-selection.js';
 import { getTuiRendererOfRecord } from './tui-renderer-of-record.js';
 
 const debugLogger = createDebugLogger('STATUS');
@@ -289,24 +288,15 @@ function getAgentLoopInfo(context: SystemInfoContext): string | undefined {
       surface = 'acp';
       break;
     case 'interactive': {
-      // Prefer the renderer that actually mounted: a requested OpenTUI can
+      // Report the renderer that actually mounted: a requested OpenTUI can
       // fail to boot and fall back to ink without the environment changing,
       // and re-deriving the gate would then name the wrong renderer and loop.
+      // When nothing has been recorded, omit the line rather than re-deriving
+      // the gate (the entry records the renderer on both the OpenTUI success
+      // path and the ink fallback, so a serving session always has a record).
       const mounted = getTuiRendererOfRecord();
-      if (mounted) {
-        surface = mounted;
-      } else {
-        try {
-          surface = selectTuiRenderer(
-            undefined,
-            undefined,
-            process.env,
-            config.getScreenReader(),
-          ).renderer;
-        } catch {
-          surface = 'ink';
-        }
-      }
+      if (!mounted) return undefined;
+      surface = mounted;
       break;
     }
     default:

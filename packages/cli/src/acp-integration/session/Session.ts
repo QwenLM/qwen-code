@@ -3033,7 +3033,9 @@ export class Session implements SessionContext {
     // The loop diagnostic must report the path this session actually runs: a
     // live or Agent Host session keeps ACP's own tool step, so its model
     // rounds stay on the shared loop even with the event-bus switch on.
-    this.config.setAgentLoopKernelEligibilityProvider((surface) =>
+    // Optional-chained like the other Config members here so a partial mock
+    // config in a test does not throw before the test body runs.
+    this.config.setAgentLoopKernelEligibilityProvider?.((surface) =>
       surface === 'acp' ? this.#runsToolsOnSharedBatch() : undefined,
     );
     // Config releases the restore projection after this Session is created.

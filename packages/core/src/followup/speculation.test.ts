@@ -122,6 +122,27 @@ describe('startSpeculation', () => {
     expect(forkedAgentMocks.runForkedAgent).not.toHaveBeenCalled();
   });
 
+  it('does not log the entry marker when the speculation never starts', async () => {
+    // The marker must sit after the early returns: a sandboxed, cache-less or
+    // pre-aborted speculation never runs a round, so it must not log a path.
+    const entrySpy = vi.spyOn(agentLoopRollout, 'logAgentLoopEntry');
+    const sandboxed = {
+      getShellExecutionSandbox: () => ({}),
+    } as unknown as Config;
+    await expect(startSpeculation(sandboxed, 'write a.ts')).rejects.toThrow(
+      'unavailable with tools.executionSandbox',
+    );
+    const cacheless = {
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
+    } as unknown as Config;
+    forkedAgentMocks.getCacheSafeParams.mockReturnValueOnce(null);
+    await expect(startSpeculation(cacheless, 'read a.ts')).rejects.toThrow(
+      'CacheSafeParams not available for speculation',
+    );
+    expect(entrySpy).not.toHaveBeenCalled();
+    entrySpy.mockRestore();
+  });
+
   it('logs the speculation loop entry marker', async () => {
     const entrySpy = vi.spyOn(agentLoopRollout, 'logAgentLoopEntry');
     const toolRegistry = {
