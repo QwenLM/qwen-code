@@ -204,10 +204,18 @@ function runPickRunnerOutputs({
     .split('\n')
     .find((line) => line.startsWith('pr_test_runner='));
   assert.ok(prTest, 'pr_test_runner not published');
+  // R1-1 (#17231 review): the step must also log the inputs that decide
+  // the selection, so a silent fallback is distinguishable from an
+  // ordinary fork run in the log.
+  const inputsLine = result.stdout
+    .split('\n')
+    .find((line) => line.startsWith('Runner routing inputs: '));
+  assert.ok(inputsLine, `no routing-inputs line: ${result.stdout}`);
   return {
     ubuntuRunner,
     lintRunner,
     prTestRunner: prTest.slice('pr_test_runner='.length),
+    inputsLine,
   };
 }
 
@@ -655,6 +663,49 @@ describe('ci.yml pick_runner canonical-repo guard', () => {
 
   it('wires the repository name into pick_runner', () => {
     assert.equal(pickRunner.env.REPO_NAME, '${{ github.repository }}');
+  });
+
+  it('logs every routing input on one line, without reusing a parsed prefix', () => {
+    // R1-1 (#17231 review): the selection echoes alone cannot tell a
+    // silent fallback apart from an ordinary fork run. The inputs line
+    // must carry every input that decides the selection — including the
+    // dispatch input, which is the one the canonical-repo conjunction can
+    // drop — and must not reuse a prefix the harness parses, since the
+    // harness takes the FIRST line per prefix.
+    const out = runPickRunnerOutputs({
+      ecsDisabled: false,
+      sameRepo: false,
+      assoc: 'NONE',
+      eventName: 'workflow_dispatch',
+      dispatch: 'self-hosted',
+      fleet: 'arm64',
+      repoName: FORK,
+    });
+    for (const fragment of [
+      'REPO_NAME=alice/qwen-code',
+      'canonical_repo=false',
+      'SAME_REPO=false',
+      'trusted_author=false',
+      'EVENT_NAME=workflow_dispatch',
+      'ECS_DISABLED=',
+      'LINUX_RUNNER_FLEET=arm64',
+      'DISPATCH_LINUX_RUNNER=self-hosted',
+    ]) {
+      assert.ok(
+        out.inputsLine.includes(fragment),
+        `inputs line must carry ${fragment}: ${out.inputsLine}`,
+      );
+    }
+    for (const prefix of [
+      'Selected Linux runner: ',
+      'Selected lint runner: ',
+      'pr_test_runner=',
+    ]) {
+      assert.ok(
+        !out.inputsLine.startsWith(prefix),
+        `inputs line must not reuse the parsed prefix ${prefix}`,
+      );
+    }
   });
 });
 

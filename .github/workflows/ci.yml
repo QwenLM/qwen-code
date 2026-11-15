@@ -256,6 +256,14 @@ jobs:
           fi
           echo "ubuntu_runner=${ubuntu_runner}" >> "${GITHUB_OUTPUT}"
           echo "Selected Linux runner: ${ubuntu_runner}"
+          # R1-1 (#17231 review): the selected labels alone cannot tell a
+          # silent fallback apart from an ordinary fork run — a rename or
+          # transfer drops to ubuntu-latest, and a dispatch input the
+          # canonical-repo conjunction drops looks the same. Log the inputs
+          # that decide the selection next to the selection itself. The
+          # prefix is deliberately not one the routing harness parses (it
+          # takes the FIRST line per prefix).
+          echo "Runner routing inputs: REPO_NAME=${REPO_NAME} canonical_repo=${canonical_repo} SAME_REPO=${SAME_REPO} trusted_author=${trusted_author} EVENT_NAME=${EVENT_NAME} ECS_DISABLED=${ECS_DISABLED} LINUX_RUNNER_FLEET=${LINUX_RUNNER_FLEET} DISPATCH_LINUX_RUNNER=${DISPATCH_LINUX_RUNNER}"
           pr_test_runner="${ubuntu_runner}"
           lint_runner="${ubuntu_runner}"
           if [[ "${canonical_repo}" == "true" && "${ECS_DISABLED}" != "true" && "${LINUX_RUNNER_FLEET}" != "hosted" && "${EVENT_NAME}" == "pull_request" && "${SAME_REPO}" == "false" && "${trusted_author}" == "false" ]]; then
