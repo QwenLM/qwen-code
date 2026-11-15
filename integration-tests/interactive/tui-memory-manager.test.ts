@@ -186,9 +186,10 @@ async function fixture(
     runtime = path.join(output, 'runtime'),
     tmp = path.join(output, 'tmp');
   const workspace = path.join(output, 'workspace'),
-    bin = path.join(output, 'bin'),
+    esm = path.join(output, 'esm'),
+    bin = path.join(esm, 'bin'),
     memoryBase = path.join(output, 'memory-base');
-  for (const dir of [home, runtime, tmp, workspace, bin, memoryBase])
+  for (const dir of [home, runtime, tmp, workspace, esm, bin, memoryBase])
     fs.mkdirSync(dir);
   fs.mkdirSync(path.join(workspace, '.qwen'));
   const save = (name: string, value: unknown) =>
@@ -274,6 +275,11 @@ async function fixture(
     path.join(projectMemory, AUTO_MEMORY_INDEX_FILENAME),
   ];
   const externalScript = `#!${process.execPath}\nconst fs=require('node:fs'),path=require('node:path');const kind=path.basename(process.argv[1]);const args=process.argv.slice(2);fs.appendFileSync(process.env.QWEN_OWNED_MEMORY_EXEC_LOG,JSON.stringify({kind,argv:args,cwd:process.cwd(),pid:process.pid,ppid:process.ppid})+'\\n');if(args.length!==1||!JSON.parse(process.env.QWEN_OWNED_MEMORY_ALLOWED_TARGETS).includes(args[0]))process.exit(91);if(kind==='vim'){if(process.env.QWEN_OWNED_MEMORY_EDITOR_FAILURE==='1')process.exit(7);fs.appendFileSync(args[0],${JSON.stringify(editMarker)});}process.exit(0);\n`;
+  // The extensionless fixture scripts are CommonJS. Keep an ESM-scoped ancestor
+  // in every lane so a missing module marker fails here, not only in the release
+  // lane where the fixture lands under the repo's "type": "module" root.
+  writeJSON(path.join(esm, 'package.json'), { type: 'module' });
+  writeJSON(path.join(bin, 'package.json'), { type: 'commonjs' });
   for (const name of ['vim', 'open', 'xdg-open'])
     fs.writeFileSync(path.join(bin, name), externalScript, { mode: 0o700 });
   const events = (): ExecEvent[] =>
