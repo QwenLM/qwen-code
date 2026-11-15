@@ -7438,11 +7438,34 @@ describe('Server Config (config.ts)', () => {
       });
       afterEach(() => vi.unstubAllEnvs());
 
-      it('defaults to off for every surface', () => {
+      it('defaults to on for headless and the Ink TUI and off for every other surface', () => {
         for (const surface of AGENT_LOOP_SURFACES) {
-          expect(makeConfig().isUnifiedAgentLoopEnabled(surface)).toBe(false);
+          expect(makeConfig().isUnifiedAgentLoopEnabled(surface)).toBe(
+            surface === 'headless' || surface === 'ink',
+          );
         }
       });
+
+      it.each(['headless', 'ink'] as const)(
+        'keeps %s on its own loop when the setting is false',
+        (surface) => {
+          expect(
+            makeConfig({
+              unifiedAgentLoopEnabled: false,
+            }).isUnifiedAgentLoopEnabled(surface),
+          ).toBe(false);
+        },
+      );
+
+      it.each(['headless', 'ink'] as const)(
+        'keeps %s on its own loop when the environment turns it off',
+        (surface) => {
+          vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', `${surface}=0`);
+          expect(makeConfig().isUnifiedAgentLoopEnabled(surface)).toBe(false);
+          vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', '0');
+          expect(makeConfig().isUnifiedAgentLoopEnabled(surface)).toBe(false);
+        },
+      );
 
       it('honors the constructor parameter', () => {
         expect(
@@ -7480,7 +7503,9 @@ describe('Server Config (config.ts)', () => {
         const config = makeConfig();
         expect(config.isUnifiedAgentLoopEnabled('acp')).toBe(true);
         expect(config.isUnifiedAgentLoopEnabled('ink')).toBe(false);
-        expect(config.isUnifiedAgentLoopEnabled('headless')).toBe(false);
+        // An unnamed surface falls back to its default, on for headless.
+        expect(config.isUnifiedAgentLoopEnabled('headless')).toBe(true);
+        expect(config.isUnifiedAgentLoopEnabled('opentui')).toBe(false);
       });
 
       it('resolves each surface independently', () => {
@@ -7511,22 +7536,22 @@ describe('Server Config (config.ts)', () => {
         // table is flipped — re-merging the two tables reds this case.
         vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
         vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
-        UNIFIED_SURFACE_DEFAULTS.headless = true;
+        UNIFIED_SURFACE_DEFAULTS.opentui = true;
         const config = makeConfig();
-        expect(config.isUnifiedAgentLoopEnabled('headless')).toBe(true);
-        expect(config.isEventBusAgentLoopEnabled('headless')).toBe(
-          savedEventBus.headless,
+        expect(config.isUnifiedAgentLoopEnabled('opentui')).toBe(true);
+        expect(config.isEventBusAgentLoopEnabled('opentui')).toBe(
+          savedEventBus.opentui,
         );
       });
 
       it('flipping an event-bus surface default does not flip the unified default', () => {
         vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', undefined);
         vi.stubEnv('QWEN_CODE_ENABLE_EVENT_BUS_AGENT_LOOP', undefined);
-        EVENT_BUS_SURFACE_DEFAULTS.headless = true;
+        EVENT_BUS_SURFACE_DEFAULTS.opentui = true;
         const config = makeConfig();
-        expect(config.isEventBusAgentLoopEnabled('headless')).toBe(true);
-        expect(config.isUnifiedAgentLoopEnabled('headless')).toBe(
-          savedUnified.headless,
+        expect(config.isEventBusAgentLoopEnabled('opentui')).toBe(true);
+        expect(config.isUnifiedAgentLoopEnabled('opentui')).toBe(
+          savedUnified.opentui,
         );
       });
     });
@@ -7538,9 +7563,11 @@ describe('Server Config (config.ts)', () => {
       });
       afterEach(() => vi.unstubAllEnvs());
 
-      it('defaults to legacy for every surface', () => {
+      it('defaults to shared for headless and the Ink TUI and legacy for every other surface', () => {
         for (const surface of AGENT_LOOP_SURFACES) {
-          expect(makeConfig().getAgentLoopPath(surface)).toBe('legacy');
+          expect(makeConfig().getAgentLoopPath(surface)).toBe(
+            surface === 'headless' || surface === 'ink' ? 'shared' : 'legacy',
+          );
         }
       });
 
