@@ -56,6 +56,14 @@ export interface SkillConfig {
   allowedTools?: string[];
 
   /**
+   * Optional list of MCP server names this skill depends on. Checked at
+   * activation: servers missing from the registered MCP config are named
+   * in the activation output with how to add them, so a missing dependency
+   * surfaces before the first tool call fails (#17317).
+   */
+  mcpServers?: string[];
+
+  /**
    * Hooks to register when this skill is invoked.
    * Hooks are registered as session-scoped hooks that persist
    * for the duration of the session.

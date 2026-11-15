@@ -757,6 +757,19 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     return { llmContent: msg, returnDisplay: msg };
   }
 
+  /**
+   * Names from the skill's `mcp` frontmatter missing from the registered
+   * MCP config; undefined when the skill declares none or all are present.
+   */
+  private findMissingMcpServers(skill: SkillConfig): string[] | undefined {
+    if (!skill.mcpServers || skill.mcpServers.length === 0) return undefined;
+    const registered = new Set(
+      Object.keys(this.config.getMcpServers?.() ?? {}),
+    );
+    const missing = skill.mcpServers.filter((name) => !registered.has(name));
+    return missing.length > 0 ? missing : undefined;
+  }
+
   async execute(
     _signal?: AbortSignal,
     _updateOutput?: (output: ToolResultDisplay) => void,
@@ -926,6 +939,20 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         activationWarning = ` Warning: review workflow activation failed (${error.message}); workflow dispatch may be unavailable.`;
       }
 
+      // MCP dependency check (#17317): a skill can declare the MCP servers
+      // it needs; surface missing ones in the activation output (before the
+      // first tool call fails with an opaque "tool not found") with how to
+      // add them. Presence check only — installing servers stays a user
+      // action.
+      const missingMcpServers = this.findMissingMcpServers(skill);
+      if (missingMcpServers) {
+        activationWarning +=
+          ` Warning: this skill declares MCP dependencies that are not configured: ` +
+          `${missingMcpServers.join(', ')}. Add them to settings.json ` +
+          `"mcpServers" (or the equivalent managed config) and restart, or ` +
+          `skill tool calls that need them will fail.`;
+      }
+
       // Prevent re-invoking an already-loaded skill from appending
       // duplicate instructions to context. The first invocation
       // returns the full skill body; subsequent invocations return a
@@ -953,7 +980,13 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       });
 
       return {
-        llmContent: [{ text: llmContent }],
+        llmContent: [
+          {
+            text: activationWarning
+              ? `${llmContent}\n${activationWarning.trim()}`
+              : llmContent,
+          },
+        ],
         returnDisplay: skill.description,
         modelOverride: skill.model,
       };

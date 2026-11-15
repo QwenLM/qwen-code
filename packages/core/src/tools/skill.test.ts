@@ -258,6 +258,45 @@ describe('SkillTool', () => {
   };
   const setDisabled = (...names: string[]) =>
     vi.mocked(config.getDisabledSkillNames).mockReturnValue(new Set(names));
+
+  const mcpSkill = (name: string, mcpServers: string[]): SkillConfig => ({
+    name,
+    description: 'Skill with MCP dependencies',
+    level: 'project',
+    filePath: `/project/.qwen/skills/${name}/SKILL.md`,
+    body: 'Body.',
+    mcpServers,
+  });
+
+  /** Config whose getMcpServers reports the given registered server names. */
+  const setMcpServers = (...names: string[]) => {
+    const servers: Record<string, unknown> = {};
+    for (const n of names) servers[n] = {};
+    (
+      config as unknown as { getMcpServers: ReturnType<typeof vi.fn> }
+    ).getMcpServers = vi.fn().mockReturnValue(servers);
+  };
+
+  it('names unconfigured MCP dependencies in the activation warning (#17317)', async () => {
+    const skill = mcpSkill('mcp-needy', ['github', 'missing-server']);
+    setSkills([skill]);
+    loads(skill);
+    setMcpServers('github');
+
+    const text = await execText('mcp-needy');
+    expect(text).toContain('missing-server');
+    expect(text).toContain('MCP dependencies that are not configured');
+  });
+
+  it('adds no MCP warning when all declared servers are registered (#17317)', async () => {
+    const skill = mcpSkill('mcp-satisfied', ['github']);
+    setSkills([skill]);
+    loads(skill);
+    setMcpServers('github');
+
+    const text = await execText('mcp-satisfied');
+    expect(text).not.toContain('MCP dependencies');
+  });
   const setCommands = (
     commands: Array<{ name: string; description: string }>,
   ) =>
