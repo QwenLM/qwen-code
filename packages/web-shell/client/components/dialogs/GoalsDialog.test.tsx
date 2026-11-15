@@ -1389,6 +1389,29 @@ describe('GoalsDialog multi-workspace', () => {
     expect(onCreateGoal).toHaveBeenCalledWith('ship it', '/w-secondary');
   });
 
+  it('refuses the submit with a visible error when no workspace is creatable', async () => {
+    // Every registered workspace is untrusted: the form must not submit
+    // undefined into the App's silent no-target path — the user gets the
+    // declared refusal instead of a dead button. Removing the guard reds
+    // this case (onCreateGoal would be called with undefined).
+    const onCreateGoal = vi.fn().mockResolvedValue(undefined);
+    await mount([], {
+      workspaces: [{ ...primaryWs, trusted: false }, untrustedWs],
+      onCreateGoal,
+      listGoalsByWorkspace: {},
+    });
+
+    click(findButton('New goal'));
+    setTextarea('ship it');
+    click(findButton('Set goal'));
+    await flush();
+
+    expect(onCreateGoal).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'unavailable or untrusted',
+    );
+  });
+
   it('reconciles a vanished selection with the creatable set for control and submit', async () => {
     // A capabilities refresh can drop the selected workspace while the form
     // stays open. Both the rendered select and the submitted cwd must fall

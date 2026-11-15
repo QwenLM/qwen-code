@@ -140,10 +140,12 @@ ordinaryWorkspaces`，以及 `lockedWorkspaceCapability`）。
   项）；App 通过 `defaultWorkspaceCwd` prop 提供该默认值。提交目标是
   `effectiveFormWorkspaceCwd`：选择仍可创建时用选择，否则用默认——
   capabilities 刷新移除或撤销所选 workspace 的信任时，渲染的 `<select>`
-  与提交一并回退，而不是留一个空白控件却仍提交已消失的 cwd。选择器与徽章
-  标签经 `disambiguateWorkspaceLabels` 消歧，两个同 basename 的 checkout
-  在原生 `<select>`（无法承载 tooltip）里仍可区分。编辑表单无选择器——
-  Goal 的会话已确定其 workspace。
+  与提交一并回退（否则控件会落到第一项、提交却仍是已消失的 cwd）。
+  完全没有可创建 workspace 时，提交显示已翻译的
+  `goals.error.workspaceUnavailable` 拒绝提示，而不是静默无操作。选择器
+  与徽章标签经 `disambiguateWorkspaceLabels` 消歧，两个同 basename 的
+  checkout 在原生 `<select>`（无法承载 tooltip）里仍可区分。编辑表单无
+  选择器——Goal 的会话已确定其 workspace。
 - `onCreateGoal` 变为 `(condition: string, workspaceCwd?: string)`。
   `onOpenSession` 变为 `(sessionId: string, workspaceCwd?: string)`，App
   在 Goal 自己的 workspace 里加载会话，与 scheduled-tasks 页完全一致。

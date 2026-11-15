@@ -168,8 +168,9 @@ export function GoalsDialog({
   }, [defaultWorkspaceCwd, creatableWorkspaces]);
   // A capabilities refresh can drop the selected workspace (removal or trust
   // revocation) while the form stays open. Reconcile the selection with the
-  // creatable set for BOTH the control and the submit, so the select never
-  // renders blank on a cwd the submit would still send.
+  // creatable set for BOTH the control and the submit: otherwise the control
+  // falls back to its first option while the submit still sends the vanished
+  // cwd.
   const effectiveFormWorkspaceCwd = creatableWorkspaces.some(
     (ws) => ws.cwd === formWorkspaceCwd,
   )
@@ -371,6 +372,13 @@ export function GoalsDialog({
           }),
         );
       } else {
+        // Every registered workspace is untrusted or remote: there is no
+        // target the create path would accept. Surface the refusal instead
+        // of submitting undefined into a silent no-op.
+        if (isMultiWorkspace && !effectiveFormWorkspaceCwd) {
+          setFormError(t('goals.error.workspaceUnavailable'));
+          return;
+        }
         const created = await onCreateGoal(
           trimmed,
           isMultiWorkspace ? effectiveFormWorkspaceCwd : undefined,

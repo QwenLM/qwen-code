@@ -838,6 +838,69 @@ describe('GET /workspaces/:workspace/goals', () => {
     expect(res.body.code).toBe('daemon_draining');
   });
 
+  it('makes a drain wait for an in-flight live-conversation listing', async () => {
+    // The sealed-before case proves refusal; this one proves the drain
+    // actually COUNTS the listing: sealAndWait() must stay pending while a
+    // probe is in flight, then the listing completes with a full page.
+    // Without the gate.run() wrap the seal resolves immediately (active 0)
+    // and this case reds.
+    const gate = new ConversationRuntimeActivityGate();
+    let inFlight = false;
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const app = makeQualifiedApp(
+      [
+        {
+          workspaceId: 'id-primary',
+          workspaceCwd: WORKSPACE,
+          trusted: true,
+          bridge: primaryBridge(),
+        },
+        {
+          workspaceId: 'id-conversations',
+          workspaceCwd: '/w-conversations',
+          trusted: true,
+          provenance: 'live-conversation',
+          bridge: {
+            listWorkspaceSessions: () => [
+              summary('live-1', { workspaceCwd: '/w-conversations' }),
+            ],
+            getSessionGoal: async () => {
+              inFlight = true;
+              await blocked;
+              return activeGoal('conversation goal');
+            },
+          },
+        },
+      ],
+      { conversationRuntimeActivity: gate },
+    );
+
+    // supertest is a thenable: attach immediately so the request fires.
+    const listing = request(app)
+      .get(qualified('id-conversations'))
+      .then((res) => res);
+    await vi.waitFor(() => expect(inFlight).toBe(true));
+
+    let sealed = false;
+    const drain = gate.sealAndWait().then(() => {
+      sealed = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(sealed).toBe(false);
+
+    release();
+    const res = await listing;
+    await drain;
+
+    expect(res.status).toBe(200);
+    expect(res.body.goals).toHaveLength(1);
+    expect(res.body.goals[0].condition).toBe('conversation goal');
+    expect(res.body.droppedCount).toBe(0);
+  });
+
   it('answers 503 conversation_runtime_unavailable for a live-conversation listing without a gate', async () => {
     // Mirrors the qualified scheduled-tasks surface: an active Conversations
     // runtime cannot be listed when the daemon wired no activity gate.

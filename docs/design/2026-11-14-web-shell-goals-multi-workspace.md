@@ -161,8 +161,11 @@ ordinaryWorkspaces`, and `lockedWorkspaceCapability`).
   prop. The submitted target is `effectiveFormWorkspaceCwd`: the selection
   when it is still creatable, else the default — a capabilities refresh
   that removes or untrusts the selected workspace reconciles both the
-  rendered `<select>` and the submit instead of leaving a blank control
-  that still sends the vanished cwd. Picker and badge labels go through
+  rendered `<select>` and the submit (without it, the control falls back
+  to its first option while the submit still sends the vanished cwd).
+  When no workspace is creatable at all, the submit surfaces the
+  translated `goals.error.workspaceUnavailable` refusal instead of a
+  silent no-op. Picker and badge labels go through
   `disambiguateWorkspaceLabels` so two checkouts sharing a basename stay
   distinguishable in a native `<select>` (which cannot carry tooltips).
   Edit form: no picker — the goal's session already owns its workspace.

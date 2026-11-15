@@ -298,7 +298,7 @@ test('both surfaces agree on the primary goal even if the map carries a primary 
   await expect(primaryCard.getByText('Paused', { exact: true })).toBeVisible();
 });
 
-test('a retry after a failed creation targets the newly picked workspace', async ({
+test('a retry after a failed creation targets the newly picked workspace @smoke', async ({
   page,
   baseURL,
 }) => {
@@ -380,7 +380,7 @@ test('a retry after a failed creation targets the newly picked workspace', async
   ).not.toContain('stranded retry goal');
 });
 
-test('a stale picker selection reconciles to the default workspace', async ({
+test('a stale picker selection reconciles to the default workspace @smoke', async ({
   page,
   baseURL,
 }) => {
