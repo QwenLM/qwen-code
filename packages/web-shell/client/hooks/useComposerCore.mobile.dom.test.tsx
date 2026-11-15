@@ -314,6 +314,47 @@ describe('useComposerCore mobile textarea backend', () => {
     });
   });
 
+  it('keeps a quote chip through a mobile draft remount', async () => {
+    mockTouchDevice();
+    const tag = {
+      id: 'quote:7a1e2b3c-1',
+      kind: 'quote' as const,
+      value: 'quoted fragment',
+      serialized: '<quoted-message>quoted fragment</quoted-message>',
+    };
+    await mount({ sessionId: 'session-a', persistFileReferences: true });
+    typeText('explain this');
+    // The textarea backend has no inline chips, so the quote rides as a
+    // top tag — the same shape the CodeMirror path's serialized draft
+    // carries.
+    act(() => latest!.addTags([tag], { placement: 'top' }));
+    act(() => window.dispatchEvent(new Event('pagehide')));
+    act(() => root!.unmount());
+    root = null;
+    container?.remove();
+    container = null;
+    const { onSubmit } = await mount({
+      sessionId: 'session-a',
+      persistFileReferences: true,
+    });
+    // The stored tag round-trips byte-identically: the restored chip must
+    // serialize to the same fence the annotation pins into the prompt.
+    expect(latest!.composerTags).toEqual([tag]);
+    act(() => latest!.submitText());
+    expect(onSubmit.mock.calls[0]?.[4]).toMatchObject({
+      inputAnnotations: [
+        expect.objectContaining({
+          text: tag.serialized,
+          reference: expect.objectContaining({
+            id: tag.id,
+            kind: 'quote',
+            value: tag.value,
+          }),
+        }),
+      ],
+    });
+  });
+
   it('keeps restored inline snapshots when mobile adds another top file', async () => {
     mockTouchDevice();
     const inline = {

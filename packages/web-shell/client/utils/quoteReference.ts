@@ -93,7 +93,11 @@ function hashQuoteText(text: string): string {
   return (hash >>> 0).toString(16).padStart(8, '0');
 }
 
-let quoteSequence = 0;
+// A random per-page-load base keeps ids unique across reloads: a restored
+// chip keeps the id of the load that created it, and the × handler deletes
+// every range carrying that id, so a fresh chip must never collide with a
+// restored one.
+let quoteSequence = Math.floor(Math.random() * 0x7fffffff);
 
 /**
  * Builds the composer tag for a quoted message fragment, or `null` when

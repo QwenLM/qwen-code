@@ -8,6 +8,10 @@
 import * as messageDeletion from '../utils/message-deletion';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, forwardRef, useContext, useImperativeHandle } from 'react';
+import {
+  AskInSideTaskContext,
+  type AskInSideTaskAction,
+} from './messages/askInSideTaskContext';
 import { QuoteToComposerContext } from './messages/quoteToComposerContext';
 import { createRoot, type Root } from 'react-dom/client';
 import { DAEMON_APPROVAL_MODES } from '../test/sidebarHarness';
@@ -75,6 +79,7 @@ const insertQuote = vi.fn(
   (_tag: { kind?: string; serialized?: string }) => true,
 );
 let latestPaneQuoteToComposer: ((text: string) => void) | null | undefined;
+let latestPaneAskInSideTask: AskInSideTaskAction | null | undefined;
 const transcriptDispatch = vi.fn();
 const appendLocalUserMessage = vi.fn();
 const sendPrompt = vi.fn(async () => ({}) as any);
@@ -239,6 +244,7 @@ vi.mock('../monitorDetailsContext', async () => {
 vi.mock('./TranscriptViewport', () => ({
   TranscriptViewport: function MockTranscriptViewport(props: any) {
     latestPaneQuoteToComposer = useContext(QuoteToComposerContext);
+    latestPaneAskInSideTask = useContext(AskInSideTaskContext);
     return (
       <div
         data-testid="pane-messages"
@@ -541,6 +547,7 @@ beforeEach(() => {
   insertText.mockClear();
   insertQuote.mockClear();
   latestPaneQuoteToComposer = undefined;
+  latestPaneAskInSideTask = undefined;
   submitPermission.mockClear();
   respondToPermission.mockClear();
   cancel.mockClear();
@@ -1890,6 +1897,28 @@ describe('ChatPane', () => {
       serialized: '<quoted-message>quoted text</quoted-message>',
     });
     expect(mainQuote).not.toHaveBeenCalled();
+  });
+
+  it('offers no Ask-in-side-task action inherited from an outer chat', () => {
+    const mainAsk: AskInSideTaskAction = vi.fn();
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() =>
+      root!.render(
+        <AskInSideTaskContext.Provider value={mainAsk}>
+          <WebShellCustomizationProvider value={EMPTY_CUSTOMIZATION}>
+            <I18nProvider language="en">
+              <ChatPane />
+            </I18nProvider>
+          </WebShellCustomizationProvider>
+        </AskInSideTaskContext.Provider>,
+      ),
+    );
+    // The pane publishes null over the context, so its transcript never
+    // sees the outer (main session's) creator.
+    expect(latestPaneAskInSideTask).toBeNull();
+    expect(mainAsk).not.toHaveBeenCalled();
   });
 
   it('offers no Quote action while an approval owns the pane composer', () => {

@@ -92,6 +92,19 @@ describe('buildQuoteReferenceTag', () => {
     const b = buildQuoteReferenceTag('fragment b');
     expect(a?.id).not.toBe(b?.id);
   });
+
+  it('never collides with a restored chip after a simulated page reload', async () => {
+    const restored = buildQuoteReferenceTag('same text');
+    vi.resetModules();
+    const { buildQuoteReferenceTag: freshBuild } = await import(
+      './quoteReference'
+    );
+    const fresh = freshBuild('same text');
+    // The × handler deletes every range carrying the id, so a chip built in
+    // a new load must never reuse the id a restored chip kept from the
+    // previous one.
+    expect(fresh?.id).not.toBe(restored?.id);
+  });
 });
 
 describe('insertQuoteIntoComposer', () => {

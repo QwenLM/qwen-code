@@ -23245,9 +23245,6 @@ export function App({
       {/* prettier-ignore */}
       <BrandProvider value={resolvedBrand}>
       <I18nProvider language={selectedLanguage}>
-        <AskInSideTaskContext.Provider
-          value={sideTasksAvailable ? askInSideTaskFromSelection : null}
-        >
         <McpAppMessagesContext.Provider value={mcpAppMessages.context}>
         <McpAppModelContextContext.Provider value={mcpAppModelContext}>
         <McpAppHostContext.Provider value={workspace.baseUrl}>
@@ -25340,6 +25337,12 @@ export function App({
                 >
                   <WebShellCustomizationProvider value={mainChatCustomization}>
                     <McpAppVisibilityContext.Provider value={chatActive && !showMissingSessionState}>
+                      {/* The Ask action is scoped to the main chat surface:
+                          panes publish null over this context, and surfaces
+                          outside the chat subtree see no creator at all. */}
+                      <AskInSideTaskContext.Provider
+                        value={sideTasksAvailable ? askInSideTaskFromSelection : null}
+                      >
                       <QuoteToComposerContext.Provider
                         value={
                           approvalOverlayActive ||
@@ -26504,6 +26507,7 @@ export function App({
                         )}
                       </div>
                       </QuoteToComposerContext.Provider>
+                      </AskInSideTaskContext.Provider>
                     </McpAppVisibilityContext.Provider>
                   </WebShellCustomizationProvider>
                 </div>
@@ -26787,7 +26791,6 @@ export function App({
         </McpAppHostContext.Provider>
         </McpAppModelContextContext.Provider>
         </McpAppMessagesContext.Provider>
-        </AskInSideTaskContext.Provider>
       </I18nProvider>
       </BrandProvider>
     </ThemeProvider>

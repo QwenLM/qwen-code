@@ -2607,7 +2607,11 @@ export function useComposerCore(
       inlineTags: placements.filter(
         ({ tag }) => tag.kind === 'file' || tag.kind === 'quote',
       ),
-      tags: composerTagsRef.current.filter((tag) => tag.kind === 'file'),
+      // The textarea backend has no inline chips, so a quote chip lives only
+      // as a top tag and must ride this list to survive a reload.
+      tags: composerTagsRef.current.filter(
+        (tag) => tag.kind === 'file' || tag.kind === 'quote',
+      ),
     };
   }
   const referenceEffects = useCallback(
