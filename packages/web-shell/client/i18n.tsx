@@ -704,6 +704,7 @@ const EN: Messages = {
   'gitCommit.filesSelected': (v) =>
     `Files to commit (${v?.selected ?? 0}/${v?.total ?? 0})`,
   'gitCommit.noFilesSelected': 'Select at least one file to commit',
+  'gitCommit.listCapped': 'The list is truncated — committing every change',
   'gitCommit.fileAdded': 'Added',
   'gitCommit.fileDeleted': 'Deleted',
   'gitCommit.fileRenamed': 'Renamed',
@@ -5889,6 +5890,7 @@ const ZH: Messages = {
   'gitCommit.filesSelected': (v) =>
     `要提交的文件（${v?.selected ?? 0}/${v?.total ?? 0}）`,
   'gitCommit.noFilesSelected': '请至少选择一个文件',
+  'gitCommit.listCapped': '列表已截断——将提交全部变更',
   'gitCommit.fileAdded': '已新增',
   'gitCommit.fileDeleted': '已删除',
   'gitCommit.fileRenamed': '已重命名',

@@ -64,6 +64,11 @@
   color: var(--muted-foreground, #666);
 }
 
+.commitFilesCapped {
+  margin-left: 8px;
+  color: var(--destructive-foreground, #b45309);
+}
+
 .commitFileList {
   display: flex;
   flex-direction: column;

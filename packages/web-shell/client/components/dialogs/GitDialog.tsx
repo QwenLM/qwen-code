@@ -190,19 +190,28 @@ export function GitDialog({
       setCommitFiles(files);
       const firstLoad = commitFilesRef.current === null;
       commitFilesRef.current = files;
+      // The record of paths already shown accumulates: a refresh that comes
+      // back empty (a merge or index lock in progress) must not erase it, or
+      // the next complete listing would treat every cleared row as new and
+      // re-select what the user just excluded. The write sits outside the
+      // `setSelectedPaths` updater so a StrictMode double-invoke cannot
+      // replay it against an already-mutated set.
+      const seen = loadedPathsRef.current;
+      loadedPathsRef.current = new Set([
+        ...seen,
+        ...files.map((file) => file.path),
+      ]);
       setSelectedPaths((prev) => {
         // `prev.size === 0` cannot stand in for "first load": unchecking every
         // row is a deliberate state, and the next refresh must not re-add them.
         // Once loaded, keep what is still selected and preselect only paths
         // that appear for the first time.
-        const seen = loadedPathsRef.current;
         const next = new Set<string>();
         for (const file of files) {
           if (firstLoad || prev.has(file.path) || !seen.has(file.path)) {
             next.add(file.path);
           }
         }
-        loadedPathsRef.current = new Set(files.map((file) => file.path));
         return next;
       });
       // A rename's old path has to be forwarded or the commit stages only the
@@ -411,8 +420,12 @@ export function GitDialog({
       // list: the rows it dropped would silently stay uncommitted, and an
       // empty list is indistinguishable from "nothing selected". In that case
       // commit everything — `all` and `paths` are mutually exclusive, so the
-      // request carries `all` alone.
-      const commitAll = !commitListComplete;
+      // request carries `all` alone. A listing that never loaded counts too:
+      // `commitListComplete` starts `true`, so without this the Commit click
+      // would die on the "select at least one file" guard while no checklist
+      // is rendered at all. The ref reads the same never-loaded state without
+      // putting the files array in this callback's dependencies.
+      const commitAll = commitFilesRef.current === null || !commitListComplete;
       if (!commitAll && paths.length === 0) {
         setCommitStatus({
           msg: t('gitCommit.noFilesSelected'),
@@ -850,6 +863,11 @@ export function GitDialog({
                     ).length,
                     total: commitFiles.length,
                   })}
+                  {!commitListComplete && (
+                    <span className={styles.commitFilesCapped}>
+                      {t('gitCommit.listCapped')}
+                    </span>
+                  )}
                 </legend>
                 <div className={styles.commitFileList}>
                   {commitFiles.map((file) => (
@@ -857,6 +875,7 @@ export function GitDialog({
                       <input
                         type="checkbox"
                         checked={selectedPaths.has(file.path)}
+                        disabled={!commitListComplete}
                         onChange={() => toggleCommitPath(file.path)}
                       />
                       <span

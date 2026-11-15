@@ -1015,17 +1015,22 @@ describe('gitCommit', () => {
     },
   );
 
-  it('names an emptied selection instead of forwarding git did not match', async () => {
+  it('names a rename reached through a directory-prefix selection', async () => {
     const dir = makeRepo();
     commitFile(dir, 'dir/a.txt', 'one\n', 'add a');
-    // Status reports the pair against `dir`; the rename filter drops both
-    // halves because neither equals the selected path, so the resolver hands
-    // staging an empty selection.
+    // Status reports the pair against `dir`; the prefix reaches both halves,
+    // and a rename only exists when its two halves are recorded in one
+    // commit — so the resolver names the pair instead of dropping it (which
+    // would read as "nothing selected" while git itself would forward a raw
+    // "did not match" for the selection).
     git(dir, 'mv', 'dir/a.txt', 'dir/b.txt');
 
-    await expect(
-      gitCommit(dir, 'commit dir', { paths: ['dir'] }),
-    ).rejects.toThrow('cannot commit: none of the selected paths have changes');
+    await gitCommit(dir, 'commit dir', { paths: ['dir'] });
+
+    expect(git(dir, 'status', '--porcelain').trim()).toBe('');
+    expect(
+      git(dir, 'show', '--name-status', '-M', '--format=', 'HEAD').trim(),
+    ).toBe('R100\tdir/a.txt\tdir/b.txt');
   });
 
   it('rejects a selection that escapes the repository', async () => {
@@ -1139,6 +1144,170 @@ describe('gitCommit', () => {
       'R  old.txt -> new.txt\n?? old.txt',
     );
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses when a dangling symlink sits at a rename pre-image',
+    async () => {
+      // `existsSync` follows the dead link and would read "nothing there", then
+      // name the link into the commit in place of the tracked source file.
+      const dir = makeRepo();
+      commitFile(dir, 'old.txt', 'content\n', 'add old');
+      git(dir, 'mv', 'old.txt', 'new.txt');
+      fs.symlinkSync(
+        path.join(dir, 'no-such-target.bin'),
+        path.join(dir, 'old.txt'),
+      );
+
+      await expect(
+        gitCommit(dir, 'rename file', { paths: ['new.txt'] }),
+      ).rejects.toThrow(/a file now sits at the old path/);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32' || process.platform === 'darwin')(
+    'commits a case-only rename without reading the post-image as a squatter',
+    async () => {
+      // A case-folding filesystem resolves the old spelling to the new file;
+      // the guard must not refuse it, and the pre-image must still be named
+      // so the deletion lands instead of staying staged. (On a folding
+      // filesystem git itself refuses any pathspec-scoped commit of a
+      // case-only rename with a "file alias" error, so the resolution
+      // assertion only holds where the index spelling is exact.)
+      const dir = makeRepo();
+      commitFile(dir, 'Foo.tsx', 'component\n', 'add component');
+      git(dir, 'mv', 'Foo.tsx', 'foo.tsx');
+
+      await gitCommit(dir, 'rename component', { paths: ['foo.tsx'] });
+
+      expect(git(dir, 'status', '--porcelain').trim()).toBe('');
+      expect(
+        git(dir, 'show', '--name-status', '-M', '--format=', 'HEAD').trim(),
+      ).toBe('R100\tFoo.tsx\tfoo.tsx');
+    },
+  );
+
+  it('records both halves when the status pair is selected through both rows', async () => {
+    // A staged rename whose post-image was rewritten past git's rename
+    // threshold: the checklist lists two independent rows and the user ticks
+    // both, but only the status pair still carries the pre-image.
+    const dir = makeRepo();
+    commitFile(dir, 'old.txt', 'original body\n', 'add old');
+    git(dir, 'mv', 'old.txt', 'new.txt');
+    write(dir, { 'new.txt': 'a wholly different body of text\n' });
+
+    await gitCommit(dir, 'rename and rewrite', {
+      paths: ['old.txt', 'new.txt'],
+    });
+
+    expect(git(dir, 'status', '--porcelain').trim()).toBe('');
+    expect(git(dir, 'show', '--name-status', '--format=', 'HEAD')).toMatch(
+      /old\.txt/,
+    );
+    expect(git(dir, 'show', '--name-only', '--format=', 'HEAD')).toContain(
+      'new.txt',
+    );
+  });
+
+  it('pairs a rename the checklist renders as one row from either half', async () => {
+    // Default config detects renames in `git diff HEAD`, so the resolver's
+    // un-forced pairing view still pairs the halves without an explicit -M.
+    const dir = makeRepo();
+    commitFile(dir, 'old.txt', 'content\n', 'add old');
+    git(dir, 'mv', 'old.txt', 'new.txt');
+
+    await gitCommit(dir, 'rename file', { paths: ['new.txt'] });
+
+    expect(git(dir, 'status', '--porcelain').trim()).toBe('');
+    expect(
+      git(dir, 'show', '--name-status', '-M', '--format=', 'HEAD').trim(),
+    ).toBe('R100\told.txt\tnew.txt');
+  });
+
+  it('keeps diff.renames=false rows independent', async () => {
+    // The checklist renders `D old.txt` and `A new.txt` as two rows; clearing
+    // the deletion row must leave that deletion uncommitted, not re-pair it
+    // behind the user's back.
+    const dir = makeRepo();
+    git(dir, 'config', 'diff.renames', 'false');
+    commitFile(dir, 'old.txt', 'content\n', 'add old');
+    git(dir, 'mv', 'old.txt', 'new.txt');
+
+    await gitCommit(dir, 'add new only', { paths: ['new.txt'] });
+
+    expect(
+      git(dir, 'show', '--name-status', '--format=', 'HEAD').trim(),
+    ).not.toContain('old.txt');
+    // The deletion the user cleared stays pending.
+    expect(git(dir, 'status', '--porcelain')).toContain('old.txt');
+  });
+
+  it('pairs renames with root-relative paths under diff.relative', async () => {
+    // A workspace bound below the repository root plus `diff.relative=true`
+    // makes an unanchored `git diff` print cwd-relative paths, which would
+    // match no root-relative selection and silently skip the pairing.
+    const dir = makeRepo();
+    git(dir, 'config', 'diff.relative', 'true');
+    commitFile(dir, 'sub/old.txt', 'content\n', 'add sub file');
+    git(dir, 'mv', 'sub/old.txt', 'sub/new.txt');
+    const sub = path.join(dir, 'sub');
+
+    await gitCommit(sub, 'rename sub file', { paths: ['sub/new.txt'] });
+
+    expect(git(dir, 'status', '--porcelain').trim()).toBe('');
+    expect(
+      git(dir, 'show', '--name-status', '-M', '--format=', 'HEAD').trim(),
+    ).toBe('R100\tsub/old.txt\tsub/new.txt');
+  });
+
+  it('commits a rename and an edit under a directory-prefix selection', async () => {
+    // `dir` selects the rename's two halves and the sibling edit; the pair
+    // must not be dropped for not being named exactly.
+    const dir = makeRepo();
+    commitFile(dir, 'dir/a.txt', 'one\n', 'add a');
+    commitFile(dir, 'dir/x.txt', 'one\n', 'add x');
+    git(dir, 'mv', 'dir/a.txt', 'dir/b.txt');
+    write(dir, { 'dir/x.txt': 'two\n' });
+
+    await gitCommit(dir, 'commit dir', { paths: ['dir'] });
+
+    expect(git(dir, 'status', '--porcelain').trim()).toBe('');
+    const names = git(dir, 'show', '--name-only', '--format=', 'HEAD');
+    expect(names).toContain('dir/b.txt');
+    expect(names).toContain('dir/x.txt');
+  });
+
+  it('commits a staged deletion selected by path', async () => {
+    // `git rm` leaves the path in neither the index nor the worktree, so the
+    // stageable listing is empty; the commit still has to record it from the
+    // index instead of reading the selection as empty.
+    const dir = makeRepo();
+    commitFile(dir, 'old.txt', 'content\n', 'add old');
+    git(dir, 'rm', '-q', 'old.txt');
+
+    await gitCommit(dir, 'remove old', { paths: ['old.txt'] });
+
+    expect(git(dir, 'status', '--porcelain').trim()).toBe('');
+    expect(git(dir, 'show', '--name-status', '--format=', 'HEAD').trim()).toBe(
+      'D\told.txt',
+    );
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'accepts a git-legal root-level name that starts with a drive-like prefix',
+    async () => {
+      // `a:b.txt` is a legal POSIX filename and the diff listing offers it
+      // preselected; only a colon followed by a separator is a Windows
+      // absolute path.
+      const dir = makeRepo();
+      write(dir, { 'a:b.txt': 'fresh\n' });
+
+      await gitCommit(dir, 'add colon name', { paths: ['a:b.txt'] });
+
+      expect(git(dir, 'show', '--name-only', '--format=', 'HEAD').trim()).toBe(
+        'a:b.txt',
+      );
+    },
+  );
 });
 
 describe('gitPull', () => {

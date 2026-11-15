@@ -737,6 +737,72 @@ describe('GitDialog', () => {
     expect(workspaceGitCommit).not.toHaveBeenCalled();
   });
 
+  it('keeps a deliberate unselect-all across an empty refresh', async () => {
+    const file = (path: string) => ({
+      path,
+      added: 1,
+      removed: 0,
+      isBinary: false,
+      isUntracked: false,
+      isDeleted: false,
+      truncated: false,
+    });
+    const twoFiles = {
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      filesCount: 2,
+      linesAdded: 2,
+      linesRemoved: 0,
+      files: [file('a.ts'), file('b.ts')],
+      hiddenCount: 0,
+    };
+    workspaceGitDiff
+      .mockResolvedValueOnce(twoFiles)
+      // The daemon's empty listing — returned while a merge, rebase or index
+      // lock is in progress — must not erase the record of what the user
+      // already saw, or the next complete listing re-selects every cleared row.
+      .mockResolvedValueOnce({
+        v: 1,
+        workspaceCwd: '/repo',
+        available: false,
+        filesCount: 0,
+        linesAdded: 0,
+        linesRemoved: 0,
+        files: [],
+        hiddenCount: 0,
+      })
+      .mockResolvedValue(twoFiles);
+    mount('commit');
+    await flush();
+
+    const checkboxes = () =>
+      Array.from(
+        document.body.querySelectorAll<HTMLInputElement>(
+          '[data-web-shell-dialog] input[type="checkbox"]',
+        ),
+      );
+    expect(checkboxes().map((box) => box.checked)).toEqual([true, true]);
+
+    await act(async () => {
+      for (const box of checkboxes()) box.click();
+    });
+    // Leave and re-enter the commit view: the re-entry runs the empty
+    // listing through `applyCommitFiles`, then the next refresh returns the
+    // full one.
+    await act(async () => {
+      document.getElementById('git-dialog-tab-diff')!.click();
+    });
+    await flush();
+    await act(async () => {
+      document.getElementById('git-dialog-tab-commit')!.click();
+    });
+    await flush();
+
+    expect(checkboxes().map((box) => box.checked)).toEqual([false, false]);
+    expect(workspaceGitCommit).not.toHaveBeenCalled();
+  });
+
   it('commits everything when the daemon caps the file list', async () => {
     const file = (path: string) => ({
       path,
@@ -804,6 +870,63 @@ describe('GitDialog', () => {
 
     // `all` and `paths` are mutually exclusive on the route, so the request
     // must carry `all` alone.
+    expect(workspaceGitCommit).toHaveBeenCalledWith(
+      'feat: everything',
+      { all: true },
+      undefined,
+      undefined,
+    );
+    // A capped listing cannot honor a per-row selection: the rows it dropped
+    // would silently stay uncommitted. The rendered rows are disabled and a
+    // notice says the whole tree will be committed, so an unchecked row can
+    // never promise an exclusion the request cannot carry.
+    const cappedCheckboxes = Array.from(
+      document.body.querySelectorAll<HTMLInputElement>(
+        '[data-web-shell-dialog] input[type="checkbox"]',
+      ),
+    );
+    expect(cappedCheckboxes.length).toBeGreaterThan(0);
+    expect(cappedCheckboxes.every((box) => box.disabled)).toBe(true);
+    expect(document.body.textContent).toContain(
+      'The list is truncated — committing every change',
+    );
+  });
+
+  it('commits everything when the listing never loaded', async () => {
+    // A rejected listing leaves `commitFiles` null while `commitListComplete`
+    // keeps its initial `true`; without the null arm the Commit click dies on
+    // the "select at least one file" guard while no checklist is rendered.
+    workspaceGitDiff.mockRejectedValue(new Error('daemon 5xx'));
+    workspaceGitCommit.mockResolvedValue({ sha: 'abc1234', subject: 'x' });
+    mount('commit');
+    await flush();
+
+    const textarea = document.body.querySelector(
+      '[data-web-shell-dialog] textarea',
+    );
+    await act(async () => {
+      const nativeSetter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )?.set;
+      nativeSetter?.call(textarea, 'feat: everything');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+
+    const commitBtn = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>(
+        '[data-web-shell-dialog] button',
+      ),
+    ).find(
+      (b) =>
+        b.textContent?.trim() === 'Commit' && b.getAttribute('role') !== 'tab',
+    );
+    await act(async () => {
+      commitBtn!.click();
+    });
+    await flush();
+
     expect(workspaceGitCommit).toHaveBeenCalledWith(
       'feat: everything',
       { all: true },
