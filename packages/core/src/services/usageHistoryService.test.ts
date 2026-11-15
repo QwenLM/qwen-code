@@ -1710,50 +1710,16 @@ describe('loadUsageHistoryWithLive — replay cache + selective scan', () => {
       // outside the chats enumeration with a distinct sessionId: if the open
       // followed symlinks, that session would appear; refused, it must not.
       const real = plant('sess-real', 1000);
+      // Reuse the same fixture as the real transcripts (no hand-copied records
+      // that could drift and make this negative assertion vacuous), then move
+      // the target out of the chats enumeration so it is reachable only through
+      // the symlink.
+      const targetInChats = plant('sess-link-target', 2000);
       const targetPath = path.join(
         process.env['QWEN_HOME']!,
         'symlink-target.jsonl',
       );
-      const at = (m: number) => `2026-06-11T00:0${m}:00.000Z`;
-      const targetRecords = [
-        {
-          sessionId: 'sess-link-target',
-          cwd: '/real/project',
-          uuid: 'u1',
-          parentUuid: null,
-          timestamp: at(0),
-          type: 'user',
-          message: { role: 'user', content: 'hi' },
-        },
-        {
-          sessionId: 'sess-link-target',
-          cwd: '/real/project',
-          uuid: 'u2',
-          parentUuid: 'u1',
-          timestamp: at(1),
-          type: 'system',
-          subtype: 'ui_telemetry',
-          systemPayload: {
-            uiEvent: {
-              'event.name': 'qwen-code.api_response',
-              'event.timestamp': at(1),
-              response_id: 'r1',
-              model: 'qwen-max',
-              duration_ms: 1200,
-              input_token_count: 600,
-              output_token_count: 300,
-              cached_content_token_count: 0,
-              thoughts_token_count: 100,
-              total_token_count: 1000,
-              prompt_id: 'p1',
-            },
-          },
-        },
-      ];
-      fs.writeFileSync(
-        targetPath,
-        targetRecords.map((r) => JSON.stringify(r)).join('\n') + '\n',
-      );
+      fs.renameSync(targetInChats, targetPath);
       const linkPath = path.join(path.dirname(real), 'sess-link.jsonl');
       fs.symlinkSync(targetPath, linkPath);
       try {
@@ -1826,6 +1792,30 @@ describe('persistUsageBeforeTranscriptDeletion (issue #7384)', () => {
     );
     expect(fs.existsSync(usagePath())).toBe(false);
   });
+
+  it.skipIf(process.platform === 'win32')(
+    'salvage refuses a symlinked transcript without throwing or persisting (no-follow)',
+    async () => {
+      // The shared reader is no-follow for every caller, including the salvage:
+      // a symlinked transcript is refused (the salvage never throws) and nothing
+      // is written. If the open followed the link, the target's usage would be
+      // persisted instead.
+      const target = plantTranscript('sess-salvage-link-target', true);
+      const linkPath = path.join(
+        path.dirname(target),
+        'sess-salvage-link.jsonl',
+      );
+      fs.symlinkSync(target, linkPath);
+      try {
+        await expect(
+          persistUsageBeforeTranscriptDeletion(linkPath),
+        ).resolves.toBe(false);
+        expect(fs.existsSync(usagePath())).toBe(false);
+      } finally {
+        fs.rmSync(linkPath, { force: true });
+      }
+    },
+  );
 
   it.each([
     [false, 'request_lifecycle'],

@@ -352,7 +352,11 @@ async function summarizeTranscriptFile(
   // fd-level isFile() check below is what refuses a non-regular file. Symlink
   // policy: the helper refuses a symlinked final component (ELOOP), unlike the
   // symlink-following Phase-1 statSync prefilter, so a symlinked transcript is
-  // skipped — the same no-follow posture as the other transcript readers.
+  // skipped. That refusal applies to every caller of this shared reader — the
+  // dashboard replay, the persisting migration, and the pre-deletion salvage —
+  // so a symlinked transcript's usage is neither replayed, migrated, nor
+  // salvaged. The session-list readers follow the link, so the session still
+  // appears there without its usage.
   const handle = await openNoFollow(filePath, { nonBlocking: true }).catch(
     async (error: unknown) => {
       // A volume with no inode numbers (FAT/exFAT, some SMB) cannot prove
