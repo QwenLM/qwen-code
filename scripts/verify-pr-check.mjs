@@ -28,6 +28,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  statSync,
 } from 'node:fs';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { isEntryPoint } from './lib/entry-point.js';
@@ -151,6 +152,50 @@ function readIfExists(path) {
   } catch {
     return UNREADABLE;
   }
+}
+
+// Root-aware containment. A root of '/' contains every path, so it must fail
+// closed rather than compare against '//' — no real path starts with '//',
+// which silently disabled the refusal for a round dir directly under a
+// root-level tmp/ (R17-1). Both the --context refusal and the --context-root
+// containment test use this so the two stay consistent.
+function withinRoot(root, p) {
+  return (
+    root === sep ||
+    p === root ||
+    p.startsWith(root.endsWith(sep) ? root : root + sep)
+  );
+}
+
+// The dev:ino identities of the regular files under the artifact dir. A hard
+// link gives one inode two names, so a --context path outside the trust root
+// can still be a file the round wrote inside it; realpath cannot see the
+// second name, but the inode matches (R17-1). lstat only and never following
+// a symlink, so a planted link cannot drag the walk outside the tree or cycle.
+function collectRegularFileIds(dir) {
+  const ids = new Set();
+  const stack = [dir];
+  while (stack.length > 0) {
+    const d = stack.pop();
+    let entries;
+    try {
+      entries = readdirSync(d);
+    } catch {
+      continue;
+    }
+    for (const name of entries) {
+      const p = join(d, name);
+      let st;
+      try {
+        st = lstatSync(p);
+      } catch {
+        continue;
+      }
+      if (st.isFile()) ids.add(`${st.dev}:${st.ino}`);
+      else if (st.isDirectory()) stack.push(p);
+    }
+  }
+  return ids;
 }
 
 /** OIDs are quoted at every length from 7 to 40; compare by prefix. */
@@ -1000,7 +1045,7 @@ function main(argv) {
       );
       return 2;
     }
-    if (realDir !== realRoot && !realDir.startsWith(realRoot + sep)) {
+    if (!withinRoot(realRoot, realDir)) {
       process.stderr.write(
         `verify-pr check: --context-root ${contextRoot} does not contain the artifact directory ${dir}\n\n${HELP}`,
       );
@@ -1133,7 +1178,25 @@ function main(argv) {
           ? realpathSync(dirname(container))
           : realpathSync(dir);
     }
-    if (realContext === trustRoot || realContext.startsWith(trustRoot + sep)) {
+    const insideByPath = withinRoot(trustRoot, realContext);
+    // A hard link gives a PR-writable file a second name outside the trust
+    // root; realpath cannot see it, so compare the context's inode against
+    // the artifact dir's regular files (R17-1). Only walk when the path test
+    // did not already refuse.
+    let contextIsAlias = false;
+    if (!insideByPath) {
+      try {
+        const ctxStat = statSync(realContext);
+        if (ctxStat.isFile()) {
+          contextIsAlias = collectRegularFileIds(dir).has(
+            `${ctxStat.dev}:${ctxStat.ino}`,
+          );
+        }
+      } catch {
+        // A missing/unreadable context is reported by the head-OID check below.
+      }
+    }
+    if (insideByPath || contextIsAlias) {
       process.stderr.write(
         `verify-pr check: --context must not point inside the PR-writable worktree (${contextPath}): it cannot judge its own waiver — pass a host-held copy the round never saw\n`,
       );

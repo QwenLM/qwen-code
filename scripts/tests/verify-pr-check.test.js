@@ -6,6 +6,7 @@
 
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
+  linkSync,
   mkdirSync,
   mkdtempSync,
   rmSync,
@@ -2481,4 +2482,104 @@ describe('round-15 witnesses', () => {
     expect(res.status).toBe(2);
     expect(res.stderr).toMatch(/does not contain the artifact directory/);
   });
+});
+
+describe('R17-1 witnesses', () => {
+  // The trust refusal must fail closed on two entrances the path-string test
+  // missed: a round dir directly under a root-level tmp/ derives trustRoot='/'
+  // (startsWith('//') never matches), and a hard link aliases a PR-writable
+  // file under a path outside the root (realpath cannot see the second name).
+  const populate = (dir) => {
+    const files = validFiles({});
+    mkdirSync(join(dir, 'evidence'), { recursive: true });
+    writeFileSync(join(dir, 'report.md'), files.report);
+    writeFileSync(join(dir, 'verdict.txt'), files.verdict);
+    writeFileSync(join(dir, 'assertions.json'), files.assertions);
+    writeFileSync(join(dir, 'boundary.json'), files.boundary);
+    writeFileSync(join(dir, 'boundary-gate.json'), files.boundaryGate);
+    writeFileSync(join(dir, 'evidence/01-x.png'), 'png');
+  };
+  const snapshot = JSON.stringify({
+    repo: 'QwenLM/qwen-code',
+    pr: 7,
+    headRefOid: HEAD,
+  });
+  const run = (args) =>
+    spawnSync(process.execPath, [SCRIPT, ...args], {
+      encoding: 'utf8',
+      env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+    });
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a context inside a round dir directly under root-level tmp',
+    () => {
+      // Directly under tmpdir() (not a mkdtemp subdir): on Linux the tmp
+      // container's parent is '/', so the fallback trustRoot is '/'.
+      const dir = join(
+        tmpdir(),
+        `pr7-verify-r17a-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      );
+      mkdirSync(dir, { recursive: true });
+      tmpDirs.push(dir);
+      populate(dir);
+      writeFileSync(join(dir, 'context.json'), snapshot);
+      const res = run(['--context', join(dir, 'context.json'), dir]);
+      expect(res.status).toBe(1);
+      expect(res.stderr).toMatch(
+        /must not point inside the PR-writable worktree/,
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a hard-link alias of the round context planted outside the root',
+    () => {
+      const base = mkdtempSync(join(tmpdir(), 'verify-pr-r17b-'));
+      tmpDirs.push(base);
+      const clone = join(base, 'clone');
+      const dir = join(clone, 'tmp', 'pr7-verify-20261115-000000');
+      mkdirSync(dir, { recursive: true });
+      populate(dir);
+      writeFileSync(join(dir, 'context.json'), snapshot);
+      const outside = join(base, 'host-copy.json');
+      linkSync(join(dir, 'context.json'), outside);
+      const res = run(['--context', outside, '--context-root', clone, dir]);
+      expect(res.status).toBe(1);
+      expect(res.stderr).toMatch(
+        /must not point inside the PR-writable worktree/,
+      );
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'accepts a genuine host-held snapshot outside the root (no false alias)',
+    () => {
+      const base = mkdtempSync(join(tmpdir(), 'verify-pr-r17c-'));
+      tmpDirs.push(base);
+      const clone = join(base, 'clone');
+      const dir = join(clone, 'tmp', 'pr7-verify-20261115-000000');
+      mkdirSync(dir, { recursive: true });
+      populate(dir);
+      const outside = join(base, 'host-snapshot.json');
+      writeFileSync(outside, snapshot);
+      const res = run(['--context', outside, '--context-root', clone, dir]);
+      expect(res.status).toBe(0);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'a --context-root of / fails closed on every context',
+    () => {
+      const dir = makeArtifactDir(validFiles({}), ['01-ab-cells.png']);
+      const base = mkdtempSync(join(tmpdir(), 'verify-pr-r17d-'));
+      tmpDirs.push(base);
+      const host = join(base, 'host-snapshot.json');
+      writeFileSync(host, snapshot);
+      const res = run(['--context', host, '--context-root', '/', dir]);
+      expect(res.status).toBe(1);
+      expect(res.stderr).toMatch(
+        /must not point inside the PR-writable worktree/,
+      );
+    },
+  );
 });
