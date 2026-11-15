@@ -372,9 +372,9 @@ export function getHomeEnvFallbackVars(
  *
  * When workspace is untrusted (or has no recorded trust decision yet), only
  * allow user-level .env files at:
+ * - <global dir>/.env (QWEN_HOME, the XDG directory on Linux, or ~/.qwen)
  * - ~/.qwen/.env
  * - ~/.env
- * - <QWEN_HOME>/.env (when set)
  *
  * When the workspace IS trusted, the upward walk also accepts ancestor .env
  * files: trust is a decision about the workspace, and re-resolving it per
@@ -431,8 +431,12 @@ export function findEnvFiles(
     );
   };
 
-  // Home-dir candidates in priority order: globalQwenDir/.env, then legacy
-  // ~/.qwen/.env (when the global dir is elsewhere), then ~/.env.
+  // Home-dir candidates in priority order, first value wins: the global dir's
+  // .env, then the legacy ~/.qwen/.env whenever the global dir is elsewhere,
+  // then ~/.env. Elsewhere means QWEN_HOME, and also every default XDG install
+  // on Linux, where a leftover ~/.qwen/.env outranks ~/.env. That is on
+  // purpose: the docs pointed users at ~/.qwen/.env for years (see the XDG
+  // design note). It cannot set the global dir (isGlobalDirEnvKey).
   const pushCandidate = (filePath: string): boolean => {
     const normalized = path.normalize(filePath);
     if (

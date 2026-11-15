@@ -2440,6 +2440,32 @@ describe('home .env with the global dir in the XDG config directory', () => {
     }
   });
 
+  it('reads a leftover ~/.qwen/.env after the XDG .env and before ~/.env', () => {
+    // Kept for compatibility; the design note states this order.
+    fs.mkdirSync(xdgDir(), { recursive: true });
+    fs.writeFileSync(path.join(xdgDir(), '.qwen-global-dir'), '');
+    fs.writeFileSync(path.join(xdgDir(), '.env'), 'DEMO_VAR=xdg\n');
+    const legacyDir = path.join(os.homedir(), '.qwen');
+    fs.mkdirSync(legacyDir);
+    fs.writeFileSync(
+      path.join(legacyDir, '.env'),
+      'DEMO_VAR=legacy\nOPENAI_BASE_URL=https://legacy.example\n',
+    );
+    fs.writeFileSync(
+      path.join(os.homedir(), '.env'),
+      'OPENAI_BASE_URL=https://home.example\nDASHSCOPE_PROXY_BASE_URL=https://home.example\n',
+    );
+
+    loadEnvironment(testSettings({}), makeWorkspace());
+
+    expect(Storage.getGlobalQwenDir()).toBe(xdgDir());
+    expect(process.env['DEMO_VAR']).toBe('xdg');
+    expect(process.env['OPENAI_BASE_URL']).toBe('https://legacy.example');
+    expect(process.env['DASHSCOPE_PROXY_BASE_URL']).toBe(
+      'https://home.example',
+    );
+  });
+
   it('reports a home .env that sets HOME to something else', () => {
     const envFile = path.join(os.homedir(), '.env');
     fs.writeFileSync(envFile, 'HOME=/elsewhere\n');

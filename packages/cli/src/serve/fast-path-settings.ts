@@ -222,6 +222,8 @@ function findEnvFilesFastPath(
     return false;
   };
 
+  // Same order as findEnvFiles() in config/environment.ts, so a leftover
+  // ~/.qwen/.env also outranks ~/.env here on a default XDG install.
   const pushHomeCandidates = (): void => {
     const candidates = [path.join(globalQwenDir, '.env')];
     if (hasCustomConfigDir) {
