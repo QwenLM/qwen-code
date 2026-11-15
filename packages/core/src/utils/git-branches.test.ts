@@ -818,6 +818,93 @@ describe('gitCheckout with a dirty working tree', () => {
     },
   );
 
+  it('stash checkout keeps the entry when a post-checkout hook refuses after the switch', async () => {
+    const dir = dirtyCheckoutFixture();
+    write(dir, { 'new.txt': 'untracked\n' });
+    installHook(dir, 'post-checkout', 'exit 1');
+
+    const failure = await checkoutFails(
+      dir,
+      'feature',
+      { stash: true },
+      'checkout_failed',
+    );
+
+    // The switch completed: the entry must NOT be applied onto the new
+    // branch (a clean apply would drop the only record of the changes);
+    // it stays on the stack and rides back as stashSha.
+    expect(failure.message).toContain(
+      'switched, but the checkout reported a failure',
+    );
+    expect(currentBranch(dir)).toBe('feature');
+    expect(read(dir, 'a.txt')).toBe('feature\n');
+    expect(has(dir, 'new.txt')).toBe(false);
+    const entries = stashList(dir);
+    expect(entries).toHaveLength(1);
+    expect(failure.stashSha).toBe(git(dir, 'rev-parse', 'refs/stash').trim());
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'stash checkout reports the kept entry when the drop fails',
+    async () => {
+      const dir = dirtyCheckoutFixture();
+      const env = gitShim(hermeticEnv(), [
+        {
+          match: '"stash drop"*',
+          script: 'echo "error: cannot lock ref refs/stash" >&2; exit 1',
+        },
+      ]);
+
+      const failure = await checkoutFails(
+        dir,
+        'missing-branch',
+        { stash: true },
+        'checkout_failed',
+        env,
+      );
+
+      // The apply succeeded but the drop failed: the entry survives, so
+      // the failure must carry its SHA, not render as a dismissible error.
+      expect(failure.message).toContain('your local changes were restored');
+      expect(failure.message).toContain('could not be dropped');
+      expect(stashList(dir)).toHaveLength(1);
+      expect(failure.stashSha).toBe(git(dir, 'rev-parse', 'refs/stash').trim());
+      expect(read(dir, 'a.txt')).toBe('local edit\n');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'stash capture does not adopt a concurrent request entry',
+    async () => {
+      const dir = dirtyCheckoutFixture();
+      const env = gitShim(hermeticEnv(), [
+        // A concurrent request stashes the tree (base label, no nonce)
+        // immediately before our push, making our own push a no-op.
+        {
+          match: '"stash push"*',
+          before:
+            '"$REAL" stash push --include-untracked -m "qwen-code: auto-stash before checkout"',
+        },
+      ]);
+
+      const failure = await checkoutFails(
+        dir,
+        'missing-branch',
+        { stash: true },
+        'checkout_failed',
+        env,
+      );
+
+      // Our push created nothing; the foreign entry must survive untouched
+      // and must not be reported as ours.
+      expect(failure.stashSha).toBeUndefined();
+      expect(failure.message).not.toContain('restored');
+      const entries = stashList(dir);
+      expect(entries).toHaveLength(1);
+      expect(entries[0]).toContain('qwen-code: auto-stash before checkout');
+    },
+  );
+
   it('stash checkout types the refusal when git cannot stash an intent-to-add entry', async () => {
     const dir = dirtyCheckoutFixture();
     write(dir, { 'new.txt': 'new\n' });
@@ -1076,6 +1163,29 @@ describe('gitCheckout with a dirty working tree', () => {
     );
     expect(currentBranch(dir)).toBe('feature');
     expect(read(dir, 'a.txt')).toBe('feature\n');
+  });
+
+  it('force checkout reports the completed switch when the target is at the current commit', async () => {
+    const dir = dirtyCheckoutFixture();
+    git(dir, 'branch', 'same-commit');
+    write(dir, { 'new.txt': 'untracked\n' });
+    installHook(dir, 'post-checkout', 'exit 1');
+
+    const failure = await checkoutFails(
+      dir,
+      'same-commit',
+      { force: true },
+      'checkout_failed',
+    );
+
+    // The branch pointer moved even though the commit did not: the switch
+    // completed, the discard happened, and the residue was cleaned.
+    expect(failure.message).toContain(
+      'switched, but the checkout reported a failure',
+    );
+    expect(currentBranch(dir)).toBe('same-commit');
+    expect(read(dir, 'a.txt')).toBe('one\n');
+    expect(has(dir, 'new.txt')).toBe(false);
   });
 
   it('both resolutions refuse while a merge is parked', async () => {

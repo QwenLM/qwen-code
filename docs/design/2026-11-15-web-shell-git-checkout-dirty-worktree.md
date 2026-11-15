@@ -35,37 +35,53 @@ sending both is a `400 invalid_stash_force`; a non-boolean value is a 400).
 They are the two things a user would do in a terminal, and nothing more:
 
 - `stash`: refuse a parked operation, `git stash push --include-untracked`
-  (the entry identified by provenance and labelled
-  `qwen-code: auto-stash before checkout`), then run the same checkout as
-  the plain path. If the checkout fails, the entry is restored (apply by
-  SHA, checked drop) and the response is `409 checkout_failed` carrying
-  git's message and the entry's whereabouts — also when there was nothing
-  to stash, so the client shows git's reason instead of re-offering the
-  same resolution. If git refuses the stash itself (an intent-to-add
-  entry, a wedged index lock), nothing has been touched and the refusal is
-  `409 checkout_failed` as well. On success the entry is **kept**:
-  switching branches is deliberate, and restoring the old branch's
-  changes onto the new one is not what a switch means. The response
-  carries `stashSha`, and the popover shows a sticky warning naming the
-  entry so the changes are never silently orphaned.
+  (the entry identified by provenance: its subject is
+  `qwen-code: auto-stash before checkout` plus a per-request nonce, so a
+  concurrent request's entry can never be adopted even when this
+  request's own push was a no-op), then run the same checkout as the plain
+  path. If the checkout fails **without moving HEAD**, the entry is
+  restored (apply by SHA, checked drop) and the response is
+  `409 checkout_failed` carrying git's message and the entry's whereabouts
+  — also when there was nothing to stash, so the client shows git's reason
+  instead of re-offering the same resolution. If a `post-checkout` hook
+  refuses **after HEAD moved**, the switch completed: the entry is kept
+  (restoring it would apply the old branch's changes onto the new branch),
+  and the response is `409 checkout_failed` ("switched, but the checkout
+  reported a failure") carrying the entry's SHA. If git refuses the stash
+  itself (an intent-to-add entry, a wedged index lock), nothing has been
+  touched and the refusal is `409 checkout_failed` as well. On success the
+  entry is **kept**: switching branches is deliberate, and restoring the
+  old branch's changes onto the new one is not what a switch means. The
+  response carries `stashSha`, and the popover stays open with a sticky
+  warning naming the entry so the changes are never silently orphaned.
+  `stashSha` rides a failure response whenever the entry survives — a
+  failed apply, but also a successful restore whose listing or drop failed
+  (a non-empty restore notice means the entry is still on the stack).
 - `force`: refuse a parked operation, refuse when the workspace cwd is
   below the repository root (`409 force_unsupported`, because a forced
   checkout acts on the whole repository and would erase changes outside
   the workspace), refuse a parked operation again, then run the same
   checkout as the plain path **with `-f`**, and finally `git clean -fd`
   for the untracked residue the forced checkout leaves behind (ignored
-  files are kept). There is deliberately no hand-written ref preflight:
-  `git checkout -f` validates the ref and discards tracked changes in one
-  atomic step, reading the real remote config, refspecs and DWIM rules,
-  so a switch git refuses — an unresolvable ref, an ambiguous DWIM name,
-  a branch occupied by another linked worktree, a skip-worktree conflict,
-  DWIM disabled by `checkout.guess` — leaves the tree untouched and is
-  `409 checkout_failed` ("cannot discard and switch") with nothing
-  discarded. Untracked files in the way are overwritten by the forced
-  checkout itself. The clean runs after the switch, so the target
-  branch's ignore rules decide what is kept; a clean that fails after a
-  successful switch is `409 checkout_failed` ("switched, but removing
-  untracked files failed").
+  files are kept under the target branch's ignore rules — a file ignored
+  only on the source branch is untracked residue on the target and is
+  removed; see Non-goals). There is deliberately no hand-written ref
+  preflight: `git checkout -f` validates the ref and discards tracked
+  changes in one atomic step, reading the real remote config, refspecs
+  and DWIM rules, so a switch git refuses — an unresolvable ref, an
+  ambiguous DWIM name, a branch occupied by another linked worktree, a
+  skip-worktree conflict, DWIM disabled by `checkout.guess` — leaves the
+  tree untouched and is `409 checkout_failed` ("cannot discard and
+  switch") with nothing discarded. Untracked files in the way are
+  overwritten by the forced checkout itself. A `post-checkout` hook can
+  refuse after the switch completed; the flow detects that by comparing
+  HEAD's branch identity (name and commit — a ref at the current commit
+  moves the pointer, not the SHA) before and after, cleans the residue,
+  and reports `409 checkout_failed` ("switched, but the checkout reported
+  a failure") rather than claiming nothing happened. The clean runs after
+  the switch, so the target branch's ignore rules decide what is kept; a
+  clean that fails after a successful switch is `409 checkout_failed`
+  ("switched, but removing untracked files failed").
 
 Both options are refused (`409 operation_in_progress`) while a merge,
 cherry-pick, revert, rebase or am is parked in the worktree: `git stash
@@ -77,7 +93,7 @@ through `git rev-parse --git-path`, so linked worktrees resolve correctly
 A plain checkout — no option — runs the exact git invocation it always
 has. The response-level changes are the optional `stashSha` field on a
 successful stash checkout, and the same field on a `checkout_failed`
-response whose auto-stash could not be restored (see below).
+response whose auto-stash entry survives (see below).
 
 Failures are classified by what the core did, not by matching git's text:
 a new `GitCheckoutFailure` carries the stable codes
@@ -112,18 +128,23 @@ with the daemon's explanation in place of the blocked line, because the
 tree is still dirty and stashing is still available. Every other refusal
 renders the daemon's `message` and closes the panel. A success carrying
 `stashSha` renders as a sticky warning naming the entry and the ref the
-user clicked; it survives the reopen reset, since the checkout may settle
-while the popover is closed and it is the only signal the user gets. A
-`checkout_failed` response carrying `stashSha` (the auto-stash could not
-be restored) renders the same way — a standing warning, not a dismissible
-error — because the kept entry is then the only record of the changes.
-Like the pull flow, a failed resolution re-reads the listing and status
-without awaiting them.
+user clicked, and **keeps the picker open** so the warning is painted
+immediately — closing in the same update would hide the only record of
+where the changes went (the pull flow stays open for the same reason;
+plain checkouts keep the close-on-success contract). The warning also
+survives the reopen reset. A `checkout_failed` response carrying
+`stashSha` (the auto-stash entry survives) renders the same way — a
+standing warning, not a dismissible error — because the kept entry is
+then the only record of the changes. Like the pull flow, a failed
+resolution re-reads the listing and status without awaiting them. The
+notice lives in component state, as the pull flow's does: a reload drops
+it, and the entry remains recoverable from `git stash list` by its
+labelled subject.
 
 The SDK's `workspaceGitCheckout` (both the legacy and the
 workspace-qualified method) takes the options plus an optional per-call
 timeout so the popover can outsize the client's default fetch budget: the
-stash flow's failure path chains up to ~14 git commands, each with its own
+stash flow's failure path chains up to ~18 git commands, each with its own
 30s limit, so the popover allows 600s, mirroring the pull ceiling.
 
 ## Ownership
@@ -143,18 +164,30 @@ omission:
 - **No auto-restore after a successful switch.** The stash entry is kept
   and named; restoring it onto the new branch is the user's call
   (`git stash apply`), not a side effect of switching.
-- **Ignored files are kept, as in the pull force flow.** `clean -fd`
-  removes untracked files but not ignored ones; no `-x` option is offered
-  (it would delete `.env`, local configuration, dependency trees). Ignored
-  build artifacts usually do not block a checkout; when the target branch
-  tracks such a path, git's own refusal surfaces.
+- **Ignored files are kept under the target branch's rules, not the
+  source's.** `clean -fd` runs after the switch and removes untracked
+  files but not ignored ones; no `-x` option is offered (it would delete
+  `.env`, local configuration, dependency trees). A file ignored only on
+  the source branch is untracked residue on the target and is removed —
+  the confirmation text ("all uncommitted changes including untracked
+  files") covers it, and cleaning before the switch is not an option:
+  it would destroy untracked files for a switch git then refuses.
+  Separately, when the target branch TRACKS a path that holds a locally
+  ignored file, `git checkout` silently overwrites that file with the
+  committed blob (git's default `--overwrite-ignore`); it does not
+  refuse, and neither resolution preserves the ignored content — the
+  stash (`--include-untracked`, never `--all`) does not capture ignored
+  files. This is git's own plain-checkout behavior, inherited unchanged.
 - **No hand-written ref or collision preflight.** The forced checkout
   lets git itself decide whether the switch can happen, atomically with
   the discard; a preflight that re-implements git's ref resolution
   (remote config, refspecs, DWIM, worktree occupancy) diverges from it in
-  the corners and can discard for a switch git then refuses. This is
-  stronger than the pull design's "no collision preflight" decision: no
-  ref validation is re-implemented at all.
+  the corners and can discard for a switch git then refuses. The one
+  mapping that does run is the plain path's existing remote-tracking
+  remap in `runCheckout` (a clicked `origin/dev` resolves to the local
+  `dev` when one exists, else a tracking branch is created): it is
+  shared with the plain checkout, completes before the destructive step,
+  and is the established fork-layout contract, not a new validation.
 - **Stash from a subdirectory is not refused, as in the pull flow.**
   `git stash push` from below the root captures repository-wide changes,
   and the switch moves the whole repository — but nothing is destroyed:
@@ -163,9 +196,12 @@ omission:
   a stash refusal here would also leave the panel offering an option
   that always fails in subdirectory workspaces.
 - **No cross-request serialization.** Concurrent git operations fail
-  loudly on git's own `index.lock`; the provenance-based capture and
-  identity-based restore fail closed (entry kept) rather than applying or
-  dropping someone else's entry.
+  loudly on git's own `index.lock`. The stash capture carries a
+  per-request nonce in the entry subject (the documented label stays as
+  its prefix), so a request whose own push was a no-op — because a
+  concurrent request stashed the tree first — adopts nothing and reports
+  no entry; the identity-based restore never applies or drops someone
+  else's entry. The pull flow shares the helper and the same guarantee.
 - **The session-creation dirty gate and Git Mode are unchanged.** The
   "create a branch for a new session" gate in the session route and the
   agent-driven Git Mode popover keep their current behavior.
@@ -184,35 +220,46 @@ omission:
   exposure the existing pull force flow has; the explicit confirmation is
   the gate. Whether to add an active-session warning is an open question
   below, not part of this change.
-- A failing `post-checkout` hook can refuse after HEAD already moved. The
-  stash flow restores (or keeps) the entry and reports `checkout_failed`
-  with the kept entry's SHA; the force flow detects the moved HEAD by
-  state comparison and reports that the switch completed. Both match the
-  plain path's existing hook behavior.
+- A failing `post-checkout` hook can refuse after HEAD already moved.
+  Both flows detect the completed switch by comparing HEAD's branch
+  identity (name and commit) before and after: the stash flow keeps the
+  entry (never applies it onto the new branch) and reports
+  `checkout_failed` with the entry's SHA; the force flow cleans the
+  residue and reports that the switch completed. A switch onto a ref at
+  the current commit moves the branch pointer, not the SHA — the identity
+  comparison covers that case too.
 
 ## Validation plan
 
 - Core unit tests against real temporary repositories: stash success keeps
   the entry and reports its SHA; a failed checkout restores the entry, and
-  a failed restore keeps it and reports its SHA; an intent-to-add entry
-  types the stash refusal; force discards tracked modifications and
-  untracked files (including directories) but keeps ignored ones; force
-  refuses without discarding for an unresolvable ref, an ambiguous DWIM
-  name, a tracking ref git cannot resolve (no configured remote), DWIM
-  disabled by `checkout.guess`, a branch occupied by another worktree, and
-  a skip-worktree conflict; force accepts the DWIM shapes git accepts
-  (bare and slash names, remote-tracking refs); a refusing post-checkout
-  hook is reported as a completed switch; the subdirectory and
-  parked-operation refusals.
+  a failed restore keeps it and reports its SHA; a failed drop after a
+  clean apply still reports the surviving entry's SHA; a refusing
+  post-checkout hook keeps the entry and reports the completed switch
+  (stash and force, including a target at the current commit); a
+  concurrent request's labelled entry is never adopted when our own push
+  is a no-op; an intent-to-add entry types the stash refusal; force
+  discards tracked modifications and untracked files (including
+  directories) but keeps ignored ones under the target branch's rules;
+  force refuses without discarding for an unresolvable ref, an ambiguous
+  DWIM name, a tracking ref git cannot resolve (no configured remote),
+  DWIM disabled by `checkout.guess`, a branch occupied by another
+  worktree, and a skip-worktree conflict; force accepts the DWIM shapes
+  git accepts (bare and slash names, remote-tracking refs); the
+  subdirectory and parked-operation refusals.
 - Route tests: option validation (400s), typed 409 mapping, redaction,
-  `stashSha` forwarding on a failed restore.
+  `stashSha` forwarding when a post-checkout hook refuses after the
+  switch.
 - SDK tests: request bodies carry the options; the timeout is forwarded.
 - Component tests: the panel appears on a dirty checkout refusal,
   dispatches the right options, arms the confirm step, keeps the panel on
   `force_unsupported`, shows the in-flight spinner, dismisses the panel
-  when a competing action starts, and renders the kept-stash warning
-  (success and failed restore) across a reopen.
-- E2E (mock daemon, Playwright): the full panel flow for both resolutions.
+  when a competing action starts, keeps the picker open and paints the
+  kept-stash warning immediately on a stash success, and keeps the
+  warning (success and failed restore) across a reopen.
+- E2E (mock daemon, Playwright, `@smoke` so PR CI runs them): the full
+  panel flow for both resolutions, the kept-entry warning visible
+  immediately and across a reopen, and the cancel path.
 
 ## Acceptance criteria
 

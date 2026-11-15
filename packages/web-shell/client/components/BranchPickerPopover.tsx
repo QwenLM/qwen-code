@@ -50,10 +50,10 @@ import styles from './BranchPickerPopover.module.css';
 const GIT_PULL_FETCH_TIMEOUT_MS = 600_000;
 
 // The checkout stash/force flows chain git commands with the same 30s
-// per-command budget (guards, stash push, listings, checkout, and the
-// failure path's apply/drop) — a worst case below the pull flow's, sized
-// to the same UX ceiling so a slow repository surfaces as a client
-// timeout rather than a hang.
+// per-command budget (guards, stash push, listings, HEAD identity probes,
+// checkout, and the failure path's apply/drop) — the stash failure path
+// reaches ~18 of them (540s), sized to the same 600s UX ceiling as pull
+// so a slow repository surfaces as a client timeout rather than a hang.
 const GIT_CHECKOUT_FETCH_TIMEOUT_MS = 600_000;
 
 // A remote mutation chains git's add/rm plus the verification and
@@ -753,11 +753,19 @@ export function BranchPickerPopover({
             }),
             'warning',
           );
+          onBranchChanged?.();
+          // Keep the picker open so the warning is painted now: closing in
+          // the same update would hide the only record of the changes
+          // until the next reopen. The pull flow stays open for the same
+          // reason; plain checkouts keep the close-on-success contract.
+          // The open list's HEAD marker is stale after the switch; re-read
+          // it silently, like the pull flow's post-success refresh.
+          void fetchBranches(true);
         } else {
           showStatus(t('branchPicker.checkedOut', { branch: ref }), 'success');
+          onBranchChanged?.();
+          onOpenChange(false);
         }
-        onBranchChanged?.();
-        onOpenChange(false);
       } catch (err) {
         if (isDirtyWorkingTreeError(err)) {
           setPullBlocked(true);
@@ -802,6 +810,7 @@ export function BranchPickerPopover({
       onOpenChange,
       showStatus,
       clearPullPanel,
+      fetchBranches,
       refreshAfterAction,
       t,
     ],

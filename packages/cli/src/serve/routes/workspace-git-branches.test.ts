@@ -1456,14 +1456,15 @@ describe('checkout resolutions against a real repo', () => {
     );
   });
 
-  it('forwards the kept stash entry when a failed checkout cannot restore it', async () => {
+  it('forwards the kept stash entry when a post-checkout hook refuses after the switch', async () => {
     const dir = dirtyCheckoutRepo();
     fs.writeFileSync(path.join(dir, 'b.txt'), 'untracked\n');
     git(dir, 'config', 'core.hooksPath', path.join(dir, '.git', 'hooks'));
-    // The hook fails the checkout after HEAD moved AND recreates the
-    // untracked path the stash holds, so the restore's apply refuses.
+    // The hook fails the checkout after HEAD moved: the switch completed,
+    // so the entry must be kept (not applied onto the new branch) and its
+    // SHA forwarded to the client.
     const hook = path.join(dir, '.git', 'hooks', 'post-checkout');
-    fs.writeFileSync(hook, '#!/bin/sh\necho clash > b.txt\nexit 1\n');
+    fs.writeFileSync(hook, '#!/bin/sh\nexit 1\n');
     fs.chmodSync(hook, 0o755);
 
     const response = await request(appWithWorkspace(dir))
@@ -1472,9 +1473,15 @@ describe('checkout resolutions against a real repo', () => {
 
     expect(response.status).toBe(409);
     expect(response.body.error).toBe('checkout_failed');
-    expect(response.body.message).toContain('could not be restored');
+    expect(response.body.message).toContain(
+      'switched, but the checkout reported a failure',
+    );
     expect(response.body.stashSha).toMatch(/^[0-9a-f]{40}$/);
     expect(git(dir, 'stash', 'list')).toContain('auto-stash before checkout');
+    expect(git(dir, 'branch', '--show-current').trim()).toBe('feature');
+    // The entry was not applied onto the new branch.
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe('feature\n');
+    expect(fs.existsSync(path.join(dir, 'b.txt'))).toBe(false);
   });
 
   it('maps the subdirectory force refusal to 409 force_unsupported without discarding', async () => {

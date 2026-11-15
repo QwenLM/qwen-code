@@ -57,7 +57,7 @@ async function refuseCheckout(popover: ReturnType<Page['locator']>) {
   ).toBeVisible();
 }
 
-test('dirty checkout offers stash and switch, keeping the entry named', async ({
+test('dirty checkout offers stash and switch, keeping the entry named @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createGitWorkspaceScenario({ gitCheckoutDirty: true });
@@ -81,8 +81,15 @@ test('dirty checkout offers stash and switch, keeping the entry named', async ({
     stash: true,
   });
 
-  // Success closes the popover; the kept-entry warning is sticky, so it
-  // must greet the next open — it is the only record of the changes.
+  // A stash success keeps the picker open so the kept-entry warning — the
+  // only record of where the changes went — is painted immediately.
+  await expect(popover).toBeVisible();
+  await expect(
+    popover.getByText(/kept in stash entry a1b2c3d4e5f6/),
+  ).toBeVisible();
+
+  // The warning is sticky: it survives a close/reopen too.
+  await page.keyboard.press('Escape');
   await expect(popover).not.toBeVisible();
   await openBranchPicker(page, scenario);
   await expect(
@@ -92,7 +99,7 @@ test('dirty checkout offers stash and switch, keeping the entry named', async ({
   ).toBeVisible();
 });
 
-test('dirty checkout offers discard and switch behind a confirm', async ({
+test('dirty checkout offers discard and switch behind a confirm @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createGitWorkspaceScenario({ gitCheckoutDirty: true });
@@ -123,7 +130,7 @@ test('dirty checkout offers discard and switch behind a confirm', async ({
   await expect(popover).not.toBeVisible();
 });
 
-test('cancelling the checkout resolution sends nothing', async ({
+test('cancelling the checkout resolution sends nothing @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createGitWorkspaceScenario({ gitCheckoutDirty: true });

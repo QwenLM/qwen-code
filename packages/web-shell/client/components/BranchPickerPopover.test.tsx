@@ -1298,7 +1298,7 @@ describe('BranchPickerPopover checkout resolution panel', () => {
     expect(footerText()).not.toContain('Stash Changes and Switch');
   });
 
-  it('keeps the kept-stash warning, with the entry id, across a reopen', async () => {
+  it('paints the kept-stash warning immediately and keeps it across a reopen', async () => {
     workspaceGitCheckout.mockRejectedValueOnce(checkoutDirtyError());
     // A detached result (tag/SHA checkout): the warning must name the ref
     // the user clicked, not the resolved HEAD.
@@ -1307,7 +1307,8 @@ describe('BranchPickerPopover checkout resolution panel', () => {
       detached: true,
       stashSha: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0',
     });
-    mountWithBranches(CHECKOUT_BRANCHES);
+    const onOpenChange = vi.fn();
+    mountWithBranches(CHECKOUT_BRANCHES, { onOpenChange });
     await flush();
 
     clickButton('dev');
@@ -1315,6 +1316,9 @@ describe('BranchPickerPopover checkout resolution panel', () => {
     clickButton('Stash Changes and Switch');
     await flush();
 
+    // The picker stays open on a stash success: closing in the same update
+    // would hide the only record of where the changes went.
+    expect(onOpenChange).not.toHaveBeenCalledWith(false);
     expect(footerText()).toContain('Switched to dev');
     expect(footerText()).toContain('kept in stash entry a1b2c3d4e5f6');
 
