@@ -33964,9 +33964,10 @@ describe('createAcpSessionBridge', () => {
         closeIfUnheld: true,
         reason: 'scheduled_task_deleted',
       });
-      // A granted close that fails to tear the session down leaves the event
-      // bus open, so awaiting an unbounded drain would report a timeout
-      // instead of the `sessionCount` assertion below.
+      // A granted close must publish `session_closed` on the bus. Waiting for
+      // that event is what makes a bus left open observable; the
+      // `sessionCount` assertion below cannot stand in for it, because the
+      // teardown deletes from `byId` before it closes the bus.
       await vi.waitFor(() =>
         expect(events.some((e) => e.type === 'session_closed')).toBe(true),
       );
