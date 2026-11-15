@@ -70,7 +70,11 @@ cannot reach the aggregate view without the sidebar.
 - The status pill carries `data-status` mapped by `goalStatusTone(status)`:
   `active → running`, `paused | blocked | usage_limited → attention`,
   `complete → done`. CSS reuses the shared execution-status palette. This
-  matches `GoalStatusMessage`'s existing warning/success language.
+  matches `GoalStatusMessage`'s existing warning/success language. The
+  `done` branch is defined for completeness but unreachable today: both
+  goals listings filter `complete` out (pre-existing daemon policy) and the
+  strip returns null for it, so no surface currently renders a completed
+  goal. Listing completed goals would be a separate daemon-side change.
 - When at least one budget is armed, a `budgets` section renders one row per
   budget between the reason and the footer: label, a `role="progressbar"`
   track (`data-testid="goal-budget-<kind>"`, `aria-valuenow` = clamped
@@ -108,9 +112,11 @@ cannot reach the aggregate view without the sidebar.
   `onOpenGoals={projectFeaturesAvailable ? openGoals : undefined}`, the same
   gate the Goals page itself renders under.
 - The split-view `ChatPane` renders the same strip and already receives an
-  `onOpenGoals` prop (its `/goal status` command uses it; side-task panes
-  pass none). Its strip now forwards that same prop, so panes with a Goals
-  surface get the affordance and panes without one render no button.
+  `onOpenGoals` prop (its `/goal status` command uses it). Its strip now
+  forwards that same prop. `SplitView` itself only mounts under
+  `projectFeaturesAvailable && mainView === 'split'`, so every mounted pane
+  has a Goals surface and renders the affordance; the prop stays optional
+  for any surface without the Goals page, where no button renders.
 
 ### i18n
 
@@ -153,7 +159,8 @@ cannot reach the aggregate view without the sidebar.
 - `packages/web-shell/client/components/ChatPane.tsx` (split-view strip wiring)
 - `packages/web-shell/client/i18n.tsx` (en / zh / ru keys)
 - Tests: `GoalsDialog.test.tsx`, `GoalStatusStrip.test.tsx`,
-  `ChatPane.test.tsx`, `web-shell.goals-multi-workspace.spec.ts`
+  `ChatPane.test.tsx`, `App.test.tsx`,
+  `web-shell.goals-multi-workspace.spec.ts`
 
 ## Constraints and risks
 

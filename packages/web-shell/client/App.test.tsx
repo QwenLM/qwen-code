@@ -29550,8 +29550,19 @@ describe('App session callbacks', () => {
     expect(
       container.querySelector('[data-testid="goal-status-strip"]'),
     ).not.toBeNull();
+    const openGoals = container.querySelector<HTMLButtonElement>(
+      '[data-testid="goal-open-goals"]',
+    );
+    expect(openGoals).not.toBeNull();
+    // Rendering is not enough: the button must be bound to the real Goals
+    // navigation, not a no-op. A `() => {}` mutant survives a presence-only
+    // assertion and ships a dead button.
+    await act(async () => {
+      openGoals!.click();
+      await flush();
+    });
     expect(
-      container.querySelector('[data-testid="goal-open-goals"]'),
+      container.querySelector('[data-testid="goals-page"]'),
     ).not.toBeNull();
   });
 

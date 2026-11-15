@@ -34,7 +34,7 @@ Goals 页列出每个已加载会话的目标，但要查看一个目标，只�
 
 - 卡片头部新增第一个图标操作（`MessageSquareText`，`data-testid="goal-open-session"`），调用 `onOpenSession(item.sessionId, item.workspaceCwd)` —— 与页脚链接同一处理器，含工作区标签。它是导航而非控制，因此永不被按会话的 `busy` 门禁用，并着交互蓝（`--agent-blue-500`），与灰色的编辑/暂停/清除控制图标区分开。
 - 页脚会话入口是带标签的链接而非灰色文字（`data-testid="goal-session-link"`）：会话图标 + 会话名 + 箭头图标，交互蓝，悬停/聚焦下划线，聚焦环。第一版沿用了旧的灰色纯文本形态，评审中与周围 meta 无法区分、读者根本找不到跳转，因此现在链接具备全部常规链接线索。
-- 状态胶囊带上由 `goalStatusTone(status)` 映射的 `data-status`：`active → running`，`paused | blocked | usage_limited → attention`，`complete → done`。CSS 复用共享执行状态色板。这与 `GoalStatusMessage` 现有的 warning/success 颜色语言一致。
+- 状态胶囊带上由 `goalStatusTone(status)` 映射的 `data-status`：`active → running`，`paused | blocked | usage_limited → attention`，`complete → done`。CSS 复用共享执行状态色板。这与 `GoalStatusMessage` 现有的 warning/success 颜色语言一致。`done` 分支为完备性而定义，但当前不可达：两个 goals 列表都过滤 `complete`（daemon 既有策略），strip 对 `complete` 返回 null，因此目前没有界面渲染已完成目标。列出已完成目标属于独立的 daemon 侧改动。
 - 当至少设定了一个预算时，在 reason 与页脚之间渲染 `budgets` 区块，每个预算一行：标签、`role="progressbar"` 的轨道（`data-testid="goal-budget-<kind>"`，`aria-valuenow` = 截断后的百分比）、按生命周期色调着色的填充条，以及数值文本。进度条的可访问名就是可见的标签与数值本身（`aria-labelledby` 引用，按会话唯一 id），不在 `aria-label` 里再复制一份。该行是已设定预算数值的**唯一载体**：行渲染时抑制对应的页脚单元格（`goal-turns`、`goal-tokens`、`goal-elapsed`），同一事实绝不陈述两次；数值复用页脚原有的本地化模板（`goal.turnsOfBudget`、`goal.tokensOfBudget`，活跃时长走 `getGoalActiveTimeLabel`），文案变更会同时作用于所有界面。轮数用 `turnCount / turnBudget`；tokens 对 `tokensUsed / tokenBudget` 使用 `formatContextTokens`，daemon 未上报用量时跳过；活跃时长复用 elapsed meta 已在使用的同一个实时 `getGoalActiveTimeMs`，对照 `activeTimeBudgetMs`。比例截断到 `[0, 1]`，耗尽的预算显示为满条。无上限的目标不渲染该区块、保留页脚数值。填充条的宽度过渡包在 `@media (prefers-reduced-motion: no-preference)` 里，与兄弟进度条一致——因为活跃时长比例每秒都在推进。
 
 ### GoalStatusStrip
@@ -46,7 +46,7 @@ Goals 页列出每个已加载会话的目标，但要查看一个目标，只�
 ### App 接线
 
 - 主输入框的 strip 接收 `onOpenGoals={projectFeaturesAvailable ? openGoals : undefined}`，与 Goals 页自身的渲染门一致。
-- 分屏视图的 `ChatPane` 渲染同一个 strip，且本就接收 `onOpenGoals` prop（其 `/goal status` 命令在用；侧任务 pane 不传）。它的 strip 现在透传同一 prop，因此有 Goals 界面的 pane 获得该入口，没有的 pane 不渲染按钮。
+- 分屏视图的 `ChatPane` 渲染同一个 strip，且本就接收 `onOpenGoals` prop（其 `/goal status` 命令在用）。它的 strip 现在透传同一 prop。`SplitView` 本身只在 `projectFeaturesAvailable && mainView === 'split'` 下挂载，因此每个挂载的 pane 都有 Goals 界面并渲染该入口；prop 保持可选，供没有 Goals 页的界面使用，那里不渲染按钮。
 
 ### i18n
 
@@ -68,7 +68,7 @@ Goals 页列出每个已加载会话的目标，但要查看一个目标，只�
 - `packages/web-shell/client/App.tsx`（仅 strip 接线）
 - `packages/web-shell/client/components/ChatPane.tsx`（分屏 strip 接线）
 - `packages/web-shell/client/i18n.tsx`（en / zh / ru 键）
-- 测试：`GoalsDialog.test.tsx`、`GoalStatusStrip.test.tsx`、`ChatPane.test.tsx`、`web-shell.goals-multi-workspace.spec.ts`
+- 测试：`GoalsDialog.test.tsx`、`GoalStatusStrip.test.tsx`、`ChatPane.test.tsx`、`App.test.tsx`、`web-shell.goals-multi-workspace.spec.ts`
 
 ## 约束与风险
 

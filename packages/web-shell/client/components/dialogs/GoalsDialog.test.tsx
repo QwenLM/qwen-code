@@ -418,10 +418,16 @@ describe('GoalsDialog', () => {
 
     it("states an armed budget's figures exactly once on the card", async () => {
       // Removing the footer suppression must turn this red: the row and the
-      // footer would both print the same localised figure.
+      // footer would both print the same localised figure. The row must also
+      // exist and carry the figure itself — otherwise "row deleted, footer
+      // took over" would keep the count at one and pass vacuously.
       await mount([withSpend({ turnCount: 3, turnBudget: 20 })]);
 
       const card = document.querySelector('[role="listitem"]')!;
+      const row = card.querySelector('[data-testid="goal-budget-turns"]');
+      expect(row).not.toBeNull();
+      const rowText = row!.closest('[class*="budgetRow"]')?.textContent ?? '';
+      expect(rowText).toContain('3 / 20 turns');
       const occurrences =
         (card.textContent ?? '').split('3 / 20 turns').length - 1;
       expect(occurrences).toBe(1);

@@ -94,12 +94,30 @@ test('opening a goal from the card header loads its session @smoke', async ({
   const secondaryCard = page
     .locator('[role="listitem"]')
     .filter({ hasText: 'secondary goal' });
+  const pillColor = await secondaryCard
+    .getByTestId('goal-status')
+    .evaluate((el) => getComputedStyle(el).color);
   await secondaryCard.getByTestId('goal-open-session').click();
 
   // The transcript IS the goal's history: the header action must land on the
   // owning session's route and leave the Goals page.
   await page.waitForURL('**/session/sess-secondary**');
   await expect(page.getByTestId('goals-page')).toHaveCount(0);
+
+  // The strip's lifecycle tint must actually be painted and read the same
+  // state as the card it came from: deleting the strip's [data-status]
+  // colour rule falls back to plain foreground and goes red here.
+  const strip = page.getByTestId('goal-status-strip');
+  await expect(strip).toBeVisible();
+  const [stripStatusColor, stripActivityColor] = await strip.evaluate(
+    (root) => {
+      const status = root.querySelector('[data-status]') as HTMLElement;
+      const activity = root.querySelector('[class*="activity"]') as HTMLElement;
+      return [getComputedStyle(status).color, getComputedStyle(activity).color];
+    },
+  );
+  expect(stripStatusColor).toBe(pillColor);
+  expect(stripStatusColor).not.toBe(stripActivityColor);
 });
 
 test('a stopped goal shows its lifecycle tone and budget progress @smoke', async ({
