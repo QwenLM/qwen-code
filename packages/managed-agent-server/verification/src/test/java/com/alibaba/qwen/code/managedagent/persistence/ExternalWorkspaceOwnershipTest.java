@@ -186,6 +186,25 @@ class ExternalWorkspaceOwnershipTest {
         assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(owner);
     }
 
+    // The workspace-isolated shared profile has no harness session (its
+    // isolation key is null by construction), so the stop receipt comes from
+    // the storage fence alone: a drained, drain-requested shared binding with
+    // no nonterminal execution stops; one with an in-flight execution waits.
+    @Test
+    void sharedExternalDrainStopsOnTheStorageFenceAlone() throws Exception {
+        prepareBinding("workspace", null, "shared-member-1");
+        ownership.claim(context, session, binding, bindings);
+        binding = bindings.claimOperation(binding.getBindingId(), "drainer", Duration.ofMinutes(1));
+        binding = bindings.compareAndSet(binding, binding.withDrainRequested(true, Instant.now())
+                .withState(RuntimeBindingRecord.State.DRAINING, binding.getLease(), Instant.now()));
+        assertThat(ownership.canStopExternalDrained(binding, bindings)).isTrue();
+        executions.findOrCreate(com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord.prepared(
+                "execution", "tenant", binding.getBindingId(), binding.getGeneration(), "harness",
+                session.getRuntimeSessionId(), "turn", "call", "digest", Map.of("sessionId", session.getRuntimeSessionId(),
+                        "promptId", "turn", "callId", "call", "argsDigest", "digest")));
+        assertThat(ownership.canStopExternalDrained(binding, bindings)).isFalse();
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void lostRetiredReleaseRequiresACommittedReceiptAtBothEntrypoints(boolean throughBroker) {

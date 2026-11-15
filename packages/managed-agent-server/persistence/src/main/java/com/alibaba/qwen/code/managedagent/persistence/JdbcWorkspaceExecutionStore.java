@@ -628,11 +628,22 @@ public class JdbcWorkspaceExecutionStore
         }
         if (HarnessOwnership.sharesRuntimeSessions(saved.getRequest())) {
             // A workspace-isolated external binding has no per-session proof to
-            // check; the shared storage fence below is its drain evidence.
-            return external(null, saved, repository,
-                    saved.getRequest().getScope(),
-                    saved.getRequest().getIsolationKey(), false,
-                    (connection, owner, current) -> noActiveExecutions(current));
+            // check (its isolation key is null by construction), so it cannot
+            // enter savedContext/requireExternalHarnessAdmission at all. The
+            // storage fence is its drain evidence: a short-circuit false is
+            // "not yet drainable", while an unavailable owner stays the
+            // mapped 409 refusal the drain coordinator retries against.
+            if (!(repository instanceof JdbcRuntimeBindingRepository original)
+                    || !original.usesDataSource(jdbc.getDataSource())) {
+                throw unavailable();
+            }
+            WorkspaceStorageKindGuard.requireFreshTransaction();
+            return Boolean.TRUE.equals(transaction.execute(status -> jdbc.execute(
+                    (org.springframework.jdbc.core.ConnectionCallback<Boolean>) connection -> {
+                        JdbcExternalWorkspaceOwnership.lockOwner(connection, saved);
+                        var current = JdbcExternalWorkspaceOwnership.requireCurrent(connection, original, saved, false);
+                        return noActiveExecutions(current);
+                    })));
         }
         return external(null, saved, repository,
                 saved.getRequest().getScope(),
