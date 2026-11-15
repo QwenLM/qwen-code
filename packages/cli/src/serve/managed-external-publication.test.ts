@@ -534,7 +534,7 @@ describe.skipIf(process.platform === 'win32')(
 );
 
 it.skipIf(process.platform === 'win32')(
-  'persists replayable drain proof after real executor capture and acknowledgements',
+  'persists replayable drain proof after real executor capture without an acknowledgement',
   async () => {
     publication = new ManagedExternalPublication(root, boot);
     const ledger = ManagedRuntimeLedger.create({
@@ -602,15 +602,10 @@ it.skipIf(process.platform === 'win32')(
         sequence++;
       }
     }
-    expect(await publication.stopDrained(executor)).toEqual({
-      state: 'unknown',
-    });
-    executor.acknowledgeV3(reference, {
-      executionCallId: request.capture.executionCallId,
-      manifest: result.capture!.manifest,
-      deliveryStatus: 'committed',
-      historyRevision: 1,
-    });
+    // This lane retires on the drained stop itself. Its worker holds no
+    // control-plane credential, so no ACK ever reaches its journal and waiting
+    // for one would refuse every close; the acknowledged EOF sequences above
+    // are the whole proof it needs.
     const drained = await publication.stopDrained(executor);
     expect(drained).toMatchObject({
       state: 'drained',
