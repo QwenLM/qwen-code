@@ -911,6 +911,13 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
               ? { readBaselineNeedsRefresh: true }
               : {},
           );
+        if (this.params.modified_by_user) {
+          // The bounded result may omit user-authored bytes. A partial Read
+          // must not make a later full Read quote those bytes from history.
+          this.config
+            .getFileReadCache()
+            .markReadEvictedFromHistory(postWriteStats);
+        }
       } catch (error) {
         if (mutation) throw error;
         // Non-fatal: leaving a stale entry is preferable to failing

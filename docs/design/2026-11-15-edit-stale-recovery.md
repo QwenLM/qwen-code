@@ -49,11 +49,15 @@ rejects until a successful text Read refreshes the baseline. Partial or truncate
 text reads qualify under the existing prior-read contract; requiring a full Read
 would reintroduce the large-file deadlock from #3945 / #4002. An internal disk read
 while preparing an Edit does not call `recordRead` and cannot clear this flag.
-The existing model-visible read paths (ReadFile, attached text, visible Grep
-results and injected memory) retain their existing `recordRead` semantics.
+ReadFile, attached text and injected memory retain their existing `recordRead`
+semantics. Grep and RipGrep retain ordinary prior-read credit, but search snippets
+do not clear a pending recovery baseline; only an actual text Read does.
 A partial Read clears the baseline flag without falsely making the whole file
 resident; a following full Read returns real content rather than a placeholder.
-Normal writes retain their existing read-credit behavior.
+Normal writes retain their existing read-credit behavior. User-modified Edits
+disarm full-content history residency because their bounded result can omit
+user-authored bytes. A partial Read does not re-arm that residency; a full Read
+must first return actual content before later Reads can use a placeholder.
 
 The shell tool's simulated `sed -i` edit also waits for a successful text Read.
 It supports regex substitution against the current file and writes the complete

@@ -9,6 +9,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Config } from '../config/config.js';
+import { GrepTool } from '../tools/grep.js';
+import { RipGrepTool } from '../tools/ripGrep.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { ToolConfirmationOutcome } from '../tools/tools.js';
 import { LocalExecutionEnvironment } from './local-execution-environment.js';
@@ -329,6 +331,155 @@ describe('LocalExecutionEnvironment', () => {
       });
       expect(allowed.error).toBeUndefined();
       expect(await readFile(file, 'utf8')).toBe('external-header-v2\nfinal\n');
+    },
+  );
+
+  it.each([
+    ['Grep', GrepTool],
+    ['RipGrep', RipGrepTool],
+  ] as const)(
+    'keeps the recovery baseline after %s results',
+    async (_name, SearchTool) => {
+      const file = path.join(workspace, 'grep-baseline.txt');
+      await writeFile(file, 'original header\ntarget\n');
+      await execute('read', ToolNames.READ_FILE, { file_path: file });
+      await writeFile(file, 'unseen external header\ntarget\n');
+      const recovered = await execute('recover', ToolNames.EDIT, {
+        file_path: file,
+        old_string: 'target',
+        new_string: 'updated',
+      });
+      expect(recovered.error).toBeUndefined();
+      const search = new SearchTool(config);
+      const found = await search
+        .build({ pattern: 'updated', path: workspace })
+        .execute(signal);
+      expect(found.error).toBeUndefined();
+      expect(found.llmContent).toContain('updated');
+      expect(found.llmContent).not.toContain('unseen external header');
+      const overwrite = await execute('overwrite', ToolNames.WRITE_FILE, {
+        file_path: file,
+        content: 'original header\nupdated\n',
+      });
+      expect(overwrite.error?.type).toBe('file_changed_since_read');
+      expect(overwrite.llmContent).toContain('Read baseline');
+      expect(await readFile(file, 'utf8')).toBe(
+        'unseen external header\nupdated\n',
+      );
+      const next = await execute('next', ToolNames.EDIT, {
+        file_path: file,
+        old_string: 'updated',
+        new_string: 'again',
+      });
+      expect(next.error).toBeUndefined();
+      expect(next.llmContent).toContain('recovery checks');
+      expect(await readFile(file, 'utf8')).toBe(
+        'unseen external header\nagain\n',
+      );
+      const partial = await execute('partial', ToolNames.READ_FILE, {
+        file_path: file,
+        offset: 1,
+        limit: 1,
+      });
+      expect(partial.error).toBeUndefined();
+      const allowed = await execute('allowed', ToolNames.WRITE_FILE, {
+        file_path: file,
+        content: 'unseen external header\nfinal\n',
+      });
+      expect(allowed.error).toBeUndefined();
+
+      const ordinary = path.join(workspace, 'ordinary.txt');
+      await writeFile(ordinary, 'ordinary match\n');
+      const ordinarySearch = await search
+        .build({ pattern: 'ordinary match', path: workspace })
+        .execute(signal);
+      expect(ordinarySearch.error).toBeUndefined();
+      expect(ordinarySearch.llmContent).toContain('ordinary match');
+      const ordinaryWrite = await execute(
+        'ordinary-write',
+        ToolNames.WRITE_FILE,
+        {
+          file_path: ordinary,
+          content: 'ordinary replacement\n',
+        },
+      );
+      expect(ordinaryWrite.error).toBeUndefined();
+      expect(await readFile(ordinary, 'utf8')).toBe('ordinary replacement\n');
+    },
+  );
+
+  it.each([
+    ['snippet', false],
+    ['snippet', true],
+    ['omitted', false],
+    ['omitted', true],
+  ] as const)(
+    'reads user-modified content after %s output (partial first=%s)',
+    async (output, partialFirst) => {
+      const file = path.join(workspace, 'user-modified.txt');
+      const original = 'header\nold\nfooter\n';
+      const replacement =
+        output === 'snippet'
+          ? 'user change'
+          : Array.from(
+              { length: 100 },
+              (_, i) => `user change ${i} ${'x'.repeat(90)}`,
+            ).join('\n');
+      const modified = `header\n${replacement}\nfooter\n`;
+      await writeFile(file, original);
+      await execute('read', ToolNames.READ_FILE, { file_path: file });
+      const prepared = await environment.prepare(
+        {
+          id: 'modified',
+          toolName: ToolNames.EDIT,
+          params: {
+            file_path: file,
+            old_string: 'old',
+            new_string: 'model change',
+          },
+          modification: { oldContent: original, newContent: modified },
+        },
+        signal,
+      );
+      expect(prepared.params).toMatchObject({
+        modified_by_user: true,
+        old_string: original,
+        new_string: modified,
+      });
+      const result = await environment.execute('modified', signal);
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('User modified');
+      expect(result.llmContent).toContain(
+        output === 'snippet' ? 'Showing lines' : 'Use Read',
+      );
+      expect(await readFile(file, 'utf8')).toBe(modified);
+      const written = config.getFileReadCache().check(await stat(file));
+      expect(written.state).toBe('fresh');
+      if (written.state !== 'fresh')
+        throw new Error('Missing write cache entry');
+      const writeTime = written.entry.lastWriteAt!;
+      await vi.waitFor(() => expect(Date.now()).toBeGreaterThan(writeTime));
+      if (partialFirst) {
+        const partial = await execute('partial', ToolNames.READ_FILE, {
+          file_path: file,
+          offset: 0,
+          limit: 1,
+        });
+        expect(partial.error).toBeUndefined();
+        expect(partial.llmContent).toContain('header');
+        expect(partial.llmContent).not.toContain('user change');
+        expect(written.entry.lastReadAt).toBeGreaterThan(writeTime);
+      }
+      const full = await execute('full', ToolNames.READ_FILE, {
+        file_path: file,
+      });
+      expect(full.error).toBeUndefined();
+      expect(full.llmContent).toContain(replacement);
+      expect(full.llmContent).not.toContain('unchanged since last read');
+      const cached = await execute('cached', ToolNames.READ_FILE, {
+        file_path: file,
+      });
+      expect(cached.llmContent).toContain('unchanged since last read');
     },
   );
 
