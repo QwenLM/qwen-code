@@ -3526,6 +3526,63 @@ describe('turn collapse with a background notification ack', () => {
     });
   });
 
+  it('does not let a notice above the marker win the answer over the deliverable', () => {
+    // A stray notice from an earlier task can sit between the deliverable and
+    // the marker. The above-marker sub-search runs assistant-rows-only, so the
+    // notice cannot be elected: it would render the `<task-notification>` text
+    // as the answer and leave the footer map with no assistant row to key on.
+    const rows = collapseItems(
+      groupParallelAgents([
+        makeUserMessage('u1'),
+        {
+          id: 'report',
+          role: 'assistant',
+          content: 'the deliverable report',
+        },
+        {
+          id: 'notice-x',
+          role: 'system',
+          variant: 'info',
+          source: 'background_notification',
+          content: '<task-notification>earlier task</task-notification>',
+        },
+        {
+          id: 'marker',
+          role: 'system',
+          variant: 'info',
+          source: 'background_notification_turn_started',
+          content: 'Background result',
+          backgroundTurn: {
+            turnId: 'auto-task',
+            taskId: 'task',
+            kind: 'shell',
+            startedAt: 100,
+          },
+        },
+        {
+          id: 'notice-n',
+          role: 'system',
+          variant: 'info',
+          source: 'background_notification',
+          content: '<task-notification>done</task-notification>',
+        },
+        {
+          id: 'ack',
+          role: 'assistant',
+          content: 'acknowledged',
+        },
+      ]),
+      { backgroundSummaryGraceActive: false },
+    );
+    expect(rowIds(rows)).toEqual(['u1', 'tc-u1', 'report']);
+    const footerIds = collectFinalAssistantTurnIds(rows, {
+      isResponding: false,
+      latestTurnAwaitsAgentSummary: false,
+      gateBackgroundAgentStatus: true,
+    });
+    expect(footerIds).toMatchObject(new Map([['report', 'u1']]));
+  });
+
   it('collapses the turn instead of waiting for a summary the ack already gave', () => {
     // Pins only that the ack never becomes the collapsed answer: the turn
     // already collapsed pre-change, with the ack visible, so the summary-wait

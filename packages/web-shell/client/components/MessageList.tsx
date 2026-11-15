@@ -891,11 +891,15 @@ function findFinalAnswerIndexForDisplay(
     );
     return deliverable >= 0 ? deliverable : answerIdx;
   }
+  // Assistant rows only, like the multi-marker branch above and the footer map
+  // in `collectFinalAssistantTurnIds`: letting the sub-search elect a
+  // `background_notification` row would render a `<task-notification>` bubble
+  // as the answer and leave the footer with no assistant row to key on.
   const answerAboveMarker = findFinalAnswerIndex(
     items,
     start,
     markerIdx - 1,
-    true,
+    false,
   );
   return answerAboveMarker >= 0 ? answerAboveMarker : answerIdx;
 }
