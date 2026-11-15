@@ -53,7 +53,7 @@
 ### 3.4 任务列表与 workspace 形状
 
 - `PublicTaskList`：暴露 `active_child_count`（镜像 `WebShellTaskPage`）；核对 `ManagedTaskService.listPublicTasks` 与 Public tasks 路由返回类型。
-- `WorkspaceDiscoveryController.PublicItem`：加 `default_cwd_relative`、`can_select_directory`；`PublicCapabilities`：加 `workspace_creation`、`workspace_listing`、`directory_selection`、`local_directory_import`（镜像 WebShell list/get 形状）。这也会补齐既有 Public workspace list/get 响应。
+- `WorkspaceDiscoveryController.PublicItem`：加 `default_cwd_relative`、`can_select_directory`；`PublicCapabilities`：加 `workspace_creation`、`approval_mode_selection`、`directory_selection`、`local_directory_import`（镜像 WebShell list/get 形状）。这也会补齐既有 Public workspace list/get 响应。勘误：早期稿写作 `workspace_listing`，WebShell 并无此标志；其孪生是 `approvalModeSelection`（前端据此决定是否展示创建时的审批模式选择），故按镜像目标定名 `approval_mode_selection`。
 
 ### 3.5 OpenAPI + 契约同步
 

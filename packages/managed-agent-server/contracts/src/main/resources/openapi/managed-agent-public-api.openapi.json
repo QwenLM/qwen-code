@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "Qwen Managed Agent Public and WebShell API",
-    "version": "1.120.0",
+    "version": "1.121.0",
     "description": "Canonical first-release contract for the public Managed Agent resources and the WebShell adapter. Implemented routes and fields describe the current matching Server, Broker, Harness and WebShell build. Partial entries have remaining implementation or contract-test work; planned entries are not current server capabilities and must be excluded from production SDKs. Turn submission and cancellation always return the durable operation identifier and its persisted admission and delivery state. Session-list cursors are bound to the normalized archive state and title query. Earlier development API shapes, checkpoints and database catalogs are unsupported; initialize fresh state for this build. Runtime feature capabilities and deployment policy still govern optional execution modes. Public conversation history reads directly from mutable message projections; persisted conversation snapshots and fixed-content paging are no longer provided. Retained removed MCP-management entries stay in the response snapshot: only non-removed entries count toward the 32-server selection capacity, so the servers array may exceed 32 while preserving tombstones."
   },
   "servers": [
@@ -11662,6 +11662,25 @@
             "minLength": 1,
             "maxLength": 128,
             "description": "Optional immutable binding to the authenticated user's personal MemoryStore. Omission disables long-term memory. Bound Sessions require owner access as well as existing Workspace grants; creation idempotency includes this field."
+          },
+          "title": {
+            "type": ["string", "null"],
+            "maxLength": 256,
+            "description": "The server enforces the bound in UTF-16 code units (Java String.length()), so an astral character counts as two: a title this schema's code-point maxLength accepts can still exceed the server's 256-unit bound and answer 400 invalid_title."
+          },
+          "approval_mode": {
+            "type": "string",
+            "enum": ["default", "auto-edit", "yolo"],
+            "description": "Optional initial execution policy for Workspace creation, validated against the resolved Agent and profile. Omission preserves its default and idempotency digest. Independent of plan_mode. Requires workspace."
+          },
+          "plan_mode": {
+            "type": "boolean",
+            "description": "Persisted public Plan overlay, independent of execution permission. Requires workspace; omission starts with plan mode inactive."
+          },
+          "model_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Optional host-catalog model for a bound built-in qwen-code Session. Requires workspace and model_selection_supported. Persisted atomically before the first Turn and included in creation idempotency; omission preserves the default model and old digest."
           }
         }
       },
@@ -11915,6 +11934,47 @@
           "owner_only": {
             "type": "boolean",
             "description": "When true, only the owning actor with existing Workspace grants may access this Session. Private children inherit visibility without inheriting the Store binding."
+          },
+          "title": {
+            "type": ["string", "null"]
+          },
+          "environment": {
+            "type": ["object", "null"],
+            "additionalProperties": true
+          },
+          "approval_mode": {
+            "type": "string",
+            "enum": ["default", "auto", "auto-edit", "yolo"],
+            "description": "Current effective approval policy; initial_approval_mode retains the immutable creation policy. Absent for unbound catalog Sessions, which predate policy selection."
+          },
+          "approval_revision": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "initial_approval_mode": {
+            "type": "string",
+            "enum": ["default", "auto-edit", "yolo"],
+            "description": "Immutable creation-time policy, used to confirm creation replay."
+          },
+          "plan_mode": {
+            "type": "boolean",
+            "description": "Persisted public Plan overlay, independent of execution permission. Omission on a change preserves the selected state."
+          },
+          "plan_mode_supported": {
+            "type": "boolean",
+            "description": "Optional deployment capability; missing means false."
+          },
+          "model_context": {
+            "$ref": "#/components/schemas/PublicModelContext"
+          },
+          "model_selection": {
+            "$ref": "#/components/schemas/PublicModelSelection"
+          },
+          "lifecycle_operation": {
+            "$ref": "#/components/schemas/PublicLifecycleOperation",
+            "description": "Current unsettled lifecycle operation, queried in batch under Session read authorization. A failed close/delete may leave the Session closing/deleting; only explicit retry starts a new operation. Settled Sessions omit this projection."
           }
         }
       },
@@ -11927,7 +11987,8 @@
           "artifacts",
           "resync",
           "tasks",
-          "actions"
+          "actions",
+          "workspace_turns"
         ],
         "properties": {
           "items": {
@@ -11951,7 +12012,9 @@
           "cwd_change": {
             "type": "boolean",
             "default": false,
-            "x-qwen-implementation-status": "planned"
+            "x-qwen-implementation-status": "implemented",
+            "description": "Retired: Session directory-change submission has been removed; always false.",
+            "deprecated": true
           },
           "actions": {
             "type": "boolean",
@@ -12010,6 +12073,35 @@
           "recap": {
             "type": "boolean",
             "default": false
+          },
+          "workspace_turns": {
+            "type": "boolean",
+            "default": false,
+            "description": "True when the caller may submit later Turns of this Workspace-bound Session: the deployment enables Workspace files, the caller holds the OPERATOR role on a Workspace registry row whose state is ACTIVE and still backs the Session's binding, the actor recorded by the Workspace create command keeps OPERATOR or above, and the Session is active and undeleted and is either a qwen-code Session or a Session pinned to a stored definition (both on the Workspace's frozen execution profile). Cancelling only aborts work already running, so an OPERATOR caller may cancel a running Turn even when this is false; the capability does not gate cancellation. False for every other caller and for unbound Sessions, which do not use it. Shell Sessions also require foreground_shell=true for fresh sending; workspace_turns may remain true with Shell admission disabled and is not sufficient Shell Turn admission. Manual rename uses the independent rename capability."
+          },
+          "model_change": {
+            "type": "boolean",
+            "description": "The caller may change the Session model selection for later Turns using the server model catalog, including while a Turn or approval is active. Missing means unsupported; authorization, recovery and revision admission still apply."
+          },
+          "approval_mode_change": {
+            "type": "boolean",
+            "description": "The caller owns this eligible Workspace Session with current OPERATOR or OWNER access. Built-in qwen-code requires approval-selection/1; stored AgentDefinitions on exactly hosted-workspace-files/1, hosted-workspace-files/3, hosted-workspace-shell/1 or hosted-workspace-shell/3 also require agent-definition-approval-selection/1. Idle-state admission is checked separately. Missing means false."
+          },
+          "input_attachments": {
+            "type": "boolean",
+            "description": "Optional deployment capability; missing means false."
+          },
+          "rename": {
+            "type": "boolean",
+            "default": false,
+            "x-qwen-implementation-status": "implemented",
+            "description": "True for a visible ACTIVE Session when the Harness supports fenced title persistence and is available. Workspace-bound Sessions additionally require Workspace files admission, current OPERATOR access and the original binding's frozen execution facts, independently of approval or fresh Turn sending support. Unbound Sessions use the existing tenant-scoped rename permission. An active Turn does not itself make this false. Missing means false. This advertises fresh rename only; authorized completed original-key replay remains available under the rename service's replay rules."
+          },
+          "client_files": {
+            "type": "boolean",
+            "default": false,
+            "description": "Browser local-files registration is available for this Session: the Session is bound to a Workspace, the caller holds current execution authority, the deployment enables the client-files relay and the Harness supports it. A Workspace-less Session never advertises this capability. Registration admission still checks the actor grant and idle state separately.",
+            "x-qwen-implementation-status": "implemented"
           }
         }
       },
@@ -13511,6 +13603,16 @@
           "state": {
             "type": "string",
             "enum": ["active", "draining", "removed"]
+          },
+          "default_cwd_relative": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048,
+            "description": "Persisted default working directory for new Sessions; absent means dot."
+          },
+          "can_select_directory": {
+            "type": "boolean",
+            "description": "Current actor owns this active root Workspace; directory discovery rechecks authorization and native storage."
           }
         },
         "x-qwen-implementation-status": "partial"
@@ -13554,6 +13656,22 @@
               "workspace_binding": {
                 "type": "boolean",
                 "description": "Supports authorized Workspace discovery, Session creation, and saved binding read-back. This capability does not advertise execution readiness. Deployments may separately opt in to an initial Workspace Turn at creation: Read/Write/Edit under hosted-workspace-files/1, or file tools plus mandatory-approval foreground Shell under hosted-workspace-shell/1 when the Shell opt-in is enabled. Qualified new public Shell Sessions expose agent by default under the public-child deployment switch and runtime/Harness admission; existing Sessions retain their original tool scope. Callers holding the OPERATOR role may submit later Turns or rename under the same opt-in while the registry row stays ACTIVE and still backs the Session's binding and the actor recorded by the Workspace create command keeps OPERATOR or above, and may cancel a running Turn (its delivery re-checks no grants). Shell fresh sending also requires foreground_shell=true. Public Shell close and active delete require lifecycle v2 and reliable original-Worker stop support; archive and unarchive require completed close proof, while close of other profiles follows its separate capability and lifecycle admission; archive, delete and unarchive follow their separate retention capabilities after reliable Workspace close."
+              },
+              "workspace_creation": {
+                "type": "boolean",
+                "description": "Supports creating empty Workspaces under the operator-controlled root. Missing or false means unsupported; current actor and server admission checks still apply."
+              },
+              "approval_mode_selection": {
+                "type": "boolean",
+                "description": "Supports effective Session policy options and explicit Workspace-bound creation policy. Missing or false means unsupported."
+              },
+              "directory_selection": {
+                "type": "boolean",
+                "description": "Supports browsing and selecting existing directories on authorized Linux or macOS storage; absent means unsupported."
+              },
+              "local_directory_import": {
+                "type": "boolean",
+                "description": "Trusted single-user local deployment can browse and import existing host directories without a pre-registered Workspace. Missing or false means unsupported."
               }
             },
             "x-qwen-implementation-status": "partial"
@@ -15772,6 +15890,11 @@
           "next_cursor": {
             "type": ["string", "null"],
             "maxLength": 512
+          },
+          "active_child_count": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "The total number of nonterminal child Agent tasks in this Session, independent of pagination."
           }
         },
         "x-qwen-implementation-status": "partial",
@@ -18224,6 +18347,65 @@
         "properties": {
           "model_id": { "type": "string", "minLength": 1, "maxLength": 512 },
           "revision": { "type": "integer" }
+        }
+      },
+      "PublicModelContext": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["observed_at"],
+        "properties": {
+          "model_id": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Actual model identity from the committed main-model usage resource."
+          },
+          "input_tokens": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "description": "Provider prompt token count for the latest successfully committed main-model request; not cumulative billing usage."
+          },
+          "context_window_size": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991,
+            "description": "Context capacity from the same resolved model configuration. Missing means unknown."
+          },
+          "observed_at": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991,
+            "description": "Timestamp of the committed source observation, in Unix epoch milliseconds."
+          }
+        },
+        "description": "Safe allowlisted observation for a Workspace-bound Session. Unknown counts are omitted, never estimated."
+      },
+      "PublicLifecycleOperation": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["operation_id", "type", "status"],
+        "properties": {
+          "operation_id": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "type": {
+            "type": "string",
+            "enum": ["close", "archive", "delete"]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "running",
+              "completed",
+              "failed",
+              "recovery_blocked"
+            ]
+          },
+          "failure_code": {
+            "type": ["string", "null"]
+          }
         }
       },
       "PublicSessionModels": {

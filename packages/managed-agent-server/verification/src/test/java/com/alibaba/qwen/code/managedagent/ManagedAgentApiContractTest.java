@@ -252,11 +252,12 @@ class ManagedAgentApiContractTest {
                     entry(SessionCapabilities.class,
                             List.of("SessionCapabilities")),
                     entry(PublicList.class, List.of("PublicSessionList",
-                            "PublicEventList", "PublicTaskList",
+                            "PublicEventList",
                             "PublicTaskEventList", "PublicTurnList",
                             "PublicArtifactList", "PublicAutomationList",
                             "PublicAutomationRunList", "PublicChannelList",
                             "PublicChannelDeliveryList")),
+                    entry(ApiModels.PublicTaskList.class, List.of("PublicTaskList")),
                     entry(ApiModels.AutomationDefinitionRequest.class,
                             List.of("AutomationDefinitionRequest")),
                     entry(ApiModels.PublicAutomation.class,
@@ -283,6 +284,8 @@ class ManagedAgentApiContractTest {
                     entry(ApiModels.PublicSessionOptions.class, List.of("PublicSessionOptions")),
                     entry(ApiModels.PublicModelOption.class, List.of("PublicModelOption")),
                     entry(ApiModels.PublicModelSelection.class, List.of("PublicModelSelection")),
+                    entry(ApiModels.PublicModelContext.class, List.of("PublicModelContext")),
+                    entry(ApiModels.PublicLifecycleOperation.class, List.of("PublicLifecycleOperation")),
                     entry(ApiModels.PublicSessionModels.class, List.of("PublicSessionModels")),
                     entry(ApiModels.PublicModelChangeResult.class, List.of("PublicModelChangeResult")),
                     entry(ApiModels.PublicSessionApproval.class, List.of("PublicSessionApproval")),
@@ -3288,7 +3291,9 @@ class ManagedAgentApiContractTest {
             JsonNode capabilities = json("""
                     {"items":true,"snapshots":true,"artifacts":false,
                      "resync":true,"session_lifecycle":true,"tasks":true,"actions":false,"session_close":true,
-                     "session_archive":true,"session_unarchive":true,"session_delete":true,"context_compression":false,"btw":false,"recap":false}
+                     "session_archive":true,"session_unarchive":true,"session_delete":true,"context_compression":false,"btw":false,"recap":false,
+                     "workspace_turns":false,"cwd_change":false,"model_change":false,"approval_mode_change":false,
+                     "input_attachments":false,"rename":true,"client_files":false}
                     """);
             assertThat(session.get("capabilities")).isEqualTo(capabilities);
             assertThat(session.get("replay_floor_sequence").asLong()).isZero();
@@ -3309,6 +3314,47 @@ class ManagedAgentApiContractTest {
                                  "sessionArchive":true,"sessionUnarchive":true,"sessionDelete":true,"cwdChange":false,"modelChange":false,"approvalModeChange":false,"inputAttachments":false,"rename":true,"contextCompression":false,"diagnostics":true,"btw":false,"recap":false,"clientFiles":false}
                                 """);
                 assertThat(other.get("capabilities")).isEqualTo(webCapabilities);
+                // The enriched Public fields report the same authority's
+                // answers as the WebShell twins for the same caller,
+                // snake_case on the Public wire.
+                assertThat(session.get("title")).isEqualTo(other.get("title"));
+                assertThat(session.get("environment"))
+                        .isEqualTo(other.get("environment"));
+                assertThat(session.get("approval_mode"))
+                        .isEqualTo(other.get("approvalMode"));
+                assertThat(session.get("approval_revision"))
+                        .isEqualTo(other.get("approvalRevision"));
+                assertThat(session.get("initial_approval_mode"))
+                        .isEqualTo(other.get("initialApprovalMode"));
+                assertThat(session.get("plan_mode"))
+                        .isEqualTo(other.get("planMode"));
+                assertThat(session.get("plan_mode_supported"))
+                        .isEqualTo(other.get("planModeSupported"));
+                assertThat(session.get("model_context")).isEqualTo(snakeKeys(
+                        other.get("modelContext"), Map.of(
+                                "modelId", "model_id",
+                                "inputTokens", "input_tokens",
+                                "contextWindowSize", "context_window_size",
+                                "observedAt", "observed_at")));
+                assertThat(session.get("model_selection")).isEqualTo(snakeKeys(
+                        other.get("modelSelection"),
+                        Map.of("modelId", "model_id")));
+                assertThat(session.get("lifecycle_operation"))
+                        .isEqualTo(snakeKeys(other.get("lifecycleOperation"),
+                                Map.of("operationId", "operation_id",
+                                        "failureCode", "failure_code")));
+                for (var flag : Map.of("workspace_turns", "workspaceTurns",
+                        "cwd_change", "cwdChange",
+                        "model_change", "modelChange",
+                        "approval_mode_change", "approvalModeChange",
+                        "input_attachments", "inputAttachments",
+                        "rename", "rename",
+                        "client_files", "clientFiles").entrySet()) {
+                    assertThat(session.get("capabilities").get(flag.getKey()))
+                            .as("capabilities.%s", flag.getKey())
+                            .isEqualTo(other.get("capabilities")
+                            .get(flag.getValue()));
+                }
             }
         }
 
@@ -4071,6 +4117,19 @@ class ManagedAgentApiContractTest {
 
     private JsonNode json(String content) throws IOException {
         return objectMapper.readTree(content);
+    }
+
+    /** A WebShell object re-keyed to its Public snake_case twin; an absent
+     * or null projection stays absent or null on both wires. */
+    private JsonNode snakeKeys(JsonNode node, Map<String, String> names) {
+        if (node == null || !node.isObject()) {
+            return node;
+        }
+        ObjectNode mapped = objectMapper.createObjectNode();
+        node.fields().forEachRemaining(field -> mapped.set(
+                names.getOrDefault(field.getKey(), field.getKey()),
+                field.getValue()));
+        return mapped;
     }
 
     private ObjectNode mcpManagementSnapshot(int live, int removed) {

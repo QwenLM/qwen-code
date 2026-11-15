@@ -46,7 +46,8 @@ public class WorkspaceDiscoveryController {
                 page.defaultWorkspace() == null ? null
                         : publicItem(page.defaultWorkspace()),
                 page.hasMore(), page.nextCursor(),
-                new PublicCapabilities(true, false)));
+                new PublicCapabilities(true, false, creation.enabled(), true,
+                        creation.directorySelectionEnabled(), creation.localDirectoryImportEnabled())));
     }
 
     @GetMapping("/v1/agents/workspaces/{workspaceId}")
@@ -160,7 +161,8 @@ public class WorkspaceDiscoveryController {
         return new PublicItem(item.workspaceId(), "agent.workspace",
                 item.displayName(),
                 item.state().toLowerCase(Locale.ROOT),
-                item.canCreateSession());
+                item.canCreateSession(),
+                item.defaultCwdRelative(), item.canSelectDirectory());
     }
 
     private static WorkspaceSummary webShellItem(WorkspaceSummary item) {
@@ -206,13 +208,19 @@ public class WorkspaceDiscoveryController {
 
     public record PublicCapabilities(
             @JsonProperty("workspace_binding") boolean workspaceBinding,
-            @JsonProperty("workspace_context") boolean workspaceContext) {
+            @JsonProperty("workspace_context") boolean workspaceContext,
+            @JsonProperty("workspace_creation") boolean workspaceCreation,
+            @JsonProperty("approval_mode_selection") boolean approvalModeSelection,
+            @JsonProperty("directory_selection") boolean directorySelection,
+            @JsonProperty("local_directory_import") boolean localDirectoryImport) {
     }
 
     public record PublicItem(String id, String object,
             @JsonProperty("display_name") String displayName,
             String state,
-            @JsonProperty("can_create_session") boolean canCreateSession) {
+            @JsonProperty("can_create_session") boolean canCreateSession,
+            @JsonProperty("default_cwd_relative") String defaultCwdRelative,
+            @JsonProperty("can_select_directory") boolean canSelectDirectory) {
     }
 
     public record PublicPage(String object, List<PublicItem> data,

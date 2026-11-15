@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicLifecycleOperation;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionRecovery;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionRecoveryActions;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellLifecycleOperation;
@@ -84,6 +85,27 @@ class ManagedAgentSessionCapabilitiesTest {
             assertThat(view.capabilities().sessionDelete()).isEqualTo(owner);
             assertThat(view.capabilities().childAgents()).isEqualTo(!child);
         });
+        // The Public surface reports the same actor-scoped flags and policy
+        // fields for the same caller; its existing lifecycle flags keep their
+        // own non-actor computation.
+        var publicViews = List.of(service.getPublicSession("tenant", "actor", "session"),
+                service.listPublicSessions("tenant", "actor", null, 10).data().getFirst());
+        assertThat(publicViews).allSatisfy(view -> {
+            assertThat(view.capabilities().workspaceTurns()).isEqualTo(!child);
+            assertThat(view.capabilities().cwdChange()).isFalse();
+            assertThat(view.capabilities().approvalModeChange()).isEqualTo(!child && owner);
+            assertThat(view.planModeSupported()).isEqualTo(!child && owner);
+            assertThat(view.capabilities().childAgents()).isEqualTo(!child);
+            assertThat(view.title()).isEqualTo("title");
+            assertThat(view.approvalMode()).isEqualTo("default");
+            assertThat(view.initialApprovalMode()).isEqualTo("default");
+            assertThat(view.approvalRevision()).isNull();
+            assertThat(view.planMode()).isFalse();
+            assertThat(view.environment()).isNull();
+            assertThat(view.modelContext()).isNull();
+            assertThat(view.modelSelection()).isNull();
+            assertThat(view.lifecycleOperation()).isNull();
+        });
     }
 
     @Test
@@ -109,6 +131,12 @@ class ManagedAgentSessionCapabilitiesTest {
         assertThat(view.lifecycleOperation()).isEqualTo(operation);
         assertThat(view.recovery()).isEqualTo(recovery);
         assertThat(view.capabilities().workspaceTurns()).isFalse();
+
+        var publicView = service.getPublicSession("tenant", "actor", "session");
+        assertThat(publicView.lifecycleOperation()).isEqualTo(
+                new PublicLifecycleOperation("op-close", "close", "running", null));
+        assertThat(publicView.recovery()).isEqualTo(recovery);
+        assertThat(publicView.capabilities().workspaceTurns()).isFalse();
     }
 
     @Test
@@ -156,6 +184,14 @@ class ManagedAgentSessionCapabilitiesTest {
         assertThat(service.getWebShellSession("tenant", "actor", "excluded")
                 .capabilities().approvalModeChange()).isFalse();
         assertThat(view.capabilities().approvalModeChange()).isFalse();
+
+        var publicViews = service.listPublicSessions("tenant", "actor", null, 10).data();
+        assertThat(publicViews.getFirst().capabilities().approvalModeChange()).isTrue();
+        assertThat(publicViews.getFirst().planModeSupported()).isTrue();
+        assertThat(publicViews.getLast().capabilities().approvalModeChange()).isFalse();
+        assertThat(publicViews.getLast().planModeSupported()).isFalse();
+        assertThat(service.getPublicSession("tenant", "actor", "excluded")
+                .capabilities().approvalModeChange()).isFalse();
     }
 
     @ParameterizedTest
@@ -254,6 +290,8 @@ class ManagedAgentSessionCapabilitiesTest {
         when(store.requireSession("tenant", "session")).thenReturn(session);
         assertThat(service.getWebShellSession("tenant", "actor", "session")
                 .capabilities().clientFiles()).isFalse();
+        assertThat(service.getPublicSession("tenant", "actor", "session")
+                .capabilities().clientFiles()).isFalse();
 
         var settings = mock(ManagedAgentSettings.class);
         var clientFiles = mock(ManagedAgentSettings.ClientFiles.class);
@@ -264,6 +302,8 @@ class ManagedAgentSessionCapabilitiesTest {
         service.configureClientFiles(settings);
 
         assertThat(service.getWebShellSession("tenant", "actor", "session")
+                .capabilities().clientFiles()).isEqualTo(expected);
+        assertThat(service.getPublicSession("tenant", "actor", "session")
                 .capabilities().clientFiles()).isEqualTo(expected);
     }
 }

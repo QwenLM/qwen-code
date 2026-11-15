@@ -53,7 +53,7 @@ Add optional `title`, `approval_mode`, `plan_mode`, `model_id` and wire them thr
 ### 3.4 Task list and workspace shapes
 
 - `PublicTaskList`: expose `active_child_count` (mirror `WebShellTaskPage`); check `ManagedTaskService.listPublicTasks` and the Public tasks route return type.
-- `WorkspaceDiscoveryController.PublicItem`: add `default_cwd_relative`, `can_select_directory`; `PublicCapabilities`: add `workspace_creation`, `workspace_listing`, `directory_selection`, `local_directory_import` (mirror the WebShell list/get shapes). This also enriches the existing Public workspace list/get responses.
+- `WorkspaceDiscoveryController.PublicItem`: add `default_cwd_relative`, `can_select_directory`; `PublicCapabilities`: add `workspace_creation`, `approval_mode_selection`, `directory_selection`, `local_directory_import` (mirror the WebShell list/get shapes). This also enriches the existing Public workspace list/get responses. Erratum: an earlier draft said `workspace_listing`, which has no WebShell counterpart; the twin is `approvalModeSelection` (the client reads it to decide whether to offer creation-time approval-mode selection), so the mirrored name is `approval_mode_selection`.
 
 ### 3.5 OpenAPI + contract sync
 

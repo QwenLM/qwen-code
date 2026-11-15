@@ -709,6 +709,212 @@ class ManagedWorkspaceAdmissionTest {
                         .value("d-default"));
     }
 
+    @Test
+    void publicWorkspaceDiscoveryMirrorsTheWebShellShape() throws Exception {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-owner", "storage-owner");
+        register(tenant, "ws-reader", "storage-reader");
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,"
+                        + " workspace_id, actor_id, role) VALUES (?, ?, ?,"
+                        + " 'OWNER')", tenant, "ws-owner",
+                "actor-a".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        grant(tenant, "ws-reader", "actor-a", false);
+        setDefaultWorkspace(tenant, "ws-owner");
+
+        var publicPage = mapper.readTree(mvc.perform(get("/v1/agents/workspaces")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .principal(actor(tenant, "actor-a")))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString());
+        var webPage = mapper.readTree(mvc.perform(
+                        post("/api/agent/web-shell/v1/workspaces/query")
+                                .header(TenantContextFilter.HEADER, tenant)
+                                .principal(actor(tenant, "actor-a"))
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{}"))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString());
+        assertThat(publicPage.get("data")).hasSize(2);
+        for (int index = 0; index < publicPage.get("data").size(); index++) {
+            var item = publicPage.get("data").get(index);
+            var twin = webPage.get("data").get(index);
+            assertThat(item.get("id")).isEqualTo(twin.get("workspaceId"));
+            assertThat(item.get("display_name"))
+                    .isEqualTo(twin.get("displayName"));
+            assertThat(item.get("state")).isEqualTo(twin.get("state"));
+            assertThat(item.get("can_create_session"))
+                    .isEqualTo(twin.get("canCreateSession"));
+            assertThat(item.get("default_cwd_relative"))
+                    .isEqualTo(twin.get("defaultCwdRelative"));
+            assertThat(item.get("can_select_directory"))
+                    .isEqualTo(twin.get("canSelectDirectory"));
+        }
+        var publicDefault = publicPage.get("default_workspace");
+        var webDefault = webPage.get("defaultWorkspace");
+        assertThat(publicDefault.get("id"))
+                .isEqualTo(webDefault.get("workspaceId"));
+        assertThat(publicDefault.get("default_cwd_relative"))
+                .isEqualTo(webDefault.get("defaultCwdRelative"));
+        assertThat(publicDefault.get("can_select_directory"))
+                .isEqualTo(webDefault.get("canSelectDirectory"));
+        var capabilities = publicPage.get("capabilities");
+        var webCapabilities = webPage.get("capabilities");
+        assertThat(capabilities.get("workspace_binding"))
+                .isEqualTo(webCapabilities.get("workspaceBinding"));
+        assertThat(capabilities.get("workspace_context"))
+                .isEqualTo(webCapabilities.get("workspaceContext"));
+        assertThat(capabilities.get("workspace_creation"))
+                .isEqualTo(webCapabilities.get("workspaceCreation"));
+        assertThat(capabilities.get("approval_mode_selection"))
+                .isEqualTo(webCapabilities.get("approvalModeSelection"));
+        assertThat(capabilities.get("directory_selection"))
+                .isEqualTo(webCapabilities.get("workspaceDirectorySelection"));
+        assertThat(capabilities.get("local_directory_import"))
+                .isEqualTo(webCapabilities.get("localDirectoryImport"));
+
+        var publicItem = mapper.readTree(mvc.perform(
+                        get("/v1/agents/workspaces/ws-owner")
+                                .header(TenantContextFilter.HEADER, tenant)
+                                .principal(actor(tenant, "actor-a")))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString());
+        var webItem = mapper.readTree(mvc.perform(
+                        post("/api/agent/web-shell/v1/workspaces/get")
+                                .header(TenantContextFilter.HEADER, tenant)
+                                .principal(actor(tenant, "actor-a"))
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("{\"workspaceId\":\"ws-owner\"}"))
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString());
+        assertThat(publicItem.get("default_cwd_relative"))
+                .isEqualTo(webItem.get("defaultCwdRelative"));
+        assertThat(publicItem.get("can_select_directory"))
+                .isEqualTo(webItem.get("canSelectDirectory"));
+        // The OWNER of an active native root Workspace may select directories.
+        assertThat(publicItem.get("can_select_directory").asBoolean()).isTrue();
+    }
+
+    @Test
+    void publicCreateWiresTitleAndPolicyFieldsLikeWebShell() throws Exception {
+        String tenant = "tenant-" + UUID.randomUUID();
+        register(tenant, "ws-create", "storage-create");
+        grant(tenant, "ws-create", "actor-a", true);
+
+        // Title flows through both creation paths and reads back enriched.
+        var titled = mapper.readTree(mvc.perform(post("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "create-titled")
+                        .principal(actor(tenant, "actor-a"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"agent_id":"qwen-code","input":[],
+                                 "title":"Public title",
+                                 "workspace":{"workspace_id":"ws-create"}}
+                                """))
+                .andExpect(status().isAccepted())
+                .andReturn().getResponse().getContentAsString());
+        assertThat(titled.get("title").asText()).isEqualTo("Public title");
+        assertThat(titled.get("metadata").get("title").asText())
+                .isEqualTo("Public title");
+        var unboundTitled = mapper.readTree(mvc.perform(
+                        post("/v1/agents/sessions")
+                                .header(TenantContextFilter.HEADER, tenant)
+                                .header("Idempotency-Key",
+                                        "create-titled-unbound")
+                                .principal(actor(tenant, "actor-a"))
+                                .contentType(MediaType.APPLICATION_JSON)
+                                .content("""
+                                        {"agent_id":"qwen-code","input":[],
+                                         "title":"Legacy title"}
+                                        """))
+                .andExpect(status().isAccepted())
+                .andReturn().getResponse().getContentAsString());
+        assertThat(unboundTitled.get("title").asText())
+                .isEqualTo("Legacy title");
+
+        // Without a Workspace the policy fields refuse exactly as WebShell.
+        mvc.perform(post("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "create-approval-unbound")
+                        .principal(actor(tenant, "actor-a"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"agent_id":"qwen-code","input":[],
+                                 "approval_mode":"yolo"}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code")
+                        .value("unsupported_approval_mode"));
+        mvc.perform(post("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "create-plan-unbound")
+                        .principal(actor(tenant, "actor-a"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"agent_id":"qwen-code","input":[],
+                                 "plan_mode":true}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code")
+                        .value("unsupported_approval_mode"));
+        mvc.perform(post("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "create-model-unbound")
+                        .principal(actor(tenant, "actor-a"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"agent_id":"qwen-code","input":[],
+                                 "model_id":"model-x"}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code")
+                        .value("unsupported_feature"));
+
+        // With a Workspace the fields reach the same service and admission
+        // gates WebShell uses, instead of being dropped. "auto" is a real
+        // mode that no built-in creation profile offers, so the admission
+        // refuses it independently of this deployment's Harness support.
+        mvc.perform(post("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "create-approval-bound")
+                        .principal(actor(tenant, "actor-a"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"agent_id":"qwen-code","input":[],
+                                 "approval_mode":"auto",
+                                 "workspace":{"workspace_id":"ws-create"}}
+                                """))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error.code")
+                        .value("unsupported_approval_mode"));
+        mvc.perform(post("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "create-plan-bound")
+                        .principal(actor(tenant, "actor-a"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"agent_id":"qwen-code","input":[],
+                                 "plan_mode":true,
+                                 "workspace":{"workspace_id":"ws-create"}}
+                                """))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code")
+                        .value("unsupported_feature"));
+        mvc.perform(post("/v1/agents/sessions")
+                        .header(TenantContextFilter.HEADER, tenant)
+                        .header("Idempotency-Key", "create-model-bound")
+                        .principal(actor(tenant, "actor-a"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("""
+                                {"agent_id":"qwen-code","input":[],
+                                 "model_id":"model-x",
+                                 "workspace":{"workspace_id":"ws-create"}}
+                                """))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error.code")
+                        .value("unsupported_feature"));
+    }
+
     @ParameterizedTest
     @ValueSource(ints = {0, 101})
     void discoveryRejectsOutOfRangePageSizes(int limit) throws Exception {

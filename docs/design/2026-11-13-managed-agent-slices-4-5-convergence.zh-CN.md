@@ -110,7 +110,7 @@
 - **`PublicSession`：** 增加可选字段 `title`、`environment`、`approval_mode`、`approval_revision`、`initial_approval_mode`、`plan_mode`、`plan_mode_supported`、`model_context`（`PublicModelContext`）、`model_selection`（`PublicModelSelection`）及 `lifecycle_operation`（`PublicLifecycleOperation`），在 `ManagedAgentService.publicSessions(records, actorId)` 中复用与 `webShellSessions` 相同的批量查询填充；`created_at` / `updated_at` 保持现有 Public API 的秒级时间戳约定。
 - **`SessionCapabilities`：** 增加 `workspace_turns`、`cwd_change`、`model_change`、`approval_mode_change`、`input_attachments`、`rename`、`client_files`。
 - **`PublicTaskList`：** 在 `GET /v1/agents/sessions/{sessionId}/tasks` 返回 `PublicTaskList`（`object = "list"`、`data`、`next_cursor`、`has_more`、`active_child_count`）。
-- **`WorkspaceDiscoveryController`：** 为 `PublicItem` 补齐 `default_cwd_relative` 与 `can_select_directory`，为 `PublicCapabilities` 补齐 `workspace_creation`、`workspace_listing`、`directory_selection` 与 `local_directory_import`。
+- **`WorkspaceDiscoveryController`：** 为 `PublicItem` 补齐 `default_cwd_relative` 与 `can_select_directory`，为 `PublicCapabilities` 补齐 `workspace_creation`、`approval_mode_selection`、`directory_selection` 与 `local_directory_import`（`approval_mode_selection` 镜像 WebShell 的 `approvalModeSelection`；早期稿误作 `workspace_listing`）。
 
 ## 安全与所有权不变量
 

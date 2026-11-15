@@ -18,6 +18,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicSessionApproval;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicSessionModels;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicTask;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicTaskEvent;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicTaskList;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicTranscript;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicTurn;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.RecoveryRecheckRequest;
@@ -98,6 +99,15 @@ public class PublicAgentController {
                     "unsupported_feature",
                     "Phase 1 streams through the Session events route.");
         }
+        if (selection == null && (request.approvalMode() != null || request.planMode() != null)) {
+            throw new ManagedAgentException(400,
+                    "unsupported_approval_mode",
+                    "Approval mode selection requires a bound Workspace.");
+        }
+        if (selection == null && request.modelId() != null) {
+            throw new ManagedAgentException(400, "unsupported_feature",
+                    "Model selection requires a bound Workspace.");
+        }
         if (selection == null && request.skills() != null && !request.skills().isEmpty()) {
             throw new ManagedAgentException(400, "unsupported_feature",
                     "Session Skills require a bound Workspace.");
@@ -112,12 +122,13 @@ public class PublicAgentController {
         CommandAdmission admission = selection == null
                 ? service.createSession(tenant.tenantId(), tenant.actorId(),
                         idempotencyKey, request.agentId(),
-                        request.agentRevision(), null, request.metadata(),
+                        request.agentRevision(), request.title(), request.metadata(),
                         request.input(), com.alibaba.qwen.code.managedagent.model.SessionModelConfig.parse(request.modelConfig()),
                         request.memoryStoreId())
                 : service.createWorkspaceSession(tenant.tenantId(), tenant.requireActorId(), idempotencyKey,
-                        request.agentId(), request.agentRevision(), null, request.metadata(), request.input(),
-                        selection, null, null, request.skills(), null, request.extensionPins(), worktree,
+                        request.agentId(), request.agentRevision(), request.title(), request.metadata(), request.input(),
+                        selection, request.approvalMode(), request.planMode(), request.skills(), request.modelId(),
+                        request.extensionPins(), worktree,
                         com.alibaba.qwen.code.managedagent.model.SessionModelConfig.parse(request.modelConfig()), request.memoryStoreId());
         PublicSession session = service.getPublicSession(tenant.tenantId(),
                 tenant.actorId(), admission.sessionId());
@@ -304,7 +315,7 @@ public class PublicAgentController {
     }
 
     @GetMapping("/{sessionId}/tasks")
-    public PublicList<PublicTask> tasks(TenantContext tenant,
+    public PublicTaskList tasks(TenantContext tenant,
             @PathVariable String sessionId,
             @RequestParam(required = false) String cursor,
             @RequestParam(defaultValue = "20") int limit) {

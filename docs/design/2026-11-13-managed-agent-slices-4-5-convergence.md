@@ -110,7 +110,7 @@ After Tier-1 pre-production convergence landed (`#17044`, `#17047`, `#17058`, `#
 - **`PublicSession`:** add optional `title`, `environment`, `approval_mode`, `approval_revision`, `initial_approval_mode`, `plan_mode`, `plan_mode_supported`, `model_context` (`PublicModelContext`), `model_selection` (`PublicModelSelection`), and `lifecycle_operation` (`PublicLifecycleOperation`), populated in `ManagedAgentService.publicSessions(records, actorId)` using the same batched queries as `webShellSessions`. Keep `created_at` / `updated_at` in epoch seconds per existing Public API convention.
 - **`SessionCapabilities`:** add `workspace_turns`, `cwd_change`, `model_change`, `approval_mode_change`, `input_attachments`, `rename`, `client_files`.
 - **`PublicTaskList`:** return `PublicTaskList` (`object = "list"`, `data`, `next_cursor`, `has_more`, `active_child_count`) on `GET /v1/agents/sessions/{sessionId}/tasks`.
-- **`WorkspaceDiscoveryController`:** extend `PublicItem` with `default_cwd_relative` and `can_select_directory`, and `PublicCapabilities` with `workspace_creation`, `workspace_listing`, `directory_selection`, and `local_directory_import`.
+- **`WorkspaceDiscoveryController`:** extend `PublicItem` with `default_cwd_relative` and `can_select_directory`, and `PublicCapabilities` with `workspace_creation`, `approval_mode_selection`, `directory_selection`, and `local_directory_import` (`approval_mode_selection` mirrors WebShell's `approvalModeSelection`; an earlier draft misnamed it `workspace_listing`).
 
 ## Security and Ownership Invariants
 

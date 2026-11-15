@@ -6,8 +6,8 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.CommitTransactionRequest;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicList;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicTask;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicTaskList;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcChannelInstanceStore;
 import com.alibaba.qwen.code.managedagent.persistence.JdbcManagedExtensionRecordStore;
@@ -816,6 +816,29 @@ class ManagedExtensionRecordStoreTest {
         assertThat(tasks.queryWebShellTasks(TENANT, TENANT, sessionId, null,
                 10).data().getFirst().childSessionId())
                 .isEqualTo("session-child");
+        // Both task lists count the same nonterminal child Agents; a Session
+        // without the public child protocol omits the count on both wires.
+        assertThat(tasks.listPublicTasks(TENANT, TENANT, sessionId, null, 10)
+                .activeChildCount()).isNull();
+        assertThat(tasks.queryWebShellTasks(TENANT, TENANT, sessionId, null,
+                10).activeChildCount()).isNull();
+        // The public protocol also resolves the named child Session row,
+        // whose reader requires the Session event stream to exist.
+        jdbc.update("INSERT INTO ma_session (tenant_id,"
+                + " session_id, agent_id, status, gmt_create, gmt_modified)"
+                + " VALUES (?, 'session-child', 'qwen-code', 'ACTIVE', 1, 1)",
+                TENANT);
+        jdbc.update("INSERT INTO ma_event_stream (tenant_id, session_id,"
+                + " stream_kind, stream_id, gmt_modified)"
+                + " VALUES (?, 'session-child', 'SESSION', X'', 1)", TENANT);
+        jdbc.update("UPDATE ma_session SET public_child_agents_version = 1"
+                + " WHERE tenant_id = ? AND session_id = ?", TENANT,
+                sessionId);
+        assertThat(tasks.listPublicTasks(TENANT, TENANT, sessionId, null, 10)
+                .activeChildCount())
+                .isEqualTo(tasks.queryWebShellTasks(TENANT, TENANT, sessionId,
+                        null, 10).activeChildCount())
+                .isEqualTo(1L);
         ObjectNode stopping = attached.deepCopy();
         stopping.put("stopRequested", true);
         commitDomain(journal, "stop-4", "child_run", stopping, List.of());
@@ -1903,7 +1926,7 @@ class ManagedExtensionRecordStoreTest {
             List<String> seen = new ArrayList<>();
             String cursor = null;
             do {
-                PublicList<PublicTask> page = tasks.listPublicTasks(TENANT,
+                PublicTaskList page = tasks.listPublicTasks(TENANT,
                         null, sessionId, cursor, limit);
                 page.data().forEach(task -> seen.add(task.createdAt() + " "
                         + task.id()));
