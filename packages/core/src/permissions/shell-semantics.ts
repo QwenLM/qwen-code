@@ -2555,6 +2555,12 @@ function canBraceExpand(
   bare: string | undefined,
   budget?: BraceScanBudget,
 ): boolean {
+  // A target with no `{` at all can never expand, so neither bail below may
+  // claim it does: they answer "expands" without looking for a brace, and an
+  // absolute brace-free `cd` that follows a spent budget or an over-long
+  // earlier target would then republish the segment's starting cwd instead of
+  // its own — turning a deny rule for a protected path into an approvable ask.
+  if (!target.includes('{')) return false;
   // `bare` is undefined when the caller has no per-character marking; a target
   // reached here is always shell-decoded, so assume the braces were typed bare.
   const isBare = (index: number) => bare === undefined || bare[index] === '1';

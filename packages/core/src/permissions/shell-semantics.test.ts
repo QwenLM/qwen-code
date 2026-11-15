@@ -1153,6 +1153,22 @@ describe('extractShellOperationsAcrossCommand', () => {
     expect(Date.now() - started).toBeLessThan(1_000);
   });
 
+  it('still resolves a brace-free cd after the length bail', () => {
+    // The length bail answers "expands" without looking for a `{`, so a
+    // brace-free target that reaches it must not keep that answer: an
+    // absolute, statically resolvable `cd` has to hold its own directory, or a
+    // deny rule for a protected path degrades to an approvable ask.
+    expect(
+      across(
+        `cd ${'./'.repeat(2100)}sub && cd /repo/.qwen && echo x > settings.json`,
+      ),
+    ).toEqual([write('/repo/.qwen/settings.json')]);
+    // The same target with no absolute cd after it still stays uncertain.
+    expect(
+      across(`cd ${'./'.repeat(2100)}sub && echo x > settings.json`),
+    ).toEqual([write('/repo/sub/settings.json')]);
+  });
+
   it('does not scan in-bound brace targets past the work budget', () => {
     // One target just under the length bound, with 600 bare `{` to re-walk.
     // Every separator is quoted, so no group can return early and the re-walk
