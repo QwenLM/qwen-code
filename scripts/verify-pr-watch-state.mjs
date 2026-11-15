@@ -135,8 +135,45 @@ export function readState(stateRoot, prNumber) {
       `state file ${path} is not a JSON object; inspect or remove it before the next round`,
     );
   }
+  // A well-formed object whose keys are ALL unknown is not a state this
+  // helper can migrate: reading it as "no state" would let --start rewrite
+  // the file from empty lists and erase a live in-flight record (R16-2).
+  // Fail closed on shape, like corrupt JSON, rather than silently reset.
+  // The legacy `inFlight` key counts only as a string head: `inFlight:true`
+  // (the old flag) or `inFlight:{…}` alone is not a migratable marker.
+  const keys = Object.keys(parsed);
+  const knownPresent = keys.some((key) =>
+    key === 'inFlight' ? typeof parsed[key] === 'string' : STATE_KEYS.has(key),
+  );
+  if (keys.length > 0 && !knownPresent) {
+    throw new Error(
+      `state file ${path} has no recognised state key; inspect or remove it before the next round`,
+    );
+  }
   return parsed;
 }
+
+/** The state keys the migration ladder recognises (R16-2 shape guard). */
+const STATE_KEYS = new Set([
+  'pr',
+  'repo',
+  'round',
+  'artifactDir',
+  'startedAt',
+  'completedAt',
+  'verdict',
+  'commentId',
+  'seqCounter',
+  'verifiedHeads',
+  'verifiedHead',
+  'previousHead',
+  'inFlightHeads',
+  'inFlightHead',
+  'inFlight',
+  'deferredHeads',
+  'releasedHeads',
+  'retiredSeqs',
+]);
 
 /**
  * OIDs are quoted at every length from 7 to 40; compare by prefix. An

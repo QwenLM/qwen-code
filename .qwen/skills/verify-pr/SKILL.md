@@ -203,19 +203,22 @@ nothing mounted, no host credentials>","reason":"<why a VM>"}` — the same
 maintainer approval the waiver requires, never the round's own claim. The
 credential-free attestation (`QWEN_VERIFY_CREDENTIAL_FREE=1`) is the
 **operator's attestation**, never set by the round itself or left exported
-afterwards: unset it when the round ends. The
-VM round also runs under a **scratch `HOME`** — the gate
-(`--require-isolation`) reads `~/.ssh`, `~/.config/gh`, `~/.aws` and the rest
-under the process home, so the operator's real home fails the gate even on a
-clean VM. (The separate credential scan reads the round's work tree for
-credential-shaped files; the home and environment checks belong to the
-gate.) The gate reads credential **environment signals** too, so in that same
-shell unset `SSH_AUTH_SOCK`, `GH_TOKEN`, `GITHUB_TOKEN`, `KUBECONFIG`,
-`OPENAI_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`,
-`GOOGLE_APPLICATION_CREDENTIALS`, `AZURE_CLIENT_SECRET`, the `AWS_*` keys
-and `SANDBOX_MOUNTS` before running the gate: an agent-forwarded shell
-carries `SSH_AUTH_SOCK` even under a scratch home, and the gate refuses it
-with exit 4. The shapes:
+afterwards: unset it when the round ends. The VM path runs **no
+`--require-isolation` gate**: a VM carries no observed container marker, so
+the gate would refuse on the absent marker (exit 4) before any home or
+credential check, and a `mode:"vm"` declaration needs no gate record — only
+the maintainer's approval and the operator's attestation. The VM round still
+runs under a **scratch `HOME`** and a scrubbed environment so the round
+itself sees no host credentials: in the shell that starts the round unset
+`SSH_AUTH_SOCK`, `GH_TOKEN`, `GITHUB_TOKEN`, `KUBECONFIG`, `OPENAI_API_KEY`,
+`GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_APPLICATION_CREDENTIALS`,
+`AZURE_CLIENT_SECRET`, the `AWS_*` keys and `SANDBOX_MOUNTS` (an
+agent-forwarded shell carries `SSH_AUTH_SOCK` even under a scratch home),
+and run the credential scan over the work tree. The home and environment
+_gate_ checks — `--require-isolation` reads `~/.ssh`, `~/.config/gh`,
+`~/.aws` and credential environment signals — belong to the **container**
+recipe's step 5, where an observed marker exists to pass; they are not a VM
+requirement. The shapes:
 
 - Inside an observed container boundary that passed `--require-isolation`:
   `{"mode":"container","detail":"<image, network policy, credential-free mount>"}`
@@ -513,7 +516,16 @@ authority to certify the round.
    On a pass the gate writes `boundary-gate.json` there — the record the
    host checker requires alongside the step-7 declaration. The artifact
    tree is PR-writable, so the record corroborates an operator who ran the
-   gate; it is not proof against a round that forges it.
+   gate; it is not proof against a round that forges it. The gate also
+   writes a per-round **nonce** to `$HOME/.qwen-verify-nonce` (container-local,
+   not the shared mount) and into the gate record. The round MUST read that
+   container-local nonce and echo it into its raw harness logs (e.g. a
+   `container-nonce: <nonce>` line at the start of every harness run), so
+   step 7 can tie the `mode:"container"` declaration to execution inside
+   this container — a battery run on the host cannot read the container-local
+   nonce. If the battery cannot run in this container (e.g. a Java-heavy
+   round whose image carries no JDK), do NOT declare `mode:"container"`:
+   declare `mode:"waived"` with the maintainer's approval instead.
 
    The scan names credential-shaped ignored files (nested ones included, but
    not public keys; the private-key families cover RSA, Ed25519, ECDSA and
@@ -600,6 +612,18 @@ authority to certify the round.
    fi
    if [ "$rc" -eq 0 ]; then
      rm -rf -- "$rd/boundary.json" || { echo "cannot clear boundary.json" >&2; rc=1; }
+   fi
+   if [ "$rc" -eq 0 ]; then
+     # The container declaration must be tied to execution INSIDE the
+     # container, not just to a gate that ran there (R16-1). The gate's
+     # per-round nonce (in the gate record) must also appear in the round's
+     # raw harness logs; a battery run on the host cannot read the
+     # container-local nonce, so its logs lack it. Exclude the gate record
+     # and the declaration themselves from the search.
+     nonce="$(sed -n 's/.*"nonce"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$rd/boundary-gate.json" | head -1)"
+     if [ -z "$nonce" ] || ! grep -rqF --exclude=boundary-gate.json --exclude=boundary.json -- "$nonce" "$rd"; then
+       echo "round logs carry no container nonce; refusing mode:container — declare mode:waived with the maintainer's approval if the battery ran on the host" >&2; rc=1
+     fi
    fi
    if [ "$rc" -eq 0 ]; then
      # Fill in the detail with the image and network policy you used — the

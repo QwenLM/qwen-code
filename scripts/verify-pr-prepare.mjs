@@ -49,6 +49,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import {
   existsSync,
   mkdirSync,
@@ -851,6 +852,16 @@ function requireBoundary(artifactDir = null) {
     return 4;
   }
   if (artifactDir) {
+    // A per-round nonce ties the declaration to execution inside THIS
+    // container (R16-1). It is written to a container-local path (the
+    // process home, NOT the shared artifact mount) so the round must read
+    // it from inside the container and echo it into its raw harness logs;
+    // step 7 refuses mode:"container" unless the logs carry it. The nonce
+    // also rides the gate record so the host check can read it after the
+    // container stops. Like the record itself, this corroborates an
+    // operator who ran the round in the container — it is not proof
+    // against a round that forges both.
+    const nonce = randomBytes(16).toString('hex');
     const record = {
       gate: 'require-isolation',
       passed: true,
@@ -860,7 +871,14 @@ function requireBoundary(artifactDir = null) {
       // the checker requires one to back a container claim.
       observed: isolation.observed,
       credentialFree: true,
+      nonce,
     };
+    try {
+      writeFileSync(join(homedir(), '.qwen-verify-nonce'), `${nonce}\n`);
+    } catch {
+      // Best-effort: the record still carries the nonce; a home that
+      // cannot be written does not fail the gate.
+    }
     const tmp = `${recordPath}.${process.pid}.tmp`;
     // A filesystem failure here is the documented exit-3 path, not an
     // uncaught throw after the pass line: a driver keyed on exit 4 must

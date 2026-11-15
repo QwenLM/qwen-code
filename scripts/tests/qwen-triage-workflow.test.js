@@ -6828,9 +6828,16 @@ describe('qwen-triage verify hardening round 2', () => {
     // container, CI lane, and VM alike.
     expect(flat).toContain("the boundary's operator writes it");
     expect(flat).toContain("the VM's operator for a VM boundary");
-    // The credential scan reads the process home: a VM round under the
-    // operator's real home fails --require-isolation even on a clean VM.
-    expect(flat).toContain('The VM round also runs under a **scratch `HOME`**');
+    // R16-4: the VM path runs no --require-isolation gate (no observed
+    // marker exists to pass, and mode:"vm" needs no gate record); the
+    // scratch HOME protects the round itself, and the home/env gate checks
+    // belong to the container recipe's step 5.
+    expect(flat).toContain(
+      'The VM path runs **no `--require-isolation` gate**',
+    );
+    expect(flat).toContain(
+      'The VM round still runs under a **scratch `HOME`**',
+    );
     expect(flat).toContain(
       '{"mode":"container","detail":"<image, network policy, credential-free mount>"}',
     );
@@ -6994,6 +7001,7 @@ describe('qwen-triage verify hardening round 2', () => {
       symlinkRound = false,
       spacesInPath = false,
       slashSuffix = '',
+      noNonce = false,
     } = {}) => {
       const root = mkdtempSync(join(tmpdir(), 'verify-step7-'));
       // R10-48: a round path with a space exercises the quoted expansions.
@@ -7019,6 +7027,26 @@ describe('qwen-triage verify hardening round 2', () => {
       writeFileSync(join(proxyDir, 'proxy.pid'), '424242\n');
       writeFileSync(join(proxyDir, 'proxy.json'), '{"token":"bearer"}');
       writeFileSync(join(proxyDir, 'proxy.err'), '');
+      // R16-1: the gate record carries a per-round nonce; the round's raw
+      // harness logs must echo it for step 7 to declare mode:"container".
+      // noNonce leaves the logs without it (the gate still passed).
+      const nonce = 'n0nce1234567890abcdef';
+      if (!planted && !readOnlyRound && !symlinkRound) {
+        writeFileSync(
+          join(round, 'boundary-gate.json'),
+          JSON.stringify({
+            gate: 'require-isolation',
+            passed: true,
+            observed: ['/.dockerenv'],
+            credentialFree: true,
+            nonce,
+          }),
+        );
+        writeFileSync(
+          join(round, 'harness.log'),
+          noNonce ? 'PASS cell\n' : `container-nonce: ${nonce}\nPASS cell\n`,
+        );
+      }
       const calls = join(root, 'calls.log');
       for (const [tool, body] of [
         [
@@ -7087,6 +7115,25 @@ describe('qwen-triage verify hardening round 2', () => {
           '"mode":"container"',
         );
         // The token-bearing files are gone, not just the process killed.
+        for (const f of ['proxy.pid', 'proxy.json', 'proxy.err']) {
+          expect(existsSync(join(proxyDir, f))).toBe(false);
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    // R16-1: the gate record passes but the round logs carry no container
+    // nonce (the battery ran on the host) — step 7 must refuse to mint a
+    // mode:"container" declaration and exit non-zero, proxy still torn down.
+    it('refuses a container declaration when the logs carry no nonce', () => {
+      const { res, log, round, root, proxyDir } = replay({ noNonce: true });
+      try {
+        expect(res.status).toBe(1);
+        expect(res.stderr).toMatch(/round logs carry no container nonce/);
+        expect(existsSync(join(round, 'boundary.json'))).toBe(false);
+        expect(log).not.toMatch(/^node /m);
+        expect(log).toMatch(/kill 424242/);
         for (const f of ['proxy.pid', 'proxy.json', 'proxy.err']) {
           expect(existsSync(join(proxyDir, f))).toBe(false);
         }

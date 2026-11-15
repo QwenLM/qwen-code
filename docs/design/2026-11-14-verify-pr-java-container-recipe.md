@@ -79,7 +79,21 @@ claim to mirror the gate's full trigger:
 1. **Image.** A Maven image bundling the lane's Maven and JDK, such as
    `maven:3.9.11-eclipse-temurin-21`. Verify the exact tag exists at
    implementation time and pin by digest (the JS recipe references
-   `node:22-bookworm` by tag; the Java recipe should be stricter).
+   `node:22-bookworm` by tag; the Java recipe should be stricter). The
+   **seed/gate** image must ALSO bundle a digest-pinned Node: the isolation
+   gate is a Node program (`node /trusted-scripts/verify-pr-prepare.mjs
+--require-isolation --artifact-dir …`), and the stock Maven image carries
+   no Node, so a Java-only round could not produce the `boundary-gate.json`
+   its `mode:"container"` declaration requires (R16-6). Run the seed and the
+   gate in this one Maven+JDK+Node image (trusted scripts at
+   `/trusted-scripts`), so the gate's `observed`/`credentialFree` attest the
+   same container that executes the PR's Maven code. The offline **battery**
+   image stays the stock Maven+JDK image (no Node needed for the battery);
+   the "no Java+Node derivative" non-goal applies to the battery image, not
+   the seed/gate image. If a model turn runs in a separate `node:22-bookworm`
+   container, that container needs its own gate record too — one
+   `boundary-gate.json` per PR-code-bearing container, each recording the
+   container it observed.
 2. **Offline Maven repository, seeded inside a boundary.** No host step runs
    a Maven goal against the PR's poms: `mvn install` walks the whole default
    lifecycle, so any plugin execution the PR binds to `compile` or `test`
@@ -93,16 +107,23 @@ claim to mirror the gate's full trigger:
    `<mirrorOf>central</mirrorOf>` does not redirect a pom-declared
    `<repositories>` entry), the strip list removes
    `<repositories>`/`<pluginRepositories>` from every pom, and the seed
-   container's egress is restricted to the configured mirror by an
-   internal-only seed network with the mirror reachable through a
-   sidecar/forward proxy and no host route, or by host firewall rules in
-   BOTH the iptables `DOCKER-USER` (FORWARD) chain and INPUT-chain rules on
-   the bridge interface — `DOCKER-USER` alone filters only FORWARD, so it
-   cannot stop the seed reaching a service on the host itself (including
-   the host-side model proxy). Docker itself has no egress-allowlist
-   feature, and Maven settings cannot bound code executing inside the
-   project lifecycle, so the containment must name the layer that actually
-   enforces it, in both directions. The seed
+   container's egress is restricted to the configured mirror by host
+   firewall rules in BOTH the iptables `DOCKER-USER` (FORWARD) chain AND
+   INPUT-chain rules on the bridge interface, with the mirror reachable
+   through a sidecar/forward proxy that **denies by default and allowlists
+   only the mirror**. An internal-only seed network (`docker network create
+   --internal`) is NOT sufficient on its own: `--internal` drops FORWARD
+   (off-subnet) traffic, but a packet from the seed to the host's own
+   bridge-gateway address on that subnet is delivered locally via INPUT and
+   answered by a host service — so option A still needs the INPUT-chain rule
+   to block host-bound listeners (including the host-side model proxy when
+   it binds the bridge gateway). `DOCKER-USER` alone filters only FORWARD,
+   so it cannot stop the seed reaching a service on the host itself. Docker
+   itself has no egress-allowlist feature, and Maven settings cannot bound
+   code executing inside the project lifecycle, so the containment must
+   name the layer that actually enforces it, in both directions, and the
+   sidecar must not be an open CONNECT forwarder (no allowlist = reachable
+   everything). The seed
    FIRST installs the one SDK module the lane and the consumer actually use,
    `packages/sdk-java/qwencode` (`mvn install -DskipTests -Dgpg.skip=true
 -Dmaven.javadoc.skip=true` on that module's pom, as the CI lane does
@@ -225,10 +246,15 @@ claim to mirror the gate's full trigger:
   and builds).
 - **Bundled image over JDK-on-node.** Layering a JDK onto `node:22-bookworm`
   would serve mixed PRs in one container, but drifts from the CI lane's
-  runtime and grows the image the round must trust. The stock Maven+JDK
-  image carries no Node, and a Java+Node derivative is a declared non-goal;
-  a mixed round runs its JS suites in the JS recipe's container and its Java
-  battery in this one, sharing the artifact directory through the host.
+  runtime and grows the image the round must trust. The offline **battery**
+  image stays the stock Maven+JDK image (no Node needed to run the battery),
+  and a general Java+Node battery derivative is a declared non-goal; a mixed
+  round runs its JS suites in the JS recipe's container and its Java battery
+  in this one, sharing the artifact directory through the host. The
+  **seed/gate** image is the exception: it bundles a digest-pinned Node so
+  the Node-based isolation gate can run in the same container that seeds the
+  PR's Maven code (R16-6) — that is a gate requirement, not a general
+  multi-language battery image.
 
 ## Constraints
 

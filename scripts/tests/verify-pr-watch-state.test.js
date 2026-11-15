@@ -1150,6 +1150,36 @@ describe('readState', () => {
       );
     }
   });
+
+  // R16-2: a well-formed object whose keys are all unknown (or whose only
+  // legacy key is a non-string inFlight) is not a migratable state — it must
+  // be refused, not read as "no state" and rewritten from empty lists.
+  it('refuses a well-formed body with no recognised state key', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    for (const body of [
+      JSON.stringify({ head: HEAD, inFlight: true }),
+      JSON.stringify({ inFlight: { head: HEAD } }),
+      JSON.stringify({ something: 'else' }),
+    ]) {
+      writeFileSync(statePath(root, 1), body);
+      expect(() => readState(root, 1)).toThrow(/no recognised state key/);
+    }
+    // A legacy string inFlight head is still migratable.
+    writeFileSync(statePath(root, 1), JSON.stringify({ inFlight: HEAD }));
+    expect(() => readState(root, 1)).not.toThrow();
+  });
+
+  it('--start refuses an unknown-key body exit 1 and leaves it byte-identical', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    const body = JSON.stringify({ head: HEAD, inFlight: true });
+    writeFileSync(statePath(root, 16866), body);
+    const res = run(root, [...START, '--artifact-dir', 'r11']);
+    expect(res.status).toBe(1);
+    expect(res.stderr).toMatch(/no recognised state key/);
+    expect(readFileSync(statePath(root, 16866), 'utf8')).toBe(body);
+  });
 });
 
 describe('duplicateHead', () => {
