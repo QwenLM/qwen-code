@@ -8,6 +8,7 @@
 // Batch runs at half the realtime price with a >=24h completion window, so it
 // is a fan-out tool for many independent single-turn requests, not a path for
 // the agent loop. Design: docs/design/2026-09-23-batch-api-design.md
+import { commandMetadata } from './command-metadata.js';
 import type { Argv, CommandModule } from 'yargs';
 import { AuthType } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
 import { isTlsVerificationDisabled } from '@qwen-code/qwen-code-core/utils/runtimeFetchOptions.js';
@@ -438,8 +439,7 @@ export const listWorkflowCommand: CommandModule = {
 };
 
 export const batchCommand: CommandModule = {
-  command: 'batch',
-  describe: 'Run many independent requests through the DashScope Batch API',
+  ...commandMetadata.batch,
   builder: (yargs: Argv) =>
     yargs
       .command(runWorkflowCommand)

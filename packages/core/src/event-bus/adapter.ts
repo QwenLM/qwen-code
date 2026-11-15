@@ -42,7 +42,11 @@ export async function runAgentLoopOnBus(
   const runId = randomUUID();
   // Execution marker: with QWEN_DEBUG_LOG_FILE on, this line proves a run
   // took the bus path rather than the procedural loop.
-  debugLogger.debug('runAgentLoopOnBus started', runId);
+  debugLogger.debug(
+    'runAgentLoopOnBus started',
+    runId,
+    `(prompt ${options.first.promptId})`,
+  );
   const runtime = createLoopEventRuntime();
   const state = runtime.store.create({
     runId,
@@ -75,12 +79,21 @@ export async function runAgentLoopOnBus(
     { runId },
   );
 
+  const { signal } = options;
+  const onAbort = () =>
+    runtime.bus.publish(
+      createBusEvent('loop.cancelled', state, { reason: 'abort' }),
+    );
   try {
     runtime.bus.publish(
       createBusEvent('loop.started', state, { promptId: state.promptId }),
     );
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
     return await result;
   } finally {
+    signal.removeEventListener('abort', onAbort);
+    clearTimeout(state.settleTimer);
     off();
     runtime.store.delete(runId);
     runtime.dispose();
