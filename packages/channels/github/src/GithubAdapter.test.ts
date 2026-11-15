@@ -24865,6 +24865,9 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
           } finally {
             stderr.mockRestore();
           }
+          // Positive control that the watch pass really was skipped: no comment
+          // fetch happened, so only the gap-detection persist could arm the entry.
+          expect(mockOctokit.rest.issues.listComments).not.toHaveBeenCalled();
           expect(
             readWatchState().entries['owner/repo#42']!['digestPending'],
           ).toBe(true);
@@ -25310,6 +25313,14 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
           expect(boundSessions.deliverPrompt.mock.calls[0]![1]).toContain(
             'Offline backlog: 25',
           );
+          // Positive control that the ring really evicted a rendered key, so the
+          // frontier (not the ring) is what dedupes the follow-up.
+          const ringAfter = cursor.dispatchedComments ?? [];
+          const renderedKeys = Array.from(
+            { length: 20 },
+            (_, i) => `IC_${605 + i}`,
+          );
+          expect(renderedKeys.some((k) => !ringAfter.includes(k))).toBe(true);
           (
             channel as unknown as {
               prWatchState: {
