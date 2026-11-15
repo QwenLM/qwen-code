@@ -360,6 +360,10 @@ export class ManagedDingtalkAdapter {
     // Remember the newest webhook for the conversation before anything else:
     // the reply may arrive after this webhook's own message is long gone.
     if (conversationId && sessionWebhook) {
+      // Reinsert at the end so a re-seen conversation counts as recent and the
+      // overflow evicts the least-recently-seen key, not the first-inserted
+      // one (#17173 R1-20).
+      delete state.webhooks[conversationId];
       state.webhooks[conversationId] = sessionWebhook;
       const keys = Object.keys(state.webhooks);
       if (keys.length > 256) delete state.webhooks[keys[0]!];

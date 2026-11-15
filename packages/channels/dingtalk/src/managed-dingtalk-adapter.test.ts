@@ -549,6 +549,61 @@ describe('managed DingTalk adapter outbox', () => {
     await adapter.disconnect();
   });
 
+  it('evicts the least-recently-seen webhook, not the first-inserted (R1-20)', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    const hook = (session: string): string =>
+      `https://oapi.dingtalk.com/robot/sendBySession?session=${session}`;
+    // Fill the 256-slot webhook map with distinct conversations. The claim
+    // table caps at 32, so drain it with a tick between batches.
+    for (let batch = 0; batch < 8; batch++) {
+      for (let j = 0; j < 32; j++) {
+        const i = batch * 32 + j;
+        fake.push(
+          `fill-${i}`,
+          messageData({
+            msgId: `fill-${i}`,
+            conversationId: `conv-${i}`,
+            sessionWebhook: hook(`w${i}`),
+          }),
+        );
+      }
+      await adapter.tick();
+    }
+    // Re-seen the first-inserted conversation: its recency must refresh.
+    fake.push(
+      'revisit',
+      messageData({
+        msgId: 'revisit',
+        conversationId: 'conv-0',
+        sessionWebhook: hook('w0-new'),
+      }),
+    );
+    await adapter.tick();
+    // The 257th conversation overflows the map and evicts the least-recent key.
+    fake.push(
+      'overflow',
+      messageData({
+        msgId: 'overflow',
+        conversationId: 'conv-256',
+        sessionWebhook: hook('w256'),
+      }),
+    );
+    await adapter.tick();
+    // conv-0 was re-seen, so its updated webhook must survive the eviction.
+    // The delivery carries no webhook of its own and relies on the cache.
+    const probe = delivery('d-0', 1);
+    probe.replyContext = {
+      conversationId: 'conv-0',
+      sessionWebhook: '',
+      senderId: 'staff-1',
+      robotCode: 'robot-app',
+    };
+    plane.enqueue([probe]);
+    await adapter.tick();
+    expect(fake.sent.map((entry) => entry.webhook)).toEqual([hook('w0-new')]);
+    await adapter.disconnect();
+  });
+
   it('drops a deterministically refused orphan receipt without wedging later ones', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
     // Both sends land but their receipt answers are lost: both entries stay
