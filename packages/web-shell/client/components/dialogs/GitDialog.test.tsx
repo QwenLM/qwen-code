@@ -553,7 +553,7 @@ describe('GitDialog', () => {
     expect(workspaceGitCommit).not.toHaveBeenCalled();
     expect(workspaceGitPush).not.toHaveBeenCalled();
     expect(document.body.textContent).toContain(
-      'Select at least one file to commit',
+      'Nothing to commit — the working tree is clean',
     );
   });
 
@@ -735,6 +735,137 @@ describe('GitDialog', () => {
     // click has to stay empty rather than commit both files.
     expect(checkboxes().map((box) => box.checked)).toEqual([false, false]);
     expect(workspaceGitCommit).not.toHaveBeenCalled();
+  });
+
+  it('re-reads the diff so a second commit in the same dialog still commits', async () => {
+    // The checklist is a snapshot, and the refresh after a successful commit
+    // empties it. A Commit click then carries `paths: []` and is refused while
+    // the tree is dirty again, so the request is built from a fresh listing.
+    const file = (path: string) => ({
+      path,
+      added: 1,
+      removed: 0,
+      isBinary: false,
+      isUntracked: false,
+      isDeleted: false,
+      truncated: false,
+    });
+    const oneFile = (path: string) => ({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      filesCount: 1,
+      linesAdded: 1,
+      linesRemoved: 0,
+      files: [file(path)],
+      hiddenCount: 0,
+    });
+    // The refresh that follows a successful commit empties the checklist; the
+    // agent's next edit does not re-open the view, so the snapshot stays empty
+    // while the tree is dirty again.
+    let commitResolved = false;
+    let emptyServed = false;
+    workspaceGitDiff.mockImplementation(async () => {
+      if (commitResolved && !emptyServed) {
+        emptyServed = true;
+        return { ...oneFile('a.ts'), filesCount: 0, files: [] };
+      }
+      return oneFile('a.ts');
+    });
+    let sha = 0;
+    workspaceGitCommit.mockImplementation(async () => {
+      commitResolved = true;
+      return { sha: `abc123${++sha}`, subject: 'committed' };
+    });
+    mount('commit');
+    await flush();
+
+    const textarea = document.body.querySelector(
+      '[data-web-shell-dialog] textarea',
+    )!;
+    const typeMessage = async (value: string) => {
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(
+          HTMLTextAreaElement.prototype,
+          'value',
+        )?.set?.call(textarea, value);
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await flush();
+    };
+    const commitButton = () =>
+      Array.from(
+        document.body.querySelectorAll<HTMLButtonElement>(
+          '[data-web-shell-dialog] button',
+        ),
+      ).find(
+        (b) =>
+          b.textContent?.trim() === 'Commit' &&
+          b.getAttribute('role') !== 'tab',
+      )!;
+
+    await typeMessage('fix: a');
+    await act(async () => {
+      commitButton().click();
+    });
+    await flush();
+    // Wait until the post-commit refresh has landed: the checklist is empty
+    // while the tree is dirty again.
+    for (let i = 0; i < 20; i++) {
+      if (
+        document.body.querySelectorAll(
+          '[data-web-shell-dialog] input[type="checkbox"]',
+        ).length === 0
+      )
+        break;
+      await flush();
+    }
+    expect(
+      document.body.querySelectorAll(
+        '[data-web-shell-dialog] input[type="checkbox"]',
+      ).length,
+    ).toBe(0);
+    await typeMessage('fix: a again');
+    console.log(
+      'CHK',
+      document.body.querySelectorAll(
+        '[data-web-shell-dialog] input[type="checkbox"]',
+      ).length,
+    );
+    // The stale listing is shown again rather than committed blind; the row
+    // comes back selected, so the next click commits it.
+    await act(async () => {
+      commitButton().click();
+    });
+    await flush();
+    console.log(
+      'CHK2',
+      document.body.querySelectorAll(
+        '[data-web-shell-dialog] input[type="checkbox"]',
+      ).length,
+      'MSG',
+      (document.body.querySelector('[data-web-shell-dialog] textarea') || {})
+        .value,
+    );
+    expect(workspaceGitCommit).toHaveBeenCalledTimes(1);
+    expect(
+      document.body.querySelectorAll(
+        '[data-web-shell-dialog] input[type="checkbox"]',
+      ).length,
+    ).toBe(1);
+    await act(async () => {
+      commitButton().click();
+    });
+    await flush();
+    console.log('CALLS', JSON.stringify(workspaceGitCommit.mock.calls));
+
+    expect(workspaceGitCommit).toHaveBeenCalledTimes(2);
+    expect(workspaceGitCommit).toHaveBeenLastCalledWith(
+      'fix: a again',
+      { paths: ['a.ts'] },
+      undefined,
+      undefined,
+    );
   });
 
   it('keeps a deliberate unselect-all across an empty refresh', async () => {

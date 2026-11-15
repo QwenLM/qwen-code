@@ -1488,6 +1488,7 @@ async function resolveCommitPaths(
       resolved.push(p);
     }
   };
+  const preImageCandidates: Array<{ path: string; oldPath: string }> = [];
   for (const entry of entries) {
     if (entry.oldPath) {
       if (!selectedOrPrefix(entry.path) && !selectedOrPrefix(entry.oldPath)) {
@@ -1499,7 +1500,10 @@ async function resolveCommitPaths(
       // rewritten past git's rename threshold — the checklist then shows two
       // independent rows, and naming the pre-image from the index pair alone
       // would record a deletion the user never selected.
-      if (selectedOrPrefix(entry.oldPath)) push(entry.oldPath);
+      if (selectedOrPrefix(entry.oldPath)) {
+        push(entry.oldPath);
+        preImageCandidates.push({ path: entry.path, oldPath: entry.oldPath });
+      }
       continue;
     }
     push(entry.path);
@@ -1535,29 +1539,49 @@ async function resolveCommitPaths(
     const newPath = tokens[i + 2];
     if (!selectedOrPrefix(newPath) && !selectedOrPrefix(oldPath)) continue;
     for (const p of [newPath, oldPath]) push(p);
-    // `oldPath` is repo-root-relative, so the pre-image check resolves it
-    // against the repository root — a workspace bound below the root would
-    // never see the occupant through `cwd`. A case-only rename reads as
-    // occupied on a case-folding filesystem even though nothing sits at the
-    // old path — the occupant is the rename's own post-image. Decide that by
-    // file identity rather than by folding the names: on a case-sensitive
-    // filesystem a squatter at the old spelling is a different file and must
-    // still be refused. `lstat` over `existsSync` keeps a dangling symlink at
-    // the old path a squatter too.
-    const oldStat = lstatOrNull(root || cwd, oldPath);
-    const newStat = lstatOrNull(root || cwd, newPath);
-    const sameIdentity =
-      oldStat !== null &&
-      newStat !== null &&
-      oldStat.dev === newStat.dev &&
-      oldStat.ino === newStat.ino;
-    if (oldStat !== null && !sameIdentity) {
-      throw new Error(
-        `cannot commit: ${oldPath} was renamed to ${newPath}, but a file now sits at the old path`,
-      );
-    }
+    refuseOccupiedPreImage(root || cwd, oldPath, newPath);
+  }
+  // A staged rename this view no longer pairs — its post-image was rewritten
+  // past the similarity threshold, or the repo sets `diff.renames=false` —
+  // still carries its pre-image in `git status`, whose pair names the deletion
+  // the user selected. Skipping the guard there would stage and publish
+  // whatever recreated the old path in place of that deletion.
+  for (const pair of preImageCandidates) {
+    refuseOccupiedPreImage(root || cwd, pair.oldPath, pair.path);
   }
   return resolved;
+}
+
+/**
+ * Refuse to commit when a path the commit will name as a deletion holds a file
+ * instead. `commit -- <old path>` takes the working-tree content of every path
+ * it names, so an occupant would be published in place of the deletion.
+ */
+function refuseOccupiedPreImage(
+  root: string,
+  oldPath: string,
+  newPath: string,
+): void {
+  // `oldPath` is repo-root-relative, so the pre-image check resolves it
+  // against the repository root — a workspace bound below the root would never
+  // see the occupant through `cwd`. A case-only rename reads as occupied on a
+  // case-folding filesystem even though nothing sits at the old path — the
+  // occupant is the rename's own post-image. Decide that by file identity
+  // rather than by folding the names: on a case-sensitive filesystem a
+  // squatter at the old spelling is a different file and must still be
+  // refused. `lstat` over `existsSync` keeps a dangling symlink at the old path
+  // a squatter too.
+  const oldStat = lstatOrNull(root, oldPath);
+  if (oldStat === null) return;
+  const newStat = lstatOrNull(root, newPath);
+  const sameIdentity =
+    newStat !== null &&
+    oldStat.dev === newStat.dev &&
+    oldStat.ino === newStat.ino;
+  if (sameIdentity) return;
+  throw new Error(
+    `cannot commit: ${oldPath} was renamed to ${newPath}, but a file now sits at the old path`,
+  );
 }
 
 /**

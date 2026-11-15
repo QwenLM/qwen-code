@@ -109,6 +109,10 @@ export function GitDialog({
   // transient state, and either way a paths-only commit would cover a subset.
   const [commitListComplete, setCommitListComplete] = useState(true);
   const loadedPathsRef = useRef<Set<string>>(new Set());
+  // A commit consumes the selection: the listing that follows reports the
+  // tree the commit produced, and an empty one shows no rows at all, so the
+  // next listing is a fresh starting point rather than a set the user cleared.
+  const selectionSpentRef = useRef(false);
   // Files whose deletion must be committed together with their addition.
   // Map of `path` -> `oldPath`; both paths are sent for a renamed file.
   const renameOldPaths = useRef(new Map<string, string>());
@@ -189,6 +193,12 @@ export function GitDialog({
       setCommitListComplete(complete);
       setCommitFiles(files);
       const firstLoad = commitFilesRef.current === null;
+      // The listing that follows a commit reports the tree the commit left
+      // behind — often empty — so the first non-empty one after it is a fresh
+      // starting point, and holding the flag across the empty refreshes keeps
+      // it that way.
+      const freshAfterCommit = selectionSpentRef.current && files.length > 0;
+      if (freshAfterCommit) selectionSpentRef.current = false;
       commitFilesRef.current = files;
       // The record of paths already shown accumulates: a refresh that comes
       // back empty (a merge or index lock in progress) must not erase it, or
@@ -208,7 +218,12 @@ export function GitDialog({
         // that appear for the first time.
         const next = new Set<string>();
         for (const file of files) {
-          if (firstLoad || prev.has(file.path) || !seen.has(file.path)) {
+          if (
+            firstLoad ||
+            freshAfterCommit ||
+            prev.has(file.path) ||
+            !seen.has(file.path)
+          ) {
             next.add(file.path);
           }
         }
@@ -426,23 +441,73 @@ export function GitDialog({
       // is rendered at all. The ref reads the same never-loaded state without
       // putting the files array in this callback's dependencies.
       const commitAll = commitFilesRef.current === null || !commitListComplete;
-      if (!commitAll && paths.length === 0) {
-        setCommitStatus({
-          msg: t('gitCommit.noFilesSelected'),
-          type: 'error',
-        });
-        return;
-      }
+      // The request is built from a diff read at commit time, not from the
+      // checklist: a row can appear after the snapshot loaded, and a commit
+      // empties it while the tree may be dirty again by the next click. A
+      // list that would leave every row out is shown instead of committed.
       setCommitBusy(andPush ? 'push' : 'commit');
       setCommitStatus(null);
       try {
         const ws = client.workspaceByCwd(workspaceCwd);
+        let request: { all?: true; paths?: string[] } = commitAll
+          ? { all: true }
+          : { paths };
+        if (!commitAll) {
+          try {
+            const diff = await ws.workspaceGitDiff(gitCwd, gitSessionId);
+            const complete = diff.available && diff.hiddenCount === 0;
+            if (complete) {
+              if (diff.files.length === 0) {
+                setCommitStatus({
+                  msg: t('gitCommit.nothingToCommit'),
+                  type: 'success',
+                });
+                return;
+              }
+              const live = new Set(diff.files.map((file) => file.path));
+              const kept = paths.filter((p) => live.has(p));
+              if (kept.length === 0) {
+                // Nothing the previous listing offered survives. Either the
+                // user cleared every row, or the tree moved on under the
+                // dialog (a commit elsewhere, an agent edit) and the rows on
+                // screen are stale. Committing the new tree unasked is the
+                // hazard the path list exists to prevent, so show it instead:
+                // the refreshed checklist renders every row selected, and the
+                // user can confirm with one click.
+                applyCommitFiles(diff.files);
+                setCommitStatus({
+                  msg: t('gitCommit.listRefreshed'),
+                  type: 'success',
+                });
+                return;
+              }
+              const oldPaths = renameOldPaths.current;
+              const refreshed: string[] = [];
+              for (const p of kept) {
+                refreshed.push(p);
+                const oldPath = oldPaths.get(p);
+                if (oldPath && !refreshed.includes(oldPath))
+                  refreshed.push(oldPath);
+              }
+              // Rows that appeared after the snapshot start unchecked, so they
+              // stay out of this commit rather than riding along unasked.
+              if (refreshed.length < diff.files.length) {
+                applyCommitFiles(diff.files);
+              }
+              request = { paths: refreshed };
+            }
+          } catch {
+            // The snapshot is still usable; the commit below reports the real
+            // error if the tree really is unreadable.
+          }
+        }
         const result = await ws.workspaceGitCommit(
           commitMsg.trim(),
-          commitAll ? { all: true } : { paths },
+          request,
           gitCwd,
           gitSessionId,
         );
+        selectionSpentRef.current = true;
         if (andPush) {
           try {
             await ws.workspaceGitPush(
@@ -494,6 +559,7 @@ export function GitDialog({
       commitListComplete,
       commitPathList,
       refreshCommitFiles,
+      applyCommitFiles,
       t,
     ],
   );

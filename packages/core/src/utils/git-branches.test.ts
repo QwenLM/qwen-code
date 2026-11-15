@@ -1259,6 +1259,23 @@ describe('gitCommit', () => {
     expect(git(dir, 'status', '--porcelain')).toContain('old.txt');
   });
 
+  it('refuses a rewritten rename whose pre-image holds a different file', async () => {
+    // The post-image is rewritten far enough that `git diff HEAD` no longer
+    // pairs the halves, so the rename-view guard never sees this pre-image.
+    // `git status` still pairs them, so the selection names `old.txt` as a
+    // deletion — and `commit -- old.txt` would publish whatever sits there.
+    const dir = makeRepo();
+    commitFile(dir, 'old.txt', 'original body of text\n', 'add old');
+    git(dir, 'mv', 'old.txt', 'new.txt');
+    write(dir, { 'new.txt': 'a wholly different body\n' });
+    write(dir, { 'old.txt': 'local shim\n' });
+
+    await expect(
+      gitCommit(dir, 'rename file', { paths: ['old.txt', 'new.txt'] }),
+    ).rejects.toThrow(/a file now sits at the old path/);
+    expect(git(dir, 'show', 'HEAD:old.txt')).toBe('original body of text\n');
+  });
+
   it('pairs renames with root-relative paths under diff.relative', async () => {
     // A workspace bound below the repository root plus `diff.relative=true`
     // makes an unanchored `git diff` print cwd-relative paths, which would
