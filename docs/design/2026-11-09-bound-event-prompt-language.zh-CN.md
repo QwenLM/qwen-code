@@ -274,7 +274,8 @@ channel 撰写的字符串：
 - 下一个补充哪种语言，以及届时 locale 联合是否要超出 `'en' | 'zh'`
   （channel `locale` 类型与 `resolveChannelLocale` 将一起扩展）。按运维
   指示延后：先中文，其他语言后续按需。
-- daemon watch 生产方启用时，应逐字复用共享 zh 字符串还是提供平台中立
-  变体（与角色指引设计相同的开放问题）。
+- 已由 [Daemon PR watch：提示词语言](2026-11-15-daemon-pr-watch-drain-language.zh-CN.md)
+  回答：daemon 逐字复用共享的 zh 信封与角色指引，并自行撰写按语言、平台中立的
+  转换摘要与来源说明行（`PR_WATCH_SUMMARY_COPY`、`DRAIN_PROVENANCE`）。
 - 字段标签是否应本地化。刻意排除在范围外；未来改动需要结构化元数据
   表示，而不是重新解析已渲染的行。

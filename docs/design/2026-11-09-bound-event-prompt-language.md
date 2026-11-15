@@ -328,9 +328,10 @@ Check names keep their `, ` join in both languages; they are platform data.
   `'en' | 'zh'` at that point (the channel `locale` type and
   `resolveChannelLocale` would extend together). Deferred per the operator's
   instruction: Chinese first, other languages later as needed.
-- Whether the daemon watch producer should reuse the shared zh strings verbatim
-  or supply platform-neutral variants when it is enabled (same open question as
-  the role-guidance design).
+- Resolved by [Daemon PR watch: prompt language](2026-11-15-daemon-pr-watch-drain-language.md):
+  the daemon reuses the shared zh envelope and role guidance verbatim, and
+  authors its own per-language, platform-neutral transition summaries and
+  provenance line (`PR_WATCH_SUMMARY_COPY`, `DRAIN_PROVENANCE`).
 - Whether field labels should ever be localized. Deliberately out of scope; a
   future change would need a structured metadata representation instead of
   re-parsing rendered lines.
