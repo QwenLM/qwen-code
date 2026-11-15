@@ -49,6 +49,7 @@ import {
   getAllMCPServerStatuses,
   getMCPConnectionStatus,
   getMCPServerStatus,
+  isMCPConnectionTeardownIntent,
   isMCPServerTeardownIntent,
   MCPServerStatus,
   removeMCPStatusChangeListener,
@@ -474,6 +475,19 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     );
   }
 
+  /**
+   * Whether this invocation's server was stopped on purpose. The connection's
+   * own marker outranks the name: a sibling connection registered under the
+   * same name clears the name-keyed intent when it reaches CONNECTED, but the
+   * owner's stop of *this* transport still holds.
+   */
+  private isTeardownIntent(): boolean {
+    return this.mcpClient !== undefined &&
+      isMCPConnectionTeardownIntent(this.mcpClient)
+      ? true
+      : isMCPServerTeardownIntent(this.serverName);
+  }
+
   private async attemptReconnect(): Promise<DiscoveredMCPTool | null> {
     if (!this.cliConfig) {
       return null;
@@ -546,7 +560,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     if (
       statusAtCall === MCPServerStatus.CONNECTED &&
       status === MCPServerStatus.DISCONNECTED &&
-      !isMCPServerTeardownIntent(this.serverName)
+      !this.isTeardownIntent()
     ) {
       void this.attemptReconnect().catch(() => undefined);
       return;
@@ -591,7 +605,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       // detaching here would spend this invocation's only listener on someone
       // else's transition — the later drop that is this abort's damage would
       // then never be repaired. The expiry still bounds the listener.
-      if (isMCPServerTeardownIntent(this.serverName)) {
+      if (this.isTeardownIntent()) {
         return;
       }
       detach();
@@ -728,7 +742,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
 
     // The owner is tearing this server down on purpose: reconnecting would
     // resurrect a transport the operator just stopped.
-    if (isMCPServerTeardownIntent(this.serverName)) {
+    if (this.isTeardownIntent()) {
       return false;
     }
 

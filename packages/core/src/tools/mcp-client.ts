@@ -36,6 +36,7 @@ import type { McpToolAnnotations } from './mcp-tool.js';
 import { SdkControlClientTransport } from './sdk-control-client-transport.js';
 import {
   markMCPServerTeardownIntent,
+  markMCPConnectionTeardownIntent,
   MCPServerStatus,
   recordMCPConnectionStatus,
   recordMCPServerLastError,
@@ -47,6 +48,7 @@ export {
   getMCPServerLastError,
   getMCPServerStatus,
   markMCPServerTeardownIntent,
+  markMCPConnectionTeardownIntent,
   MCPServerStatus,
   recordMCPServerLastError,
   removeMCPServerStatus,
@@ -874,6 +876,11 @@ export class McpClient {
     // `updateMCPServerStatus` call below and must be able to tell this
     // deliberate teardown from abort damage (issue #12160).
     markMCPServerTeardownIntent(this.serverName);
+    // Name-keyed intent is shared by every connection registered under this
+    // name, and a sibling that reconnects clears it. Record this transport's
+    // stop on the connection itself so an invocation holding it still knows
+    // the owner asked for this teardown.
+    markMCPConnectionTeardownIntent(this.client);
     // Record the per-connection truth too: this write skips `updateStatus()`,
     // but an abort repair holding this client reads the connection, not the
     // name-keyed registry, so it would otherwise keep a stale CONNECTED.

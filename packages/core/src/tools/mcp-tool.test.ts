@@ -30,7 +30,9 @@ import {
 } from './mcp-client.js';
 import {
   recordMCPConnectionStatus,
+  isMCPServerTeardownIntent,
   markMCPServerTeardownIntent,
+  markMCPConnectionTeardownIntent,
 } from './mcp-status.js';
 import {
   INVOCATION_CONTEXT_META_KEY,
@@ -2471,6 +2473,93 @@ describe('DiscoveredMCPTool', () => {
       expect(mockMcpClient.callTool).toHaveBeenCalledTimes(1);
       expect(discoverToolsForServer).not.toHaveBeenCalled();
       expect(ensureTool).not.toHaveBeenCalled();
+    });
+
+    it('keeps a stopped connection stopped after a sibling clears the name', async () => {
+      // The pool keeps one entry per `serverName + fingerprint`, so two live
+      // connections share a name. A's owner stops A and records intent on the
+      // connection; B comes back up and its CONNECTED write clears the
+      // name-keyed marker. A's pending call then rejects late. Name-keyed
+      // provenance has forgotten A's stop by then, so the guard has to read
+      // the connection to keep A stopped.
+      const toolName = 'literature.search_pubmed';
+      const { config, discoverToolsForServer, ensureTool } = registry({
+        ensured: safeTool({ toolName, client: okClient() }),
+        extra: noTruncation,
+      });
+      let rejectCall: ((error: Error) => void) | undefined;
+      const clientA: McpDirectClient = {
+        callTool: vi.fn().mockImplementation(
+          () =>
+            new Promise((_resolve, reject) => {
+              rejectCall = reject;
+            }),
+        ),
+      };
+      const siblingB = { id: 'sibling-b' };
+      recordMCPConnectionStatus(clientA, MCPServerStatus.CONNECTED);
+      recordMCPConnectionStatus(siblingB, MCPServerStatus.CONNECTED);
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      const toolA = safeTool({ toolName, config, client: clientA });
+
+      const executePromise = exec(toolA);
+      // A's owner stops it: intent lands on the connection, then DISCONNECTED.
+      markMCPConnectionTeardownIntent(clientA);
+      markMCPServerTeardownIntent(serverName);
+      recordMCPConnectionStatus(clientA, MCPServerStatus.DISCONNECTED);
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      // B's surviving connection publishes the aggregate, which drops the
+      // name-keyed marker.
+      recordMCPConnectionStatus(siblingB, MCPServerStatus.CONNECTED);
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      expect(isMCPServerTeardownIntent(serverName)).toBe(false);
+
+      // Only now does A's pending call reject with a plain connection error.
+      rejectCall!(new Error('Connection closed'));
+
+      await expect(executePromise).rejects.toThrow('Connection closed');
+      expect(clientA.callTool).toHaveBeenCalledTimes(1);
+      expect(discoverToolsForServer).not.toHaveBeenCalled();
+      expect(ensureTool).not.toHaveBeenCalled();
+    });
+
+    it('repairs a connection that dies unasked while its sibling shares the name', async () => {
+      // Positive control for the test above: the invocation's own connection
+      // was stopped by nobody, so a connection error is still eligible for
+      // repair even though a healthy sibling shares the name.
+      const toolName = 'literature.search_pubmed';
+      const newMockMcpClient: McpDirectClient = {
+        callTool: vi.fn().mockResolvedValueOnce(textResult('Repaired')),
+      };
+      const { config, ensureTool } = registry({
+        ensured: safeTool({ toolName, client: newMockMcpClient }),
+        extra: noTruncation,
+      });
+      let rejectCall: ((error: Error) => void) | undefined;
+      const clientA: McpDirectClient = {
+        callTool: vi.fn().mockImplementation(
+          () =>
+            new Promise((_resolve, reject) => {
+              rejectCall = reject;
+            }),
+        ),
+      };
+      const siblingB = { id: 'sibling-b' };
+      recordMCPConnectionStatus(clientA, MCPServerStatus.CONNECTED);
+      recordMCPConnectionStatus(siblingB, MCPServerStatus.CONNECTED);
+      updateMCPServerStatus(serverName, MCPServerStatus.CONNECTED);
+      const toolA = safeTool({ toolName, config, client: clientA });
+
+      const executePromise = exec(toolA);
+      // Nobody asked for this drop: A's transport just dies.
+      recordMCPConnectionStatus(clientA, MCPServerStatus.DISCONNECTED);
+      updateMCPServerStatus(serverName, MCPServerStatus.DISCONNECTED);
+      rejectCall!(new Error('Connection closed'));
+
+      const result = await executePromise;
+      expect(result.llmContent).toEqual([{ text: 'Repaired' }]);
+      expect(clientA.callTool).toHaveBeenCalledTimes(1);
+      expect(ensureTool).toHaveBeenCalledWith(toolA.name);
     });
 
     it('keeps configured App resource limits across a reconnect replay', async () => {

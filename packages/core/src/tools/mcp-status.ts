@@ -76,6 +76,26 @@ export function markMCPServerTeardownIntent(serverName: string): void {
   deliberateTeardownServers.add(serverName);
 }
 
+/**
+ * Connections whose owner is tearing them down on purpose. The name-keyed
+ * marker above is shared by every connection registered under that name, and
+ * the pool keeps one entry per `serverName + fingerprint`, so a sibling that
+ * comes back up clears the name and loses this connection's stop. Provenance
+ * for one invocation has to outlive the shared name: it dies with the SDK
+ * `Client` that owned the transport, not with the server name.
+ */
+const deliberateTeardownConnections: WeakSet<object> = new WeakSet();
+
+/** Record that `connection` is being torn down on purpose by its owner. */
+export function markMCPConnectionTeardownIntent(connection: object): void {
+  deliberateTeardownConnections.add(connection);
+}
+
+/** Whether `connection` is currently being torn down on purpose. */
+export function isMCPConnectionTeardownIntent(connection: object): boolean {
+  return deliberateTeardownConnections.has(connection);
+}
+
 /** Whether `serverName` is currently being torn down on purpose. */
 export function isMCPServerTeardownIntent(serverName: string): boolean {
   return deliberateTeardownServers.has(serverName);
