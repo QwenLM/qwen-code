@@ -205,7 +205,7 @@ ACP passes one policy, the Todo Stop Guard. The current turn's background result
 
 `experimental.unifiedAgentLoop` is a boolean, `false` by default, and takes effect after a restart. The `QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` environment variable overrides it per surface: `1` forces every surface on, `0` forces every surface off, and a comma-separated list such as `headless,acp=0` forces individual surfaces. This lets CI and scripts run the suites with the shared loop, and lets an operator force a surface back off. It extends the force-on-only pattern of `experimental.agentTeam` / `QWEN_CODE_ENABLE_AGENT_TEAM` with force-off and per-surface control, so a new loop switch should copy this grammar rather than the agentTeam one.
 
-`Config.isUnifiedAgentLoopEnabled(surface)` exposes it. Each surface reads it at its loop's entry point, naming itself (`headless`, `acp`, `ink`, `opentui`, `agent-core`, `speculation`):
+`Config.isUnifiedAgentLoopEnabled(surface)` exposes it. Each surface reads it at its loop's entry point, naming itself (`headless`, `acp`, `ink`, `opentui`, `agent-core`, `speculation`, `hosted`):
 
 ```ts
 if (config.isUnifiedAgentLoopEnabled('headless')) {
