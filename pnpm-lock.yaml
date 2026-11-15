@@ -477,10 +477,16 @@ importers:
       dingtalk-stream-sdk-nodejs:
         specifier: ^2.0.4
         version: 2.0.4(supports-color@7.2.0)
+      proper-lockfile:
+        specifier: ^4.1.2
+        version: 4.1.2
       undici:
         specifier: ^7.28.0
         version: 7.29.0
     devDependencies:
+      '@types/proper-lockfile':
+        specifier: ^4.1.4
+        version: 4.1.4
       typescript:
         specifier: 5.8.3
         version: 5.8.3
@@ -639,6 +645,9 @@ importers:
       saxes:
         specifier: 6.0.0
         version: 6.0.0
+      undici:
+        specifier: ^7.28.0
+        version: 7.29.0
     devDependencies:
       typescript:
         specifier: 5.8.3
