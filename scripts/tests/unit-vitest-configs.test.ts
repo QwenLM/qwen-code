@@ -780,10 +780,35 @@ describe('autofix-gate per-file ceiling floor', () => {
   ];
   it('keeps the tuned suites from overriding the granted testTimeout', () => {
     for (const file of guarded) {
+      const src = readFileSync(join(root, file), 'utf8');
       expect(
-        readFileSync(join(root, file), 'utf8'),
+        src,
         `${file} overrides the testTimeout the lane grants`,
       ).not.toMatch(/vi\.setConfig\(\{[^}]*testTimeout/);
+      // A describe-level `{ timeout }` outranks --testTimeout exactly like a
+      // runtime setConfig (vitest resolves options.timeout ?? config.testTimeout),
+      // so the floor must cover that spelling too (R5-1). Check every ceiling
+      // constant's FAST arm — the one in force inside the gate, where env -i
+      // drops RUNNER_NAME/RUNNER_OS and the worker clamp keeps loadavg under
+      // the slow-host threshold: it must inherit (undefined) or sit at/above
+      // the 60000 the gate grants, never below it.
+      for (const [, name, expr] of src.matchAll(
+        /const\s+(\w*CEILING\w*)\s*=\s*([^;]+);/g,
+      )) {
+        let fast = expr.trim();
+        const q = fast.indexOf('?');
+        if (q >= 0) fast = fast.slice(fast.indexOf(':', q) + 1).trim();
+        if (fast === 'undefined') continue;
+        const n = Number(fast.replace(/_/g, ''));
+        expect(
+          Number.isFinite(n),
+          `${file}: ${name} fast arm "${fast}" is not a plain literal`,
+        ).toBe(true);
+        expect(
+          n,
+          `${file}: ${name} fast arm ${n} sits below the gate's 60000 grant`,
+        ).toBeGreaterThanOrEqual(60_000);
+      }
     }
   });
 });
