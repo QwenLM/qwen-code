@@ -1330,6 +1330,38 @@ describe('BranchPickerPopover checkout resolution panel', () => {
     expect(footerText()).toContain('kept in stash entry a1b2c3d4e5f6');
   });
 
+  it('re-reads the tree status after a stash success keeps the picker open', async () => {
+    workspaceGitCheckout.mockRejectedValueOnce(checkoutDirtyError());
+    workspaceGitCheckout.mockResolvedValueOnce({
+      branch: 'dev',
+      detached: false,
+      stashSha: 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0',
+    });
+    workspaceGit.mockResolvedValue({
+      v: 2,
+      workspaceCwd: '/repo',
+      branch: 'dev',
+      staged: 0,
+      unstaged: 0,
+      untracked: 0,
+      conflicted: 0,
+      computedAt: Date.now(),
+    });
+    mountWithBranches(CHECKOUT_BRANCHES);
+    await flush();
+
+    clickButton('dev');
+    await flush();
+    const statusReadsBefore = workspaceGit.mock.calls.length;
+    clickButton('Stash Changes and Switch');
+    await flush();
+
+    // The open picker's hints read the tree snapshot; a stash success must
+    // re-read it (paired with the listing), not keep reporting the
+    // pre-stash uncommitted changes for a now-clean tree.
+    expect(workspaceGit.mock.calls.length).toBeGreaterThan(statusReadsBefore);
+  });
+
   it('switches the panel back to pull wording when a pull is blocked', async () => {
     workspaceGitCheckout.mockRejectedValueOnce(checkoutDirtyError());
     workspaceGitPull.mockRejectedValueOnce(dirtyTreeError());

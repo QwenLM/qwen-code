@@ -1478,7 +1478,6 @@ async function forceCheckout(
   ref: string,
   env?: Readonly<Record<string, string | undefined>>,
 ): Promise<GitCheckoutResult> {
-  await refuseCheckoutOperationInProgress(cwd, env);
   const toplevel = (
     await runGit(cwd, ['rev-parse', '--show-toplevel'], env)
   ).trim();
@@ -1492,25 +1491,47 @@ async function forceCheckout(
       'cannot discard changes: the workspace is a subdirectory of its repository, so discarding would also reset changes outside the workspace; resolve them from a terminal',
     );
   }
-  await refuseCheckoutOperationInProgress(cwd, env);
   // git validates the ref and discards tracked changes in one atomic step
   // (`checkout -f`): a switch it refuses — an unresolvable ref, a branch
   // occupied by another worktree, a skip-worktree conflict, DWIM disabled
   // by checkout.guess — leaves the tree untouched, so nothing is ever
   // discarded for a doomed switch. No hand-written ref preflight: git's
   // own resolution (remote config, refspecs, DWIM) is the authority.
+  // The completion probes are read-only; the parked-operation guard stays
+  // the LAST statement before the destructive command, so a merge parked
+  // while the probes run is still refused.
   const headBefore = await headIdentity(cwd, env);
+  const wasDirty =
+    (
+      await runGit(
+        cwd,
+        ['status', '--porcelain', '--untracked-files=no'],
+        env,
+      ).catch(() => '')
+    ).trim() !== '';
+  await refuseCheckoutOperationInProgress(cwd, env);
   let result: GitCheckoutResult;
   try {
     result = await runCheckout(cwd, ref, env, true);
   } catch (err) {
-    // A post-checkout hook can refuse AFTER git moved HEAD and discarded
-    // the changes; tell that apart from a pre-touch refusal by the state,
-    // not by git's text, so the message never claims nothing happened
-    // when the switch actually completed. The identity includes the branch
-    // name: a ref at the current commit moves the pointer, not the SHA.
+    // A post-checkout hook can refuse AFTER git discarded the changes and
+    // moved HEAD; tell that apart from a pre-touch refusal by the state,
+    // not by git's text. HEAD identity alone is not enough: forcing the
+    // branch HEAD already sits on (or a detached ref at the same commit)
+    // discards without changing the identity, so the dirty->clean
+    // transition is the second witness. Requiring a clean tree also keeps
+    // a pre-touch refusal (tree still dirty) out of this arm even when a
+    // concurrent actor moved HEAD while the checkout failed.
     const headAfter = await headIdentity(cwd, env);
-    if (headBefore !== headAfter) {
+    const nowClean =
+      (
+        await runGit(
+          cwd,
+          ['status', '--porcelain', '--untracked-files=no'],
+          env,
+        ).catch(() => '?')
+      ).trim() === '';
+    if (nowClean && (wasDirty || headBefore !== headAfter)) {
       await runGit(cwd, ['clean', '-fd'], env).catch(() => undefined);
       throw new GitCheckoutFailure(
         'checkout_failed',
@@ -1551,6 +1572,9 @@ async function stashCheckout(
     throw asCheckoutFailure(err);
   }
   const headBefore = await headIdentity(cwd, env);
+  // The guard stays the last statement before the checkout: a merge parked
+  // while the identity probe runs must still be refused.
+  await refuseCheckoutOperationInProgress(cwd, env);
   let result: GitCheckoutResult;
   try {
     result = await runCheckout(cwd, ref, env);
@@ -1562,9 +1586,13 @@ async function stashCheckout(
     // of them), so keep the entry and report the completed switch instead.
     const headAfter = await headIdentity(cwd, env);
     if (headBefore !== headAfter) {
+      // Name the kept entry ahead of the git detail: the route bounds the
+      // client-visible message, and the entry is the user's only record.
       throw new GitCheckoutFailure(
         'checkout_failed',
-        `${SWITCH_COMPLETED_FAILURE}:\n${detail}`,
+        stashed === undefined
+          ? `${SWITCH_COMPLETED_FAILURE}:\n${detail}`
+          : `${SWITCH_COMPLETED_FAILURE}; your local changes are kept in stash entry ${stashed}:\n${detail}`,
         stashed,
       );
     }

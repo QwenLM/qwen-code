@@ -842,6 +842,37 @@ describe('gitCheckout with a dirty working tree', () => {
     const entries = stashList(dir);
     expect(entries).toHaveLength(1);
     expect(failure.stashSha).toBe(git(dir, 'rev-parse', 'refs/stash').trim());
+    // The message itself names the entry (ahead of the git detail, which
+    // the route's length cap could otherwise truncate away).
+    expect(failure.message).toContain(failure.stashSha!);
+  });
+
+  it('stash checkout leaves ignored files on disk and out of the entry', async () => {
+    const dir = makeRepo();
+    commitFile(dir, '.gitignore', 'ign.txt\n');
+    git(dir, 'checkout', '-q', '-b', 'feature');
+    commitFile(dir, 'a.txt', 'feature\n');
+    git(dir, 'checkout', '-q', 'master');
+    write(dir, {
+      'a.txt': 'local edit\n',
+      'new.txt': 'untracked\n',
+      'ign.txt': 'ignored\n',
+    });
+
+    const result = await gitCheckout(
+      dir,
+      'feature',
+      { stash: true },
+      hermeticEnv(),
+    );
+
+    // --include-untracked, never --all: the ignored file stays in the
+    // working tree and is absent from the entry's untracked parent.
+    expect(read(dir, 'ign.txt')).toBe('ignored\n');
+    expect(() => git(dir, 'show', `${result.stashSha!}^3:ign.txt`)).toThrow();
+    expect(git(dir, 'show', `${result.stashSha!}^3:new.txt`)).toBe(
+      'untracked\n',
+    );
   });
 
   it.skipIf(process.platform === 'win32')(
@@ -1186,6 +1217,135 @@ describe('gitCheckout with a dirty working tree', () => {
     expect(currentBranch(dir)).toBe('same-commit');
     expect(read(dir, 'a.txt')).toBe('one\n');
     expect(has(dir, 'new.txt')).toBe(false);
+  });
+
+  it('force checkout of the current branch reports the completed discard when a hook refuses', async () => {
+    const dir = dirtyCheckoutFixture();
+    write(dir, { 'new.txt': 'untracked\n' });
+    installHook(dir, 'post-checkout', 'exit 1');
+
+    const failure = await checkoutFails(
+      dir,
+      'master',
+      { force: true },
+      'checkout_failed',
+    );
+
+    // HEAD identity is unchanged (same branch, same commit), but the
+    // forced checkout discarded the edit: the dirty->clean transition
+    // witnesses the completed discard, and the residue clean still runs.
+    expect(failure.message).toContain(
+      'switched, but the checkout reported a failure',
+    );
+    expect(currentBranch(dir)).toBe('master');
+    expect(read(dir, 'a.txt')).toBe('one\n');
+    expect(has(dir, 'new.txt')).toBe(false);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'force checkout does not claim a completed switch when a concurrent actor moved HEAD',
+    async () => {
+      const dir = dirtyCheckoutFixture();
+      git(dir, 'branch', 'side');
+      write(dir, { 'new.txt': 'untracked\n' });
+      const env = gitShim(hermeticEnv(), [
+        // A terminal switches to a same-commit branch right before our
+        // doomed checkout; the tree stays dirty, so the identity change
+        // alone must not be read as this call's completed switch.
+        {
+          match: '"checkout missing-branch"*',
+          before: '"$REAL" checkout side --',
+        },
+      ]);
+
+      const failure = await checkoutFails(
+        dir,
+        'missing-branch',
+        { force: true },
+        'checkout_failed',
+        env,
+      );
+
+      expect(failure.message).toContain('cannot discard and switch');
+      expect(read(dir, 'a.txt')).toBe('local edit\n');
+      expect(read(dir, 'new.txt')).toBe('untracked\n');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'force checkout refuses a merge parked while the completion probes run',
+    async () => {
+      const dir = makeRepo();
+      git(dir, 'checkout', '-q', '-b', 'other');
+      commitFile(dir, 'a.txt', 'other\n');
+      git(dir, 'checkout', '-q', 'master');
+      commitFile(dir, 'a.txt', 'master2\n');
+      git(dir, 'branch', 'feature');
+      const env = gitShim(hermeticEnv(), [
+        // Park a conflicting merge during the headIdentity probe, i.e.
+        // AFTER the flow started but BEFORE the destructive command.
+        { match: '"rev-parse HEAD"', before: '"$REAL" merge other' },
+      ]);
+
+      const failure = await checkoutFails(
+        dir,
+        'feature',
+        { force: true },
+        'operation_in_progress',
+        env,
+      );
+
+      expect(failure.message).toContain('merge');
+      expect(fs.existsSync(path.join(dir, '.git', 'MERGE_HEAD'))).toBe(true);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'force checkout types the failure when the residue clean fails after the switch',
+    async () => {
+      const dir = dirtyCheckoutFixture();
+      const env = gitShim(hermeticEnv(), [
+        {
+          match: '"clean -fd"*',
+          script: 'echo "error: clean failed" >&2; exit 1',
+        },
+      ]);
+
+      const failure = await checkoutFails(
+        dir,
+        'feature',
+        { force: true },
+        'checkout_failed',
+        env,
+      );
+
+      expect(failure.message).toContain(
+        'switched, but removing untracked files failed',
+      );
+      expect(currentBranch(dir)).toBe('feature');
+      expect(read(dir, 'a.txt')).toBe('feature\n');
+    },
+  );
+
+  it('force checkout removes a file ignored only on the source branch', async () => {
+    const dir = makeRepo();
+    git(dir, 'checkout', '-q', '-b', 'feature');
+    commitFile(dir, 'a.txt', 'feature\n');
+    git(dir, 'checkout', '-q', 'master');
+    // The ignore rule exists only on master: after the switch the file is
+    // untracked residue under the target branch's rules, and is removed.
+    commitFile(dir, '.gitignore', 'ign.txt\n');
+    write(dir, { 'a.txt': 'local edit\n', 'ign.txt': 'ignored\n' });
+
+    const result = await gitCheckout(
+      dir,
+      'feature',
+      { force: true },
+      hermeticEnv(),
+    );
+
+    expect(result.branch).toBe('feature');
+    expect(has(dir, 'ign.txt')).toBe(false);
   });
 
   it('both resolutions refuse while a merge is parked', async () => {

@@ -1495,6 +1495,26 @@ describe('checkout resolutions against a real repo', () => {
 
     expect(response.status).toBe(409);
     expect(response.body.error).toBe('force_unsupported');
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      'local edit\n',
+    );
+  });
+
+  it('redacts the worktree path from a typed force refusal', async () => {
+    const dir = dirtyCheckoutRepo();
+    // A branch held by a linked worktree: git's refusal names the worktree
+    // by absolute path, so the typed 409 branch must redact it.
+    const worktree = path.join(dir, '.qwen', 'worktrees', 'linked');
+    fs.mkdirSync(path.dirname(worktree), { recursive: true });
+    git(dir, 'worktree', 'add', '-q', worktree, 'feature');
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/checkout')
+      .send({ ref: 'feature', force: true });
+
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe('checkout_failed');
+    expect(JSON.stringify(response.body)).toContain('<workspace>');
     expect(JSON.stringify(response.body)).not.toContain(dir);
     expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
       'local edit\n',

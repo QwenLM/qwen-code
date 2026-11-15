@@ -758,9 +758,10 @@ export function BranchPickerPopover({
           // the same update would hide the only record of the changes
           // until the next reopen. The pull flow stays open for the same
           // reason; plain checkouts keep the close-on-success contract.
-          // The open list's HEAD marker is stale after the switch; re-read
-          // it silently, like the pull flow's post-success refresh.
-          void fetchBranches(true);
+          // The open list AND the tree snapshot are stale after the switch
+          // (the hints would keep reporting uncommitted changes for a clean
+          // tree); re-read both silently, like the pull flow's refresh.
+          void refreshAfterAction();
         } else {
           showStatus(t('branchPicker.checkedOut', { branch: ref }), 'success');
           onBranchChanged?.();
@@ -810,7 +811,6 @@ export function BranchPickerPopover({
       onOpenChange,
       showStatus,
       clearPullPanel,
-      fetchBranches,
       refreshAfterAction,
       t,
     ],
