@@ -13,10 +13,10 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalShellPublication;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 
 import java.nio.charset.StandardCharsets;
@@ -552,7 +552,6 @@ public final class ExternalShellPublicationProducer
         }
     }
 
-
     private long revision(RuntimeBindingRecord binding) {
         if (binding == null || binding.getLease() == null || binding.getProvisionSeed() == null
                 || !WorkspaceExecutionProfile.isExternalShellRequest(binding.getRequest())) {
@@ -668,5 +667,4 @@ public final class ExternalShellPublicationProducer
                     message + ".", false);
         }
     }
-
 }
