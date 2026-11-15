@@ -36,6 +36,7 @@ export const HOSTED_MCP_PROFILE = 'hosted-workspace-mcp/1';
 
 export {
   parseHostedMcpServers,
+  HOSTED_COUNTER_CEILING,
   type HostedMcpServerPin,
 } from './hosted-mcp-definitions.js';
 import { type HostedMcpServerPin } from './hosted-mcp-definitions.js';

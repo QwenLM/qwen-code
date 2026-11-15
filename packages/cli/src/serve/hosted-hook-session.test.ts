@@ -1050,6 +1050,11 @@ it('admits the hook catalog revision up to the shared counter ceiling', () => {
   ).toThrow();
 });
 
+it('still reads a stored hook pin admitted under the wider ceiling', () => {
+  const legacy = { ...pin, catalogRevision: Number.MAX_SAFE_INTEGER };
+  expect(parseHostedHookPin(legacy, true)).toEqual(legacy);
+});
+
 it.each([
   {
     event: HookEventName.UserPromptSubmit,

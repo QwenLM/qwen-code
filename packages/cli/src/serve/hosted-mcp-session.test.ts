@@ -1470,6 +1470,14 @@ it('accepts only the shared counter ceiling and refuses the value above it', () 
   ).toThrow();
 });
 
+it('still reads a stored pin admitted under the wider ceiling', () => {
+  // A Session persisted before the ceiling tightened keeps its pin on the
+  // stored read; refusing it here would wedge the Session behind a load that
+  // cannot succeed while attach, its delete precondition, stays unreachable.
+  const legacy = { ...pin, serverRevision: Number.MAX_SAFE_INTEGER };
+  expect(parseHostedMcpServers([legacy], true)).toEqual([legacy]);
+});
+
 it('does not let a stale cancel intent claim not-started after invocation dispatch', async () => {
   await mcp.ensureReady();
   const operationId = randomUUID();
