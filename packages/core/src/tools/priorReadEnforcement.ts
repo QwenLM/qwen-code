@@ -15,8 +15,10 @@ export { StructuredToolError } from './tool-error.js';
  * Result of checking whether a tool that mutates an existing file is
  * cleared to proceed based on the session FileReadCache.
  *
- *  - `ok: true` — the model has legitimately read the file in this
- *    session and the on-disk fingerprint still matches.
+ *  - `ok: true` — the path is absent (creation), or prior-read evidence
+ *    permits mutation. Normally the fingerprint still matches; an explicit
+ *    stale recovery grant instead returns a snapshot and rejection for the
+ *    caller to enforce its recovery contract before writing.
  *  - `ok: false` — the call must be rejected. `type` selects the
  *    error code; `rawMessage` is the model-facing prose; `displayMessage`
  *    is the short user-facing form.
@@ -96,15 +98,15 @@ export type PriorReadVerb = 'editing' | 'overwriting';
  *    race. The default (`expectExisting: false`) is the pre-read
  *    behaviour: ENOENT means "go ahead and create".
  *
- * **Do not re-introduce a `requireFullRead` (or any "stricter for
- * WriteFile than Edit") option here.** PR #3932 added one with the
- * rationale that WriteFile's overwrite path needs more evidence than
+ * **Do not re-introduce a `requireFullRead` option here.** PR #3932 added one
+ * with the rationale that WriteFile's overwrite path needs more evidence than
  * Edit's `old_string`-matched in-place change; PR #4002 removed it
  * because the truncate-tool-output limit makes "fully read" an
  * impossible precondition on files larger than the limit, producing
  * the deadlock issue #3945 reported. The contract now matches Claude
- * Code's `readFileState`: any prior read clears enforcement for both
- * tools, the mtime/size drift check is the safety net.
+ * Code's `readFileState`: any prior text read clears enforcement for both
+ * tools while fresh. Edit may explicitly request stale recovery under its
+ * separate authorization/matching contract; WriteFile never requests it.
  *
  * There is no built-in "stricter than this" mode. `fileReadCacheDisabled:
  * true` is the OPPOSITE — it bypasses the cache (and thus prior-read
@@ -121,7 +123,8 @@ export interface CheckPriorReadOptions {
   expectExisting?: boolean;
   /**
    * When true, allow a previously read cacheable file whose on-disk
-   * fingerprint has drifted (`stale`) to return `ok: true` with
+   * fingerprint has drifted (`stale`), or whose Read baseline still needs
+   * refresh after a recovered write, to return `ok: true` with
    * `recoveredFromStale: true` and the captured `staleSnapshot`. Callers
    * (such as `EditTool`) must still verify read authorization and exact
    * unique literal matching, and recheck `expectedStaleSnapshot` on later
@@ -130,7 +133,11 @@ export interface CheckPriorReadOptions {
   allowStaleRecovery?: boolean;
   /**
    * Pin post-read / pre-write TOCTOU checks on a stale-recovered edit to
-   * the exact disk snapshot seen at calculate/confirm time.
+   * the exact disk snapshot seen at calculate/confirm time. This grants
+   * permission for a matching stale fingerprint without allowStaleRecovery;
+   * it is not a verification-only option. Pass only a snapshot obtained from
+   * an authorized recovery decision, and retain it even if another Read
+   * refreshes the cache while confirmation is pending.
    */
   expectedStaleSnapshot?: StaleFileSnapshot;
 }
@@ -154,11 +161,11 @@ export interface CheckPriorReadOptions {
  * precondition on files larger than the limit (issue #3945).
  * Aligning with Claude Code's `readFileState`: any prior read clears
  * enforcement for both Edit and WriteFile; the mtime/size drift
- * check above is the only gate that distinguishes "the model has
- * seen current bytes" from "the model has seen older bytes", and it
- * fires identically for both tools. Issue #2499 (model hallucinates
- * unread bytes on overwrite) is the residual risk this stance
- * accepts, mitigated by the drift check. There is no built-in
+ * check distinguishes current from older evidence. WriteFile rejects drift;
+ * Edit can request the explicit stale recovery exception and must enforce
+ * its additional authorization, matching and frozen-snapshot checks.
+ * Issue #2499 (model hallucinates unread bytes on overwrite) is the residual
+ * risk this stance accepts, mitigated by the drift check. There is no built-in
  * stricter mode — `fileReadCacheDisabled: true` is an OPT-OUT (it
  * bypasses enforcement entirely so application-level locking can
  * take over), not an opt-in to anything stricter.
@@ -177,7 +184,9 @@ export interface CheckPriorReadOptions {
  * brand-new entry, so a subsequent edit on that same file passes here
  * without an intervening explicit Read. The model authored those bytes;
  * for the purposes of prior-read enforcement that counts as having
- * seen them.
+ * seen them. A stale-recovered Edit is different: recordWrite must retain
+ * readBaselineNeedsRefresh, so further Edits use recovery guards and
+ * WriteFile requires an actual text Read even when the fingerprint is fresh.
  */
 export async function checkPriorRead(
   cache: FileReadCache,
@@ -278,6 +287,7 @@ export async function checkPriorRead(
   const status = cache.check(stats);
   if (
     status.state === 'fresh' &&
+    !status.entry.readBaselineNeedsRefresh &&
     status.entry.lastReadAt !== undefined &&
     status.entry.lastReadCacheable
   ) {
@@ -295,7 +305,12 @@ export async function checkPriorRead(
     }
     return { ok: true };
   }
-  if (status.state === 'stale') {
+  if (
+    status.state === 'stale' ||
+    (status.state === 'fresh' &&
+      status.entry.readBaselineNeedsRefresh &&
+      status.entry.lastReadCacheable)
+  ) {
     const rejection = makeStaleRejection(filePath, verb);
     if (options.expectedStaleSnapshot !== undefined) {
       if (

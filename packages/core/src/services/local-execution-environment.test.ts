@@ -213,7 +213,7 @@ describe('LocalExecutionEnvironment', () => {
     },
   );
 
-  it('preserves prior-read enforcement across invocations and detects external writes', async () => {
+  it('preserves prior-read enforcement across invocations and rejects a missing stale target', async () => {
     const file = path.join(workspace, 'file.txt');
     await writeFile(file, 'before\n');
     const unread = await execute('unread', ToolNames.EDIT, {
@@ -236,12 +236,83 @@ describe('LocalExecutionEnvironment', () => {
     await writeFile(file, 'externally changed\n');
     const stale = await execute('stale', ToolNames.EDIT, {
       file_path: file,
-      old_string: 'externally changed',
+      old_string: 'after',
       new_string: 'lost',
     });
     expect(stale.error?.type).toBe('file_changed_since_read');
     expect(await readFile(file, 'utf8')).toBe('externally changed\n');
   });
+
+  it.each(['full', 'partial', 'partial-then-full'])(
+    'keeps consecutive Edits in recovery until an actual text Read (read=%s)',
+    async (readMode) => {
+      const file = path.join(workspace, 'recovered.txt');
+      await writeFile(file, 'header-v1\ntarget\n');
+      await execute('read', ToolNames.READ_FILE, { file_path: file });
+      await writeFile(file, 'external-header-v2\ntarget\n');
+      const result = await execute('recover', ToolNames.EDIT, {
+        file_path: file,
+        old_string: 'target',
+        new_string: 'updated',
+      });
+      expect(result.error).toBeUndefined();
+      expect(await readFile(file, 'utf8')).toBe(
+        'external-header-v2\nupdated\n',
+      );
+      const followup = await execute('followup', ToolNames.EDIT, {
+        file_path: file,
+        old_string: 'updated',
+        new_string: 'again',
+      });
+      expect(followup.error).toBeUndefined();
+      expect(followup.llmContent).toContain('recovery checks');
+      const third = await execute('third', ToolNames.EDIT, {
+        file_path: file,
+        old_string: 'again',
+        new_string: 'third',
+      });
+      expect(third.error).toBeUndefined();
+      expect(third.llmContent).toContain('recovery checks');
+      if (readMode === 'full') {
+        const fileSystem = config.getFileSystemService();
+        const originalRead = fileSystem.withReadFile;
+        fileSystem.withReadFile = async () => {
+          throw new Error('read unavailable');
+        };
+        try {
+          await expect(
+            execute('failed-read', ToolNames.READ_FILE, { file_path: file }),
+          ).rejects.toThrow('read unavailable');
+        } finally {
+          fileSystem.withReadFile = originalRead;
+        }
+      }
+      const overwrite = await execute('overwrite', ToolNames.WRITE_FILE, {
+        file_path: file,
+        content: 'header-v1\nupdated\n',
+      });
+      expect(overwrite.error?.type).toBe('file_changed_since_read');
+      expect(await readFile(file, 'utf8')).toBe('external-header-v2\nthird\n');
+      const partial = await execute('partial', ToolNames.READ_FILE, {
+        file_path: file,
+        ...(readMode === 'full' ? {} : { offset: 1, limit: 1 }),
+      });
+      expect(partial.error).toBeUndefined();
+      if (readMode === 'partial-then-full') {
+        const full = await execute('full', ToolNames.READ_FILE, {
+          file_path: file,
+        });
+        expect(full.llmContent).toContain('external-header-v2');
+        expect(full.llmContent).not.toContain('unchanged since last read');
+      }
+      const allowed = await execute('allowed', ToolNames.WRITE_FILE, {
+        file_path: file,
+        content: 'external-header-v2\nfinal\n',
+      });
+      expect(allowed.error).toBeUndefined();
+      expect(await readFile(file, 'utf8')).toBe('external-header-v2\nfinal\n');
+    },
+  );
 
   it('invalidates quoted reads after history eviction without revoking prior-read rights', async () => {
     const file = path.join(workspace, 'file.txt');

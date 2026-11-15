@@ -17,12 +17,7 @@ import type {
 import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, Kind, ToolConfirmationOutcome } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
-import {
-  makeRelative,
-  realpathNearestExisting,
-  shortenPath,
-  unescapePath,
-} from '../utils/paths.js';
+import { makeRelative, shortenPath, unescapePath } from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
@@ -203,17 +198,10 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     if (this.config.getFileService?.()?.shouldQwenIgnoreFile?.(filePath)) {
       return false;
     }
-    let defaultPermission: PermissionDecision;
-    if (this.config.storage) {
-      defaultPermission = getFileReadDefaultPermission(this.config, filePath);
-    } else {
-      const resolved = realpathNearestExisting(path.resolve(filePath));
-      defaultPermission =
-        this.config.getWorkspaceContext().isPathWithinWorkspace(resolved) ||
-        isAnyAutoMemPath(resolved, this.config.getTargetDir())
-          ? 'allow'
-          : 'ask';
-    }
+    const defaultPermission = getFileReadDefaultPermission(
+      this.config,
+      filePath,
+    );
     if (defaultPermission !== 'allow') {
       return false;
     }
@@ -667,6 +655,13 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       fileDiff,
       originalContent: editData.currentContent,
       newContent: editData.newContent,
+      ...(editData.recoveredFromStale
+        ? {
+            warnings: [
+              'The file changed since the last Read. Review the current diff before approving.',
+            ],
+          }
+        : {}),
       onConfirm: async (outcome: ToolConfirmationOutcome) => {
         if (outcome === ToolConfirmationOutcome.ProceedAlways) {
           this.config.setApprovalMode(ApprovalMode.AUTO_EDIT);
@@ -896,12 +891,9 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         );
       }
 
-      // Mark the cache entry written, capturing the post-write stats
-      // so a follow-up Read sees `lastReadAt < lastWriteAt` and falls
-      // through to the full pipeline instead of returning the
-      // pre-edit placeholder. Best-effort: a stat failure here does
-      // not undo the successful write — the next Read will simply
-      // re-stat and treat the cache entry as stale.
+      // A recovered write preserves unread external bytes. Carry that state
+      // explicitly onto the post-write inode so subsequent Edit uses recovery
+      // guards and WriteFile waits for an actual Read.
       let postWriteSizeBytes: number | undefined;
       try {
         if (mutation && !committedStats)
@@ -912,12 +904,13 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         postWriteSizeBytes = postWriteStats.size;
         this.config
           .getFileReadCache()
-          .recordWrite(this.params.file_path, postWriteStats);
-        if (editData.recoveredFromStale) {
-          this.config
-            .getFileReadCache()
-            .markReadEvictedFromHistory(postWriteStats);
-        }
+          .recordWrite(
+            this.params.file_path,
+            postWriteStats,
+            editData.recoveredFromStale
+              ? { readBaselineNeedsRefresh: true }
+              : {},
+          );
       } catch (error) {
         if (mutation) throw error;
         // Non-fatal: leaving a stale entry is preferable to failing
@@ -925,6 +918,12 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         // entry's mtime/size still does not match the on-disk bytes
         // post-write, so the next ReadFile will report stale and
         // refresh the entry.
+      }
+
+      if (editData.recoveredFromStale) {
+        debugLogger.debug('stale edit recovery', {
+          path: this.params.file_path,
+        });
       }
 
       const fileName = path.basename(this.params.file_path);
@@ -983,7 +982,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
 
       if (editData.recoveredFromStale) {
         llmSuccessMessageParts.push(
-          `Note: The file had been modified since it was last read in this session, but \`old_string\` still matched uniquely and the edit was applied.`,
+          `Note: The file had been modified since it was last read in this session, but \`old_string\` still matched uniquely and the edit was applied. Other content may have changed; Read the file before using WriteFile. Further Edits still use recovery checks.`,
         );
       }
 
@@ -1003,15 +1002,21 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
 
       if (this.params.modified_by_user) {
         llmSuccessMessageParts.push(
-          `User modified the \`new_string\` content to be: ${this.params.new_string}.`,
+          `User modified the \`new_string\` content before approving.`,
         );
+      }
+      if (this.params.modified_by_user || editData.recoveredFromStale) {
         const snippetResult = extractEditSnippet(
-          editData.currentContent,
+          editData.currentContent ?? '',
           editData.newContent,
         );
-        if (snippetResult) {
+        if (snippetResult && snippetResult.content.length <= 8_000) {
           const snippetText = `Showing lines ${snippetResult.startLine}-${snippetResult.endLine} of ${snippetResult.totalLines} from the edited file:\n\n---\n\n${snippetResult.content}`;
           llmSuccessMessageParts.push(snippetText);
+        } else {
+          llmSuccessMessageParts.push(
+            'Use Read to inspect the updated content.',
+          );
         }
       }
 
