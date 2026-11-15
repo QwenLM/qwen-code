@@ -13,6 +13,7 @@ const {
   restoreWorktreeContextMock,
   generatePromptSuggestionMock,
   startSpeculationMock,
+  prepareFileWatchersForProcessExitMock,
 } = vi.hoisted(() => ({
   writeTerminalTitleSpy: vi.fn(),
   useWakeRepaintMock: vi.fn(),
@@ -20,10 +21,25 @@ const {
   restoreWorktreeContextMock: vi.fn(),
   generatePromptSuggestionMock: vi.fn(),
   startSpeculationMock: vi.fn(),
+  prepareFileWatchersForProcessExitMock: vi.fn(),
   buildWakeRepaintSpy: vi.fn((deps: Record<string, unknown>) =>
     vi.fn(() => deps),
   ),
 }));
+
+vi.mock(
+  '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js')
+      >();
+    return {
+      ...actual,
+      prepareFileWatchersForProcessExit: prepareFileWatchersForProcessExitMock,
+    };
+  },
+);
 
 vi.mock('./hooks/use-wake-repaint.js', () => ({
   useWakeRepaint: useWakeRepaintMock,
@@ -82,7 +98,8 @@ import { renderHook } from '@testing-library/react';
 import * as interactiveMods from '../services/interactive-mod-session.js';
 import { ModSession } from '../services/mod-session.js';
 import { CommandService } from '../services/CommandService.js';
-import { registerCleanup } from '../utils/cleanup.js';
+import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
+import * as processUtils from '../utils/processUtils.js';
 import { useContext, useState, useReducer, useEffect, act } from 'react';
 import {
   AppContainer,
@@ -1469,49 +1486,85 @@ describe('AppContainer State Management', () => {
   });
 
   describe('Basic Rendering', () => {
-    it('continues quitting when cancelling the active request fails', () => {
-      vi.useFakeTimers();
-      const cancelOngoingRequest = vi.fn(() => {
-        throw new Error('cancel failed');
-      });
-      const requestShutdown = vi.fn();
-      mockedUseLlmStream.mockReturnValue({
-        streamingState: StreamingState.Responding,
-        submitQuery: vi.fn(),
-        initError: null,
-        pendingHistoryItems: [],
-        thought: null,
-        cancelOngoingRequest,
-        retryLastPrompt: vi.fn(),
-        streamingResponseLengthRef: { current: 0 },
-        isReceivingContent: false,
-      });
-      vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue({
-        initialize: vi.fn().mockResolvedValue(undefined),
-        setTools: vi.fn().mockResolvedValue(undefined),
-        isInitialized: vi.fn().mockReturnValue(false),
-        requestShutdown,
-      } as unknown as LlmClient);
+    it.each([false, true])(
+      'prepares watchers before quitting when cancellation throws: %s',
+      async (cancelThrows) => {
+        vi.useFakeTimers();
+        const order: string[] = [];
+        prepareFileWatchersForProcessExitMock.mockImplementation(() => {
+          order.push('watchers');
+        });
+        const cancelOngoingRequest = vi.fn(() => {
+          order.push('cancel');
+          if (cancelThrows) throw new Error('cancel failed');
+        });
+        const requestShutdown = vi.fn(() => {
+          order.push('shutdown');
+        });
+        vi.mocked(runExitCleanup).mockImplementation(async () => {
+          order.push('cleanup');
+        });
+        const exit = vi
+          .spyOn(processUtils, 'exitCleanly')
+          .mockImplementation(async () => {
+            order.push('exit');
+            return undefined as never;
+          });
+        mockedUseLlmStream.mockReturnValue({
+          streamingState: StreamingState.Responding,
+          submitQuery: vi.fn(),
+          initError: null,
+          pendingHistoryItems: [],
+          thought: null,
+          cancelOngoingRequest,
+          retryLastPrompt: vi.fn(),
+          streamingResponseLengthRef: { current: 0 },
+          isReceivingContent: false,
+        });
+        vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue({
+          initialize: vi.fn().mockResolvedValue(undefined),
+          setTools: vi.fn().mockResolvedValue(undefined),
+          isInitialized: vi.fn().mockReturnValue(false),
+          requestShutdown,
+        } as unknown as LlmClient);
 
-      render(
-        <AppContainer
-          config={mockConfig}
-          settings={mockSettings}
-          version="1.0.0"
-          initializationResult={mockInitResult}
-        />,
-      );
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
 
-      const slashCommandActions = mockedUseSlashCommandProcessor.mock.calls.at(
-        -1,
-      )?.[11] as { quit: (messages: HistoryItem[]) => void };
-      const timerCount = vi.getTimerCount();
-      expect(() => slashCommandActions.quit([])).not.toThrow();
+        const slashCommandActions =
+          mockedUseSlashCommandProcessor.mock.calls.at(-1)?.[11] as {
+            quit: (messages: HistoryItem[]) => void;
+          };
+        try {
+          act(() => slashCommandActions.quit([]));
 
-      expect(cancelOngoingRequest).toHaveBeenCalledOnce();
-      expect(requestShutdown).toHaveBeenCalledOnce();
-      expect(vi.getTimerCount()).toBe(timerCount + 1);
-    });
+          expect(order).toEqual(['watchers', 'cancel', 'shutdown']);
+          expect(cancelOngoingRequest).toHaveBeenCalledOnce();
+          expect(requestShutdown).toHaveBeenCalledOnce();
+          await vi.advanceTimersByTimeAsync(99);
+          expect(vi.mocked(runExitCleanup)).not.toHaveBeenCalled();
+          await vi.advanceTimersByTimeAsync(1);
+          expect(order).toEqual([
+            'watchers',
+            'cancel',
+            'shutdown',
+            'cleanup',
+            'exit',
+          ]);
+          expect(exit).toHaveBeenCalledExactlyOnceWith(0);
+        } finally {
+          exit.mockRestore();
+          prepareFileWatchersForProcessExitMock.mockReset();
+          vi.mocked(runExitCleanup).mockReset();
+        }
+      },
+    );
 
     it('shows recording failures as warnings and unsubscribes on unmount', async () => {
       const addItem = vi.fn();
