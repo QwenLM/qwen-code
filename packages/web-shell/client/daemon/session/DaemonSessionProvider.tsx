@@ -3715,7 +3715,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   ? { ...context.recovery, canContinue: false }
                   : undefined));
             if (loadedSessionThisIteration) {
-              autoContinueLoadRecoveryRef.current = publishedRecovery;
+              autoContinueLoadRecoveryRef.current = recoverySnapshotCurrent
+                ? context?.recovery
+                : undefined;
             }
             return {
               ...current,
