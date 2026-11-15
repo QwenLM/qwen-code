@@ -2,7 +2,7 @@
 
 [English](2026-11-09-bound-delivery-active-watch-gate.md) | [简体中文](2026-11-09-bound-delivery-active-watch-gate.zh-CN.md)
 
-Status: proposed (2026-11-09)
+Status: proposed (2026-11-09). The PR-state-watch part is superseded by [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md), which has landed: the daemon owns state detection and delivery and its drain never reads `requireBoundWatch`, so the gate below filters the channel's comment delivery only. That comment-delivery part is still live.
 
 ## Problem statement
 

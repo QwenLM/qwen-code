@@ -2,7 +2,7 @@
 
 [English](2026-11-09-bound-delivery-active-watch-gate.md) | [简体中文](2026-11-09-bound-delivery-active-watch-gate.zh-CN.md)
 
-状态：提案（2026-11-09）
+状态：提案（2026-11-09）。其中 PR 状态监视部分已被[由 daemon PR 刷新产生 PR 状态转换事件](2026-11-04-daemon-pr-state-transitions.zh-CN.md)取代，且该设计已落地：daemon 拥有状态检测与投递，其 drain 从不读取 `requireBoundWatch`，因此下文的门只过滤 channel 的评论投递。该评论投递部分仍然在用。
 
 ## 问题陈述
 
