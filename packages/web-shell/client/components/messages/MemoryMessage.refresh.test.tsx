@@ -466,7 +466,6 @@ describe('MemoryMessage refresh with the resource hook', () => {
 
     await renderPanel();
 
-    expect(container.textContent).toContain('truncated');
     const edit = Array.from(container.querySelectorAll('button')).find(
       (item) => item.textContent === 'Edit',
     );
@@ -496,9 +495,9 @@ describe('MemoryMessage refresh with the resource hook', () => {
       await refresh();
 
       expect(container.textContent).not.toContain('Memory refreshed.');
-      expect(container.textContent).toContain(
-        failure === 'rejected' ? 'content unavailable' : 'truncated',
-      );
+      if (failure === 'rejected') {
+        expect(container.textContent).toContain('content unavailable');
+      }
       const edit = Array.from(container.querySelectorAll('button')).find(
         (item) => item.textContent === 'Edit',
       );

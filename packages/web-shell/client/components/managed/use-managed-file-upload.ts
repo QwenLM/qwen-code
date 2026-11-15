@@ -1,3 +1,4 @@
+import { randomUUID } from '../../utils/random-uuid.js';
 import { useEffect, useMemo, useRef } from 'react';
 import { fileReferenceInsertText } from '../../hooks/useAtMentionSources';
 import type { FileUploadClient } from '../../hooks/useFileUpload';
@@ -75,7 +76,7 @@ export function useManagedFileUpload(
                   ? new Uint8Array(request.data).buffer
                   : request.data,
               ]);
-        const uploadId = crypto.randomUUID();
+        const uploadId = randomUUID();
         let result: Awaited<ReturnType<NonNullable<typeof api.upload>>>;
         try {
           result = await api.upload!(
