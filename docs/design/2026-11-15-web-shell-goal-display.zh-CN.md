@@ -35,7 +35,7 @@ Goals 页列出每个已加载会话的目标，但要查看一个目标，只�
 - 卡片头部新增第一个图标操作（`MessageSquareText`，`data-testid="goal-open-session"`），调用 `onOpenSession(item.sessionId, item.workspaceCwd)` —— 与页脚链接同一处理器，含工作区标签。它是导航而非控制，因此永不被按会话的 `busy` 门禁用，并着交互蓝（`--agent-blue-500`），与灰色的编辑/暂停/清除控制图标区分开。
 - 页脚会话入口是带标签的链接而非灰色文字（`data-testid="goal-session-link"`）：会话图标 + 会话名 + 箭头图标，交互蓝，悬停/聚焦下划线，聚焦环。第一版沿用了旧的灰色纯文本形态，评审中与周围 meta 无法区分、读者根本找不到跳转，因此现在链接具备全部常规链接线索。
 - 状态胶囊带上由 `goalStatusTone(status)` 映射的 `data-status`：`active → running`，`paused | blocked | usage_limited → attention`，`complete → done`。CSS 复用共享执行状态色板。这与 `GoalStatusMessage` 现有的 warning/success 颜色语言一致。
-- 当至少设定了一个预算时，在 reason 与页脚之间渲染 `budgets` 区块，每个预算一行：标签、`role="progressbar"` 的轨道（`data-testid="goal-budget-<kind>"`，`aria-valuenow` = 截断后的百分比，`aria-label` = `"<标签>: <数值>"`）、按生命周期色调着色的填充条，以及数值文本。该行是已设定预算数值的**唯一载体**：行渲染时抑制对应的页脚单元格（`goal-turns`、`goal-tokens`、`goal-elapsed`），同一事实绝不陈述两次；数值复用页脚原有的本地化模板（`goal.turnsOfBudget`、`goal.tokensOfBudget`、`goal.activeOfBudget`），文案变更会同时作用于两个界面。轮数用 `turnCount / turnBudget`；tokens 对 `tokensUsed / tokenBudget` 使用 `formatContextTokens`，daemon 未上报用量时跳过；活跃时长复用 elapsed meta 已在使用的同一个实时 `getGoalActiveTimeMs`，对照 `activeTimeBudgetMs`。比例截断到 `[0, 1]`，耗尽的预算显示为满条。无上限的目标不渲染该区块、保留页脚数值。填充条的宽度过渡包在 `@media (prefers-reduced-motion: no-preference)` 里，与兄弟进度条一致——因为活跃时长比例每秒都在推进。
+- 当至少设定了一个预算时，在 reason 与页脚之间渲染 `budgets` 区块，每个预算一行：标签、`role="progressbar"` 的轨道（`data-testid="goal-budget-<kind>"`，`aria-valuenow` = 截断后的百分比）、按生命周期色调着色的填充条，以及数值文本。进度条的可访问名就是可见的标签与数值本身（`aria-labelledby` 引用，按会话唯一 id），不在 `aria-label` 里再复制一份。该行是已设定预算数值的**唯一载体**：行渲染时抑制对应的页脚单元格（`goal-turns`、`goal-tokens`、`goal-elapsed`），同一事实绝不陈述两次；数值复用页脚原有的本地化模板（`goal.turnsOfBudget`、`goal.tokensOfBudget`，活跃时长走 `getGoalActiveTimeLabel`），文案变更会同时作用于所有界面。轮数用 `turnCount / turnBudget`；tokens 对 `tokensUsed / tokenBudget` 使用 `formatContextTokens`，daemon 未上报用量时跳过；活跃时长复用 elapsed meta 已在使用的同一个实时 `getGoalActiveTimeMs`，对照 `activeTimeBudgetMs`。比例截断到 `[0, 1]`，耗尽的预算显示为满条。无上限的目标不渲染该区块、保留页脚数值。填充条的宽度过渡包在 `@media (prefers-reduced-motion: no-preference)` 里，与兄弟进度条一致——因为活跃时长比例每秒都在推进。
 
 ### GoalStatusStrip
 
@@ -79,9 +79,10 @@ Goals 页列出每个已加载会话的目标，但要查看一个目标，只�
 ## 验证计划
 
 - 单测：`GoalsDialog.test.tsx`（带/不带工作区标签的头部操作、各生命周期状态的胶囊色调、预算条的有无/截断、token 条跳过、填充条色调、填充条内联宽度、数值只出现一次的见证）与 `GoalStatusStrip.test.tsx`（入口接线/缺席、状态色调、色调映射）。`ChatPane.test.tsx` 双向钉住分屏透传：接线时渲染按钮且点击触发一次；未接线时不渲染按钮而 strip 保留控制。
-- 变异见证（字节级还原已核验）：去掉页脚抑制、删除 `ChatPane` 透传、把填充宽度硬编码为 `0%`，各自使其钉子变红。
+- `GoalsDialog.test.tsx` 还钉住控制请求在途时头部会话跳转仍可用（导航不是控制）；`App.test.tsx` 双向钉住主输入框 strip 的 `projectFeaturesAvailable` 门（有项目特性时入口在、无时缺席）。
+- 变异见证（字节级还原已核验）：去掉页脚抑制、删除 `ChatPane` 透传、把填充宽度硬编码为 `0%`、把链接改回 meta 灰、删除任一 `[data-status='attention']` 颜色规则、给头部跳转加 busy 门禁、让 `getGoalActiveTimeLabel` 输出分叉，各自使其钉子变红。
 - 对改动文件跑 `npm run typecheck`、ESLint、Prettier。
-- E2E：现有 `web-shell.goal.spec.ts` 与 `web-shell.goals-multi-workspace.spec.ts` 套件必须保持全绿（它们钉住了新按钮旁边的控制操作与卡片结构）；预算 @smoke 用例还在真实浏览器测量填充条相对轨道的像素宽度（15% ± 1px）。
+- E2E：现有 `web-shell.goal.spec.ts` 与 `web-shell.goals-multi-workspace.spec.ts` 套件必须保持全绿（它们钉住了新按钮旁边的控制操作与卡片结构）；预算 @smoke 用例还在真实浏览器测量填充条相对轨道的像素宽度（15% ± 1px）并读取计算颜色——填充对轨道、链接对 meta、填充等于胶囊的 attention 色——色调与链接线索必须真的被绘制。
 
 ## 验收标准
 

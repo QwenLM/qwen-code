@@ -74,22 +74,23 @@ cannot reach the aggregate view without the sidebar.
 - When at least one budget is armed, a `budgets` section renders one row per
   budget between the reason and the footer: label, a `role="progressbar"`
   track (`data-testid="goal-budget-<kind>"`, `aria-valuenow` = clamped
-  percent, `aria-label` = `"<label>: <figure>"`), a fill tinted with the
-  lifecycle tone, and the figure text. The row is the **single home** for an
-  armed budget's figures: the matching footer cell (`goal-turns`,
-  `goal-tokens`, `goal-elapsed`) is suppressed while its row renders, so a
-  fact is never stated twice, and the figure reuses the same localised
-  templates the footer used (`goal.turnsOfBudget`, `goal.tokensOfBudget`,
-  `goal.activeOfBudget`) so a catalogue change moves both surfaces. Turns
-  use `turnCount / turnBudget`; tokens use `formatContextTokens` on
-  `tokensUsed / tokenBudget` and are skipped when the daemon reports no usage
-  figure; active time uses the same live `getGoalActiveTimeMs` the elapsed
-  meta already ticks with, against `activeTimeBudgetMs`. Ratios clamp to
-  `[0, 1]` so a spent budget reads as a full bar. Unbounded goals render no
-  section and keep the footer figures. The fill's width transition is gated
-  behind `@media (prefers-reduced-motion: no-preference)`, matching the
-  sibling progress fills, because the active-time ratio advances every
-  second.
+  percent), a fill tinted with the lifecycle tone, and the figure text. The
+  progressbar's accessible name is the visible label and figure themselves
+  via `aria-labelledby` (per-session ids), not a second copy in `aria-label`.
+  The row is the **single home** for an armed budget's figures: the matching
+  footer cell (`goal-turns`, `goal-tokens`, `goal-elapsed`) is suppressed
+  while its row renders, so a fact is never stated twice, and the figure
+  reuses the same localised templates the footer used (`goal.turnsOfBudget`,
+  `goal.tokensOfBudget`, and `getGoalActiveTimeLabel` for active time) so a
+  catalogue change moves every surface. Turns use `turnCount / turnBudget`;
+  tokens use `formatContextTokens` on `tokensUsed / tokenBudget` and are
+  skipped when the daemon reports no usage figure; active time uses the same
+  live `getGoalActiveTimeMs` the elapsed meta already ticks with, against
+  `activeTimeBudgetMs`. Ratios clamp to `[0, 1]` so a spent budget reads as a
+  full bar. Unbounded goals render no section and keep the footer figures.
+  The fill's width transition is gated behind
+  `@media (prefers-reduced-motion: no-preference)`, matching the sibling
+  progress fills, because the active-time ratio advances every second.
 
 ### GoalStatusStrip
 
@@ -173,15 +174,23 @@ cannot reach the aggregate view without the sidebar.
   tone, tone mapping). `ChatPane.test.tsx` pins the split-view forward both
   ways: wired renders the button and fires the handler once; unwired renders
   no button while the strip keeps its controls.
+- `GoalsDialog.test.tsx` also pins that the header session action stays
+  enabled while a control is in flight (navigation is not a control), and
+  `App.test.tsx` pins the composer strip's `projectFeaturesAvailable` gate
+  both ways (affordance present with project features, absent without).
 - Mutation witnesses (byte-level restore verified): removing the footer
-  suppression, deleting the `ChatPane` forward, and hardcoding the fill width
-  to `0%` each turn their pin red.
+  suppression, deleting the `ChatPane` forward, hardcoding the fill width
+  to `0%`, reverting the link to the meta grey, deleting either
+  `[data-status='attention']` colour rule, gating the header jump on `busy`,
+  and diverging `getGoalActiveTimeLabel` each turn their pin red.
 - `npm run typecheck`, ESLint, Prettier on the touched files.
 - E2E: the existing `web-shell.goal.spec.ts` and
   `web-shell.goals-multi-workspace.spec.ts` suites must stay green (they pin
   the control actions and card structure the new button lives beside); the
   budget @smoke case additionally measures the fill's real pixel width
-  against its track (15% ± 1px).
+  against its track (15% ± 1px) and reads computed colours — fill vs track,
+  link vs meta, and fill equal to the pill's attention colour — so the tint
+  and the link cue must actually be painted.
 
 ## Acceptance criteria
 

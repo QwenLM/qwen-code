@@ -21,7 +21,6 @@ import {
   Trash2,
 } from 'lucide-react';
 import { useI18n } from '../../i18n';
-import { formatRuntime } from '../../utils/formatRuntime';
 import { formatContextTokens } from '../../utils/formatTokenCount';
 import {
   disambiguateWorkspaceLabels,
@@ -685,10 +684,9 @@ export function GoalsDialog({
             budgets.push({
               key: 'time',
               label: t('goals.budget.time'),
-              valueText: t('goal.activeOfBudget', {
-                used: formatRuntime(activeTimeMs),
-                budget: formatRuntime(goal.activeTimeBudgetMs),
-              }),
+              // Same helper the strip and the unbudgeted footer cell use, so
+              // a change to the active-time wording moves every surface.
+              valueText: getGoalActiveTimeLabel(goal, activeTimeMs, t),
               ratio:
                 goal.activeTimeBudgetMs > 0
                   ? activeTimeMs / goal.activeTimeBudgetMs
@@ -788,9 +786,14 @@ export function GoalsDialog({
                     const percent = Math.round(
                       Math.min(1, Math.max(0, budget.ratio)) * 100,
                     );
+                    // The progressbar's name is the visible label + figure
+                    // themselves (aria-labelledby), not a second copy of them
+                    // in aria-label. Ids are per-session so cards never collide.
+                    const labelId = `${item.sessionId}-budget-${budget.key}-label`;
+                    const valueId = `${item.sessionId}-budget-${budget.key}-value`;
                     return (
                       <div key={budget.key} className={styles.budgetRow}>
-                        <span className={styles.budgetLabel}>
+                        <span className={styles.budgetLabel} id={labelId}>
                           {budget.label}
                         </span>
                         <div
@@ -799,7 +802,7 @@ export function GoalsDialog({
                           aria-valuemin={0}
                           aria-valuemax={100}
                           aria-valuenow={percent}
-                          aria-label={`${budget.label}: ${budget.valueText}`}
+                          aria-labelledby={`${labelId} ${valueId}`}
                           data-testid={`goal-budget-${budget.key}`}
                         >
                           <div
@@ -808,7 +811,7 @@ export function GoalsDialog({
                             style={{ width: `${percent}%` }}
                           />
                         </div>
-                        <span className={styles.budgetValue}>
+                        <span className={styles.budgetValue} id={valueId}>
                           {budget.valueText}
                         </span>
                       </div>

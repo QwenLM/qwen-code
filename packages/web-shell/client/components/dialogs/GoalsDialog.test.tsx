@@ -84,6 +84,21 @@ function findButton(label: string): HTMLButtonElement | undefined {
   );
 }
 
+/** Compose a budget progressbar's accessible name from the visible nodes its
+ * aria-labelledby references — the name must be the rendered label + figure
+ * themselves, not a duplicated aria-label string. */
+function barName(testid: string): string {
+  const bar = document.querySelector(`[data-testid="${testid}"]`);
+  if (!bar) throw new Error(`bar not found: ${testid}`);
+  const ids = (bar.getAttribute('aria-labelledby') ?? '')
+    .split(/\s+/)
+    .filter(Boolean);
+  expect(ids).toHaveLength(2);
+  return ids
+    .map((id) => document.getElementById(id)?.textContent ?? '')
+    .join(': ');
+}
+
 /** Set the condition textarea the way React's onChange expects. */
 function setTextarea(value: string) {
   const textarea = document.querySelector('textarea');
@@ -281,16 +296,8 @@ describe('GoalsDialog', () => {
     ]);
     // Armed budgets state their figures once, in the progress row; the
     // matching footer cells are suppressed so the card never repeats them.
-    expect(
-      document
-        .querySelector('[data-testid="goal-budget-turns"]')
-        ?.getAttribute('aria-label'),
-    ).toBe('Turns: 3 / 20 turns');
-    expect(
-      document
-        .querySelector('[data-testid="goal-budget-time"]')
-        ?.getAttribute('aria-label'),
-    ).toBe('Active time: 12m 3s / 30m 0s');
+    expect(barName('goal-budget-turns')).toBe('Turns: 3 / 20 turns');
+    expect(barName('goal-budget-time')).toBe('Active time: 12m 3s / 30m 0s');
     expect(document.querySelector('[data-testid="goal-turns"]')).toBeNull();
     expect(document.querySelector('[data-testid="goal-elapsed"]')).toBeNull();
   });
@@ -390,13 +397,9 @@ describe('GoalsDialog', () => {
       expect(turns?.getAttribute('aria-valuenow')).toBe('15');
       expect(tokens?.getAttribute('aria-valuenow')).toBe('25');
       expect(time?.getAttribute('aria-valuenow')).toBe('33');
-      expect(turns?.getAttribute('aria-label')).toBe('Turns: 3 / 20 turns');
-      expect(tokens?.getAttribute('aria-label')).toBe(
-        'Tokens: 5.0M / 20.0M tokens',
-      );
-      expect(time?.getAttribute('aria-label')).toBe(
-        'Active time: 10m 0s / 30m 0s',
-      );
+      expect(barName('goal-budget-turns')).toBe('Turns: 3 / 20 turns');
+      expect(barName('goal-budget-tokens')).toBe('Tokens: 5.0M / 20.0M tokens');
+      expect(barName('goal-budget-time')).toBe('Active time: 10m 0s / 30m 0s');
       // The inline width is the visual readout; aria alone would stay green
       // with every bar rendered empty or full. jsdom does no layout, so pin
       // the inline style, not a computed pixel width.
@@ -627,6 +630,43 @@ describe('GoalsDialog', () => {
     // Message icon + arrow icon frame the name so it reads as a jump, not a
     // label; the grey text-only shape was indistinguishable from the meta.
     expect(link!.querySelectorAll('svg')).toHaveLength(2);
+  });
+
+  it('keeps the header session action enabled while a control is in flight', async () => {
+    // Navigation is not a control: the busy gate that locks edit/pause/clear
+    // must never lock the jump to the session. Gating it would strand the
+    // user on the Goals page for the whole duration of a slow control.
+    const onOpenSession = vi.fn();
+    await mount([baseGoal()], { onOpenSession });
+    let release: (() => void) | undefined;
+    actions.controlGoal.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve({ snapshot: { v: 2, activity: 'idle', goal: null } });
+        }),
+    );
+
+    click(document.querySelector('button[aria-label="Clear goal"]'));
+    await flush();
+    expect(
+      document.querySelector<HTMLButtonElement>(
+        'button[aria-label="Clear goal"]',
+      )?.disabled,
+    ).toBe(true);
+
+    const jump = document.querySelector<HTMLButtonElement>(
+      '[data-testid="goal-open-session"]',
+    );
+    expect(jump?.disabled).toBe(false);
+    click(jump);
+    expect(onOpenSession).toHaveBeenCalledWith('sess-1', undefined);
+
+    await act(async () => {
+      release?.();
+      await Promise.resolve();
+    });
+    await flush();
   });
 
   it('opens the goal session in its tagged workspace from the header action', async () => {

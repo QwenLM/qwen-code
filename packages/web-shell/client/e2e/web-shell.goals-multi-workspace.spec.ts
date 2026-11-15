@@ -136,6 +136,38 @@ test('a stopped goal shows its lifecycle tone and budget progress @smoke', async
   });
   expect(widths.track).toBeGreaterThan(0);
   expect(Math.abs(widths.fill - widths.track * 0.15)).toBeLessThan(1);
+
+  // The tint and the link cue must actually be painted: reverting the link
+  // to the meta grey or deleting a [data-status] colour rule has to go red.
+  const [fillBg, trackBg, linkColor, metaColor, pillColor, pillBg] =
+    await turnsBar.evaluate((track) => {
+      const fill = track.firstElementChild as HTMLElement;
+      const link = document.querySelector(
+        '[data-testid="goal-session-link"]',
+      ) as HTMLElement;
+      const meta = document.querySelector(
+        '[data-testid="goal-activity"]',
+      ) as HTMLElement;
+      const pill = document.querySelector(
+        '[data-testid="goal-status"]',
+      ) as HTMLElement;
+      return [
+        getComputedStyle(fill).backgroundColor,
+        getComputedStyle(track).backgroundColor,
+        getComputedStyle(link).color,
+        getComputedStyle(meta).color,
+        getComputedStyle(pill).color,
+        getComputedStyle(pill).backgroundColor,
+      ];
+    });
+  expect(fillBg).not.toBe(trackBg);
+  expect(fillBg).not.toBe('rgba(0, 0, 0, 0)');
+  expect(linkColor).not.toBe(metaColor);
+  // The paused fill and the pill read the same attention token; deleting
+  // either [data-status] rule makes them diverge. The pill background must
+  // also differ from the plain muted track (its base colour).
+  expect(fillBg).toBe(pillColor);
+  expect(pillBg).not.toBe(trackBg);
 });
 
 test('the create form targets the picked workspace @smoke', async ({

@@ -29542,6 +29542,37 @@ describe('App session callbacks', () => {
     expect(activeGoals.at(-1)).toBeNull();
   });
 
+  it('offers the strip Goals-page affordance when project features are available', async () => {
+    mockConnection.goalState = activeGoalSnapshot();
+    const { container } = renderApp();
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="goal-status-strip"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="goal-open-goals"]'),
+    ).not.toBeNull();
+  });
+
+  it('hides the strip Goals-page affordance when project features are unavailable', async () => {
+    // The Goals page renders under the same gate; offering the button where
+    // the page cannot open would navigate nowhere.
+    mockWorkspace.capabilities = {
+      workspaces: [],
+    } as typeof mockWorkspace.capabilities;
+    mockConnection.goalState = activeGoalSnapshot();
+    const { container } = renderApp();
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="goal-status-strip"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="goal-open-goals"]'),
+    ).toBeNull();
+  });
+
   it('refuses /language ui while a Goal owns the session', async () => {
     // The daemon sync is what makes the agent answer in the new language; if
     // it is skipped the chrome switches alone and the agent keeps replying in
