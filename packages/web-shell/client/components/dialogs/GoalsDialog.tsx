@@ -51,7 +51,8 @@ interface GoalBudgetBar {
   key: 'turns' | 'tokens' | 'time';
   label: string;
   valueText: string;
-  /** Clamped to [0, 1]; a spent budget reads as a full bar, not overflow. */
+  /** Raw used/budget; the rendered bar clamps to [0, 1] so a spent budget
+   * reads as full, not overflow. */
   ratio: number;
 }
 
