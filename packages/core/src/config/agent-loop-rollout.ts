@@ -19,7 +19,8 @@ export type AgentLoopSurface =
   | 'ink'
   | 'opentui'
   | 'agent-core'
-  | 'speculation';
+  | 'speculation'
+  | 'hosted';
 
 export const AGENT_LOOP_SURFACES: readonly AgentLoopSurface[] = [
   'headless',
@@ -28,6 +29,7 @@ export const AGENT_LOOP_SURFACES: readonly AgentLoopSurface[] = [
   'opentui',
   'agent-core',
   'speculation',
+  'hosted',
 ];
 
 // Each switch has its own default table so a rollout flip of the unified
@@ -42,6 +44,7 @@ export const UNIFIED_SURFACE_DEFAULTS: Record<AgentLoopSurface, boolean> = {
   opentui: false,
   'agent-core': false,
   speculation: false,
+  hosted: false,
 };
 
 export const EVENT_BUS_SURFACE_DEFAULTS: Record<AgentLoopSurface, boolean> = {
@@ -51,6 +54,7 @@ export const EVENT_BUS_SURFACE_DEFAULTS: Record<AgentLoopSurface, boolean> = {
   opentui: false,
   'agent-core': false,
   speculation: false,
+  hosted: false,
 };
 
 function isSurface(name: string): name is AgentLoopSurface {

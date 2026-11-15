@@ -165,7 +165,15 @@ Transcript pages expose the same deeply immutable event snapshot through `getEve
 
 ## Legacy stdio API
 
-The existing `com.alibaba.qwen.code.cli` API remains available:
+The existing `com.alibaba.qwen.code.cli` API remains available.
+
+If a custom `SessionEventConsumers.onControlRequest` handler throws, times out, returns no response envelope, returns a missing or mismatched request ID, returns an unknown response subtype, or returns a success envelope without a response payload, the session sends a correlated `control_response` error to the CLI. The error preserves the original `request_id`, so a request still pending in the CLI can fail when the reply arrives. Timeout errors name the handler's configured budget. Unexpected handler failures include the exception type after bounded wrapper unwrapping but keep the host exception's message and full cause chain in the SDK log. Validation errors describe the invalid response, including both IDs for a correlation failure. Valid success responses and error responses without a success payload are forwarded unchanged.
+
+The default simple consumer has two timeout layers. If the inner `onPermissionRequestTimeout` expires, it logs the failure and returns `Behavior.defaultBehavior()` (deny) in a correlated `subtype: "success"` envelope. If `onOtherControlRequestTimeout` expires, it instead returns a success envelope with an empty, non-null response payload. Neither inner fallback emits a timeout error. Only expiry of the session's outer `onControlRequestTimeout` wait produces the correlated `Control request handler timed out after ...` error. The default outer limit is 180 seconds and the default inner limits are 60 seconds; the session uses its own 60-second fallback when the outer timeout method returns null.
+
+CLI deadlines depend on the request path: leader and workflow tool approvals default to 60 seconds (unless configured otherwise), while teammate approvals use the generic 30-second request deadline. Choose the outer SDK limit below the shortest applicable CLI deadline, leaving time for reply delivery. Keeping the inner limits below that outer limit lets their normal fallback replies settle first; it does not turn them into errors. Letting the outer limit expire first produces an error but can discard an inner callback's later approval. These settings do not shorten CLI deadlines or change any default fallback behavior.
+
+The legacy `ProcessTransport` currently logs callback write failures inside its asynchronous read loop and can return from `sendPrompt` without consuming a result. A successfully constructed error response therefore does not guarantee delivery after the process input stream has closed. The broader asynchronous-wait behavior is tracked separately in [#8835: java-runnable-runandwait-swallows-timeout](https://github.com/QwenLM/qwen-code/issues/8835#issuecomment-5565612693).
 
 ```java
 public static void runSimpleExample() {
@@ -349,6 +357,8 @@ For proper operation, the following timeout relationships should be maintained:
 
 - `onAssistantMessageTimeout` return value should be greater than `onTextTimeout`, `onThinkingTimeout`, `onToolUseTimeout`, `onToolResultTimeout`, and `onOtherContentTimeout` return values
 - `onControlRequestTimeout` return value should be greater than `onPermissionRequestTimeout` and `onOtherControlRequestTimeout` return values
+
+For control requests, `inner callback timeout < onControlRequestTimeout` lets the default inner fallback complete first: permission denial or an empty other-control payload, both with a success envelope. Only the outer wait's expiry produces a timeout error. Keep that outer limit below the shortest CLI deadline the handler serves (30 seconds for teammate approvals; 60 seconds by default for leader/workflow approvals), with a margin for reply delivery. An outer timeout can discard a later inner approval.
 
 ### Transport Options
 

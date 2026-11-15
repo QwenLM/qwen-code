@@ -25107,14 +25107,54 @@ export function App({
                   </div>
                   <div className={styles.fullPageBody}>
                     <GoalsDialog
-                      onCreateGoal={async (condition) => {
+                      // Registered workspaces (multi-workspace daemons only) so
+                      // the page aggregates every project's goals and the New
+                      // form can target one; absent/single → primary-only view.
+                      workspaces={
+                        lockedWorkspaceCwd
+                          ? visibleWorkspaces
+                          : ordinaryWorkspaces
+                      }
+                      lockedWorkspace={lockedWorkspaceCapability}
+                      defaultWorkspaceCwd={resolveWorkspaceMaintenanceTargetCwd()}
+                      onCreateGoal={async (condition, workspaceCwd) => {
                         const stranded = strandedGoalSessionRef.current;
+                        // Reuse the stranded session only when the picker still
+                        // targets its workspace; otherwise a retry after a failed
+                        // attempt would silently create the goal in the previous
+                        // workspace while the picker displays the new one.
                         const canReuseStranded =
                           stranded !== undefined &&
-                          connectionRef.current.sessionId === stranded;
+                          connectionRef.current.sessionId === stranded &&
+                          (workspaceCwd === undefined ||
+                            workspaceCwd ===
+                              connectionRef.current.workspaceCwd);
                         if (!canReuseStranded) {
+                          // The picker can outlive a trust change or workspace
+                          // removal: re-validate its cwd before createNewSession,
+                          // which clears the current session before allocation
+                          // would refuse an untrusted target.
+                          const pickedCwd =
+                            workspaceCwd === undefined
+                              ? undefined
+                              : ordinaryWorkspaces.find(
+                                  (entry) =>
+                                    entry.cwd === workspaceCwd &&
+                                    entry.trusted !== false,
+                                )?.cwd;
+                          if (workspaceCwd !== undefined && !pickedCwd) {
+                            reportError(
+                              new Error(t('goals.error.workspaceUnavailable')),
+                              'Failed to create the goal',
+                            );
+                            return false;
+                          }
+                          // Only forget the stranded session once the retry
+                          // actually proceeds; a refused target must leave the
+                          // recovery handle intact for a later retry.
                           strandedGoalSessionRef.current = undefined;
                           const targetCwd =
+                            pickedCwd ??
                             resolveWorkspaceMaintenanceTargetCwd();
                           if (!targetCwd) return false;
                           const created = await createNewSession(
@@ -25196,10 +25236,11 @@ export function App({
                         strandedGoalSessionRef.current = undefined;
                         showChat();
                       }}
-                      onOpenSession={(sessionId) => {
-                        // The goal's session transcript IS its history.
+                      onOpenSession={(sessionId, workspaceCwd) => {
+                        // The goal's session transcript IS its history — load
+                        // it in the goal's own workspace.
                         showChat();
-                        loadSidebarSession(sessionId).catch(
+                        loadSidebarSession(sessionId, workspaceCwd).catch(
                           (error: unknown) => {
                             reportError(error, 'Failed to open session');
                           },
