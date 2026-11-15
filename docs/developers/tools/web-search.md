@@ -535,7 +535,7 @@ Replace `${YDC_API_KEY}` with your actual You.com API key, or set it as an envir
 A hosted MCP server from SpecStream with web search, page reading and multi-step research. Search queries, the URLs you ask it to read and research questions are sent to SpecStream.
 
 - **Documentation:** https://specstream.ai/docs/mcp
-- **Cost:** Paid ($10 of credit on sign-up, no card). $5 per 1,000 searches, $1 per 1,000 with `speed: "fast"`, $0.80 per 1,000 pages read
+- **Cost:** Paid (pay per call from a prepaid balance; new accounts get $10 of credit)
 - **Get API Key:** https://specstream.ai/workspace (Agents & API)
 - **Best for:** Web search with a source URL and published date per result, and reading pages or PDFs as Markdown
 
