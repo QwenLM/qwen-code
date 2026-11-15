@@ -32,6 +32,7 @@ import { FinishReason } from '@qwen-code/qwen-code-core/core/genai-compat.js';
 import type { UserTurnInput } from '@qwen-code/qwen-code-core/core/client.js';
 import { markToolCallArgumentsIncomplete } from '@qwen-code/qwen-code-core/core/incomplete-tool-call-args.js';
 import { runAgentLoop } from '@qwen-code/qwen-code-core/core/agent-loop.js';
+import * as agentLoopRollout from '@qwen-code/qwen-code-core/config/agent-loop-rollout.js';
 import { ManagedRuntimeOutcomeUnknownError } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import {
   getApiHistoryPromptId,
@@ -1300,6 +1301,21 @@ describe('Session', () => {
       mockClient,
       mockSettings,
     );
+  });
+
+  describe('agent loop diagnostic entry marker', () => {
+    it('logs the acp loop entry marker on a prompt', async () => {
+      const entrySpy = vi.spyOn(agentLoopRollout, 'logAgentLoopEntry');
+      vi.mocked(mockChat.sendMessageStream).mockImplementation(async () =>
+        createEmptyStream(),
+      );
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text' as const, text: 'hello' }],
+      });
+      expect(entrySpy).toHaveBeenCalledWith(mockConfig, 'acp');
+      entrySpy.mockRestore();
+    });
   });
 
   describe('session agent records', () => {
@@ -6968,6 +6984,7 @@ describe('Session', () => {
         );
 
       it('runs a cron fire as a Cron round and records its prompt once sent', async () => {
+        const entrySpy = vi.spyOn(agentLoopRollout, 'logAgentLoopEntry');
         fireCron('nightly report');
         const sends = automaticRounds((index) =>
           index === 1 ? [text('cron result'), finished()] : [finished()],
@@ -7006,6 +7023,11 @@ describe('Session', () => {
         ).mock.calls;
         expect(kernelCalls.length).toBeGreaterThan(0);
         expect(kernelCalls.every(([surface]) => surface === 'acp')).toBe(true);
+        // Both the primary prompt and the cron turn must log the acp entry
+        // marker; deleting the cron-tick site drops this from 2 to 1.
+        expect(entrySpy).toHaveBeenCalledTimes(2);
+        expect(entrySpy).toHaveBeenCalledWith(mockConfig, 'acp');
+        entrySpy.mockRestore();
       });
 
       it('records a cron prompt before the response its round records', async () => {
@@ -7209,6 +7231,7 @@ describe('Session', () => {
       });
 
       it('runs a background notification as a Notification round and shows its response once', async () => {
+        const entrySpy = vi.spyOn(agentLoopRollout, 'logAgentLoopEntry');
         const sends = automaticRounds(() => [
           text('agent '),
           text('done'),
@@ -7268,6 +7291,11 @@ describe('Session', () => {
         ).mock.calls;
         expect(kernelCalls.length).toBeGreaterThan(0);
         expect(kernelCalls.every(([surface]) => surface === 'acp')).toBe(true);
+        // Only the notification turn runs here (no primary prompt), so the
+        // entry marker fires exactly once — at the notification site.
+        expect(entrySpy).toHaveBeenCalledTimes(1);
+        expect(entrySpy).toHaveBeenCalledWith(mockConfig, 'acp');
+        entrySpy.mockRestore();
       });
 
       it('ends a notification turn that loop protection stopped as partial', async () => {
