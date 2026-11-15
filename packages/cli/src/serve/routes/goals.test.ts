@@ -21,6 +21,7 @@ import {
   createWorkspaceGenerationGuard,
   type WorkspaceRegistry,
 } from '../workspace-registry.js';
+import { ConversationRuntimeActivityGate } from '../conversations/conversation-runtime-activity.js';
 import {
   registerGoalsRoutes,
   registerWorkspaceQualifiedGoalsRoutes,
@@ -432,7 +433,10 @@ interface QualifiedGoalsRuntime {
 
 /** Both surfaces on one app, as in the real server: the primary behind
  * `/goals`, every registered workspace behind the qualified route. */
-function makeQualifiedApp(runtimes: QualifiedGoalsRuntime[]) {
+function makeQualifiedApp(
+  runtimes: QualifiedGoalsRuntime[],
+  options?: { conversationRuntimeActivity?: ConversationRuntimeActivityGate },
+) {
   const entries = runtimes.map((runtime, index) => ({
     workspaceId: runtime.workspaceId,
     workspaceCwd: runtime.workspaceCwd,
@@ -461,7 +465,12 @@ function makeQualifiedApp(runtimes: QualifiedGoalsRuntime[]) {
     boundWorkspace: runtimes[0]!.workspaceCwd,
     bridge: runtimes[0]!.bridge,
   });
-  registerWorkspaceQualifiedGoalsRoutes(app, { workspaceRegistry });
+  registerWorkspaceQualifiedGoalsRoutes(app, {
+    workspaceRegistry,
+    ...(options?.conversationRuntimeActivity
+      ? { conversationRuntimeActivity: options.conversationRuntimeActivity }
+      : {}),
+  });
   return app;
 }
 
@@ -762,6 +771,139 @@ describe('GET /workspaces/:workspace/goals', () => {
   });
 
   it('lists a live-conversation workspace read-only', async () => {
+    const app = makeQualifiedApp(
+      [
+        {
+          workspaceId: 'id-primary',
+          workspaceCwd: WORKSPACE,
+          trusted: true,
+          bridge: primaryBridge(),
+        },
+        {
+          workspaceId: 'id-conversations',
+          workspaceCwd: '/w-conversations',
+          trusted: true,
+          provenance: 'live-conversation',
+          bridge: {
+            listWorkspaceSessions: () => [
+              summary('live-1', { workspaceCwd: '/w-conversations' }),
+            ],
+            getSessionGoal: async () => activeGoal('conversation goal'),
+          },
+        },
+      ],
+      { conversationRuntimeActivity: new ConversationRuntimeActivityGate() },
+    );
+
+    const res = await request(app).get(qualified('id-conversations'));
+
+    expect(res.status).toBe(200);
+    expect(res.body.goals[0].condition).toBe('conversation goal');
+  });
+
+  it('answers 503 daemon_draining for a live-conversation listing once the gate is sealed', async () => {
+    // The listing must run INSIDE the gate: a drain that seals the gate
+    // refuses new work with the declared 503 instead of shutting the bridge
+    // down under an in-flight probe fan-out (a partial 200 page). Removing
+    // the gate.run() wrap reds this case.
+    const gate = new ConversationRuntimeActivityGate();
+    const app = makeQualifiedApp(
+      [
+        {
+          workspaceId: 'id-primary',
+          workspaceCwd: WORKSPACE,
+          trusted: true,
+          bridge: primaryBridge(),
+        },
+        {
+          workspaceId: 'id-conversations',
+          workspaceCwd: '/w-conversations',
+          trusted: true,
+          provenance: 'live-conversation',
+          bridge: {
+            listWorkspaceSessions: () => [
+              summary('live-1', { workspaceCwd: '/w-conversations' }),
+            ],
+            getSessionGoal: async () => activeGoal('conversation goal'),
+          },
+        },
+      ],
+      { conversationRuntimeActivity: gate },
+    );
+    await gate.sealAndWait();
+
+    const res = await request(app).get(qualified('id-conversations'));
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('daemon_draining');
+  });
+
+  it('makes a drain wait for an in-flight live-conversation listing', async () => {
+    // The sealed-before case proves refusal; this one proves the drain
+    // actually COUNTS the listing: sealAndWait() must stay pending while a
+    // probe is in flight, then the listing completes with a full page.
+    // Without the gate.run() wrap the seal resolves immediately (active 0)
+    // and this case reds.
+    const gate = new ConversationRuntimeActivityGate();
+    let inFlight = false;
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const app = makeQualifiedApp(
+      [
+        {
+          workspaceId: 'id-primary',
+          workspaceCwd: WORKSPACE,
+          trusted: true,
+          bridge: primaryBridge(),
+        },
+        {
+          workspaceId: 'id-conversations',
+          workspaceCwd: '/w-conversations',
+          trusted: true,
+          provenance: 'live-conversation',
+          bridge: {
+            listWorkspaceSessions: () => [
+              summary('live-1', { workspaceCwd: '/w-conversations' }),
+            ],
+            getSessionGoal: async () => {
+              inFlight = true;
+              await blocked;
+              return activeGoal('conversation goal');
+            },
+          },
+        },
+      ],
+      { conversationRuntimeActivity: gate },
+    );
+
+    // supertest is a thenable: attach immediately so the request fires.
+    const listing = request(app)
+      .get(qualified('id-conversations'))
+      .then((res) => res);
+    await vi.waitFor(() => expect(inFlight).toBe(true));
+
+    let sealed = false;
+    const drain = gate.sealAndWait().then(() => {
+      sealed = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(sealed).toBe(false);
+
+    release();
+    const res = await listing;
+    await drain;
+
+    expect(res.status).toBe(200);
+    expect(res.body.goals).toHaveLength(1);
+    expect(res.body.goals[0].condition).toBe('conversation goal');
+    expect(res.body.droppedCount).toBe(0);
+  });
+
+  it('answers 503 conversation_runtime_unavailable for a live-conversation listing without a gate', async () => {
+    // Mirrors the qualified scheduled-tasks surface: an active Conversations
+    // runtime cannot be listed when the daemon wired no activity gate.
     const app = makeQualifiedApp([
       {
         workspaceId: 'id-primary',
@@ -775,18 +917,16 @@ describe('GET /workspaces/:workspace/goals', () => {
         trusted: true,
         provenance: 'live-conversation',
         bridge: {
-          listWorkspaceSessions: () => [
-            summary('live-1', { workspaceCwd: '/w-conversations' }),
-          ],
-          getSessionGoal: async () => activeGoal('conversation goal'),
+          listWorkspaceSessions: () => [],
+          getSessionGoal: async () => noGoal,
         },
       },
     ]);
 
     const res = await request(app).get(qualified('id-conversations'));
 
-    expect(res.status).toBe(200);
-    expect(res.body.goals[0].condition).toBe('conversation goal');
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('conversation_runtime_unavailable');
   });
 
   it('answers 503 conversation_runtime_unavailable when the Conversations runtime is not active', async () => {
