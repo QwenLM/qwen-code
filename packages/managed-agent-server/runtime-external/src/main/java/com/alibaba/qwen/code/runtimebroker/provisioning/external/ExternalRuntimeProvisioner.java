@@ -213,10 +213,16 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
                     try {
                         observation = reattach(request, seed, handle, originalEndpoint);
                     } catch (RuntimeBrokerException failure) {
-                        // A failing reattach proves nothing about identity:
-                        // the observed worker may still be running, so this
-                        // must stay retryable and never reach the conflict arm
-                        // that permanently fences the binding.
+                        if ("runtime_broker_resource_conflict".equals(failure.getCode())) {
+                            // A GONE reattach answer is an identity verdict
+                            // (the worker is provably gone), not a transient
+                            // failure: keep it on the permanent-conflict path.
+                            throw failure;
+                        }
+                        // Any other failing reattach proves nothing about
+                        // identity: the observed worker may still be running,
+                        // so this must stay retryable and never reach the
+                        // conflict arm that permanently fences the binding.
                         return RuntimeObservation.unknown(handle);
                     }
                 }
