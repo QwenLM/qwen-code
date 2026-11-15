@@ -58,6 +58,8 @@ import {
   resetUnattendedFixGrantsForTests,
 } from './autofix-pr-grants.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
+// eslint-disable-next-line import/no-internal-modules -- Static regression data, not a module implementation.
+import replayCases from './fixtures/edit-stale-recovery.json' with { type: 'json' };
 
 const readText = (filePath: string) => fs.readFileSync(filePath, 'utf8');
 
@@ -2035,6 +2037,35 @@ describe('EditTool', () => {
         fs.utimesSync(target, future, future);
       };
 
+      it('replays public anonymous stale case-048 and preserves its external newline change', async () => {
+        const fixture = replayCases.stale;
+        seedFile(filePath, fixture.previousContent);
+        modifyExternally(filePath, fixture.currentContent);
+
+        const result = await run(
+          edit(filePath, fixture.oldString, fixture.newString),
+        );
+
+        expect(result.error).toBeUndefined();
+        expect(result.llmContent).toContain('recovery checks');
+        expect(readText(filePath)).toBe(
+          fixture.currentContent.replace(fixture.oldString, fixture.newString),
+        );
+        expect(readText(filePath).endsWith('\n')).toBe(false);
+      });
+
+      it('replays public anonymous no-match case-021 without mutating its excerpt', async () => {
+        const fixture = replayCases.noMatch;
+        seedFile(filePath, fixture.content);
+
+        const result = await run(
+          edit(filePath, fixture.oldString, fixture.newString),
+        );
+
+        expect(result.error?.type).toBe(ToolErrorType.EDIT_NO_OCCURRENCE_FOUND);
+        expect(readText(filePath)).toBe(fixture.content);
+      });
+
       it('recovers when a previously read text file changed elsewhere and old_string matches uniquely', async () => {
         seedFile(filePath, 'header-v1\ntarget line\nfooter\n');
         modifyExternally(filePath, 'header-v2\ntarget line\nfooter\n');
@@ -2100,7 +2131,6 @@ describe('EditTool', () => {
       it('carries recovery state across atomic inode replacement on consecutive edits', async () => {
         seedFile(filePath, 'header-v1\ntarget\n');
         modifyExternally(filePath, 'header-v2\ntarget\n');
-        const oldInode = fs.statSync(filePath).ino;
         vi.spyOn(fsService, 'writeTextFile').mockImplementation(
           async (params) => {
             const replacement = `${params.path}.replacement`;
@@ -2113,15 +2143,16 @@ describe('EditTool', () => {
           ['target', 'updated'],
           ['updated', 'again'],
         ]) {
+          const beforeInode = fs.statSync(filePath).ino;
           const result = await run(edit(filePath, oldText, newText));
           expect(result.error).toBeUndefined();
           expect(result.llmContent).toContain('recovery checks');
+          expect(fs.statSync(filePath).ino).not.toBe(beforeInode);
           const current = fileReadCache.check(fs.statSync(filePath));
           expect(current.state).toBe('fresh');
           if (current.state === 'fresh')
             expect(current.entry.readBaselineNeedsRefresh).toBe(true);
         }
-        expect(fs.statSync(filePath).ino).not.toBe(oldInode);
         expect(readText(filePath)).toBe('header-v2\nagain\n');
       });
 
@@ -2174,6 +2205,18 @@ describe('EditTool', () => {
           ToolErrorType.EDIT_EXPECTED_OCCURRENCE_MISMATCH,
         );
         expect(readText(filePath)).toBe('target\nmiddle\ntarget\nfooter\n');
+        expect(mockRecoveryDebug).not.toHaveBeenCalled();
+      });
+
+      it('does not log a successful recovery while only preparing confirmation', async () => {
+        seedFile(filePath, 'header-v1\ntarget\n');
+        modifyExternally(filePath, 'header-v2\ntarget\n');
+
+        const details = await confirm(edit(filePath, 'target', 'updated'));
+
+        expect(details.type).toBe('edit');
+        expect(readText(filePath)).toBe('header-v2\ntarget\n');
+        expect(mockRecoveryDebug).not.toHaveBeenCalled();
       });
 
       it('rejects with FILE_CHANGED_SINCE_READ when replace_all is true on a stale file', async () => {
@@ -2218,6 +2261,27 @@ describe('EditTool', () => {
         expect(outsideResult.error?.type).toBe(
           ToolErrorType.FILE_CHANGED_SINCE_READ,
         );
+        expect(readText(outsidePath)).toBe('v2\ntarget\n');
+
+        const allowReadManager = new PermissionManager({
+          getPermissionsAllow: () => ['ReadFile'],
+          getPermissionsAsk: () => undefined,
+          getPermissionsDeny: () => undefined,
+          getProjectRoot: () => rootDir,
+          getCwd: () => rootDir,
+        });
+        allowReadManager.initialize();
+        const allowReadConfig = {
+          ...mockConfig,
+          getPermissionManager: () => allowReadManager,
+        } as unknown as Config;
+        const allowedRuleResult = await new EditTool(allowReadConfig)
+          .build(edit(outsidePath, 'target', 'updated'))
+          .execute(new AbortController().signal);
+        expect(allowedRuleResult.error?.type).toBe(
+          ToolErrorType.FILE_CHANGED_SINCE_READ,
+        );
+        expect(readText(outsidePath)).toBe('v2\ntarget\n');
 
         fs.writeFileSync(path.join(rootDir, '.qwenignore'), 'ignored.txt\n');
         const ignoredPath = path.join(rootDir, 'ignored.txt');

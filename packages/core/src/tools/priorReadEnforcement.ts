@@ -57,6 +57,20 @@ function makeStaleRejection(
   };
 }
 
+function makeReadBaselineRejection(
+  filePath: string,
+  verb: PriorReadVerb,
+): PriorReadFailure {
+  return {
+    type: ToolErrorType.FILE_CHANGED_SINCE_READ,
+    rawMessage:
+      `A recovered edit preserved content in ${filePath} that has not been read. ` +
+      `Refresh the Read baseline with the ${ToolNames.READ_FILE} tool ` +
+      `before ${verb} it.`,
+    displayMessage: `Read baseline needs refreshing after recovery; re-run ${ToolNames.READ_FILE} first.`,
+  };
+}
+
 function matchesStaleSnapshot(
   stats: fs.Stats,
   snapshot: StaleFileSnapshot,
@@ -311,7 +325,10 @@ export async function checkPriorRead(
       status.entry.readBaselineNeedsRefresh &&
       status.entry.lastReadCacheable)
   ) {
-    const rejection = makeStaleRejection(filePath, verb);
+    const rejection =
+      status.state === 'fresh'
+        ? makeReadBaselineRejection(filePath, verb)
+        : makeStaleRejection(filePath, verb);
     if (options.expectedStaleSnapshot !== undefined) {
       if (
         status.entry.lastReadAt !== undefined &&
@@ -325,7 +342,7 @@ export async function checkPriorRead(
           staleRejection: rejection,
         };
       }
-      return { ok: false, ...rejection };
+      return { ok: false, ...makeStaleRejection(filePath, verb) };
     }
     if (
       options.allowStaleRecovery &&
