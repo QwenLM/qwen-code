@@ -101,11 +101,72 @@ describe('readStdin', () => {
       vi.advanceTimersByTime(500);
 
       await expect(promise).resolves.toBe('');
+      expect(stderrSpy).toHaveBeenCalledTimes(1);
       expect(stderrSpy).toHaveBeenCalledWith(
         'Warning: no stdin input received within 500ms; proceeding without stdin.\n',
       );
     } finally {
       (process.stderr as { write: typeof originalWrite }).write = originalWrite;
+      vi.useRealTimers();
+    }
+  });
+
+  it('should stay silent on timeout when warnOnTimeout is false or omitted', async () => {
+    vi.useFakeTimers();
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    const stderrSpy = vi.fn(() => true);
+    (process.stderr as { write: unknown }).write = stderrSpy;
+
+    try {
+      const pDefault = readStdin();
+      vi.advanceTimersByTime(500);
+      await expect(pDefault).resolves.toBe('');
+
+      const pFalse = readStdin({ warnOnTimeout: false });
+      vi.advanceTimersByTime(500);
+      await expect(pFalse).resolves.toBe('');
+
+      expect(stderrSpy).not.toHaveBeenCalled();
+    } finally {
+      (process.stderr as { write: typeof originalWrite }).write = originalWrite;
+      vi.useRealTimers();
+    }
+  });
+
+  it('should ignore EPIPE errors when writing timeout warning', async () => {
+    vi.useFakeTimers();
+    const originalWrite = process.stderr.write.bind(process.stderr);
+    const destroySpy = vi
+      .spyOn(process.stderr, 'destroy')
+      .mockReturnValue(process.stderr);
+
+    const epipe = () =>
+      Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+
+    const stderrSpy = vi
+      .fn()
+      .mockImplementationOnce(() => {
+        throw epipe();
+      })
+      .mockImplementationOnce(() => {
+        process.stderr.emit('error', epipe());
+        return false;
+      });
+    (process.stderr as { write: unknown }).write = stderrSpy;
+
+    try {
+      const syncPromise = readStdin({ warnOnTimeout: true });
+      vi.advanceTimersByTime(500);
+      await expect(syncPromise).resolves.toBe('');
+
+      const asyncPromise = readStdin({ warnOnTimeout: true });
+      vi.advanceTimersByTime(500);
+      await expect(asyncPromise).resolves.toBe('');
+
+      expect(stderrSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      (process.stderr as { write: typeof originalWrite }).write = originalWrite;
+      destroySpy.mockRestore();
       vi.useRealTimers();
     }
   });

@@ -58,6 +58,7 @@ vi.mock(
 );
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+const mockReadStdin = vi.hoisted(() => vi.fn(async () => ''));
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockConsumeLastRenderError = vi.hoisted(() => vi.fn());
 const mockHandleListExtensions = vi.hoisted(() => vi.fn());
@@ -230,6 +231,10 @@ vi.mock('./utils/stdioHelpers.js', () => ({
   clearScreen: vi.fn(),
 }));
 
+vi.mock('./utils/readStdin.js', () => ({
+  readStdin: mockReadStdin,
+}));
+
 vi.mock('./utils/relaunch.js', () => ({
   exitWhenSupervisorExits: vi.fn(),
   relaunchAppInChildProcess: vi.fn(),
@@ -393,6 +398,7 @@ describe('llm.tsx main function', () => {
     [];
 
   beforeEach(() => {
+    mockReadStdin.mockReset().mockResolvedValue('');
     mockStartNonInteractiveOpenAILogHousekeeping.mockClear();
     mockStopNonInteractiveOpenAILogHousekeeping.mockClear();
     lspConfigWatcherMock.instances.length = 0;
@@ -2665,6 +2671,155 @@ describe('llm.tsx main function', () => {
     );
   });
 
+  const runNonInteractiveWithPipedStdin = async (
+    question: string,
+  ): Promise<number> => {
+    const originalNoRelaunch = process.env['QWEN_CODE_NO_RELAUNCH'];
+    const originalIsTTY = Object.getOwnPropertyDescriptor(
+      process.stdin,
+      'isTTY',
+    );
+    process.env['QWEN_CODE_NO_RELAUNCH'] = 'true';
+    Object.defineProperty(process.stdin, 'isTTY', {
+      value: false,
+      configurable: true,
+    });
+
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const cleanupModule = await import('./utils/cleanup.js');
+    const validatorModule = await import('./validateNonInterActiveAuth.js');
+    const nonInteractiveModule = await import('./nonInteractiveCli.js');
+    const initializerModule = await import('./core/initializer.js');
+    const startupWarningsModule = await import('./utils/startupWarnings.js');
+    const userStartupWarningsModule = await import(
+      './utils/userStartupWarnings.js'
+    );
+
+    vi.mocked(cleanupModule.runExitCleanup).mockResolvedValue(undefined);
+    const initSpy = vi
+      .spyOn(initializerModule, 'initializeApp')
+      .mockResolvedValue({
+        authError: null,
+        themeError: null,
+        shouldOpenAuthDialog: false,
+        memoryFileCount: 0,
+      });
+    const startupSpy = vi
+      .spyOn(startupWarningsModule, 'getStartupWarnings')
+      .mockResolvedValue([]);
+    const userStartupSpy = vi
+      .spyOn(userStartupWarningsModule, 'getUserStartupWarnings')
+      .mockResolvedValue([]);
+    const runNonInteractiveSpy = vi
+      .spyOn(nonInteractiveModule, 'runNonInteractive')
+      .mockResolvedValue(0);
+
+    const configStub = {
+      isInteractive: () => false,
+      isProjectHooksPendingApproval: () => false,
+      getQuestion: () => question,
+      getSandbox: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getDebugMode: () => false,
+      getListExtensions: () => false,
+      getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
+      getModelProvidersConfig: () => undefined,
+      initialize: vi.fn().mockResolvedValue(undefined),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      getFailedMcpServerNames: () => [],
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getScreenReader: () => false,
+      getMemoryFileCount: () => 0,
+      getProjectRoot: () => '/',
+      getOutputFormat: () => OutputFormat.TEXT,
+      getWarnings: () => [],
+      isSafeMode: () => false,
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+      getContentGeneratorConfig: () => undefined,
+      getUsageStatisticsEnabled: () => true,
+      getSessionId: () => 'test-session-id',
+      getProxy: () => undefined,
+      getResumedSessionData: () => undefined,
+    } as unknown as Config;
+
+    vi.mocked(parseArguments).mockResolvedValue({
+      extensions: [],
+      ...(question ? { prompt: question } : {}),
+    } as unknown as CliArgs);
+    vi.mocked(loadSettings).mockReturnValue({
+      errors: [],
+      merged: {
+        advanced: {},
+        security: { auth: {} },
+        ui: {},
+      },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getSystemHooks: () => undefined,
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    } as never);
+    vi.mocked(loadCliConfig).mockResolvedValue(configStub);
+    const validateAuthSpy = vi
+      .spyOn(validatorModule, 'validateNonInteractiveAuth')
+      .mockResolvedValue(configStub);
+
+    let calls = 0;
+    try {
+      await main();
+    } catch (error) {
+      if (!(error instanceof MockProcessExitError)) {
+        throw error;
+      }
+    } finally {
+      calls = runNonInteractiveSpy.mock.calls.length;
+      processExitSpy.mockRestore();
+      initSpy.mockRestore();
+      startupSpy.mockRestore();
+      userStartupSpy.mockRestore();
+      runNonInteractiveSpy.mockRestore();
+      validateAuthSpy.mockRestore();
+      if (originalIsTTY) {
+        Object.defineProperty(process.stdin, 'isTTY', originalIsTTY);
+      } else {
+        delete (process.stdin as { isTTY?: unknown }).isTTY;
+      }
+      if (originalNoRelaunch !== undefined) {
+        process.env['QWEN_CODE_NO_RELAUNCH'] = originalNoRelaunch;
+      } else {
+        delete process.env['QWEN_CODE_NO_RELAUNCH'];
+      }
+    }
+    return calls;
+  };
+
+  it('enables stdin timeout warning in non-interactive mode when prompt is set', async () => {
+    const calls = await runNonInteractiveWithPipedStdin('hello');
+
+    expect(mockReadStdin).toHaveBeenCalledTimes(1);
+    expect(mockReadStdin).toHaveBeenCalledWith({ warnOnTimeout: true });
+    expect(calls).toBe(1);
+  });
+
+  it('disables stdin timeout warning in non-interactive mode when prompt is empty', async () => {
+    const calls = await runNonInteractiveWithPipedStdin('');
+
+    expect(mockReadStdin).toHaveBeenCalledTimes(1);
+    expect(mockReadStdin).toHaveBeenCalledWith({ warnOnTimeout: false });
+    expect(calls).toBe(0);
+  });
+
   const runSandboxRelaunch = async (
     argv: string[],
     sessionId = '123e4567-e89b-12d3-a456-426614174000',
@@ -2783,6 +2938,30 @@ describe('llm.tsx main function', () => {
         process.env['QWEN_CODE_HOST_UPDATE_RELAUNCH'] = originalCapability;
       }
     }
+  });
+
+  it('suppresses timeout warning on outer stdin read when relaunching into sandbox', async () => {
+    const originalIsTTY = Object.getOwnPropertyDescriptor(
+      process.stdin,
+      'isTTY',
+    );
+    Object.defineProperty(process.stdin, 'isTTY', {
+      value: false,
+      configurable: true,
+    });
+
+    try {
+      await runSandboxRelaunch(['node', 'script.js', '--debug', '-p', 'hello']);
+    } finally {
+      if (originalIsTTY) {
+        Object.defineProperty(process.stdin, 'isTTY', originalIsTTY);
+      } else {
+        delete (process.stdin as { isTTY?: unknown }).isTTY;
+      }
+    }
+
+    expect(mockReadStdin).toHaveBeenCalledTimes(1);
+    expect(mockReadStdin).toHaveBeenCalledWith();
   });
 
   it('does not pass an empty session ID into the sandbox child process', async () => {

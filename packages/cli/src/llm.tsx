@@ -795,7 +795,8 @@ export async function main() {
       const isAcpMode = argv.acp || argv.experimentalAcp;
       let stdinData = '';
       if (!process.stdin.isTTY && inputFormat !== 'stream-json' && !isAcpMode) {
-        stdinData = await readStdin({ warnOnTimeout: Boolean(argv.prompt) });
+        // Let the sandbox child emit any timeout warning so it is printed once.
+        stdinData = await readStdin();
       }
 
       // This function is a copy of the one from sandbox.ts
