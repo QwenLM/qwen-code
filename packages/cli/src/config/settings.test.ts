@@ -356,8 +356,12 @@ describe('Settings Loading and Merging', () => {
           SETTINGS_DIRECTORY_NAME,
           'settings.json',
         );
-        (mockFsExistsSync as Mock).mockImplementation(
-          (p: fs.PathLike) => p.toString() === userSettingsPath,
+        // Report the file's directory too, as above: on Linux a missing
+        // ~/.qwen makes the XDG directory the global dir.
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [userSettingsPath, pathActual.dirname(userSettingsPath)].includes(
+            p.toString(),
+          ),
         );
         (fs.readFileSync as Mock).mockImplementation(
           (p: fs.PathOrFileDescriptor) =>
