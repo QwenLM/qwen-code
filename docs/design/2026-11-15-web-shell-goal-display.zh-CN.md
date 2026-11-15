@@ -1,0 +1,92 @@
+# Web Shell Goal 展示：会话跳转与状态可读性
+
+[English](2026-11-15-web-shell-goal-display.md) | [简体中文](2026-11-15-web-shell-goal-display.zh-CN.md)
+
+状态：已实现（2026-11-15），在多工作区 Goals 页（#17230、#17291）之上的纯客户端增强。
+
+## 问题
+
+Goals 页列出每个已加载会话的目标，但要查看一个目标，只能找到卡片页脚最右侧那个小小的会话名文字链接。卡片本身无法让人一眼看出生命周期状态（状态胶囊是单色的），也无法看出已设定的预算消耗了多少（数字只是若干 meta 项中的纯文本）。会话内的 `GoalStatusStrip` 没有回到 Goals 页的入口，用户进入某个目标的会话后，只能靠侧栏才能到达聚合视图。
+
+## 现状
+
+- `GoalsDialog` 每个目标渲染一张卡片：状态圆点（活动态）、目标内容、编辑/暂停/继续/清除图标操作、`lastReason`，以及页脚的工作区胶囊、单色状态胶囊、活动态、轮数、tokens、耗时，还有一个调用 `onOpenSession(sessionId, workspaceCwd)` 的会话名按钮。
+- `GoalStatusStrip` 渲染在目标所属会话的输入框上方，包含状态文本、目标内容、耗时/轮数/token 数字，以及同样的四个控制操作。它没有导航入口。
+- 驾驶舱（cockpit）头部与工作流检查器已共享一套执行状态色板（`App.module.css` 中的 `--status-running-*`、`--status-attention-*`、`--status-done-*`、`--status-idle-*`），让同一状态在各处读起来颜色一致。Goals 尚未使用它。
+
+## 目标
+
+- 让「从目标跳到其会话」成为卡片上常驻、一等公民的操作。
+- 让生命周期状态一眼可读，并与 Web Shell 其余部分使用同一套颜色语言。
+- 对每个已设定的预算（轮数、tokens、活跃时长）以紧凑的进度条展示消耗进度，同时不给无上限的目标增加噪音。
+- 在 Goals 页可用的前提下，让会话内的 strip 能打开 Goals 页。
+
+## 非目标
+
+- 不改 daemon、SDK 或 wire 格式。一切均派生自现有的 `DaemonGoal` / `GoalSnapshotV2` 载荷。
+- 不在侧栏会话列表上加目标标记：那需要新增一个常驻的 goals 轮询（`GET /goals` 会探测每个存活会话），或新增会话摘要字段，两者都超出展示增强的范围。
+- 不改目标控制语义、门控或创建/编辑表单。
+- 不新增页面或深链；strip 复用现有的 `openGoals` 动作。
+
+## 改动方案
+
+### GoalsDialog 卡片
+
+- 卡片头部新增第一个图标操作（`MessageSquareText`，`data-testid="goal-open-session"`），调用 `onOpenSession(item.sessionId, item.workspaceCwd)` —— 与页脚链接同一处理器，含工作区标签。它是导航而非控制，因此永不被按会话的 `busy` 门禁用。页脚链接保留，用于可发现性以及展示会话名本身。
+- 状态胶囊带上由 `goalStatusTone(status)` 映射的 `data-status`：`active → running`，`paused | blocked | usage_limited → attention`，`complete → done`。CSS 复用共享执行状态色板。这与 `GoalStatusMessage` 现有的 warning/success 颜色语言一致。
+- 当至少设定了一个预算时，在 reason 与页脚之间渲染 `budgets` 区块，每个预算一行：标签、`role="progressbar"` 的轨道（`data-testid="goal-budget-<kind>"`，`aria-valuenow` = 截断后的百分比，`aria-label` = `"<标签>: <已用> / <预算>"`）、按生命周期色调着色的填充条，以及 `已用 / 预算` 数值文本。轮数用 `turnCount / turnBudget`；tokens 对 `tokensUsed / tokenBudget` 使用 `formatContextTokens`，daemon 未上报用量时跳过；活跃时长复用 elapsed meta 已在使用的同一个实时 `getGoalActiveTimeMs`，对照 `activeTimeBudgetMs`。比例截断到 `[0, 1]`，耗尽的预算显示为满条。无上限的目标完全不渲染该区块。
+
+### GoalStatusStrip
+
+- `goalStatusTone` 定义于此并导出（dialog 本就从这个模块导入展示辅助函数；反向导入会形成循环依赖）。
+- 状态文本带上同样的 `data-status` 色调。
+- 新增可选 `onOpenGoals` prop，渲染一个 `Target` 图标按钮（`data-testid="goal-open-goals"`，标签 `goals.viewAll`）作为第一个操作。prop 缺席则不渲染按钮，没有 Goals 页的界面保持现有形态。
+
+### App 接线
+
+- 主输入框的 strip 接收 `onOpenGoals={projectFeaturesAvailable ? openGoals : undefined}`，与 Goals 页自身的渲染门一致。
+- 分屏视图的 `ChatPane` 渲染同一个 strip，且本就接收 `onOpenGoals` prop（其 `/goal status` 命令在用；侧任务 pane 不传）。它的 strip 现在透传同一 prop，因此有 Goals 界面的 pane 获得该入口，没有的 pane 不渲染按钮。
+
+### i18n
+
+- en / zh / ru 新增键：`goals.viewAll`、`goals.budget.turns`、`goals.budget.tokens`、`goals.budget.time`。预算数值文本复用现有的 `formatRuntime` / `formatContextTokens` 格式化器。
+
+## 设计决策
+
+- **头部图标而非整卡可点。** 整卡点击目标会嵌套五个按钮并夺走目标内容的文本选择；常驻头部图标在不改变卡片语义的前提下保证可发现性。
+- **共享色板，不引入新颜色。** 色调映射复用 `--status-*-fg/bg`，两种主题下 goals 与驾驶舱、工作流界面读起来完全一致；不新增主题 token。
+- **仅为已设定的预算渲染进度条。** 多数目标无上限；为它们渲染空轨道会增加噪音并暗示一个不存在的上限。有 `tokenBudget` 而无 `tokensUsed`（旧 daemon）时跳过而非画成零——零会断言一个快照无法证明的消耗。
+- **`goalStatusTone` 放在 strip 模块。** 两个界面共用单一来源；dialog 已依赖 strip 的辅助函数，依赖方向保持无环。
+
+## 涉及文件
+
+- `packages/web-shell/client/components/dialogs/GoalsDialog.tsx` / `.module.css`
+- `packages/web-shell/client/components/GoalStatusStrip.tsx` / `.module.css`
+- `packages/web-shell/client/App.tsx`（仅 strip 接线）
+- `packages/web-shell/client/components/ChatPane.tsx`（分屏 strip 接线）
+- `packages/web-shell/client/i18n.tsx`（en / zh / ru 键）
+- 测试：`GoalsDialog.test.tsx`、`GoalStatusStrip.test.tsx`
+
+## 约束与风险
+
+- 新增头部按钮与页脚链接共享同一可访问名模式（`"<提示>: <会话名>"`）；两者执行同一导航，且没有 E2E 选择器按该名字查询，冗余是安全的。
+- 预算条仅在有目标处于 active 时随现有 1 秒 tick 重渲染；不引入新计时器。
+- 没有 `tokensUsed` 的旧 daemon 只是不显示 token 条；不编造兜底数字。
+
+## 验证计划
+
+- 单测：`GoalsDialog.test.tsx`（带/不带工作区标签的头部操作、各生命周期状态的胶囊色调、预算条的有无/截断、token 条跳过、填充条色调）与 `GoalStatusStrip.test.tsx`（入口接线/缺席、状态色调、色调映射）。`ChatPane.test.tsx` 的 goal-strip 用例在分屏接线下必须保持全绿。
+- 对改动文件跑 `npm run typecheck`、ESLint、Prettier。
+- E2E：现有 `web-shell.goal.spec.ts` 与 `web-shell.goals-multi-workspace.spec.ts` 套件必须保持全绿（它们钉住了新按钮旁边的控制操作与卡片结构）。
+
+## 验收标准
+
+- 每张目标卡片提供常驻头部操作，能在目标自己的工作区打开其会话。
+- 状态胶囊与 strip 状态文本在两种主题下使用共享生命周期色调。
+- 已设定的预算渲染进度条，百分比截断正确、可访问标签完整；无上限的目标不渲染。
+- strip 在 Goals 页可用处能打开该页，在不可用处不渲染入口。
+- 无 daemon/SDK 改动；现有 goals E2E 套件原样通过。
+
+## 开放问题
+
+- 无。侧栏目标标记明确延后（见「非目标」）。

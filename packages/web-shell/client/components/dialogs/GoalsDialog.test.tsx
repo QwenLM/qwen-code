@@ -344,6 +344,83 @@ describe('GoalsDialog', () => {
     expect(document.querySelector('[data-testid="goal-tokens"]')).toBeNull();
   });
 
+  describe('budget progress bars', () => {
+    it('renders a bar for each armed budget', async () => {
+      await mount([
+        withSpend({
+          status: 'paused',
+          turnCount: 3,
+          turnBudget: 20,
+          tokensUsed: 5_000_000,
+          tokenBudget: 20_000_000,
+          activeTimeMs: 600_000,
+          activeTimeBudgetMs: 1_800_000,
+        }),
+      ]);
+
+      const turns = document.querySelector('[data-testid="goal-budget-turns"]');
+      const tokens = document.querySelector(
+        '[data-testid="goal-budget-tokens"]',
+      );
+      const time = document.querySelector('[data-testid="goal-budget-time"]');
+      expect(turns?.getAttribute('aria-valuenow')).toBe('15');
+      expect(tokens?.getAttribute('aria-valuenow')).toBe('25');
+      expect(time?.getAttribute('aria-valuenow')).toBe('33');
+      expect(turns?.getAttribute('aria-label')).toBe('Turns: 3 / 20');
+      expect(tokens?.getAttribute('aria-label')).toBe('Tokens: 5.0M / 20.0M');
+      expect(time?.getAttribute('aria-label')).toBe(
+        'Active time: 10m 0s / 30m 0s',
+      );
+    });
+
+    it('renders no bars when no budget is armed', async () => {
+      await mount([baseGoal()]);
+
+      expect(
+        document.querySelector('[data-testid="goal-budget-turns"]'),
+      ).toBeNull();
+      expect(
+        document.querySelector('[data-testid="goal-budget-tokens"]'),
+      ).toBeNull();
+      expect(
+        document.querySelector('[data-testid="goal-budget-time"]'),
+      ).toBeNull();
+    });
+
+    it('skips the token bar when the daemon reports no spend', async () => {
+      // A budget without a usage figure cannot attest zero spend.
+      await mount([withSpend({ tokenBudget: 20_000_000 })]);
+
+      expect(
+        document.querySelector('[data-testid="goal-budget-tokens"]'),
+      ).toBeNull();
+    });
+
+    it('clamps a spent budget to a full bar', async () => {
+      await mount([
+        withSpend({ status: 'usage_limited', turnCount: 25, turnBudget: 20 }),
+      ]);
+
+      expect(
+        document
+          .querySelector('[data-testid="goal-budget-turns"]')
+          ?.getAttribute('aria-valuenow'),
+      ).toBe('100');
+    });
+
+    it('tones the fill by lifecycle state', async () => {
+      await mount([
+        withSpend({ status: 'paused', turnCount: 3, turnBudget: 20 }),
+      ]);
+
+      expect(
+        document
+          .querySelector('[data-testid="goal-budget-turns"] > div')
+          ?.getAttribute('data-status'),
+      ).toBe('attention');
+    });
+  });
+
   const stopped = (
     over: Partial<MockGoal['snapshot']['goal']> = {},
   ): MockGoal => {
@@ -469,6 +546,67 @@ describe('GoalsDialog', () => {
     click(findButton('fix-ci'));
 
     expect(onOpenSession).toHaveBeenCalledWith('sess-1', undefined);
+  });
+
+  it('opens the goal session from the header action', async () => {
+    const onOpenSession = vi.fn();
+    await mount([baseGoal()], { onOpenSession });
+
+    click(document.querySelector('[data-testid="goal-open-session"]'));
+
+    expect(onOpenSession).toHaveBeenCalledWith('sess-1', undefined);
+  });
+
+  it('opens the goal session in its tagged workspace from the header action', async () => {
+    const onOpenSession = vi.fn();
+    await mount([], {
+      workspaces: [
+        { id: 'ws-1', cwd: '/w-primary', primary: true, trusted: true },
+        { id: 'ws-2', cwd: '/w-secondary', primary: false, trusted: true },
+      ],
+      listGoalsByWorkspace: {
+        '': { goals: [baseGoal()], droppedCount: 0 },
+        'ws-2': { goals: [], droppedCount: 0 },
+      },
+      onOpenSession,
+    });
+
+    click(document.querySelector('[data-testid="goal-open-session"]'));
+
+    expect(onOpenSession).toHaveBeenCalledWith('sess-1', '/w-primary');
+  });
+
+  it('tones the status pill by lifecycle state', async () => {
+    const statuses = [
+      'active',
+      'paused',
+      'blocked',
+      'usage_limited',
+      'complete',
+    ] as const;
+    const tones = ['running', 'attention', 'attention', 'attention', 'done'];
+    // Distinct descending setAt values keep the merged list in this order.
+    await mount(
+      statuses.map((status, index) => {
+        const goal = baseGoal({
+          sessionId: `sess-${index}`,
+          setAt: 1000 - index,
+        });
+        return {
+          ...goal,
+          snapshot: {
+            ...goal.snapshot,
+            goal: { ...goal.snapshot.goal, status },
+          },
+        };
+      }),
+    );
+
+    const pills = document.querySelectorAll('[data-testid="goal-status"]');
+    expect(pills).toHaveLength(statuses.length);
+    statuses.forEach((_, index) => {
+      expect(pills[index].getAttribute('data-status')).toBe(tones[index]);
+    });
   });
 
   it('clears a goal immediately and reloads the list', async () => {

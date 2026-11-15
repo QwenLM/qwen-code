@@ -299,6 +299,77 @@
   padding: 3px 10px;
 }
 
+/* Lifecycle tones from the shared execution-status palette (App.module.css),
+   the same mapping the cockpit header and workflow inspector use. */
+.statusPill[data-status='running'] {
+  color: var(--status-running-fg);
+  background: var(--status-running-bg);
+}
+
+.statusPill[data-status='attention'] {
+  color: var(--status-attention-fg);
+  background: var(--status-attention-bg);
+}
+
+.statusPill[data-status='done'] {
+  color: var(--status-done-fg);
+  background: var(--status-done-bg);
+}
+
+/* ── Budget progress ─────────────────────────────────────────── */
+
+.budgets {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.budgetRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* Natural width, not a fixed column: the labels are localized and a fixed
+   basis would clip the longer ru strings. */
+.budgetLabel {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--muted-foreground);
+}
+
+.budgetTrack {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--muted);
+  overflow: hidden;
+}
+
+.budgetFill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--status-running-fg);
+  transition: width 0.3s ease;
+}
+
+.budgetFill[data-status='attention'] {
+  background: var(--status-attention-fg);
+}
+
+.budgetFill[data-status='done'] {
+  background: var(--status-done-fg);
+}
+
+.budgetValue {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
 .meta {
   font-size: 12px;
   color: var(--muted-foreground);

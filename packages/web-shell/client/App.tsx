@@ -26187,6 +26187,11 @@ export function App({
                                 onPause={() => runGoalControl('pause')}
                                 onResume={() => runGoalControl('resume')}
                                 onClear={() => runGoalControl('clear')}
+                                onOpenGoals={
+                                  projectFeaturesAvailable
+                                    ? openGoals
+                                    : undefined
+                                }
                               />
                             )}
                           </div>

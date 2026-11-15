@@ -12,8 +12,10 @@ import {
   type DaemonGoal,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import type { DaemonWorkspaceCapability } from '@qwen-code/sdk/daemon';
-import { Pause, Pencil, Play, Trash2 } from 'lucide-react';
+import { MessageSquareText, Pause, Pencil, Play, Trash2 } from 'lucide-react';
 import { useI18n } from '../../i18n';
+import { formatRuntime } from '../../utils/formatRuntime';
+import { formatContextTokens } from '../../utils/formatTokenCount';
 import {
   disambiguateWorkspaceLabels,
   workspaceLabel,
@@ -23,6 +25,7 @@ import {
   getGoalActiveTimeLabel,
   getGoalActiveTimeMs,
   getGoalTokenLabel,
+  goalStatusTone,
 } from '../GoalStatusStrip';
 import { WorkspacePill } from '../WorkspacePill';
 import styles from './GoalsDialog.module.css';
@@ -36,6 +39,14 @@ import styles from './GoalsDialog.module.css';
 const RELOAD_INTERVAL_MS = 10_000;
 /** The elapsed-time column ticks independently of the refetch. */
 const TICK_INTERVAL_MS = 1000;
+
+interface GoalBudgetBar {
+  key: 'turns' | 'tokens' | 'time';
+  label: string;
+  valueText: string;
+  /** Clamped to [0, 1]; a spent budget reads as a full bar, not overflow. */
+  ratio: number;
+}
 
 interface GoalsDialogProps {
   /** Create a canonical Goal in a brand-new session and switch to it.
@@ -630,6 +641,40 @@ export function GoalsDialog({
           const canResume = canResumeGoal(goal);
           const tokenLabel = getGoalTokenLabel(goal, t);
           const activeTimeMs = getGoalActiveTimeMs(item.snapshot, now);
+          const tone = goalStatusTone(goal.status);
+          // Only armed budgets get a bar: an unbounded goal has no ceiling to
+          // show progress against. A token budget without a usage figure
+          // (older daemon) is skipped too — a bar with no fill would claim
+          // zero spend the snapshot cannot actually attest.
+          const budgets: GoalBudgetBar[] = [];
+          if (goal.turnBudget !== undefined) {
+            budgets.push({
+              key: 'turns',
+              label: t('goals.budget.turns'),
+              valueText: `${goal.turnCount} / ${goal.turnBudget}`,
+              ratio: goal.turnBudget > 0 ? goal.turnCount / goal.turnBudget : 1,
+            });
+          }
+          if (goal.tokenBudget !== undefined && goal.tokensUsed !== undefined) {
+            budgets.push({
+              key: 'tokens',
+              label: t('goals.budget.tokens'),
+              valueText: `${formatContextTokens(goal.tokensUsed)} / ${formatContextTokens(goal.tokenBudget)}`,
+              ratio:
+                goal.tokenBudget > 0 ? goal.tokensUsed / goal.tokenBudget : 1,
+            });
+          }
+          if (goal.activeTimeBudgetMs !== undefined) {
+            budgets.push({
+              key: 'time',
+              label: t('goals.budget.time'),
+              valueText: `${formatRuntime(activeTimeMs)} / ${formatRuntime(goal.activeTimeBudgetMs)}`,
+              ratio:
+                goal.activeTimeBudgetMs > 0
+                  ? activeTimeMs / goal.activeTimeBudgetMs
+                  : 1,
+            });
+          }
           return (
             <div key={item.sessionId} className={styles.card} role="listitem">
               <div className={styles.cardHeader}>
@@ -641,6 +686,22 @@ export function GoalsDialog({
                   {goal.objective}
                 </div>
                 <div className={styles.cardMenu}>
+                  {/* The transcript IS the goal's history, so opening the
+                      session is the primary way to inspect a goal — give it
+                      a constant header affordance, not only the footer link.
+                      Navigation, not a control: never gated on `busy`. */}
+                  <button
+                    type="button"
+                    className={styles.iconAction}
+                    onClick={() =>
+                      onOpenSession(item.sessionId, item.workspaceCwd)
+                    }
+                    title={t('goals.openSessionHint')}
+                    aria-label={`${t('goals.openSessionHint')}: ${item.displayName || item.sessionId}`}
+                    data-testid="goal-open-session"
+                  >
+                    <MessageSquareText size={15} aria-hidden="true" />
+                  </button>
                   {canEdit && (
                     <button
                       type="button"
@@ -699,6 +760,41 @@ export function GoalsDialog({
                 </div>
               )}
 
+              {budgets.length > 0 && (
+                <div className={styles.budgets}>
+                  {budgets.map((budget) => {
+                    const percent = Math.round(
+                      Math.min(1, Math.max(0, budget.ratio)) * 100,
+                    );
+                    return (
+                      <div key={budget.key} className={styles.budgetRow}>
+                        <span className={styles.budgetLabel}>
+                          {budget.label}
+                        </span>
+                        <div
+                          className={styles.budgetTrack}
+                          role="progressbar"
+                          aria-valuemin={0}
+                          aria-valuemax={100}
+                          aria-valuenow={percent}
+                          aria-label={`${budget.label}: ${budget.valueText}`}
+                          data-testid={`goal-budget-${budget.key}`}
+                        >
+                          <div
+                            className={styles.budgetFill}
+                            data-status={tone}
+                            style={{ width: `${percent}%` }}
+                          />
+                        </div>
+                        <span className={styles.budgetValue}>
+                          {budget.valueText}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
               <div className={styles.cardFooter}>
                 {isMultiWorkspace && item.workspaceCwd && (
                   <span data-testid="goal-workspace">
@@ -708,7 +804,11 @@ export function GoalsDialog({
                     />
                   </span>
                 )}
-                <span className={styles.statusPill}>
+                <span
+                  className={styles.statusPill}
+                  data-status={tone}
+                  data-testid="goal-status"
+                >
                   {t(`goal.status.${goal.status}`)}
                 </span>
                 <span className={styles.meta} data-testid="goal-activity">

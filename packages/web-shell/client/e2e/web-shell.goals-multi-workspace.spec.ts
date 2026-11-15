@@ -85,6 +85,50 @@ test('aggregates goals from every workspace and badges each card @smoke', async 
   expect(paths).toContain('GET /workspaces/ws-secondary/goals');
 });
 
+test('opening a goal from the card header loads its session @smoke', async ({
+  page,
+  baseURL,
+}) => {
+  await openGoals(page, baseURL!, multiWorkspaceOverrides);
+
+  const secondaryCard = page
+    .locator('[role="listitem"]')
+    .filter({ hasText: 'secondary goal' });
+  await secondaryCard.getByTestId('goal-open-session').click();
+
+  // The transcript IS the goal's history: the header action must land on the
+  // owning session's route and leave the Goals page.
+  await page.waitForURL('**/session/sess-secondary**');
+  await expect(page.getByTestId('goals-page')).toHaveCount(0);
+});
+
+test('a stopped goal shows its lifecycle tone and budget progress @smoke', async ({
+  page,
+  baseURL,
+}) => {
+  const base = goalSnapshot('budgeted goal', 1_000);
+  await openGoals(page, baseURL!, {
+    goalSnapshot: {
+      ...base,
+      goal: {
+        ...base.goal,
+        status: 'paused' as const,
+        turnCount: 3,
+        turnBudget: 20,
+      },
+    },
+  });
+
+  await expect(page.getByTestId('goal-status')).toHaveAttribute(
+    'data-status',
+    'attention',
+  );
+  await expect(page.getByTestId('goal-budget-turns')).toHaveAttribute(
+    'aria-valuenow',
+    '15',
+  );
+});
+
 test('the create form targets the picked workspace @smoke', async ({
   page,
   baseURL,

@@ -1,0 +1,166 @@
+# Web Shell Goal display: session navigation and status readability
+
+[English](2026-11-15-web-shell-goal-display.md) | [简体中文](2026-11-15-web-shell-goal-display.zh-CN.md)
+
+Status: implemented (2026-11-15), client-only enhancement on top of the
+multi-workspace Goals page (#17230, #17291).
+
+## Problem
+
+The Goals page lists every loaded session's goal, but inspecting a goal means
+finding the small session-name text link at the far right of the card footer.
+The card itself gives no at-a-glance sense of lifecycle state (the status pill
+is monochrome) or of how much of an armed budget is already spent (the figures
+are plain text among several other meta items). The in-session `GoalStatusStrip`
+has no way back to the Goals page, so a user who lands in a goal's session
+cannot reach the aggregate view without the sidebar.
+
+## Current state
+
+- `GoalsDialog` renders one card per goal: status dot (activity), objective,
+  edit/pause/resume/clear icon actions, `lastReason`, and a footer with the
+  workspace pill, a monochrome status pill, activity, turns, tokens, elapsed
+  time, and a session-name button that calls
+  `onOpenSession(sessionId, workspaceCwd)`.
+- `GoalStatusStrip` renders above the composer of the goal's own session with
+  status text, objective, elapsed/turn/token figures, and the same four control
+  actions. It has no navigation affordance.
+- The cockpit header and workflow inspector already share an execution-status
+  palette (`--status-running-*`, `--status-attention-*`, `--status-done-*`,
+  `--status-idle-*` in `App.module.css`) so a status reads the same colour
+  across surfaces. Goals do not use it.
+
+## Goals
+
+- Make the jump from a goal to its session a first-class, always-visible
+  action on the card.
+- Make lifecycle state readable at a glance, using the same colour language
+  as the rest of the Web Shell.
+- Show progress against each armed budget (turns, tokens, active time) as a
+  compact bar, without adding noise for unbounded goals.
+- Let the in-session strip open the Goals page when that page is available.
+
+## Non-goals
+
+- No daemon, SDK, or wire-format change. Everything is derived from the
+  existing `DaemonGoal` / `GoalSnapshotV2` payloads.
+- No goal markers in the sidebar session list: that would need a new
+  always-on goals poll (`GET /goals` probes every live session) or a new
+  session-summary field, both out of scope for a display enhancement.
+- No change to goal control semantics, gating, or the create/edit forms.
+- No new page or deep link; the strip reuses the existing `openGoals` action.
+
+## Proposed changes
+
+### GoalsDialog card
+
+- A new first icon action in the card header (`MessageSquareText`,
+  `data-testid="goal-open-session"`) calls
+  `onOpenSession(item.sessionId, item.workspaceCwd)` — the same handler as the
+  footer link, including the workspace tag. It is navigation, not a control,
+  so it is never disabled by the per-session `busy` gate. The footer link
+  stays for discoverability and for the session name itself.
+- The status pill carries `data-status` mapped by `goalStatusTone(status)`:
+  `active → running`, `paused | blocked | usage_limited → attention`,
+  `complete → done`. CSS reuses the shared execution-status palette. This
+  matches `GoalStatusMessage`'s existing warning/success language.
+- When at least one budget is armed, a `budgets` section renders one row per
+  budget between the reason and the footer: label, a `role="progressbar"`
+  track (`data-testid="goal-budget-<kind>"`, `aria-valuenow` = clamped
+  percent, `aria-label` = `"<label>: <used> / <budget>"`), a fill tinted with
+  the lifecycle tone, and the `used / budget` value text. Turns use
+  `turnCount / turnBudget`; tokens use `formatContextTokens` on
+  `tokensUsed / tokenBudget` and are skipped when the daemon reports no usage
+  figure; active time uses the same live `getGoalActiveTimeMs` the elapsed
+  meta already ticks with, against `activeTimeBudgetMs`. Ratios clamp to
+  `[0, 1]` so a spent budget reads as a full bar. Unbounded goals render no
+  section at all.
+
+### GoalStatusStrip
+
+- `goalStatusTone` lives here and is exported (the dialog already imports its
+  display helpers from this module; the reverse import would be a cycle).
+- The status text carries the same `data-status` tone.
+- A new optional `onOpenGoals` prop renders a `Target` icon button
+  (`data-testid="goal-open-goals"`, label `goals.viewAll`) as the first
+  action. Absent prop → no button, so surfaces without the Goals page keep
+  the current shape.
+
+### App wiring
+
+- The main composer's strip receives
+  `onOpenGoals={projectFeaturesAvailable ? openGoals : undefined}`, the same
+  gate the Goals page itself renders under.
+- The split-view `ChatPane` renders the same strip and already receives an
+  `onOpenGoals` prop (its `/goal status` command uses it; side-task panes
+  pass none). Its strip now forwards that same prop, so panes with a Goals
+  surface get the affordance and panes without one render no button.
+
+### i18n
+
+- New keys in en / zh / ru: `goals.viewAll`, `goals.budget.turns`,
+  `goals.budget.tokens`, `goals.budget.time`. Budget value texts reuse the
+  existing `formatRuntime` / `formatContextTokens` formatters.
+
+## Design decisions
+
+- **Header icon instead of a clickable card.** A whole-card click target
+  would nest five buttons and steal objective text selection; a constant
+  header icon is discoverable without changing card semantics.
+- **Shared palette, not new colours.** The tone mapping reuses
+  `--status-*-fg/bg` so goals read identically to the cockpit and workflow
+  surfaces in both themes; no new theme tokens are introduced.
+- **Bars only for armed budgets.** Most goals are unbounded; rendering empty
+  tracks for them would add noise and imply a ceiling that does not exist.
+  A token budget without `tokensUsed` (older daemon) is skipped rather than
+  drawn at zero, which would attest a spend the snapshot cannot prove.
+- **`goalStatusTone` in the strip module.** Single source for both surfaces;
+  the dialog already depends on the strip's helpers, so the dependency
+  direction stays acyclic.
+
+## Files affected
+
+- `packages/web-shell/client/components/dialogs/GoalsDialog.tsx` / `.module.css`
+- `packages/web-shell/client/components/GoalStatusStrip.tsx` / `.module.css`
+- `packages/web-shell/client/App.tsx` (strip wiring only)
+- `packages/web-shell/client/components/ChatPane.tsx` (split-view strip wiring)
+- `packages/web-shell/client/i18n.tsx` (en / zh / ru keys)
+- Tests: `GoalsDialog.test.tsx`, `GoalStatusStrip.test.tsx`
+
+## Constraints and risks
+
+- The added header button shares its accessible-name pattern with the footer
+  link (`"<hint>: <session name>"`); both perform the same navigation, and no
+  E2E selector queries that name, so the redundancy is safe.
+- Budget bars re-render on the existing 1 s tick only while a goal is active;
+  no new timer is introduced.
+- Older daemons without `tokensUsed` simply show no token bar; no fallback
+  figure is invented.
+
+## Validation plan
+
+- Unit: `GoalsDialog.test.tsx` (header action with and without a workspace
+  tag, pill tone per lifecycle state, budget bars present/absent/clamped,
+  token-bar skip, fill tone) and `GoalStatusStrip.test.tsx` (affordance
+  wired/absent, status tone, tone mapping). The `ChatPane.test.tsx` goal-strip
+  tests must stay green under the split-view wiring.
+- `npm run typecheck`, ESLint, Prettier on the touched files.
+- E2E: the existing `web-shell.goal.spec.ts` and
+  `web-shell.goals-multi-workspace.spec.ts` suites must stay green (they pin
+  the control actions and card structure the new button lives beside).
+
+## Acceptance criteria
+
+- Every goal card offers a constant header action that opens its session in
+  the goal's own workspace.
+- Status pills and strip status text use the shared lifecycle tones in both
+  themes.
+- Armed budgets render progress bars with correct clamped percentages and
+  accessible labels; unbounded goals render none.
+- The strip opens the Goals page where the page is available, and renders no
+  affordance where it is not.
+- No daemon/SDK change; existing goals E2E suites pass unchanged.
+
+## Open questions
+
+- None. Sidebar goal markers are explicitly deferred (see Non-goals).

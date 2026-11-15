@@ -4,7 +4,11 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GoalSnapshotV2 } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../i18n';
-import { GoalStatusStrip, getGoalActiveTimeMs } from './GoalStatusStrip';
+import {
+  GoalStatusStrip,
+  getGoalActiveTimeMs,
+  goalStatusTone,
+} from './GoalStatusStrip';
 
 function snapshot(
   status: NonNullable<GoalSnapshotV2['goal']>['status'],
@@ -292,5 +296,54 @@ describe('GoalStatusStrip', () => {
     expect(
       container.querySelector('[data-testid="goal-checkpoint-stalls"]'),
     ).toBeNull();
+  });
+
+  it('opens the goals page when the affordance is wired', () => {
+    const onOpenGoals = vi.fn();
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GoalStatusStrip
+            snapshot={snapshot('active')}
+            onEdit={vi.fn()}
+            onPause={vi.fn()}
+            onResume={vi.fn()}
+            onClear={vi.fn()}
+            onOpenGoals={onOpenGoals}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const button = container.querySelector<HTMLButtonElement>(
+      '[data-testid="goal-open-goals"]',
+    );
+    expect(button).not.toBeNull();
+    act(() => button!.click());
+    expect(onOpenGoals).toHaveBeenCalledOnce();
+  });
+
+  it('hides the goals-page affordance when the page is unavailable', () => {
+    render('active');
+
+    expect(
+      container.querySelector('[data-testid="goal-open-goals"]'),
+    ).toBeNull();
+  });
+
+  it('tones the status text by lifecycle state', () => {
+    render('active');
+    expect(container.querySelector('[data-status="running"]')).not.toBeNull();
+
+    render('paused');
+    expect(container.querySelector('[data-status="attention"]')).not.toBeNull();
+  });
+
+  it('maps every lifecycle state onto the shared status tones', () => {
+    expect(goalStatusTone('active')).toBe('running');
+    expect(goalStatusTone('paused')).toBe('attention');
+    expect(goalStatusTone('blocked')).toBe('attention');
+    expect(goalStatusTone('usage_limited')).toBe('attention');
+    expect(goalStatusTone('complete')).toBe('done');
   });
 });

@@ -36,6 +36,20 @@
   font-weight: 600;
 }
 
+/* Same lifecycle tones as the Goals page's status pill, from the shared
+   execution-status palette (App.module.css). */
+.status[data-status='running'] {
+  color: var(--status-running-fg);
+}
+
+.status[data-status='attention'] {
+  color: var(--status-attention-fg);
+}
+
+.status[data-status='done'] {
+  color: var(--status-done-fg);
+}
+
 .activity,
 .objective {
   color: var(--muted-foreground);

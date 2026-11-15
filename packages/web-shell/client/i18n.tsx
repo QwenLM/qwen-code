@@ -3579,6 +3579,10 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
     `${v?.count ?? 0} workspace${Number(v?.count) === 1 ? '' : 's'} not shown (untrusted or remote).`,
   'goals.notYetEvaluated': 'not yet evaluated',
   'goals.openSessionHint': "Open this goal's session",
+  'goals.viewAll': 'View all goals',
+  'goals.budget.turns': 'Turns',
+  'goals.budget.tokens': 'Tokens',
+  'goals.budget.time': 'Active time',
   'goals.error.emptyCondition': 'Enter a condition for the goal.',
   'goals.error.clearKeyword': (v) =>
     `"${v?.word ?? ''}" clears a goal rather than setting one. Describe the condition to work toward.`,
@@ -8648,6 +8652,10 @@ const ZH: Messages = {
     `有 ${v?.count ?? 0} 个工作区未显示（不受信任或远程）。`,
   'goals.notYetEvaluated': '尚未判定',
   'goals.openSessionHint': '打开该目标所在的会话',
+  'goals.viewAll': '查看全部目标',
+  'goals.budget.turns': '轮数',
+  'goals.budget.tokens': 'Tokens',
+  'goals.budget.time': '活跃时长',
   'goals.error.emptyCondition': '请输入目标条件。',
   'goals.error.clearKeyword': (v) =>
     `“${v?.word ?? ''}”是清除目标的指令，不是一个条件。请描述要达成的条件。`,
@@ -10341,6 +10349,10 @@ const RU: Messages = {
     `Не показано: ${v?.count ?? 0} ${ruPlural(v?.count, 'рабочая область', 'рабочие области', 'рабочих областей')} (нет доверия или удалённый доступ).`,
   'goals.notYetEvaluated': 'ещё не оценено',
   'goals.openSessionHint': 'Открыть сессию этой цели',
+  'goals.viewAll': 'Все цели',
+  'goals.budget.turns': 'Ходы',
+  'goals.budget.tokens': 'Токены',
+  'goals.budget.time': 'Активное время',
   'goals.error.emptyCondition': 'Введите условие для цели.',
   'goals.error.clearKeyword': (v) =>
     `"${v?.word ?? ''}" снимает цель, а не задаёт её. Опишите условие, к которому нужно работать.`,
