@@ -1949,18 +1949,27 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               this.updateDisplay(
                 {
                   toolCalls: [...this.currentToolCalls!],
-                  pendingConfirmation: nextPendingConfirmation(),
+                  pendingConfirmation: undefined,
                 },
                 updateOutput,
               );
             } else {
               this.updateDisplay(
-                { pendingConfirmation: nextPendingConfirmation() },
+                { pendingConfirmation: undefined },
                 updateOutput,
               );
             }
 
-            await event.respond(outcome, payload);
+            try {
+              await event.respond(outcome, payload);
+            } finally {
+              // Show the next prompt only once the scheduler has taken this
+              // answer; on failure it terminalizes this call as an error.
+              const next = nextPendingConfirmation();
+              if (next) {
+                this.updateDisplay({ pendingConfirmation: next }, updateOutput);
+              }
+            }
           },
         } as ToolCallConfirmationDetails;
         pendingConfirmations.set(event.callId, details);
