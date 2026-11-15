@@ -460,6 +460,49 @@ function collectActiveSubagents(config: Config): SubagentSnapshot[] {
  * returned by PreCompact hooks. Order is user-first / hook-appended so an
  * explicit user intent outranks a global hook policy when both speak.
  */
+/**
+ * Bounded digest of recent failed tool calls for the compaction summarizer
+ * (#17314). Failed attempts live in the history being summarized, but the
+ * summary keeps them only at the summarizer's discretion; the digest states
+ * them explicitly so post-compaction context preserves "what was tried and
+ * why it failed" (peer evidence: Codex attaches ExecutedToolCallMetadata to
+ * compaction prompts). Newest first, capped in entries and per-entry error
+ * length; undefined when the history has no recent failures.
+ */
+const FAILED_ATTEMPT_DIGEST_MAX_ENTRIES = 8;
+const FAILED_ATTEMPT_ERROR_SNIPPET_CHARS = 160;
+
+export function buildFailedToolAttemptDigest(
+  history: Content[],
+): string | undefined {
+  const entries: string[] = [];
+  for (
+    let i = history.length - 1;
+    i >= 0 && entries.length < FAILED_ATTEMPT_DIGEST_MAX_ENTRIES;
+    i--
+  ) {
+    for (const part of history[i]?.parts ?? []) {
+      const response = part.functionResponse?.response as
+        | { error?: unknown }
+        | undefined;
+      const error = response?.error;
+      if (typeof error !== 'string' || error.length === 0) continue;
+      const name = part.functionResponse?.name ?? 'unknown_tool';
+      const snippet =
+        error.length > FAILED_ATTEMPT_ERROR_SNIPPET_CHARS
+          ? `${error.slice(0, FAILED_ATTEMPT_ERROR_SNIPPET_CHARS)}...`
+          : error;
+      const entry = `- ${name}: ${snippet.replaceAll('\n', ' ')}`;
+      if (!entries.includes(entry)) entries.push(entry);
+    }
+  }
+  if (entries.length === 0) return undefined;
+  return [
+    'Recent tool calls that FAILED (carry these attempts and their failure reasons into the state snapshot so they are not retried blindly):',
+    ...entries,
+  ].join('\n');
+}
+
 function buildCompressionSystemPrompt(
   userInstructions: string | undefined,
   hookInstructions: string,
@@ -744,9 +787,14 @@ export class ChatCompressionService {
     };
 
     // Hoist the system prompt so the guard can include it in the estimate.
+    const failedAttemptDigest = buildFailedToolAttemptDigest(sideQueryHistory);
     const systemInstruction = buildCompressionSystemPrompt(
       opts.customInstructions,
-      hookExtraInstructions,
+      failedAttemptDigest
+        ? [hookExtraInstructions, failedAttemptDigest]
+            .filter((part) => part.length > 0)
+            .join('\n\n')
+        : hookExtraInstructions,
     );
 
     // Guard: if the compaction model's context window is too small for the

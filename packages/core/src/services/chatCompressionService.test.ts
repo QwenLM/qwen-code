@@ -779,6 +779,54 @@ describe('ChatCompressionService', () => {
     );
   });
 
+  it('carries recent failed tool attempts into the summarizer system prompt (#17314)', async () => {
+    // Failed attempts live in the history being summarized; the digest
+    // states them in the system instruction so the snapshot keeps "what
+    // was tried and why it failed" regardless of summarizer discretion.
+    const spy = spySideQuery(...SNAPSHOT_SUMMARY);
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'do the thing' }] },
+      {
+        role: 'model',
+        parts: [{ functionCall: { name: 'write_file', args: {} } }],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              name: 'write_file',
+              response: {
+                error:
+                  'rejected to prevent writing truncated content: the response hit the output limit',
+              },
+            },
+          },
+        ],
+      },
+      { role: 'model', parts: [{ text: 'ack' }] },
+    ];
+
+    await compressWith(fakeChat(history), fakeConfig({ sessionStart: true }));
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    const systemInstruction =
+      (spy.mock.calls[0]![1] as { systemInstruction?: string })
+        .systemInstruction ?? '';
+    expect(systemInstruction).toContain('Recent tool calls that FAILED');
+    expect(systemInstruction).toContain('write_file');
+    expect(systemInstruction).toContain('rejected to prevent writing');
+  });
+
+  it('adds no digest when the history has no failed tool responses', async () => {
+    const spy = spySideQuery(...SNAPSHOT_SUMMARY);
+    await compressWith(fakeChat(msgs()), fakeConfig({ sessionStart: true }));
+    const systemInstruction =
+      (spy.mock.calls[0]![1] as { systemInstruction?: string })
+        .systemInstruction ?? '';
+    expect(systemInstruction).not.toContain('Recent tool calls that FAILED');
+  });
+
   it('passes getCompactionModel to runSideQuery for compression', async () => {
     // Compression passes config.getCompactionModel?.() to runSideQuery so it
     // uses the compaction model (falling back to the main model) instead of
