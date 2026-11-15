@@ -851,6 +851,34 @@ describe('runToolBatch', () => {
     expect(recordToolResult).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps only the calls a cancelled batch started for a surface that asks', async () => {
+    const controller = new AbortController();
+    const { client } = fakeClient([]);
+    const { config, recordToolResult } = fakeConfig();
+    const onToolResult = vi.fn();
+
+    const result = await runToolBatch([toolRequest('c1'), toolRequest('c2')], {
+      config,
+      client,
+      signal: controller.signal,
+      duplicates: duplicates(),
+      host: {
+        beforeToolLaunch: () => !controller.signal.aborted,
+        onToolResult,
+      },
+      executor: fakeExecutor((request) => {
+        controller.abort();
+        return okResponse(request);
+      }).executor,
+      keepCancelledResults: 'launched',
+    });
+
+    expect(result.stop).toBe('cancelled');
+    expect(ids(result.parts)).toEqual(['c1']);
+    expect(recordToolResult).toHaveBeenCalledTimes(1);
+    expect(onToolResult).toHaveBeenCalledTimes(1);
+  });
+
   it('runs one batch with the scheduler executor a surface passes', async () => {
     const { client } = fakeClient([]);
     const { config } = fakeConfig();

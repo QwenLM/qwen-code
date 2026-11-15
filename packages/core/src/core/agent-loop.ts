@@ -279,7 +279,7 @@ export interface AgentLoopOptions {
   runtimeView?: RuntimeContentGeneratorView;
   /** Passed to each tool batch; see {@link ToolBatchOptions}. */
   duplicateStateForCall?: ToolBatchOptions['duplicateStateForCall'];
-  keepCancelledResults?: boolean;
+  keepCancelledResults?: ToolBatchOptions['keepCancelledResults'];
   /** Leave recording to the host via `nextRound` or the loop result. */
   deferRecording?: boolean;
   /**
@@ -479,8 +479,10 @@ export interface ToolBatchOptions {
   /**
    * Finish and record a batch `signal` cancelled and return its results,
    * with the stop reason `cancelled`, for a surface that keeps them.
+   * `'launched'` keeps only the calls that started and leaves the rest
+   * unanswered.
    */
-  keepCancelledResults?: boolean;
+  keepCancelledResults?: boolean | 'launched';
   /**
    * Leave each result unrecorded and return its recording as `record` on
    * `responses`, for a surface that records only the results it sends.
@@ -682,6 +684,7 @@ export async function runToolBatch(
   }
   for (const request of executable) {
     if (results.has(request)) continue;
+    if (aborted && options.keepCancelledResults === 'launched') continue;
     answer(
       request,
       skippedResponse(request, host.skippedOutput?.(request) ?? ''),

@@ -2860,6 +2860,9 @@ export async function runNonInteractive(
           },
           ...(modSession?.hasToolHooks && { executor: modExecutor }),
           runtimeView: scope.runtimeView,
+          // Record the results of the calls a cancelled batch started, as the
+          // current loop does; the abort then ends the run.
+          keepCancelledResults: 'launched',
           host: {
             onRoundStart: (round) => {
               roundStartedAt = Date.now();
