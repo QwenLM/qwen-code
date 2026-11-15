@@ -77,23 +77,53 @@ export function markMCPServerTeardownIntent(serverName: string): void {
 }
 
 /**
- * Connections whose owner is tearing them down on purpose. The name-keyed
- * marker above is shared by every connection registered under that name, and
- * the pool keeps one entry per `serverName + fingerprint`, so a sibling that
- * comes back up clears the name and loses this connection's stop. Provenance
- * for one invocation has to outlive the shared name: it dies with the SDK
- * `Client` that owned the transport, not with the server name.
+ * Transport generation of each connection, bumped every time that connection
+ * reports `CONNECTED`. A restart reuses the same SDK `Client` — and therefore
+ * the same marker key — so the generation is what tells the transport
+ * lifetime an invocation started in apart from the one now live.
  */
-const deliberateTeardownConnections: WeakSet<object> = new WeakSet();
+const connectionGenerations: WeakMap<object, number> = new WeakMap();
 
-/** Record that `connection` is being torn down on purpose by its owner. */
-export function markMCPConnectionTeardownIntent(connection: object): void {
-  deliberateTeardownConnections.add(connection);
+/** Generations of a connection that its owner stopped on purpose. */
+const stoppedConnectionGenerations: WeakMap<
+  object,
+  Set<number>
+> = new WeakMap();
+
+/**
+ * The transport generation `connection` is on, or 0 before its first
+ * `CONNECTED`. An invocation captures this when it starts so a late rejection
+ * can be attributed to the lifetime that actually produced it.
+ */
+export function getMCPConnectionGeneration(connection: object): number {
+  return connectionGenerations.get(connection) ?? 0;
 }
 
-/** Whether `connection` is currently being torn down on purpose. */
-export function isMCPConnectionTeardownIntent(connection: object): boolean {
-  return deliberateTeardownConnections.has(connection);
+/**
+ * Record that `connection` is being torn down on purpose by its owner. The
+ * stop is filed against the generation live at this moment, so a later
+ * `CONNECTED` on the same client starts a fresh lifetime that is repairable
+ * again while pending work from the stopped one stays stopped.
+ */
+export function markMCPConnectionTeardownIntent(connection: object): void {
+  const generation = getMCPConnectionGeneration(connection);
+  const stopped = stoppedConnectionGenerations.get(connection) ?? new Set();
+  stopped.add(generation);
+  stoppedConnectionGenerations.set(connection, stopped);
+}
+
+/**
+ * Whether the transport `connection` was on at `generation` was stopped on
+ * purpose. Defaults to the current generation. Passing the generation
+ * captured at invocation start keeps a late rejection from a stopped old
+ * lifetime suppressed after the connection has reconnected — the marker
+ * alone cannot, because a restart keeps the same `Client`.
+ */
+export function isMCPConnectionTeardownIntent(
+  connection: object,
+  generation: number = getMCPConnectionGeneration(connection),
+): boolean {
+  return stoppedConnectionGenerations.get(connection)?.has(generation) ?? false;
 }
 
 /** Whether `serverName` is currently being torn down on purpose. */
@@ -120,6 +150,20 @@ export function recordMCPConnectionStatus(
   status: MCPServerStatus,
 ): void {
   connectionStatuses.set(connection, status);
+  if (status === MCPServerStatus.CONNECTED) {
+    // A reachable connection is a new transport lifetime on the same client:
+    // bump it so the stop recorded against the old one no longer vetoes
+    // repair, and drop stops old enough that no live invocation can still
+    // reject against them.
+    const generation = getMCPConnectionGeneration(connection) + 1;
+    connectionGenerations.set(connection, generation);
+    const stopped = stoppedConnectionGenerations.get(connection);
+    if (stopped) {
+      for (const stale of stopped) {
+        if (stale < generation - 1) stopped.delete(stale);
+      }
+    }
+  }
 }
 
 /**
