@@ -3030,14 +3030,6 @@ export class Session implements SessionContext {
   ) {
     this.sessionId = id;
     this.requestLifecycleSessionId = id;
-    // The loop diagnostic must report the path this session actually runs: a
-    // live or Agent Host session keeps ACP's own tool step, so its model
-    // rounds stay on the shared loop even with the event-bus switch on.
-    // Optional-chained like the other Config members here so a partial mock
-    // config in a test does not throw before the test body runs.
-    this.config.setAgentLoopKernelEligibilityProvider?.((surface) =>
-      surface === 'acp' ? this.#runsToolsOnSharedBatch() : undefined,
-    );
     // Config releases the restore projection after this Session is created.
     this.restoredHistoryGaps = config.getSessionRestoreRuntime?.()?.historyGaps;
     this.workflowHistory = [...workflowHistory];
@@ -7686,12 +7678,8 @@ export class Session implements SessionContext {
                     },
                   },
                   maxRounds: 1,
-                  // Bound the transport to the same predicate as the shared
-                  // round so a kernel-ineligible session's blocked turn stays
-                  // procedural, matching the path the marker and /about report.
                   useEventBus:
-                    this.config.isEventBusAgentLoopEnabled?.('acp') === true &&
-                    sharedToolBatch,
+                    this.config.isEventBusAgentLoopEnabled?.('acp') === true,
                   host: {
                     onModelEvent: async (event) => {
                       if (event.type === LlmEventType.UserPromptSubmitBlocked) {

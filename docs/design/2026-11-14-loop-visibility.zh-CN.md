@@ -17,7 +17,7 @@
 
 ### Core：一份路径解析、一个标记
 
-- `Config.getAgentLoopPath(surface): 'legacy' | 'shared' | 'kernel'` 从入口所用的**同一对** getter 推导路径：`!isUnifiedAgentLoopEnabled(surface)` → `legacy`；否则 `isEventBusAgentLoopEnabled(surface)` → `kernel`；否则 `shared`。不复制第二份 env/设置/默认值规则。所报为**实际（effective）**路径：执行分支进不了内核的入口即便两开关全开也封顶 `shared`——speculation 从不读 event-bus 开关，保留自有工具步的 ACP 会话（live 工具 / Agent Host）仍走 `runModelRound`。ACP 会话经 `Config.setAgentLoopKernelEligibilityProvider` 上报该资格，使诊断与会话实际所走分支一致。
+- `Config.getAgentLoopPath(surface): 'legacy' | 'shared' | 'kernel'` 从入口所用的**同一对** getter 推导路径：`!isUnifiedAgentLoopEnabled(surface)` → `legacy`；否则 `isEventBusAgentLoopEnabled(surface)` → `kernel`；否则 `shared`。不复制第二份 env/设置/默认值规则。所报为**实际（effective）**路径：执行分支进不了内核的入口即便两开关全开也封顶 `shared`——speculation 与 Hosted Harness 从不读 event-bus 开关（其轮次恒走 `runModelRound`），使诊断与入口实际所走分支一致。（live 工具 / Agent Host ACP 会话已在 #17218 移入共享工具批，故 ACP 不再需要按会话的内核资格封顶。）
 - `logAgentLoopEntry(config, surface)` helper（core，走内核 `[EVENT_BUS]` 同款 `debugLogger` 通道）记一行，写明入口与解析路径，如 `[LOOP] headless legacy`。每个入口在读取 loop 开关处（其 loop 入口）调用，含 legacy 路径。
 
 ### `/about` 与 `/bug`：一行共享
@@ -28,19 +28,19 @@
 
 ## 关键设计决策
 
-| 决策                                          | 理由                                                                                        |
-| --------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| 路径由既有 getter 推导，不复制新规则          | 设计要求该行用入口所用的同一解析；第二份副本会漂移。                                        |
-| 报实际执行分支，而非仅开关请求                | speculation 与 live/Agent-Host ACP 会话进不了内核；在那里标 `kernel` 会把 shared 运行误标。 |
-| 标记在 loop 决策点、含 legacy                 | 使每个入口的路径可证明；legacy 目前什么都不记。                                             |
-| 当前入口由执行模式 + 实际渲染器判定           | `/about`/`/bug` 在某模式下运行；交互入口即实际服务的渲染器。                                |
-| `executionMode` 在 `SystemInfoContext` 上可选 | 设置对话框只传 config+settings；省略该行而非臆测入口。                                      |
+| 决策                                          | 理由                                                                               |
+| --------------------------------------------- | ---------------------------------------------------------------------------------- |
+| 路径由既有 getter 推导，不复制新规则          | 设计要求该行用入口所用的同一解析；第二份副本会漂移。                               |
+| 报实际执行分支，而非仅开关请求                | speculation 与 Hosted Harness 进不了内核；在那里标 `kernel` 会把 shared 运行误标。 |
+| 标记在 loop 决策点、含 legacy                 | 使每个入口的路径可证明；legacy 目前什么都不记。                                    |
+| 当前入口由执行模式 + 实际渲染器判定           | `/about`/`/bug` 在某模式下运行；交互入口即实际服务的渲染器。                       |
+| `executionMode` 在 `SystemInfoContext` 上可选 | 设置对话框只传 config+settings；省略该行而非臆测入口。                             |
 
 ## 涉及文件
 
-- `packages/core/src/config/config.ts` — `getAgentLoopPath` + `setAgentLoopKernelEligibilityProvider`。
+- `packages/core/src/config/config.ts` — `getAgentLoopPath`。
 - `packages/core/src/config/agent-loop-rollout.ts`（或一个小的 core util）— 标记 helper。
-- 各入口 loop entry：`nonInteractiveCli.ts`、`use-llm-stream.ts`、`live-session.ts`、`Session.ts`（并注册 ACP 内核资格 provider）、`agent-core.ts`、`speculation.ts`。
+- 各入口 loop entry：`nonInteractiveCli.ts`、`use-llm-stream.ts`、`live-session.ts`、`Session.ts`、`agent-core.ts`、`speculation.ts`。
 - `packages/cli/src/ui/systemInfo.ts`、`systemInfoFields.ts`、`commands/aboutCommand.ts`、`components/AboutBox.tsx`（经 fields）。
 - `packages/cli/src/ui/tui-renderer-of-record.ts` + `llm.tsx` — 为交互诊断记录实际挂载的渲染器。
 

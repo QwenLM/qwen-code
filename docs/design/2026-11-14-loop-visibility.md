@@ -30,11 +30,11 @@ started`, and the **legacy path logs nothing**. The wording differs per
   `isEventBusAgentLoopEnabled(surface)` → `kernel`; else `shared`. No second copy
   of the env/setting/default rules. The reported path is the **effective** one:
   a surface whose execution branch cannot enter the kernel is capped at `shared`
-  even with both switches on — speculation never reads the event-bus switch, and
-  an ACP session that keeps its own tool step (live tools / Agent Host) stays on
-  `runModelRound`. ACP sessions report that eligibility through
-  `Config.setAgentLoopKernelEligibilityProvider`, so the diagnostic matches the
-  branch the session actually runs.
+  even with both switches on — speculation and the Hosted Harness never read the
+  event-bus switch (their rounds always run on `runModelRound`), so the diagnostic
+  matches the branch the surface actually runs. (Live-tool / Agent Host ACP
+  sessions moved onto the shared tool batch in #17218, so ACP no longer needs a
+  per-session kernel-eligibility cap.)
 - A `logAgentLoopEntry(config, surface)` helper (core, `debugLogger` channel like
   the kernel's `[EVENT_BUS]`) logs one line naming the surface and the resolved
   path, e.g. `[LOOP] headless legacy`. Each surface calls it where it reads the
@@ -57,22 +57,20 @@ started`, and the **legacy path logs nothing**. The wording differs per
 
 ## Key design decisions
 
-| Decision                                                    | Rationale                                                                                                                    |
-| ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| Path derived from the existing getters, not a new rule copy | The design requires the line to use the same resolution the surface uses; a second copy would drift.                         |
-| Report the effective branch, not just the switch request    | Speculation and live/Agent-Host ACP sessions cannot enter the kernel; certifying `kernel` there would mislabel a shared run. |
-| Marker logged at the loop decision point, incl. legacy      | Makes every surface's path provable; legacy currently logs nothing.                                                          |
-| Current surface from execution mode + renderer of record    | `/about`/`/bug` run in a mode; the interactive surface is the renderer actually serving the session.                         |
-| `executionMode` optional on `SystemInfoContext`             | The Settings dialog passes only config+settings; it omits the line rather than guessing a surface.                           |
+| Decision                                                    | Rationale                                                                                                          |
+| ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Path derived from the existing getters, not a new rule copy | The design requires the line to use the same resolution the surface uses; a second copy would drift.               |
+| Report the effective branch, not just the switch request    | Speculation and the Hosted Harness cannot enter the kernel; certifying `kernel` there would mislabel a shared run. |
+| Marker logged at the loop decision point, incl. legacy      | Makes every surface's path provable; legacy currently logs nothing.                                                |
+| Current surface from execution mode + renderer of record    | `/about`/`/bug` run in a mode; the interactive surface is the renderer actually serving the session.               |
+| `executionMode` optional on `SystemInfoContext`             | The Settings dialog passes only config+settings; it omits the line rather than guessing a surface.                 |
 
 ## Files affected
 
-- `packages/core/src/config/config.ts` — `getAgentLoopPath` +
-  `setAgentLoopKernelEligibilityProvider`.
+- `packages/core/src/config/config.ts` — `getAgentLoopPath`.
 - `packages/core/src/config/agent-loop-rollout.ts` (or a small core util) — marker helper.
 - Surface loop entries: `nonInteractiveCli.ts`, `use-llm-stream.ts`,
-  `live-session.ts`, `Session.ts` (also registers the ACP kernel-eligibility
-  provider), `agent-core.ts`, `speculation.ts`.
+  `live-session.ts`, `Session.ts`, `agent-core.ts`, `speculation.ts`.
 - `packages/cli/src/ui/systemInfo.ts`, `systemInfoFields.ts`,
   `commands/aboutCommand.ts`, `components/AboutBox.tsx` (via fields).
 - `packages/cli/src/ui/tui-renderer-of-record.ts` + `llm.tsx` — record the

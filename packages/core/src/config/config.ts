@@ -2887,9 +2887,6 @@ export class Config {
   private sessionSourceType?: string;
   private sessionSourceId?: string;
   private sessionData?: ResumedSessionData;
-  private agentLoopKernelEligibility?: (
-    surface: AgentLoopSurface,
-  ) => boolean | undefined;
   private readonly workflowModeContext = new WorkflowModeContext();
   private initialWorkflowMode: boolean | undefined;
   private workflowModeReady = false;
@@ -10892,30 +10889,16 @@ export class Config {
   }
 
   /**
-   * Lets a surface's session report whether its execution branch can actually
-   * enter the event-bus kernel, so the reported path matches the path taken.
-   * Returning false for a surface caps its path at `shared`; undefined leaves
-   * the switch resolution unchanged.
-   */
-  setAgentLoopKernelEligibilityProvider(
-    provider: (surface: AgentLoopSurface) => boolean | undefined,
-  ): void {
-    this.agentLoopKernelEligibility = provider;
-  }
-
-  /**
    * The loop path a surface runs: unified off -> legacy; otherwise the kernel
    * only when the event-bus switch is on AND the surface's execution branch
-   * actually enters it, else shared. Speculation never reads the event-bus
-   * switch (its rounds always run on the shared loop), and an ACP session may
-   * keep its own tool step, so both are capped at shared even with both
-   * switches on.
+   * actually enters it, else shared. Speculation and the Hosted Harness never
+   * read the event-bus switch (their rounds always run on the shared loop), so
+   * both are capped at shared even with both switches on.
    */
   getAgentLoopPath(surface: AgentLoopSurface): AgentLoopPath {
     if (!this.isUnifiedAgentLoopEnabled(surface)) return 'legacy';
     if (!this.isEventBusAgentLoopEnabled(surface)) return 'shared';
-    if (surface === 'speculation') return 'shared';
-    if (this.agentLoopKernelEligibility?.(surface) === false) return 'shared';
+    if (surface === 'speculation' || surface === 'hosted') return 'shared';
     return 'kernel';
   }
 

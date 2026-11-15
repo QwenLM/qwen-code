@@ -1154,7 +1154,6 @@ describe('Session', () => {
       getModel: vi.fn().mockImplementation(() => currentModel),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getSessionSourceType: vi.fn().mockReturnValue(undefined),
-      setAgentLoopKernelEligibilityProvider: vi.fn(),
       isProvisionalWorkspace: vi.fn().mockReturnValue(false),
       setLiveAppendSystemPrompt: vi.fn(),
       takeActiveTodoReminder: vi.fn().mockReturnValue(undefined),
@@ -1304,32 +1303,7 @@ describe('Session', () => {
     );
   });
 
-  describe('agent loop diagnostic kernel eligibility', () => {
-    it('excludes an Agent Host session from the kernel', () => {
-      // An Agent Host session keeps ACP's own tool step, so its model rounds
-      // stay on the shared loop even with both rollout switches on.
-      mockConfig.getSessionSourceType = vi.fn().mockReturnValue('agent-host');
-      const agentHostSession = new Session(
-        'agent-host-session',
-        mockConfig,
-        mockClient,
-        mockSettings,
-      );
-      expect(agentHostSession).toBeDefined();
-      const provider = vi
-        .mocked(mockConfig.setAgentLoopKernelEligibilityProvider)
-        .mock.calls.at(-1)?.[0];
-      expect(provider?.('acp')).toBe(false);
-      expect(provider?.('headless')).toBeUndefined();
-    });
-
-    it('admits a regular session to the kernel', () => {
-      const provider = vi
-        .mocked(mockConfig.setAgentLoopKernelEligibilityProvider)
-        .mock.calls.at(-1)?.[0];
-      expect(provider?.('acp')).toBe(true);
-    });
-
+  describe('agent loop diagnostic entry marker', () => {
     it('logs the acp loop entry marker on a prompt', async () => {
       const entrySpy = vi.spyOn(agentLoopRollout, 'logAgentLoopEntry');
       vi.mocked(mockChat.sendMessageStream).mockImplementation(async () =>
@@ -1341,53 +1315,6 @@ describe('Session', () => {
       });
       expect(entrySpy).toHaveBeenCalledWith(mockConfig, 'acp');
       entrySpy.mockRestore();
-    });
-
-    it('keeps a blocked prompt procedural for a kernel-ineligible session', async () => {
-      // Both switches on, but an Agent Host session cannot enter the kernel, so
-      // getAgentLoopPath('acp') is capped at 'shared'. The blocked-prompt round
-      // must derive its transport from that same predicate, not the switch
-      // alone, or the marker and /about would certify 'shared' while the round
-      // actually runs on the event bus.
-      mockConfig.isUnifiedAgentLoopEnabled = vi.fn().mockReturnValue(true);
-      mockConfig.isEventBusAgentLoopEnabled = vi.fn().mockReturnValue(true);
-      mockConfig.getSessionSourceType = vi.fn().mockReturnValue('agent-host');
-      const agentHostSession = new Session(
-        'agent-host-blocked',
-        mockConfig,
-        mockClient,
-        mockSettings,
-      );
-      Object.assign(mockLlmClient, {
-        admitUserPrompt: vi.fn().mockResolvedValue({ blocked: true }),
-        sendMessageStream: vi.fn(() =>
-          (async function* () {
-            yield {
-              type: core.LlmEventType.UserPromptSubmitBlocked,
-              value: { reason: 'not today', originalPrompt: 'hello' },
-            };
-          })(),
-        ),
-      });
-      vi.mocked(runAgentLoop).mockClear();
-
-      await agentHostSession.prompt({
-        sessionId: 'agent-host-blocked',
-        prompt: [{ type: 'text' as const, text: 'hello' }],
-      });
-
-      const provider = vi
-        .mocked(mockConfig.setAgentLoopKernelEligibilityProvider)
-        .mock.calls.at(-1)?.[0];
-      expect(provider?.('acp')).toBe(false);
-      const blockedCall = vi
-        .mocked(runAgentLoop)
-        .mock.calls.find(
-          ([options]) => options.first?.options?.promptAdmission?.blocked,
-        );
-      // 'shared' path => procedural transport. Dropping the sharedToolBatch
-      // guard makes useEventBus true here and reds this case.
-      expect(blockedCall?.[0].useEventBus).toBe(false);
     });
   });
 

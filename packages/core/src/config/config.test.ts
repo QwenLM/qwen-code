@@ -7555,10 +7555,10 @@ describe('Server Config (config.ts)', () => {
           unifiedAgentLoopEnabled: true,
           eventBusAgentLoopEnabled: true,
         });
-        // Every surface except speculation can enter the kernel; pin the arm
-        // for ink, opentui and agent-core too, not just acp.
+        // Every surface except speculation and hosted can enter the kernel;
+        // pin the arm for ink, opentui and agent-core too, not just acp.
         for (const surface of AGENT_LOOP_SURFACES) {
-          if (surface === 'speculation') continue;
+          if (surface === 'speculation' || surface === 'hosted') continue;
           expect(config.getAgentLoopPath(surface)).toBe('kernel');
         }
       });
@@ -7579,48 +7579,16 @@ describe('Server Config (config.ts)', () => {
         expect(config.getAgentLoopPath('acp')).toBe('legacy');
       });
 
-      it('caps speculation at shared even with both switches on', () => {
-        // runSpeculationModelRound only calls runModelRound and never reads
-        // the event-bus switch, so speculation cannot enter the kernel.
+      it('caps speculation and hosted at shared even with both switches on', () => {
+        // runSpeculationModelRound and the Hosted Harness model round only call
+        // runModelRound and never read the event-bus switch, so neither can
+        // enter the kernel.
         const config = makeConfig({
           unifiedAgentLoopEnabled: true,
           eventBusAgentLoopEnabled: true,
         });
         expect(config.getAgentLoopPath('speculation')).toBe('shared');
-      });
-
-      it('caps a surface at shared when its session reports kernel-ineligible', () => {
-        // A live / Agent Host ACP session keeps its own tool step, so its
-        // model rounds stay on the shared loop even with both switches on.
-        const config = makeConfig({
-          unifiedAgentLoopEnabled: true,
-          eventBusAgentLoopEnabled: true,
-        });
-        config.setAgentLoopKernelEligibilityProvider((surface) =>
-          surface === 'acp' ? false : undefined,
-        );
-        expect(config.getAgentLoopPath('acp')).toBe('shared');
-        expect(config.getAgentLoopPath('headless')).toBe('kernel');
-      });
-
-      it('keeps kernel when the session reports kernel-eligible', () => {
-        const config = makeConfig({
-          unifiedAgentLoopEnabled: true,
-          eventBusAgentLoopEnabled: true,
-        });
-        config.setAgentLoopKernelEligibilityProvider((surface) =>
-          surface === 'acp' ? true : undefined,
-        );
-        expect(config.getAgentLoopPath('acp')).toBe('kernel');
-      });
-
-      it('leaves the path unchanged when the provider returns undefined', () => {
-        const config = makeConfig({
-          unifiedAgentLoopEnabled: true,
-          eventBusAgentLoopEnabled: true,
-        });
-        config.setAgentLoopKernelEligibilityProvider(() => undefined);
-        expect(config.getAgentLoopPath('acp')).toBe('kernel');
+        expect(config.getAgentLoopPath('hosted')).toBe('shared');
       });
     });
 
