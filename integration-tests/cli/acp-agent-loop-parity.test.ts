@@ -116,16 +116,9 @@ interface Run {
 
 const PROMPT_TIMEOUT_MS = 60_000;
 
-/**
- * What the session logs once per round it runs on the shared loop. Count the
- * unprefixed "model round on the shared agent loop (prompt …)" line: the
- * `#runSharedRound` entry also logs an `[ACP]`-prefixed copy for the same
- * round, so the bare substring would count those rounds twice. The negative
- * lookbehind drops the `[ACP]` copy and keeps the one unprefixed line each
- * round logs.
- */
+/** What the session logs for each round it runs in a `runAgentLoop` call. */
 const SHARED_ROUND_LOG =
-  /(?<!\[ACP\] )model round on the shared agent loop \(prompt/g;
+  /round in its own runAgentLoop call \(prompt ([^)]+)\)/g;
 
 /**
  * The session's rounds the event-bus adapter ran, matched to the session's
@@ -134,12 +127,7 @@ const SHARED_ROUND_LOG =
  */
 function countKernelRounds(debugLog: string): number {
   const promptIds = new Set(
-    Array.from(
-      debugLog.matchAll(
-        /(?<!\[ACP\] )model round on the shared agent loop \(prompt ([^)]+)\)/g,
-      ),
-      ([, promptId]) => promptId,
-    ),
+    Array.from(debugLog.matchAll(SHARED_ROUND_LOG), ([, promptId]) => promptId),
   );
   return Array.from(
     debugLog.matchAll(
