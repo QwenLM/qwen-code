@@ -1,0 +1,69 @@
+name: PR 15959 Unicode asynchronous fixture A-B
+'on':
+  push:
+    branches:
+    - codex/verify-pr-15959-unicode-fixture-ab
+permissions:
+  contents: read
+env:
+  MAVEN_VERSION: 3.9.11
+  MAVEN_SHA512: bcfe4fe305c962ace56ac7b5fc7a08b87d5abd8b7e89027ab251069faebee516b0ded8961445d6d91ec1985dfe30f8153268843c89aa392733d1a3ec956c9978
+  NODE_OPTIONS: --max-old-space-size=6144
+jobs:
+  unicode-fixture-ab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    services:
+      mysql:
+        image: mysql:8.4.6
+        env:
+          MYSQL_DATABASE: hosted_harness_test
+          MYSQL_ROOT_PASSWORD: hosted-fixture
+        ports:
+        - 3306/tcp
+        options: --health-cmd "mysqladmin ping -h 127.0.0.1 -phosted-fixture" --health-interval 5s --health-timeout 5s --health-retries 30
+    steps:
+    - name: Checkout
+      uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      with:
+        ref: 252344cd32ad2574e93d0a40580c5c8e7f56a05d
+        persist-credentials: false
+        fetch-depth: 2
+    - name: Set up Java
+      uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654
+      with:
+        distribution: temurin
+        java-version: '21'
+        cache: ${{ runner.environment == 'github-hosted' && 'maven' || '' }}
+        cache-dependency-path: 'packages/sdk-java/**/pom.xml
+
+          packages/managed-agent-server/**/pom.xml'
+        settings-path: ${{ runner.temp }}/setup-java-m2
+    - name: Set up Node.js
+      uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+      with:
+        node-version: '22'
+        package-manager-cache: false
+    - name: Enable Corepack
+      run: corepack enable
+    - name: Install, build and bundle CLI
+      run: "for attempt in 1 2 3; do\n  if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then\n    if [[ \"${attempt}\" != \"1\" ]]; then\n      echo \"::warning::corepack pnpm install failed $((attempt - 1)) time(s) before the retry absorbed it \u2014 this step also runs prepare's build, so check the failure class before counting it toward #11726.\"\n    fi\n    break\n  fi\n  if [[ \"${attempt}\" == \"3\" ]]; then\n    exit 1\n  fi\n  sleep $((attempt * 15))\ndone"
+    - name: Install Managed Agent dependencies
+      id: managed_dependencies
+      env:
+        MAVEN_ARGS: --settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml
+      run: mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
+    - name: Observe exact original and corrected Unicode fixture on MySQL
+      timeout-minutes: 82
+      env:
+        MAVEN_ARGS: --settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml
+        MYSQL_PORT: ${{ job.services.mysql.ports['3306'] }}
+      run: "python3 - <<'PY'\nimport hashlib, json, os, re, shutil, subprocess, xml.etree.ElementTree as ET\nfrom pathlib import Path\nout = Path('.verify-evidence')\nout.mkdir(exist_ok=True)\nbase = '1905d85f642614f000dda4c6e6d260b04114f9c1'\nrelative = 'packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/HostedWorkspaceToolTurnIT.java'\npath = Path(relative)\ncanonical = path.read_text()\noriginal = subprocess.check_output(['git', 'show', base + ':' + relative], text=True)\nassert subprocess.check_output(['git', 'diff', '--name-only', base, 'HEAD'], text=True).splitlines() == [relative]\nsubprocess.run(['git', 'diff', '--exit-code'], check=True)\ndiagnostic = \"\"\"                    if (unicode) {\n                        System.out.println(\"UNICODE_PUBLICATION_DIAGNOSTIC \" + new ObjectMapper().writeValueAsString(\n                                Map.of(\"captures\", cases,\n                                        \"verifierBeans\", spring.getBeanNamesForType(\n                                                com.alibaba.qwen.code.managedagent.persistence.ToolPublicationVerifier.class).length,\n                                        \"schedulerPresent\", spring.containsBean(\"managedToolVerificationScheduler\"),\n                                        \"operations\", jdbc.queryForList(\"SELECT operation_kind, state, is_verification_ready FROM ma_operation WHERE tenant_id = ? AND operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')\", tenant))));\n                    }\n\"\"\"\nanchor = '                    assertThat(driver.exitValue()).as(\"Driver output: %s\", Files.readString(log)).isZero();'\nassert original.count(anchor) == canonical.count(anchor) == 1\n(out / 'source.json').write_text(json.dumps({\n    'actualCheckout': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),\n    'originalSource': base,\n    'onlyChangedTrackedInput': relative,\n    'nodeHeap': os.environ.get('NODE_OPTIONS'),\n}, indent=2) + '\\n')\nresults = {}\ntry:\n    for arm, source in [('original', original), ('fixed', canonical)]:\n        # The fixed fixture is applied only after the original runtime assertions below pass.\n        armout = out / arm\n        armout.mkdir()\n        (armout / 'canonical.java').write_text(source)\n        instrumented = source.replace(anchor, diagnostic + anchor)\n        path.write_text(instrumented)\n        (armout / 'instrumented.java').write_text(instrumented)\n        command = ['mvn', '--batch-mode', '--no-transfer-progress',\n            '-Phosted-harness-mysql',\n            '-Dit.test=HostedWorkspaceToolTurnIT#malformedShellUnicodeIsCorrectableBeforeAcquisition',\n            '-Dnode.executable=' + shutil.which('node'),\n            '-Dqwen.cli.entry=' + str(Path('dist/cli.js').resolve()),\n            '-Dmysql.url=jdbc:mysql://127.0.0.1:' + os.environ['MYSQL_PORT']\n                + '/unicode_' + arm + '?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false',\n            '-Dmysql.user=root', '-Dmysql.password=hosted-fixture',\n            'clean', 'verify', 'checkstyle:check']\n        (armout / 'command.json').write_text(json.dumps(command) + '\\n')\n        with (armout / 'maven.log').open('wb') as log:\n            run = subprocess.run(command, cwd='packages/managed-agent-server',\n                stdout=log, stderr=subprocess.STDOUT, timeout=2400)\n        (armout / 'maven.rc').write_text(str(run.returncode) + '\\n')\n        reports = Path('packages/managed-agent-server/verification/target/failsafe-reports')\n        assert reports.exists(), 'No actual integration reports'\n        shutil.copytree(reports, armout / 'failsafe-reports')\n        cases, diagnostics = [], []\n        for xml in reports.glob('TEST-*.xml'):\n            root = ET.parse(xml).getroot()\n            for case in root.findall('testcase'):\n                failures = [f.get('message', '') for f in case.findall('failure')]\n                cases.append({'class': case.get('classname'), 'name': case.get('name'),\n                    'failures': failures, 'errors': len(case.findall('error')),\n                    'skipped': case.find('skipped') is not None})\n                for line in (case.findtext('system-out') or '').splitlines():\n                    if line.startswith('UNICODE_PUBLICATION_DIAGNOSTIC '):\n                        diagnostics.append(json.loads(line.split(' ', 1)[1]))\n        (armout / 'cases.json').write_text(json.dumps(cases, indent=2) + '\\n')\n        (armout / 'diagnostics.json').write_text(json.dumps(diagnostics, indent=2) + '\\n')\n        assert len(cases) == len(diagnostics) == 2\n        assert all(c['class'].endswith('.HostedWorkspaceToolTurnIT')\n            and c['name'].startswith('malformedShellUnicodeIsCorrectableBeforeAcquisition(')\n            and not c['errors'] and not c['skipped'] for c in cases)\n        bycapture = {d['captures'][0]: d for d in diagnostics}\n        assert set(bycapture) == {'local', 'o2'}\n        if arm == 'original':\n            assert run.returncode == 1\n            assert not cases[0]['failures'] and len(cases[1]['failures']) == 1\n            assert 'Timed out after 30000ms' in cases[1]['failures'][0]\n            assert all(d['verifierBeans'] == 0 and not d['schedulerPresent'] for d in diagnostics)\n            operations = bycapture['o2']['operations']\n            assert operations and any(o['state'] == 'PENDING'\n                and o['is_verification_ready'] == 1 for o in operations)\n            print('EXPECTED RED: exact old fixture has no verifier/scheduler and ready PENDING output operation', flush=True)\n        else:\n            assert run.returncode == 0 and not any(c['failures'] for c in cases)\n            assert all(d['verifierBeans'] == 1 and d['schedulerPresent'] for d in diagnostics)\n            operations = bycapture['o2']['operations']\n            assert operations and all(o['state'] == 'SUCCEEDED' for o in operations)\n            print('PASS: identical local/o2 Unicode oracles complete with real asynchronous verifier and scheduler', flush=True)\n        results[arm] = {'exit': run.returncode, 'cases': len(cases),\n            'failures': sum(len(c['failures']) for c in cases),\n            'diagnostics': diagnostics,\n            'canonicalSha256': hashlib.sha256(source.encode()).hexdigest(),\n            'instrumentedSha256': hashlib.sha256(instrumented.encode()).hexdigest()}\n        (out / 'results.json').write_text(json.dumps(results, indent=2) + '\\n')\nfinally:\n    path.write_text(canonical)\n    subprocess.run(['git', 'diff', '--exit-code'], check=True)\n\nPY\n"
+    - name: Preserve original raw and both-arm reports
+      if: always()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: pr15959-unicode-fixture-ab
+        path: .verify-evidence
+        if-no-files-found: error
+        retention-days: 3
