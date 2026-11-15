@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { describe, expect, it, vi } from 'vitest';
 import {
   SendMessageType,
@@ -99,6 +100,7 @@ describe.each([false, true])('startSharedLoopRound (kernel=%s)', (kernel) => {
       config,
       signal: new AbortController().signal,
       toolSignal: new AbortController().signal,
+      deferRecording: true,
       useEventBus: kernel,
       onModelEvent: () => {},
       ...extra,
@@ -134,6 +136,55 @@ describe.each([false, true])('startSharedLoopRound (kernel=%s)', (kernel) => {
       'fresh',
       'replayed',
     ]);
+  });
+
+  it('runs the tools under the signal the batch brings, behind its launch check', async () => {
+    const toolSignal = new AbortController().signal;
+    const shared = start(clientYielding([call('first'), call('second')]), {
+      deferRecording: false,
+    });
+    await shared.model;
+    const executor = okExecutor();
+    const results: string[] = [];
+    const batch = await shared.runBatch({
+      executor,
+      handled: new Map(),
+      responded: new Set(),
+      toolSignal,
+      beforeToolLaunch: ({ callId }) => callId === 'first',
+      onToolResult: ({ request, origin }) => {
+        results.push(`${request.callId}:${origin}`);
+      },
+    });
+    expect(executor.run.mock.calls[0][1]).toBe(toolSignal);
+    expect(results).toEqual(['first:executed', 'second:skipped']);
+    // The batch recorded its results instead of leaving them to the turn.
+    expect(batch.responses?.map(({ record }) => record)).toEqual([
+      undefined,
+      undefined,
+    ]);
+  });
+
+  it('runs the tools in the async context the batch was handed over in', async () => {
+    const turn = new AsyncLocalStorage<string>();
+    const shared = start(clientYielding([call('c1')]));
+    await shared.model;
+    const executor = okExecutor();
+    const contexts: Array<string | undefined> = [];
+    await turn.run('batch', () =>
+      shared.runBatch({
+        executor: {
+          run: (requests, signal, hooks) => {
+            contexts.push(turn.getStore());
+            return executor.run(requests, signal, hooks);
+          },
+        },
+        handled: new Map(),
+        responded: new Set(),
+        onToolResult: () => {},
+      }),
+    );
+    expect(contexts).toEqual(['batch']);
   });
 
   it('skips the batch, replays included, when the turn closes the round', async () => {

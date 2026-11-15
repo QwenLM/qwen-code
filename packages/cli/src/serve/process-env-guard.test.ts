@@ -442,7 +442,9 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'daemon environment into the TLS trust probe child. NODE_TLS_REJECT_UNAUTHORIZED is read to skip the ' +
         'worker TLS trust check when it disables verification: workers inherit the variable unscrubbed and dial ' +
         'via fetch, which honors it, so the strict probe would flag an outage that never happens. ' +
-        'The Hosted Harness capability digest and private CSI Session Store URL are process-scoped deployment contracts fixed at daemon bootstrap.',
+        'The Hosted Harness capability digest and private CSI Session Store URL are process-scoped deployment contracts fixed at daemon bootstrap. ' +
+        'One more whole-object read resolves serve.sessionPrWatch: its two environment overrides are boot-time operator ' +
+        'contracts, read once beside the settings they override rather than per tick.',
       accesses: {
         'computed:EXTERNAL_TOOL_GUARD_TOKEN_ENV': 1,
         'computed:HOSTED_HARNESS_CAPABILITY_DIGEST_ENV': 1,
@@ -459,7 +461,7 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:QWEN_SERVE_NO_MCP_POOL': 1,
         'key:QWEN_SERVE_NO_PERSISTENT_REGISTRATION': 1,
         'key:VITEST_WORKER_ID': 1,
-        whole: 6,
+        whole: 7,
       },
     },
   ],

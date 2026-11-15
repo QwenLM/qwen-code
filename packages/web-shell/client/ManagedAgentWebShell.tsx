@@ -21,6 +21,7 @@ import {
 } from './components/managed/java-managed-agent-provider';
 import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
 import { RootErrorFallback } from './components/RootErrorFallback';
+import { WindowToastHost } from './components/ToastHost';
 import { WebShellCustomizationProvider } from './customization';
 import { I18nProvider, normalizeLanguage, type WebShellLanguage } from './i18n';
 import { WebShellPortalRootContext } from './portalRoot';
@@ -412,6 +413,12 @@ function ManagedAgentWebShellRoot(props: ManagedAgentWebShellProps) {
                           navigationSearch={navigationSearch}
                         />
                       )}
+                      {/* The managed-only shell has no App toast state; host
+                          the window toast channel here so nested controls'
+                          requestToast notices are not silently dropped. The
+                          scope keeps co-mounted shells from showing each
+                          other's notices. */}
+                      <WindowToastHost scope={portalRoot} />
                     </div>
                   </CompactModeContext.Provider>
                 </TodoContextsProvider>

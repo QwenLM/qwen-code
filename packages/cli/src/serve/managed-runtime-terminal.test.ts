@@ -75,17 +75,17 @@ function terminalUrl(
   );
 }
 
-function connect(
+function open(
   port: number,
   terminalId: string,
   selector: string,
   headers: Record<string, string> = AUTH_HEADERS,
-): Promise<WebSocket> {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(terminalUrl(port, terminalId, selector), {
-      headers,
-    });
-    sockets.push(ws);
+): { ws: WebSocket; opened: Promise<WebSocket> } {
+  const ws = new WebSocket(terminalUrl(port, terminalId, selector), {
+    headers,
+  });
+  sockets.push(ws);
+  const opened = new Promise<WebSocket>((resolve, reject) => {
     const timer = setTimeout(() => {
       ws.terminate();
       reject(new Error('terminal attach timed out'));
@@ -105,6 +105,16 @@ function connect(
       reject(error);
     });
   });
+  return { ws, opened };
+}
+
+function connect(
+  port: number,
+  terminalId: string,
+  selector: string,
+  headers: Record<string, string> = AUTH_HEADERS,
+): Promise<WebSocket> {
+  return open(port, terminalId, selector, headers).opened;
 }
 
 /** Waits until the terminal echoed the marker text. */
@@ -303,10 +313,12 @@ describe('ManagedRuntimeTerminals', () => {
     const port = await start();
     const first = await attachAndEcho(port, 'replay', 'session-a');
     first.terminate();
-    const second = await connect(port, 'replay', 'session-a');
+    // The snapshot replay carries the earlier output without new input. The
+    // server writes it in the same turn as the upgrade response, so the replay
+    // listener must exist before 'open' resolves.
+    const { ws: second, opened } = open(port, 'replay', 'session-a');
     const replayed = waitForOutput(second, 'mwt-echo-ok');
-    // The snapshot replay carries the earlier output without new input.
-    await replayed;
+    await Promise.all([opened, replayed]);
   });
 
   it('admission reads lifecycle state without joining the scrollback', async () => {
