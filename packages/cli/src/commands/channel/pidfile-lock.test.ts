@@ -7,11 +7,25 @@ import { withChannelPidfileLock } from './pidfile-lock.js';
 
 describe('withChannelPidfileLock', () => {
   const tempDirs: string[] = [];
+  const itPosix = process.platform === 'win32' ? it.skip : it;
 
   afterEach(() => {
     for (const dir of tempDirs.splice(0)) {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  itPosix('creates a missing directory with the requested dirMode', () => {
+    const tempDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'qwen-channel-pid-lock-'),
+    );
+    tempDirs.push(tempDir);
+    const pidfile = path.join(tempDir, 'private', 'service.pid');
+
+    expect(
+      withChannelPidfileLock(pidfile, () => 'locked', { dirMode: 0o700 }),
+    ).toBe('locked');
+    expect(fs.statSync(path.dirname(pidfile)).mode & 0o777).toBe(0o700);
   });
 
   it('acquires and releases the real synchronous proper-lockfile adapter', () => {

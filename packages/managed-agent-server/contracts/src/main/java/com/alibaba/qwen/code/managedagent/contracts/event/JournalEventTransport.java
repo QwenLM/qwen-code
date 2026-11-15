@@ -1,8 +1,10 @@
 package com.alibaba.qwen.code.managedagent.contracts.event;
 
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
+
 /**
  * The authoritative-journal wire (design 2026-10-04-managed-agent-event-transport,
- * phase MQ2b). An after-commit publication point on {@link com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore#commit}
+ * phase MQ2b). An after-commit publication point on {@link ManagedSessionStore#commit}
  * hands the committed journal record (the raw record bytes) to this port. It is
  * distinct from the {@link EventTransport} hub seam, which carries the public
  * event stream that MQ2c wires as the {@code public_event} envelope extension.

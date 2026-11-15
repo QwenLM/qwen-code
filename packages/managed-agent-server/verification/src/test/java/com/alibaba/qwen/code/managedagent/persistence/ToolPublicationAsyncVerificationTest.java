@@ -50,6 +50,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.PUBLICATION_TOKEN;
 import static com.alibaba.qwen.code.managedagent.PublicationJournalFixture.WRITER_TOKEN;
+import static com.alibaba.qwen.code.managedagent.persistence.PublicationVerification.verified;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
@@ -105,7 +106,7 @@ public class ToolPublicationAsyncVerificationTest {
     private JsonNode publish(String operation, int ordinal, String value) {
         byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
         return data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, operation, "stdout", ordinal,
-                bytes, ToolPublicationContract.sha256(bytes), true);
+                bytes, ToolPublicationContract.sha256(bytes));
     }
 
     private void due(String operation) {
@@ -227,7 +228,7 @@ public class ToolPublicationAsyncVerificationTest {
     @ValueSource(strings = {"null", "{"})
     void malformedCandidateInputsFailWithoutEscapingTheScan(String encoded) {
         publish("healthy", 0, "bytes");
-        data.finish(key, "pub-1", PUBLICATION_TOKEN, "bad-inputs", terminal(10), true);
+        data.finish(key, "pub-1", PUBLICATION_TOKEN, "bad-inputs", terminal(10));
         fixture.jdbc.update("UPDATE ma_operation SET verification_request_json = ?,"
                         + " verification_next_at = ? WHERE operation_id = X'6261642d696e70757473'",
                 encoded.equals("null") ? null : encoded, Timestamp.valueOf("2000-01-01 00:00:00"));
@@ -246,7 +247,7 @@ public class ToolPublicationAsyncVerificationTest {
     @ValueSource(strings = {"segment", "inline-resource", "object-resource", "seal", "prefix", "inline-terminal", "object-terminal"})
     void acceptedInputsSurviveReplacementWithoutReposting(String kind) {
         if (kind.equals("seal") || kind.equals("prefix")) {
-            data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "seed", "stdout", 0,
+            verified(data).publishSegment(key, "pub-1", PUBLICATION_TOKEN, "seed", "stdout", 0,
                     new byte[] {1, 2}, null);
             bucket.opens.set(0);
         }
@@ -255,15 +256,15 @@ public class ToolPublicationAsyncVerificationTest {
             response = publish("accepted", 0, "stored");
         } else if (kind.endsWith("resource")) {
             response = data.publishResource(key, "pub-1", PUBLICATION_TOKEN, "accepted", "content:test",
-                    "managed-tool-result-content", new byte[kind.startsWith("inline") ? 10 : 70000], true);
+                    "managed-tool-result-content", new byte[kind.startsWith("inline") ? 10 : 70000]);
         } else if (kind.equals("seal")) {
             response = data.seal(key, "pub-1", PUBLICATION_TOKEN, "accepted", "stdout", 1, 2,
-                    ToolPublicationContract.sha256(new byte[] {1, 2}), true);
+                    ToolPublicationContract.sha256(new byte[] {1, 2}));
         } else if (kind.equals("prefix")) {
-            response = data.prefix(key, "pub-1", PUBLICATION_TOKEN, "accepted", "stdout", true);
+            response = data.prefix(key, "pub-1", PUBLICATION_TOKEN, "accepted", "stdout");
         } else {
             response = data.finish(key, "pub-1", PUBLICATION_TOKEN, "accepted",
-                    terminal(kind.startsWith("object") ? 70000 : 10), true);
+                    terminal(kind.startsWith("object") ? 70000 : 10));
             assertThatThrownBy(() -> data.finished(key, "pub-1", WRITER_TOKEN)).hasMessageContaining("no finished");
         }
         assertThat(response.path("state").asText()).isEqualTo("PENDING");
@@ -288,9 +289,8 @@ public class ToolPublicationAsyncVerificationTest {
             com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class)
     static class SchedulingHarness {}
 
-    @ParameterizedTest
-    @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
-    void springSchedulingDrainsAcceptedWorkEvenWithAdmissionDisabled(boolean asyncEnabled) {
+    @Test
+    void springSchedulingDrainsAcceptedWork() {
         data = replacement(Duration.ofMinutes(5), Duration.ofSeconds(2));
         publish("restart", 0, "bytes");
         new org.springframework.boot.test.context.runner.ApplicationContextRunner()
@@ -300,7 +300,6 @@ public class ToolPublicationAsyncVerificationTest {
                         com.alibaba.qwen.code.managedagent.config.ToolPublicationConfiguration.class)
                 .withPropertyValues("qwen.managed-agent.tool-publication.enabled=true",
                         "qwen.managed-agent.tool-publication.service-base-url=https://test.invalid",
-                        "qwen.managed-agent.tool-publication.async-verification-enabled=" + asyncEnabled,
                         "qwen.managed-agent.tool-publication.execution-bytes=104857600",
                         "qwen.managed-agent.tool-publication.session-bytes=104857600",
                         "qwen.managed-agent.tool-publication.tenant-bytes=104857600",
@@ -314,8 +313,8 @@ public class ToolPublicationAsyncVerificationTest {
                 .withBean("managedJdbcTemplate", org.springframework.jdbc.core.JdbcTemplate.class, () -> fixture.jdbc)
                 .withBean("managedAgentTransactionManager", PlatformTransactionManager.class, () -> fixture.manager)
                 .withBean(WriterCredentialPolicy.class, WriterCredentialPolicy::unbound)
-                .withBean(ManagedSessionStore.class, () -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(
-                        fixture.jdbc, new ManagedExtensionRecordStore(fixture.jdbc), null, null, null, bucket, null, null,
+                .withBean(JdbcManagedSessionStore.class, () -> com.alibaba.qwen.code.managedagent.VerificationFixtures.managedSessionStore(
+                        fixture.jdbc, new JdbcManagedExtensionRecordStore(fixture.jdbc), null, null, null, bucket, null, null,
                         WriterCredentialPolicy.unbound(), fixture.bindings))
                 .withBean(HarnessRules.class, SdkHarnessRules::new)
                 .withBean(StorageReadPolicy.class, ManagedSessionReaderVersion::new)
@@ -329,7 +328,6 @@ public class ToolPublicationAsyncVerificationTest {
                             .hasSingleBean(ToolPublicationDataStore.class).doesNotHaveBean(com.aliyun.oss.OSS.class);
                     var settings = context.getBean(com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties.class)
                             .getToolPublication();
-                    assertThat(settings.isAsyncVerificationEnabled()).isEqualTo(asyncEnabled);
                     assertThat(settings.getVerificationConcurrency()).isEqualTo(3);
                     await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
                             assertThat(status("restart").path("state").asText()).isEqualTo("SUCCEEDED"));
@@ -389,7 +387,7 @@ public class ToolPublicationAsyncVerificationTest {
                 new ToolPublicationDataStore.VerificationBudget(16 * 1024 * 1024, Duration.ofMinutes(25)));
         try (var requests = Executors.newSingleThreadExecutor()) {
             var request = requests.submit(() -> accepting.publishSegment(key, "pub-1", PUBLICATION_TOKEN,
-                    "commit", "stdout", 0, new byte[] {1}, null, true));
+                    "commit", "stdout", 0, new byte[] {1}, null));
             try {
                 assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
                 assertThat(request.isDone()).isFalse();
@@ -407,9 +405,9 @@ public class ToolPublicationAsyncVerificationTest {
 
     @Test
     void temporaryFailureKeepsThePrefixSlotAndRetriesWithoutReuploading() {
-        data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "seed", "stdout", 0, new byte[] {1}, null);
+        verified(data).publishSegment(key, "pub-1", PUBLICATION_TOKEN, "seed", "stdout", 0, new byte[] {1}, null);
         int puts = bucket.puts.get();
-        data.prefix(key, "pub-1", PUBLICATION_TOKEN, "prefix", "stdout", true);
+        data.prefix(key, "pub-1", PUBLICATION_TOKEN, "prefix", "stdout");
         bucket.failRead = true;
         try (var verifier = manualVerifier(data)) {
             assertThat(verifier.runOnce()).isTrue();
@@ -517,7 +515,7 @@ public class ToolPublicationAsyncVerificationTest {
         data = replacement(Duration.ofMinutes(2), Duration.ofSeconds(3));
         byte[] bytes = "h".repeat(70000).getBytes(StandardCharsets.US_ASCII);
         data.publishResource(key, "pub-1", PUBLICATION_TOKEN, "resource", "content:test",
-                "managed-tool-result-content", bytes, true);
+                "managed-tool-result-content", bytes);
         bucket.midRead = () -> blockRecovery("BLOCKED_EXECUTION");
         assertThat(data.verifyNextOperation()).isTrue();
         assertThat(bucket.opens).hasValue(1);
@@ -543,7 +541,7 @@ public class ToolPublicationAsyncVerificationTest {
     void recoveryBlockBeforeClaimFailsWithoutReadingHealthyCandidate(String recovery) {
         byte[] bytes = "h".repeat(70000).getBytes(StandardCharsets.US_ASCII);
         data.publishResource(key, "pub-1", PUBLICATION_TOKEN, "resource", "content:test",
-                "managed-tool-result-content", bytes, true);
+                "managed-tool-result-content", bytes);
         blockRecovery(recovery);
         assertThat(data.verifyNextOperation()).isTrue();
         assertThat(status("resource").path("state").asText()).isEqualTo("FAILED");
@@ -563,7 +561,7 @@ public class ToolPublicationAsyncVerificationTest {
     @ValueSource(strings = {"BLOCKED_EXECUTION", "BLOCKED_RESOURCE", "BLOCKED_WORKSPACE"})
     void recoveryBlockBeforeClaimPermanentlyFailsAcceptedTerminal(String recovery) {
         byte[] bytes = terminal(70000);
-        data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish", bytes, true);
+        data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish", bytes);
         blockRecovery(recovery);
         assertThat(data.verifyNextOperation()).isTrue();
         assertThat(status("finish").path("state").asText()).isEqualTo("FAILED");
@@ -664,8 +662,8 @@ public class ToolPublicationAsyncVerificationTest {
 
     @Test
     void expiredPrefixCannotRecoverAndSealRecoveryRejectsAddedSegments() {
-        data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "seed", "stdout", 0, new byte[] {1}, null);
-        data.prefix(key, "pub-1", PUBLICATION_TOKEN, "prefix", "stdout", true);
+        verified(data).publishSegment(key, "pub-1", PUBLICATION_TOKEN, "seed", "stdout", 0, new byte[] {1}, null);
+        data.prefix(key, "pub-1", PUBLICATION_TOKEN, "prefix", "stdout");
         fixture.jdbc.update("UPDATE ma_operation SET deadline = ? WHERE operation_id = X'707265666978'",
                 Timestamp.valueOf("2000-01-01 00:00:00"));
         try (var verifier = manualVerifier(data)) {
@@ -673,11 +671,11 @@ public class ToolPublicationAsyncVerificationTest {
             assertThatThrownBy(() -> data.recoverOperation(key, "pub-1", PUBLICATION_TOKEN, "prefix"))
                     .hasMessageContaining("prefix cannot be recovered");
             data.seal(key, "pub-1", PUBLICATION_TOKEN, "seal", "stdout", 1, 1,
-                    ToolPublicationContract.sha256(new byte[] {1}), true);
+                    ToolPublicationContract.sha256(new byte[] {1}));
             fixture.jdbc.update("UPDATE ma_operation SET deadline = ? WHERE operation_id = X'7365616c'",
                     Timestamp.valueOf("2000-01-01 00:00:00"));
             verifier.runOnce();
-            data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "extra", "stdout", 1, new byte[] {2}, null);
+            verified(data).publishSegment(key, "pub-1", PUBLICATION_TOKEN, "extra", "stdout", 1, new byte[] {2}, null);
             data.recoverOperation(key, "pub-1", PUBLICATION_TOKEN, "seal");
             assertThat(verifier.runOnce()).isTrue();
         }
@@ -754,13 +752,13 @@ public class ToolPublicationAsyncVerificationTest {
     void staleCorruptScanCannotQuarantineTheSuccessorsPublication(String scan) throws Exception {
         data = replacement(Duration.ofMinutes(2), Duration.ofMinutes(1));
         byte[] bytes = new byte[] {1, 2};
-        data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "seed", "stdout", 0, bytes, null);
+        verified(data).publishSegment(key, "pub-1", PUBLICATION_TOKEN, "seed", "stdout", 0, bytes, null);
         bucket.opens.set(0);
         if (scan.equals("seal")) {
             data.seal(key, "pub-1", PUBLICATION_TOKEN, "takeover", "stdout", 1, bytes.length,
-                    ToolPublicationContract.sha256(bytes), true);
+                    ToolPublicationContract.sha256(bytes));
         } else {
-            data.prefix(key, "pub-1", PUBLICATION_TOKEN, "takeover", "stdout", true);
+            data.prefix(key, "pub-1", PUBLICATION_TOKEN, "takeover", "stdout");
         }
         bucket.blockOpen = 1;
         bucket.corruptBlockedRead = true;
@@ -815,29 +813,23 @@ public class ToolPublicationAsyncVerificationTest {
                 .isEqualTo(1);
         bucket.objects.values().iterator().next()[0] = 'x';
         assertThat(publish("original", 0, "bytes").path("state").asText()).isEqualTo("SUCCEEDED");
-        assertThatThrownBy(() -> data.prefix(key, "pub-1", PUBLICATION_TOKEN, "actual-read", "stdout"))
-                .hasMessageContaining("digest changed");
+        assertThatThrownBy(() -> verified(data).prefix(key, "pub-1", PUBLICATION_TOKEN, "actual-read", "stdout"))
+                .hasMessageContaining("invalid_request");
         assertThatThrownBy(() -> publish("original", 0, "bytes")).hasMessageContaining("quarantined");
     }
 
     @Test
-    void executionModeIsStickyAcrossCapabilityChangesAndIncompletePuts() {
+    void unknownPutResultStaysRetryableUntilTheSameRequestIsAccepted() {
         bucket.failPut = true;
-        assertThatThrownBy(() -> data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "sync", "stdout", 0,
-                new byte[] {1}, null)).hasMessageContaining("Unknown PUT result");
-        assertThat(fixture.jdbc.queryForObject("SELECT execution_mode FROM ma_operation WHERE operation_kind IN ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')",
-                String.class)).isEqualTo("SYNC");
-        assertThat(status("sync").path("state").asText()).isEqualTo("RETRYABLE");
-        assertThat(data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "sync", "stdout", 0,
-                new byte[] {1}, null, true).has("state")).isFalse();
+        assertThatThrownBy(() -> publish("retry", 0, "bytes")).hasMessageContaining("Unknown PUT result");
+        assertThat(status("retry").path("state").asText()).isEqualTo("RETRYABLE");
+        assertThat(data.verifyNextOperation()).isFalse();
+        assertThat(publish("retry", 0, "bytes").path("state").asText()).isEqualTo("PENDING");
         assertThat(bucket.puts).hasValue(1);
         assertThat(fixture.jdbc.queryForObject("SELECT state FROM ma_operation WHERE operation_kind = 'OBJECT_PUT'",
                 String.class)).isEqualTo("RETURNED");
-        assertThat(fixture.jdbc.queryForObject("SELECT execution_mode FROM ma_operation WHERE operation_kind IN"
-                + " ('OUTPUT_UPLOAD', 'OUTPUT_VERIFY', 'OUTPUT_FINISH')", String.class)).isEqualTo("SYNC");
-        try (var verifier = manualVerifier(data)) {
-            assertThat(verifier.runOnce()).isFalse();
-        }
+        assertThat(data.verifyNextOperation()).isTrue();
+        assertThat(status("retry").path("state").asText()).isEqualTo("SUCCEEDED");
     }
 
     @Test
@@ -890,7 +882,7 @@ public class ToolPublicationAsyncVerificationTest {
             assertThat(verifier.runOnce()).isTrue();
         }
         byte[] body = terminal(10);
-        assertThat(data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish", body, true).path("state").asText())
+        assertThat(data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish", body).path("state").asText())
                 .isEqualTo("PENDING");
         fixture.jdbc.update("UPDATE ma_resource SET inline_bytes = ? WHERE slot_key = X'7465726d696e616c'",
                 new byte[] {1});
@@ -904,7 +896,7 @@ public class ToolPublicationAsyncVerificationTest {
                 + " AND slot_key = X'7465726d696e616c'", Integer.class)).isZero();
         assertThat(fixture.jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE publication_id IS NOT NULL AND kind <> X'6d616e616765642d746f6f6c2d7365616c2d6d616e6966657374'"
                 + " AND capture_state <> 'VERIFIED'", Integer.class)).isZero();
-        assertThat(data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish-2", body, true).path("state").asText())
+        assertThat(data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish-2", body).path("state").asText())
                 .isEqualTo("PENDING");
         try (var verifier = manualVerifier(data)) {
             assertThat(verifier.runOnce()).isTrue();
@@ -951,10 +943,10 @@ public class ToolPublicationAsyncVerificationTest {
     @ParameterizedTest
     @ValueSource(strings = {"missing", "extra", "digest"})
     void sealValidationFailuresNeverInstallASeal(String damage) {
-        data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "seed", "stdout", 0, new byte[] {1}, null);
+        verified(data).publishSegment(key, "pub-1", PUBLICATION_TOKEN, "seed", "stdout", 0, new byte[] {1}, null);
         int count = damage.equals("missing") ? 2 : damage.equals("extra") ? 0 : 1;
         data.seal(key, "pub-1", PUBLICATION_TOKEN, "bad-seal", "stdout", count, 1,
-                ToolPublicationContract.sha256(new byte[] {2}), true);
+                ToolPublicationContract.sha256(new byte[] {2}));
         try (var verifier = manualVerifier(data)) {
             assertThat(verifier.runOnce()).isTrue();
         }
@@ -971,17 +963,17 @@ public class ToolPublicationAsyncVerificationTest {
         try (var verifier = manualVerifier(data)) {
             publish("segment", 0, new String(bytes, StandardCharsets.UTF_8));
             verifier.runOnce();
-            data.seal(key, "pub-1", PUBLICATION_TOKEN, "seal-out", "stdout", 1, 2, digest, true);
+            data.seal(key, "pub-1", PUBLICATION_TOKEN, "seal-out", "stdout", 1, 2, digest);
             verifier.runOnce();
             data.seal(key, "pub-1", PUBLICATION_TOKEN, "seal-err", "stderr", 0, 0,
-                    ToolPublicationContract.sha256(new byte[0]), true);
+                    ToolPublicationContract.sha256(new byte[0]));
             verifier.runOnce();
             ObjectNode page = JSON.createObjectNode().put("toolResult", "managed-tool-result/1")
                     .put("type", "page").put("captureId", "capture-1").put("streamId", "stdout")
                     .put("firstOrdinal", 0).put("offset", 0);
             page.putArray("segments").add(JSON.createObjectNode().put("byteLength", 2).put("digest", digest));
             data.publishResource(key, "pub-1", PUBLICATION_TOKEN, "page", "page:stdout:0",
-                    "managed-tool-result-page", page.toString().getBytes(StandardCharsets.UTF_8), true);
+                    "managed-tool-result-page", page.toString().getBytes(StandardCharsets.UTF_8));
             verifier.runOnce();
             ObjectNode manifest = JSON.createObjectNode().put("toolResult", "managed-tool-result/1")
                     .put("type", "manifest").put("tenantId", invalid ? "wrong" : "tenant-1")
@@ -1007,7 +999,7 @@ public class ToolPublicationAsyncVerificationTest {
                 contents.add(content);
             }
             data.publishResource(key, "pub-1", PUBLICATION_TOKEN, "manifest", "manifest:1",
-                    "managed-tool-result-manifest", manifest.toString().getBytes(StandardCharsets.UTF_8), true);
+                    "managed-tool-result-manifest", manifest.toString().getBytes(StandardCharsets.UTF_8));
             verifier.runOnce();
             ObjectNode envelope = JSON.createObjectNode().put("executionStatus", "success");
             envelope.putArray("responseParts");
@@ -1015,7 +1007,7 @@ public class ToolPublicationAsyncVerificationTest {
                     .putNull("captureReason").put("previewTruncated", false).put("deliveryStatus", "pending");
             capture.set("manifest", status("manifest").path("receipt"));
             data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish",
-                    envelope.toString().getBytes(StandardCharsets.UTF_8), true);
+                    envelope.toString().getBytes(StandardCharsets.UTF_8));
             bucket.opens.set(0);
             if (readFailure) {
                 bucket.readFailure = new IllegalArgumentException("Unclassified capture read failure");
@@ -1043,7 +1035,7 @@ public class ToolPublicationAsyncVerificationTest {
     @Test
     void finishWaitsForItsPredecessorAndFailsWhenThePredecessorFails() {
         publish("predecessor", 0, "bytes");
-        data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish", terminal(10), true);
+        data.finish(key, "pub-1", PUBLICATION_TOKEN, "finish", terminal(10));
         bucket.objects.values().iterator().next()[0] = 'x';
         fixture.jdbc.update("UPDATE ma_operation SET verification_next_at = deadline"
                 + " WHERE operation_id = ?", "predecessor");
@@ -1106,6 +1098,20 @@ public class ToolPublicationAsyncVerificationTest {
             if (failPut) {
                 failPut = false;
                 throw new IllegalStateException("Unknown PUT result");
+            }
+        }
+
+        @Override
+        public InputStream openRange(String objectKey, long offset, long length, Runnable guard) {
+            guard.run();
+            try (InputStream full = open(objectKey)) {
+                byte[] bytes = full.readAllBytes();
+                if (offset < 0 || length < 0 || offset + length > bytes.length) {
+                    throw new IllegalArgumentException("Invalid object range");
+                }
+                return new ByteArrayInputStream(bytes, (int) offset, (int) length);
+            } catch (java.io.IOException error) {
+                throw new IllegalStateException("Test range read failed", error);
             }
         }
 

@@ -9,10 +9,10 @@ the Runtime Broker. Existing tests cover a lost start reply and an unavailable
 status, but the Workspace integration fixture uses H2 even in the MySQL job.
 Prepare currently does not retry a lost reply.
 
-This change covers acquire, prepare, start, status, cancel and release. Store
-failures, process crashes, general cancellation, SSE gaps, Shell, provider
-controls and automatic continuation remain FG6b–f / W0e work. No route or
-execution contract is added.
+This change covers acquire, prepare, start, status, cancel, release and
+release-before-forward. Store failures, process crashes, general cancellation,
+SSE gaps, Shell, provider controls and automatic continuation remain FG6b–f /
+W0e work. No route or execution contract is added.
 
 ## Design
 
@@ -28,23 +28,28 @@ each case must prove its fault fired. Prepare retries once only on a transport
 failure, reusing the original reservation fields. Definite Broker refusals and
 invalid replies are not retried. Repeated prepare loss remains blocked.
 
-| Reply         | Expected evidence                                                                                       |
-| ------------- | ------------------------------------------------------------------------------------------------------- |
-| acquire       | No reservation or start; blocked Session; storage owner retained                                        |
-| prepare       | Two requests, identical reservation identity, one execution and one start                               |
-| prepare twice | One reservation, no start; blocked Session; owner retained                                              |
-| start         | One start, status reads only the original execution; one effect                                         |
-| status        | No new start or identity; blocked Session; no model continuation                                        |
-| cancel        | Cancel after reservation but before start; lost reply blocks even if cancellation applied; zero effects |
-| release       | Result persisted, no terminal Turn; live and cold Session admission blocked                             |
+| Reply                  | Expected evidence                                                                                       |
+| ---------------------- | ------------------------------------------------------------------------------------------------------- |
+| acquire                | No reservation or start; blocked Session; storage owner retained                                        |
+| prepare                | Two requests, identical reservation identity, one execution and one start                               |
+| prepare twice          | One reservation, no start; blocked Session; owner retained                                              |
+| start                  | One start, status reads only the original execution; one effect                                         |
+| status                 | No new start or identity; blocked Session; no model continuation                                        |
+| cancel                 | Cancel after reservation but before start; lost reply blocks even if cancellation applied; zero effects |
+| release                | Result persisted, no terminal Turn; live and cold Session admission blocked                             |
+| release-before-forward | Settled turn; the detach terminal drain pays the owed release; session RELEASED, no owner retained      |
 
 A release reply can be lost **after release applied**: the Broker has already
 closed admission and cleared the Workspace storage owner. The Harness cannot
 infer that success and must retain its unsettled input. It cannot force the
-Broker to retain an owner after a completed release. A separate failure before
-forwarding release verifies that the storage owner stays held when release has
-not applied. This distinction follows the existing release protocol; FG6a does
-not introduce a second release acknowledgement phase.
+Broker to retain an owner after a completed release. The reverse failure — a
+release reply lost **before the release is forwarded** (`release-before-forward`)
+— reaches the same ownerless state by a different path: the turn has already
+settled (its `turn_complete` and `tool_result` are durable), so the detach's
+terminal drain pays the owed cleanup and the runtime Session ends `RELEASED`
+with no storage owner retained. Both cases therefore assert a released session;
+`release-before-forward` pins the drain's reconciliation of a settled turn, and
+FG6a still does not introduce a second release acknowledgement phase.
 
 The driver checks transcript results, model call counts, rejection of new
 input and reload, and filesystem effects. Java independently checks the SQL

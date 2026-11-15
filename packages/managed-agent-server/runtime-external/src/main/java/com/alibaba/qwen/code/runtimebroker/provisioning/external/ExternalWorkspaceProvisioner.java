@@ -77,7 +77,8 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
      */
     @Override
     public RuntimeProvisionRequest createRequest(RuntimeScope scope, String isolationKey) {
-        if (!WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(scope.getCapabilityDigest())) {
+        if (!WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(scope.getCapabilityDigest())
+                && !WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST.equals(scope.getCapabilityDigest())) {
             return super.createRequest(scope, isolationKey);
         }
         return new RuntimeProvisionRequest(scope, isolationKey, KIND, scope.getWorkspaceId());
@@ -194,8 +195,8 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
                 || !request.getScope().getWorkspaceId().equals(storage.tenantWorkspaceId())
                 || !provider.equals(storage.providerId())
                 || !request.getScope().getCanonicalCwd().equals(storage.mountRoot())
-                || !WorkspaceExecutionProfile.CAPABILITY_DIGEST
-                        .equals(request.getScope().getCapabilityDigest())) {
+                || (!WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(request.getScope().getCapabilityDigest())
+                        && !WorkspaceExecutionProfile.MEASURED_CAPABILITY_DIGEST.equals(request.getScope().getCapabilityDigest()))) {
             throw refuse("external_storage_registration_mismatch",
                     "The external storage registration does not match this placement.");
         }

@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
+import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -220,7 +221,7 @@ class Issue13180HardenedVerificationTest {
                 "INSERT INTO ma_session_record (record_kind, session_scope_key, record_key, tenant_id, session_id,"
                         + " action_id, record_id, action_version, domain, revision, state, options_json, gmt_create)"
                         + " VALUES ('ACTION', ?, ?, ?, ?, ?, ?, 1, 'approval', 1, 'requested', ?, ?)",
-                com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, session),
+                ManagedSessionStore.sessionScopeKey(tenant, session),
                 com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys.key(tenant, session, actionId), tenant, session, actionId, actionId,
                 "{\"v\":1,\"requestId\":\"" + actionId + "\","
                         + "\"turnId\":\"turn-verify\","

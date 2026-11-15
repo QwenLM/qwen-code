@@ -1,25 +1,25 @@
 package com.alibaba.qwen.code.runtimebroker;
 
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
+import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Proxy;
 import java.net.URI;
-import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneOffset;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -48,7 +48,7 @@ class RuntimeExtensionMetadataControlTest {
             assertEquals(1, fixture.observations.get());
             assertEquals(1, fixture.attestations.get());
             assertEquals(1, fixture.controls.get());
-            assertSame(before, fixture.bindings.findById(before.getBindingId()));
+            assertUnchanged(before, fixture.bindings.findById(before.getBindingId()));
             assertEquals(0, fixture.sessions.countActiveByBinding(before.getBindingId(), before.getGeneration()));
             fixture.observable = false;
             assertEquals("managed_extension_owner_unavailable", failure(fixture.broker.extensionControl("harness",
@@ -73,7 +73,7 @@ class RuntimeExtensionMetadataControlTest {
                     binding.getBindingId(), binding.getGeneration(), Map.of("kind", "extension-activate", "operationId", OPERATION,
                             "expectedRevision", 0, "revision", 1))).getCode());
             fixture.broker.extensionControl("harness", binding.getBindingId(), binding.getGeneration(), reconcile).toCompletableFuture().join();
-            assertSame(draining, fixture.bindings.findById(binding.getBindingId()));
+            assertUnchanged(draining, fixture.bindings.findById(binding.getBindingId()));
             assertEquals(1, fixture.controls.get());
         }
     }
@@ -87,10 +87,22 @@ class RuntimeExtensionMetadataControlTest {
                 () -> result.toCompletableFuture().join()).getCause();
     }
 
+    /** A JDBC read deserializes a fresh record, so "unchanged" is value equality. */
+    private static void assertUnchanged(RuntimeBindingRecord expected, RuntimeBindingRecord actual) {
+        assertTrue(actual.sameIdentity(expected));
+        assertEquals(expected.getVersion(), actual.getVersion());
+        assertEquals(expected.getState(), actual.getState());
+        assertEquals(expected.getAttestationGeneration(), actual.getAttestationGeneration());
+        assertEquals(expected.isDrainRequested(), actual.isDrainRequested());
+        assertEquals(expected.getResourceHandle(), actual.getResourceHandle());
+        assertTrue(expected.hasSameLease(actual.getLease()));
+        assertEquals(expected.getOperationOwner(), actual.getOperationOwner());
+        assertEquals(expected.getOperationGeneration(), actual.getOperationGeneration());
+    }
+
     private static final class Fixture implements AutoCloseable {
-        private final Clock clock = Clock.fixed(NOW, ZoneOffset.UTC);
-        private final InMemoryRuntimeBindingRepository bindings = new InMemoryRuntimeBindingRepository(clock, () -> "binding");
-        private final InMemoryRuntimeSessionRepository sessions = new InMemoryRuntimeSessionRepository();
+        private final JdbcRuntimeBindingRepository bindings;
+        private final JdbcRuntimeSessionRepository sessions;
         private final AtomicInteger observations = new AtomicInteger();
         private final AtomicInteger attestations = new AtomicInteger();
         private final AtomicInteger controls = new AtomicInteger();
@@ -99,6 +111,13 @@ class RuntimeExtensionMetadataControlTest {
         private boolean observable = true;
 
         Fixture(boolean installed) {
+            var source = new JdbcDataSource();
+            source.setURL("jdbc:h2:mem:extension-metadata-" + UUID.randomUUID()
+                    + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+            com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+            bindings = new JdbcRuntimeBindingRepository(source,
+                    new AesGcmSecretProtector("test", new byte[32]), () -> "binding");
+            sessions = new JdbcRuntimeSessionRepository(source);
             if (installed) {
                 var candidate = bindings.findOrCreate(new RuntimeProvisionRequest(SCOPE, "harness", "fixture"));
                 candidate = bindings.claimOperation(candidate.getBindingId(), "original-broker", Duration.ofMinutes(1));
@@ -122,7 +141,7 @@ class RuntimeExtensionMetadataControlTest {
                     observations.incrementAndGet();
                     assertEquals(original.getRequest(), request);
                     assertEquals(original.getResourceHandle(), handle);
-                    assertSame(original.getLease(), lease);
+                    assertTrue(original.hasSameLease(lease));
                     return CompletableFuture.completedFuture(observable ? RuntimeObservation.ready(handle, lease.getEndpoint(),
                             lease.getRuntimeInstanceId(), lease.getLeaseId(), lease.getEpoch()) : RuntimeObservation.unknown(handle));
                 }
@@ -145,7 +164,7 @@ class RuntimeExtensionMetadataControlTest {
                         throw new AssertionError("Extension metadata must not acquire or execute a tool: " + method.getName());
                     });
             broker = new RuntimeBrokerService(id -> CompletableFuture.completedFuture(SCOPE), provisioner, transport,
-                    bindings, sessions, new InMemoryToolExecutionRepository(clock), "new-broker", Duration.ofMinutes(1), Duration.ofMinutes(1));
+                    bindings, sessions, new JdbcToolExecutionRepository(source), "new-broker", Duration.ofMinutes(1), Duration.ofMinutes(1));
         }
 
         @Override

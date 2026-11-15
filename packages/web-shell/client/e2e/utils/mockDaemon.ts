@@ -43,6 +43,7 @@ import {
   type PermissionResponse,
   type PromptRequest,
 } from '@qwen-code/sdk/daemon';
+import { installBootRetry } from './bootRetry';
 import { installSseTransport, type SseTransport } from './sseTransport';
 
 /** One transcript page as the mock daemon serves it. */
@@ -97,6 +98,8 @@ export interface WebShellDaemonScenario {
   pairingApprovals: Record<string, string[]>;
   pairingGroupApprovals: Record<string, string[]>;
   sessions: DaemonSessionSummary[];
+  workspaceOrder: string[];
+  workspaceOrderSaveError?: boolean;
   standaloneSessions: DaemonStandaloneSessionSummary[];
   standaloneCreateError?: {
     status: number;
@@ -157,6 +160,23 @@ export interface WebShellDaemonScenario {
   /** Response for `POST /session/:id/btw`. */
   btwAnswer?: string;
   goalSnapshot: GoalSnapshotV2;
+  /**
+   * Per-workspace goal listings for `GET /workspaces/:id/goals`, keyed by
+   * workspace id. Each entry projects exactly like the primary `/goals`
+   * branch. The route gates on `capabilities.workspaces` registration (400
+   * `workspace_mismatch`) and trust (403 `untrusted_workspace`), not on map
+   * membership: an advertised workspace absent from the map lists empty.
+   * An entry keyed by the PRIMARY workspace id is ignored — the primary
+   * always derives from `goalSnapshot` on both surfaces.
+   */
+  goalsByWorkspace?: Record<
+    string,
+    {
+      sessionId: string;
+      displayName?: string | null;
+      snapshot: GoalSnapshotV2;
+    }
+  >;
   midTurnMessages: Array<{ messageId: string; text: string }>;
   /** Stateful response and replay used by historical branch E2E flows. */
   branch?: {
@@ -461,6 +481,8 @@ export function createWebShellDaemonScenario(
     pairingApprovals: overrides.pairingApprovals ?? {},
     pairingGroupApprovals: overrides.pairingGroupApprovals ?? {},
     sessions,
+    workspaceOrder: overrides.workspaceOrder ?? [],
+    workspaceOrderSaveError: overrides.workspaceOrderSaveError,
     standaloneSessions: overrides.standaloneSessions ?? [],
     standaloneCreateError: overrides.standaloneCreateError,
     sessionGroups: overrides.sessionGroups ?? [],
@@ -491,6 +513,9 @@ export function createWebShellDaemonScenario(
       goal: null,
       activity: 'idle',
     },
+    goalsByWorkspace: overrides.goalsByWorkspace
+      ? structuredClone(overrides.goalsByWorkspace)
+      : undefined,
     midTurnMessages: overrides.midTurnMessages ?? [],
     branch: overrides.branch,
   };
@@ -528,6 +553,9 @@ export async function installMockDaemon(
   peers.set(baseOrigin, { scenario, requests });
   const resolvePeer = (origin: string): DaemonPeer | undefined =>
     origin ? peers.get(origin) : undefined;
+  // Most app specs install their daemon before navigating, so hooking the
+  // boot retry here covers them without a page-setup line in each spec.
+  await installBootRetry(page);
   const sse = await installSseTransport<DaemonEvent>(page, { baseURL });
 
   await page.route(`${baseOrigin}/**`, async (route) => {
@@ -826,8 +854,11 @@ function isDaemonPath(path: string): boolean {
   return (
     path === '/health' ||
     path === '/capabilities' ||
+    path === '/workspace-order' ||
     path === '/brand' ||
+    path === '/auth/subscription' ||
     path === '/workspace/settings' ||
+    path === '/workspace/hooks' ||
     path === '/workspace/providers' ||
     path === '/workspace/skills' ||
     path === '/workspace/tools' ||
@@ -876,13 +907,17 @@ function isDaemonPath(path: string): boolean {
       path,
     ) ||
     path === '/goals' ||
+    /^\/workspaces\/[^/]+\/goals\/?$/.test(path) ||
     /^\/file\/?$/.test(path) ||
+    /^\/session\/[^/]+\/metadata\/?$/.test(path) ||
+    /^\/workspaces\/[^/]+\/session\/[^/]+\/metadata\/?$/.test(path) ||
     /^\/session\/[^/]+\/artifacts\/?$/.test(path) ||
     /^\/session\/[^/]+\/transcript\/?$/.test(path) ||
     /^\/permission\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/pending-prompts(?:\/[^/]+)?\/?$/.test(path) ||
     /^\/session\/[^/]+\/goal\/?$/.test(path) ||
     /^\/session\/[^/]+\/status\/?$/.test(path) ||
+    /^\/session\/[^/]+\/stats\/?$/.test(path) ||
     /^\/session\/[^/]+\/tasks\/?$/.test(path) ||
     /^\/session\/[^/]+\/saved-workflows\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/mid-turn-message\/?$/.test(path) ||
@@ -895,12 +930,15 @@ function isDaemonPath(path: string): boolean {
 }
 
 function isDaemonRoute(method: string, path: string): boolean {
+  if ((method === 'GET' || method === 'POST') && path === '/workspace-order')
+    return true;
   if (
     method === 'GET' &&
     (path === '/health' || path === '/capabilities' || path === '/brand')
   ) {
     return true;
   }
+  if (method === 'GET' && path === '/auth/subscription') return true;
   if (method === 'GET' && path === '/workspace-path-suggestions') return true;
   if (method === 'GET' && path === '/remote-workspace-path-suggestions') {
     return true;
@@ -920,6 +958,7 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   }
   if (method === 'GET' && path === '/workspace/providers') return true;
+  if (method === 'GET' && path === '/workspace/hooks') return true;
   if (method === 'GET' && path === '/workspace/skills') return true;
   if (method === 'GET' && path === '/workspace/tools') return true;
   if (method === 'GET' && path === '/workspace/extensions') return true;
@@ -1086,7 +1125,17 @@ function isDaemonRoute(method: string, path: string): boolean {
   ) {
     return true;
   }
+  if (
+    method === 'PATCH' &&
+    (/^\/session\/[^/]+\/metadata\/?$/.test(path) ||
+      /^\/workspaces\/[^/]+\/session\/[^/]+\/metadata\/?$/.test(path))
+  ) {
+    return true;
+  }
   if (method === 'GET' && path === '/goals') return true;
+  if (method === 'GET' && /^\/workspaces\/[^/]+\/goals\/?$/.test(path)) {
+    return true;
+  }
   if (
     (method === 'GET' || method === 'POST') &&
     /^\/session\/[^/]+\/goal\/?$/.test(path)
@@ -1116,6 +1165,9 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   }
   if (method === 'GET' && /^\/session\/[^/]+\/status\/?$/.test(path)) {
+    return true;
+  }
+  if (method === 'GET' && /^\/session\/[^/]+\/stats\/?$/.test(path)) {
     return true;
   }
   if (method === 'GET' && /^\/workspaces\/.+\/git\/?$/.test(path)) {
@@ -1251,6 +1303,24 @@ async function handleDaemonRoute(
   searchParams: URLSearchParams = new URLSearchParams(),
   resolvePeer?: (origin: string) => DaemonPeer | undefined,
 ): Promise<void> {
+  if (path === '/workspace-order') {
+    if (method === 'POST') {
+      if (scenario.workspaceOrderSaveError) {
+        await json(
+          route,
+          {
+            error: 'Failed to persist workspace order',
+            code: 'workspace_registration_store_error',
+          },
+          500,
+        );
+        return;
+      }
+      scenario.workspaceOrder = getRecordValue(body, 'cwds') as string[];
+    }
+    await json(route, { cwds: scenario.workspaceOrder });
+    return;
+  }
   if (method === 'GET' && path === '/health') {
     await json(route, { status: 'ok' });
     return;
@@ -1264,6 +1334,13 @@ async function handleDaemonRoute(
     // the visual baselines stay valid. A spec that needs a white-label shell
     // should give this a scenario field rather than loosening it here.
     await json(route, {});
+    return;
+  }
+  if (method === 'GET' && path === '/auth/subscription') {
+    // The shell reads the subscription config at boot. Keep it disabled unless
+    // a spec opts in with its own route, so the read succeeds without reaching
+    // the real network and without turning subscription UI on everywhere.
+    await json(route, { enabled: false });
     return;
   }
   if (method === 'GET' && path === '/workspace-path-suggestions') {
@@ -1395,6 +1472,21 @@ async function handleDaemonRoute(
         ...(overrides.hooks ?? {}),
       });
     }
+    return;
+  }
+  if (method === 'GET' && path === '/workspace/hooks') {
+    // The legacy primary-workspace route answers the same projection as the
+    // scoped /workspaces/:cwd/hooks route above.
+    const overrides = scenario.workspaceOverviews[scenario.workspaceCwd] ?? {};
+    await json(route, {
+      v: 1,
+      workspaceCwd: scenario.workspaceCwd,
+      initialized: true,
+      disabled: false,
+      hooks: [],
+      events: {},
+      ...(overrides.hooks ?? {}),
+    });
     return;
   }
   if (method === 'GET' && path === '/workspace/settings') {
@@ -2162,8 +2254,202 @@ async function handleDaemonRoute(
       return;
     }
   }
+  const sessionMetadataMatch =
+    path.match(/^\/session\/([^/]+)\/metadata\/?$/) ??
+    path.match(/^\/workspaces\/([^/]+)\/session\/([^/]+)\/metadata\/?$/);
+  if (method === 'PATCH' && sessionMetadataMatch) {
+    // The workspace-scoped route resolves the session INSIDE the named
+    // workspace; mirror that ownership rule so a wrong-workspace write
+    // fails here like it does in production. A workspace segment that
+    // cannot be decoded fails closed (workspace_mismatch), not as an
+    // unscoped route.
+    const isWorkspaceRoute = sessionMetadataMatch[2] !== undefined;
+    const workspaceSegment = isWorkspaceRoute
+      ? decodeRouteSegment(sessionMetadataMatch[1])
+      : undefined;
+    const sessionId = decodeRouteSegment(
+      sessionMetadataMatch[2] ?? sessionMetadataMatch[1],
+    );
+    const index =
+      sessionId === undefined
+        ? -1
+        : scenario.sessions.findIndex(
+            (session) => session.sessionId === sessionId,
+          );
+    if (index < 0) {
+      await json(
+        route,
+        {
+          code: 'session_not_found',
+          message: `Session ${sessionId ?? ''} was not found.`,
+        },
+        404,
+      );
+      return;
+    }
+    if (
+      isWorkspaceRoute &&
+      (workspaceSegment === undefined ||
+        scenario.sessions[index].workspaceCwd !== workspaceSegment)
+    ) {
+      await json(
+        route,
+        {
+          code: 'workspace_mismatch',
+          message: `Session ${sessionId} does not belong to the named workspace.`,
+        },
+        400,
+      );
+      return;
+    }
+    const summary = scenario.sessions[index];
+    const displayName = readStringField(body, 'displayName');
+    const prInput = getRecordValue(body, 'pr');
+    let prs = summary.prs ?? [];
+    if (prInput !== undefined) {
+      // Mirror the real route's parseSessionPrBody: an invalid pr is a 400
+      // invalid_metadata, not a payload the mock silently accepts.
+      const pr = isRecord(prInput) ? prInput : null;
+      const number = pr?.['number'];
+      const url = pr?.['url'];
+      const state = pr?.['state'];
+      const role = pr?.['role'];
+      if (
+        pr === null ||
+        typeof number !== 'number' ||
+        !Number.isInteger(number) ||
+        number <= 0 ||
+        typeof url !== 'string' ||
+        url.length > 2048 ||
+        !/^https?:\/\//i.test(url) ||
+        Array.from(url).some((character) => {
+          const code = character.charCodeAt(0);
+          return code <= 31 || code === 127;
+        }) ||
+        (state !== undefined &&
+          state !== 'open' &&
+          state !== 'merged' &&
+          state !== 'closed') ||
+        (role !== undefined &&
+          role !== null &&
+          role !== 'review' &&
+          role !== 'verify' &&
+          role !== 'fix')
+      ) {
+        await json(
+          route,
+          {
+            // The real route answers { error, code, field } and the SDK reads
+            // `error` first; keep the same shape AND the route's verbatim text
+            // so a test asserting the production body is written against the
+            // route, not a fixture paraphrase.
+            error:
+              '`pr` must be an object with a positive integer `number` and an http(s) `url` of at most 2048 characters, without control characters, an optional `state` that is one of `open`, `merged`, or `closed`, and an optional `role` that is one of `review`, `verify`, `fix`, or null to clear',
+            code: 'invalid_metadata',
+            field: 'pr',
+          },
+          400,
+        );
+        return;
+      }
+      // Mirror upsertSessionPr's merge: an omitted state/role preserves the
+      // known entry's value (matched by number AND url), and role:null clears.
+      // The route matches on the canonical URL; the fixture uses exact equality
+      // because the bind URLs here are already canonical. A different URL is a
+      // different PR and carries nothing across (no known entry matches).
+      const known = prs.find((p) => p.number === number && p.url === url);
+      const mergedState =
+        state === 'open' || state === 'merged' || state === 'closed'
+          ? state
+          : known?.state;
+      const mergedRole =
+        role === undefined
+          ? known?.role
+          : role === 'review' || role === 'verify' || role === 'fix'
+            ? role
+            : undefined;
+      const entry = {
+        number,
+        url,
+        ...(mergedState ? { state: mergedState } : {}),
+        ...(mergedRole ? { role: mergedRole } : {}),
+      };
+      prs = [...prs.filter((p) => p.number !== number), entry];
+    }
+    scenario.sessions[index] = {
+      ...summary,
+      ...(displayName !== undefined ? { displayName } : {}),
+      prs,
+      updatedAt: now,
+    };
+    await json(route, {
+      sessionId,
+      ...(displayName !== undefined ? { displayName } : {}),
+      prs,
+    });
+    return;
+  }
   if (method === 'POST' && path === '/session') {
     await json(route, sessionEnvelope(scenario, { attached: false }));
+    return;
+  }
+  const workspaceGoalsMatch = path.match(/^\/workspaces\/([^/]+)\/goals\/?$/);
+  if (method === 'GET' && workspaceGoalsMatch) {
+    const selector = decodeURIComponent(workspaceGoalsMatch[1]!);
+    // Gate on registration and trust like the real route, not on map
+    // membership: an advertised workspace with no goals lists empty, and an
+    // untrusted one is rejected even if the fixture gave it goals.
+    const ws = (scenario.capabilities.workspaces ?? []).find(
+      (w) => w.id === selector || w.cwd === selector,
+    );
+    if (!ws) {
+      await json(
+        route,
+        {
+          error:
+            'Workspace mismatch: the requested workspace is not registered with this daemon.',
+          code: 'workspace_mismatch',
+        },
+        400,
+      );
+      return;
+    }
+    if (!ws.trusted) {
+      await json(
+        route,
+        { error: 'Workspace is not trusted.', code: 'untrusted_workspace' },
+        403,
+      );
+      return;
+    }
+    // The primary workspace derives from scenario.goalSnapshot on BOTH
+    // surfaces (the real daemon reads one runtime); a map entry keyed by the
+    // primary id is ignored so the two listings can never disagree.
+    const entry = ws.primary ? undefined : scenario.goalsByWorkspace?.[ws.id];
+    const snapshot = ws.primary ? scenario.goalSnapshot : entry?.snapshot;
+    const sessionId = ws.primary ? scenario.sessionId : entry?.sessionId;
+    const displayName = ws.primary
+      ? scenario.displayName
+      : (entry?.displayName ?? null);
+    const goal = snapshot?.goal;
+    await json(route, {
+      v: 1,
+      goals:
+        snapshot && goal && goal.status !== 'complete'
+          ? [
+              {
+                sessionId,
+                displayName,
+                condition: goal.objective,
+                iterations: goal.turnCount,
+                setAt: goal.createdAt,
+                hasActivePrompt: snapshot.activity !== 'idle',
+                snapshot,
+              },
+            ]
+          : [],
+      droppedCount: 0,
+    });
     return;
   }
   if (method === 'GET' && path === '/goals') {
@@ -2191,15 +2477,36 @@ async function handleDaemonRoute(
 
   const goalMatch = path.match(/^\/session\/([^/]+)\/goal\/?$/);
   if (goalMatch) {
+    // Resolve the target snapshot by session id so controlling a secondary
+    // goal does not mutate the primary's card (the real routes address the
+    // owning runtime). The primary session always derives from
+    // scenario.goalSnapshot — the map must not hold a second primary copy.
+    const sessionId = decodeURIComponent(goalMatch[1]!);
+    const wsEntry =
+      sessionId === scenario.sessionId
+        ? undefined
+        : Object.values(scenario.goalsByWorkspace ?? {}).find(
+            (entry) => entry.sessionId === sessionId,
+          );
     if (method === 'GET') {
-      await json(route, { snapshot: scenario.goalSnapshot });
+      await json(route, {
+        snapshot: wsEntry ? wsEntry.snapshot : scenario.goalSnapshot,
+      });
       return;
     }
-    scenario.goalSnapshot = reduceMockGoal(
-      scenario.goalSnapshot,
-      body as GoalControlRequest,
-    );
-    await json(route, { snapshot: scenario.goalSnapshot });
+    if (wsEntry) {
+      wsEntry.snapshot = reduceMockGoal(
+        wsEntry.snapshot,
+        body as GoalControlRequest,
+      );
+      await json(route, { snapshot: wsEntry.snapshot });
+    } else {
+      scenario.goalSnapshot = reduceMockGoal(
+        scenario.goalSnapshot,
+        body as GoalControlRequest,
+      );
+      await json(route, { snapshot: scenario.goalSnapshot });
+    }
     return;
   }
   if (method === 'GET' && /^\/session\/[^/]+\/status\/?$/.test(path)) {
@@ -2211,6 +2518,31 @@ async function handleDaemonRoute(
       sessionId: scenario.sessionId,
       workspaceCwd: scenario.workspaceCwd,
       displayName: scenario.displayName,
+    });
+    return;
+  }
+  const statsMatch = path.match(/^\/session\/([^/]+)\/stats\/?$/);
+  if (method === 'GET' && statsMatch) {
+    // The composer reads session usage in the background. A mock session makes
+    // no model API calls, so it reports zero usage and the reading renders
+    // nothing; specs that exercise the reading override this route with their
+    // own totals.
+    await json(route, {
+      v: 1,
+      sessionId: decodeURIComponent(statsMatch[1] ?? ''),
+      workspaceCwd: scenario.workspaceCwd,
+      sessionStartTimeMs: Date.now() - 60_000,
+      durationMs: 60_000,
+      promptCount: 0,
+      models: {},
+      tools: {
+        totalCalls: 0,
+        totalSuccess: 0,
+        totalFail: 0,
+        totalDurationMs: 0,
+        byName: {},
+      },
+      files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
     });
     return;
   }

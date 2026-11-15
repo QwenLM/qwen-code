@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof;
 import com.alibaba.qwen.code.runtimebroker.JsonCodec;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAttestation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
@@ -12,21 +13,25 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.alibaba.qwen.code.runtimebroker.RuntimePublicationGrant;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
+import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
+import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.host.HostCommandRunner;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocol;
 import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import com.alibaba.qwen.code.runtimebroker.spi.SshRuntimeNode;
 import com.alibaba.qwen.code.runtimebroker.spi.SshRuntimeStorage;
 import com.sun.net.httpserver.HttpServer;
+import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -219,9 +224,10 @@ class SshRuntimeInteropTest {
 
     @Test
     void aNewBrokerAdoptsTheLiveMasterAfterTheOldJvmHaltsWithoutShutdownHooks() throws Exception {
-        var bindings = new InMemoryRuntimeBindingRepository();
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository();
+        var source = source();
+        var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
         SshRuntimeStorage storage;
         RuntimeProvisionRequest request;
         RuntimeBindingRecord saved;
@@ -306,7 +312,7 @@ class SshRuntimeInteropTest {
             var http = new HttpRuntimeTransport(connections::resolveEndpoint);
             try (var provisioner = new SshRuntimeProvisioner(id -> node, ignored -> storage, connections, http)) {
                 var request = provisioner.createRequest(scope, "harness");
-                var repository = new InMemoryRuntimeBindingRepository();
+                var repository = new JdbcRuntimeBindingRepository(source(), new AesGcmSecretProtector("test", new byte[32]));
                 var binding = repository.findOrCreate(request);
                 var claim = repository.claimOperation(binding.getBindingId(), "owner", Duration.ofSeconds(30));
                 var seed = claim.getProvisionSeed();
@@ -339,7 +345,7 @@ class SshRuntimeInteropTest {
             var http = new HttpRuntimeTransport(connections::resolveEndpoint);
             try (var provisioner = new SshRuntimeProvisioner(id -> node, ignored -> storage, connections, http)) {
                 var request = provisioner.createRequest(scope, "harness");
-                var repository = new InMemoryRuntimeBindingRepository();
+                var repository = new JdbcRuntimeBindingRepository(source(), new AesGcmSecretProtector("test", new byte[32]));
                 var binding = repository.findOrCreate(request);
                 var claim = repository.claimOperation(binding.getBindingId(), "owner", Duration.ofSeconds(30));
                 var handle = await(provisioner.ensureResource(request, claim.getProvisionSeed(), null));
@@ -369,9 +375,10 @@ class SshRuntimeInteropTest {
             var storage = registerStorage(connections);
             var scope = new RuntimeScope("tenant", "workspace", "1", storage.mountRoot(), WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session");
             var http = new HttpRuntimeTransport(connections::resolveEndpoint);
-            var bindings = new InMemoryRuntimeBindingRepository();
-            var sessions = new InMemoryRuntimeSessionRepository();
-            var executions = new InMemoryToolExecutionRepository();
+            var source = source();
+            var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
+            var sessions = new JdbcRuntimeSessionRepository(source);
+            var executions = new JdbcToolExecutionRepository(source);
             var transport = new WorkspaceTransport(http, bindings, sessions, executions);
             try (var provisioner = new SshRuntimeProvisioner(id -> node, ignored -> storage, connections, http);
                     var service = new RuntimeBrokerService(ignored -> CompletableFuture.completedFuture(scope), provisioner,
@@ -461,9 +468,10 @@ class SshRuntimeInteropTest {
 
     @Test
     void rebuildsTheMissingSqlStopReceiptFromTheOriginalCleanProofWithoutHttpAcknowledgement() throws Exception {
-        var bindings = new InMemoryRuntimeBindingRepository();
-        var sessions = new InMemoryRuntimeSessionRepository();
-        var executions = new InMemoryToolExecutionRepository();
+        var source = source();
+        var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
+        var sessions = new JdbcRuntimeSessionRepository(source);
+        var executions = new JdbcToolExecutionRepository(source);
         SshRuntimeStorage storage;
         RuntimeScope scope;
         RuntimeBindingRecord binding;
@@ -523,9 +531,10 @@ class SshRuntimeInteropTest {
                     quote(node.nodeExecutable()) + " --input-type=module -e " + quote(fetch))));
             var scope = new RuntimeScope("tenant", "workspace", "1", storage.mountRoot(), WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session");
             var http = new HttpRuntimeTransport(connections::resolveEndpoint);
-            var bindings = new InMemoryRuntimeBindingRepository();
-            var sessions = new InMemoryRuntimeSessionRepository();
-            var executions = new InMemoryToolExecutionRepository();
+            var source = source();
+            var bindings = new JdbcRuntimeBindingRepository(source, new AesGcmSecretProtector("test", new byte[32]));
+            var sessions = new JdbcRuntimeSessionRepository(source);
+            var executions = new JdbcToolExecutionRepository(source);
             var transport = new WorkspaceTransport(http, bindings, sessions, executions);
             try (var provisioner = new SshRuntimeProvisioner(id -> node, ignored -> storage, connections, http);
                     var service = new RuntimeBrokerService(ignored -> CompletableFuture.completedFuture(scope), provisioner,
@@ -589,6 +598,13 @@ class SshRuntimeInteropTest {
 
     private URI publicationEndpoint() {
         return URI.create("http://127.0.0.1:" + publications.getAddress().getPort() + "/publications");
+    }
+
+    private static JdbcDataSource source() {
+        var source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:ssh-interop-" + UUID.randomUUID() + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        return source;
     }
 
     private ToolExecutionRecord runFile(RuntimeBrokerService service, String runtime, String call) throws Exception {
@@ -680,15 +696,15 @@ class SshRuntimeInteropTest {
 
     private static final class WorkspaceTransport implements RuntimeTransport {
         private final HttpRuntimeTransport http;
-        private final InMemoryRuntimeBindingRepository bindings;
-        private final InMemoryRuntimeSessionRepository sessions;
-        private final InMemoryToolExecutionRepository records;
+        private final RuntimeBindingRepository bindings;
+        private final RuntimeSessionRepository sessions;
+        private final ToolExecutionRepository records;
         private final AtomicInteger executions = new AtomicInteger();
         private final AtomicInteger acknowledgements = new AtomicInteger();
         private boolean loseFirstAcknowledgement = true;
 
-        private WorkspaceTransport(HttpRuntimeTransport http, InMemoryRuntimeBindingRepository bindings,
-                InMemoryRuntimeSessionRepository sessions, InMemoryToolExecutionRepository records) {
+        private WorkspaceTransport(HttpRuntimeTransport http, RuntimeBindingRepository bindings,
+                RuntimeSessionRepository sessions, ToolExecutionRepository records) {
             this.http = http;
             this.bindings = bindings;
             this.sessions = sessions;
