@@ -656,6 +656,7 @@ describe('Session', () => {
   let mockFileHistoryService: {
     makeSnapshot: ReturnType<typeof vi.fn>;
     getSnapshots: ReturnType<typeof vi.fn>;
+    getForeignSnapshotCwds: ReturnType<typeof vi.fn>;
     restoreFromSnapshots: ReturnType<typeof vi.fn>;
     rewind: ReturnType<typeof vi.fn>;
   };
@@ -1096,6 +1097,7 @@ describe('Session', () => {
     mockFileHistoryService = {
       makeSnapshot: vi.fn().mockResolvedValue(undefined),
       getSnapshots: vi.fn().mockReturnValue([]),
+      getForeignSnapshotCwds: vi.fn().mockReturnValue([]),
       restoreFromSnapshots: vi.fn(),
       rewind: vi.fn(),
     };
@@ -13453,6 +13455,65 @@ describe('Session', () => {
         expect.any(Array),
         { mode: ApprovalMode.DEFAULT },
       );
+    });
+
+    it('refuses a file rewind with foreign-cwd checkpoints before touching history', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+        { role: 'model', parts: [{ text: 'second reply' }] },
+      ];
+      identifyPrompts(history, [0, 2]);
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(
+        ['p1', 'p2'].map((promptId) => ({
+          promptId,
+          timestamp: new Date('2026-10-09T00:00:00.000Z'),
+          trackedFileBackups: {},
+        })),
+      );
+      vi.mocked(mockFileHistoryService.getForeignSnapshotCwds).mockReturnValue([
+        '/elsewhere',
+      ]);
+
+      expect(() => session.rewindToTurn(1)).toThrow(
+        /different working directory/,
+      );
+
+      expect(mockChat.truncateHistory).not.toHaveBeenCalled();
+      expect(
+        mockFileHistoryService.restoreFromSnapshots,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('still allows a conversation-only rewind with foreign-cwd checkpoints', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+        { role: 'model', parts: [{ text: 'second reply' }] },
+      ];
+      identifyPrompts(history, [0, 2]);
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+      vi.mocked(mockFileHistoryService.getSnapshots).mockReturnValue(
+        ['p1', 'p2'].map((promptId) => ({
+          promptId,
+          timestamp: new Date('2026-10-09T00:00:00.000Z'),
+          trackedFileBackups: {},
+        })),
+      );
+      vi.mocked(mockFileHistoryService.getForeignSnapshotCwds).mockReturnValue([
+        '/elsewhere',
+      ]);
+
+      expect(session.rewindToTurn(1, { rewindFiles: false })).toEqual({
+        targetTurnIndex: 1,
+        apiTruncateIndex: 2,
+      });
+      expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
     });
 
     function identifyPrompts(history: Content[], indexes: number[]) {

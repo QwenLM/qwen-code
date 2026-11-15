@@ -6,6 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -269,6 +270,87 @@ describe('ManagedToolFileHistory', () => {
       expect(operation).not.toHaveBeenCalled();
     } finally {
       validate.mockRestore();
+    }
+  });
+
+  it('carries the snapshot cwd across capture, state and reload', async () => {
+    await owner.checkpoint('parent-1');
+    const state = owner.state();
+
+    expect(state.snapshots[0].cwd).toBe(cwd);
+    expect(() => managedToolDigest(state)).not.toThrow();
+
+    const reloaded = new ManagedToolFileHistory(
+      ownerSessionId,
+      cwd,
+      state.snapshots,
+    );
+    await reloaded.ready();
+    expect(reloaded.service.getSnapshots()[0].cwd).toBe(cwd);
+    expect(reloaded.state().snapshots[0].cwd).toBe(cwd);
+    await reloaded.drain();
+  });
+
+  it('keeps a relocated checkpoint visible but not file-restorable', async () => {
+    const elsewhere = await mkdtemp(
+      join(tmpdir(), 'managed-history-elsewhere-'),
+    );
+    try {
+      const filePath = join(cwd, 'proof.txt');
+      await writeFile(filePath, 'zero');
+      await owner.checkpoint('parent-1');
+      await owner.run(() => owner.service.trackEdit(filePath));
+      await writeFile(filePath, 'one');
+      const state = owner.state();
+      expect(state.snapshots[0].cwd).toBe(cwd);
+
+      const relocated = new ManagedToolFileHistory(
+        ownerSessionId,
+        elsewhere,
+        state.snapshots,
+      );
+      await relocated.ready();
+      expect(relocated.service.getSnapshots().map((s) => s.promptId)).toEqual([
+        'parent-1',
+      ]);
+      await expect(relocated.service.rewind('parent-1')).rejects.toThrow(
+        /different working directory/,
+      );
+      expect(await readFile(filePath, 'utf-8')).toBe('one');
+      expect(existsSync(join(elsewhere, 'proof.txt'))).toBe(false);
+      await relocated.drain();
+    } finally {
+      await rm(elsewhere, { recursive: true, force: true });
+    }
+  });
+
+  it('does not capture relocated edits into the original checkpoint', async () => {
+    const elsewhere = await mkdtemp(
+      join(tmpdir(), 'managed-history-relocated-'),
+    );
+    try {
+      await owner.checkpoint('parent-1');
+      const relocated = new ManagedToolFileHistory(
+        ownerSessionId,
+        elsewhere,
+        owner.state().snapshots,
+      );
+      await relocated.ready();
+
+      const filePath = join(elsewhere, 'new.txt');
+      await writeFile(filePath, 'zero');
+      await relocated.run(() => relocated.service.trackEdit(filePath));
+
+      const snapshot = relocated.state().snapshots.at(-1)!;
+      // The checkpoint keeps its original-directory label and must not gain
+      // entries captured under the relocated root, or reloading it in the
+      // original directory would pass the cross-directory guard with
+      // mixed-provenance content.
+      expect(snapshot.cwd).toBe(cwd);
+      expect(snapshot.trackedFileBackups['new.txt']).toBeUndefined();
+      await relocated.drain();
+    } finally {
+      await rm(elsewhere, { recursive: true, force: true });
     }
   });
 });

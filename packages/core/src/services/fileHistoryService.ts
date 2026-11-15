@@ -81,6 +81,13 @@ export interface FileHistorySnapshot {
   /** Original turn endpoint when the following turn has been deleted. */
   diffAfterBackups?: Record<string, FileHistoryBackup>;
   timestamp: Date;
+  /**
+   * Working directory the snapshot was captured under. Relative tracked
+   * paths expand against the service cwd, so a snapshot from another
+   * directory must not have its files applied here — `rewind` refuses it.
+   * Older payloads lack it; those keep restoring as before.
+   */
+  cwd?: string;
 }
 
 export interface FileHistoryState {
@@ -150,6 +157,7 @@ export interface SerializedFileHistorySnapshot {
   trackedFileBackups: Record<string, SerializedFileHistoryBackup>;
   diffAfterBackups?: Record<string, SerializedFileHistoryBackup>;
   timestamp: string;
+  cwd?: string;
 }
 
 export interface SerializedFileHistoryBackup {
@@ -183,6 +191,7 @@ export function serializeSnapshot(
     ...(s.diffAfterBackups
       ? { diffAfterBackups: serializeBackups(s.diffAfterBackups) }
       : {}),
+    ...(s.cwd ? { cwd: s.cwd } : {}),
   };
 }
 
@@ -217,6 +226,7 @@ export function deserializeSnapshots(
     ...(s.diffAfterBackups
       ? { diffAfterBackups: deserializeBackups(s.diffAfterBackups) }
       : {}),
+    ...(s.cwd ? { cwd: s.cwd } : {}),
   }));
 }
 /** Per-turn read-fanout cap. Each candidate file may read up to two backups,
@@ -718,6 +728,23 @@ export class FileHistoryService {
     return this.state.snapshots;
   }
 
+  /**
+   * Working directories recorded on timeline snapshots that were captured
+   * under a root other than this service's. File rewind expands tracked
+   * paths and first-version backups from every snapshot against this cwd,
+   * so any foreign entry makes file restoration unsafe (see `rewind`).
+   * Legacy snapshots without a recorded cwd never count as foreign.
+   */
+  getForeignSnapshotCwds(): string[] {
+    const foreign = new Set<string>();
+    for (const snapshot of this.state.snapshots) {
+      if (snapshot.cwd && resolve(snapshot.cwd) !== resolve(this.cwd)) {
+        foreign.add(snapshot.cwd);
+      }
+    }
+    return [...foreign];
+  }
+
   private recordSnapshotUpdate(snapshot: FileHistorySnapshot): void {
     try {
       this.onSnapshotUpdated?.(snapshot);
@@ -732,6 +759,10 @@ export class FileHistoryService {
       throw new Error('Retained history exceeds its snapshot limit.');
     const trackedFiles = new Set<string>();
     const migrated: FileHistorySnapshot[] = [];
+    // Foreign-cwd snapshots are deliberately kept: every rewind surface
+    // resolves turns through this array's positions (conversation-only rewind
+    // included), so filtering here would corrupt turn-index mapping. The
+    // cross-directory guard lives in `rewind`, at file-application time.
     for (const snapshot of snapshots) {
       const trackedFileBackups: Record<string, FileHistoryBackup> =
         Object.create(null);
@@ -869,6 +900,18 @@ export class FileHistoryService {
           existing.backupFileName,
           async () => {},
         );
+      return;
+    }
+    if (mostRecent.cwd && resolve(mostRecent.cwd) !== resolve(this.cwd)) {
+      // Folding a backup captured under this cwd into a snapshot labeled
+      // with another directory would give that snapshot mixed provenance:
+      // reloading it in the labeled directory would then pass the
+      // cross-directory guard and restore this capture into an unrelated
+      // file. Skip the write; the next makeSnapshot opens a snapshot
+      // labeled with the current cwd.
+      debugLogger.warn(
+        `FileHistory: Skipping trackEdit for ${trackingPath}: snapshot ${mostRecent.promptId} was captured in ${mostRecent.cwd}`,
+      );
       return;
     }
 
@@ -1026,6 +1069,7 @@ export class FileHistoryService {
       promptId,
       trackedFileBackups,
       timestamp: new Date(),
+      cwd: resolve(this.cwd),
     };
 
     this.state.snapshots.push(newSnapshot);
@@ -1048,6 +1092,18 @@ export class FileHistoryService {
     if (this.retainedStorage)
       throw new Error('Retained history cannot rewind.');
     if (!this.enabled) return { filesChanged: [], filesFailed: [] };
+
+    // File application consumes tracked paths and first-version backups from
+    // every snapshot in the timeline, so a single foreign-cwd checkpoint
+    // makes the whole applied set unsafe — not just the selected one.
+    // Refuse before any file is touched or history truncated; conversation
+    // rewind does not go through here, so refusing only blocks file restore.
+    const foreignCwds = this.getForeignSnapshotCwds();
+    if (foreignCwds.length > 0) {
+      throw new Error(
+        `The session timeline contains checkpoints captured in a different working directory (${foreignCwds.join(', ')}) and cannot restore files from ${this.cwd}`,
+      );
+    }
 
     // Refuse a shared key before truncation can prune the wrong backups.
     let matches = 0;

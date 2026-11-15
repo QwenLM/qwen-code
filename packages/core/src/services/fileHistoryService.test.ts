@@ -15,7 +15,7 @@ import {
   readFile,
 } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename, join, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 
 const mockStorageDir = vi.hoisted(() => vi.fn());
@@ -569,6 +569,271 @@ describe('FileHistoryService', () => {
       expect(result.filesChanged).toEqual([]);
       expect(result.filesFailed).toContain(victim);
       expect(await readFile(victim, 'utf-8')).toBe('current');
+    });
+  });
+
+  describe('snapshot cwd compatibility', () => {
+    it('records the working directory on every new snapshot', async () => {
+      await service.makeSnapshot('p1');
+
+      expect(service.getSnapshots()[0].cwd).toBe(projectDir);
+    });
+
+    it('round-trips the snapshot cwd through serialization', () => {
+      const snapshot: FileHistorySnapshot = {
+        ...restoredP1('a.txt', 'deadbeefcafebabe@v1'),
+        cwd: projectDir,
+      };
+
+      const [restored] = deserializeSnapshots([serializeSnapshot(snapshot)]);
+
+      expect(restored.cwd).toBe(projectDir);
+    });
+
+    it('keeps foreign-cwd checkpoints in the timeline for turn mapping', () => {
+      const otherDir = join(tmpdir(), 'fh-other-root');
+      const local: FileHistorySnapshot = {
+        ...restoredP1('b.txt', 'deadfeed012345678@v1'),
+        promptId: 'p2',
+        cwd: projectDir,
+      };
+      service.restoreFromSnapshots([
+        { ...restoredP1('a.txt', 'deadbeefcafebabe@v1'), cwd: otherDir },
+        local,
+      ]);
+
+      // Rewind surfaces resolve turns through these positions, so a foreign
+      // checkpoint must stay in place rather than disappear from the list.
+      expect(service.getSnapshots().map((s) => s.promptId)).toEqual([
+        'p1',
+        'p2',
+      ]);
+    });
+
+    it('does not fold a deleted foreign checkpoint into a local survivor', () => {
+      const otherDir = join(tmpdir(), 'fh-other-root');
+      const survivor: FileHistorySnapshot = {
+        ...restoredP1('a.txt', 'deadbeefcafebabe@v1'),
+        promptId: 'p1',
+        cwd: projectDir,
+      };
+      const foreign: FileHistorySnapshot = {
+        ...restoredP1('b.txt', 'deadfeed012345678@v1'),
+        promptId: 'p2',
+        cwd: otherDir,
+      };
+
+      const [kept] = removeFileHistorySnapshots(
+        [survivor, foreign],
+        new Set(['p2']),
+      );
+
+      // The fold is dropped: the survivor must not gain entries captured
+      // under another directory, or rewind would resolve them through
+      // first-version fallback against the wrong root while
+      // getForeignSnapshotCwds reports nothing.
+      expect(kept.diffAfterBackups).toBeUndefined();
+      expect(kept.cwd).toBe(projectDir);
+    });
+
+    it('still folds same-directory and legacy deletions', () => {
+      const otherDir = join(tmpdir(), 'fh-other-root');
+      const sameDirSurvivor: FileHistorySnapshot = {
+        ...restoredP1('a.txt', 'deadbeefcafebabe@v1'),
+        promptId: 'p1',
+        cwd: projectDir,
+      };
+      const sameDirDeleted: FileHistorySnapshot = {
+        ...restoredP1('b.txt', 'deadfeed012345678@v1'),
+        promptId: 'p2',
+        cwd: join(projectDir, '.'), // resolves to the same root
+      };
+      const legacySurvivor: FileHistorySnapshot = {
+        ...restoredP1('c.txt', 'deadbeefcafebabe@v2'),
+        promptId: 'p1',
+      };
+      const legacyDeleted: FileHistorySnapshot = {
+        ...restoredP1('d.txt', 'deadfeed012345678@v2'),
+        promptId: 'p2',
+      };
+      const foreignDeleted: FileHistorySnapshot = {
+        ...restoredP1('e.txt', 'deadbeefcafebabe@v3'),
+        promptId: 'p2',
+        cwd: otherDir,
+      };
+
+      const [keptSame] = removeFileHistorySnapshots(
+        [sameDirSurvivor, sameDirDeleted],
+        new Set(['p2']),
+      );
+      expect(keptSame.diffAfterBackups).toEqual(
+        sameDirDeleted.trackedFileBackups,
+      );
+
+      const [keptLegacy] = removeFileHistorySnapshots(
+        [legacySurvivor, legacyDeleted],
+        new Set(['p2']),
+      );
+      // Legacy (unlabeled) deleted data keeps folding as before.
+      expect(keptLegacy.diffAfterBackups).toEqual(
+        legacyDeleted.trackedFileBackups,
+      );
+
+      const [keptLegacyForeign] = removeFileHistorySnapshots(
+        [legacySurvivor, foreignDeleted],
+        new Set(['p2']),
+      );
+      // A cwd-labeled foreign snapshot must not fold into an unlabeled
+      // legacy survivor either — its backups would then bypass the
+      // cross-directory guard while getForeignSnapshotCwds reports nothing.
+      expect(keptLegacyForeign.diffAfterBackups).toBeUndefined();
+    });
+
+    it('refuses file rewind when any checkpoint in the timeline is foreign', async () => {
+      const otherDir = join(tmpdir(), 'fh-other-root');
+      const local: FileHistorySnapshot = {
+        ...restoredP1('b.txt', 'deadfeed012345678@v1'),
+        promptId: 'p2',
+        cwd: projectDir,
+      };
+      service.restoreFromSnapshots([
+        { ...restoredP1('a.txt', 'deadbeefcafebabe@v1'), cwd: otherDir },
+        local,
+      ]);
+
+      expect(service.getForeignSnapshotCwds()).toEqual([otherDir]);
+      // The target itself is local, but tracked paths and first-version
+      // fallbacks still consume the earlier foreign checkpoint, so the whole
+      // file rewind must be refused.
+      await expect(service.rewind('p2', false)).rejects.toThrow(
+        /different working directory/,
+      );
+    });
+
+    it('does not fold edits from another directory into a foreign-labeled snapshot', async () => {
+      const otherDir = await mkdtemp(join(tmpdir(), 'fh-foreign-label-'));
+      try {
+        const svcA = new FileHistoryService('test-session', true, otherDir);
+        await svcA.makeSnapshot('p1');
+
+        // This service is rooted at projectDir but its last snapshot is
+        // labeled with otherDir; a capture from here must not be folded
+        // into it, or reloading that snapshot in otherDir would pass the
+        // cross-directory guard with mixed-provenance content.
+        service.restoreFromSnapshots(svcA.getSnapshots());
+        const file = join(projectDir, 'local.txt');
+        await writeFile(file, 'local');
+        await service.trackEdit(file);
+        expect(
+          service.getSnapshots()[0].trackedFileBackups['local.txt'],
+        ).toBeUndefined();
+
+        // The next makeSnapshot opens a snapshot labeled with the current
+        // directory and trackEdit captures normally again.
+        await service.makeSnapshot('p2');
+        expect(service.getSnapshots().at(-1)?.cwd).toBe(projectDir);
+        await service.trackEdit(file);
+        expect(
+          service.getSnapshots().at(-1)!.trackedFileBackups['local.txt'],
+        ).toBeDefined();
+      } finally {
+        await rm(otherDir, { recursive: true, force: true });
+      }
+    });
+
+    it('refuses a cross-directory rewind instead of overwriting the new root', async () => {
+      const dirA = await mkdtemp(join(tmpdir(), 'fh-root-a-'));
+      const dirB = await mkdtemp(join(tmpdir(), 'fh-root-b-'));
+      try {
+        const fileA = join(dirA, 'file.txt');
+        const fileB = join(dirB, 'file.txt');
+        await writeFile(fileA, 'captured-in-a');
+        await writeFile(fileB, 'unrelated-in-b');
+
+        const svcA = new FileHistoryService('test-session', true, dirA);
+        await svcA.makeSnapshot('p1');
+        await svcA.trackEdit(fileA);
+        const payload = svcA.getSnapshots().map(serializeSnapshot);
+
+        const svcB = new FileHistoryService('test-session', true, dirB);
+        svcB.restoreFromSnapshots(deserializeSnapshots(payload));
+
+        expect(svcB.getSnapshots().map((s) => s.promptId)).toEqual(['p1']);
+        await expect(svcB.rewind('p1', false)).rejects.toThrow(
+          /different working directory/,
+        );
+        expect(await readFile(fileB, 'utf-8')).toBe('unrelated-in-b');
+        // The refusal happens before any history truncation.
+        expect(svcB.getSnapshots()).toHaveLength(1);
+      } finally {
+        await rm(dirA, { recursive: true, force: true });
+        await rm(dirB, { recursive: true, force: true });
+      }
+    });
+
+    it('still restores and rewinds legacy snapshots without a recorded cwd', async () => {
+      const file = join(projectDir, 'legacy.txt');
+      await writeFile(file, 'before');
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+      await writeFile(file, 'after');
+
+      const legacy = { ...service.getSnapshots()[0] };
+      delete legacy.cwd;
+
+      const fresh = new FileHistoryService('test-session', true, projectDir);
+      fresh.restoreFromSnapshots([legacy]);
+      expect(fresh.getSnapshots()).toHaveLength(1);
+      expect((await fresh.rewind('p1', false)).filesFailed).toEqual([]);
+      expect(await readFile(file, 'utf-8')).toBe('before');
+    });
+
+    it('admits lexically equivalent cwd spellings', async () => {
+      const file = join(projectDir, 'same.txt');
+      await writeFile(file, 'before');
+      await service.makeSnapshot('p1');
+      await service.trackEdit(file);
+      await writeFile(file, 'after');
+      const captured = service.getSnapshots()[0];
+
+      for (const spelling of [
+        join(projectDir, 'sub', '..'),
+        join(projectDir, '.'),
+        `${projectDir}${sep}`,
+      ]) {
+        const fresh = new FileHistoryService('test-session', true, projectDir);
+        fresh.restoreFromSnapshots([{ ...captured, cwd: spelling }]);
+        expect((await fresh.rewind('p1', false)).filesFailed).toEqual([]);
+      }
+      expect(await readFile(file, 'utf-8')).toBe('before');
+    });
+
+    it('re-admits the checkpoint after the session moves back', async () => {
+      const dirA = await mkdtemp(join(tmpdir(), 'fh-root-a-'));
+      const dirB = await mkdtemp(join(tmpdir(), 'fh-root-b-'));
+      try {
+        const fileA = join(dirA, 'file.txt');
+        await writeFile(fileA, 'captured');
+        const svcA = new FileHistoryService('test-session', true, dirA);
+        await svcA.makeSnapshot('p1');
+        await svcA.trackEdit(fileA);
+        await writeFile(fileA, 'modified');
+        const payload = svcA.getSnapshots().map(serializeSnapshot);
+
+        const svcB = new FileHistoryService('test-session', true, dirB);
+        svcB.restoreFromSnapshots(deserializeSnapshots(payload));
+        await expect(svcB.rewind('p1', false)).rejects.toThrow(
+          /different working directory/,
+        );
+
+        const backHome = new FileHistoryService('test-session', true, dirA);
+        backHome.restoreFromSnapshots(deserializeSnapshots(payload));
+        expect((await backHome.rewind('p1', false)).filesFailed).toEqual([]);
+        expect(await readFile(fileA, 'utf-8')).toBe('captured');
+      } finally {
+        await rm(dirA, { recursive: true, force: true });
+        await rm(dirB, { recursive: true, force: true });
+      }
     });
   });
 

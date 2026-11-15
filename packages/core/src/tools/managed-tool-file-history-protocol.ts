@@ -142,13 +142,20 @@ function snapshots(value: unknown): SerializedFileHistorySnapshot[] {
       'promptId',
       'timestamp',
       'trackedFileBackups',
+      'cwd',
     ]);
     const promptId = parseManagedToolFileHistoryPromptId(snapshot['promptId']);
     if (prompts.has(promptId)) throw new ManagedToolProtocolError();
     prompts.add(promptId);
+    // Same absolute-path contract as `executionCwd`: bounded length, no NUL,
+    // absolute and lexically normalized. Anything else would poison the
+    // cross-directory guard that compares it against the service root.
+    const cwd =
+      snapshot['cwd'] === undefined ? undefined : absolutePath(snapshot['cwd']);
     return {
       promptId,
       timestamp: timestamp(snapshot['timestamp']),
+      ...(cwd !== undefined ? { cwd } : {}),
       trackedFileBackups: Object.fromEntries(
         Object.entries(record(snapshot['trackedFileBackups'])).map(
           ([filePath, value]) => {

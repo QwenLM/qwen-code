@@ -5614,6 +5614,25 @@ export class Session implements SessionContext {
 
     const daemonPromptId = this.getRewindDaemonPromptId(promptId);
 
+    const rewindFiles = opts?.rewindFiles !== false;
+    if (rewindFiles) {
+      // A timeline holding checkpoints from another working directory cannot
+      // restore files here (relative tracked paths expand against the wrong
+      // root). Refuse before anything is truncated so the conversation and
+      // the snapshot timeline stay intact; conversation-only rewind below
+      // stays available.
+      const foreignCwds = this.config
+        .getFileHistoryService()
+        .getForeignSnapshotCwds();
+      if (foreignCwds.length > 0) {
+        throw new RequestError(
+          -32602,
+          `Cannot rewind files: the session timeline contains checkpoints captured in a different working directory (${foreignCwds.join(', ')}) and cannot restore them from the current working directory`,
+          { errorKind: 'cross_directory_checkpoint' },
+        );
+      }
+    }
+
     llmClient.truncateHistory(apiTruncateIndex);
     chat.stripThoughtsFromHistory();
     this.clearActiveTodoPlanRevision();
@@ -5628,7 +5647,6 @@ export class Session implements SessionContext {
       !preserveQueuedPromptPriority;
     this.todoStopGuard.blockUntilOrdinaryPromptStarts();
 
-    const rewindFiles = opts?.rewindFiles !== false;
     const fileHistoryService = this.config.getFileHistoryService();
     // Every rewind surface resolves a turn through this array's positions:
     // `getRewindSnapshots` hands out the index, and the agent resolves a

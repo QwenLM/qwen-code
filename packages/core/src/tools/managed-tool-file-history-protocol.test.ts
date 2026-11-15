@@ -313,4 +313,41 @@ describe('managed file history protocol', () => {
       expect(() => parseManagedToolFileHistoryPromptId(promptId)).toThrow();
     },
   );
+
+  it('round-trips an optional snapshot cwd and rejects malformed ones', () => {
+    const withCwd = {
+      ...binding,
+      snapshots: [{ ...snapshot, cwd: binding.executionCwd }],
+    };
+    expect(parseManagedToolFileHistoryBinding(withCwd)).toEqual(withCwd);
+    expect(
+      parseManagedToolFileHistoryState({
+        ownerSessionId,
+        revision: 1,
+        snapshots: withCwd.snapshots,
+      }),
+    ).toEqual({
+      ownerSessionId,
+      revision: 1,
+      snapshots: withCwd.snapshots,
+    });
+    // A snapshot without cwd keeps parsing, as every pre-cwd payload does.
+    expect(parseManagedToolFileHistoryBinding(binding)).toEqual(binding);
+
+    for (const bad of [
+      'relative/dir',
+      `${binding.executionCwd}${path.sep}sub${path.sep}..`,
+      `/tmp/nul${'\0'}dir`,
+      `/${'x'.repeat(4096)}`,
+      17,
+    ]) {
+      expect(() =>
+        parseManagedToolFileHistoryState({
+          ownerSessionId,
+          revision: 1,
+          snapshots: [{ ...snapshot, cwd: bad }],
+        }),
+      ).toThrow();
+    }
+  });
 });
