@@ -82,7 +82,7 @@ channel 不再检测 PR 状态，因此除 channel 的评论车道外，daemon �
 - **不做运行时语言切换**：locale 在 channel worker 启动时读取，与既有
   权限文案 locale 完全一致。修改 `general.language` 在下次 channel 启动
   时生效。watch 摘要在检测时渲染并持久化在 pending 信封里，因此 pending
-  事件保持其检测时的语言。已接受的聚合评论／comment-watch 任务在恢复
+  摘要保持其检测时的语言。已接受的聚合评论／comment-watch 任务在恢复
   时同样保留生成时的 `boundText`；不会在新 locale 下再对不可信正文
   推导标记归属。
 

@@ -83,8 +83,8 @@ export interface PrWatchDepsSources {
   wakeDormant: boolean;
   /**
    * The prompt language for both seams, resolved once at boot. One value for
-   * both so the observation and the drain cannot disagree about one event.
-   * Absent means English.
+   * both so the observation and the drain cannot disagree about the locale
+   * within one boot. Absent means English.
    */
   language?: BoundPromptLanguage;
   /** Late-bound: the serve app is built after the refresh timer starts. */

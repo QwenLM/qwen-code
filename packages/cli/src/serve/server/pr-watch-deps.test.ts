@@ -282,7 +282,8 @@ describe('createPrWatchDeps', () => {
 
   it('carries the language to both seams', () => {
     // The wiring this feature exists for: one value reaches the observation
-    // and the drain together, so they cannot disagree about one event.
+    // and the drain together, so they cannot disagree about the locale within
+    // one boot.
     const { watch, drain } = build({ language: 'zh' });
     expect(watch.language).toBe('zh');
     expect(drain.language).toBe('zh');

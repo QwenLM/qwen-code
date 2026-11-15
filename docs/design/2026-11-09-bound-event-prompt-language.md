@@ -96,7 +96,7 @@ lane the daemon is now a producer of bound event prompts too.
 - **No live language switching**: the locale is read at channel worker startup,
   exactly like the existing permission-copy locale. Changing `general.language`
   takes effect on the next channel start. Watch summaries are rendered at
-  detection time and persisted in the pending envelope, so a pending event
+  detection time and persisted in the pending envelope, so a pending summary
   keeps the language of its detection. Accepted aggregate and comment-watch
   tasks likewise retain their producer-composed `boundText` across recovery;
   markers are not later re-derived from untrusted text under a new locale.
