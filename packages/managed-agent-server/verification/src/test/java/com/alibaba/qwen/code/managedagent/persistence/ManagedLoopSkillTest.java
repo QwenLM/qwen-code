@@ -157,6 +157,54 @@ class ManagedLoopSkillTest {
     }
 
     @Test
+    void mergeIntoReplacesTheTrimmedBundledImportTheDaemonPublishes() throws Exception {
+        // The daemon publishes the bundled body trimmed (skill-manager / parseSkillContent
+        // `body.trim()`); the reference sidecar must equal that wire value, so a caller
+        // loop carrying the trimmed body is still recognized as the bundled import. An
+        // untrimmed reference would fail this exact comparison and keep the local body.
+        var trimmed = Map.<String, Object>of("name", "loop", "description", "bundled",
+                "body", ((String) bundledCallerLoop().get("body")).trim());
+        var merged = new java.util.ArrayList<Map<String, Object>>();
+        var injected = ManagedLoopSkill.mergeInto(merged, java.util.List.of(trimmed),
+                WorkspaceToolProfiles.FILES_V4, true);
+        assertThat(injected).isNotNull();
+        assertThat((String) merged.get(0).get("body")).contains("CronCreate");
+    }
+
+    @Test
+    void mergeIntoPreservesAUserAuthoredLoopAlongsideTheBundledImport() throws Exception {
+        // A bundled import plus a user-authored loop: provenance classifies the whole
+        // caller set, so the user's loop is preserved (no silent delete-by-name) and no
+        // rival variant is injected; caller validation reports the duplicate name.
+        var userLoop = Map.<String, Object>of("name", "loop", "description", "mine", "body", "MY_CUSTOM_LOOP");
+        var merged = new java.util.ArrayList<Map<String, Object>>();
+        var injected = ManagedLoopSkill.mergeInto(merged,
+                java.util.List.of(bundledCallerLoop(), userLoop), WorkspaceToolProfiles.FILES_V4, true);
+        assertThat(injected).isNull();
+        assertThat(merged).extracting(s -> s.get("body")).contains("MY_CUSTOM_LOOP");
+        // Order-independent: the user-authored loop survives regardless of position.
+        var merged2 = new java.util.ArrayList<Map<String, Object>>();
+        var injected2 = ManagedLoopSkill.mergeInto(merged2,
+                java.util.List.of(userLoop, bundledCallerLoop()), WorkspaceToolProfiles.FILES_V4, true);
+        assertThat(injected2).isNull();
+        assertThat(merged2).extracting(s -> s.get("body")).contains("MY_CUSTOM_LOOP");
+    }
+
+    @Test
+    void selectApprovalModeCarriesTheDefinitionSkillsThroughApprovalSelection() {
+        // A requested approval mode rebuilds the pin; the definition's Skills must
+        // survive that rebuild or a creator-bearing definition loses its catalog and
+        // the server variant takes the definition loop's place. Dropping pin.skills()
+        // here (List.of()) reddens this case.
+        var defSkill = Map.<String, Object>of("name", "default", "description", "d", "body", "DEFAULT");
+        var pin = new AgentSessionPolicies.AgentPin("1", null, "default",
+                WorkspaceToolProfiles.FILES, false, false, java.util.List.of(defSkill));
+        var selected = ExternalWorkspaceSessionPolicies.selectApprovalMode(pin, "auto-edit", true);
+        assertThat(selected.approvalMode()).isEqualTo("auto-edit");
+        assertThat(selected.skills()).containsExactly(defSkill);
+    }
+
+    @Test
     void mergeIntoCarriesTheBundledCallerLoopInvocationFlagsOntoTheVariant() throws Exception {
         var callerLoop = new java.util.LinkedHashMap<String, Object>(bundledCallerLoop());
         callerLoop.put("model_invocable", false);

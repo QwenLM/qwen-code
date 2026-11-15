@@ -50,9 +50,12 @@ for (const [profile, file] of targets) {
   console.log(`${file}: ${Buffer.byteLength(out, 'utf8')} bytes`);
 }
 
-// The verbatim bundled body, so admission can tell the Web Shell's bundled
-// `loop` import apart from a user-authored `loop` and only replace the former.
-const bundledOut = JSON.stringify({ body }, null, 2) + '\n';
+// The bundled body as the daemon publishes it, so admission can tell the Web
+// Shell's bundled `loop` import apart from a user-authored `loop` and only
+// replace the former. The producer trims (skill-manager.ts / parseSkillContent
+// `body: body.trim()`), so the reference must be the trimmed wire value or the
+// exact byte comparison never matches a real creation.
+const bundledOut = JSON.stringify({ body: body.trim() }, null, 2) + '\n';
 writeFileSync(
   join(contractsDir, 'managed-loop-skill-bundled-body.json'),
   bundledOut,

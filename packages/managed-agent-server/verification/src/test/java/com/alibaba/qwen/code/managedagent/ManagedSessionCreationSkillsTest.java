@@ -587,6 +587,24 @@ class ManagedSessionCreationSkillsTest {
                     "snap-child-digest-2", "audit", List.of(), null,
                     new com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage(loopParent, loopParent, "run-snap-2", 1), childCwd2);
             assertThat(snapshots.snapshot(tenant, child2.sessionId())).isNull();
+
+            // A parent definition that OWNS a loop: the READ child inherits that
+            // definition-authored loop (parentDefinitionHasLoop=true), unlike the
+            // server variant above which the READ child drops. Forcing the flag to
+            // false loses the definition loop here and reddens this case.
+            var defLoop = Map.<String, Object>of("name", "loop", "description", "def", "body", "DEFINITION_LOOP_BODY");
+            String defLoopAgent = defineProfile("hosted-workspace-files/4", "snap-defloop-agent", List.of(defLoop));
+            String defLoopParent = create(request(defLoopAgent, List.of(callerSkill)), "snap-defloop-parent", false).get("id").asText();
+            assertThat(snapshots.snapshot(tenant, defLoopParent))
+                    .extracting(s -> s.get("name")).containsExactlyInAnyOrder("loop", "review");
+            String childCwd3 = ".qwen-child-workspaces/cccccccccccccccccccccccccccccccc";
+            readySnapshotChildWorkspace(defLoopParent, "run-snap-3", childCwd3);
+            var child3 = store.insertChildSessionCommand(tenant, defLoopParent, UUID.randomUUID().toString(),
+                    "snap-child-digest-3", "audit", List.of(), null,
+                    new com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage(defLoopParent, defLoopParent, "run-snap-3", 1), childCwd3);
+            var child3Catalog = snapshots.snapshot(tenant, child3.sessionId());
+            assertThat(child3Catalog).extracting(s -> s.get("name")).containsExactlyInAnyOrder("loop", "review");
+            assertThat(loopBody(child3Catalog)).isEqualTo("DEFINITION_LOOP_BODY");
         } finally {
             com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles", previousProfiles);
         }

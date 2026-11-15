@@ -122,16 +122,19 @@ final class ManagedLoopSkill {
         }
         boolean definitionHasLoop = merged.subList(0, definitionCount).stream()
                 .anyMatch(skill -> NAME.equals(skill.get("name")));
-        Map<String, Object> callerLoop = merged.subList(definitionCount, merged.size()).stream()
-                .filter(skill -> NAME.equals(skill.get("name"))).findFirst().orElse(null);
+        List<Map<String, Object>> callerSlice = merged.subList(definitionCount, merged.size());
         // A user-authored caller loop is not the server's to replace: keep it and
-        // inject no rival variant.
-        if (callerLoop != null && !isBundledLoop(callerLoop)) {
+        // inject no rival variant. Classify the whole caller loop set so a bundled
+        // sibling cannot drag a user-authored loop into the delete below; caller
+        // validation reports the duplicate rather than silently dropping user content.
+        if (callerSlice.stream()
+                .anyMatch(skill -> NAME.equals(skill.get("name")) && !isBundledLoop(skill))) {
             return null;
         }
+        Map<String, Object> callerLoop = callerSlice.stream()
+                .filter(ManagedLoopSkill::isBundledLoop).findFirst().orElse(null);
         // Only the bundled caller import is the server's to replace.
-        merged.subList(definitionCount, merged.size())
-                .removeIf(skill -> NAME.equals(skill.get("name")));
+        callerSlice.removeIf(ManagedLoopSkill::isBundledLoop);
         if (definitionHasLoop) {
             return null;
         }

@@ -12,11 +12,15 @@ import {
   buildManagedLoopSkill,
   type ManagedLoopProfile,
 } from './managed-loop-skill.js';
+import { parseSkillContent } from '../../skill-load.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const contractsDir = join(here, '../../../managed-runtime/contracts');
 
-/** The bundled body + frontmatter description exactly as the daemon reads them. */
+/** The raw bundled body + frontmatter description, as the variant generator
+ * consumes them (it normalizes internally). The daemon publishes the body
+ * trimmed; the bundled-body reference sidecar pins that trimmed wire value
+ * against parseSkillContent in its own test below. */
 function bundled(): { body: string; description: string } {
   const raw = readFileSync(join(here, 'SKILL.md'), 'utf8');
   const normalized = raw
@@ -124,14 +128,21 @@ describe('managed loop skill parity', () => {
     expect(asset('wakeup').body).not.toContain('~/.qwen/loop.md');
   });
 
-  it('the bundled-body reference sidecar equals the verbatim bundled body', () => {
+  it('the bundled-body reference sidecar equals the body the daemon publishes', () => {
     const reference = JSON.parse(
       readFileSync(
         join(contractsDir, 'managed-loop-skill-bundled-body.json'),
         'utf8',
       ),
     );
-    expect(reference.body).toBe(body);
+    // Pin the reference to the producer that actually publishes the wire value
+    // (parseSkillContent trims), not to the raw frontmatter remainder: an
+    // untrimmed reference never matches a real creation's trimmed body.
+    const published = parseSkillContent(
+      readFileSync(join(here, 'SKILL.md'), 'utf8'),
+      join(here, 'SKILL.md'),
+    );
+    expect(reference.body).toBe(published.body);
   });
 
   it('the cron body carries no loop.md task-file mode and no sentinel at all', () => {
