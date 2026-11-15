@@ -60,7 +60,10 @@ export function serializeTerminalToText(terminal: Terminal): string {
     lines.push(lineContent);
   }
 
-  return lines.join('\n').trimEnd();
+  return lines
+    .map((line) => line.trimEnd())
+    .join('\n')
+    .trimEnd();
 }
 
 const enum Attribute {

@@ -249,6 +249,41 @@ describe('terminalSerializer', () => {
         'abcdefghijklmnopqrstuvwxyz\n123456\ndone',
       );
     });
+
+    it('strips explicit trailing spaces from each line (#17350)', async () => {
+      // ConPTY repaints full terminal rows, so the headless buffer holds
+      // explicit space cells past the text — unlike empty cells, those are
+      // NOT trimmed by translateToString(true). The transcript text sent to
+      // the model must not carry the terminal-width padding.
+      const terminal = new Terminal({
+        cols: 20,
+        rows: 4,
+        allowProposedApi: true,
+        scrollback: 100,
+        convertEol: true,
+      });
+
+      await writeToTerminal(
+        terminal,
+        `x${' '.repeat(19)}\r\nyy${' '.repeat(18)}\r\n`,
+      );
+
+      expect(serializeTerminalToText(terminal)).toBe('x\nyy');
+    });
+
+    it('keeps the space at a soft-wrap boundary when stripping (#17350)', async () => {
+      const terminal = new Terminal({
+        cols: 8,
+        rows: 4,
+        allowProposedApi: true,
+        scrollback: 100,
+        convertEol: true,
+      });
+
+      await writeToTerminal(terminal, 'abcdefg hijklmnop\n');
+
+      expect(serializeTerminalToText(terminal)).toBe('abcdefg hijklmnop');
+    });
   });
 
   describe('convertColorToHex', () => {

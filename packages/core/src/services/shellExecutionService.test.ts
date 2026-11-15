@@ -60,7 +60,10 @@ const mockSerializeTerminalToText = vi.hoisted(() =>
       lines.push(lineContent);
     }
 
-    return lines.join('\n').trimEnd();
+    return lines
+      .map((line) => line.trimEnd())
+      .join('\n')
+      .trimEnd();
   }),
 );
 const mockGetShellConfiguration = vi.hoisted(() =>
