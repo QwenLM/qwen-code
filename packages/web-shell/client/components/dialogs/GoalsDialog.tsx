@@ -372,10 +372,13 @@ export function GoalsDialog({
           }),
         );
       } else {
-        // Every registered workspace is untrusted or remote: there is no
-        // target the create path would accept. Surface the refusal instead
-        // of submitting undefined into a silent no-op.
-        if (isMultiWorkspace && !effectiveFormWorkspaceCwd) {
+        // No workspace the create path would accept — every registered one
+        // is untrusted or remote, including the single-workspace deployment
+        // whose trust was revoked. Surface the refusal instead of submitting
+        // undefined into a silent no-op. A daemon that advertises NO
+        // workspace list keeps the legacy shape: submit undefined and create
+        // in the primary.
+        if (workspaceList.length > 0 && !effectiveFormWorkspaceCwd) {
           setFormError(t('goals.error.workspaceUnavailable'));
           return;
         }
@@ -414,6 +417,7 @@ export function GoalsDialog({
     resetForm,
     setSessionBusy,
     t,
+    workspaceList,
   ]);
 
   const control = useCallback(

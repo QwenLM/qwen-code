@@ -44,7 +44,9 @@ scheduled tasks 回 503，goals primary 列举不做运行时查询。）本设�
 
 - Goals 页列出每个可操作 workspace（primary 加所有受信 secondary）的非终
   态 Goal；存在多个 workspace 时每张卡片标注所属 workspace。
-- 创建表单可指向任一可操作 workspace；默认仍是当前选中的 workspace。
+- 创建表单可指向任一受信本地 workspace；默认仍是当前选中的 workspace
+  （若可创建），否则 primary。未受信 primary 留在聚合列举里让其失败可见，
+  但绝不成为创建目标。
 - 暂停 / 恢复 / 编辑 / 清除对任何 workspace 的 Goal 保持可用（会话级控制
   路由已能解析属主）。
 - 单 workspace 部署保持今天的行为与外观（无徽章、无选择器）。锁定到

@@ -1412,6 +1412,30 @@ describe('GoalsDialog multi-workspace', () => {
     );
   });
 
+  it('refuses the submit when the single advertised workspace is untrusted', async () => {
+    // No picker renders in the single-workspace view, but the refusal must
+    // still fire: submitting undefined would reach the App's silent
+    // no-target path. Narrowing the guard back to isMultiWorkspace reds
+    // this case.
+    const onCreateGoal = vi.fn().mockResolvedValue(undefined);
+    await mount([], {
+      workspaces: [{ ...primaryWs, trusted: false }],
+      onCreateGoal,
+      listGoalsByWorkspace: {},
+    });
+
+    click(findButton('New goal'));
+    expect(document.querySelector('select')).toBeNull();
+    setTextarea('ship it');
+    click(findButton('Set goal'));
+    await flush();
+
+    expect(onCreateGoal).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'unavailable or untrusted',
+    );
+  });
+
   it('reconciles a vanished selection with the creatable set for control and submit', async () => {
     // A capabilities refresh can drop the selected workspace while the form
     // stays open. Both the rendered select and the submitted cwd must fall

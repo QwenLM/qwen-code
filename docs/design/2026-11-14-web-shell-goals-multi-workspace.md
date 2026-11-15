@@ -48,8 +48,10 @@ lookup.) This design preserves each surface's existing gate.
 - The Goals page lists non-terminal goals from every operable workspace
   (the primary plus every trusted secondary), each card tagged with its
   workspace when more than one workspace is present.
-- The create form can target any operable workspace; the default stays the
-  currently selected workspace.
+- The create form can target any trusted local workspace; the default
+  stays the currently selected workspace when it is creatable, else the
+  primary. The untrusted primary stays in the aggregated listing so its
+  failure is visible, but is never a create target.
 - Pause / resume / edit / clear keep working for goals in any workspace
   (the per-session control routes already resolve the owner).
 - Single-workspace deployments keep today's behavior and chrome (no

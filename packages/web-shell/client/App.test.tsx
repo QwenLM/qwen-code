@@ -51550,7 +51550,8 @@ describe('App /goal command', () => {
         },
       ],
     } as typeof mockWorkspace.capabilities;
-    const { container } = renderApp();
+    const onToast = vi.fn();
+    const { container } = renderApp({ onToast });
     await flush();
 
     testState.prompt = '/goal';
@@ -51569,6 +51570,12 @@ describe('App /goal command', () => {
     expect(result).toBe(false);
     expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
     expect(mockSessionActions.controlGoal).not.toHaveBeenCalled();
+    // The toast is the only user-visible surface of this refusal; removing
+    // the reportError call must red this assertion.
+    expect(onToast).toHaveBeenCalledWith(
+      'error',
+      'The selected workspace is unavailable or untrusted.',
+    );
   });
 
   it.each(['resolve', 'reject'] as const)(
