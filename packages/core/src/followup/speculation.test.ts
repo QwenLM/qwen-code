@@ -15,6 +15,7 @@ import {
 import type { Content, Part } from '@google/genai';
 import { ApprovalMode, type Config } from '../config/config.js';
 import * as agentLoop from '../core/agent-loop.js';
+import * as agentLoopRollout from '../config/agent-loop-rollout.js';
 import type { CacheSafeParams } from '../agents/forkedAgent.js';
 import type { LlmClient } from '../core/client.js';
 import type { ToolResultBoundaryObservation } from '../tools/tool-result-boundary-diagnostics.js';
@@ -119,6 +120,75 @@ describe('startSpeculation', () => {
 
     expect(forkedAgentMocks.createForkedChat).not.toHaveBeenCalled();
     expect(forkedAgentMocks.runForkedAgent).not.toHaveBeenCalled();
+  });
+
+  it('does not log the entry marker when the speculation never starts', async () => {
+    // The marker must sit after the early returns: a sandboxed, cache-less or
+    // pre-aborted speculation never runs a round, so it must not log a path.
+    const entrySpy = vi.spyOn(agentLoopRollout, 'logAgentLoopEntry');
+    const sandboxed = {
+      getShellExecutionSandbox: () => ({}),
+    } as unknown as Config;
+    await expect(startSpeculation(sandboxed, 'write a.ts')).rejects.toThrow(
+      'unavailable with tools.executionSandbox',
+    );
+    const cacheless = {
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
+    } as unknown as Config;
+    forkedAgentMocks.getCacheSafeParams.mockReturnValueOnce(null);
+    await expect(startSpeculation(cacheless, 'read a.ts')).rejects.toThrow(
+      'CacheSafeParams not available for speculation',
+    );
+    // The third early return: a parent signal already aborted at entry resolves
+    // to an aborted state without running a round, so it must not log either.
+    forkedAgentMocks.getCacheSafeParams.mockReturnValueOnce(
+      {} as CacheSafeParams,
+    );
+    await expect(
+      startSpeculation(cacheless, 'read a.ts', AbortSignal.abort()),
+    ).resolves.toMatchObject({ status: 'aborted' });
+    expect(entrySpy).not.toHaveBeenCalled();
+    entrySpy.mockRestore();
+  });
+
+  it('logs the speculation loop entry marker', async () => {
+    const entrySpy = vi.spyOn(agentLoopRollout, 'logAgentLoopEntry');
+    const toolRegistry = {
+      isPermissionDeferred: vi.fn().mockReturnValue(true),
+      ensureTool: vi.fn(),
+    };
+    const config = {
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getFastModel: vi.fn().mockReturnValue(undefined),
+      getSessionId: vi.fn().mockReturnValue('spec-session'),
+      getTargetDir: vi.fn().mockReturnValue('/spec/cwd'),
+      getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
+    } as unknown as Config;
+    forkedAgentMocks.runForkedAgent.mockResolvedValue({
+      jsonResult: { suggestion: '' },
+    });
+    forkedAgentMocks.sendMessageStream.mockImplementation(async function* () {
+      yield {
+        type: 'chunk',
+        value: {
+          candidates: [
+            {
+              content: {
+                parts: [fnCall('read_file', { path: '.env' }, 'call-marker')],
+              },
+            },
+          ],
+        },
+      };
+    });
+
+    const state = await startSpeculation(config, 'read .env');
+    await vi.waitFor(() => expect(state.status).toBe('boundary'));
+
+    expect(entrySpy).toHaveBeenCalledWith(config, 'speculation');
+    entrySpy.mockRestore();
+    await abortSpeculation(state);
   });
 
   it('stops before executing a permission-deferred tool', async () => {
