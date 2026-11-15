@@ -335,6 +335,12 @@ worker 的 status 同时也是本通道长命令唯一的结果来路：它自�
 
 后台 Shell 与 `monitor` 不在本切片内，它们仍是 #15512 的目标，不是被悄悄删掉的需求。§6 的 boot-v2 文档、marker 与 nonce 没有实现。
 
-已完成的本地验证：dispatch 通道的时序、cancel 与 reconciliation 两道 fence，以及关闭/恢复这几条——最后一组跑在真实 JDBC 仓储上，H2 与一次性 **MySQL 8.4** 数据库各跑一遍（Shell 在飞时关闭、`LOST` worker 不构成充分证明、丢失恢复的 abandon、worker 换代、重启恢复）。每道 fence 都用对应用例做过变异验证。整个模块的 Checkstyle 门禁通过。
+已完成的本地验证：
 
-仍未运行：SpotBugs、TypeScript 消费方测试、MySQL 上的真实并发归属、完整的 `mysql-integration` 与 Hosted/fault profile（这些由 CI 负责），以及 producer 自己搬运字节那条路径对真实 worker 的 HTTP 端到端——关闭/恢复用例是用 publication verifier 的替身，没有真正跑通 `begin`/`read`/`renew`。真实 provider 验收、UI 验证、人工评审与部署门禁全部待定。本节记录的是实现边界与上述证据，不是完整验收。
+- dispatch 通道的时序，以及 cancel 与 reconciliation 两道 fence。
+- 关闭/恢复这几条跑在真实 JDBC 仓储上，H2 与一次性 **MySQL 8.4** 数据库各跑一遍：Shell 在飞时关闭、`LOST` worker 不构成充分证明、丢失恢复的 abandon、worker 换代、重启恢复。
+- capture 协议的 worker 那一半**对真实 worker 进程、走真 HTTP**，并通过真实带 attest 的 transport 驱动：`begin` 按 execution 幂等、每个块都被读取并确认直到它自己那个空 EOF、空 stderr 同样由 EOF 界定、多块 capture 不丢不乱序、`renew` 只把 horizon 往前推、EOF 未确认时 drained stop 拒绝、`pending` 绝不被当成空块、外来 lease 或过期 incarnation 根本到不了 capture。
+
+每道 fence、每条 wire 规则都用对应用例做过变异验证。整个模块的 Checkstyle 门禁通过。
+
+仍未运行：SpotBugs、TypeScript 消费方测试、MySQL 上的真实并发归属，以及完整的 `mysql-integration` 与 Hosted/fault profile（这些由 CI 负责）。worker 替身实现的是已发布 worker 的通道规则，但它**不是**那个已发布的 worker：两半还没有在同一棵进程树里对跑过。producer 往控制面存储写入的那一段也仍未端到端验证——它需要完整的预留链，所以协议用例是直接驱动 Broker 的复制游标，而不是经由 `ToolPublicationDataStore`。真实 provider 验收、UI 验证、人工评审与部署门禁全部待定。本节记录的是实现边界与上述证据，不是完整验收。
