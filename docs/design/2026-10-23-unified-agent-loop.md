@@ -2,7 +2,7 @@
 
 [English](2026-10-23-unified-agent-loop.md) | [简体中文](2026-10-23-unified-agent-loop.zh-CN.md)
 
-- **Status**: accepted in #15343. The headless (PR 1, #15369), ACP (PR 2, #15509–#16190), Ink TUI (PR 3, #16206–#16704) and OpenTUI (PR 4, #16743–#16820) migrations are merged; each surface's default flip waits on the nightly unified-loop E2E gate (#16192). PR 5 (AgentCore) is in progress: 5a (#16880) and 5b (#17035) are merged. The remaining steps are tracked in #17045. PR 6a (speculation's model round, #17029) is merged.
+- **Status**: accepted in #15343. The headless (PR 1, #15369), ACP (PR 2, #15509–#16190), Ink TUI (PR 3, #16206–#16704) and OpenTUI (PR 4, #16743–#16820) migrations are merged; each surface's default flip follows the ladder in [Migration](#migration), and headless is the first. PR 5 (AgentCore) is in progress: 5a (#16880) and 5b (#17035) are merged. The remaining steps are tracked in #17045. PR 6a (speculation's model round, #17029) is merged.
 - **Date**: 2026-10-23, against upstream `779a4d5d0d`.
 - **Related**:
   - tracking issue #15327, and #17045 for the remaining steps, the rollout and the capability ledger;

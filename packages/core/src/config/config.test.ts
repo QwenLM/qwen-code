@@ -7556,9 +7556,11 @@ describe('Server Config (config.ts)', () => {
       });
       afterEach(() => vi.unstubAllEnvs());
 
-      it('defaults to legacy for every surface', () => {
+      it('defaults to shared for headless and legacy for every other surface', () => {
         for (const surface of AGENT_LOOP_SURFACES) {
-          expect(makeConfig().getAgentLoopPath(surface)).toBe('legacy');
+          expect(makeConfig().getAgentLoopPath(surface)).toBe(
+            surface === 'headless' ? 'shared' : 'legacy',
+          );
         }
       });
 

@@ -2,7 +2,7 @@
 
 [English](2026-10-23-unified-agent-loop.md) | [简体中文](2026-10-23-unified-agent-loop.zh-CN.md)
 
-- **状态**：已在 #15343 中通过。headless（PR 1，#15369）、ACP（PR 2，#15509–#16190）、Ink TUI（PR 3，#16206–#16704）与 OpenTUI（PR 4，#16743–#16820）的迁移均已合入；各 surface 的默认开启等待 nightly 统一 loop E2E 门控（#16192）。PR 5（AgentCore）正在进行：5a（#16880）和 5b（#17035）已合入。其余步骤在 #17045 中跟踪。PR 6a（speculation 的模型轮，#17029）已合入。
+- **状态**：已在 #15343 中通过。headless（PR 1，#15369）、ACP（PR 2，#15509–#16190）、Ink TUI（PR 3，#16206–#16704）与 OpenTUI（PR 4，#16743–#16820）的迁移均已合入；各 surface 的默认开启按[迁移计划](#迁移计划)中的阶梯进行，headless 是第一个。PR 5（AgentCore）正在进行：5a（#16880）和 5b（#17035）已合入。其余步骤在 #17045 中跟踪。PR 6a（speculation 的模型轮，#17029）已合入。
 - **日期**：2026-10-23，基于 upstream `779a4d5d0d`。
 - **相关**：
   - 跟踪 issue #15327，以及剩余步骤、灰度和能力台账的跟踪 issue #17045；
