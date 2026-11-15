@@ -1,21 +1,26 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
+import com.alibaba.qwen.code.managedagent.contracts.catalog.AgentDefinitionExtensions;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
- * The Managed /loop skill variant injected at creation admission. The body is
- * one of three committed assets generated from the bundled local SKILL.md
- * (packages/core/src/skills/bundled/loop/managed-loop-skill.ts); a TypeScript
- * parity test pins each asset to the bundled source. This class is a pure
- * selector: it maps the Session's tool profile to the asset whose body names
- * only the creators that profile declares, and does no string composition.
+ * The Managed /loop skill variant injected at creation admission. The
+ * description and body are read from a committed JSON sidecar generated from the
+ * bundled local SKILL.md (packages/core/src/skills/bundled/loop/
+ * managed-loop-skill.ts); a TypeScript parity test pins each sidecar to the
+ * bundled source. This class is a pure selector: it maps the Session's tool
+ * profile to the sidecar whose body names only the creators that profile
+ * declares, and does no string composition.
  *
  * <p>See docs/design/2026-11-14-managed-loop-skill-asset.md. The deployment
  * gates are operation gates that leave the tool declaration in place, so the
@@ -23,6 +28,7 @@ import java.util.Map;
  */
 final class ManagedLoopSkill {
     static final String NAME = "loop";
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     private ManagedLoopSkill() {
     }
@@ -33,45 +39,37 @@ final class ManagedLoopSkill {
      */
     static Map<String, Object> forProfile(String profile) {
         String asset;
-        String description;
         if (WorkspaceToolProfiles.SHELL_V4.equals(profile)) {
-            asset = "managed-loop-skill-union.md";
-            description = "Create a loop that runs a prompt now and follows up on a fixed "
-                    + "schedule or through self-paced wakeups. Usage - /loop 5m check the "
-                    + "build, /loop check the PR every 30m, /loop check the deploy. /loop "
-                    + "list to show jobs, /loop clear to cancel all.";
+            asset = "managed-loop-skill-union.json";
         } else if (WorkspaceToolProfiles.FILES_V4.equals(profile)
                 || WorkspaceToolProfiles.INTERNAL_TEAM_LEAD_V2.equals(profile)) {
-            asset = "managed-loop-skill-cron.md";
-            description = "Create a loop that runs a prompt now and follows up on a fixed "
-                    + "schedule. Usage - /loop 5m check the build, /loop check the PR every "
-                    + "30m. /loop list to show jobs, /loop clear to cancel all.";
+            asset = "managed-loop-skill-cron.json";
         } else if (WorkspaceToolProfiles.SHELL_V3.equals(profile)) {
-            asset = "managed-loop-skill-wakeup.md";
-            description = "Create a loop that runs a prompt now and follows up through "
-                    + "self-paced wakeups. Usage - /loop check the deploy. /loop list to "
-                    + "show jobs, /loop clear to cancel all.";
+            asset = "managed-loop-skill-wakeup.json";
         } else {
             return null;
         }
+        Map<String, Object> sidecar = readSidecar(asset);
         Map<String, Object> skill = new LinkedHashMap<>();
         skill.put("name", NAME);
-        skill.put("description", description);
-        skill.put("body", readBody(asset));
+        skill.put("description", sidecar.get("description"));
+        skill.put("body", sidecar.get("body"));
         return skill;
     }
 
     /**
      * Append the caller skills and the profile's loop variant to the admission
      * catalog, returning whether the variant was injected. The variant is a
-     * server contribution added even when the caller supplies no skills (the
-     * built-in qwen-code case). It is authoritative: a caller-imported "loop"
-     * skill (the Web Shell imports the bundled one verbatim from the daemon
-     * snapshot) is replaced, not refused, so the default creation path is not
-     * broken by a duplicate name. The injection is gated on the negotiated
-     * Session Skills capability so a Harness without it keeps the creation-time
-     * refusal rather than failing later at dispatch. Kept here so the admission
-     * class does not grow.
+     * server contribution added even when the caller supplies no skills. It is
+     * authoritative: a caller-imported "loop" skill (the Web Shell imports the
+     * bundled one verbatim from the daemon snapshot) is replaced, not refused,
+     * so the default creation path is not broken by a duplicate name. On a
+     * profile with no loop creator the caller's "loop" entry is still dropped,
+     * so a creator-less Session never publishes a body naming tools it lacks.
+     * The injection is gated on the negotiated Session Skills capability and on
+     * the catalog capacity: if the variant cannot fit within the published
+     * 256-entry / 2 MiB limits it is skipped rather than refusing the creation.
+     * Kept here so the admission class does not grow.
      */
     static boolean mergeInto(List<Map<String, Object>> merged,
             List<Map<String, Object>> callerSkills, String profile,
@@ -80,22 +78,49 @@ final class ManagedLoopSkill {
         if (!sessionSkillsSupported) {
             return false;
         }
+        merged.removeIf(skill -> NAME.equals(skill.get("name")));
         Map<String, Object> loop = forProfile(profile);
         if (loop == null) {
             return false;
         }
-        merged.removeIf(skill -> NAME.equals(skill.get("name")));
+        List<Map<String, Object>> candidate = new ArrayList<>(merged);
+        candidate.add(loop);
+        try {
+            AgentDefinitionExtensions.sessionSkills(candidate);
+        } catch (ManagedAgentException overCapacity) {
+            return false;
+        }
         merged.add(loop);
         return true;
     }
 
-    private static String readBody(String asset) {
+    /**
+     * Re-select the loop entry for a child whose tool profile differs from the
+     * parent's (a snapshot child is read-only). The inherited server variant is
+     * dropped and replaced by the child profile's own variant, or by nothing
+     * when the child declares no loop creator, so a read-only child never
+     * publishes a body naming tools it lacks. Caller/definition skills inherit
+     * unchanged.
+     */
+    static List<Map<String, Object>> reselectForProfile(
+            List<Map<String, Object>> inherited, String childProfile) {
+        List<Map<String, Object>> result = new ArrayList<>(inherited);
+        result.removeIf(skill -> NAME.equals(skill.get("name")));
+        Map<String, Object> loop = forProfile(childProfile);
+        if (loop != null) {
+            result.add(loop);
+        }
+        return result;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> readSidecar(String asset) {
         try (InputStream stream =
                 ManagedLoopSkill.class.getResourceAsStream("/contracts/" + asset)) {
             if (stream == null) {
                 throw new IllegalStateException("Missing managed loop skill asset: " + asset);
             }
-            return new String(stream.readAllBytes(), StandardCharsets.UTF_8);
+            return JSON.readValue(new String(stream.readAllBytes(), StandardCharsets.UTF_8), Map.class);
         } catch (IOException error) {
             throw new IllegalStateException("Cannot read managed loop skill asset: " + asset, error);
         }

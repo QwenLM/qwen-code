@@ -437,6 +437,24 @@ class ManagedSessionCreationSkillsTest {
         }
     }
 
+    @Test
+    void injectionStripsCallerImportedLoopOnCreatorLessProfiles() throws Exception {
+        Object target = org.springframework.test.util.AopTestUtils.getUltimateTargetObject(store);
+        Object previousProfiles = com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "definitionToolProfiles");
+        com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles",
+                List.of("hosted-workspace-files/1", "hosted-workspace-files/4"));
+        try {
+            // A creator-less profile strips a caller-imported bundled loop so it
+            // never publishes a body naming tools the profile lacks.
+            String filesAgent = defineProfile("hosted-workspace-files/1", "strip-agent", List.of());
+            var localLoop = Map.<String, Object>of("name", "loop", "description", "Local", "body", "LOCAL");
+            String stripSession = create(request(filesAgent, List.of(localLoop)), "strip-loop", false).get("id").asText();
+            assertThat(snapshots.effective(store.requireSession(tenant, stripSession))).isEmpty();
+        } finally {
+            com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles", previousProfiles);
+        }
+    }
+
     private String defineProfile(String profile, String key, List<Map<String, Object>> skills) throws Exception {
         var definition = json.createObjectNode();
         definition.putObject("model");

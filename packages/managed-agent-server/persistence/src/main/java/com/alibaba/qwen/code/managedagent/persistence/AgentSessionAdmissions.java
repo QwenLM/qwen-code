@@ -237,7 +237,7 @@ final class AgentSessionAdmissions {
             merged.addAll(AgentDefinitionExtensions.skills(storeRows.readMap(definitions.find(tenantId, agentId,
                     Long.parseLong(pin.revision())).orElseThrow().definitionJson()).get("skills"), true));
         }
-        boolean loopInjected = ManagedLoopSkill.mergeInto(merged, skills, pin.toolProfile(), command.sessionSkillsSupported());
+        ManagedLoopSkill.mergeInto(merged, skills, pin.toolProfile(), command.sessionSkillsSupported());
         var effectiveSkills = AgentDefinitionExtensions.sessionSkills(merged);
         if (worktree != null && sessionWorktrees == null) {
             throw new ManagedAgentException(409, "worktree_unavailable", "Session worktrees are unavailable.");
@@ -259,7 +259,7 @@ final class AgentSessionAdmissions {
             jdbc.update("UPDATE ma_session SET public_child_agents_version=1 WHERE tenant_id=? AND session_id=?",
                     tenantId, admission.sessionId());
         }
-        if (!skills.isEmpty() || loopInjected) {
+        if (!effectiveSkills.isEmpty()) {
             creationSkills.save(tenantId, admission.sessionId(), effectiveSkills);
         }
         if (extensionPins != null) {
@@ -612,7 +612,7 @@ final class AgentSessionAdmissions {
         var inheritedSkills = snapshot == null ? creationSkills.snapshot(tenantId, parentSessionId)
                 : creationSkills.fromLaunchReference(tenantId, parentSessionId, snapshot.path("skillsRef"));
         if (inheritedSkills != null) {
-            creationSkills.save(tenantId, sessionId, inheritedSkills);
+            creationSkills.save(tenantId, sessionId, toolProfile == null ? inheritedSkills : ManagedLoopSkill.reselectForProfile(inheritedSkills, toolProfile));
         }
         eventJournal.appendEvent(tenantId, sessionId, null, "session.created",
                 Map.of("sessionId", sessionId), false, null, now);

@@ -3526,6 +3526,29 @@ describe('managed-agent-server e2e runner', () => {
     expect(source).toMatch(/stallTimer\.unref\(\)/);
   });
 
+  it('copies every core contract asset the pom pulls into the image', () => {
+    // The contracts module copies a set of core/src/managed-runtime/contracts
+    // assets onto the classpath; the image build must COPY each one or the
+    // packaged jar silently lacks it (Maven does not fail on a missing include)
+    // and runtime resource reads throw. Pin the Dockerfile COPY set against the
+    // pom includes so adding an include without a COPY reddens here.
+    const pom = read('packages/managed-agent-server/contracts/pom.xml');
+    const block = pom.match(
+      /<resource>\s*<directory>\$\{managed\.module\.root\}\/\.\.\/core\/src\/managed-runtime\/contracts<\/directory>[\s\S]*?<\/resource>/,
+    )?.[0];
+    expect(block).toBeTruthy();
+    const includes = [...block.matchAll(/<include>([^<]+)<\/include>/g)].map(
+      (m) => m[1],
+    );
+    expect(includes.length).toBeGreaterThan(0);
+    const dockerfile = read('packages/managed-agent-server/Dockerfile');
+    for (const include of includes) {
+      expect(dockerfile).toContain(
+        `COPY packages/core/src/managed-runtime/contracts/${include} packages/core/src/managed-runtime/contracts/`,
+      );
+    }
+  });
+
   it('resolves the project version from the real pom', () => {
     // The runner's own regex executes against the real pom — lifted from
     // the runner source, not copied — so a whitespace change between

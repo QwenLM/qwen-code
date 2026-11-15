@@ -171,27 +171,28 @@ declaration already allows. This keeps the skill consistent with the tool
 surface rather than trying to predict a runtime operation gate (one of which,
 the loop env gate, is not even visible to Java) from the control plane.
 
-**D3 — Body source and single source of truth.** The shared skill content lives
-in the bundled `SKILL.md`. A TypeScript generator `buildManagedLoopBody(profile)`
-derives the managed body from it: a small documented set of wording substitutions
-(the durable/expiry sentences) plus profile-conditional section selection.
-Because the two paths interleave throughout the body (Parsing, loop.md mode, and
-Autonomous mode all reference both creators), the composition lives in
-TypeScript, not Java string surgery. Three bodies are generated and committed
-under `packages/core/src/managed-runtime/contracts/` — union (shell/4), cron-only
-(files/4, team-lead/2), and wakeup-only (shell/3) — the directory the contracts
-module already copies onto the Java classpath (`contracts/pom.xml:53-54`). A
-TypeScript parity test asserts each committed asset equals
-`buildManagedLoopBody(profile)` byte-for-byte and binds the generator to the
+**D3 — Skill source and single source of truth.** The shared skill content lives
+in the bundled `SKILL.md`. A TypeScript generator
+`buildManagedLoopSkill(profile, bundledBody, frontmatterDescription)` derives the
+managed skill (description + body) from it: a small documented set of wording
+substitutions (the durable/expiry/UTC sentences) plus profile-conditional section
+selection. Because the two paths interleave throughout the body (Parsing, loop.md
+mode, and Autonomous mode all reference both creators), the composition lives in
+TypeScript, not Java string surgery. Three JSON sidecars (description + body) are
+generated and committed under `packages/core/src/managed-runtime/contracts/` —
+union (shell/4), cron-only (files/4, team-lead/2), and wakeup-only (shell/3) — the
+directory the contracts module already copies onto the Java classpath
+(`contracts/pom.xml:53-54`). A TypeScript parity test asserts each committed
+sidecar equals the generator output byte-for-byte and binds the generator to the
 bundled source; drift in either direction reddens the test (the "pin the consumer
-from the producer" pattern). Java is a pure selector: it reads the asset for the
+from the producer" pattern). Java is a pure selector: it reads the sidecar for the
 Session's profile and injects it, doing no string composition.
 
 **D4 — Frozen, replay-safe, capacity-bounded.** The injected variant rides the
 existing immutable receipt and digest; no new resource kind, no schema version
-bump. The loop body is ~7 KiB, far under the 512 KiB per-body / 2 MiB catalog
-limits (`AgentDefinitionExtensions.java:42-81`). Injection is deterministic in
-the profile, preserving replay under the idempotency key.
+bump. The loop bodies are ~6–10 KiB, far under the 512 KiB per-body / 2 MiB
+catalog limits (`AgentDefinitionExtensions.java:42-81`). Injection is
+deterministic in the profile, preserving replay under the idempotency key.
 
 **D5 — Naming.** The variant keeps the skill name `loop` so `/loop` invocation
 and the `allowedTools` source property are unchanged; only the body wording and
@@ -207,37 +208,45 @@ The injection is gated on the negotiated Session Skills capability
 (`sessionSkillsSupported`, threaded through `SessionCreationCommand` like the
 other capability flags): a Harness that does not advertise `session-skills/2`
 gets no server row, keeping the failure at creation time rather than at dispatch.
-The save guard writes a row when the caller sent skills OR the variant was
-injected; a pinned definition's stored skills are merged whenever a definition
-is pinned, so an injected row carries the definition's skills plus `loop` and
-never shadows the definition catalog on the consumer side.
+The save guard writes a row whenever the effective catalog (definition skills +
+caller skills + the injected variant, after any strip) is non-empty; a pinned
+definition's stored skills are merged whenever a definition is pinned, so an
+injected row carries the definition's skills plus `loop` and never shadows the
+definition catalog on the consumer side.
 
 ### Files affected
 
 - `packages/core/src/managed-runtime/contracts/` — the three generated managed
-  loop bodies (union / cron-only / wakeup-only), copied to Java.
+  loop JSON sidecars (description + body; union / cron-only / wakeup-only),
+  copied to Java.
 - `packages/core/src/skills/bundled/loop/managed-loop-skill.ts` — the
-  `buildManagedLoopBody(profile)` generator (wording substitutions + section
-  selection); a collocated parity test binds the generated assets to `SKILL.md`
-  and pins the shared steward prose across every profile (no change to `SKILL.md`
-  itself). `regenerate-managed-loop-assets.ts` is the committed regeneration
-  entry point.
+  `buildManagedLoopSkill(profile, bundledBody, frontmatterDescription)` generator
+  (wording substitutions + section selection); a collocated parity test binds the
+  generated sidecars to `SKILL.md` and pins the shared steward prose across every
+  profile (no change to `SKILL.md` itself). `regenerate-managed-loop-assets.ts` is
+  the committed regeneration entry point.
 - `packages/managed-agent-server/persistence/.../ManagedLoopSkill.java` — the
-  pure profile-to-asset selector and `mergeInto` (override + capability gate);
-  reads the classpath body, no string composition.
+  pure profile-to-sidecar selector, `mergeInto` (override + capability gate +
+  capacity skip), and `reselectForProfile` for children; reads the classpath
+  sidecar, no string composition.
 - `packages/managed-agent-server/persistence/.../AgentSessionAdmissions.java` —
-  merge the pinned definition's skills, call `mergeInto`, and write the row when
-  the caller sent skills or the variant was injected.
+  merge the pinned definition's skills, call `mergeInto`, write the row when the
+  effective catalog is non-empty, and re-select the inherited loop entry by the
+  child's profile before saving a child catalog.
 - `packages/managed-agent-server/contracts/.../SessionCreationCommand.java` and
   `control-plane/.../ManagedAgentService.java` — thread the
   `sessionSkillsSupported` capability flag from the negotiated Harness.
-- `packages/managed-agent-server/contracts/pom.xml` — copy the generated bodies
+- `packages/managed-agent-server/contracts/pom.xml` — copy the generated sidecars
   onto the Java classpath.
+- `packages/managed-agent-server/Dockerfile` — COPY the generated sidecars into
+  the image build; a scripts test pins the COPY set against the contracts pom
+  includes so a missing asset copy reddens.
 - Verification: a selector unit test across every profile (including null and
-  no-creator), and admission tests for the empty-caller injection, the
-  caller-imported `loop` override, the pinned-definition-with-skills no-shadowing
-  case, gate-off behavior, replay determinism, and the no-creator empty
-  contribution — on H2 and real MySQL 8.4.
+  no-creator), the catalog-capacity skip, and the read-only child reselect; and
+  admission tests for the empty-caller injection, the caller-imported `loop`
+  override, the pinned-definition-with-skills no-shadowing case, gate-off
+  behavior, replay determinism, and the creator-less strip — on H2 and real
+  MySQL 8.4.
 
 ## Constraints
 
@@ -260,24 +269,35 @@ never shadows the definition catalog on the consumer side.
   Mitigation: D3's parity test derives the managed asset from the bundled source.
 - **Idempotency interaction.** Injecting after the request digest must not change
   replay outcomes. Mitigation: a replay test asserts the identical snapshot.
-- **Duplicate-name conflict** with a caller-imported local `loop`. Mitigation:
-  D5 documents the server variant as authoritative; a test pins the conflict.
+- **Caller-imported local `loop`.** The Web Shell posts the bundled `loop`
+  verbatim, so the server variant replaces it (D5); a test pins the replacement.
+  On a creator-less profile the caller's `loop` is dropped, so no body naming
+  undeclared tools is published.
+- **Catalog capacity.** The injection is skipped (not refused) when the caller
+  catalog is already at the published 256-entry / 2 MiB cap; a unit test pins the
+  skip at 256 entries.
+- **Snapshot children.** A child admitted on a different profile (a snapshot
+  child is read-only) re-selects the loop entry by its own profile before save,
+  so a read-only child never inherits a body naming tools it lacks.
 
 ## Validation plan
 
 - Admission matrix: each of shell/3, files/4, team-lead/2, shell/4 receives a
   variant whose body names exactly the creators that profile declares; READ and
-  a no-creator profile receive none.
-- Empty-caller-skills: a built-in `qwen-code` creation with no caller skills
-  still receives the variant (the widened save guard).
-- Gate independence: with either deployment gate off, the injected body is
-  unchanged for the same profile (the gates are operation gates); a create or
-  arming call still gets the typed runtime refusal, and the declaration remains.
+  a no-creator profile receive none (a caller-imported `loop` is stripped).
+- Empty-caller-skills: a definition pinned to a creator-bearing profile with no
+  caller skills still receives the variant. (The built-in `qwen-code` agent
+  resolves to shell/1 or files/1 and correctly receives none.)
+- Gate independence: with the Session Skills capability off, no server row is
+  written and the creation-time behavior is preserved.
 - Replay: a re-driven creation injects the identical variant and reproduces the
   identical receipt digest.
-- Parity: the TS test asserts each profile's managed body equals the bundled
-  source under the documented substitutions; a mutation dropping a section or
-  drifting the wording reddens it.
+- Parity: the TS test asserts each profile's sidecar equals the generator output
+  and pins the shared steward prose, the home-only loop.md path, the absence of
+  non-expanding cron sentinels, and the UTC wording; a mutation drifting any of
+  these reddens it.
+- Image: a scripts test pins the Dockerfile COPY set against the contracts pom
+  includes so a missing asset copy reddens.
 - Skill E2E (deferred to the separate E2E effort): `/loop 5m …` creates the
   definition and runs the prompt immediately; `/loop list` shows it; `/loop
 clear` retires it.
@@ -285,12 +305,16 @@ clear` retires it.
 ## Acceptance criteria
 
 - A Managed Session on a creator-bearing profile has a `loop` skill in its
-  published catalog whose body uses Managed durable/expiry wording and names
-  only the creators the profile declares.
-- The built-in `qwen-code` agent with no caller skills receives the variant.
-- The READ profile and no-creator profiles receive no loop skill.
+  published catalog whose body uses Managed durable/expiry/UTC wording, names
+  only the creators the profile declares, teaches no non-expanding cron
+  sentinel, and claims only the home `~/.qwen/loop.md` file.
+- A definition pinned to a creator-bearing profile with no caller skills
+  receives the variant; the built-in `qwen-code` agent (shell/1 / files/1)
+  receives none.
+- The READ profile and no-creator profiles publish no loop skill, and a
+  read-only snapshot child does not inherit one.
 - A replayed creation produces the identical catalog snapshot.
-- The managed body cannot drift from the bundled source without a red parity
+- The managed sidecar cannot drift from the bundled source without a red parity
   test.
 - No new wire field, resource kind, or journal change.
 
@@ -308,9 +332,16 @@ Resolved during design (kept here for the record):
   the tool declaration in place (`hosted-workspace-tool-turn.ts:2488-2513`
   consult no gate), so the body is profile-driven and gate-independent; a gate
   refuses the call at runtime. Decided: gates do not affect the body.
-- **Coexistence with a caller-imported local `loop`.** Reject the duplicate
-  (current admission behavior) and document that a managed-bound creation should
-  not also import the local `loop` body, rather than silently overriding caller
-  intent. Decided: reject + document.
+- **Coexistence with a caller-imported local `loop`.** The Web Shell imports the
+  bundled `loop` verbatim from the daemon snapshot, so rejecting the duplicate
+  would 409 every creation on a loop-bearing profile. The server variant is
+  authoritative and replaces any same-named entry; on a creator-less profile the
+  caller's `loop` is dropped. Decided: replace + document (refined from the
+  initial reject proposal after the default-path 409 was found).
+- **Cron fire mechanics.** A Managed cron fire does not expand loop sentinels
+  (only the self-paced wakeup fire does), so the cron path teaches
+  natural-language prompts the model executes each fire (reading the home
+  `~/.qwen/loop.md` itself); only the wakeup path uses sentinels. Decided:
+  natural-language cron prompts (no production fire-path change).
 
 No open questions remain for implementation.
