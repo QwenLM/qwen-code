@@ -14,6 +14,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -725,7 +726,7 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
     ).toBe('bulk\n');
   });
 
-  it('applyStashSnapshot fails closed when the target index is locked (R6-2)', async () => {
+  it('applyStashSnapshot fails closed when the target index is unwritable (R6-2)', async () => {
     // A non-conflict apply failure (unwritable index) must not resolve:
     // the handoff would otherwise report a dirty carry that never landed.
     await fs.writeFile(path.join(repoRoot, 'f.txt'), 'one\n');
@@ -741,14 +742,22 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
     const snapshot = await service.createStashSnapshot(targetPath);
     expect(snapshot).not.toBe('');
     git(targetPath, 'checkout', '--', 'f.txt');
+    // Deny index writes by permission rather than a held index.lock: the
+    // lock proved non-portable across the CI fleet's git builds, while a
+    // read-only git directory blocks every index-write path and bites for
+    // both non-root developers and the root-run CI lane (which drops
+    // DAC_OVERRIDE precisely so permission fixtures work).
     const gitDir = git(targetPath, 'rev-parse', '--absolute-git-dir');
-    await fs.writeFile(path.join(gitDir, 'index.lock'), '');
-
-    await expect(
-      service.applyStashSnapshot(targetPath, snapshot),
-    ).rejects.toThrow('failed to apply');
-    // The dirty change never landed.
-    expect(await read(path.join(targetPath, 'f.txt'))).toBe('one\n');
+    await fs.chmod(gitDir, 0o555);
+    try {
+      await expect(
+        service.applyStashSnapshot(targetPath, snapshot),
+      ).rejects.toThrow('failed to apply');
+      // The dirty change never landed.
+      expect(await read(path.join(targetPath, 'f.txt'))).toBe('one\n');
+    } finally {
+      await fs.chmod(gitDir, 0o755);
+    }
   });
 
   it('applyStashSnapshot refuses a conflicting apply and restores committed state (R6-2)', async () => {
@@ -810,16 +819,20 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
   it.skipIf(process.platform === 'win32')(
     'createUserWorktree surfaces a non-conflict carry failure (R5-5)',
     async () => {
-      // Hold the NEW worktree's index.lock from a post-checkout hook (it
-      // runs during `git worktree add`, after the index exists): the
-      // tracked stash apply then fails for an environment reason, with no
-      // unmerged entries. Creation must refuse rather than record a carry
-      // that never landed.
+      // Make the NEW worktree's git directory read-only from a
+      // post-checkout hook (it runs during `git worktree add`, after the
+      // index exists): the tracked stash apply then fails for an
+      // environment reason, with no unmerged entries. Creation must
+      // refuse rather than record a carry that never landed. Permission
+      // denial is used instead of a held index.lock because the lock
+      // proved non-portable across the CI fleet's git builds; a read-only
+      // git directory blocks every index-write path and bites for both
+      // non-root developers and the root-run CI lane (DAC_OVERRIDE dropped).
       const hooksDir = path.join(repoParent, 'hooks');
       await fs.mkdir(hooksDir);
       await fs.writeFile(
         path.join(hooksDir, 'post-checkout'),
-        '#!/bin/sh\ngd=$(git rev-parse --absolute-git-dir)\ntouch "$gd/index.lock"\n',
+        '#!/bin/sh\ngd=$(git rev-parse --absolute-git-dir)\nchmod 555 "$gd"\n',
         { mode: 0o755 },
       );
       git(repoRoot, 'config', 'core.hooksPath', hooksDir);
@@ -833,6 +846,14 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
 
       expect(created.success).toBe(false);
       expect(created.error).toContain('failed to apply');
+      // Restore the directory mode so the fixture cleanup can reap it.
+      // The failed removal deletes the working tree but cannot delete the
+      // read-only git directory's contents, so address the git directory
+      // directly rather than through the (possibly gone) worktree path.
+      const gitDir = path.join(repoRoot, '.git', 'worktrees', 'locked');
+      if (existsSync(gitDir)) {
+        await fs.chmod(gitDir, 0o755);
+      }
     },
   );
 });
