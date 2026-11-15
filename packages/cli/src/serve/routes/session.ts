@@ -116,6 +116,7 @@ import {
   SessionLimitExceededError,
   SessionNotFoundError,
   SessionResetPendingError,
+  BridgeTimeoutError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
   type AcpSessionBridge,
@@ -5596,6 +5597,19 @@ export function registerSessionRoutes(
                   currentCwd: worktree.path,
                 });
                 return;
+              }
+              // A caller-facing timeout does NOT abort the underlying cd
+              // (withTimeout only ends the caller's wait): the queued cd can
+              // still land the session in this worktree after this rejection
+              // and update effectiveCwd to it, so the observed-cwd read above
+              // may be stale. Rolling back on an undetermined timeout would
+              // delete the checkout the session is about to inhabit and
+              // strand it in a vanished directory. Keep the checkout +
+              // sidecar so a late-landing cd has a valid home; only a
+              // definitive failure (the cd rejected, or settled elsewhere)
+              // is safe to roll back.
+              if (error instanceof BridgeTimeoutError) {
+                throw error;
               }
               // Roll back the fresh worktree, sidecar, and marker; the
               // session stays in the local checkout.

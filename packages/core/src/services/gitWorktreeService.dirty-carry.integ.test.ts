@@ -791,6 +791,39 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
     expect(git(repoRoot, 'status', '--porcelain')).toBe('');
   });
 
+  it('carryUntrackedFilesTo refuses an ancestor symlink escaping the target (R7)', async () => {
+    const service = new GitWorktreeService(repoRoot);
+    const target = await service.createUserWorktree('carry-escape', 'main', {
+      detached: true,
+    });
+    expect(target.success).toBe(true);
+    const targetPath = target.worktree!.path;
+    const outside = path.join(repoParent, 'outside');
+    await fs.mkdir(outside);
+    // The target commits out -> outside (a clean descendant-HEAD shape).
+    // The worktree's base tree has no such link, so the source's untracked
+    // out/carried.txt is listed and would be copied THROUGH the link to the
+    // outside directory without the ancestor guard.
+    await fs.symlink(outside, path.join(targetPath, 'out'));
+    git(targetPath, 'add', 'out');
+    git(targetPath, 'commit', '-qm', 'out link', '--no-verify');
+    // The source holds untracked out/carried.txt and a safe nested file.
+    await fs.mkdir(path.join(repoRoot, 'out'), { recursive: true });
+    await fs.writeFile(path.join(repoRoot, 'out', 'carried.txt'), 'escape\n');
+    await fs.mkdir(path.join(repoRoot, 'safe'), { recursive: true });
+    await fs.writeFile(path.join(repoRoot, 'safe', 'nested.txt'), 'ok\n');
+
+    const created = await service.carryUntrackedFilesTo(targetPath);
+
+    expect(created).toContain('safe/nested.txt');
+    expect(created).not.toContain('out/carried.txt');
+    // Nothing was written outside the target checkout.
+    await expect(fs.lstat(path.join(outside, 'carried.txt'))).rejects.toThrow();
+    expect(await read(path.join(targetPath, 'safe', 'nested.txt'))).toBe(
+      'ok\n',
+    );
+  });
+
   it('carryUntrackedFilesTo skips pre-existing destinations and records only created paths (R6-1)', async () => {
     const service = new GitWorktreeService(repoRoot);
     const target = await service.createUserWorktree('carry-skip', 'main', {

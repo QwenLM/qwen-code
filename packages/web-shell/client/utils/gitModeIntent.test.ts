@@ -31,6 +31,36 @@ describe('gitModeIntentMustReset', () => {
     ).toBe(true);
   });
 
+  it('keeps the intent for a detached HEAD (tag/SHA checkout) (R7)', () => {
+    // Mirrors App.gitModeEligible: branch:null with detached:true is the
+    // shared-checkout shape the worktree default isolates, not a non-Git
+    // workspace, so the armed worktree intent must survive the reset effect.
+    expect(
+      gitModeIntentMustReset({
+        ...trustedGit,
+        gitStatus: { branch: null, detached: true, hasHead: true },
+      }),
+    ).toBe(false);
+  });
+
+  it('still resets a detached HEAD with an unborn HEAD (R7)', () => {
+    expect(
+      gitModeIntentMustReset({
+        ...trustedGit,
+        gitStatus: { branch: null, detached: true, hasHead: false },
+      }),
+    ).toBe(true);
+  });
+
+  it('resets a non-Git workspace (no branch and not detached) (R7)', () => {
+    expect(
+      gitModeIntentMustReset({
+        ...trustedGit,
+        gitStatus: { branch: null, detached: false },
+      }),
+    ).toBe(true);
+  });
+
   it('resets on a definitive unborn HEAD even with a branch present', () => {
     // The fast status that armed the intent may omit hasHead; the fresh
     // status reporting hasHead:false must drop the worktree intent in the

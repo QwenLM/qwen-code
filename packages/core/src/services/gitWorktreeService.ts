@@ -13,7 +13,7 @@ import { execFile, execSync } from 'node:child_process';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
-import type { SimpleGit } from 'simple-git';
+import type { SimpleGit, SimpleGitOptions } from 'simple-git';
 import { Storage } from '../config/storage.js';
 import { isCommandAvailable } from '../utils/shell-utils.js';
 import { isNodeError } from '../utils/errors.js';
@@ -35,6 +35,27 @@ export const WORKTREE_BRANCH_PREFIX = 'worktree-';
 export function worktreeBranchForSlug(slug: string): string {
   return `${WORKTREE_BRANCH_PREFIX}${slug}`;
 }
+
+/**
+ * Error detection for the dirty-carry `stash apply` calls. simple-git's
+ * default treats a non-zero exit as an error only when stderr is non-empty
+ * (`exitCode && stdErr.length`); a git apply that fails with an empty
+ * stderr — observed on the CI fleet's git build, where a held index lock /
+ * read-only git directory made the apply exit non-zero yet resolve — would
+ * otherwise leave `applyError` unset and record a carry that never landed.
+ * Judge by the real process exit status so any non-zero exit surfaces,
+ * regardless of which stream git reported on.
+ */
+export const carryApplyErrorDetection: NonNullable<
+  SimpleGitOptions['errors']
+> = (error, result) => {
+  if (error) return error;
+  if (result.exitCode === 0) return undefined;
+  const message = Buffer.concat([...result.stdOut, ...result.stdErr])
+    .toString('utf8')
+    .trim();
+  return new Error(message || `git apply exited with code ${result.exitCode}`);
+};
 
 /**
  * Filename of the in-worktree session marker. Created at worktree
@@ -1533,9 +1554,10 @@ export class GitWorktreeService {
    * Copy this checkout's untracked files into another checkout of the
    * same repository at the same repository-relative offset (the target
    * may be rooted at a subdirectory). Fail-open per file; a pre-existing
-   * destination is never overwritten. Returns the paths actually CREATED
-   * so a caller can undo the overlay on rollback without deleting files
-   * that were already there.
+   * destination is never overwritten, and an entry whose destination would
+   * escape the target checkout through an ancestor symlink is skipped.
+   * Returns the paths actually CREATED so a caller can undo the overlay on
+   * rollback without deleting files that were already there.
    */
   async carryUntrackedFilesTo(targetCwd: string): Promise<string[]> {
     const repoTop = await this.getRepoTopLevel().catch(() => null);
@@ -1551,6 +1573,7 @@ export class GitWorktreeService {
       (await new GitWorktreeService(targetCwd)
         .getRepoTopLevel()
         .catch(() => null)) ?? targetCwd;
+    const realTargetTop = await fs.realpath(targetTop).catch(() => targetTop);
     const copied: string[] = [];
     for (const rel of files) {
       try {
@@ -1564,7 +1587,43 @@ export class GitWorktreeService {
           .then(() => true)
           .catch(() => false);
         if (exists) continue;
-        await fs.mkdir(path.dirname(dst), { recursive: true });
+        const parent = path.dirname(dst);
+        // Refuse to write through an ancestor symlink that escapes the
+        // target checkout: a committed `out -> <outside>` link (a clean
+        // descendant HEAD) would otherwise let mkdir/copyFile land the carry
+        // outside the repo, where the rollback cannot reap it. Check the
+        // deepest existing ancestor's real location BEFORE creating anything
+        // — mkdir recursive follows symlink ancestors.
+        let ancestor = parent;
+        while (
+          !(await fs
+            .lstat(ancestor)
+            .then(() => true)
+            .catch(() => false))
+        ) {
+          const up = path.dirname(ancestor);
+          if (up === ancestor) break;
+          ancestor = up;
+        }
+        if (
+          !isWithinRoot(
+            await fs.realpath(ancestor).catch(() => ancestor),
+            realTargetTop,
+          )
+        ) {
+          continue;
+        }
+        await fs.mkdir(parent, { recursive: true });
+        // Re-verify after mkdir: the created tail is real directories, but an
+        // ancestor swapped to a symlink mid-flight must still not escape.
+        if (
+          !isWithinRoot(
+            await fs.realpath(parent).catch(() => parent),
+            realTargetTop,
+          )
+        ) {
+          continue;
+        }
         await this.copyOverlayEntry(path.join(repoTop, rel), dst);
         copied.push(rel);
       } catch {
@@ -1590,7 +1649,9 @@ export class GitWorktreeService {
     },
   ): Promise<void> {
     const { simpleGit } = await loadSimpleGit();
-    const wtGit = simpleGit(worktreePath).env(gitEnv());
+    const wtGit = simpleGit(worktreePath, {
+      errors: carryApplyErrorDetection,
+    }).env(gitEnv());
     if (dirtyState.stashCommit) {
       let applyError: unknown;
       try {
@@ -2950,7 +3011,9 @@ export class GitWorktreeService {
     snapshot: string,
   ): Promise<void> {
     const { simpleGit } = await loadSimpleGit();
-    const git = simpleGit(checkoutPath).env(gitEnv());
+    const git = simpleGit(checkoutPath, {
+      errors: carryApplyErrorDetection,
+    }).env(gitEnv());
     let applyError: unknown;
     try {
       await git.raw(['stash', 'apply', snapshot]);

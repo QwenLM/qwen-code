@@ -8,7 +8,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Mock } from 'vitest';
 import type * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { GitWorktreeService } from './gitWorktreeService.js';
+import {
+  GitWorktreeService,
+  carryApplyErrorDetection,
+} from './gitWorktreeService.js';
 import type { WorktreeInfo } from './gitWorktreeService.js';
 import { isCommandAvailable } from '../utils/shell-utils.js';
 
@@ -646,5 +649,48 @@ describe('GitWorktreeService', () => {
         /may only contain/,
       );
     });
+  });
+});
+
+describe('carryApplyErrorDetection', () => {
+  const result = (
+    exitCode: number,
+    stdOut: string[] = [],
+    stdErr: string[] = [],
+  ) => ({
+    exitCode,
+    stdOut: stdOut.map((s) => Buffer.from(s)),
+    stdErr: stdErr.map((s) => Buffer.from(s)),
+  });
+
+  it('treats a non-zero exit with empty stderr as an error (the CI git shape)', () => {
+    // simple-git's default detection is `exitCode && stdErr.length`; a git
+    // apply that fails with empty stderr must still surface, or the carry
+    // is recorded as landed when it never did.
+    const err = carryApplyErrorDetection(undefined, result(1));
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain('exited with code 1');
+  });
+
+  it('surfaces the git message from either stream', () => {
+    expect(
+      carryApplyErrorDetection(
+        undefined,
+        result(1, [], ['could not write index']),
+      ),
+    ).toMatchObject({ message: 'could not write index' });
+    expect(
+      carryApplyErrorDetection(undefined, result(1, ['stdout message'], [])),
+    ).toMatchObject({ message: 'stdout message' });
+  });
+
+  it('passes a clean exit through', () => {
+    expect(carryApplyErrorDetection(undefined, result(0))).toBeUndefined();
+  });
+
+  it('preserves an error simple-git already detected', () => {
+    const prior = new Error('prior');
+    expect(carryApplyErrorDetection(prior, result(0))).toBe(prior);
+    expect(carryApplyErrorDetection(prior, result(1))).toBe(prior);
   });
 });

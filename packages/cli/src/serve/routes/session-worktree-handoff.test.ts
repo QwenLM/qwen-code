@@ -32,6 +32,7 @@ import {
   type ChatRecord,
 } from '@qwen-code/qwen-code-core';
 import {
+  BridgeTimeoutError,
   SessionNotFoundError,
   SessionResetPendingError,
   type AcpSessionBridge,
@@ -106,6 +107,7 @@ function makeFixture(
   let cdGate: Promise<void> | null = null;
   let cdReject = false;
   let cdLandThenReject = false;
+  let cdTimeoutThenLand = false;
   const bridge = {
     getSessionSummary: (id: string) => {
       gateOrder.push(`summary:${id}`);
@@ -137,6 +139,19 @@ function makeFixture(
           newCwd: `${req.path}-rejected`,
           warnings: [],
         };
+      }
+      if (cdTimeoutThenLand) {
+        // A caller-facing timeout that does NOT abort the underlying cd:
+        // the route's await rejects now, but the queued cd lands later and
+        // updates effectiveCwd AFTER the catch reads it (the real race the
+        // observed-state rollback must not delete the checkout for).
+        const landed = opts.symlinkWorkspace
+          ? realpathSync(req.path)
+          : req.path;
+        setTimeout(() => {
+          effectiveCwd = landed;
+        }, 0);
+        throw new BridgeTimeoutError('changeSessionCwd', 30_000);
       }
       const previousCwd = effectiveCwd;
       // The real agent canonicalizes the requested path (fs.realpath)
@@ -228,6 +243,9 @@ function makeFixture(
     },
     setCdLandThenReject(landThenReject: boolean) {
       cdLandThenReject = landThenReject;
+    },
+    setCdTimeoutThenLand(timeoutThenLand: boolean) {
+      cdTimeoutThenLand = timeoutThenLand;
     },
     setEffectiveCwd(cwd: string) {
       effectiveCwd = cwd;
@@ -1295,6 +1313,35 @@ describe('POST /session/:id/worktree-handoff', () => {
     expect(existsSync(res.body.worktree.path)).toBe(true);
     const sidecar = await fixture.readSidecar();
     expect(sidecar.state).toBe('valid');
+  });
+
+  it('keeps the checkout when a caller-facing timeout lands the cd AFTER the catch reads the cwd (R7)', async () => {
+    // withTimeout only ends the caller's wait; the queued cd keeps running
+    // and updates effectiveCwd later. The catch reads a STALE cwd (still the
+    // local checkout), so an observed-state rollback would delete the
+    // worktree the session is about to inhabit. An undetermined timeout must
+    // keep the checkout + sidecar, not roll back.
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    fixture.setCdTimeoutThenLand(true);
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'worktree' });
+
+    // The timeout surfaces as an error, but the checkout and sidecar
+    // survive for the late-landing cd (no rollback on an undetermined cd).
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    const sidecar = await fixture.readSidecar();
+    expect(sidecar.state).toBe('valid');
+    if (sidecar.state === 'valid') {
+      expect(existsSync(sidecar.session.worktreePath)).toBe(true);
+    }
+    // Let the queued cd land; the session's home must still exist.
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    if (sidecar.state === 'valid') {
+      expect(existsSync(sidecar.session.worktreePath)).toBe(true);
+    }
   });
 
   it('hands back a branch-route sidecar whose base names the repo top', async () => {
