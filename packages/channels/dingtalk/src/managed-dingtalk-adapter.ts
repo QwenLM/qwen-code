@@ -19,6 +19,8 @@ import type {
 import {
   MANAGED_DINGTALK_PENDING_LIMIT,
   ManagedDingtalkStateStore,
+  RECENT_LIMIT,
+  WEBHOOK_LIMIT,
 } from './managed-state.js';
 import type { ManagedDingtalkState, ManagedReceipt } from './managed-state.js';
 
@@ -366,12 +368,12 @@ export class ManagedDingtalkAdapter {
       delete state.webhooks[conversationId];
       state.webhooks[conversationId] = sessionWebhook;
       const keys = Object.keys(state.webhooks);
-      if (keys.length > 256) delete state.webhooks[keys[0]!];
+      if (keys.length > WEBHOOK_LIMIT) delete state.webhooks[keys[0]!];
       this.persist();
     }
     const eventId = `dingtalk:${msgId}`;
     const skip = () => {
-      state.recent = [...state.recent, eventId].slice(-256);
+      state.recent = [...state.recent, eventId].slice(-RECENT_LIMIT);
       this.persist();
     };
     // The managed path serves private chats under the private-chat policy.
@@ -388,12 +390,15 @@ export class ManagedDingtalkAdapter {
     // A frame with no usable reply target — neither a committed sessionWebhook
     // nor one cached for the conversation — can never be answered; drop it at
     // admission instead of spending a claim slot and control-plane work on a
-    // reply the send path would only reject (#17173 R1-32).
+    // reply the send path would only reject (#17173 R1-32). Own-key membership,
+    // not truthiness: a conversationId naming an Object.prototype member
+    // ('constructor', 'toString', ...) must not resolve on an empty cache
+    // (#17173 R2-2).
     if (
       !conversationId ||
       !senderId ||
       !text ||
-      !state.webhooks[conversationId]
+      !Object.hasOwn(state.webhooks, conversationId)
     ) {
       skip();
       return;
@@ -466,7 +471,7 @@ export class ManagedDingtalkAdapter {
       state.pending = state.pending.filter(
         (entry) => entry.eventId !== eventId,
       );
-      state.recent = [...state.recent, eventId].slice(-256);
+      state.recent = [...state.recent, eventId].slice(-RECENT_LIMIT);
       if (!admitted.replayed && wasHeld) {
         state.instanceRefusals = 0;
         this.instanceStalled = false;
@@ -516,7 +521,7 @@ export class ManagedDingtalkAdapter {
           `Managed DingTalk admission of ${eventId} was refused (${status}); the message is skipped.`,
         );
         state.pending = state.pending.filter((p) => p.eventId !== eventId);
-        state.recent = [...state.recent, eventId].slice(-256);
+        state.recent = [...state.recent, eventId].slice(-RECENT_LIMIT);
         this.liftStallWhenNothingHeld();
         this.persist();
         return;
@@ -631,9 +636,13 @@ export class ManagedDingtalkAdapter {
     const context =
       delivery.replyContext as Partial<DingtalkReplyContext> | null;
     const conversationId = context?.conversationId;
+    // Own-key membership, not truthiness: a conversationId naming an
+    // Object.prototype member must not resolve the inherited value as a
+    // webhook on an empty cache (#17173 R2-2).
     const webhook =
-      (conversationId ? state.webhooks[conversationId] : undefined) ??
-      context?.sessionWebhook;
+      (conversationId && Object.hasOwn(state.webhooks, conversationId)
+        ? state.webhooks[conversationId]
+        : undefined) ?? context?.sessionWebhook;
     if (
       !conversationId ||
       !webhook ||

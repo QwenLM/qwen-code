@@ -27,6 +27,7 @@ import {
 } from './managed-dingtalk-adapter.js';
 import {
   MANAGED_DINGTALK_PENDING_LIMIT,
+  RECENT_LIMIT,
   WEBHOOK_LIMIT,
 } from './managed-state.js';
 
@@ -270,6 +271,19 @@ describe('managed DingTalk adapter inbound', () => {
 
   it('admits only frames with a usable reply target (R1-32)', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
+    // A conversationId naming an Object.prototype member must not resolve on
+    // an empty cache (R2-2): without own-key membership the inherited value
+    // reads truthy and the frame would be admitted.
+    fake.push(
+      'proto',
+      messageData({
+        msgId: 'proto',
+        conversationId: 'constructor',
+        sessionWebhook: '',
+      }),
+    );
+    await adapter.tick();
+    expect(plane.submit).toHaveLength(0);
     // No committed webhook and none cached: the frame can never be answered,
     // so it is dropped at admission rather than staged as a claim.
     fake.push('no-hook', messageData({ msgId: 'no-hook', sessionWebhook: '' }));
@@ -635,6 +649,32 @@ describe('managed DingTalk adapter outbox', () => {
     const persisted = JSON.parse(readFileSync(store.file, 'utf8'));
     expect(persisted.outbound).toHaveLength(MANAGED_OUTBOUND_LIMIT);
     await adapter.disconnect();
+  });
+
+  it('keeps the recent window loadable at the shared cap (R2-1)', async () => {
+    const cwd = tempCwd();
+    const first = await connectedAdapter(cwd);
+    // Drive one past the recent cap; the writer must slice to the same cap the
+    // validator enforces, or the persisted state becomes unloadable on restart.
+    for (let i = 0; i < RECENT_LIMIT + 1; i++) {
+      expect(
+        first.fake.push(
+          `ev-${i}`,
+          messageData({ msgId: `ev-${i}`, conversationId: `conv-${i}` }),
+        ),
+      ).toBe(true);
+      if ((i + 1) % MANAGED_DINGTALK_PENDING_LIMIT === 0)
+        await first.adapter.tick();
+    }
+    await first.adapter.tick();
+    const store = (first.adapter as unknown as { store: { file: string } })
+      .store;
+    const persisted = JSON.parse(readFileSync(store.file, 'utf8'));
+    expect(persisted.recent).toHaveLength(RECENT_LIMIT);
+    await first.adapter.disconnect();
+    // Writer and validator share the cap, so the state still loads.
+    const second = await connectedAdapter(cwd);
+    await second.adapter.disconnect();
   });
 
   it('reports a definitive webhook refusal as rejected and never resends', async () => {
