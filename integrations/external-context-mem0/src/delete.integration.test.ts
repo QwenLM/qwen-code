@@ -106,7 +106,10 @@ async function start(mode: Mode = 'normal', outside = false) {
     // Inside the 900 ms budget: the preflight responses leave the verification
     // GET enough time to reach the server, and its 450 ms response lands after
     // the deadline but before any deadline that starts after the preflight
-    // read, so a late-starting deadline fails the assertions below.
+    // read, so a late-starting deadline fails the assertions below. The 450 ms
+    // delay must also stay below the 900 ms budget: at or above it, a fresh
+    // per-request timeout would abort the verification read too, and the case
+    // could no longer tell a cumulative budget from a per-request one.
     if (mode === 'cumulative-deadline')
       timers.push(setTimeout(respond, deleted ? 450 : 300));
     else respond();
