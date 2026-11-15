@@ -18,6 +18,14 @@ export const HOSTED_WORKSPACE_FILE_PROFILE_V3 = 'hosted-workspace-files/3';
 // (#15330) and is deliberately not reused, so the persisted vocabulary stays
 // unambiguous.
 export const HOSTED_WORKSPACE_SHELL_PROFILE_V3 = 'hosted-workspace-shell/3';
+// Fixed-interval /loop: the cron trio (cron_create plus the union
+// cron_list/cron_delete) ships on the next revisions. shell/4 inherits
+// loop_wakeup from shell/3; files/4 and team-lead/2 declare the cron trio
+// without loop_wakeup. shell/2 stays retired (#15330).
+export const HOSTED_WORKSPACE_FILE_PROFILE_V4 = 'hosted-workspace-files/4';
+export const HOSTED_WORKSPACE_SHELL_PROFILE_V4 = 'hosted-workspace-shell/4';
+export const HOSTED_WORKSPACE_TEAM_LEAD_PROFILE_V2 =
+  'hosted-workspace-team-lead/2';
 export const HOSTED_WORKSPACE_TEAM_LEAD_PROFILE =
   'hosted-workspace-team-lead/1';
 // #13753 I3: a snapshot child's profile, `read_file` and `glob` only. The
@@ -31,7 +39,10 @@ export type HostedWorkspaceToolProfile =
   | typeof HOSTED_WORKSPACE_FILE_PROFILE_V2
   | typeof HOSTED_WORKSPACE_FILE_PROFILE_V3
   | typeof HOSTED_WORKSPACE_SHELL_PROFILE_V3
+  | typeof HOSTED_WORKSPACE_FILE_PROFILE_V4
+  | typeof HOSTED_WORKSPACE_SHELL_PROFILE_V4
   | typeof HOSTED_WORKSPACE_TEAM_LEAD_PROFILE
+  | typeof HOSTED_WORKSPACE_TEAM_LEAD_PROFILE_V2
   | typeof HOSTED_WORKSPACE_READ_PROFILE;
 
 export function isHostedWorkspaceProfile(
@@ -43,7 +54,10 @@ export function isHostedWorkspaceProfile(
     profile === HOSTED_WORKSPACE_FILE_PROFILE_V2 ||
     profile === HOSTED_WORKSPACE_FILE_PROFILE_V3 ||
     profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3 ||
+    profile === HOSTED_WORKSPACE_FILE_PROFILE_V4 ||
+    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V4 ||
     profile === HOSTED_WORKSPACE_TEAM_LEAD_PROFILE ||
+    profile === HOSTED_WORKSPACE_TEAM_LEAD_PROFILE_V2 ||
     profile === HOSTED_WORKSPACE_READ_PROFILE
   );
 }
@@ -52,7 +66,9 @@ export function isHostedWorkspaceShellProfile(profile: unknown): boolean {
   return (
     profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
     profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3 ||
-    profile === HOSTED_WORKSPACE_TEAM_LEAD_PROFILE
+    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V4 ||
+    profile === HOSTED_WORKSPACE_TEAM_LEAD_PROFILE ||
+    profile === HOSTED_WORKSPACE_TEAM_LEAD_PROFILE_V2
   );
 }
 
@@ -67,7 +83,8 @@ export function isHostedWorkspacePublicShellProfile(
 ): profile is string {
   return (
     profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
-    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3
+    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3 ||
+    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V4
   );
 }
 
@@ -86,7 +103,9 @@ export function isHostedWorkspaceSearchProfile(profile: unknown): boolean {
     profile === HOSTED_WORKSPACE_FILE_PROFILE_V2 ||
     profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
     profile === HOSTED_WORKSPACE_SHELL_PROFILE_V3 ||
-    profile === HOSTED_WORKSPACE_FILE_PROFILE_V3
+    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V4 ||
+    profile === HOSTED_WORKSPACE_FILE_PROFILE_V3 ||
+    profile === HOSTED_WORKSPACE_FILE_PROFILE_V4
   );
 }
 

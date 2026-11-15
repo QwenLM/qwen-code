@@ -1659,7 +1659,7 @@ export function extractErrorCode(err: unknown): string | undefined {
  * history goes to the model conversation, not the persisted transcript
  * the refresh pages) and latest-wins state metadata
  * (`available_commands_update`, `current_mode_update`, and
- * `session_info_update`).
+ * `session_info_update`), plus Hook lifecycle diagnostics.
  */
 const REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES = new Set([
   'pending_prompt_added',
@@ -1711,7 +1711,7 @@ const REFRESH_APPEND_BOOKKEEPING_EVENT_TYPES = new Set([
  * history instead of the transcript the refresh pages) and the
  * latest-wins state snapshots (`available_commands_update` from a
  * skills/settings refresh, the legacy dual-emit `current_mode_update`, and
- * title metadata in `session_info_update`).
+ * title metadata in `session_info_update`), plus Hook lifecycle diagnostics.
  */
 function isIdleBookkeepingSessionUpdate(event: BridgeEvent): boolean {
   if (event.type !== 'session_update') return false;
@@ -1732,7 +1732,11 @@ function isIdleBookkeepingSessionUpdate(event: BridgeEvent): boolean {
   }
   const meta = updateRecord['_meta'];
   if (!meta || typeof meta !== 'object' || Array.isArray(meta)) return false;
-  return (meta as Record<string, unknown>)['source'] === 'user-shell';
+  const metaRecord = meta as Record<string, unknown>;
+  return (
+    metaRecord['source'] === 'user-shell' ||
+    metaRecord['hookLifecycle'] !== undefined
+  );
 }
 
 /**
@@ -8229,6 +8233,7 @@ export function createSessionControlPlane(
     historyPageSize: number,
     liveReplayMode: 'full' | 'summary',
   ): Promise<ReturnType<typeof replayFieldsFor>> {
+    // Active turns need the live journal; persisted pages cannot replace it.
     // A pending permission/question lives only in the in-memory journal — it
     // is never persisted to the chat transcript — and the turns that park on
     // one without an RPC prompt (Goal and background-notification turns)
@@ -8237,9 +8242,6 @@ export function createSessionControlPlane(
     // would strand the interaction: the session summary still advertises it
     // (input-needed badge) while the re-opening client receives nothing to
     // answer.
-    if (entry.pendingInteractions.size > 0) {
-      return replayFieldsFor(entry, 'load', liveReplayMode);
-    }
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const lastEventId = entry.events.lastEventId;
@@ -8250,6 +8252,16 @@ export function createSessionControlPlane(
         let cursor: string | undefined;
         let page: BridgeSessionTranscriptPage;
         do {
+          // Check before every read, including empty-page traversal and a
+          // retry after activity started while the previous read was pending.
+          if (
+            entry.promptActive ||
+            entry.goalTurnActive === true ||
+            entry.backgroundTurn ||
+            entry.pendingInteractions.size > 0
+          ) {
+            return replayFieldsFor(entry, 'load', liveReplayMode);
+          }
           page = await requestSessionTranscriptPage({
             sessionId: entry.sessionId,
             ...(cursor ? { cursor } : { direction: 'backward' }),
@@ -8282,6 +8294,7 @@ export function createSessionControlPlane(
         if (
           byId.get(entry.sessionId) === entry &&
           !entry.promptActive &&
+          !entry.goalTurnActive &&
           !entry.backgroundTurn &&
           entry.events.epoch === eventEpoch &&
           entry.events.lastEventId === lastEventId &&
@@ -8329,7 +8342,8 @@ export function createSessionControlPlane(
               if (!isRecord(meta)) continue;
               if (
                 !isRecord(meta['executionLifecycle']) &&
-                !isRecord(meta['toolLifecycle'])
+                !isRecord(meta['toolLifecycle']) &&
+                !isRecord(meta['hookLifecycle'])
               )
                 continue;
               lifecycleReplay.push({
@@ -8340,6 +8354,9 @@ export function createSessionControlPlane(
                   _meta: {
                     ...(isRecord(meta['executionLifecycle'])
                       ? { executionLifecycle: meta['executionLifecycle'] }
+                      : {}),
+                    ...(isRecord(meta['hookLifecycle'])
+                      ? { hookLifecycle: meta['hookLifecycle'] }
                       : {}),
                     ...(isRecord(meta['toolLifecycle'])
                       ? { toolLifecycle: meta['toolLifecycle'] }

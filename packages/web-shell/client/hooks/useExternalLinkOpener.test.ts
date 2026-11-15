@@ -7,6 +7,7 @@ import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../i18n';
 import { TOAST_REQUEST_EVENT } from '../components/ToastHost';
+import { WebShellPortalRootContext } from '../portalRoot';
 import { useExternalLinkOpener } from './useExternalLinkOpener';
 
 type TauriWindow = { __TAURI__?: { core?: { invoke?: unknown } } };
@@ -127,6 +128,61 @@ describe('useExternalLinkOpener', () => {
       expect(toasts[0].message).toContain('Could not open link');
     } finally {
       window.removeEventListener(TOAST_REQUEST_EVENT, listener);
+    }
+  });
+
+  it('scopes the failure toast to its shell when several are mounted (F1)', async () => {
+    const invoke = vi.fn().mockRejectedValue(new Error('ForbiddenUrl'));
+    (window as TauriWindow).__TAURI__ = { core: { invoke } };
+    // Two shell roots: the single-root fallback cannot mask a missing scope.
+    const shellA = document.createElement('div');
+    shellA.setAttribute('data-web-shell-root', '');
+    const shellB = document.createElement('div');
+    shellB.setAttribute('data-web-shell-root', '');
+    document.body.append(shellA, shellB);
+    const seenA: unknown[] = [];
+    const seenB: unknown[] = [];
+    const listenerA = (event: Event) =>
+      seenA.push((event as CustomEvent).detail);
+    const listenerB = (event: Event) =>
+      seenB.push((event as CustomEvent).detail);
+    shellA.addEventListener(TOAST_REQUEST_EVENT, listenerA);
+    shellB.addEventListener(TOAST_REQUEST_EVENT, listenerB);
+    try {
+      container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      act(() => {
+        root.render(
+          createElement(
+            I18nProvider,
+            { language: 'en' },
+            createElement(
+              WebShellPortalRootContext.Provider,
+              { value: shellA },
+              createElement(TestLink, {
+                url: 'https://github.com/QwenLM/qwen-code',
+              }),
+            ),
+          ),
+        );
+      });
+      unmount = () => {
+        act(() => root.unmount());
+        container.remove();
+      };
+      click(container.querySelector('a')!);
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(seenA).toHaveLength(1);
+      expect(seenB).toHaveLength(0);
+    } finally {
+      shellA.removeEventListener(TOAST_REQUEST_EVENT, listenerA);
+      shellB.removeEventListener(TOAST_REQUEST_EVENT, listenerB);
+      shellA.remove();
+      shellB.remove();
     }
   });
 });
