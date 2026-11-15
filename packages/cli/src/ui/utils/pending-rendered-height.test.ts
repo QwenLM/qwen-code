@@ -9,6 +9,7 @@ import {
   TABLE_CHROME_ROWS,
   estimateWrappedRows,
   estimateLineRows,
+  hasMermaidFence,
   isTableStart,
   fitPendingSlice,
   splitMarkdownTableRow,
@@ -99,17 +100,34 @@ describe('estimateLineRows', () => {
     expect(estimateLineRows(`100. ${'x'.repeat(94)}`, 100)).toBe(1);
   });
 
+  it('charges a task item by its glyph, not its literal [ ] prefix', () => {
+    // RenderListItemInternal matches `[ ] ` and draws a 2-column glyph, so
+    // charging the literal prefix over-charges a fitting checklist by four
+    // columns and demotes it to plain text (#13956 in the safe direction).
+    expect(estimateLineRows(`- [ ] ${'x'.repeat(75)}`, 78)).toBe(1);
+    expect(estimateLineRows(`- [ ] ${'x'.repeat(76)}`, 78)).toBe(2);
+  });
+
+  it('insets a nested item by its indent, padding and marker', () => {
+    // RenderListItemInternal insets at every nesting level: the text box is
+    // contentWidth - indent - padding - marker. ' - ' + 75 chars at 78 puts
+    // 75 chars in a 74-col box — 2 rows, while a full-width charge calls it
+    // one.
+    expect(estimateLineRows(` - ${'x'.repeat(75)}`, 78)).toBe(2);
+    expect(estimateLineRows(` - ${'x'.repeat(74)}`, 78)).toBe(1);
+  });
+
   it('leaves a plain line on the full content width', () => {
     expect(estimateLineRows('x'.repeat(100), 100)).toBe(1);
     expect(estimateLineRows('x'.repeat(101), 100)).toBe(2);
   });
 
   it('does not narrow a nested bullet a second time', () => {
-    // Nested items keep their leading whitespace as indentation; the source
-    // line already carries those columns, so only the marker inset applies.
+    // The indent is charged once — as the renderer's paddingLeft inset — not
+    // twice (once via the inset and once via the source line's own columns).
     const line = `  - ${'x'.repeat(90)}`;
     expect(estimateLineRows(line, 100)).toBe(
-      estimateWrappedRows(`- ${'x'.repeat(90)}`, 100),
+      estimateWrappedRows(`-${'x'.repeat(90)}`, 100 - 2 - 1 - 2),
     );
   });
 });
@@ -144,6 +162,23 @@ describe('isTableStart', () => {
   });
 });
 
+describe('hasMermaidFence', () => {
+  it('flags a mermaid fence', () => {
+    expect(hasMermaidFence(['```mermaid', 'flowchart TD', '```'])).toBe(true);
+    expect(hasMermaidFence(['~~~mermaid', 'flowchart TD', '~~~'])).toBe(true);
+    expect(
+      hasMermaidFence(['prose', '```mermaid', 'graph LR', '```', 'more']),
+    ).toBe(true);
+  });
+
+  it('ignores non-mermaid fences and fence-looking content', () => {
+    expect(hasMermaidFence(['```ts', 'const x = 1;', '```'])).toBe(false);
+    expect(hasMermaidFence(['prose only'])).toBe(false);
+    // A mermaid info string inside a code block is code, not a fence opener.
+    expect(hasMermaidFence(['```ts', '```mermaid', '```'])).toBe(false);
+  });
+});
+
 describe('fitPendingSlice', () => {
   const CLAMP = 1000; // effectively unclamped unless a test sets it small
 
@@ -154,6 +189,32 @@ describe('fitPendingSlice', () => {
       clipped: false,
       renderedRows: 3,
     });
+  });
+
+  it('charges a fence body at the code box width the renderer draws', () => {
+    // RenderCodeBlock insets code by CODE_BLOCK_PREFIX_PADDING and
+    // colorizeCode prefixes each line with a right-padded line number plus a
+    // space, so a 98-char line renders 2 rows in a 6-line block at width 100
+    // (box 100 - 1 - (1 + 1) = 97). A full-width charge calls it one row and
+    // admits prose + fence past the budget with no cue.
+    const lines = [
+      'prose one',
+      'prose two',
+      'prose three',
+      '```',
+      ...Array.from({ length: 6 }, () => 'x'.repeat(98)),
+      '```',
+    ];
+    const slice = fitPendingSlice(lines, 100, 14, 11, {
+      showLineNumbers: true,
+    });
+    expect(slice.clipped).toBe(true);
+
+    // Without the gutter the same block fits: the option is load-bearing.
+    const unguttered = fitPendingSlice(lines, 100, 14, 11, {
+      showLineNumbers: false,
+    });
+    expect(unguttered.clipped).toBe(false);
   });
 
   it('reports renderedRows even when a kept first table overflows the budget', () => {

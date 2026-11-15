@@ -121,8 +121,21 @@ vi.mock('./DiffRenderer.js', () => ({
   },
 }));
 vi.mock('../../utils/MarkdownDisplay.js', () => ({
-  MarkdownDisplay: function MockMarkdownDisplay({ text }: { text: string }) {
-    return <Text>MockMarkdown:{text}</Text>;
+  MarkdownDisplay: function MockMarkdownDisplay({
+    text,
+    enforceHeightBudget,
+  }: {
+    text: string;
+    enforceHeightBudget?: boolean;
+  }) {
+    // Echo the flag: it is the markdown branch's only height bound, so a
+    // call site that stops forwarding it must fail here instead of leaving
+    // the branch silently unbounded.
+    return (
+      <Text>
+        MockMarkdown:budget={String(enforceHeightBudget)}:{text}
+      </Text>
+    );
   },
 }));
 vi.mock('./ToolConfirmationMessage.js', () => ({
@@ -200,7 +213,7 @@ describe('<ToolMessage />', () => {
     const output = lastFrame();
     expect(output).toContain('✓');
     expect(output).toContain('ReadFile');
-    expect(output).not.toContain('MockMarkdown:Test result'); // collapsed
+    expect(output).not.toContain('MockMarkdown:budget=true:Test result'); // collapsed
   });
 
   it('routes a findings_list result to the findings renderer', () => {
@@ -323,7 +336,7 @@ describe('<ToolMessage />', () => {
 
     const output = lastFrame();
     expect(output).toContain('qwen3-vl-plus');
-    expect(output).toContain('MockMarkdown:Test result');
+    expect(output).toContain('MockMarkdown:budget=true:Test result');
   });
 
   it('sanitizes terminal controls in the vision bridge display summary', () => {
@@ -438,7 +451,7 @@ describe('<ToolMessage />', () => {
     const output = lastFrame();
     expect(output).toContain('✓');
     expect(output).toContain('test-tool');
-    expect(output).toContain('MockMarkdown:Test result'); // not collapsed
+    expect(output).toContain('MockMarkdown:budget=true:Test result'); // not collapsed
   });
 
   it('renders structured terminal image results through TerminalImage', () => {
@@ -468,7 +481,7 @@ describe('<ToolMessage />', () => {
     const lines = (lastFrame() ?? '').split('\n');
     const headerLine = lines.findIndex((line) => line.includes('test-tool'));
     const resultLine = lines.findIndex((line) =>
-      line.includes('MockMarkdown:Test result'),
+      line.includes('MockMarkdown:budget=true:Test result'),
     );
 
     expect(headerLine).toBeGreaterThanOrEqual(0);
@@ -483,7 +496,7 @@ describe('<ToolMessage />', () => {
     const output = lastFrame();
     expect(output).toContain('✓');
     expect(output).toContain('Grep');
-    expect(output).not.toContain('MockMarkdown:Test result'); // result hidden
+    expect(output).not.toContain('MockMarkdown:budget=true:Test result'); // result hidden
   });
 
   it('shows result for Error status', () => {
@@ -491,7 +504,7 @@ describe('<ToolMessage />', () => {
       <ToolMessage {...baseProps} status={ToolCallStatus.Error} />,
       StreamingState.Idle,
     );
-    expect(lastFrame()).toContain('MockMarkdown:Test result');
+    expect(lastFrame()).toContain('MockMarkdown:budget=true:Test result');
   });
 
   it('shows result for Executing status', () => {
@@ -499,7 +512,7 @@ describe('<ToolMessage />', () => {
       <ToolMessage {...baseProps} status={ToolCallStatus.Executing} />,
       StreamingState.Idle,
     );
-    expect(lastFrame()).toContain('MockMarkdown:Test result');
+    expect(lastFrame()).toContain('MockMarkdown:budget=true:Test result');
   });
 
   it('shows result for Pending status', () => {
@@ -507,7 +520,7 @@ describe('<ToolMessage />', () => {
       <ToolMessage {...baseProps} status={ToolCallStatus.Pending} />,
       StreamingState.Idle,
     );
-    expect(lastFrame()).toContain('MockMarkdown:Test result');
+    expect(lastFrame()).toContain('MockMarkdown:budget=true:Test result');
   });
 
   it('shows result when forceShowResult overrides collapse', () => {
@@ -515,7 +528,7 @@ describe('<ToolMessage />', () => {
       <ToolMessage {...baseProps} forceShowResult />,
       StreamingState.Idle,
     );
-    expect(lastFrame()).toContain('MockMarkdown:Test result');
+    expect(lastFrame()).toContain('MockMarkdown:budget=true:Test result');
   });
 
   describe('markdown survives a terminal height budget', () => {
@@ -538,7 +551,7 @@ describe('<ToolMessage />', () => {
         StreamingState.Idle,
       );
 
-      expect(lastFrame()).toContain('MockMarkdown:**Color**: Blue');
+      expect(lastFrame()).toContain('MockMarkdown:budget=true:**Color**: Blue');
     });
 
     it('falls back to plain text when the result is taller than the budget', () => {
@@ -580,8 +593,11 @@ describe('<ToolMessage />', () => {
     });
 
     it('keeps shell output on the plain-text path with no budget and no cap', () => {
-      // ShellTool does not declare `isOutputMarkdown: false` — it inherits
-      // DeclarativeTool's `true` — so without the `isShellTool` branch this
+      // Live ShellTool results already arrive with
+      // `renderOutputAsMarkdown: false` (the tool declares
+      // `isOutputMarkdown: false`), so this case models the displays that
+      // carry no flag at all — the `!`-command `Shell Command` display built
+      // in shellCommandProcessor.ts. Without the `isShellTool` branch this
       // result (no availableTerminalHeight, no `Capped` status) would take the
       // markdown path and lose the MaxSizedBox hidden-lines cue.
       const { lastFrame } = renderWithContext(
@@ -643,16 +659,16 @@ describe('<ToolMessage />', () => {
         StreamingState.Idle,
       );
 
-      expect(lastFrame()).toContain('MockMarkdown:**Color**: Blue');
+      expect(lastFrame()).toContain('MockMarkdown:budget=true:**Color**: Blue');
     });
 
     it('keeps a resumed shell result on the plain-text path with no budget', () => {
-      // Resumed sessions rebuild tool displays without `renderOutputAsMarkdown`
-      // (ToolMessage defaults it to true) and ctrl+s drops the height budget.
-      // Shell output must still stay plain text: ShellTool does not declare
-      // `isOutputMarkdown: false` — it inherits DeclarativeTool's `true` — so
-      // the `isShellTool` branch is the only thing keeping the
-      // ui.shellOutputMaxLines cap in force (#10640).
+      // Resumed sessions rebuild tool displays without
+      // `renderOutputAsMarkdown` (ToolMessage defaults it to true) and ctrl+s
+      // drops the height budget. Shell output must still stay plain text: the
+      // `isShellTool` branch is the only thing keeping the
+      // ui.shellOutputMaxLines cap in force for a display rebuilt without the
+      // flag (#10640).
       const { lastFrame } = renderWithContext(
         <ToolMessage
           {...baseProps}
@@ -680,6 +696,110 @@ describe('<ToolMessage />', () => {
           {...baseProps}
           name="ask_user_question"
           resultDisplay={table}
+          renderOutputAsMarkdown
+          {...BUDGET}
+        />,
+        StreamingState.Idle,
+      );
+
+      expect(lastFrame()).not.toContain('MockMarkdown:');
+    });
+
+    it('falls back for a result one row past the budget the renderer slices at', () => {
+      // MarkdownDisplay pre-slices at availableTerminalHeight - 2 (12 rows
+      // at BUDGET's 14), so the gate must reject at the same line: 13
+      // single-row lines used to pass the gate (13 <= 14) and then lose the
+      // last line behind a "viewport too small" cue.
+      const thirteen = Array.from(
+        { length: 13 },
+        (_, i) => `line ${i + 1}`,
+      ).join('\n');
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ask_user_question"
+          resultDisplay={thirteen}
+          renderOutputAsMarkdown
+          {...BUDGET}
+        />,
+        StreamingState.Idle,
+      );
+
+      const output = lastFrame()!;
+      expect(output).not.toContain('MockMarkdown:');
+      expect(output).toContain('line 13');
+    });
+
+    it('keeps a result that fits the budget the renderer slices at', () => {
+      // The matching boundary: exactly pendingRenderedBudget(14) = 12 rows
+      // stays markdown, and the mock asserts the height-bound flag is still
+      // forwarded to the renderer.
+      const twelve = Array.from({ length: 12 }, (_, i) => `line ${i + 1}`).join(
+        '\n',
+      );
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ask_user_question"
+          resultDisplay={twelve}
+          renderOutputAsMarkdown
+          {...BUDGET}
+        />,
+        StreamingState.Idle,
+      );
+
+      expect(lastFrame()).toContain('MockMarkdown:budget=true:line 1');
+      expect(lastFrame()).toContain('line 12');
+    });
+
+    it('falls back when a later block is clipped by the estimator', () => {
+      // fitPendingSlice breaks BEFORE charging a non-leading table that
+      // overflows, so renderedRows stays at the prefix while clipped is true;
+      // a gate that reads only renderedRows certifies a result whose table
+      // the renderer then drops entirely.
+      const summaryAndTable = [
+        'Result:',
+        '| name | value |',
+        '| --- | --- |',
+        ...Array.from({ length: 12 }, (_, i) => `| row${i} | v${i} |`),
+      ].join('\n');
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ask_user_question"
+          resultDisplay={summaryAndTable}
+          renderOutputAsMarkdown
+          {...BUDGET}
+        />,
+        StreamingState.Idle,
+      );
+
+      const output = lastFrame()!;
+      expect(output).not.toContain('MockMarkdown:');
+      // The plain-text path keeps the LAST rows — the table's tail, which the
+      // markdown branch would have dropped entirely.
+      expect(output).toContain('row11');
+    });
+
+    it('falls back for a mermaid fence, whose diagram is not bounded by its source lines', () => {
+      // RenderCodeBlock hands a mermaid fence to MermaidDiagram, which bounds
+      // itself by the message-level viewport only — charging the fence by its
+      // source lines would certify a fit the diagram overflows, so the gate
+      // fails closed to the plain-text path every budgeted result took before
+      // markdown was kept.
+      const content = [
+        ...Array.from({ length: 8 }, (_, i) => `prose line ${i + 1}`),
+        '```mermaid',
+        'flowchart TD',
+        '  A --> B',
+        '  B --> C',
+        '```',
+      ].join('\n');
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ask_user_question"
+          resultDisplay={content}
           renderOutputAsMarkdown
           {...BUDGET}
         />,
@@ -752,7 +872,9 @@ describe('<ToolMessage />', () => {
       const output = lastFrame();
       // detailedDisplay is raw tool output → rendered as PLAIN TEXT, not Markdown
       expect(output).toContain('full file contents here');
-      expect(output).not.toContain('MockMarkdown:full file contents here');
+      expect(output).not.toContain(
+        'MockMarkdown:budget=true:full file contents here',
+      );
       expect(output).not.toContain('Read 1 file');
     });
 
@@ -881,7 +1003,7 @@ describe('<ToolMessage />', () => {
         StreamingState.Idle,
       );
       const output = lastFrame();
-      expect(output).toContain('MockMarkdown:Read 1 file');
+      expect(output).toContain('MockMarkdown:budget=true:Read 1 file');
       expect(output).not.toContain('full file contents here');
     });
 
@@ -898,7 +1020,7 @@ describe('<ToolMessage />', () => {
         StreamingState.Idle,
       );
       const output = lastFrame();
-      expect(output).toContain('MockMarkdown:Test result');
+      expect(output).toContain('MockMarkdown:budget=true:Test result');
       expect(output).not.toContain('should not appear');
     });
 
@@ -914,7 +1036,7 @@ describe('<ToolMessage />', () => {
         />,
         StreamingState.Idle,
       );
-      expect(lastFrame()).toContain('MockMarkdown:Read 1 file');
+      expect(lastFrame()).toContain('MockMarkdown:budget=true:Read 1 file');
     });
   });
 
@@ -2176,7 +2298,7 @@ describe('<ToolMessage />', () => {
 
     const output = lastFrame();
     expect(output).toContain('Plan was rejected. Remaining in plan mode.');
-    expect(output).toContain('MockMarkdown:# My Plan');
+    expect(output).toContain('MockMarkdown:budget=undefined:# My Plan');
     expect(output).toContain('- Step 1: Do something');
     expect(output).toContain('- Step 2: Do another thing');
   });
@@ -2204,7 +2326,9 @@ describe('<ToolMessage />', () => {
       />,
       StreamingState.Idle,
     );
-    expect(lastFrame()).toContain('MockMarkdown:Health check complete');
+    expect(lastFrame()).toContain(
+      'MockMarkdown:budget=true:Health check complete',
+    );
     expect(lastFrame()).not.toContain('shell_result');
     expect(lastFrame()).not.toContain('raw stdout');
   });
@@ -2223,7 +2347,7 @@ describe('<ToolMessage />', () => {
       StreamingState.Idle,
     );
 
-    expect(lastFrame()).toContain('MockMarkdown:Selected Staging');
+    expect(lastFrame()).toContain('MockMarkdown:budget=true:Selected Staging');
     expect(lastFrame()).not.toContain('ask_user_question_answers');
   });
 
@@ -2247,7 +2371,7 @@ describe('<ToolMessage />', () => {
     );
 
     const output = lastFrame();
-    expect(output).toContain('MockMarkdown:Dashboard ready');
+    expect(output).toContain('MockMarkdown:budget=true:Dashboard ready');
     expect(output).not.toContain('PROBE_MCP_APP_HTML');
     expect(output).not.toContain('mcp_app');
   });
@@ -2273,7 +2397,7 @@ describe('<ToolMessage />', () => {
 
     const output = lastFrame();
     expect(output).toContain('User approved the plan.');
-    expect(output).toContain('MockMarkdown:# My Plan');
+    expect(output).toContain('MockMarkdown:budget=undefined:# My Plan');
     expect(output).toContain('- Step 1');
     expect(output).toContain('- Step 2');
   });

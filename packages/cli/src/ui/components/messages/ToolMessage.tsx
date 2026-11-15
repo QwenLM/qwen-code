@@ -10,7 +10,12 @@ import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import { DiffRenderer } from './DiffRenderer.js';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
-import { fitPendingSlice } from '../../utils/pending-rendered-height.js';
+import {
+  fitPendingSlice,
+  hasMermaidFence,
+  pendingRenderedBudget,
+  pendingTableClampRows,
+} from '../../utils/pending-rendered-height.js';
 import { AnsiOutputText, ShellStatsBar } from '../AnsiOutput.js';
 import type { ShellStatsBarProps } from '../AnsiOutput.js';
 import { MaxSizedBox, MINIMUM_MAX_HEIGHT } from '../shared/MaxSizedBox.js';
@@ -95,24 +100,42 @@ type DiffResultDisplay = Pick<
 >;
 
 /**
- * Whether `text` renders taller than `maxHeight` rows at `maxWidth`.
+ * Whether the markdown branch would NOT fit. The renderer this branch feeds
+ * pre-slices at `pendingRenderedBudget` — two rows tighter than the viewport —
+ * and drops everything past a block boundary it cuts, so the gate has to be at
+ * least as strict as the slice it hands the result to.
  *
- * Reads the estimator's accumulated `renderedRows` rather than `clipped`:
- * `keptLines < lines.length` only says a cut happened, and `fitPendingSlice`
- * deliberately keeps an over-budget leading table whole (the cut is gated on
- * `i > 0`), so a single tall table comes back unclipped.
+ * Three ways a result can fail here:
+ * - `clipped` is true: `fitPendingSlice` breaks before charging a non-leading
+ *   block that overflows, so `renderedRows` alone stays at the prefix and the
+ *   tail would vanish behind the renderer's own slice.
+ * - `renderedRows` exceeds `pendingRenderedBudget(maxHeight)` — the budget the
+ *   renderer actually slices at, not the raw viewport, or content in the
+ *   two-row band is certified here and then truncated with a false
+ *   "viewport too small" cue.
+ * - the text opens a ```mermaid fence: the renderer draws a diagram bounded
+ *   only by the message viewport, never by the fence's source lines, so no
+ *   source-line charge models it — fail closed to the plain-text path this
+ *   gate falls back to (the shape every budgeted result had before).
  */
 function exceedsRenderedHeight(
   text: string,
   maxWidth: number,
   maxHeight: number,
+  showLineNumbers: boolean,
 ): boolean {
   if (maxHeight <= 0) return false;
   const lines = text.split(/\r?\n/);
-  return (
-    fitPendingSlice(lines, Math.max(1, maxWidth), maxHeight, maxHeight)
-      .renderedRows > maxHeight
+  if (hasMermaidFence(lines)) return true;
+  const budget = pendingRenderedBudget(maxHeight);
+  const { clipped, renderedRows } = fitPendingSlice(
+    lines,
+    Math.max(1, maxWidth),
+    budget,
+    pendingTableClampRows(maxHeight),
+    { showLineNumbers },
   );
+  return clipped || renderedRows > budget;
 }
 
 function sliceTextForMaxHeight(
@@ -991,10 +1014,12 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   //
   // Shell output always takes the plain-text path: `ui.shellOutputMaxLines`
   // binds through MaxSizedBox (`isCappingShell`), and forcing it here also
-  // covers ctrl+s (budget dropped, cap still binding) and resumed results
-  // rebuilt without the flag (#10640). Shell results with no budget and no cap
-  // are covered too — ShellTool does not declare `isOutputMarkdown: false`, it
-  // inherits `DeclarativeTool`'s `true`.
+  // covers ctrl+s (budget dropped, cap still binding). Live ShellTool results
+  // already arrive with `renderOutputAsMarkdown: false` — the tool declares
+  // `isOutputMarkdown: false` — so this branch is really for the displays that
+  // carry no flag at all: the `!`-command `Shell Command` display built in
+  // shellCommandProcessor.ts, and resumed results rebuilt without the flag
+  // (#10640).
   const outputExceedsBudget = React.useMemo(
     () =>
       !isShellTool &&
@@ -1005,6 +1030,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
         effectiveDisplayRenderer.data,
         innerWidth,
         availableHeight,
+        settings.merged.ui?.showLineNumbers ?? true,
       ),
     [
       isShellTool,
@@ -1012,6 +1038,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
       availableHeight,
       effectiveDisplayRenderer,
       innerWidth,
+      settings,
     ],
   );
   if (isShellTool || outputExceedsBudget) {
