@@ -374,6 +374,47 @@ export function sanitizeTerminalLine(value: string): string {
     .replace(/[\t\r\n]+/g, ' ');
 }
 
+/**
+ * Caret-notation code for a C0/DEL control byte (0x00-0x1f, 0x7f): the
+ * standard `^X` convention (byte XOR 0x40), e.g. BEL (0x07) -> `^G`,
+ * ESC (0x1b) -> `^[`, DEL (0x7f) -> `^?`.
+ */
+function caretNotation(code: number): string {
+  return code === 0x7f ? '^?' : '^' + String.fromCharCode(code ^ 0x40);
+}
+
+/**
+ * Sanitizes a single-row label that stands for a *persisted* decision (an
+ * "Always allow" rule), where two different underlying values must never
+ * render identically — a human approving one grant must not be shown the
+ * same text a different, already-approved grant would show. `sanitizeTerminalLine`
+ * is wrong here: it deletes bare C0 bytes outright, so `Bash(probe\x07 *)` and
+ * `Bash(probe *)` collapse onto the same visible label even though they are
+ * different stored authorizations.
+ *
+ * Every control byte is replaced with a visible, terminal-inert `\^X`
+ * (backslash + caret-notation) instead of being dropped, and every literal
+ * backslash already in the text is doubled first — so a real control byte's
+ * `\^G` can never collide with a user who typed the three plain characters
+ * `\`, `^`, `G` (which becomes `\\^G`, a different string). The result is a
+ * lossless, single-row, terminal-safe stand-in for the raw value: no bytes
+ * are silently discarded, so a different grant always reads differently.
+ */
+export function sanitizeTerminalLineLossless(value: string): string {
+  const backslashesEscaped = value.replace(/\\/g, '\\\\');
+  let result = '';
+  for (const char of toCodePoints(backslashesEscaped)) {
+    const code = char.codePointAt(0);
+    if (code === undefined) continue;
+    if ((code >= 0x00 && code <= 0x1f) || code === 0x7f) {
+      result += '\\' + caretNotation(code);
+      continue;
+    }
+    result += char;
+  }
+  return result.replace(BIDI_OVERRIDE_CHARS_REGEX, '');
+}
+
 /* Recursively traverses a JSON-like structure (objects, arrays, primitives)
  * and escapes all ANSI control characters found in any string values.
  *

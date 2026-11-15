@@ -17,6 +17,7 @@ import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
 import {
   sanitizeTerminalText,
   sanitizeTerminalLine,
+  sanitizeTerminalLineLossless,
 } from '../../utils/textUtils.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type {
@@ -421,7 +422,7 @@ export const ToolConfirmationMessage: React.FC<
     });
     if (isTrustedFolder && !confirmationDetails.hideAlwaysAllow) {
       const friendlyLabel = executionProps.permissionRules?.length
-        ? ` ${sanitizeTerminalLine(buildHumanReadableRuleLabel(executionProps.permissionRules))}`
+        ? ` ${sanitizeTerminalLineLossless(buildHumanReadableRuleLabel(executionProps.permissionRules))}`
         : '';
       options.push({
         label: friendlyLabel

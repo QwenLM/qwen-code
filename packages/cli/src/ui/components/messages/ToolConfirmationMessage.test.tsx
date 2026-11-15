@@ -446,20 +446,22 @@ describe('ToolConfirmationMessage', () => {
   // permissionRules feeds the two persistent "Always allow ..." choice labels
   // through buildHumanReadableRuleLabel(), which embeds a rule's specifier
   // (ultimately sourced from the same untrusted command text, via
-  // extractCommandRules/getCommandName) into the visible label untouched.
-  // Only the DISPLAY copy is sanitized here: the permissionRules array itself
-  // must reach the persistence/authorization layer unchanged, so two rules
-  // that differ only by a control byte stay distinguishable there.
-  it('sanitizes terminal control sequences in the Always-allow labels, without changing permissionRules itself', () => {
+  // extractCommandRules/getCommandName) into the visible label. Because this
+  // label stands for a *persisted* grant, two different rules must never
+  // render identically: sanitizeTerminalLineLossless keeps every control byte
+  // visible as a `\^X` caret sequence (with any real backslash in the source
+  // doubled first) instead of deleting it, so a dirty and a clean rule always
+  // read differently. permissionRules itself must still reach the
+  // persistence/authorization layer unchanged.
+  const renderAlwaysAllowLabel = (permissionRules: string[]) => {
     const confirmationDetails: ToolCallConfirmationDetails = {
       type: 'exec',
       title: 'Confirm Shell Command',
       command: 'probe arg',
       rootCommand: 'probe',
-      permissionRules: ['Bash(probe\x07 *)'],
+      permissionRules,
       onConfirm: vi.fn(),
     };
-
     const { lastFrame } = renderWithProviders(
       <ToolConfirmationMessage
         confirmationDetails={confirmationDetails}
@@ -468,23 +470,47 @@ describe('ToolConfirmationMessage', () => {
         contentWidth={80}
       />,
     );
+    return { frame: lastFrame() ?? '', confirmationDetails };
+  };
 
-    const frame = lastFrame() ?? '';
-    // All four choices (Yes once, both Always-allow labels, No) are visible,
-    // none of them carry the raw BEL byte.
-    expect(frame).toContain('Yes, allow once');
+  it('renders a clean permission rule with an unmarked label', () => {
+    const { frame } = renderAlwaysAllowLabel(['Bash(probe *)']);
     expect(frame).toContain("run 'probe *' commands");
+  });
+
+  it('renders a rule containing a real BEL byte as a visible \\^G marker, distinct from the clean label', () => {
+    const { frame, confirmationDetails } = renderAlwaysAllowLabel([
+      'Bash(probe\x07 *)',
+    ]);
+    expect(frame).toContain('Yes, allow once');
+    expect(frame).toContain("run 'probe\\^G *' commands");
+    expect(frame).not.toContain("run 'probe *' commands");
     expect(frame).toContain('No, suggest changes');
     expect(frame).not.toContain('\x07');
 
     // The rule string itself is untouched after rendering: an implementation
     // that sanitized permissionRules in place (instead of only the label)
-    // would still pass the frame assertions above, since the dirty and clean
-    // rules print the same label. Asserting on the source object directly is
-    // what actually distinguishes "display fixed" from "persisted rule
-    // silently rewritten", the latter would collapse a dirty and a clean
-    // rule into one persisted grant.
+    // would still pass the frame assertions above, since both a rewritten
+    // and an already-clean rule print the same label. Asserting on the
+    // source object directly is what actually distinguishes "display fixed"
+    // from "persisted rule silently rewritten".
     expect(confirmationDetails.permissionRules).toEqual(['Bash(probe\x07 *)']);
+  });
+
+  it('renders a rule containing the literal characters backslash-caret-G differently from a real BEL byte', () => {
+    // No control byte here: the rule text is the three plain characters
+    // `\`, `^`, `G` (a single JS-source backslash escapes to one literal
+    // backslash character). This must not be confused with the \^G that a
+    // *real* BEL byte produces in the previous test.
+    const { frame } = renderAlwaysAllowLabel(['Bash(probe\\^G *)']);
+    expect(frame).toContain("run 'probe\\\\^G *' commands");
+    expect(frame).not.toContain("run 'probe\\^G *' commands");
+  });
+
+  it('shows the same distinguishing marker for both the project and the user Always-allow scopes', () => {
+    const { frame } = renderAlwaysAllowLabel(['Bash(probe\x07 *)']);
+    const matches = frame.split("run 'probe\\^G *' commands").length - 1;
+    expect(matches).toBe(2);
   });
 
   it('renders classifier fallback guidance and the Default Mode option', async () => {
