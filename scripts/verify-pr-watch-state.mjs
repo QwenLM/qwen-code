@@ -465,7 +465,15 @@ export function startRound(
             at >= 0
               ? (prior[at].deferredAt ?? now.toISOString())
               : now.toISOString(),
-          seq: at >= 0 ? prior[at].seq : (preserved?.seq ?? nextSeq(existing)),
+          // A hint with an unknown (null) seq is still a hint: propagate the
+          // null so a seq-less legacy head stays seq-less, rather than
+          // minting a maximum that retires a newer deferral (R12 R10-1).
+          seq:
+            at >= 0
+              ? prior[at].seq
+              : preserved
+                ? (preserved.seq ?? null)
+                : nextSeq(existing),
           retries:
             at >= 0 ? (prior[at].retries ?? 0) : (preserved?.retries ?? 0),
         };
@@ -505,9 +513,15 @@ export function startRound(
     // A recovery restart of a released head, or a redelivery of a retired
     // head, keeps its original push-order position (either hint); minting a
     // fresh maximum here would supersede heads pushed after it (R10-1). A
-    // genuinely new head consumes the next seq.
+    // hint with an unknown (null) seq is still a hint — propagate the null
+    // so a seq-less legacy head stays seq-less (R12 R10-1). A genuinely new
+    // head (no hint) consumes the next seq.
     const preserved = preservedEntry(existing, head);
-    const seq = own ? (own.seq ?? null) : (preserved?.seq ?? nextSeq(existing));
+    const seq = own
+      ? (own.seq ?? null)
+      : preserved
+        ? (preserved.seq ?? null)
+        : nextSeq(existing);
     const deferredHeads = priorDeferred
       .filter(
         (entry) =>

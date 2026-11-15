@@ -895,12 +895,14 @@ ambiguous rather than verify a guessed PR. Then, in order:
    answer instead of starting a duplicate. A cross-head refusal records `H`
    as deferred, and the running round's `--complete` output names it — start
    the latest deferred head it names as the next round. Exit 3 can also mean
-   the state lock is held: retry shortly, or remove a killed invocation's
-   `.lock` file (never the state file) and retry. Exit 3 can also mean the
-   state belongs to another repository — a PR number is only unique within
-   its repo; check `--repo` and the state root. The watch prompt's exit-3
-   enumeration is the full contract, and the repo guard applies to
-   `--complete` and `--release` too. When the in-flight
+   `H` is a terminal deferred head — not covered after repeated inconclusive
+   rounds; do not start it again without a new head move, report it under
+   _Not covered_. Exit 3 can also mean the state lock is held: retry shortly,
+   or remove a killed invocation's `.lock` file (never the state file) and
+   retry. Exit 3 can also mean the state belongs to another repository — a
+   PR number is only unique within its repo; check `--repo` and the state
+   root. The watch prompt's exit-3 enumeration is the full contract, and the
+   repo guard applies to `--complete` and `--release` too. When the in-flight
    round is dead (killed session, OOM, aborted turn), nothing will answer:
    recover the marker with
    `node <clone>/scripts/verify-pr-watch-state.mjs <n> --release --head <blocking head> [--round <r>] --repo <owner>/<repo>`

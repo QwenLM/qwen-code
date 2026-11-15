@@ -9,6 +9,8 @@ import {
   mkdirSync,
   mkdtempSync,
   rmSync,
+  symlinkSync,
+  truncateSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -1910,7 +1912,9 @@ describe('round-10 witnesses', () => {
       { encoding: 'utf8', env: { ...process.env, QWEN_VERIFY_CONTEXT: '' } },
     );
     expect(res.status).toBe(1);
-    expect(res.stderr).toMatch(/must not point inside the artifact directory/);
+    expect(res.stderr).toMatch(
+      /must not point inside the PR-writable worktree/,
+    );
   });
 });
 
@@ -2032,4 +2036,168 @@ describe('round-11 witnesses', () => {
     );
     expect(accepted.errors).toEqual([]);
   });
+});
+
+describe('round-12 witnesses', () => {
+  const waiver = JSON.stringify({
+    mode: 'waived',
+    by: 'maintainer',
+    approval: APPROVAL,
+    reason: 'why',
+  });
+
+  // R12-1 (a): a symlink whose target is the round's own context.json is
+  // refused by its REAL path, not followed.
+  it.skipIf(process.platform === 'win32')(
+    'refuses a --context symlink targeting the artifact context.json',
+    () => {
+      const dir = makeArtifactDir(validFiles({ boundary: waiver }), [
+        '01-ab-cells.png',
+      ]);
+      writeFileSync(
+        join(dir, 'context.json'),
+        JSON.stringify({ repo: 'evil/repo', pr: 999, headRefOid: HEAD }),
+      );
+      const link = join(dir, '..', `snap-${Date.now()}.json`);
+      symlinkSync(join(dir, 'context.json'), link);
+      const res = spawnSync(
+        process.execPath,
+        [SCRIPT, '--context', link, dir],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+        },
+      );
+      expect(res.status).toBe(1);
+      expect(res.stderr).toMatch(
+        /must not point inside the PR-writable worktree/,
+      );
+    },
+  );
+
+  // R12-1 (b): a FIFO at the --context path refuses with exit 1, not a hang.
+  it.skipIf(process.platform === 'win32')(
+    'refuses a FIFO --context path instead of hanging',
+    () => {
+      const dir = makeArtifactDir(validFiles({ boundary: waiver }), [
+        '01-ab-cells.png',
+      ]);
+      const fifo = join(dir, '..', `ctx-fifo-${Date.now()}`);
+      execFileSync('mkfifo', [fifo]);
+      const res = spawnSync(
+        process.execPath,
+        [SCRIPT, '--context', fifo, dir],
+        {
+          encoding: 'utf8',
+          timeout: 5000,
+          env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+        },
+      );
+      expect(res.status).toBe(1);
+      expect(res.stderr).toMatch(
+        /missing, unreadable, or carries no valid head OID/,
+      );
+    },
+  );
+
+  // R12-1 (c): the tmp/verify-context sibling prepare prints is inside the
+  // PR-writable worktree too, so a planted snapshot there is refused.
+  it.skipIf(process.platform === 'win32')(
+    'refuses a --context snapshot in the verify-context sibling',
+    () => {
+      const root = mkdtempSync(join(tmpdir(), 'verify-pr-r12-'));
+      tmpDirs.push(root);
+      execFileSync('git', ['init', '--quiet', root], {
+        env: { ...process.env, GIT_CONFIG_NOSYSTEM: '1' },
+      });
+      const dir = join(root, 'tmp', 'pr7-verify-20261115-000000');
+      mkdirSync(join(dir, 'evidence'), { recursive: true });
+      writeFileSync(join(dir, 'report.md'), validFiles({}).report);
+      writeFileSync(join(dir, 'verdict.txt'), 'merge-ready\n');
+      writeFileSync(
+        join(dir, 'assertions.json'),
+        '{"pass":1,"fail":0,"total":1}',
+      );
+      writeFileSync(join(dir, 'boundary.json'), waiver);
+      writeFileSync(join(dir, 'evidence/01-x.png'), 'png');
+      const sibling = join(root, 'tmp', 'verify-context', 'pr7.json');
+      mkdirSync(join(root, 'tmp', 'verify-context'), { recursive: true });
+      writeFileSync(
+        sibling,
+        JSON.stringify({ repo: 'evil/repo', pr: 9, headRefOid: HEAD }),
+      );
+      const res = spawnSync(
+        process.execPath,
+        [SCRIPT, '--context', sibling, dir],
+        { encoding: 'utf8', env: { ...process.env, QWEN_VERIFY_CONTEXT: '' } },
+      );
+      expect(res.status).toBe(1);
+      expect(res.stderr).toMatch(
+        /must not point inside the PR-writable worktree/,
+      );
+    },
+  );
+
+  // R12 deferred: an oversized (sparse) artifact is refused, not read whole
+  // into memory.
+  it('refuses an oversized artifact', () => {
+    const dir = makeArtifactDir(validFiles({}), ['01-ab-cells.png']);
+    truncateSync(join(dir, 'report.md'), 17 * 1024 * 1024);
+    const res = spawnSync(process.execPath, [SCRIPT, dir], {
+      encoding: 'utf8',
+      env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+    });
+    expect(res.status).toBe(1);
+    expect(res.stdout).toMatch(/report\.md is unreadable/);
+  });
+
+  // R12 deferred: an unreadable gate record must not suppress the
+  // declaration's own defects.
+  it('reports boundary defects even when the gate record is unreadable', () => {
+    const dir = makeArtifactDir(
+      validFiles({ boundary: JSON.stringify({ mode: 'bogus' }) }),
+      ['01-ab-cells.png'],
+    );
+    rmSync(join(dir, 'boundary-gate.json'));
+    mkdirSync(join(dir, 'boundary-gate.json'));
+    const res = spawnSync(process.execPath, [SCRIPT, dir], {
+      encoding: 'utf8',
+      env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+    });
+    expect(res.status).toBe(1);
+    expect(res.stdout).toMatch(/boundary-gate\.json is unreadable/);
+    expect(res.stdout).toMatch(/mode must be one of/);
+  });
+
+  // R12 deferred: an ATX heading carrying a number ("## 8. Methodology") is
+  // a Methodology section, not reported absent.
+  it('recognises an ATX heading that carries a number', () => {
+    const report = `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n\n## 8. Methodology\n\n**Boundary.** node:22-bookworm, --network none, credential-free.\n`;
+    const result = checkArtifacts({
+      files: validFiles({ report }),
+      evidence: ['01-ab-cells.png'],
+    });
+    expect(result.warnings.join('\n')).not.toMatch(
+      /has no Methodology section/,
+    );
+  });
+
+  // R12 deferred: a symlink artifact is refused (lstat, not stat) — a
+  // lstat→stat mutation would follow the link and read the target.
+  it.skipIf(process.platform === 'win32')(
+    'refuses a symlink artifact rather than following it',
+    () => {
+      const dir = makeArtifactDir(validFiles({}), ['01-ab-cells.png']);
+      const target = join(dir, '..', `target-${Date.now()}.md`);
+      writeFileSync(target, validFiles({}).report);
+      rmSync(join(dir, 'report.md'));
+      symlinkSync(target, join(dir, 'report.md'));
+      const res = spawnSync(process.execPath, [SCRIPT, dir], {
+        encoding: 'utf8',
+        env: { ...process.env, QWEN_VERIFY_CONTEXT: '' },
+      });
+      expect(res.status).toBe(1);
+      expect(res.stdout).toMatch(/report\.md is unreadable/);
+    },
+  );
 });

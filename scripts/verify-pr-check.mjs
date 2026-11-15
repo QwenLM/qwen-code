@@ -22,7 +22,14 @@
  * error, 2 on a usage error.
  */
 
-import { existsSync, lstatSync, readFileSync, readdirSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import {
+  existsSync,
+  lstatSync,
+  readFileSync,
+  readdirSync,
+  realpathSync,
+} from 'node:fs';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { isEntryPoint } from './lib/entry-point.js';
 
@@ -119,6 +126,9 @@ Exit codes: 0 no errors, 1 errors found, 2 usage.
 // artifact is NOT an absent one: main() reports it as an error, so a damaged
 // mutations.json or comment.md cannot silently drop its check.
 const UNREADABLE = '\u0000unreadable';
+// Artifacts are reports and JSON, never bulk data; a PR-planted sparse file
+// of arbitrary size must not be read whole into memory (R12 deferred).
+const MAX_ARTIFACT_BYTES = 16 * 1024 * 1024;
 function readIfExists(path) {
   // lstat, not existsSync + readFileSync: a FIFO blocks open(2) forever with
   // no writer, and a symlink to /dev/zero reads without end — neither raises
@@ -131,7 +141,7 @@ function readIfExists(path) {
   } catch {
     return null;
   }
-  if (!st.isFile()) return UNREADABLE;
+  if (!st.isFile() || st.size > MAX_ARTIFACT_BYTES) return UNREADABLE;
   try {
     return readFileSync(path, 'utf8');
   } catch {
@@ -476,12 +486,15 @@ function boundaryLineWarnings(text, label, boundaryMode = null) {
   // shapes a report may wrap it in — blockquote, list marker, ATX hashes,
   // bold/italic wrapping — so a bold-only "**Methodology**" or a Setext
   // heading is found, not just the hand-listed ATX/numbered forms.
+  // Strip the outer heading marker before the list marker so an ATX heading
+  // that itself carries a number ("## 8. Methodology") normalises fully
+  // (R12 deferred); a single fixed order missed the nested shape.
   const normalize = (line) =>
     line
       .trim()
       .replace(/^(?:>\s*)+/, '')
-      .replace(/^(?:[-*]\s+|\d+\.\s+)+/, '')
       .replace(/^#{1,6}\s+/, '')
+      .replace(/^(?:[-*]\s+|\d+\.\s+)+/, '')
       .replace(/^(\*{1,2}|_{1,2})/, '')
       .replace(/(\*{1,2}|_{1,2})$/, '')
       .trim();
@@ -785,17 +798,24 @@ export function checkArtifacts({
     files.boundary === null ||
     files.boundary === undefined ||
     files.boundary.trim() === '';
-  if (unreadableKeys.has('boundary') || unreadableKeys.has('boundaryGate')) {
-    // Already reported as unreadable; do not also call it missing.
+  if (unreadableKeys.has('boundary')) {
+    // The declaration itself is unreadable; already reported.
   } else if (publisherOwnsBoundary && boundaryAbsent) {
     warnings.push(
       'boundary.json is absent on the CI entry path ($QWEN_VERIFY_CONTEXT): the publish job (CI lane) or the host check step (container recipe) writes the declaration before the verdict is trusted',
     );
   } else {
+    // An unreadable gate record is reported separately, but it must not
+    // suppress the declaration's own defects (R12 deferred). Its gate-missing
+    // error would duplicate the unreadable report, so drop that one error.
+    const gateUnreadable = unreadableKeys.has('boundaryGate');
     const boundaryErrors = checkBoundary(files.boundary, files.boundaryGate, {
       publishLane,
       coordinates,
-    }).errors;
+    }).errors.filter(
+      (error) =>
+        !(gateUnreadable && error.startsWith('boundary-gate.json is missing')),
+    );
     // The publisher owns the gate record too: on the CI entry path a
     // round-authored container declaration whose gate run has not happened
     // yet is the same expected gap as an absent declaration, not a refusal
@@ -1038,27 +1058,48 @@ function main(argv) {
   };
   let coordinates = null;
   if (contextPath) {
-    // A host-held snapshot: the artifact directory is writable by the PR code
-    // the round just executed, so its own context.json cannot pin the head
-    // when the maintainer supplies a copy that code never saw. Spelling the
-    // path as --context <round-dir>/context.json is shape-identical to the
-    // prescribed invocation, so refuse it explicitly rather than let the
-    // round supply the coordinates that judge its own waiver.
-    if (resolve(contextPath).startsWith(resolve(dir) + sep)) {
+    // A host-held snapshot: the PR clone is mounted read-write, so the round
+    // can write ANY path inside it — the artifact dir AND the
+    // tmp/verify-context sibling prepare prints. Refuse a --context whose
+    // REAL path lands anywhere in the clone's worktree (a lexical prefix of
+    // the round dir misses both a symlink and the sibling), and read through
+    // the same lstat guard so a FIFO/symlink refuses instead of hanging or
+    // being followed (R12-1).
+    let realContext;
+    try {
+      realContext = realpathSync(contextPath);
+    } catch {
+      realContext = resolve(contextPath);
+    }
+    let trustRoot = resolve(dir);
+    try {
+      trustRoot = realpathSync(
+        execFileSync('git', ['-C', dir, 'rev-parse', '--show-toplevel'], {
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+        }).trim(),
+      );
+    } catch {
+      // Not a git worktree: the artifact dir itself is the writable root.
+    }
+    if (realContext === trustRoot || realContext.startsWith(trustRoot + sep)) {
       process.stderr.write(
-        `verify-pr check: --context must not point inside the artifact directory (${contextPath}): it is PR-writable and cannot judge its own waiver — pass a host-held copy the round never saw\n`,
+        `verify-pr check: --context must not point inside the PR-writable worktree (${contextPath}): it cannot judge its own waiver — pass a host-held copy the round never saw\n`,
       );
       return 1;
     }
-    try {
-      const snapshot = JSON.parse(readFileSync(contextPath, 'utf8'));
-      if (/^[0-9a-f]{40}$/.test(snapshot?.headRefOid ?? '')) {
-        expectedHead = snapshot.headRefOid;
-        snapshotPath = contextPath;
+    const snapshotText = readIfExists(contextPath);
+    if (snapshotText !== null && snapshotText !== UNREADABLE) {
+      try {
+        const snapshot = JSON.parse(snapshotText);
+        if (/^[0-9a-f]{40}$/.test(snapshot?.headRefOid ?? '')) {
+          expectedHead = snapshot.headRefOid;
+          snapshotPath = contextPath;
+        }
+        coordinates = coordinatesFrom(snapshot);
+      } catch {
+        // Reported below; never falls back to the writable artifact copy.
       }
-      coordinates = coordinatesFrom(snapshot);
-    } catch {
-      // Reported below; never falls back to the writable artifact copy.
     }
     if (!expectedHead) {
       process.stderr.write(

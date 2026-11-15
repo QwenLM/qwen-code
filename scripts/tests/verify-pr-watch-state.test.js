@@ -2812,3 +2812,79 @@ describe('round-11 witnesses', () => {
     expect(res.stderr).toMatch(/--artifact-dir must not be empty/);
   });
 });
+
+describe('round-12 witnesses', () => {
+  // R10-1 (R12): a seq-less legacy head's release hint carries seq null;
+  // restarting it must propagate null (a hint with an unknown position is
+  // still a hint), not mint a maximum that retires the newer head's only
+  // deferral.
+  it('a restarted seq-less legacy head keeps null seq and the newer deferral', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({
+        pr: 1,
+        verifiedHeads: [],
+        inFlightHeads: [
+          { head: HEAD, round: 11, artifactDir: 'r11', startedAt: null },
+        ],
+        deferredHeads: [],
+      }),
+    );
+    // PREV pushed while HEAD runs -> deferred at seq 1 (its only delivery).
+    startRound(root, { pr: 1, head: PREV, round: 12, artifactDir: 'r12' });
+    expect(readState(root, 1).deferredHeads[0]).toMatchObject({
+      head: PREV,
+      seq: 1,
+    });
+    // HEAD's round dies; release writes a seq-less hint.
+    releaseRound(root, { pr: 1, head: HEAD });
+    expect(readState(root, 1).releasedHeads[0]).toMatchObject({
+      head: HEAD,
+      seq: null,
+    });
+    // Restart HEAD: it stays seq-less and PREV survives.
+    const re = startRound(root, {
+      pr: 1,
+      head: HEAD,
+      round: 13,
+      artifactDir: 'r13',
+    });
+    expect(re.duplicate).toBeUndefined();
+    const st = readState(root, 1);
+    expect(st.inFlightHeads[0]).toMatchObject({ head: HEAD, seq: null });
+    expect(st.deferredHeads.map((e) => e.head)).toEqual([PREV]);
+  });
+
+  // R10-1 (R12) deferral twin: a released seq-less head redelivered while
+  // another round runs is a first deferral; the hint's null seq propagates
+  // there too, not a fresh maximum.
+  it('a released seq-less head redelivered into deferral keeps null seq', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({
+        pr: 1,
+        verifiedHeads: [],
+        inFlightHeads: [
+          { head: HEAD, round: 11, artifactDir: 'r11', startedAt: null },
+        ],
+        deferredHeads: [],
+      }),
+    );
+    startRound(root, { pr: 1, head: PREV, round: 12, artifactDir: 'r12' });
+    releaseRound(root, { pr: 1, head: HEAD });
+    startRound(root, { pr: 1, head: PREV, round: 13, artifactDir: 'r13' });
+    const re = startRound(root, {
+      pr: 1,
+      head: HEAD,
+      round: 14,
+      artifactDir: 'r14',
+    });
+    expect(re.duplicate).toBe('in-flight');
+    const entry = readState(root, 1).deferredHeads.find((e) => e.head === HEAD);
+    expect(entry.seq).toBeNull();
+  });
+});
