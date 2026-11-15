@@ -78,7 +78,7 @@ Each generated image is:
   fragment. An empty or unparsable selector, zero or several matching
   routes, or any missing or invalid field leaves the tool unregistered,
   with no error message. A whole-tool deny rule (including
-  `tools.excludeTools`) also removes the tool before registration. If the
+  `tools.disabled`) also removes the tool before registration. If the
   model was valid when the session started and is invalidated afterwards,
   the tool call instead fails with "Image generation is not configured with
   a valid endpoint".
@@ -100,8 +100,11 @@ Each generated image is:
   (`capabilities.vision`) alone does not qualify a route. The picker also
   lists only routes in a writable settings scope (user, or workspace when
   trusted) whose auth-type/id/base-URL combination is unique, so a
-  System-scoped or duplicated route is absent even when image-capable;
-  `/model --image` in the terminal still resolves it from the registry.
+  System-scoped or duplicated route is absent even when image-capable. In
+  the terminal, `/model --image <model-id>` resolves a unique route from the
+  registry (including System-scoped ones); a duplicated id is refused there
+  too — run `/model --image` without an argument and choose the exact
+  endpoint.
 
 ## Related
 

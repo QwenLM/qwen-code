@@ -34,8 +34,9 @@ prompt. For a realtime spoken conversation with the agent, see
 - Microphone permission for the site in your browser (and for the browser in
   your operating system's privacy settings).
 
-These requirements apply to the Web Shell; dictation in the interactive
-terminal runs locally and does not need a daemon.
+The daemon, secure-context, and browser-permission requirements above apply
+to the Web Shell. The interactive terminal runs dictation locally without a
+daemon, but still needs a selected voice model and `general.voice.enabled`.
 
 ## Setup
 
@@ -57,8 +58,11 @@ Any of these paths selects the transcription model:
 The route's `baseUrl` must be HTTPS. Loopback endpoints (`http://localhost`,
 `http://127.0.0.1`, `http://[::1]`) are allowed, and a trusted managed HTTP or
 private-network endpoint can be exempted by listing its exact complete URL in
-`security.allowedInsecureVoiceBaseUrls` (honored only from user/system scope;
-see the [settings reference](../configuration/settings.md)).
+`security.allowedInsecureVoiceBaseUrls` (honored only from user, system, or
+system-defaults scope; see the
+[settings reference](../configuration/settings.md)). Metadata, link-local,
+and transition-range addresses, and hostnames that resolve to loopback, stay
+blocked even when listed.
 
 ### 2. Enable dictation
 
@@ -111,7 +115,7 @@ All settings live under `general.voice` (see the
 
 | Setting                          | Effect                                                                                                                                                       |
 | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `general.voice.mode`             | `"hold"` (hold to talk) or `"tap"` (tap to start, tap or pause to stop).                                                                                     |
+| `general.voice.mode`             | `"hold"` (hold to talk) or `"tap"` (tap to start, tap again to stop).                                                                                        |
 | `general.voice.language`         | Preferred spoken language, e.g. `"english"` or `"chinese"`. Empty auto-detects.                                                                              |
 | `general.voice.keytermsFile`     | Path to a keyterms file (one term per line, `#` comments) that biases recognition toward domain terms.                                                       |
 | `general.voice.refineTranscript` | Clean up the transcript with the fast model before inserting it (default on). Interactive terminal only; the Web Shell inserts the ASR transcript unchanged. |
@@ -139,7 +143,9 @@ Shell does not refine transcripts.
 - **"must use an https baseUrl" / "must not use a private-network baseUrl"** —
   the voice route's endpoint is cleartext HTTP or on a private network. Use
   HTTPS or a loopback address, or add the endpoint's exact complete URL to
-  `security.allowedInsecureVoiceBaseUrls` (user/system scope only).
+  `security.allowedInsecureVoiceBaseUrls` (user, system, or system-defaults
+  scope only). Metadata, link-local, and transition-range addresses, and
+  hostnames that resolve to loopback, stay blocked even when listed.
 - **"Streaming voice transcription requires native audio capture"
   (terminal)** — the streaming ASR models need the native recorder.
   Install/rebuild `@qwen-code/audio-capture`, or switch `voiceModel` to
