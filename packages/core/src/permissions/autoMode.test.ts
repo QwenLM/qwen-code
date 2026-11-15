@@ -509,6 +509,15 @@ describe('shouldForceAutoModeReviewForAllow', () => {
     );
   });
 
+  it.each(['A=1', 'command', 'builtin'])(
+    'reviews a protected write after %s cd',
+    (prefix) => {
+      expect(
+        forcesReview(`${prefix} cd .qwen && printf '{}' > settings.json`),
+      ).toBe(true);
+    },
+  );
+
   it('returns true for relative writes after an unresolved dynamic `cd`', () => {
     // If cwd is dynamic, the apparent resolved path is only a guess. Route
     // back to the classifier so an allow rule cannot hide writes like
@@ -848,6 +857,23 @@ describe('evaluateAutoMode — fast-path gating', () => {
       expect(classifyAction).not.toHaveBeenCalled();
     },
   );
+
+  it.each([
+    "printf '{}' > .qwen/setting{s..s}.json",
+    "printf '{}' > .qwen/settings.j@(son)",
+    'touch .qwen/setting{s..s}.json',
+    'sort -o $OUT in.txt',
+    'cp -t $D settings.json',
+  ])('routes an expanded write to manual fallback: %s', async (command) => {
+    vi.mocked(classifyAction).mockClear();
+    const decision = await evaluate({
+      toolName: ToolNames.SHELL,
+      command,
+      cwd,
+    });
+    expect(decision).toEqual({ via: 'fallback', reason: 'safety_check' });
+    expect(classifyAction).not.toHaveBeenCalled();
+  });
 
   it('does not treat a literal dollar in a redirect as unresolved', async () => {
     vi.mocked(classifyAction).mockClear();

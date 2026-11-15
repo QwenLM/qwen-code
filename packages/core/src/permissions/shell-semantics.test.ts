@@ -619,7 +619,13 @@ describe('extractShellOperations', () => {
       'tee >&-$HOME/.bashrc',
       [{ ...write(`${CWD}/&-$HOME/.bashrc`), pathUnknown: true }],
     ],
-    ['tee >&-{a,b}', [write(`${CWD}/&-{a,b}`)]],
+    [
+      'tee >&-{a,b}',
+      sorted([
+        { ...write(`${CWD}/&-{a,b}`), pathUnknown: true },
+        { ...write(`${CWD}/{a,b}`), pathUnknown: true },
+      ]),
+    ],
     ['my-tool >&-notes.txt', [write(`${CWD}/&-notes.txt`)]],
     ['rm -- >&--x', [write(`${CWD}/&--x`)]],
     ['printf X >&->&"-x"', [write(`${CWD}/-x`), write(`${CWD}/&->&-x`)]],
@@ -1353,6 +1359,114 @@ describe('quoted and decoded tilde targets', () => {
     expect(across('cd "~/x" ; cat > y')).toEqual([
       uncertainWrite('/repo/~/x/y'),
     ]);
+  });
+});
+
+describe('prefixed directory changes', () => {
+  it.each([
+    'A=1',
+    'A="a b"',
+    'command',
+    'command -p',
+    'command --',
+    'builtin',
+    'builtin --',
+    'A=1 command',
+  ])('tracks the current shell directory through %s cd', (prefix) => {
+    expect(across(`${prefix} cd .qwen && printf '{}' > settings.json`)).toEqual(
+      [write(REPO_SETTINGS)],
+    );
+  });
+
+  it.each(['A=1', 'command', 'builtin'])(
+    'keeps argument marks aligned after %s',
+    (prefix) => {
+      expect(
+        across(`${prefix} cd $'\\x7e'; printf '{}' > settings.json`),
+      ).toEqual([uncertainWrite('/repo/~/settings.json')]);
+    },
+  );
+
+  it.each(['command -v cd', 'command -V cd'])(
+    'does not treat command lookup as a directory change: %s',
+    (command) => {
+      expect(across(`${command}; printf '{}' > settings.json`)).toEqual([
+        write('/repo/settings.json'),
+      ]);
+    },
+  );
+});
+
+describe('assignment syntax in directory changes', () => {
+  it.each(["'A=1'", "'A'=1", String.raw`A\=1`, "A''=1", "''A=1", "$''A=1"])(
+    'does not treat a quoted command word as an assignment: %s',
+    (prefix) => {
+      expect(
+        across(`${prefix} cd /elsewhere; printf '{}' > .qwen/settings.json`),
+      ).toEqual([write(REPO_SETTINGS)]);
+    },
+  );
+
+  it.each(['HOME=. cd', 'CDPATH=/elsewhere cd .qwen'])(
+    'does not guess a cwd affected by temporary variables: %s',
+    (command) => {
+      expect(across(`${command}; printf '{}' > .qwen/settings.json`)).toEqual([
+        uncertainWrite(REPO_SETTINGS),
+      ]);
+    },
+  );
+});
+
+describe('find starting-point uncertainty', () => {
+  it.each(['./$D', './*'])(
+    'keeps the marks on a find starting point: %s',
+    (target) => {
+      expect(across(`find ${target} -name x`)).toEqual([
+        { ...dir(`/repo/${target.slice(2)}`), pathUnknown: true },
+      ]);
+    },
+  );
+
+  it('retains the default and literal starting-point behavior', () => {
+    expect(across('find $D -name x')).toEqual([dir('/repo')]);
+    expect(across('find src -name x')).toEqual([dir('/repo/src')]);
+  });
+});
+
+describe('shell-expanded write paths', () => {
+  it.each([
+    "printf '{}' > .qwen/setting{s..s}.json",
+    "printf '{}' > .qwen/settings.j@(son)",
+    'touch .qwen/setting{s..s}.json',
+    'sort -o $OUT in.txt',
+    'sort --output=$OUT in.txt',
+    'cp -t $D settings.json',
+    'mv --target-directory=$D settings.json',
+    'curl -o $OUT https://example.com',
+    'wget -O $OUT https://example.com',
+    'patch -o $OUT input.patch',
+  ])('keeps the expanded destination uncertain: %s', (command) => {
+    const uncertainWrites = across(command).filter(
+      (op) =>
+        (op.virtualTool === 'write_file' || op.virtualTool === 'edit') &&
+        op.pathUnknown,
+    );
+    expect(uncertainWrites).toHaveLength(1);
+  });
+
+  it.each([
+    ['.qwen/setting{s..s}.json', '/repo/.qwen/setting{s..s}.json'],
+    ['.qwen/settings.j@(son)', '/repo/.qwen/settings.j@(son)'],
+  ])('keeps a quoted expansion literal: %s', (target, path) => {
+    expect(across(`printf '{}' > '${target}'`)).toEqual([write(path)]);
+  });
+
+  it('does not mistake an awk program for a brace-expanded filename', () => {
+    expect(across("awk '{print $1}' f")).toEqual([read('/repo/f')]);
+  });
+
+  it('keeps a quoted output-flag value literal', () => {
+    expect(across("sort -o '$OUT' in.txt")).toContainEqual(write('/repo/$OUT'));
   });
 });
 

@@ -117,7 +117,7 @@ function tokenize(
   // One mark per UTF-16 code unit; expansion marks survive quote removal.
   let bare = '';
   let wordStarted = false;
-  let tildeQuoted = false;
+  let prefixQuoted = false;
   let ansiCBytes: number[] = [];
   const flushAnsiC = () => {
     if (ansiCBytes.length === 0) return;
@@ -203,7 +203,7 @@ function tokenize(
     while (ch === '$' && command.startsWith('\\\n', quoteAt)) quoteAt += 2;
     if (!(ch === '$' && command[quoteAt] === "'")) flushAnsiC();
     if (ch === "'" || ch === '"' || ch === '\\') {
-      if (!current.includes('/')) tildeQuoted = true;
+      if (!current.includes('/')) prefixQuoted = true;
       wordStarted = true;
     }
     if (escaped) {
@@ -226,14 +226,14 @@ function tokenize(
       while (command[next] === '\\' && command[next + 1] === '\n') next += 2;
       if (command[next] === "'") {
         wordStarted = true;
-        if (!current.includes('/')) tildeQuoted = true;
+        if (!current.includes('/')) prefixQuoted = true;
         inAnsiC = true;
         i = next;
         continue;
       }
       if (command[next] === '"') {
         wordStarted = true;
-        if (!current.includes('/')) tildeQuoted = true;
+        if (!current.includes('/')) prefixQuoted = true;
         inDouble = true;
         i = next;
         continue;
@@ -250,7 +250,7 @@ function tokenize(
     }
     if (!inSingle && !inDouble && (ch === ' ' || ch === '\t')) {
       if (wordStarted) {
-        if (tildeQuoted && current.startsWith('~')) bare = '0' + bare.slice(1);
+        if (prefixQuoted && current.startsWith('~')) bare = '0' + bare.slice(1);
         if (current) {
           pushToken(tokens, current, bare, fdRedirects, fdCloses, bares);
         } else {
@@ -260,24 +260,25 @@ function tokenize(
         current = '';
         bare = '';
         wordStarted = false;
-        tildeQuoted = false;
+        prefixQuoted = false;
       }
       continue;
     }
     const literal = String.fromCodePoint(command.codePointAt(i)!);
     current = concatAnsiCText(current, literal);
     wordStarted = true;
+    // An empty quote in `A''=1` still makes it a command word, not an assignment.
     const mark =
       !inSingle && (ch === '$' || ch === '`')
         ? '2'
-        : inSingle || inDouble
+        : inSingle || inDouble || (ch === '=' && prefixQuoted)
           ? '0'
           : '1';
     bare += mark.repeat(literal.length);
     i += literal.length - 1;
   }
   flushAnsiC();
-  if (tildeQuoted && current.startsWith('~')) bare = '0' + bare.slice(1);
+  if (prefixQuoted && current.startsWith('~')) bare = '0' + bare.slice(1);
   if (current) pushToken(tokens, current, bare, fdRedirects, fdCloses, bares);
   else if (wordStarted) {
     tokens.push('');
@@ -409,18 +410,23 @@ function isShellAbsolutePath(p: string): boolean {
 /**
  * True when the shell can still change this word before it reaches the syscall.
  *
- * `$`/backtick expansion (mark '2'), an unquoted pathname glob and undecodable
- * bytes all qualify. A glob character is marked '1' (bare) rather than '2', so
- * reading only the expansion mark would certify `> settings.jso?` at a literal
- * name bash never opens.
+ * `$`/backtick expansion (mark '2'), unquoted brace/glob syntax and undecodable
+ * bytes all qualify. Brace and glob characters are marked '1' (bare) rather
+ * than '2', so reading only the expansion mark certifies a literal name bash
+ * may never open.
  */
 function isUncertainPath(word: string, bare?: string): boolean {
   if (bare?.includes('2') || hasUnpairedSurrogate(word)) return true;
   if (bare === undefined) return false;
   for (let i = 0; i < word.length && i < bare.length; i++) {
     if (bare[i] !== '1') continue;
-    const ch = word[i];
-    if (ch === '*' || ch === '?' || ch === '[') return true;
+    const ch = word[i]!;
+    if (
+      '*?[{'.includes(ch) ||
+      ('@+!'.includes(ch) && word[i + 1] === '(' && bare[i + 1] === '1')
+    ) {
+      return true;
+    }
   }
   return false;
 }
@@ -536,8 +542,35 @@ function dispatchHandler(
   }
 }
 
-function isEnvAssignmentToken(token: string): boolean {
-  return /^[A-Za-z_][A-Za-z0-9_]*=/.test(token);
+function isEnvAssignmentToken(token: string, bare?: string): boolean {
+  return (
+    /^[A-Za-z_][A-Za-z0-9_]*=/.test(token) &&
+    (bare === undefined || /^1+$/.test(bare.slice(0, token.indexOf('=') + 1)))
+  );
+}
+
+function stripCommandPrefixes(words: string[], bares: string[]): string[] {
+  let start = 0;
+  while (words[start] && isEnvAssignmentToken(words[start]!, bares[start])) {
+    start++;
+  }
+  while (words[start] === 'command' || words[start] === 'builtin') {
+    let next = start + 1;
+    if (words[start] === 'command') {
+      while (/^-p+$/.test(words[next] ?? '')) next++;
+    }
+    if (words[next] === '--') {
+      next++;
+    } else if (words[next]?.startsWith('-')) {
+      // In particular, `command -v/-V` describes a command without running it.
+      break;
+    }
+    start = next;
+  }
+  // Words and character marks stay index-parallel through prefix removal.
+  const prefixes = words.splice(0, start);
+  bares.splice(0, start);
+  return prefixes;
 }
 
 /**
@@ -552,8 +585,13 @@ function looksLikePath(s: string): boolean {
   if (s.startsWith('-')) return false;
   // Pure integers — likely a count/size/mode argument (e.g. -n 10, chmod 755)
   if (/^\d+$/.test(s)) return false;
-  // Script-like expressions (awk/sed programs, brace expansions)
-  if (s.includes('{') || s.includes('}')) return false;
+  // Quoted awk/sed programs are not brace-expanded path arguments.
+  if (s.includes('{') || s.includes('}')) {
+    const bare = fragmentBare(s);
+    if (!s.split('').some((ch, index) => ch === '{' && bare?.[index] === '1')) {
+      return false;
+    }
+  }
   // URLs are handled separately by the web-fetch handlers
   if (s.includes('://')) return false;
   return true;
@@ -938,7 +976,7 @@ function getFlagValue(
 
 function targetDirectoryPath(args: string[], cwd: string): string | undefined {
   const target = getFlagValue(args, '-t', '--target-directory');
-  if (!target || !looksLikePath(target)) return undefined;
+  if (!target) return undefined;
   return resolvePath(target, cwd, fragmentBare(target));
 }
 
@@ -975,7 +1013,7 @@ function writeOpForFlag(
   longName: string,
 ): ShellOperation | undefined {
   const target = getFlagValue(args, shortName, longName);
-  if (!target || !looksLikePath(target)) return undefined;
+  if (!target) return undefined;
   return pathOperation('write_file', target, cwd);
 }
 
@@ -1639,7 +1677,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
         expressionKeywords.has(arg)
       )
         break;
-      if (looksLikePath(arg)) startingPoints.push(resolvePath(arg, cwd));
+      if (looksLikePath(arg)) startingPoints.push(arg);
     }
     if (startingPoints.length === 0) {
       return [
@@ -1648,10 +1686,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
       ];
     }
     return [
-      ...startingPoints.map((p) => ({
-        virtualTool: 'list_directory' as const,
-        filePath: p,
-      })),
+      ...startingPoints.map((p) => pathOperation('list_directory', p, cwd)),
       ...extractFindExecOps(args, cwd),
     ];
   },
@@ -1983,10 +2018,7 @@ const COMMANDS: Readonly<Record<string, CommandHandler>> = {
 
   patch: (args, cwd) => {
     const output = getFlagValue(args, '-o', '--output');
-    const outputOps =
-      output && looksLikePath(output)
-        ? [pathOperation('edit', output, cwd)]
-        : [];
+    const outputOps = output ? [pathOperation('edit', output, cwd)] : [];
 
     return [
       ...outputOps,
@@ -2368,12 +2400,7 @@ export function extractShellOperations(
   const { readFiles: redirectReads, writeFiles: redirectWrites } =
     extractRedirects(tokens, cwd, fdRedirects, fdCloses, bares);
 
-  // `tokens` and `bares` are index-parallel; dropping an assignment from only
-  // one of them hands every later argument the previous word's marks.
-  while (tokens[0] && isEnvAssignmentToken(tokens[0])) {
-    tokens.shift();
-    bares.shift();
-  }
+  stripCommandPrefixes(tokens, bares);
 
   const cmdName = tokens[0];
   if (!cmdName) {
@@ -2501,6 +2528,7 @@ function resolveCdTargetCwd(
   // extractRedirects compacts `words` and `bares` together, so the target and
   // its marking are read from the filtered arrays.
   const redirects = extractRedirects(words, cwd, fdRedirects, fdCloses, bares);
+  const prefixes = stripCommandPrefixes(words, bares);
 
   if (words[0] === 'popd') return { kind: 'dynamic', redirects };
   if (words[0] !== 'cd' && words[0] !== 'pushd') return { kind: 'not-cd' };
@@ -2528,6 +2556,14 @@ function resolveCdTargetCwd(
 
   const target = words[targetIndex] ?? process.env['HOME'];
   if (!target || target === '-' || isDynamicShellPath(target)) {
+    return { kind: 'dynamic', redirects };
+  }
+  if (
+    (words[targetIndex] === undefined &&
+      prefixes.some((prefix) => prefix.startsWith('HOME='))) ||
+    (!isShellAbsolutePath(target) &&
+      prefixes.some((prefix) => prefix.startsWith('CDPATH=')))
+  ) {
     return { kind: 'dynamic', redirects };
   }
   const targetBare = bares[targetIndex];

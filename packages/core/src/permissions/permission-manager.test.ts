@@ -3492,6 +3492,51 @@ describe('PermissionManager — compound shell write attribution', () => {
     expect(await repoPm(denySettings).evaluate(ctx)).toBe('deny');
   });
 
+  it.each(['A=1', 'command', 'builtin'])(
+    'keeps a protected write denied after %s cd',
+    async (prefix) => {
+      const pm = repoPm({ permissionsAllow: ['Bash(*)'], ...denySettings });
+      const command = `${prefix} cd .qwen && printf '{}' > settings.json`;
+      expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
+    },
+  );
+
+  it.each(["'A=1' cd /elsewhere", 'HOME=. cd', 'CDPATH=/elsewhere cd .qwen'])(
+    'does not lose a protected deny through %s',
+    async (prefix) => {
+      const pm = repoPm({
+        permissionsAllow: ['Bash(*)'],
+        permissionsDeny: ['WriteFileTool(//repo/.qwen/settings.json)'],
+      });
+      const command = `${prefix}; printf '{}' > .qwen/settings.json`;
+      expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
+    },
+  );
+
+  it('asks for an uncertain find starting point despite broad allow rules', async () => {
+    const pm = repoPm({
+      permissionsAllow: ['Bash(*)', 'ListFilesTool(*)'],
+    });
+    expect(await pm.evaluate(sh('find ./$D -name x', '/repo'))).toBe('ask');
+  });
+
+  it.each([
+    "printf '{}' > .qwen/setting{s..s}.json",
+    "printf '{}' > .qwen/settings.j@(son)",
+    'touch .qwen/setting{s..s}.json',
+    'sort -o $OUT in.txt',
+    'cp -t $D settings.json',
+  ])(
+    'does not certify an expanded write despite a broad allow: %s',
+    async (command) => {
+      const pm = repoPm({
+        permissionsAllow: ['Bash(*)', 'ReadFileTool(*)', 'WriteFileTool(*)'],
+        ...denySettings,
+      });
+      expect(await pm.evaluate(sh(command, '/repo'))).toBe('ask');
+    },
+  );
+
   // B1: a `|` inside the redirect operator is a filename character. Before the
   // syntax mask included `|`, `>"|/../".qwen/settings.json` was read as the `>|`
   // clobber and the reported target lost its leading `|`, so `|/../X`
