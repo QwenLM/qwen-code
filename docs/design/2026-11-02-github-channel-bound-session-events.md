@@ -2,7 +2,7 @@
 
 [English](2026-11-02-github-channel-bound-session-events.md) | [简体中文](2026-11-02-github-channel-bound-session-events.zh-CN.md)
 
-Status: proposed (decisions confirmed by the maintainer on 2026-11-02: prompt-injection delivery, in-channel state watch, event scope = CI failure + merge conflict + new comments + head change / merged / closed).
+Status: implemented as #16117 (decisions confirmed by the maintainer on 2026-11-02: prompt-injection delivery, in-channel state watch, event scope = CI failure + merge conflict + new comments + head change / merged / closed). The body below describes the change as designed. The PR-state-watch part is superseded by [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md), which has landed: the daemon owns detection and delivery, `prWatchEvents` and the `watch:*` keys are deprecated aliases for one minor release, and `prWatchLimit` / `prWatchBudgetReserve` are ignored. The comment-delivery part below is still live.
 
 Revision 2026-11-04: Layer 1 reads the PR sidecars directly (one directory listing per workspace) instead of paginating the activity-ordered session list, so `partial` now means that part of the catalog could not be read (a registry entry without a runtime, an unlistable chats directory, an unreadable sidecar or transcript, or an unavailable live session list); the session count never makes a snapshot partial.
 
