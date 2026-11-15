@@ -344,67 +344,78 @@ async function summarizeTranscriptFile(
   // Recheck on the opened fd, not just the Phase-1 stat: the check-then-use
   // window spans the whole enumeration, so a path swapped to a writerless FIFO
   // after Phase 1 would block open() in the libuv threadpool and park the load.
-  // O_NONBLOCK makes the open return immediately; a non-regular fd is rejected.
+  // O_NONBLOCK makes the open return immediately; the fd-level isFile() check
+  // is what refuses a non-regular file (e.g. one that never reaches EOF).
   const handle = await fs.promises.open(
     filePath,
-    fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+    fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0),
   );
-  if (!(await handle.stat()).isFile()) {
-    await handle.close();
-    throw new Error(`non-regular transcript: ${filePath}`);
-  }
-  const fileStream = handle.createReadStream();
-  const rl = readline.createInterface({
-    input: fileStream,
-    crlfDelay: Infinity,
-  });
+  // Own the fd explicitly (autoClose: false + finally close), matching
+  // sessionService's open-revalidate-stream shape: letting the stream close the
+  // raw fd leaves the FileHandle finalizer to close a possibly-recycled
+  // descriptor at GC time, and a stat() failure before the stream exists leaks
+  // the fd outright.
   try {
-    for await (const line of rl) {
-      if (line.trim().length === 0) continue;
-      lastLine = line;
-      // First-match extraction: a record's own `timestamp` precedes any nested
-      // payload, so this is the record's timestamp even on huge tool-result
-      // lines. Tolerant of non-compact writers (spaces around the colon).
-      const ts = extractJsonStringField(line, 'timestamp');
-      if (ts !== undefined) lastTsFallback = ts;
+    if (!(await handle.stat()).isFile()) {
+      throw new Error(`non-regular transcript: ${filePath}`);
+    }
+    const fileStream = handle.createReadStream({ autoClose: false });
+    const rl = readline.createInterface({
+      input: fileStream,
+      crlfDelay: Infinity,
+    });
+    try {
+      for await (const line of rl) {
+        if (line.trim().length === 0) continue;
+        lastLine = line;
+        // First-match extraction: a record's own `timestamp` precedes any nested
+        // payload, so this is the record's timestamp even on huge tool-result
+        // lines. Tolerant of non-compact writers (spaces around the colon).
+        const ts = extractJsonStringField(line, 'timestamp');
+        if (ts !== undefined) lastTsFallback = ts;
 
-      if (!header) {
-        const recs = jsonl.parseLineTolerant<ChatRecord>(line, filePath);
-        if (recs.length > 0) header = recs[0]!;
-      }
+        if (!header) {
+          const recs = jsonl.parseLineTolerant<ChatRecord>(line, filePath);
+          if (recs.length > 0) header = recs[0]!;
+        }
 
-      if (line.includes('"ui_telemetry"')) {
-        for (const record of jsonl.parseLineTolerant<ChatRecord>(
-          line,
-          filePath,
-        )) {
-          if (record.type === 'system' && record.subtype === 'ui_telemetry') {
-            const payload = record.systemPayload as
-              | { uiEvent?: UiEvent }
-              | undefined;
-            if (
-              payload?.uiEvent &&
-              payload.uiEvent['event.name'] !== 'request_lifecycle' &&
-              payload.uiEvent['event.name'] !== 'tool_lifecycle' &&
-              payload.uiEvent['event.name'] !== 'hook_lifecycle'
-            ) {
-              telemetry.addEvent(payload.uiEvent);
-              hasEvents = true;
+        if (line.includes('"ui_telemetry"')) {
+          for (const record of jsonl.parseLineTolerant<ChatRecord>(
+            line,
+            filePath,
+          )) {
+            if (record.type === 'system' && record.subtype === 'ui_telemetry') {
+              const payload = record.systemPayload as
+                | { uiEvent?: UiEvent }
+                | undefined;
+              if (
+                payload?.uiEvent &&
+                payload.uiEvent['event.name'] !== 'request_lifecycle' &&
+                payload.uiEvent['event.name'] !== 'tool_lifecycle' &&
+                payload.uiEvent['event.name'] !== 'hook_lifecycle'
+              ) {
+                telemetry.addEvent(payload.uiEvent);
+                hasEvents = true;
+              }
             }
           }
         }
       }
+    } catch (e) {
+      // Rethrow read errors (EMFILE/EACCES/EIO/EBUSY, …) rather than returning
+      // null: a failed scan must not be memoized as an authoritative "no usage"
+      // result, or one transient error hides the session until its file changes.
+      // The rebuild worker's catch skips the cache write, so the next load retries.
+      debugLogger.debug(
+        `summarizeTranscriptFile: cannot read ${filePath}: ${e}`,
+      );
+      throw e;
+    } finally {
+      rl.close();
+      fileStream.destroy();
     }
-  } catch (e) {
-    // Rethrow read errors (EMFILE/EACCES/EIO/EBUSY, …) rather than returning
-    // null: a failed scan must not be memoized as an authoritative "no usage"
-    // result, or one transient error hides the session until its file changes.
-    // The rebuild worker's catch skips the cache write, so the next load retries.
-    debugLogger.debug(`summarizeTranscriptFile: cannot read ${filePath}: ${e}`);
-    throw e;
   } finally {
-    rl.close();
-    fileStream.destroy();
+    await handle.close();
   }
 
   if (!header) return null;

@@ -9,6 +9,7 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 
 const { debugMock } = vi.hoisted(() => ({ debugMock: vi.fn() }));
 
@@ -992,7 +993,7 @@ describe('loadUsageHistoryWithLive — replay cache + selective scan', () => {
     }
   });
 
-  it('does not cache a failed scan: a transient read error recovers on the next load', async () => {
+  it('does not cache a failed scan: a transient open failure recovers on the next load', async () => {
     const filePath = plant('sess-transient', 1000);
     const orig = fs.promises.open;
     let failedOnce = false;
@@ -1019,6 +1020,99 @@ describe('loadUsageHistoryWithLive — replay cache + selective scan', () => {
       // The failure was not cached, so the next load rescans and recovers.
       const second = await loadUsageHistoryWithLive();
       expect(tokensOf(second, 'sess-transient')).toBe(1000);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('does not cache a failed scan: a read error after a successful open recovers on the next load', async () => {
+    // The open succeeds and the fd recheck passes; the failure lands mid-read
+    // (the `for await` catch -> rethrow branch), which an open-time rejection
+    // never exercises. A failed scan must not be memoized as "no usage".
+    const filePath = plant('sess-read-err', 1000);
+    const orig = fs.promises.open;
+    let failedOnce = false;
+    let closeCalls = 0;
+    const spy = vi.spyOn(fs.promises, 'open').mockImplementation(((
+      p: fs.PathLike,
+      flags?: string | number,
+      mode?: fs.Mode,
+    ) => {
+      if (!failedOnce && String(p) === filePath) {
+        failedOnce = true;
+        const fakeHandle = {
+          stat: async () => ({ isFile: () => true }) as unknown as fs.Stats,
+          createReadStream: () =>
+            new Readable({
+              read() {
+                this.destroy(
+                  Object.assign(new Error('EIO: simulated'), { code: 'EIO' }),
+                );
+              },
+            }),
+          close: async () => {
+            closeCalls++;
+          },
+        };
+        return Promise.resolve(fakeHandle as unknown as fs.promises.FileHandle);
+      }
+      return orig(p, flags as number, mode);
+    }) as typeof fs.promises.open);
+    try {
+      const first = await loadUsageHistoryWithLive();
+      expect(
+        first.find((r) => r.sessionId === 'sess-read-err'),
+      ).toBeUndefined();
+      // The fd is owned explicitly, so it is closed even on the read-error path.
+      expect(closeCalls).toBe(1);
+      // The failure was not cached, so the next load rescans and recovers.
+      const second = await loadUsageHistoryWithLive();
+      expect(tokensOf(second, 'sess-read-err')).toBe(1000);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('closes the handle when stat() rejects before a stream exists, and does not cache the failure', async () => {
+    // stat() can reject (EIO/ESTALE on a network- or FUSE-backed home) after a
+    // successful open but before any stream exists to inherit the fd. The
+    // handle must still be closed, and the failed scan must not be memoized.
+    const filePath = plant('sess-stat-err', 1000);
+    const orig = fs.promises.open;
+    let failedOnce = false;
+    let closeCalls = 0;
+    const spy = vi.spyOn(fs.promises, 'open').mockImplementation(((
+      p: fs.PathLike,
+      flags?: string | number,
+      mode?: fs.Mode,
+    ) => {
+      if (!failedOnce && String(p) === filePath) {
+        failedOnce = true;
+        const fakeHandle = {
+          stat: async () => {
+            throw Object.assign(new Error('EIO: simulated'), { code: 'EIO' });
+          },
+          createReadStream: () => {
+            throw new Error(
+              'createReadStream must not run when stat() rejects',
+            );
+          },
+          close: async () => {
+            closeCalls++;
+          },
+        };
+        return Promise.resolve(fakeHandle as unknown as fs.promises.FileHandle);
+      }
+      return orig(p, flags as number, mode);
+    }) as typeof fs.promises.open);
+    try {
+      const first = await loadUsageHistoryWithLive();
+      expect(
+        first.find((r) => r.sessionId === 'sess-stat-err'),
+      ).toBeUndefined();
+      expect(closeCalls).toBe(1);
+      const second = await loadUsageHistoryWithLive();
+      expect(tokensOf(second, 'sess-stat-err')).toBe(1000);
     } finally {
       spy.mockRestore();
     }
@@ -1462,8 +1556,10 @@ describe('loadUsageHistoryWithLive — replay cache + selective scan', () => {
     async () => {
       // A real transcript plus a real FIFO. statSync is fooled into reporting
       // the FIFO as a regular file (Phase 1), so only the fd-level recheck in
-      // summarizeTranscriptFile can reject it; without that recheck the
-      // O_RDONLY open of a writerless FIFO blocks and the load never settles.
+      // summarizeTranscriptFile can reject it. O_NONBLOCK keeps the open from
+      // blocking (a writerless FIFO then reads as an empty stream), so the
+      // settle alone does not witness the recheck; the isFile() check is what
+      // refuses a non-regular file, and only its throw logs the message below.
       const real = plant('sess-real', 1000);
       const fifoPath = path.join(path.dirname(real), 'sess-fifo.jsonl');
       const mkfifo = spawnSync('mkfifo', [fifoPath]);
@@ -1481,9 +1577,17 @@ describe('loadUsageHistoryWithLive — replay cache + selective scan', () => {
         }
         return origStat(p);
       }) as typeof fs.statSync);
+      debugMock.mockClear();
       try {
         const merged = await loadUsageHistoryWithLive();
         expect(merged.map((r) => r.sessionId)).toEqual(['sess-real']);
+        // Pin the rejection, not just the settle: only the fd-level isFile()
+        // recheck throws "non-regular transcript", which the worker logs. With
+        // the recheck deleted the FIFO reads as an empty transcript and this
+        // message never appears.
+        expect(debugMock).toHaveBeenCalledWith(
+          expect.stringContaining(`non-regular transcript: ${fifoPath}`),
+        );
       } finally {
         statSpy.mockRestore();
         fs.rmSync(fifoPath, { force: true });
