@@ -19,6 +19,12 @@ non-empty `envKey`; the API key is read from that environment variable.
 DashScope-compatible image endpoints and MiniMax
 (`api.minimax.io` / `api.minimaxi.com`) are supported.
 
+The tool appends the generation path itself, so enter the API root as the
+`baseUrl`: for DashScope use `https://dashscope.aliyuncs.com/api/v1` — the
+`compatible-mode/v1` chat endpoint is **not** an image base URL and fails with
+HTTP 404. For MiniMax use `https://api.minimax.io/v1` (or
+`https://api.minimaxi.com/v1`).
+
 The easiest path in the Web Shell is **Settings → Models → + Add Model** with
 **Model purpose** set to **Image generation**: enter the endpoint and API key,
 then the model id. Adding an image model keeps your current conversation
@@ -30,8 +36,11 @@ Any of these paths sets [`imageModel`](../configuration/settings.md#imagemodel):
 
 - The **Image Model** row in Settings opens a picker of image-capable routes
   (including a **Disabled** option).
-- `/model --image <model-id>` in the composer or terminal.
+- `/model --image <model-id>` in the terminal.
 - `imageModel` in `settings.json`.
+
+The Web Shell composer does not implement `/model --image`; use the Settings
+picker there.
 
 A route can play both roles: with `supportsImageGeneration: true` and no
 `imageOnly`, it remains selectable as a conversation model and as the image
@@ -65,6 +74,10 @@ Each generated image is:
 - **"Image generation requires the … environment variable"** — the route's
   `envKey` is not set in the daemon's environment (or the `env` block of
   `settings.json`).
+- **"Image generation failed with HTTP 404"** — the route's `baseUrl` is not
+  the API root the tool expects. For DashScope use
+  `https://dashscope.aliyuncs.com/api/v1`, not the `compatible-mode/v1` chat
+  endpoint.
 - **The model is missing from the picker** — the route needs
   `supportsImageGeneration: true` (or `imageOnly: true`); image input support
   (`capabilities.vision`) alone does not qualify a route.

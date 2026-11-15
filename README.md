@@ -183,7 +183,7 @@ Qwen Code ships with a complete agent harness — multi-agent orchestration, per
 
 ### Multimodal
 
-- **[Voice input](https://qwenlm.github.io/qwen-code-docs/en/users/features/voice-input/)** — dictate prompts in the terminal or Web Shell with a configurable ASR model, and review the transcript before sending.
+- **[Voice input](https://qwenlm.github.io/qwen-code-docs/en/users/features/voice-input/)** — dictate prompts in the terminal or Web Shell with a configurable ASR model; the Web Shell inserts the transcript for review before sending.
 - **[Qwen Live](https://qwenlm.github.io/qwen-code-docs/en/users/features/qwen-live/)** _(experimental)_ — realtime speech-to-speech conversations in the Web Shell that answer directly or hand tasks to the agent, with optional screen sharing.
 - **[Image generation](https://qwenlm.github.io/qwen-code-docs/en/users/features/image-generation/)** — the built-in `image_gen` tool turns prompts into PNG artifacts using your configured image model.
 

@@ -70,7 +70,7 @@ if chat and image generation require different endpoints or credentials,
 configure two routes instead.
 
 See [Image Generation](../features/image-generation.md) for selecting the
-image model and using the tool in the Web Shell.
+image model and generating images in the terminal or Web Shell.
 
 ### Live Voice routes
 

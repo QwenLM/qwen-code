@@ -13,7 +13,9 @@ decides when backend execution is useful. For speech-to-text prompt input, see
 
 ## Requirements
 
-- A daemon with the Web Shell enabled (`qwen serve` without `--no-web`).
+- A daemon with the Web Shell enabled (`qwen serve` without `--no-web`) and
+  the ACP HTTP surface enabled (on by default; `QWEN_SERVE_ACP_HTTP=0` or the
+  `hosted-harness` profile disables it).
 - Open the Web Shell over `https` or `localhost` — the browser tab is the
   microphone and speaker, and browsers only grant microphone access in a
   [secure context](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts).
@@ -29,7 +31,8 @@ The browser endpoint works on every platform. The native macOS
 
 ## Setup
 
-Open **Settings** and find the **Qwen Live** card (marked Experimental):
+Open the **Live** section in the Web Shell sidebar. Its settings page shows
+the **Qwen Live** card (marked Experimental):
 
 1. Turn on **Enable Qwen Live**.
 2. **Realtime endpoint** — the OpenAI-compatible base URL of your key's region
@@ -39,7 +42,10 @@ Open **Settings** and find the **Qwen Live** card (marked Experimental):
    from another region is rejected with `401`.
 3. **DashScope Realtime API key** — paste a key, or select a configured
    Realtime model route instead; the route then supplies both the endpoint
-   (derived from its `baseUrl`) and the key (read from its `envKey`).
+   (derived from its `baseUrl`) and the key (read from its `envKey`). A key
+   pasted here is saved in clear text in your user settings file; to keep it
+   out of settings, configure a `realtimeOnly` route whose `envKey` names an
+   environment variable and select that route instead.
 4. **Realtime model** — pick one of your configured `realtimeOnly` routes, or
    choose **Other model id…** to enter any Realtime model id. The default is
    `qwen3.5-omni-plus-realtime`.
@@ -93,7 +99,7 @@ native **Qwen Live Host** app, which adds a system-wide global shortcut
 (default `Command+E`) and Appshot screen capture:
 
 1. Start the daemon with `QWEN_SERVE_LIVE_NATIVE_HOST=1`.
-2. Enable Qwen Live in Settings; the card downloads, verifies, and installs the
+2. Enable Qwen Live in the Live section; the card downloads, verifies, and installs the
    signed Host app.
 3. Grant the macOS permissions it requests: Microphone, Accessibility, and
    Screen Recording. Live stays unavailable until every permission is ready.
@@ -107,11 +113,13 @@ in the daemon guide for the deployment details.
 - **`401` on start** — the API key belongs to a different region than the
   endpoint; set the endpoint to your key's region or dedicated domain.
 - **"Live Voice is turned off, or this workspace is not trusted"** — enable
-  Qwen Live in Settings and use a trusted primary workspace.
+  Qwen Live in the Live section and use a trusted primary workspace.
 - **Microphone could not be opened** — check the site permission and the OS
   microphone permission for your browser; use `https` or `localhost`.
-- **No Live button** — the daemon must serve the Web Shell (no `--no-web`) and
-  advertise Live support; older daemons may lack the browser endpoint.
+- **No Live button** — the daemon must serve the Web Shell (no `--no-web`)
+  with the ACP HTTP surface enabled (`QWEN_SERVE_ACP_HTTP=0` and the
+  `hosted-harness` profile disable it), and advertise Live support; older
+  daemons may lack the browser endpoint.
 
 ## Related
 
