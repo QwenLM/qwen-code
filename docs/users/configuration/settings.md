@@ -42,6 +42,8 @@ Qwen Code uses JSON settings files for persistent configuration. There are four 
 >
 > **Note on environment variables in settings:** String values within your `settings.json` files can reference environment variables using either `$VAR_NAME` or `${VAR_NAME}` syntax. These variables will be automatically resolved when the settings are loaded. For example, if you have an environment variable `MY_API_TOKEN`, you could use it in `settings.json` like this: `"apiKey": "$MY_API_TOKEN"`.
 
+The terminal settings dialog omits settings stripped from project scope when Workspace is selected, including the Advisor Session Call Limit (`advisorMaxUses`). Select User scope to change these settings for your sessions.
+
 ### The `.qwen` directory in your project
 
 In addition to a project settings file, a project's `.qwen` directory can contain other project-specific files related to Qwen Code's operation, such as:

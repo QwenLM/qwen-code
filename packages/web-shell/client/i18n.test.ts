@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { formatSubscriptionQuotaDisplay } from '@qwen-code/qwen-code-core/utils/subscription-quota.js';
 import {
   WEB_SHELL_LANGUAGES,
+  LOCAL_FILES_MESSAGE_KEYS,
   getTranslator,
   languageLabel,
   languageSettingToWebShellLanguage,
@@ -335,6 +336,42 @@ describe('web-shell i18n catalog', () => {
     expect(zh('browserNotifications.reply', { text: 'Task' })).toBe(
       '回复：Task',
     );
+  });
+
+  it('keeps every local files translation in both locales (R1-11)', () => {
+    const en = getTranslator('en');
+    const zh = getTranslator('zh-CN');
+    // The enumeration itself is load-bearing: the loop below cannot observe
+    // its own source being replaced by the old hardcoded subset, so pin keys
+    // outside that subset here.
+    expect(LOCAL_FILES_MESSAGE_KEYS).toContain('localFiles.status.connected');
+    expect(LOCAL_FILES_MESSAGE_KEYS).toContain(
+      'localFiles.blocker.unsupportedDaemon',
+    );
+    // Derived from the EN catalog, not a hardcoded subset: a new localFiles
+    // key enters the parity check automatically. The vars bag feeds the
+    // function-valued entries (tools/gestureToast/insecureContext); string
+    // entries ignore it.
+    const vars = { count: 2, name: 'proj', localPort: 8080 };
+    for (const key of LOCAL_FILES_MESSAGE_KEYS) {
+      expect(en(key, vars)).not.toBe(key);
+      expect(zh(key, vars)).not.toBe(key);
+      // zh against en, not zh against the key: the translator falls back to EN
+      // per key, so a deleted zh entry (or one pasted with the EN text) would
+      // otherwise pass. Several of these are never rendered by a panel case.
+      expect(zh(key, vars)).not.toBe(en(key, vars));
+    }
+    // Both locales must interpolate the directory name, not drop it (R4-4).
+    expect(en('localFiles.gestureToast', vars)).toContain('proj');
+    expect(zh('localFiles.gestureToast', vars)).toContain('proj');
+    // The insecure-context instruction is function-valued too: pin its
+    // local-port branch in both locales, naming the same address.
+    const portVars = { localPort: 8080 };
+    const enPort = en('localFiles.blocker.insecureContext', portVars);
+    const zhPort = zh('localFiles.blocker.insecureContext', portVars);
+    expect(enPort).toContain('http://localhost:8080');
+    expect(zhPort).toContain('http://localhost:8080');
+    expect(zhPort).not.toBe(enPort);
   });
 
   it.each([
