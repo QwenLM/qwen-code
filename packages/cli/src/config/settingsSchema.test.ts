@@ -944,6 +944,9 @@ describe('SettingsSchema', () => {
       expect(ui?.startExpanded).toBeDefined();
       expect(ui?.startExpanded.type).toBe('boolean');
       expect(ui?.startExpanded.default).toBe(false);
+      // A restart is what applies the seed; the flag briefly shipped without
+      // it, and nothing else pins it.
+      expect(ui?.startExpanded.requiresRestart).toBe(true);
     });
 
     it('should have includeDirectories setting in schema', () => {

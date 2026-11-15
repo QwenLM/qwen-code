@@ -1172,12 +1172,6 @@ describe('startOpenTuiUI fallback contract', () => {
     expect(renderedInitialDialog()).toBeNull();
   });
 
-  // The transcript itself is mocked away, so the two props Decision 36 adds are
-  // read off the element the entry's own render seam returns: they are the only
-  // production wiring of the parked-call marker and of the args setting. Both
-  // are computed inside the entry component, which is why this case mounts the
-  // captured tree — and why this file runs in jsdom — while every other case
-  // here reads that tree's elements without executing them.
   it('seeds thoughtsExpanded from ui.startExpanded and defaults it closed', async () => {
     // ui.startExpanded only seeds the initial value; ctrl+o owns it afterwards.
     const open = async (ui: Record<string, unknown>) => {
@@ -1210,6 +1204,12 @@ describe('startOpenTuiUI fallback contract', () => {
     expect((await open({}))?.['thoughtsExpanded']).toBe(false);
   });
 
+  // The transcript itself is mocked away, so the two props Decision 36 adds are
+  // read off the element the entry's own render seam returns: they are the only
+  // production wiring of the parked-call marker and of the args setting. Both
+  // are computed inside the entry component, which is why this case mounts the
+  // captured tree — and why this file runs in jsdom — while every other case
+  // here reads that tree's elements without executing them.
   it('threads the parked call and the args setting into the transcript', async () => {
     mocks.state.waitingCalls = [{ callId: 'q1' }, { callId: 'q2' }];
     const raw = '<system-reminder>literal user text</system-reminder> workflow';
