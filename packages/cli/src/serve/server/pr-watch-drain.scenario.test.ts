@@ -510,7 +510,7 @@ describe.skipIf(process.platform === 'win32')(
       expect(ghCalls()[0]).toContain(`pr view ${PR_URL} --json`);
     });
 
-    it('keeps the detection language when the locale changes before delivery', async () => {
+    it('keeps the persisted summary in its detection language when the locale changes before delivery', async () => {
       await seedSession();
       writeView(HEAD_A, { checks: 'passing' });
       expect((await observe('zh')).observed).toBe(1);

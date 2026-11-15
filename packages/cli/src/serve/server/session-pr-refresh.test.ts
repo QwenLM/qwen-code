@@ -3231,8 +3231,10 @@ describe('startSessionPrRefreshTimer', () => {
       await vi.waitFor(() => {
         expect(detect).toHaveBeenCalled();
       });
-      // Every call the listing write makes carries the language; the view
-      // path's calls carry it too, so both producers are pinned at once.
+      // Each listing-write call carries the language. The filter keeps only
+      // the closed-PR observations, which this fixture produces from the
+      // listing alone; the view producer is pinned by
+      // pr-watch-drain.scenario.test.ts.
       const listingCalls = detect.mock.calls.filter(
         (c) =>
           c[2] !== undefined && (c[2] as { state: string }).state === 'closed',

@@ -198,11 +198,11 @@ channel 撰写的字符串：
 6. **zh 标签保持在剥壳窗口内。** zh 头部内容约 21 码点加平台名，zh 截断
    标记比英文更短；两者都 ≤ 64 码点，因此 `sanitizePromptText` 剥它们的
    副本与剥英文标签完全一致。副本测试扩展到 zh 信封。
-7. **daemon 生产方的语言不接线。** 给 `PrWatchDrainDeps` 加一个没有
-   生产调用方设置的 language 字段会是死开关。drain 保持英文缺省。启用增量
-   已落地（#17032）但未穿语言；[Daemon PR watch：提示词语言](2026-11-15-daemon-pr-watch-drain-language.zh-CN.md)
-   此后已把它穿上，因此 drain 跟随 `general.language`，而 pending 事件
-   保留其检测时的语言。
+7. **daemon 生产方的语言在 #16773 中未接线。** 给 `PrWatchDrainDeps` 加一个
+   没有生产调用方设置的 language 字段会是死开关。drain 当时保持英文缺省。启用
+   增量已落地（#17032）但未穿语言；[Daemon PR watch：提示词语言](2026-11-15-daemon-pr-watch-drain-language.zh-CN.md)
+   此后已把它穿上，因此 drain 跟随 `general.language`，而 pending 条目的持久化
+   摘要保留其检测时的语言。
 
 ## 受影响文件
 

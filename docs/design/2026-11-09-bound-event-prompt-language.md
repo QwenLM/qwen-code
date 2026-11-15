@@ -235,12 +235,12 @@ Check names keep their `, ` join in both languages; they are platform data.
    than the English one; both stay ≤ 64 code points, so `sanitizePromptText`
    peels copies of them exactly like the English tags. The copy tests are
    extended to run against the zh envelope as well.
-7. **The daemon producer's language is not wired.** Adding a language field
-   to `PrWatchDrainDeps` that no production caller sets would be a dead switch.
-   The drain keeps the English default. The enablement increment landed
-   (#17032) without threading it; [Daemon PR watch: prompt language](2026-11-15-daemon-pr-watch-drain-language.md)
+7. **The daemon producer's language was not wired in #16773.** Adding a
+   language field to `PrWatchDrainDeps` that no production caller sets would be
+   a dead switch. The drain kept the English default. The enablement increment
+   landed (#17032) without threading it; [Daemon PR watch: prompt language](2026-11-15-daemon-pr-watch-drain-language.md)
    has since threaded it, so the drain follows `general.language` while a
-   pending event keeps the language of its detection.
+   pending entry's persisted summary keeps the language of its detection.
 
 ## Files affected
 

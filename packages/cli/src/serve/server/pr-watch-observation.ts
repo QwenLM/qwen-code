@@ -86,8 +86,9 @@ const FAILING_CHECKS_IN_SUMMARY = 5;
 
 /**
  * The transition summaries, per language. Rendered at detection time and
- * persisted, so a pending event keeps the language of its detection even when
- * the daemon's locale changes before it is delivered.
+ * persisted, so a pending summary keeps the language of its detection even
+ * when the daemon's locale changes before it is delivered. The envelope around
+ * it is composed at delivery and follows the new locale.
  *
  * Platform-derived values keep their bytes: the shas interpolate unchanged, and
  * check names keep the `, ` join in both languages, as the prompt-language

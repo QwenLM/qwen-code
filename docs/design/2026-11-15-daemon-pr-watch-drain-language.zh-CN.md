@@ -22,9 +22,9 @@
 
 ## 目标
 
-- `general.language` 解析为 `zh` 的 daemon，投递的绑定 PR-watch 提示词其信封措辞、角色指引、来源说明与转换摘要均为中文。
+- `general.language` 解析为 `zh` 的 daemon，投递的绑定 PR-watch 提示词其信封措辞、角色指引与来源说明均为中文，且在该 locale 下检测到的每个转换其摘要也是中文。
 - `en`（或未设置、或无法识别）的语言保持今天的输出**逐字节不变**。
-- pending 事件保留其检测时的语言，与 channel 车道的决策一致。
+- pending 条目的持久化摘要保留其检测时的语言；信封、角色指引与来源说明跟随投递时生效的 locale。channel 车道也是同一条规则：它持久化生产方组装的正文（`boundText`），信封在投递时组装，因此两条车道的检测语言保证覆盖的都是被持久化的文本，而不是整个提示词。
 - 不改 store 结构，不改任何转换 key。
 
 ## 非目标
@@ -38,11 +38,11 @@
 
 ### 一个 locale，在启动时解析
 
-`run-qwen-serve.ts` 在既有 `resolveSessionPrWatchConfig` 调用旁解析 `resolveChannelLocale(bootSettings?.general?.language)`，并把它带进 `prWatchSources`。两个接缝读同一个值，因此 observation 与 drain 对同一个事件的语言绝不会不一致。
+`run-qwen-serve.ts` 在既有 `resolveSessionPrWatchConfig` 调用旁解析 `resolveChannelLocale(bootSettings?.general?.language)`，并把它带进 `prWatchSources`。两个接缝读同一个值，因此在同一次启动内 observation 与 drain 不会对 locale 产生分歧。跨重启则可能：在旧 locale 下持久化的摘要，会被装进按新 locale 组装的信封里投递——这正是预期的切分。
 
 ### observation 在检测时本地化摘要
 
-`PrWatchObservationTickDeps` 增加 `language?: BoundPromptLanguage`。四处 `summary:` 字面量改为按语言渲染，因此持久化的 `pending[].summary` 已经是检测时的语言。这正是 pending 事件能跨重启或跨后续 locale 变更保留其检测语言的原因，也是不往 store 增加结构化字段的原因。
+`PrWatchObservationTickDeps` 增加 `language?: BoundPromptLanguage`。四处 `summary:` 字面量改为按语言渲染，因此持久化的 `pending[].summary` 已经是检测时的语言。这正是 pending 摘要能跨重启或跨后续 locale 变更保留其检测语言的原因，也是不往 store 增加结构化字段的原因。
 
 ### drain 本地化它在投递时组装的部分
 
@@ -76,8 +76,8 @@
 
 ## 关键设计决策
 
-1. **在摘要被撰写处本地化，而不是在它被渲染处。** 在投递时重渲染需要往 store 加结构化字段，并会让 pending 事件在 locale 变更时改变语言，与 channel 车道的决策矛盾。检测时渲染不需要改结构，并保持事件语言稳定。
-2. **两个共用一个 locale。** 在启动时解析一次、经共享 sources 带下去，防止 observation 与 drain 对同一个事件产生分歧。
+1. **在摘要被撰写处本地化，而不是在它被渲染处。** 在投递时重渲染需要往 store 加结构化字段，并会让 pending 摘要在 locale 变更时改变语言。channel 车道做的是同一个切分——它持久化生产方组装的 `boundText`，信封在投递时按其启动 locale 组装——因此这是把该车道的规则应用到 daemon 的 `pending[].summary`，而不是一条更窄的规则。检测时渲染不需要改结构，并保持摘要语言稳定。
+2. **两个共用一个 locale。** 在启动时解析一次、经共享 sources 带下去，防止 observation 与 drain 在同一次启动内对 locale 产生分歧。在更早一次启动的 locale 下持久化的摘要，是唯一可能不同的部分，且这是设计如此。
 3. **缺省即英文、逐字节不变。** 字段可选，因此没有既有调用方改变行为，`en` 臂是回归守卫而不是一条新代码路径。
 4. **key 与语言无关。** 转换 key 由身份、类型与 sha/状态构成，绝不由摘要构成，因此本地化不会改变幂等性或去重。
 5. **结构性标记保持英文。** 共享契约在每种语言下都保持字段标签与 trusted-block 标签为英文；本增量不触碰它们。
@@ -87,7 +87,7 @@
 
 ## 约束与风险
 
-- locale 在启动时冻结。修改 `general.language` 的运维者只有在 daemon 重启后才看到新语言，这与 channel 车道已记录的取舍相同。
+- locale 在启动时冻结。修改 `general.language` 的运维者只有在 daemon 重启后才看到新语言，这与 channel 车道已记录的取舍相同——而且即便如此，已排队的摘要仍保留其检测时的语言。
 - 本改动之前检测到的条目保留其英文摘要。这是检测语言规则应用于历史，不是缺陷。
 - 摘要渲染现在由四种转换类型共用；缺失的语言条目必须回退到英文，而不是在提示词里产出 `undefined`。
 
@@ -98,13 +98,13 @@
 - 单元（deps）：sources 的语言到达两个接缝；缺省保持缺省。
 - 单元（refresh）：两个 no-deps 用例通过对 store 下 spy 来断言其名字声称的效果——既不认领 owner 记录，也不写 watch 文件。夹具无法把文件种在无 deps 的 drain 会去看的位置，因为 `drainNow` 在 deps 门处返回，早于任何目录被解析。
 - 单元（adapter）：弃用告警测试同时断言 `prWatchLimit` 与 `prWatchBudgetReserve`，含一个只设 `prWatchLimit` 的用例。
-- 真实场景：用真实临时 watch 目录与真实绑定扫描驱动已发布的解析器、deps 构造器、observation 与 drain，断言两种语言下投递的提示词文本。
+- 真实场景：用真实临时 watch 目录与真实绑定扫描驱动已发布的解析器、deps 构造器、observation 与 drain，断言两种语言下投递的提示词文本。第三个用例在检测与投递之间切换 locale，断言同一条提示词里英文信封包着中文摘要。
 
 ## 验收标准
 
-1. zh daemon 投递的绑定 PR-watch 提示词，其信封、指引、来源说明与摘要均为中文，结构性标记为英文。
+1. zh daemon 投递的绑定 PR-watch 提示词，其信封、指引与来源说明均为中文，结构性标记为英文；在 `zh` 下检测到的转换还带有中文摘要。
 2. en daemon 投递的提示词与改动前输出逐字节相同。
-3. 在一种语言下检测到的 pending 条目，在 locale 变更后投递时保留该语言。
+3. 在一种语言下检测到的 pending 条目，在 locale 变更后投递时其持久化摘要保留该语言；信封、角色指引与来源说明跟随投递时生效的 locale。
 4. 同一次检测在两种语言下没有任何转换 key 不同。
 5. 两个 no-deps refresh 用例在其声称的效果被破坏时变红，而不只是在接缝未被读取时变红。
 6. 弃用告警测试在 `prWatchLimit` 被告警漏掉时变红。
