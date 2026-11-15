@@ -1,0 +1,108 @@
+# Daemon PR watch: prompt language
+
+[English](2026-11-15-daemon-pr-watch-drain-language.md) | [简体中文](2026-11-15-daemon-pr-watch-drain-language.zh-CN.md)
+
+Status: proposed (2026-11-15)
+
+## Problem
+
+The daemon's PR-state watch delivers bound event prompts in English even when the operator's UI language is Chinese. The channel lane was localized in #16773, and the shared builder has carried a per-language envelope, role-guidance table and copy map ever since, but the daemon producer never passes a language: `PrWatchDrainDeps` declares no `language` member, `buildDrainPrompt` calls `buildBoundEventPrompt` without one, and the four transition summaries are authored as English literals in the observation producer. A zh deployment with an event subscription therefore receives English daemon prompts today.
+
+[Bound-session event prompt language](2026-11-09-bound-event-prompt-language.md) decision 7 records this as owed rather than scheduled: the enablement increment (#17032) landed without threading it. This increment threads it.
+
+## Current state
+
+| Surface                                                                              | Location                                                                          | Language today                                                              |
+| ------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| Envelope prose (header, notices, workflow sentence, truncation marker)               | `packages/channels/base/src/bound-session-prompt.ts`, `BOUND_ENVELOPE_COPY`       | localized; the drain passes no `language`, so it resolves to `en`           |
+| Built-in role guidance                                                               | same file, `DEFAULT_BOUND_ROLE_GUIDANCE_BY_LANGUAGE`                              | localized; the drain indexes the English-only `DEFAULT_BOUND_ROLE_GUIDANCE` |
+| Provenance line                                                                      | `packages/cli/src/serve/server/pr-watch-drain.ts`, `buildDrainPrompt`             | hardcoded English literal                                                   |
+| Transition summaries (`head_change`, `ci_failure`, `merge_conflict`, `state_change`) | `packages/cli/src/serve/server/pr-watch-observation.ts`, four `summary:` literals | hardcoded English, persisted into `pending[].summary`                       |
+| Locale resolution                                                                    | `packages/cli/src/commands/channel/runtime.ts`, `resolveChannelLocale`            | exists, used by the channel worker only                                     |
+
+## Goals
+
+- A daemon whose `general.language` resolves to `zh` delivers bound PR-watch prompts whose envelope prose, role guidance, provenance and transition summary are Chinese.
+- An `en` (or unset, or unrecognized) language keeps today's output **byte-identical**.
+- A pending event keeps the language of its detection, matching the channel lane's decision.
+- No store schema change and no change to any transition key.
+
+## Non-goals
+
+- Live language switching. The locale is read once at daemon boot, exactly as the channel worker reads it at startup.
+- Localizing operator templates. `sessionPrWatch.actions` values render verbatim in whatever language the operator wrote them.
+- Localizing the channel's comment lane, which #16773 already covers.
+- Structural markers. Field labels (`Repo:`, `PR:`, `Event:`, `Summary:`), the trusted-instruction label and the `Source:` line stay English in every language, as the shared contract requires.
+
+## Proposed changes
+
+### One locale, resolved at boot
+
+`run-qwen-serve.ts` resolves `resolveChannelLocale(bootSettings?.general?.language)` next to the existing `resolveSessionPrWatchConfig` call and carries it into `prWatchSources`. Both seams read the same value, so the observation and the drain can never disagree about the language of one event.
+
+### The observation localizes the summary at detection time
+
+`PrWatchObservationTickDeps` gains `language?: BoundPromptLanguage`. The four `summary:` literals become a per-language render, so the persisted `pending[].summary` is already in the detection language. This is what makes a pending event keep its detection language across a restart or a later locale change, and it is why no structured fields are added to the store.
+
+### The drain localizes what it composes at delivery time
+
+`PrWatchDrainDeps` gains `language?: BoundPromptLanguage`. `buildDrainPrompt` takes it and:
+
+- passes `language` to `buildBoundEventPrompt`, which selects the envelope copy;
+- indexes `DEFAULT_BOUND_ROLE_GUIDANCE_BY_LANGUAGE[language][role]` instead of the English-only table;
+- selects the provenance line from a per-language map.
+
+The summary is passed through unchanged: it was localized where it was authored.
+
+### Absent language means English
+
+Every new field is optional and defaults to `en`. A caller that does not set it — including every existing test — gets today's bytes.
+
+## Files affected
+
+| File                                                             | Change                                                                                         |
+| ---------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `packages/cli/src/serve/server/pr-watch-observation.ts` (+ test) | `language` on the tick deps; per-language summary render                                       |
+| `packages/cli/src/serve/server/pr-watch-drain.ts` (+ test)       | `language` on the drain deps; envelope, guidance and provenance selection                      |
+| `packages/cli/src/serve/server/pr-watch-deps.ts` (+ test)        | `language` on the sources, carried into both seams                                             |
+| `packages/cli/src/serve/run-qwen-serve.ts`                       | resolve the locale at boot and pass it into the sources                                        |
+| `packages/cli/src/serve/server/session-pr-refresh.test.ts`       | the two no-deps cases assert their stated effects; stale "switch" wording retired              |
+| `packages/channels/github/src/GithubAdapter.ts` (+ test)         | the deprecation predicate's JSDoc names all four keys; the warning test asserts `prWatchLimit` |
+
+## Key design decisions
+
+1. **Localize the summary where it is authored, not where it is rendered.** Re-rendering at delivery would need structured fields in the store and would make a pending event change language when the locale changes, contradicting the channel lane's decision. Detection-time rendering needs no schema change and keeps the event's language stable.
+2. **One locale for both seams.** Resolving it once at boot and carrying it through the shared sources prevents the observation and the drain from disagreeing about one event.
+3. **Absent means English, byte-identical.** The fields are optional so no existing caller changes behaviour, and the `en` arm is a regression guard rather than a new code path.
+4. **Keys are language-independent.** A transition key is built from identity, type and sha/state, never from the summary, so localizing cannot change idempotency or deduplication.
+5. **Structural markers stay English.** The shared contract keeps field labels and the trusted-block label English in every language; this increment does not touch them.
+
+## Constraints and risks
+
+- The locale is frozen at boot. An operator who changes `general.language` sees the new language only after a daemon restart, which is the same trade the channel lane already documents.
+- Entries detected before this change keep their English summary. That is the detection-language rule applied to history, not a defect.
+- The summary render is now shared by four transition types; a missing language entry must fall back to English rather than produce `undefined` in a prompt.
+
+## Validation plan
+
+- Unit (observation): each of the four transitions renders its zh summary; the `en` render is byte-identical to today; an absent language renders English; the transition key is unchanged between languages.
+- Unit (drain): a zh language selects the zh envelope, the zh role guidance and the zh provenance; the summary passes through unchanged; an absent language is byte-identical to today.
+- Unit (deps): the sources' language reaches both seams; absent stays absent.
+- Unit (refresh): the two no-deps cases assert the effects their names claim — no delivery from a leftover watch file, and no owner claim, no view and no watch-file write.
+- Unit (adapter): the deprecation warning test asserts `prWatchLimit` as well as `prWatchBudgetReserve`, including a case that sets only `prWatchLimit`.
+- Real scenario: drive the shipped resolver, deps builder, observation and drain with a real temporary watch directory and a real bindings scan, and assert the delivered prompt text in both languages.
+
+## Acceptance criteria
+
+1. A zh daemon delivers a bound PR-watch prompt whose envelope, guidance, provenance and summary are Chinese, with English structural markers.
+2. An `en` daemon's delivered prompt is byte-identical to the pre-change output.
+3. A pending entry detected under one language keeps that language when delivered after a locale change.
+4. No transition key differs between the two languages for the same detection.
+5. The two no-deps refresh cases fail when the effect they name is broken, not only when the seam goes unread.
+6. The deprecation warning test fails when `prWatchLimit` is dropped from the warning.
+
+## Related
+
+- [Bound-session event prompt language](2026-11-09-bound-event-prompt-language.md) — decision 7 records this threading as owed.
+- [Daemon PR watch: delivery drain](2026-11-08-daemon-pr-watch-drain.md) — the drain this increment localizes.
+- [PR state transitions from the daemon PR refresh](2026-11-04-daemon-pr-state-transitions.md) — the master design.
