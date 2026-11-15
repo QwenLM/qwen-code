@@ -291,6 +291,66 @@ describe('GitWorktreeService.setupWorktrees() — .worktreeinclude', () => {
     );
   });
 
+  it('does not copy a case-variant of a path the destination revision tracks', async () => {
+    // `tracks-case` commits `AppSettings.json` while naming the lower-case
+    // form in `.gitignore`; the working branch holds an ignored lower-case
+    // file. `check-ignore` folds case under `core.ignorecase`, so the
+    // tracked-set comparison must fold the same way — byte-exact spellings
+    // let the copy land on the tracked file's identity and a routine
+    // `git add -A` there would commit it.
+    gitIn(repoRoot, 'config', 'core.ignorecase', 'true');
+    await fs.writeFile(
+      path.join(repoRoot, 'AppSettings.json'),
+      '{"committed":true}\n',
+    );
+    gitIn(repoRoot, 'add', '-f', 'AppSettings.json');
+    gitIn(repoRoot, 'commit', '-q', '-m', 'track settings', '--no-verify');
+    gitIn(repoRoot, 'checkout', '-q', '-b', 'tracks-case');
+    gitIn(repoRoot, 'checkout', '-q', 'main');
+    // Now untracked and ignored on the working branch, under the lower-case
+    // spelling the destination's ignore rule names.
+    gitIn(repoRoot, 'rm', '-q', '--cached', 'AppSettings.json');
+    await fs.writeFile(
+      path.join(repoRoot, '.gitignore'),
+      '.env\n.local/\nsecrets/*.json\nappsettings.json\n',
+    );
+    await fs.writeFile(
+      path.join(repoRoot, 'appsettings.json'),
+      '{"secret":"LOCAL"}\n',
+    );
+    gitIn(repoRoot, 'add', '.gitignore');
+    gitIn(repoRoot, 'commit', '-q', '-m', 'untrack settings', '--no-verify');
+    await fs.writeFile(
+      path.join(repoRoot, WORKTREE_INCLUDE_FILE),
+      'appsettings.json\n',
+    );
+    gitIn(repoRoot, 'add', '-f', WORKTREE_INCLUDE_FILE);
+    gitIn(repoRoot, 'commit', '-q', '-m', 'include list', '--no-verify');
+
+    const service = new GitWorktreeService(repoRoot, baseDir);
+    const result = await service.setupWorktrees({
+      sessionId: 's-case',
+      sourceRepoPath: repoRoot,
+      worktreeNames: ['case-variant'],
+      baseBranch: 'tracks-case',
+    });
+    expect(result.success).toBe(true);
+    const wt = result.worktrees[0].path;
+
+    // The tracked half of the guard folds case like the ignore check: the
+    // copy is skipped outright. The tracked content is never replaced by the
+    // local secret — on a case-folding filesystem the copy would open the
+    // tracked file itself — and on a case-sensitive one no lower-case file
+    // lands next to the tracked one.
+    expect(await read(path.join(wt, 'AppSettings.json'))).toBe(
+      '{"committed":true}\n',
+    );
+    const wtRootEntries = await fs.readdir(wt);
+    expect(wtRootEntries.filter((name) => name === 'appsettings.json')).toEqual(
+      [],
+    );
+  });
+
   it('does not copy a path the destination revision does not ignore', async () => {
     // `main` gains the ignore rule; `predates-rule` was cut before it, so a
     // copy there would land as an ordinary untracked file — the baseline

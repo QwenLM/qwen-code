@@ -3179,6 +3179,30 @@ export class GitWorktreeService {
   }
 
   /**
+   * Whether `worktreePath`'s git folds case when matching paths
+   * (`core.ignorecase`), or `false` when the setting cannot be read. The
+   * ignore check goes through git and folds with it, so the tracked-set
+   * comparison has to fold the same way — byte-exact spellings would let a
+   * case-variant local file overwrite a tracked one on macOS or Windows.
+   */
+  private async destinationFoldsCase(worktreePath: string): Promise<boolean> {
+    try {
+      const { stdout } = await runGitCapture(worktreePath, [
+        ...NO_EXEC_CONFIG,
+        'config',
+        '--get',
+        'core.ignorecase',
+      ]);
+      return stdout.trim().toLowerCase() === 'true';
+    } catch (error) {
+      debugLogger.debug(
+        `copyWorktreeIncludePaths: cannot read core.ignorecase in ${worktreePath}: ${error}`,
+      );
+      return false;
+    }
+  }
+
+  /**
    * Copies the paths {@link resolveWorktreeIncludePaths} selected from the
    * source repo into `worktreePath`, preserving directory structure.
    *
@@ -3189,7 +3213,9 @@ export class GitWorktreeService {
    * -A` — and skipped when it is tracked, when it is not ignored, or when a
    * listing is unavailable. The guarded key comes from the resolved
    * destination path so a committed directory symlink cannot bypass the
-   * check by a different lexical name.
+   * check by a different lexical name. When the destination folds case the
+   * tracked set is compared folded too (Unicode composition folded with it),
+   * matching the ignore check's own case-insensitivity.
    *
    * Each entry is independent — one unreadable source does not stop the
    * rest — and the step never fails the worktree creation.
@@ -3207,6 +3233,10 @@ export class GitWorktreeService {
       );
       return;
     }
+    const foldsCase = await this.destinationFoldsCase(worktreePath);
+    const fold = (p: string) =>
+      foldsCase ? p.normalize('NFC').toLowerCase() : p;
+    const trackedFolded = new Set([...tracked].map(fold));
     for (const relPath of relPaths) {
       try {
         const src = path.join(sourceRoot, relPath);
@@ -3242,7 +3272,7 @@ export class GitWorktreeService {
           .relative(realRoot, path.join(realParent, path.basename(dst)))
           .split(path.sep)
           .join('/');
-        if (tracked.has(guardedRel)) {
+        if (trackedFolded.has(fold(guardedRel))) {
           debugLogger.warn(
             `copyWorktreeIncludePaths: ${guardedRel} is tracked in ${worktreePath}; not overwriting it`,
           );
