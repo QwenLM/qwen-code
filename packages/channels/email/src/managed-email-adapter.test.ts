@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ImapFlow } from 'imapflow';
 import type { Transporter } from 'nodemailer';
 import { simpleParser } from 'mailparser';
+import { MANAGED_OUTBOUND_LIMIT } from '@qwen-code/channel-base';
 import {
   ManagedEmailAdapter,
   type ManagedChannelControlPlane,
@@ -1581,6 +1582,23 @@ describe('managed email outbound', () => {
       segments: [{ ordinal: 0, segmentId: `${id}:0`, text }],
     };
   }
+
+  it('caps the persisted outbound ledger at the shared limit (R1-3)', async () => {
+    const adapter = make();
+    await adapter.connect();
+    // Receipt answers are lost so every sent segment stays in the ledger.
+    plane.receipt = async () => {
+      throw Object.assign(new Error('answer lost'), { status: 503 });
+    };
+    plane.outbox = Array.from({ length: MANAGED_OUTBOUND_LIMIT + 1 }, (_, i) =>
+      delivery(`d-${i}`),
+    );
+    await adapter.tick();
+    expect(sent).toHaveBeenCalledTimes(MANAGED_OUTBOUND_LIMIT + 1);
+    // The append slices to the cap, so the persisted ledger stays loadable.
+    expect(state(adapter).outbound).toHaveLength(MANAGED_OUTBOUND_LIMIT);
+    await adapter.disconnect();
+  });
 
   it('sends a claimed reply into the thread and reports the provider acceptance', async () => {
     const adapter = make();

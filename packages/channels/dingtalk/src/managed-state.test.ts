@@ -11,10 +11,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   MANAGED_DINGTALK_PENDING_LIMIT,
   ManagedDingtalkStateStore,
+  RECENT_LIMIT,
+  WEBHOOK_LIMIT,
   validManagedDingtalkState,
 } from './managed-state.js';
 import type { ManagedDingtalkState } from './managed-state.js';
-import type { ManagedInboundEvent } from '@qwen-code/channel-base';
+import {
+  MANAGED_OUTBOUND_LIMIT,
+  type ManagedInboundEvent,
+} from '@qwen-code/channel-base';
 
 // #17173 R1-33: the state store had no dedicated suite. Pin the save/load
 // round-trip, one rejection per validated field, ENOENT -> undefined and a
@@ -91,6 +96,39 @@ describe('validManagedDingtalkState', () => {
   it('accepts a minimal and a fully populated state', () => {
     expect(validManagedDingtalkState(baseState())).toBe(true);
     expect(validManagedDingtalkState(populatedState())).toBe(true);
+  });
+
+  // R1-1: the adapter routinely writes ledgers at exactly these caps, so the
+  // accepting side must be pinned too — flipping a `<=` to `<` would otherwise
+  // leave the suite green while the adapter's own steady state fails to load.
+  it('accepts each ledger at its exact cap (the adapter steady state)', () => {
+    expect(
+      validManagedDingtalkState({
+        ...baseState(),
+        outbound: Array.from({ length: MANAGED_OUTBOUND_LIMIT }, (_, i) => ({
+          deliveryId: `d${i}`,
+          ordinal: i,
+          messageId: `m${i}`,
+        })),
+      }),
+    ).toBe(true);
+    expect(
+      validManagedDingtalkState({
+        ...baseState(),
+        recent: Array.from({ length: RECENT_LIMIT }, (_, i) => `e${i}`),
+      }),
+    ).toBe(true);
+    expect(
+      validManagedDingtalkState({
+        ...baseState(),
+        webhooks: Object.fromEntries(
+          Array.from({ length: WEBHOOK_LIMIT }, (_, i) => [
+            `conv-${i}`,
+            `https://example.invalid/hook-${i}`,
+          ]),
+        ),
+      }),
+    ).toBe(true);
   });
 
   it('rejects a non-object', () => {
@@ -175,11 +213,14 @@ describe('validManagedDingtalkState', () => {
   });
 
   it('rejects outbound beyond the shared ledger cap', () => {
-    const outbound = Array.from({ length: 65 }, (_, i) => ({
-      deliveryId: `d${i}`,
-      ordinal: i,
-      messageId: `m${i}`,
-    }));
+    const outbound = Array.from(
+      { length: MANAGED_OUTBOUND_LIMIT + 1 },
+      (_, i) => ({
+        deliveryId: `d${i}`,
+        ordinal: i,
+        messageId: `m${i}`,
+      }),
+    );
     expect(validManagedDingtalkState({ ...baseState(), outbound })).toBe(false);
   });
 
@@ -190,7 +231,7 @@ describe('validManagedDingtalkState', () => {
     expect(
       validManagedDingtalkState({
         ...baseState(),
-        recent: Array.from({ length: 257 }, (_, i) => `e${i}`),
+        recent: Array.from({ length: RECENT_LIMIT + 1 }, (_, i) => `e${i}`),
       }),
     ).toBe(false);
   });
@@ -206,6 +247,17 @@ describe('validManagedDingtalkState', () => {
       validManagedDingtalkState({
         ...baseState(),
         webhooks: [] as unknown as Record<string, string>,
+      }),
+    ).toBe(false);
+    expect(
+      validManagedDingtalkState({
+        ...baseState(),
+        webhooks: Object.fromEntries(
+          Array.from({ length: WEBHOOK_LIMIT + 1 }, (_, i) => [
+            `conv-${i}`,
+            `https://example.invalid/hook-${i}`,
+          ]),
+        ),
       }),
     ).toBe(false);
   });

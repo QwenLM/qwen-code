@@ -14,16 +14,21 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type {
-  ManagedChannelControlPlane,
-  ManagedClaimedDelivery,
-  ManagedInboundEvent,
+import {
+  MANAGED_OUTBOUND_LIMIT,
+  type ManagedChannelControlPlane,
+  type ManagedClaimedDelivery,
+  type ManagedInboundEvent,
 } from '@qwen-code/channel-base';
 import {
   ManagedDingtalkAdapter,
   type ManagedDingtalkAdapterDeps,
   type DingtalkWebhookFailure,
 } from './managed-dingtalk-adapter.js';
+import {
+  MANAGED_DINGTALK_PENDING_LIMIT,
+  WEBHOOK_LIMIT,
+} from './managed-state.js';
 
 const CONFIG = {
   type: 'dingtalk',
@@ -612,6 +617,26 @@ describe('managed DingTalk adapter outbox', () => {
     await adapter.disconnect();
   });
 
+  it('caps the persisted outbound ledger at the shared limit (R1-3)', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    // Receipt answers are lost so every sent segment stays in the ledger.
+    plane.setReceiptError(() =>
+      Object.assign(new Error('answer lost'), { status: 503 }),
+    );
+    plane.enqueue(
+      Array.from({ length: MANAGED_OUTBOUND_LIMIT + 1 }, (_, i) =>
+        delivery(`d-${i}`, 1),
+      ),
+    );
+    await adapter.tick();
+    expect(fake.sent).toHaveLength(MANAGED_OUTBOUND_LIMIT + 1);
+    // The append slices to the cap, so the persisted ledger stays loadable.
+    const store = (adapter as unknown as { store: { file: string } }).store;
+    const persisted = JSON.parse(readFileSync(store.file, 'utf8'));
+    expect(persisted.outbound).toHaveLength(MANAGED_OUTBOUND_LIMIT);
+    await adapter.disconnect();
+  });
+
   it('reports a definitive webhook refusal as rejected and never resends', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
     fake.setBehavior('definitive');
@@ -683,11 +708,11 @@ describe('managed DingTalk adapter outbox', () => {
     const { adapter, plane, fake } = await connectedAdapter();
     const hook = (session: string): string =>
       `https://oapi.dingtalk.com/robot/sendBySession?session=${session}`;
-    // Fill the 256-slot webhook map with distinct conversations. The claim
-    // table caps at 32, so drain it with a tick between batches.
-    for (let batch = 0; batch < 8; batch++) {
-      for (let j = 0; j < 32; j++) {
-        const i = batch * 32 + j;
+    // Fill the webhook map to its cap with distinct conversations, asserting
+    // each frame is durably admitted — a refused push would silently shorten
+    // the fill. Pace the drain by the claim-table limit, not a literal batch.
+    for (let i = 0; i < WEBHOOK_LIMIT; i++) {
+      expect(
         fake.push(
           `fill-${i}`,
           messageData({
@@ -695,9 +720,9 @@ describe('managed DingTalk adapter outbox', () => {
             conversationId: `conv-${i}`,
             sessionWebhook: hook(`w${i}`),
           }),
-        );
-      }
-      await adapter.tick();
+        ),
+      ).toBe(true);
+      if ((i + 1) % MANAGED_DINGTALK_PENDING_LIMIT === 0) await adapter.tick();
     }
     // Re-seen the first-inserted conversation: its recency must refresh.
     fake.push(
@@ -719,6 +744,11 @@ describe('managed DingTalk adapter outbox', () => {
       }),
     );
     await adapter.tick();
+    // The fill must have landed at the cap; a short fill would red here rather
+    // than quietly letting the eviction go unexercised.
+    const store = (adapter as unknown as { store: { file: string } }).store;
+    const persisted = JSON.parse(readFileSync(store.file, 'utf8'));
+    expect(Object.keys(persisted.webhooks)).toHaveLength(WEBHOOK_LIMIT);
     // conv-0 was re-seen, so its updated webhook must survive the eviction.
     // The delivery carries no webhook of its own and relies on the cache.
     const probe = delivery('d-0', 1);

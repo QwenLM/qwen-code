@@ -39,8 +39,8 @@ export type { ManagedReceipt };
 // docs/design/2026-11-13-managed-channel-dingtalk-adapter.md.
 
 export const MANAGED_DINGTALK_PENDING_LIMIT = 32;
-const RECENT_LIMIT = 256;
-const WEBHOOK_LIMIT = 256;
+export const RECENT_LIMIT = 256;
+export const WEBHOOK_LIMIT = 256;
 
 export interface ManagedDingtalkPendingEvent {
   eventId: string;
