@@ -40,34 +40,40 @@ describe('bundled pkgdiet skill', () => {
     );
     expect(normalizedBody).toContain('/pkgdiet is the only entry point');
     expect(normalizedBody).toContain('does not gate subagents');
-    expect(normalizedBody).toContain('qwen mcp remove --scope user pkgdiet');
+    expect(body).toContain(
+      '"${QWEN_CODE_CLI:-qwen}" mcp remove --scope user pkgdiet',
+    );
     expect(normalizedBody).toContain(
       'installs the 2.x dependency tree at run time',
     );
+    expect(normalizedBody).toContain('inherits its environment');
+    expect(body).toContain(
+      'published by the same author as this PR (om-tajne)',
+    );
 
     // Bootstrap checks and options
-    expect(normalizedBody).toContain('mcpServers.pkgdiet');
-    expect(normalizedBody).toContain('reinstalling may overwrite');
-    expect(normalizedBody).toContain('OVERRIDDEN by project/workspace');
+    expect(normalizedBody).toContain('Inspect configured MCP servers');
+    expect(normalizedBody).toContain('reinstalling will overwrite');
+    expect(normalizedBody).toContain(
+      'match exactly `npx -y pkgdiet@2.0.0 mcp`',
+    );
+    expect(normalizedBody).toContain('do not advise approval');
     expect(normalizedBody).toContain('If shell execution is sandboxed');
-    expect(normalizedBody).toContain('qwen mcp approve pkgdiet');
+    expect(body).toContain('"${QWEN_CODE_CLI:-qwen}" mcp approve pkgdiet');
     expect(normalizedBody).toContain("serverName === 'pkgdiet'");
     expect(normalizedBody).toContain('mcp__pkgdiet__check_dependency');
-    expect(normalizedBody).toContain(
-      'stop and name that server instead of proceeding',
-    );
 
     const sandboxCheck = normalizedBody.indexOf(
       'If shell execution is sandboxed',
     );
-    const fastPath = normalizedBody.indexOf('skip to Instructions');
-    const stopProject = normalizedBody.indexOf(
-      'stop and name the winning file',
+    const inspectCheck = normalizedBody.indexOf(
+      'Inspect configured MCP servers',
     );
+    const fastPath = normalizedBody.indexOf('skip to Instructions');
 
     expect(sandboxCheck).toBeGreaterThanOrEqual(0);
-    expect(fastPath).toBeGreaterThan(sandboxCheck);
-    expect(stopProject).toBeGreaterThan(fastPath);
+    expect(inspectCheck).toBeGreaterThan(sandboxCheck);
+    expect(fastPath).toBeGreaterThan(inspectCheck);
 
     const confirmation = normalizedBody.indexOf(
       'Use `ask_user_question` to ask whether to continue',
@@ -76,7 +82,7 @@ describe('bundled pkgdiet skill', () => {
       '- Start the PkgDiet guardrail',
     );
     const cancelOption = normalizedBody.indexOf('- Cancel');
-    const cmdIndex = normalizedBody.indexOf('qwen mcp add');
+    const cmdIndex = normalizedBody.indexOf('"${QWEN_CODE_CLI:-qwen}" mcp add');
     const failCheck = normalizedBody.indexOf('If the command exits non-zero');
 
     expect(confirmation).toBeGreaterThanOrEqual(0);
@@ -105,6 +111,7 @@ describe('bundled pkgdiet skill', () => {
       'subagent, hook, workflow-script and terminal installs are not gated',
     );
     expect(normalizedBody).toContain('NOT active');
+    expect(normalizedBody).toContain('restore that prior configuration');
 
     // Exact string pinning requested by review
     expect(body).toContain('pkgdiet@2.0.0 mcp');
@@ -112,7 +119,7 @@ describe('bundled pkgdiet skill', () => {
     expect(body).not.toContain('--command');
     expect(body).not.toContain('--args');
     expect(body).toContain(
-      'qwen mcp add --scope user pkgdiet npx -y pkgdiet@2.0.0 mcp',
+      '"${QWEN_CODE_CLI:-qwen}" mcp add --scope user pkgdiet npx -y pkgdiet@2.0.0 mcp',
     );
 
     // Instructions contracts
@@ -132,12 +139,19 @@ describe('bundled pkgdiet skill', () => {
     expect(normalizedBody).toContain(
       'read `reasons`. If they say the package was not evaluated',
     );
+    expect(normalizedBody).toContain('treat the verdict as not applicable');
+    expect(normalizedBody).toContain(
+      'code mode, invoke it through `exec` using the `jsName`',
+    );
 
-    expect(normalizedBody).toContain('If verdict is WARN');
-    expect(normalizedBody).toContain('ask the user');
+    // Full sentence pinning for WARN and BLOCK
+    expect(normalizedBody).toContain(
+      'If verdict is WARN, report the reasons and ask the user',
+    );
     expect(normalizedBody).toContain(
       'If verdict is BLOCK or missing, do not install',
     );
+    expect(normalizedBody).toContain('Bound suggestions to at most 1 hop');
 
     expect(normalizedBody).toContain(
       'If the question cannot be shown, do not install and stop',
