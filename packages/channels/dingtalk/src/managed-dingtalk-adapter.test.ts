@@ -107,6 +107,11 @@ function fakeControlPlane() {
       submitError = error;
     },
     submitAttempts: () => submitAttempts,
+    // Simulate an admission the server committed but whose answer was lost:
+    // the next re-submission of this event answers replayed, not fresh.
+    markAdmitted: (eventId: string) => {
+      admitted.set(eventId, `input-${admitted.size + 1}`);
+    },
     setRefuseSubmit: (value: { status: number; code?: string } | undefined) => {
       refuseSubmit = value;
     },
@@ -471,6 +476,32 @@ describe('managed DingTalk adapter inbound', () => {
       'behind',
     ]);
     await second.adapter.disconnect();
+  });
+
+  it('a replayed admission answer does not reset the refusal streak (R1-26)', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    plane.setRefuseSubmit({ status: 404, code: 'workspace_not_found' });
+    fake.push('m1', messageData({ msgId: 'm1' }));
+    fake.push('m2', messageData({ msgId: 'm2' }));
+    await adapter.tick();
+    // m1 dropped as the first-occurrence sacrifice; m2 held and the stall armed.
+    expect(plane.submitAttempts()).toBe(2);
+    // The server actually committed m2's admission; only the answer was lost,
+    // so the held claim's re-submission answers replayed rather than fresh.
+    plane.markAdmitted('dingtalk:m2');
+    plane.setRefuseSubmit(undefined);
+    await adapter.tick();
+    // A replay proves nothing about the binding: the streak must stand. The
+    // next instance-scoped refusal therefore re-stalls on its FIRST occurrence
+    // instead of paying another sacrifice.
+    plane.setRefuseSubmit({ status: 404, code: 'workspace_not_found' });
+    fake.push('m3', messageData({ msgId: 'm3' }));
+    await adapter.tick();
+    // The stall re-armed, so a further frame is refused at the gate. Had the
+    // replay reset the streak, m3 would have dropped as a fresh sacrifice and
+    // this frame would have been admitted.
+    expect(fake.push('m4', messageData({ msgId: 'm4' }))).toBe(false);
+    await adapter.disconnect();
   });
 });
 
