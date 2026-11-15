@@ -2344,18 +2344,36 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'localFiles.status.resolving': 'Resolving…',
   'localFiles.needsSessionHint':
     'Start a session first. The bridge binds to exactly one session, so no other session can reach your files.',
-  'localFiles.blocker.insecureContext':
-    'This page is not a secure context, so the browser will not grant local file access. Serve the Web Shell over https, or forward the daemon port with SSH and open http://localhost:<port>.',
+  'localFiles.blocker.insecureContext': (v) =>
+    v?.localPort !== undefined
+      ? `This page is not a secure context, so the browser will not grant local file access. Serve the Web Shell over https, or run the copied SSH tunnel command and open http://localhost:${v.localPort}.`
+      : 'This page is not a secure context, so the browser will not grant local file access. Serve the Web Shell over https, or forward the daemon port with SSH and open http://localhost:<port>.',
   'localFiles.blocker.crossOriginFrame':
     'Local file access is blocked inside a cross-origin frame. Open the Web Shell in its own browser tab to connect a directory.',
   'localFiles.blocker.unsupportedBrowser':
     'This browser has no File System Access API. Use Chrome or Edge to connect a local directory.',
   'localFiles.blocker.workspaceIneligible':
-    "This conversation's workspace cannot host a local directory (untrusted or live workspace).",
+    "This conversation's workspace cannot host a local directory (untrusted or live workspace). Use a session in a trusted, regular workspace instead.",
   'localFiles.blocker.workspaceResolving':
     'Which workspace this conversation belongs to is not known yet.',
   'localFiles.blocker.unsupportedDaemon':
     'This daemon does not advertise the client filesystem bridge (client_mcp_over_ws). Start the daemon with QWEN_SERVE_CLIENT_MCP_OVER_WS=1 to enable local files.',
+  'localFiles.changeDirectory': 'Change directory…',
+  'localFiles.session': 'Session',
+  'localFiles.newSession': 'New session',
+  'localFiles.retry': 'Retry',
+  'localFiles.copyStartupCommand': 'Copy startup command',
+  'localFiles.copyTunnelCommand': 'Copy SSH tunnel command',
+  'localFiles.copied': 'Command copied',
+  'localFiles.copyFailed': 'Could not copy the command',
+  'localFiles.changeDirectoryFailed':
+    'Could not change the directory. The current directory is still connected.',
+  'localFiles.changeDirectoryDeferred':
+    'Directory change saved. It takes effect once the workspace finishes resolving; until then the current directory stays connected.',
+  'localFiles.gestureToast': (v) =>
+    v?.name
+      ? `Local directory "${v.name}" needs to be reconnected. Open Local files to grant access again.`
+      : 'Local files need to be reconnected. Open Local files to grant access again.',
   ...FILES_MESSAGES_EN,
   ...ACTIVITY_MESSAGES_EN,
   'rightPanel.add': 'Add panel',
@@ -2415,13 +2433,19 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'sidebar.project': 'Workspaces',
   'sidebar.pinnedSessions': 'Pinned',
   'sidebar.sessionSort': 'Sort sessions',
+  'sidebar.sessionDisplay': 'Display options',
+  'sidebar.sortBy': 'Sort by',
   'sidebar.sortActivity': 'Recent activity',
   'sidebar.sortQuestion': 'Last question',
+  'sidebar.workspaceFilter': 'Workspace',
+  'sidebar.filterAll': 'All',
+  'sidebar.restoreDefaults': 'Restore defaults',
   'sidebar.recentSessions': 'Recent',
   'sidebar.standalonePinUnavailable':
     'Pinning no-workspace sessions is not supported yet.',
   'sidebar.workspaceSelectLabel': 'Workspace',
   'sidebar.noWorkspace': 'No workspace',
+  'sidebar.liveSessions': 'Live sessions',
   'sidebar.noWorkspaceSessions': 'No-workspace sessions',
   'sidebar.copySessionId': 'Copy session ID',
   'sidebar.copySessionIdFailed': 'Failed to copy session ID',
@@ -3532,6 +3556,7 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'goals.empty': 'No active goals. Set one with /goal <condition>.',
   'goals.refresh': 'Refresh',
   'goals.new': 'New goal',
+  'goals.workspace': 'Workspace',
   'goals.newHint':
     'The goal starts in a new session and runs until its condition holds. For an enforced turn or time ceiling, run /config model.goalMaxTurns=20 or /config model.goalMaxActiveMinutes=30 in the chat; it applies after the daemon restarts, to Goals created afterwards.',
   'goals.condition': 'Condition',
@@ -3550,12 +3575,16 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'goals.idle': 'Waiting',
   'goals.dropped': (v) =>
     `${v?.count ?? 0} session${Number(v?.count) === 1 ? '' : 's'} could not be reached — any goals they are running are missing from this list.`,
+  'goals.workspacesSkipped': (v) =>
+    `${v?.count ?? 0} workspace${Number(v?.count) === 1 ? '' : 's'} not shown (untrusted or remote).`,
   'goals.notYetEvaluated': 'not yet evaluated',
   'goals.openSessionHint': "Open this goal's session",
   'goals.error.emptyCondition': 'Enter a condition for the goal.',
   'goals.error.clearKeyword': (v) =>
     `"${v?.word ?? ''}" clears a goal rather than setting one. Describe the condition to work toward.`,
   'goals.error.createFailed': 'Failed to start the goal',
+  'goals.error.workspaceUnavailable':
+    'The selected workspace is unavailable or untrusted.',
   'goals.error.saveFailed': 'Failed to save the goal',
   'goals.error.goalUnavailable': 'The goal is no longer available.',
   'goals.error.requiresObjective': (v) =>
@@ -3589,7 +3618,8 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   'memory.contentEmpty': 'Memory content is empty.',
   'memory.file': 'Memory file',
   'memory.fileOpen': 'Memory file opened.',
-  'memory.fileTruncated': 'Memory file opened. Content is truncated.',
+  'memory.fileTruncated':
+    'The complete memory file text is unavailable. Editing is disabled.',
   'memory.files': 'Memory Files',
   'memory.footer': 'Enter to confirm · Esc to cancel',
   'memory.footer.back': 'Esc to go back',
@@ -5289,6 +5319,15 @@ Write the explanation as a self-contained single-file HTML (inline CSS, no exter
   ...TRAJECTORY_FILTER_MESSAGES_EN,
   ...TRAJECTORY_WINDOW_MESSAGES_EN,
 };
+
+/**
+ * Every local-files message key, derived from the EN catalog so the
+ * locale-parity test covers new keys automatically instead of drifting
+ * behind a hardcoded subset.
+ */
+export const LOCAL_FILES_MESSAGE_KEYS = Object.keys(EN).filter((key) =>
+  key.startsWith('localFiles.'),
+);
 
 /**
  * zh-CN descriptions for the GitHub boundSessionActions keys. The 20 base
@@ -7482,17 +7521,34 @@ const ZH: Messages = {
   'localFiles.status.resolving': '解析中…',
   'localFiles.needsSessionHint':
     '请先创建一个会话。桥只绑定一个会话，因此其他会话无法访问你的文件。',
-  'localFiles.blocker.insecureContext':
-    '当前页面不是安全上下文，浏览器不会授予本地文件访问权。请通过 https 访问 Web Shell，或用 SSH 转发 daemon 端口后打开 http://localhost:<port>。',
+  'localFiles.blocker.insecureContext': (v) =>
+    v?.localPort !== undefined
+      ? `当前页面不是安全上下文，浏览器不会授予本地文件访问权。请通过 https 访问 Web Shell，或运行所复制的 SSH 隧道命令后打开 http://localhost:${v.localPort}。`
+      : '当前页面不是安全上下文，浏览器不会授予本地文件访问权。请通过 https 访问 Web Shell，或用 SSH 转发 daemon 端口后打开 http://localhost:<port>。',
   'localFiles.blocker.crossOriginFrame':
     '跨源 iframe 中本地文件访问被禁用。请在独立的浏览器标签页中打开 Web Shell 再连接目录。',
   'localFiles.blocker.unsupportedBrowser':
     '当前浏览器没有 File System Access API。请使用 Chrome 或 Edge 连接本地目录。',
   'localFiles.blocker.workspaceIneligible':
-    '该会话的工作区不能托管本地目录（不受信任或 live 工作区）。',
+    '该会话的工作区不能托管本地目录（不受信任或 live 工作区）。请改用受信任的普通工作区中的会话。',
   'localFiles.blocker.workspaceResolving': '尚不能确定该会话所属的工作区。',
   'localFiles.blocker.unsupportedDaemon':
     '该 daemon 未启用客户端文件桥（client_mcp_over_ws）。以 QWEN_SERVE_CLIENT_MCP_OVER_WS=1 启动 daemon 即可启用本地文件。',
+  'localFiles.changeDirectory': '更换目录…',
+  'localFiles.session': '会话',
+  'localFiles.newSession': '新建会话',
+  'localFiles.retry': '重试',
+  'localFiles.copyStartupCommand': '复制启动命令',
+  'localFiles.copyTunnelCommand': '复制 SSH 隧道命令',
+  'localFiles.copied': '命令已复制',
+  'localFiles.copyFailed': '复制命令失败',
+  'localFiles.changeDirectoryFailed': '无法更换目录。当前目录仍保持连接。',
+  'localFiles.changeDirectoryDeferred':
+    '目录变更已保存，将在工作区解析完成后生效；在此之前当前目录仍保持连接。',
+  'localFiles.gestureToast': (v) =>
+    v?.name
+      ? `本地目录「${v.name}」需要重新连接。打开「本地文件」即可重新授权。`
+      : '本地文件需要重新连接。打开「本地文件」即可重新授权。',
   ...FILES_MESSAGES_ZH,
   ...ACTIVITY_MESSAGES_ZH,
   'rightPanel.add': '添加页签',
@@ -7547,12 +7603,18 @@ const ZH: Messages = {
   'sidebar.project': '工作区',
   'sidebar.pinnedSessions': '置顶',
   'sidebar.sessionSort': '会话排序',
+  'sidebar.sessionDisplay': '显示选项',
+  'sidebar.sortBy': '排序方式',
   'sidebar.sortActivity': '最近活动',
   'sidebar.sortQuestion': '最后提问时间',
+  'sidebar.workspaceFilter': '工作区',
+  'sidebar.filterAll': '全部',
+  'sidebar.restoreDefaults': '恢复默认',
   'sidebar.recentSessions': '最近',
   'sidebar.standalonePinUnavailable': '暂不支持置顶无工作区会话。',
   'sidebar.workspaceSelectLabel': '工作区',
   'sidebar.noWorkspace': '无工作区',
+  'sidebar.liveSessions': 'Live 会话',
   'sidebar.noWorkspaceSessions': '无工作区会话',
   'sidebar.copySessionId': '复制会话 ID',
   'sidebar.copySessionIdFailed': '复制会话 ID 失败',
@@ -8563,6 +8625,7 @@ const ZH: Messages = {
   'goals.empty': '没有进行中的目标。用 /goal <条件> 设置一个。',
   'goals.refresh': '刷新',
   'goals.new': '新建目标',
+  'goals.workspace': '工作区',
   'goals.newHint':
     '目标会在一个新会话中启动，并持续运行直到条件满足。如需强制的轮数或时长上限，请在对话中运行 /config model.goalMaxTurns=20 或 /config model.goalMaxActiveMinutes=30，daemon 重启后生效，且只对之后新建的 Goal 生效。',
   'goals.condition': '条件',
@@ -8581,12 +8644,15 @@ const ZH: Messages = {
   'goals.idle': '等待中',
   'goals.dropped': (v) =>
     `有 ${v?.count ?? 0} 个会话无法访问——它们正在运行的目标未显示在此列表中。`,
+  'goals.workspacesSkipped': (v) =>
+    `有 ${v?.count ?? 0} 个工作区未显示（不受信任或远程）。`,
   'goals.notYetEvaluated': '尚未判定',
   'goals.openSessionHint': '打开该目标所在的会话',
   'goals.error.emptyCondition': '请输入目标条件。',
   'goals.error.clearKeyword': (v) =>
     `“${v?.word ?? ''}”是清除目标的指令，不是一个条件。请描述要达成的条件。`,
   'goals.error.createFailed': '启动目标失败',
+  'goals.error.workspaceUnavailable': '所选工作区不可用或不受信任。',
   'goals.error.saveFailed': '保存目标失败',
   'goals.error.goalUnavailable': '该目标已不可用。',
   'goals.error.requiresObjective': (v) =>
@@ -8614,7 +8680,7 @@ const ZH: Messages = {
   'memory.contentEmpty': 'Memory 内容为空。',
   'memory.file': 'Memory 文件',
   'memory.fileOpen': 'Memory 文件已打开。',
-  'memory.fileTruncated': 'Memory 文件已打开，内容已截断。',
+  'memory.fileTruncated': '无法获取完整的 Memory 文件内容，已禁用编辑。',
   'memory.files': 'Memory 文件',
   'memory.footer': 'Enter 确认 · Esc 取消',
   'memory.footer.back': 'Esc 返回',
@@ -10252,6 +10318,7 @@ const RU: Messages = {
   'goals.empty': 'Нет активных целей. Задайте: /goal <условие>.',
   'goals.refresh': 'Обновить',
   'goals.new': 'Новая цель',
+  'goals.workspace': 'Рабочая область',
   'goals.newHint':
     'Цель запускается в новой сессии и работает, пока условие не выполняется. Жёсткий лимит по числу ходов или времени задаётся в чате: /config model.goalMaxTurns=20 или /config model.goalMaxActiveMinutes=30 (применяется после перезапуска демона, к целям, созданным позже).',
   'goals.condition': 'Условие',
@@ -10270,12 +10337,16 @@ const RU: Messages = {
   'goals.idle': 'Ожидание',
   'goals.dropped': (v) =>
     `не удалось связаться с ${v?.count ?? 0} ${ruPlural(v?.count, 'сессией', 'сессиями', 'сессиями')} — цели, которые они выполняли, отсутствуют в этом списке.`,
+  'goals.workspacesSkipped': (v) =>
+    `Не показано: ${v?.count ?? 0} ${ruPlural(v?.count, 'рабочая область', 'рабочие области', 'рабочих областей')} (нет доверия или удалённый доступ).`,
   'goals.notYetEvaluated': 'ещё не оценено',
   'goals.openSessionHint': 'Открыть сессию этой цели',
   'goals.error.emptyCondition': 'Введите условие для цели.',
   'goals.error.clearKeyword': (v) =>
     `"${v?.word ?? ''}" снимает цель, а не задаёт её. Опишите условие, к которому нужно работать.`,
   'goals.error.createFailed': 'Не удалось запустить цель',
+  'goals.error.workspaceUnavailable':
+    'Выбранная рабочая область недоступна или не пользуется доверием.',
   'goals.error.saveFailed': 'Не удалось сохранить цель',
   'goals.error.goalUnavailable': 'Цель больше недоступна.',
   'goals.error.requiresObjective': (v) =>
