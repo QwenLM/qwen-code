@@ -5227,13 +5227,27 @@ export function registerSessionRoutes(
                     .catch(() => undefined);
                 }
                 if (autoBranch !== null) {
-                  await wtService
+                  const deleted = await wtService
                     .deleteLocalBranch(autoBranch)
-                    .catch(() => undefined);
-                  await writeWorktreeSession(sidecarPath, {
-                    ...sidecar,
-                    worktreeBranch: '',
-                  }).catch(() => undefined);
+                    .then(() => true)
+                    .catch(() => false);
+                  if (deleted) {
+                    await writeWorktreeSession(sidecarPath, {
+                      ...sidecar,
+                      worktreeBranch: '',
+                    }).catch(() => undefined);
+                  } else {
+                    // The delete was refused — typically because
+                    // detachCheckout failed and the worktree still sits on
+                    // the branch. Keep the sidecar naming it (a retry then
+                    // matches); if the worktree is detached, re-attach it so
+                    // the record describes the checkout again. Rewriting the
+                    // sidecar to '' here would wedge every later handoff in
+                    // worktree_branch_mismatch.
+                    await wtService
+                      .checkoutBranchInCheckout(realTarget, autoBranch)
+                      .catch(() => undefined);
+                  }
                 } else if (detachedFrom !== null) {
                   // The worktree sat on a named branch the handoff did not
                   // create ("Create branch here"). Re-attach it after the
@@ -5396,11 +5410,15 @@ export function registerSessionRoutes(
             const currentBranch = await sourceService
               .getCurrentBranch()
               .catch(() => undefined);
-            // Read the source HEAD directly: getRegisteredWorktreeBranch
-            // only answers at a checkout root, so a legitimate subdirectory
-            // workspace would record an empty base and the return trip
-            // would silently skip the branch promotion.
-            const baseCommit = await getHeadCommit(sourceCwd);
+            // Read the base from the checkout the sidecar records as
+            // originalCwd (the workspace root), NOT from the session's
+            // effective cwd: the return leg compares originalCwd's HEAD
+            // against this base, so the pair must describe one checkout.
+            // A session cd'd into a sibling checkout with a divergent HEAD
+            // therefore starts its worktree at the workspace HEAD (the
+            // sibling's own commits stay in the sibling); its dirty files
+            // are still carried from sourceCwd below, fail-open on conflict.
+            const baseCommit = await getHeadCommit(workspaceCwd);
             if (!baseCommit) {
               res.status(409).json({
                 error: 'Cannot read the local HEAD to record the handoff base',
@@ -5416,9 +5434,8 @@ export function registerSessionRoutes(
             // directory. Capture the dirty state from the session's own
             // checkout, which may differ from the placement root. Base the
             // worktree on the recorded SHA, not a branch name: the service
-            // resolves names in the placement repository, so a session cd'd
-            // into a sibling checkout would otherwise start at the wrong
-            // HEAD and the return trip would 409 local_head_moved forever.
+            // resolves names in the placement repository, so a branch name
+            // could start the worktree at a different commit than recorded.
             const placementService = new GitWorktreeService(workspaceCwd);
             const created = await placementService.createUserWorktree(
               slug,

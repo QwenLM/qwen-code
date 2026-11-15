@@ -18,6 +18,11 @@ const debugLogger = createDebugLogger('GIT_BRANCH_OPS');
 // `inFlightBranchWorkspaces`. Mirrors GitWorktreeService's 30s bound.
 const GIT_BRANCH_TIMEOUT_MS = 30_000;
 
+// The unborn/fault probe in getHeadCommit is diagnostic: a git that just
+// timed out will time out again, so the probe gets a small bound of its
+// own instead of re-arming the full budget and doubling the worst case.
+const HEAD_FAULT_PROBE_TIMEOUT_MS = 5_000;
+
 export async function branchExists(
   cwd: string,
   name: string,
@@ -74,7 +79,7 @@ export async function getHeadCommit(cwd: string): Promise<string | undefined> {
       await execFileAsync(
         'git',
         [...NO_EXEC_CONFIG, 'rev-parse', '--verify', '--quiet', 'HEAD'],
-        { cwd, timeout: GIT_BRANCH_TIMEOUT_MS, env: gitEnv() },
+        { cwd, timeout: HEAD_FAULT_PROBE_TIMEOUT_MS, env: gitEnv() },
       );
       debugLogger.warn(
         `getHeadCommit: rev-parse HEAD failed in ${cwd} but --verify succeeded: ${error}`,

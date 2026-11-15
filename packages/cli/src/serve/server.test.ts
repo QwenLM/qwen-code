@@ -29458,7 +29458,6 @@ describe('createServeApp', () => {
       );
       const slug = 'branch-test';
       const worktreePath = path.join(repo, '.qwen', 'worktrees', slug);
-      const worktreeBranch = `worktree-${slug}`;
       try {
         await execFileAsync('git', ['init', '-b', 'main'], { cwd: repo });
         await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
@@ -29495,24 +29494,19 @@ describe('createServeApp', () => {
           getRepoTopLevel: async () => repo,
           getCurrentBranch: async () => 'main',
           getUserWorktreePath: () => worktreePath,
+          // Mirror the real detached contract: createUserWorktree returns
+          // branch:'' when detached, never the slug-derived name.
           createUserWorktree: async (...args: unknown[]) => {
             createWorktreeCalls.push(args);
             await fsp.mkdir(path.dirname(worktreePath), { recursive: true });
             await execFileAsync(
               'git',
-              [
-                'worktree',
-                'add',
-                '-b',
-                worktreeBranch,
-                worktreePath,
-                baseCommit,
-              ],
+              ['worktree', 'add', '--detach', worktreePath, baseCommit],
               { cwd: repo },
             );
             return {
               success: true,
-              worktree: { slug, path: worktreePath, branch: worktreeBranch },
+              worktree: { slug, path: worktreePath, branch: '' },
             };
           },
         });
@@ -29600,7 +29594,7 @@ describe('createServeApp', () => {
           sessionId: expect.any(String),
           workspaceCwd: repo,
           currentCwd: worktreePath,
-          worktree: { slug, path: worktreePath, branch: worktreeBranch },
+          worktree: { slug, path: worktreePath, branch: '' },
         });
         // The dirty capture must target the session's own checkout, not
         // the placement root; dropping dirtyStateSource silently captures
@@ -29637,9 +29631,12 @@ describe('createServeApp', () => {
           `${res.body.sessionId}.worktree.json`,
         );
         expect(existsSync(sidecarPath)).toBe(true);
+        // The detached convention: the sidecar must record '', not the
+        // slug-derived branch — a named record would surface much later as
+        // a permanent 409 worktree_branch_mismatch on handoff.
         expect(
           JSON.parse(await fsp.readFile(sidecarPath, 'utf8')),
-        ).toMatchObject({ workspaceCwd: repo });
+        ).toMatchObject({ workspaceCwd: repo, worktreeBranch: '' });
         expect(
           existsSync(
             path.join(chatsDir, `.branch-worktree-${res.body.sessionId}.json`),
@@ -29655,6 +29652,141 @@ describe('createServeApp', () => {
         expect(
           await fsp.readFile(path.join(worktreePath, '.qwen-session'), 'utf8'),
         ).toBe(res.body.sessionId);
+        expect(
+          (await fsp.readdir(chatsDir)).filter((entry) =>
+            entry.startsWith('.branch-worktree-'),
+          ),
+        ).toEqual([]);
+      } finally {
+        mockWt.impl = undefined;
+        mockBranchOps.getHeadCommit = undefined;
+        await fsp.rm(repo, { recursive: true, force: true });
+        await fsp.rm(runtimeDir, { recursive: true, force: true });
+      }
+    });
+
+    it('forwards the carried overlay to the rollback when the bridge fails', async () => {
+      const repo = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-branch-carry-repo-'),
+      );
+      const runtimeDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-branch-carry-runtime-'),
+      );
+      const slug = 'branch-carry';
+      const worktreePath = path.join(repo, '.qwen', 'worktrees', slug);
+      try {
+        await execFileAsync('git', ['init', '-b', 'main'], { cwd: repo });
+        await execFileAsync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        await fsp.writeFile(path.join(repo, 'README.md'), 'base\n', 'utf8');
+        await execFileAsync('git', ['add', 'README.md'], { cwd: repo });
+        await execFileAsync(
+          'git',
+          [
+            '-c',
+            'user.name=Qwen Test',
+            '-c',
+            'user.email=qwen@example.com',
+            'commit',
+            '-m',
+            'base',
+          ],
+          { cwd: repo },
+        );
+        // The source checkout is dirty; the overlay the creation reports
+        // must reach the rollback through the journal, or the rollback
+        // refuses its own carried files and strands the worktree.
+        await fsp.writeFile(path.join(repo, 'dirty.txt'), 'dirty\n', 'utf8');
+        const { stdout } = await execFileAsync('git', ['rev-parse', 'HEAD'], {
+          cwd: repo,
+        });
+        const baseCommit = stdout.trim();
+        mockBranchOps.getHeadCommit = async () => baseCommit;
+        const removeCalls: unknown[][] = [];
+        mockWt.impl = () => ({
+          isGitRepository: async () => true,
+          getRepoTopLevel: async () => repo,
+          getCurrentBranch: async () => 'main',
+          getUserWorktreePath: () => worktreePath,
+          createUserWorktree: async () => {
+            await fsp.mkdir(path.dirname(worktreePath), { recursive: true });
+            await execFileAsync(
+              'git',
+              ['worktree', 'add', '--detach', worktreePath, baseCommit],
+              { cwd: repo },
+            );
+            return {
+              success: true,
+              worktree: { slug, path: worktreePath, branch: '' },
+              carriedPaths: ['dirty.txt'],
+            };
+          },
+          removePreparedUserWorktree: async (...args: unknown[]) => {
+            removeCalls.push(args);
+            // Honor the journal-advance callback, then reap the checkout.
+            await (args[3] as () => Promise<void>)();
+            await fsp.rm(worktreePath, { recursive: true, force: true });
+            return { success: true };
+          },
+        });
+        const bridge = fakeBridge({
+          summaryImpl: (sessionId) => {
+            if (sessionId !== 'source-session') {
+              throw new SessionNotFoundError(sessionId);
+            }
+            return {
+              sessionId,
+              workspaceCwd: repo,
+              createdAt: '2026-08-16T00:00:00.000Z',
+              clientCount: 1,
+              hasActivePrompt: false,
+            };
+          },
+        });
+        bridge.getSessionExecutionSnapshot = () => ({
+          workspaceCwd: repo,
+          effectiveCwd: repo,
+        });
+        // A settled pre-commit refusal: after mutation dispatch, only
+        // settled failures run the prepared-worktree cleanup (a generic
+        // error could mean the branch exists on the bridge).
+        bridge.branchSession = vi
+          .fn()
+          .mockRejectedValue(new SessionBusyError('source-session'));
+        const runtime = makeWorkspaceRuntimeForTest({
+          workspaceId: 'branch-worktree-primary',
+          workspaceCwd: repo,
+          sessionRuntimeBaseDir: runtimeDir,
+          primary: true,
+          bridge,
+        });
+        const app = createServeApp(
+          { ...baseOpts, workspace: repo },
+          undefined,
+          { workspaceRegistry: createWorkspaceRegistry([runtime]) },
+        );
+
+        const res = await request(app)
+          .post('/session/source-session/branch')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ worktree: { slug } });
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('session_busy');
+        expect(removeCalls).toHaveLength(1);
+        // (slug, owner, base, onRemoved, branchOwned, carriedPaths): the
+        // overlay must be forwarded, and the detached preparation owns no
+        // branch.
+        expect(removeCalls[0][0]).toBe(slug);
+        expect(removeCalls[0][2]).toBe(baseCommit);
+        expect(removeCalls[0][4]).toBe(false);
+        expect(removeCalls[0][5]).toEqual(['dirty.txt']);
+        expect(existsSync(worktreePath)).toBe(false);
+        const chatsDir = path.join(
+          new Storage(repo, runtimeDir).getProjectDir(),
+          'chats',
+        );
         expect(
           (await fsp.readdir(chatsDir)).filter((entry) =>
             entry.startsWith('.branch-worktree-'),

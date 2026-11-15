@@ -393,4 +393,33 @@ describe('GitWorktreeService — detached managed worktrees', () => {
     expect(git(repoRoot, 'rev-parse', 'worktree-sess-diverged')).toBe(userTip);
     await expect(fs.lstat(worktree.path)).rejects.toThrow();
   });
+
+  it('createWorktreeBranch succeeds when the post-checkout hook fails after the switch', async () => {
+    const worktree = await createDetached('sess-hooked');
+    // The worktree inherits the repo's hooks (configureHooksPath). A
+    // failing post-checkout hook throws AFTER `switch -c` moved the
+    // checkout: the branch exists and the checkout sits on it, so the
+    // operation must report success — treating it as "no branch" would
+    // leave the sidecar naming a state that no longer exists.
+    const hooksDir = path.join(repoRoot, '.git', 'hooks');
+    await fs.mkdir(hooksDir, { recursive: true });
+    const hook = path.join(hooksDir, 'post-checkout');
+    await fs.writeFile(hook, '#!/bin/sh\nexit 1\n');
+    await fs.chmod(hook, 0o755);
+
+    await service.createWorktreeBranch(worktree.path, 'feat/hooked');
+
+    expect(git(worktree.path, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(
+      'feat/hooked',
+    );
+    expect(
+      git(
+        repoRoot,
+        'branch',
+        '--list',
+        'feat/hooked',
+        '--format=%(refname:short)',
+      ),
+    ).toBe('feat/hooked');
+  });
 });

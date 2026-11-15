@@ -407,8 +407,8 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
 
   it('fails open when an untracked file cannot be copied', async () => {
     await makeDirty(repoRoot);
-    // A dangling symlink is listed by ls-files --others but copyFile fails;
-    // creation must still succeed with the remaining overlay applied.
+    // A dangling symlink is listed by ls-files --others; creation must
+    // still succeed with the remaining overlay applied.
     await fs.symlink(
       path.join(repoRoot, 'missing-target'),
       path.join(repoRoot, 'broken-link'),
@@ -422,5 +422,150 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
     expect(await read(path.join(worktree.path, 'untracked.txt'))).toBe(
       'dirty-untracked\n',
     );
+  });
+
+  it('prepared rollback removes a carried overlay with a content-preserving rename', async () => {
+    // No prior edit: git detects the rename, and the capture must still
+    // name BOTH sides (--no-renames) — the applied overlay presents
+    // `A moved.md` plus ` D README.md`, and a destination-only list would
+    // leave the deletion side unexempt and refuse the rollback forever.
+    git(repoRoot, 'mv', 'README.md', 'moved.md');
+    const base = git(repoRoot, 'rev-parse', 'HEAD');
+    const service = new GitWorktreeService(repoRoot);
+    const created = await service.createUserWorktree(
+      'prepared-rename',
+      'main',
+      {
+        detached: true,
+        carryDirtyState: true,
+      },
+    );
+    expect(created.success).toBe(true);
+    expect(created.carriedPaths).toContain('README.md');
+    expect(created.carriedPaths).toContain('moved.md');
+    const removed = await service.removePreparedUserWorktree(
+      'prepared-rename',
+      null,
+      base,
+      undefined,
+      true,
+      created.carriedPaths,
+    );
+    expect(removed.success).toBe(true);
+    await expect(fs.lstat(created.worktree!.path)).rejects.toThrow();
+  });
+
+  it('carries untracked symlinks as links, not materialized files', async () => {
+    await fs.writeFile(path.join(repoRoot, 'real.txt'), 'target-content\n');
+    await fs.symlink('real.txt', path.join(repoRoot, 'link.txt'));
+    await fs.mkdir(path.join(repoRoot, 'some-dir'));
+    await fs.writeFile(path.join(repoRoot, 'some-dir', 'inner.txt'), 'inner\n');
+    await fs.symlink('some-dir', path.join(repoRoot, 'dir-link'));
+    const base = git(repoRoot, 'rev-parse', 'HEAD');
+    const service = new GitWorktreeService(repoRoot);
+    const created = await service.createUserWorktree('symlinks', 'main', {
+      detached: true,
+      carryDirtyState: true,
+    });
+    expect(created.success).toBe(true);
+    const wt = created.worktree!.path;
+    // copyFile would dereference link.txt into a regular file holding the
+    // target's bytes (committable out-of-repo content) and drop dir-link
+    // with EISDIR.
+    expect((await fs.lstat(path.join(wt, 'link.txt'))).isSymbolicLink()).toBe(
+      true,
+    );
+    expect(await fs.readlink(path.join(wt, 'link.txt'))).toBe('real.txt');
+    expect((await fs.lstat(path.join(wt, 'dir-link'))).isSymbolicLink()).toBe(
+      true,
+    );
+    const removed = await service.removePreparedUserWorktree(
+      'symlinks',
+      null,
+      base,
+      undefined,
+      true,
+      created.carriedPaths,
+    );
+    expect(removed.success).toBe(true);
+  });
+
+  it('skips an overlay too large to record in the preparation journal', async () => {
+    // The journal reader refuses records above 64 KiB; an unbounded
+    // carriedPaths list would make every later phase transition throw and
+    // strand the worktree. Above the bound the carry is skipped entirely
+    // (fail-open to committed state), keeping the worktree rollbackable.
+    const prefix = 'long-';
+    const filler = 'x'.repeat(60);
+    for (let i = 0; i < 500; i++) {
+      const name = `${prefix}${String(i).padStart(4, '0')}-${filler}.txt`;
+      await fs.writeFile(path.join(repoRoot, name), 'bulk\n');
+    }
+    const base = git(repoRoot, 'rev-parse', 'HEAD');
+    const service = new GitWorktreeService(repoRoot);
+    const created = await service.createUserWorktree('bulk', 'main', {
+      detached: true,
+      carryDirtyState: true,
+    });
+    expect(created.success).toBe(true);
+    expect(created.carriedPaths).toBeUndefined();
+    await expect(
+      fs.lstat(
+        path.join(created.worktree!.path, `${prefix}0000-${filler}.txt`),
+      ),
+    ).rejects.toThrow();
+    const removed = await service.removePreparedUserWorktree(
+      'bulk',
+      null,
+      base,
+      undefined,
+      true,
+      created.carriedPaths,
+    );
+    expect(removed.success).toBe(true);
+  });
+
+  it('measures the carry bound in UTF-8 bytes, not characters', async () => {
+    // 3000 names of 2 CJK chars + 4 digits: ~27K characters (under the
+    // 32KiB bound) but ~39K UTF-8 bytes (over it). A character-count
+    // bound would carry an overlay the journal reader must refuse.
+    for (let i = 0; i < 3000; i++) {
+      await fs.writeFile(
+        path.join(repoRoot, `中中${String(i).padStart(4, '0')}`),
+        'x\n',
+      );
+    }
+    const service = new GitWorktreeService(repoRoot);
+    const created = await service.createUserWorktree('bulk-cjk', 'main', {
+      detached: true,
+      carryDirtyState: true,
+    });
+    expect(created.success).toBe(true);
+    expect(created.carriedPaths).toBeUndefined();
+  });
+
+  it('migration establishes the exclude rule before removing the legacy file', async () => {
+    const worktree = await create('legacy-upgrade', true);
+    // Simulate a pre-PR checkout: the exclude rule is gone and the legacy
+    // daemon file is the only mechanism hiding the managed directory.
+    const excludeRel = git(repoRoot, 'rev-parse', '--git-path', 'info/exclude');
+    await fs.writeFile(path.resolve(repoRoot, excludeRel), '', 'utf8');
+    await fs.mkdir(path.join(repoRoot, '.qwen'), { recursive: true });
+    await fs.writeFile(
+      path.join(repoRoot, '.qwen', '.gitignore'),
+      '# Auto-generated by qwen-code.\nworktrees/\n',
+    );
+    expect(git(repoRoot, 'status', '--porcelain')).toContain('.qwen/');
+
+    const service = new GitWorktreeService(repoRoot);
+    await service.migrateLegacyWorktreeGitignore();
+
+    await expect(
+      fs.lstat(path.join(repoRoot, '.qwen', '.gitignore')),
+    ).rejects.toThrow();
+    // The replacement exists before the old mechanism was removed: the
+    // checkout reads clean and the managed directory stays ignored.
+    expect(git(repoRoot, 'status', '--porcelain')).toBe('');
+    expect(gitOk(repoRoot, 'check-ignore', '-q', worktree.path)).toBe(true);
   });
 });

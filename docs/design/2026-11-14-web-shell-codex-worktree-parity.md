@@ -138,6 +138,21 @@ rooted at a subdirectory still lands files at the correct worktree offset
 cannot be resolved, the untracked overlay is skipped with a warning rather
 than silently missing every copy.
 
+The carry preserves symlinks as links (`lstat` + `readlink` + `symlink`):
+`copyFile` would dereference a file link into committable out-of-repo
+content and drop a directory link with `EISDIR`. The tracked-path capture
+uses `stash show --name-only --no-renames -z` so a detected rename yields
+both sides — the applied overlay presents `A new` plus ` D old`, and the
+rollback's exemption must name both. The daemon's own bookkeeping names
+(the session marker and its staged `.tmp` siblings) are filtered from the
+untracked list so they can never be carried as user content. The whole
+overlay is bounded: if its serialized UTF-8 size exceeds
+`CARRIED_PATHS_MAX_BYTES` (32 KiB, half the preparation journal's 64 KiB
+read cap), the carry is skipped entirely (fail-open to committed state,
+with a warning) — a journal that cannot be read back would strand the
+worktree and its journal on every later phase transition, including the
+rollback's own.
+
 Provisioning ignores the managed worktrees directory through the
 repository's `info/exclude`, not a daemon-written `.qwen/.gitignore`: a
 bookkeeping file in the checkout is itself untracked work, which made the

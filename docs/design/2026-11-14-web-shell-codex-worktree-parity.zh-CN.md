@@ -124,6 +124,17 @@ git 会对非 ASCII、引号、换行文件名做 C 风格转义，携带会静�
 偏移（抽取前的模式会放错位置）。仓库顶层无法解析时，跳过 untracked
 overlay 并发告警，而非静默丢失每一次复制。
 
+携带把符号链接保留为链接（`lstat` + `readlink` + `symlink`）：`copyFile`
+会把文件链接物化成可提交进仓库的仓库外内容，目录链接则 EISDIR 丢失。
+tracked 路径捕获用 `stash show --name-only --no-renames -z`，被识别的
+重命名给出两侧——apply 后的 overlay 呈现 `A new` 加 ` D old`，回滚豁免
+必须同时命名两侧。daemon 自己的簿记名（会话 marker 与其 staged `.tmp`
+兄弟）从 untracked 列表过滤，绝不能作为用户内容被携带。整个 overlay 有
+界：序列化 UTF-8 大小超过 `CARRIED_PATHS_MAX_BYTES`（32 KiB，为准备
+journal 64 KiB 读取上限的一半）时完全跳过携带（fail-open 到已提交状态，
+带告警）——读不回的 journal 会让此后每次阶段转换（包括回滚自身）抛错，
+把工作树与 journal 一起搁死。
+
 provisioning 通过仓库的 `info/exclude` 忽略托管 worktrees 目录，而不是
 写 `.qwen/.gitignore`：检出里的簿记文件本身就是 untracked 工作，曾让
 handoff 的本地干净门拒绝每一个干净仓库、cleanup 的有工作门保留每一个

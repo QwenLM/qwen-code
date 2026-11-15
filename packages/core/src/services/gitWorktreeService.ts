@@ -46,6 +46,24 @@ export function worktreeBranchForSlug(slug: string): string {
 export const WORKTREE_SESSION_FILE = '.qwen-session';
 const WORKTREE_SESSION_MARKER_MAX_BYTES = 512;
 
+/**
+ * Upper bound on the serialized carried-overlay path list. The branch
+ * preparation journal persists `carriedPaths` and its reader refuses
+ * records above 64 KiB (`BRANCH_WORKTREE_JOURNAL_MAX_BYTES`); an overlay
+ * too large to record would make every later phase transition — including
+ * the rollback's own — throw, stranding the worktree and its journal.
+ * Half the journal cap leaves room for the rest of the record. Overlays
+ * above the bound are not carried (fail-open to committed state), keeping
+ * every created worktree rollbackable.
+ */
+export const CARRIED_PATHS_MAX_BYTES = 32 * 1024;
+
+/** Root-level staged marker siblings (`.qwen-session.<hex>.tmp`), matching
+ * the anchored info/exclude rule. */
+const WORKTREE_SESSION_TMP_PATTERN = new RegExp(
+  `^${WORKTREE_SESSION_FILE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.[^/]*\\.tmp$`,
+);
+
 export class WorktreeSessionMarkerOwnerChangedError extends Error {
   constructor() {
     super('Worktree session marker owner changed');
@@ -1402,9 +1420,20 @@ export class GitWorktreeService {
     let trackedFiles: string[] = [];
     if (stashCommit) {
       try {
+        // --no-renames: a detected rename would collapse to its destination,
+        // hiding the deletion side from the rollback's exemption set; the
+        // applied overlay presents both sides (A new + D old), so the list
+        // must name both.
         const raw = await (
           await this.getGit()
-        ).raw(['stash', 'show', '--name-only', '-z', stashCommit]);
+        ).raw([
+          'stash',
+          'show',
+          '--name-only',
+          '--no-renames',
+          '-z',
+          stashCommit,
+        ]);
         trackedFiles = raw.split('\0').filter(Boolean);
       } catch {
         // Non-fatal: the rollback gate stays conservative.
@@ -1451,9 +1480,35 @@ export class GitWorktreeService {
         '--full-name',
         '-z',
       ]);
-      return raw.split('\0').filter(Boolean);
+      // Defense in depth: the daemon's own bookkeeping files are normally
+      // git-excluded, but if the exclude rule is missing (an upgraded or
+      // damaged checkout) they must not be carried as user content — a
+      // marker copied into another checkout is daemon residue, not work.
+      return raw
+        .split('\0')
+        .filter(
+          (rel) =>
+            rel.length > 0 &&
+            rel !== WORKTREE_SESSION_FILE &&
+            !WORKTREE_SESSION_TMP_PATTERN.test(rel),
+        );
     } catch {
       return [];
+    }
+  }
+
+  /**
+   * Copy one overlay entry, preserving symlinks as links. `copyFile`
+   * dereferences them: a link to a file would materialize out-of-repo
+   * content into the checkout (which a later `git add -A` could commit),
+   * and a link to a directory would fail EISDIR and vanish.
+   */
+  private async copyOverlayEntry(src: string, dst: string): Promise<void> {
+    const stat = await fs.lstat(src);
+    if (stat.isSymbolicLink()) {
+      await fs.symlink(await fs.readlink(src), dst);
+    } else {
+      await fs.copyFile(src, dst);
     }
   }
 
@@ -1482,7 +1537,7 @@ export class GitWorktreeService {
       try {
         const dst = path.join(targetTop, rel);
         await fs.mkdir(path.dirname(dst), { recursive: true });
-        await fs.copyFile(path.join(repoTop, rel), dst);
+        await this.copyOverlayEntry(path.join(repoTop, rel), dst);
         copied.push(rel);
       } catch {
         // Fail-open: skip files that can't be copied.
@@ -1518,7 +1573,7 @@ export class GitWorktreeService {
         const src = path.join(dirtyState.repoTop, relPath);
         const dst = path.join(worktreePath, relPath);
         await fs.mkdir(path.dirname(dst), { recursive: true });
-        await fs.copyFile(src, dst);
+        await this.copyOverlayEntry(src, dst);
       } catch {
         // Non-fatal: skip files that can't be copied
       }
@@ -2686,11 +2741,27 @@ export class GitWorktreeService {
             ? new GitWorktreeService(options.dirtyStateSource)
             : this;
         const dirtyState = await captureService.captureDirtyState();
-        await this.applyDirtyState(worktreePath, dirtyState);
-        carriedPaths = [
+        const overlay = [
           ...dirtyState.trackedFiles,
           ...dirtyState.untrackedFiles,
         ];
+        // Byte length, not character count: the journal is written as
+        // UTF-8 and its cap is in bytes, so non-ASCII paths must be
+        // measured the way the reader will refuse them.
+        if (
+          Buffer.byteLength(JSON.stringify(overlay), 'utf8') >
+          CARRIED_PATHS_MAX_BYTES
+        ) {
+          // Too large to persist in the preparation journal: skip the
+          // carry rather than create a worktree no rollback can reap.
+          debugLogger.warn(
+            `createUserWorktree: dirty overlay too large to record for ${slug} ` +
+              `(${overlay.length} paths); starting from committed state`,
+          );
+        } else {
+          await this.applyDirtyState(worktreePath, dirtyState);
+          carriedPaths = overlay;
+        }
       }
 
       const worktree: WorktreeInfo = {
@@ -2783,7 +2854,11 @@ export class GitWorktreeService {
    * Turns a detached worktree into a named branch at its current HEAD
    * ("Create branch here", Codex parity). Throws when the checkout is not
    * detached or the branch name is already taken — callers validate first
-   * and map the failure to a typed refusal.
+   * and map the failure to a typed refusal. A post-checkout hook failure
+   * after the switch succeeded is NOT a failure: the branch exists and
+   * the checkout sits on it, so callers must record it (treating it as
+   * "no branch" would leave the sidecar naming a state that no longer
+   * exists and wedge every later handoff in worktree_branch_mismatch).
    */
   async createWorktreeBranch(
     worktreePath: string,
@@ -2798,7 +2873,17 @@ export class GitWorktreeService {
     if (await this.localBranchExists(branchName)) {
       throw new Error(`Branch ${branchName} already exists`);
     }
-    await wtGit.raw(['switch', '-c', branchName]);
+    try {
+      await wtGit.raw(['switch', '-c', branchName]);
+    } catch (error) {
+      // `switch -c` moves the checkout BEFORE the post-checkout hook runs.
+      // If the checkout now sits on the new branch, the operation's goal
+      // is achieved even though the hook threw.
+      const now = (
+        await wtGit.revparse(['--abbrev-ref', 'HEAD']).catch(() => '')
+      ).trim();
+      if (now !== branchName) throw error;
+    }
   }
 
   /**
@@ -3208,76 +3293,7 @@ export class GitWorktreeService {
    */
   private async ensureWorktreesGitignored(): Promise<void> {
     try {
-      const git = await this.getGit();
-      const excludeRel = (
-        await git.raw(['rev-parse', '--git-path', 'info/exclude'])
-      ).trim();
-      const excludePath = path.resolve(this.sourceRepoPath, excludeRel);
-      // Canonicalize both sides: git reports a physical toplevel, and a
-      // symlinked service root would otherwise produce a ../-prefixed
-      // (malformed) relative rule.
-      const realRoot = await fs
-        .realpath(this.sourceRepoPath)
-        .catch(() => this.sourceRepoPath);
-      const repoTop =
-        (await this.getRepoTopLevel().catch(() => null)) ?? realRoot;
-      const rel = path.relative(
-        repoTop,
-        path.join(realRoot, '.qwen', WORKTREES_DIR),
-      );
-      // The rule is a gitignore pattern, not a path: escape the pattern
-      // metacharacters per segment (a route directory like app/[id]
-      // would otherwise become a character class matching nothing).
-      // A line-based pattern cannot represent newline-bearing components
-      // or an out-of-root target; skip and log instead of writing garbage.
-      const segments = rel.split(path.sep);
-      if (
-        rel.startsWith('..') ||
-        path.isAbsolute(rel) ||
-        segments.some((s) => /[\n\r]/.test(s))
-      ) {
-        debugLogger.warn(
-          `ensureWorktreesGitignored: cannot represent ${rel} as an exclude rule; skipping`,
-        );
-      } else {
-        const escaped = segments
-          .map((s) =>
-            s
-              .replace(/[\\*?[\]#!]/g, '\\$&')
-              .replace(/ +$/, (m) => m.replace(/ /g, '\\ ')),
-          )
-          .join('/');
-        const rule = `/${escaped}/`;
-        let existing = '';
-        try {
-          existing = await fs.readFile(excludePath, 'utf8');
-        } catch (error) {
-          if (!isNodeError(error) || error.code !== 'ENOENT') throw error;
-        }
-        if (!existing.split('\n').some((line) => line.trim() === rule)) {
-          await fs.mkdir(path.dirname(excludePath), { recursive: true });
-          const prefix =
-            existing.length > 0 && !existing.endsWith('\n') ? '\n' : '';
-          await fs.appendFile(excludePath, `${prefix}${rule}\n`, 'utf8');
-        }
-        // Verify against git itself: a rule that matches nothing would
-        // silently bring back the dirty-checkout failure this replaces.
-        // Forward slashes: a win32 native path would read as an escaped
-        // pathspec and spuriously report the rule as ineffective.
-        const probe = path
-          .join(realRoot, '.qwen', WORKTREES_DIR, 'probe')
-          .split(path.sep)
-          .join('/');
-        const ignored = await git
-          .raw(['check-ignore', '-q', '--', probe])
-          .then(() => true)
-          .catch(() => false);
-        if (!ignored) {
-          debugLogger.warn(
-            `ensureWorktreesGitignored: rule ${rule} does not ignore the worktrees directory`,
-          );
-        }
-      }
+      await this.ensureWorktreesExcludeRule();
       await this.migrateLegacyWorktreeGitignore();
     } catch (error) {
       // Best-effort: if writing the exclude fails (read-only fs, etc.)
@@ -3285,6 +3301,84 @@ export class GitWorktreeService {
       debugLogger.warn(
         `ensureWorktreesGitignored failed (non-fatal): ${error}`,
       );
+    }
+  }
+
+  /**
+   * Writes and verifies the `info/exclude` rule only — no legacy
+   * migration. The migration calls this before unlinking the old file so
+   * the replacement exists before the old mechanism is removed.
+   */
+  private async ensureWorktreesExcludeRule(): Promise<void> {
+    const git = await this.getGit();
+    const excludeRel = (
+      await git.raw(['rev-parse', '--git-path', 'info/exclude'])
+    ).trim();
+    const excludePath = path.resolve(this.sourceRepoPath, excludeRel);
+    // Canonicalize both sides: git reports a physical toplevel, and a
+    // symlinked service root would otherwise produce a ../-prefixed
+    // (malformed) relative rule.
+    const realRoot = await fs
+      .realpath(this.sourceRepoPath)
+      .catch(() => this.sourceRepoPath);
+    const repoTop =
+      (await this.getRepoTopLevel().catch(() => null)) ?? realRoot;
+    const rel = path.relative(
+      repoTop,
+      path.join(realRoot, '.qwen', WORKTREES_DIR),
+    );
+    // The rule is a gitignore pattern, not a path: escape the pattern
+    // metacharacters per segment (a route directory like app/[id]
+    // would otherwise become a character class matching nothing).
+    // A line-based pattern cannot represent newline-bearing components
+    // or an out-of-root target; skip and log instead of writing garbage.
+    const segments = rel.split(path.sep);
+    if (
+      rel.startsWith('..') ||
+      path.isAbsolute(rel) ||
+      segments.some((s) => /[\n\r]/.test(s))
+    ) {
+      debugLogger.warn(
+        `ensureWorktreesGitignored: cannot represent ${rel} as an exclude rule; skipping`,
+      );
+    } else {
+      const escaped = segments
+        .map((s) =>
+          s
+            .replace(/[\\*?[\]#!]/g, '\\$&')
+            .replace(/ +$/, (m) => m.replace(/ /g, '\\ ')),
+        )
+        .join('/');
+      const rule = `/${escaped}/`;
+      let existing = '';
+      try {
+        existing = await fs.readFile(excludePath, 'utf8');
+      } catch (error) {
+        if (!isNodeError(error) || error.code !== 'ENOENT') throw error;
+      }
+      if (!existing.split('\n').some((line) => line.trim() === rule)) {
+        await fs.mkdir(path.dirname(excludePath), { recursive: true });
+        const prefix =
+          existing.length > 0 && !existing.endsWith('\n') ? '\n' : '';
+        await fs.appendFile(excludePath, `${prefix}${rule}\n`, 'utf8');
+      }
+      // Verify against git itself: a rule that matches nothing would
+      // silently bring back the dirty-checkout failure this replaces.
+      // Forward slashes: a win32 native path would read as an escaped
+      // pathspec and spuriously report the rule as ineffective.
+      const probe = path
+        .join(realRoot, '.qwen', WORKTREES_DIR, 'probe')
+        .split(path.sep)
+        .join('/');
+      const ignored = await git
+        .raw(['check-ignore', '-q', '--', probe])
+        .then(() => true)
+        .catch(() => false);
+      if (!ignored) {
+        debugLogger.warn(
+          `ensureWorktreesGitignored: rule ${rule} does not ignore the worktrees directory`,
+        );
+      }
     }
   }
 
@@ -3313,6 +3407,12 @@ export class GitWorktreeService {
       // nothing and unlinking a file the user committed.
       const tracked = await git.raw(['ls-files', '--', '.qwen/.gitignore']);
       if (tracked.trim().length === 0) {
+        // Establish the info/exclude replacement BEFORE removing the old
+        // mechanism: an upgraded checkout whose worktree predates the
+        // exclude rule would otherwise read as dirty the moment the
+        // legacy file is gone, and the handoff's clean gate would refuse
+        // every handoff with local_checkout_dirty.
+        await this.ensureWorktreesExcludeRule();
         await fs.unlink(legacyGitignore);
       }
     } catch {
@@ -3599,11 +3699,6 @@ export class GitWorktreeService {
       // nested marker-like name, a late-arriving ignored file) still
       // refuses the removal.
       const exempt = new Set(carriedPaths ?? []);
-      // The daemon's own bookkeeping names, mirroring the anchored
-      // info/exclude rules: the root-level marker and its staged siblings.
-      const markerTmpPattern = new RegExp(
-        `^${WORKTREE_SESSION_FILE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\.[^/]*\\.tmp$`,
-      );
       const isClean = async () => {
         // -z keeps raw bytes: line-based output C-quotes non-ASCII,
         // quotes, and newlines (core.quotepath), and the quoted form
@@ -3644,7 +3739,7 @@ export class GitWorktreeService {
               p.length === 0 ||
               exempt.has(p) ||
               p === WORKTREE_SESSION_FILE ||
-              markerTmpPattern.test(p),
+              WORKTREE_SESSION_TMP_PATTERN.test(p),
           );
       };
       if (!(await isClean())) {
