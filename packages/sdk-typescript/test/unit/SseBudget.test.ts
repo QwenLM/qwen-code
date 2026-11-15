@@ -476,11 +476,15 @@ describe('SseBudgetRegistry.catchUp', () => {
 
   it('throws DaemonHttpError with the daemon error field on non-2xx', async () => {
     const reg = new SseBudgetRegistry(4);
-    const fetchFn = (async () =>
-      new Response(JSON.stringify({ error: 'not found' }), {
-        status: 404,
-        headers: { 'content-type': 'application/json' },
-      })) as typeof globalThis.fetch;
+    const response = new Response(JSON.stringify({ error: 'not found' }), {
+      status: 404,
+      headers: { 'content-type': 'application/json' },
+    });
+    const cancelSpy = vi.spyOn(
+      response.body as ReadableStream<Uint8Array>,
+      'cancel',
+    );
+    const fetchFn = (async () => response) as typeof globalThis.fetch;
 
     const gen = reg.catchUp(
       fetchFn,
@@ -500,15 +504,24 @@ describe('SseBudgetRegistry.catchUp', () => {
     expect((error as DaemonHttpError).message).toContain(
       'GET /session/:id/events: not found',
     );
+    // The error path never reaches the stream reader, so the cycle's
+    // own finally is the body's only teardown: the cancel must have
+    // happened before the error left the generator.
+    expect(cancelSpy).toHaveBeenCalled();
+    cancelSpy.mockRestore();
   });
 
   it('throws DaemonHttpError when the response is not text/event-stream', async () => {
     const reg = new SseBudgetRegistry(4);
-    const fetchFn = (async () =>
-      new Response('<html>proxy</html>', {
-        status: 200,
-        headers: { 'content-type': 'text/html' },
-      })) as typeof globalThis.fetch;
+    const response = new Response('<html>proxy</html>', {
+      status: 200,
+      headers: { 'content-type': 'text/html' },
+    });
+    const cancelSpy = vi.spyOn(
+      response.body as ReadableStream<Uint8Array>,
+      'cancel',
+    );
+    const fetchFn = (async () => response) as typeof globalThis.fetch;
 
     const gen = reg.catchUp(
       fetchFn,
@@ -520,6 +533,10 @@ describe('SseBudgetRegistry.catchUp', () => {
     await expect(collect(gen)).rejects.toThrow(
       'expected content-type text/event-stream',
     );
+    // The mis-typed body must be released by the cycle before the
+    // error propagates — a held body would pin the connection.
+    expect(cancelSpy).toHaveBeenCalled();
+    cancelSpy.mockRestore();
   });
 
   it('ends a silent body within the frame window (wall-clock bound)', async () => {
@@ -589,6 +606,80 @@ describe('SseBudgetRegistry.catchUp', () => {
     );
     await collect(gen);
     expect(epoch).toBe('epoch-42');
+  });
+
+  it('aborts a hanging connect after the connect timeout', async () => {
+    // A fetch that never settles must not park the cycle (and its
+    // context-wide lock) until the TCP layer gives up: the connect
+    // timeout fires on the per-cycle controller and unwinds the
+    // request with an AbortError the retry loop can act on.
+    vi.useFakeTimers();
+    const reg = new SseBudgetRegistry(4);
+    const gen = reg.catchUp(
+      (async (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          const signal = init?.signal;
+          const onAbort = () =>
+            reject(signal?.reason ?? new DOMException('aborted', 'AbortError'));
+          if (signal?.aborted) {
+            onAbort();
+            return;
+          }
+          signal?.addEventListener('abort', onAbort, { once: true });
+        })) as typeof globalThis.fetch,
+      'http://daemon/session/s1/events',
+      {},
+      new AbortController().signal,
+      { value: 10 },
+    );
+    const r = await Promise.race([
+      gen.next().then(
+        () => 'RESOLVED' as const,
+        (e: unknown) => `REJECTED:${(e as Error).name}` as const,
+      ),
+      vi.advanceTimersByTimeAsync(9_000).then(() => 'DEADLINE' as const),
+    ]);
+    expect(r).toBe('REJECTED:AbortError');
+  });
+
+  it('ends the cycle cleanly when the caller aborts mid-cycle', async () => {
+    // A caller abort while the replay body is still open must end the
+    // cycle without throwing: the consumer sees a clean `done`, the
+    // temporary body is cancelled, and no read stays parked.
+    const reg = new SseBudgetRegistry(4);
+    let bodyCancelled = false;
+    const ctrl = new AbortController();
+    const gen = reg.catchUp(
+      async () =>
+        sseResponse(
+          [sseFrame({ v: 1, type: 'session_update', data: {}, id: 1 })],
+          () => {
+            bodyCancelled = true;
+          },
+        ),
+      'http://daemon/session/s1/events',
+      {},
+      ctrl.signal,
+      { value: 0 },
+    );
+    const first = await gen.next();
+    expect(first.done).toBe(false);
+    expect((first.value as DaemonEvent).id).toBe(1);
+    ctrl.abort();
+    const second = await Promise.race([
+      gen.next().then(
+        (result) => result as IteratorResult<DaemonEvent>,
+        (e: unknown) => ({ done: `REJECTED:${(e as Error).name}` }) as never,
+      ),
+      new Promise<never>((_resolve, reject) =>
+        setTimeout(
+          () => reject(new Error('cycle did not end on caller abort')),
+          2_000,
+        ),
+      ),
+    ]);
+    expect(second.done).toBe(true);
+    expect(bodyCancelled).toBe(true);
   });
 });
 
