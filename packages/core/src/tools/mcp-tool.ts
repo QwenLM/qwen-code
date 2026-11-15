@@ -541,8 +541,8 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     // transition alone cannot tell abort damage apart. The owner records its
     // intent before closing the transport; read that instead of a status
     // field, which the tool's client (the raw SDK `Client`) does not have.
-    // A pooled session's shutdown is not in that set: it only releases the
-    // connection and detaches the session, so it records no intent.
+    // Release of an already-evicted pooled entry records nothing: it only
+    // detaches the session, so there is no transition for it to mark.
     //
     // The name-keyed registry also cannot tell two live connections for the
     // same server apart, and the pool keeps one entry per `serverName +
