@@ -20,16 +20,25 @@
  *
  * Controls use the canonical `POST /session/:id/goal` route. This listing stays
  * read-only and only projects each live runtime's current snapshot.
+ *
+ * Two surfaces share the listing: the primary `GET /goals` (bound to the
+ * primary workspace, with its trust gate) and the workspace-qualified
+ * `GET /workspaces/:workspace/goals`, which resolves any registered runtime
+ * and requires trust — the same split the scheduled-tasks routes use, so a
+ * multi-workspace Web Shell can aggregate every project's goals.
  */
 
-import type { Application } from 'express';
+import type { Application, Response } from 'express';
 import type {
   BridgeSessionGoal,
   BridgeSessionSummary,
 } from '@qwen-code/acp-bridge';
 import { AGENT_HOST_SESSION_SOURCE_TYPE } from '../../runtime/agent-session-source.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {
+  requireTrustedWorkspaceRuntime,
+  resolveWorkspaceRuntimeWithLiveCompatibilityFromParam,
   sendGenerationClosedError,
   sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
@@ -48,6 +57,10 @@ export interface RegisterGoalsRoutesDeps {
   bridge: GoalsSessionBridge;
   isWorkspaceTrusted?: () => boolean;
   captureGenerationAssertion?: () => (() => void) | undefined;
+}
+
+export interface RegisterWorkspaceQualifiedGoalsRoutesDeps {
+  workspaceRegistry: WorkspaceRegistry;
 }
 
 /**
@@ -105,6 +118,95 @@ interface GoalView {
   snapshot: BridgeSessionGoal['snapshot'];
 }
 
+/** One resolved listing target: a workspace's live sessions and its bridge. */
+interface GoalsListingTarget {
+  workspaceCwd: string;
+  bridge: GoalsSessionBridge;
+  /** Re-checked before the response so a mid-list generation close 503s. */
+  assertGenerationOpen?: () => void;
+  /** Route name used in diagnostics, so drops are attributed to a surface. */
+  routeLabel: string;
+}
+
+async function respondWithGoals(
+  res: Response,
+  target: GoalsListingTarget,
+): Promise<void> {
+  const { workspaceCwd, bridge, assertGenerationOpen, routeLabel } = target;
+  try {
+    assertGenerationOpen?.();
+    const sessions = bridge
+      .listWorkspaceSessions(workspaceCwd)
+      .filter(
+        (session) => session.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE,
+      );
+    const settled = await allSettledWithLimit(
+      sessions,
+      PROBE_CONCURRENCY,
+      async (session) => ({
+        session,
+        goal: await bridge.getSessionGoal(session.sessionId),
+      }),
+    );
+
+    const goals: GoalView[] = [];
+    const dropped: string[] = [];
+    for (const [index, outcome] of settled.entries()) {
+      // A session that died between the list and the probe simply has no
+      // goal to report. Dropping it keeps one bad session from hiding the
+      // others, but do not drop it silently: an empty page and a page whose
+      // probes all failed look identical from the client.
+      if (outcome.status !== 'fulfilled') {
+        const sessionId = sessions[index]?.sessionId ?? '(unknown)';
+        const reason =
+          outcome.reason instanceof Error
+            ? outcome.reason.message
+            : String(outcome.reason);
+        dropped.push(`${sessionId}: ${reason}`);
+        continue;
+      }
+      const { session, goal } = outcome.value;
+      const record = goal.snapshot.goal;
+      if (!record || record.status === 'complete') continue;
+      goals.push({
+        sessionId: session.sessionId,
+        displayName: session.displayName ?? null,
+        condition: record.objective,
+        iterations: record.turnCount,
+        setAt: record.createdAt,
+        ...(record.lastReason !== undefined
+          ? { lastReason: record.lastReason }
+          : {}),
+        hasActivePrompt: session.hasActivePrompt,
+        snapshot: goal.snapshot,
+      });
+    }
+    if (dropped.length > 0) {
+      writeStderrLine(
+        `qwen serve: ${routeLabel} could not probe ${dropped.length} of ${sessions.length} session(s): ${dropped.join('; ')}`,
+      );
+    }
+
+    // Newest first, matching the scheduled-tasks page.
+    goals.sort((a, b) => b.setAt - a.setAt);
+
+    // `droppedCount` lets the client tell "no goals" apart from "we could not
+    // ask". Without it a brownout looks like an empty workspace, and the user
+    // re-creates goals that are already running.
+    assertGenerationOpen?.();
+    res.status(200).json({ v: 1, goals, droppedCount: dropped.length });
+  } catch (err) {
+    if (sendGenerationClosedError(res, err)) return;
+    writeStderrLine(
+      `qwen serve: ${routeLabel} failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    res.status(500).json({
+      error: 'Failed to list active goals',
+      code: 'goals_read_failed',
+    });
+  }
+}
+
 export function registerGoalsRoutes(
   app: Application,
   deps: RegisterGoalsRoutesDeps,
@@ -117,77 +219,45 @@ export function registerGoalsRoutes(
       return;
     }
     const assertGenerationOpen = deps.captureGenerationAssertion?.();
-    try {
-      assertGenerationOpen?.();
-      const sessions = bridge
-        .listWorkspaceSessions(boundWorkspace)
-        .filter(
-          (session) => session.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE,
-        );
-      const settled = await allSettledWithLimit(
-        sessions,
-        PROBE_CONCURRENCY,
-        async (session) => ({
-          session,
-          goal: await bridge.getSessionGoal(session.sessionId),
-        }),
-      );
+    await respondWithGoals(res, {
+      workspaceCwd: boundWorkspace,
+      bridge,
+      ...(assertGenerationOpen ? { assertGenerationOpen } : {}),
+      routeLabel: 'GET /goals',
+    });
+  });
+}
 
-      const goals: GoalView[] = [];
-      const dropped: string[] = [];
-      for (const [index, outcome] of settled.entries()) {
-        // A session that died between the list and the probe simply has no
-        // goal to report. Dropping it keeps one bad session from hiding the
-        // others, but do not drop it silently: an empty page and a page whose
-        // probes all failed look identical from the client.
-        if (outcome.status !== 'fulfilled') {
-          const sessionId = sessions[index]?.sessionId ?? '(unknown)';
-          const reason =
-            outcome.reason instanceof Error
-              ? outcome.reason.message
-              : String(outcome.reason);
-          dropped.push(`${sessionId}: ${reason}`);
-          continue;
-        }
-        const { session, goal } = outcome.value;
-        const record = goal.snapshot.goal;
-        if (!record || record.status === 'complete') continue;
-        goals.push({
-          sessionId: session.sessionId,
-          displayName: session.displayName ?? null,
-          condition: record.objective,
-          iterations: record.turnCount,
-          setAt: record.createdAt,
-          ...(record.lastReason !== undefined
-            ? { lastReason: record.lastReason }
-            : {}),
-          hasActivePrompt: session.hasActivePrompt,
-          snapshot: goal.snapshot,
-        });
-      }
-      if (dropped.length > 0) {
-        writeStderrLine(
-          `qwen serve: GET /goals could not probe ${dropped.length} of ${sessions.length} session(s): ${dropped.join('; ')}`,
-        );
-      }
+/**
+ * The workspace-qualified `GET /workspaces/:workspace/goals` surface. Each
+ * request resolves `:workspace` (a workspace id or absolute path) to a
+ * registered runtime and requires trust before listing — the same gate the
+ * other qualified routes use. Read-only, like the primary surface; the Web
+ * Shell Goals page fans out over these to aggregate every project's goals.
+ */
+export function registerWorkspaceQualifiedGoalsRoutes(
+  app: Application,
+  deps: RegisterWorkspaceQualifiedGoalsRoutesDeps,
+): void {
+  const { workspaceRegistry } = deps;
 
-      // Newest first, matching the scheduled-tasks page.
-      goals.sort((a, b) => b.setAt - a.setAt);
-
-      // `droppedCount` lets the client tell "no goals" apart from "we could not
-      // ask". Without it a brownout looks like an empty workspace, and the user
-      // re-creates goals that are already running.
-      assertGenerationOpen?.();
-      res.status(200).json({ v: 1, goals, droppedCount: dropped.length });
-    } catch (err) {
-      if (sendGenerationClosedError(res, err)) return;
-      writeStderrLine(
-        `qwen serve: GET /goals failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-      res.status(500).json({
-        error: 'Failed to list active goals',
-        code: 'goals_read_failed',
-      });
-    }
+  app.get('/workspaces/:workspace/goals', async (req, res) => {
+    const runtime = resolveWorkspaceRuntimeWithLiveCompatibilityFromParam(
+      workspaceRegistry,
+      req,
+      res,
+    );
+    if (!runtime) return;
+    if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
+    await respondWithGoals(res, {
+      workspaceCwd: runtime.workspaceCwd,
+      bridge: runtime.bridge,
+      ...(runtime.generationGuard
+        ? {
+            assertGenerationOpen: () => runtime.generationGuard?.assertOpen(),
+          }
+        : {}),
+      routeLabel: `GET /workspaces/${runtime.workspaceId}/goals`,
+    });
   });
 }

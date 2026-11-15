@@ -66,9 +66,10 @@ const DINGTALK: DaemonChannelTypeDescriptor = {
   ],
 };
 
-describe.each(['dingtalk-webhook', 'feishu-webhook'])(
+describe.each(['dingtalk-webhook', 'feishu-webhook', 'wecom-webhook'])(
   '%s outbound-only channel editing',
   (type) => {
+    const signed = type !== 'wecom-webhook';
     const descriptor: DaemonChannelTypeDescriptor = {
       type,
       displayName: type,
@@ -81,7 +82,15 @@ describe.each(['dingtalk-webhook', 'feishu-webhook'])(
           kind: 'secret',
           required: true,
         },
-        { key: 'signingSecret', label: 'Signing secret', kind: 'secret' },
+        ...(signed
+          ? [
+              {
+                key: 'signingSecret',
+                label: 'Signing secret',
+                kind: 'secret' as const,
+              },
+            ]
+          : []),
       ],
     };
 
@@ -99,7 +108,7 @@ describe.each(['dingtalk-webhook', 'feishu-webhook'])(
         config: { type },
         secrets: {
           webhookUrl: { operation: 'replace', value: '$GROUP_WEBHOOK_URL' },
-          signingSecret: { operation: 'clear' },
+          ...(signed ? { signingSecret: { operation: 'clear' } } : {}),
         },
       });
     });
@@ -110,7 +119,9 @@ describe.each(['dingtalk-webhook', 'feishu-webhook'])(
         config: { type },
         secrets: {
           webhookUrl: { present: true, source: 'environment' },
-          signingSecret: { present: true, source: 'literal' },
+          ...(signed
+            ? { signingSecret: { present: true, source: 'literal' as const } }
+            : {}),
         },
         startsWithServe: false,
         runtime: { state: 'stopped' },
@@ -120,21 +131,21 @@ describe.each(['dingtalk-webhook', 'feishu-webhook'])(
         validateChannelEditorDraft(descriptor, draft, [], instance),
       ).toEqual({});
       expect(
-        buildChannelUpsertRequest(descriptor, draft, '1', instance).secrets
-          ?.webhookUrl,
-      ).toEqual({ operation: 'preserve' });
-      expect(
-        buildChannelUpsertRequest(descriptor, draft, '1', instance).secrets
-          ?.signingSecret,
-      ).toEqual({ operation: 'preserve' });
-      draft.secrets.signingSecret = { operation: 'clear' };
-      expect(
-        validateChannelEditorDraft(descriptor, draft, [], instance),
-      ).toEqual({});
-      expect(
-        buildChannelUpsertRequest(descriptor, draft, '1', instance).secrets
-          ?.signingSecret,
-      ).toEqual({ operation: 'clear' });
+        buildChannelUpsertRequest(descriptor, draft, '1', instance).secrets,
+      ).toEqual({
+        webhookUrl: { operation: 'preserve' },
+        ...(signed ? { signingSecret: { operation: 'preserve' } } : {}),
+      });
+      if (signed) {
+        draft.secrets.signingSecret = { operation: 'clear' };
+        expect(
+          validateChannelEditorDraft(descriptor, draft, [], instance),
+        ).toEqual({});
+        expect(
+          buildChannelUpsertRequest(descriptor, draft, '1', instance).secrets
+            ?.signingSecret,
+        ).toEqual({ operation: 'clear' });
+      }
       draft.secrets.webhookUrl = { operation: 'clear' };
       expect(
         validateChannelEditorDraft(descriptor, draft, [], instance),
@@ -1238,10 +1249,10 @@ describe('GitHub watch events require bound delivery', () => {
     return draft;
   }
 
-  it('refuses a watch selection while bound delivery is off', () => {
+  it('accepts the deprecated watch selection while bound delivery is off', () => {
     expect(
       validateChannelEditorDraft(BOUND, draftWithEvents('ci_failure'), []),
-    ).toEqual({ prWatchEvents: 'requiresBoundDelivery' });
+    ).toEqual({});
   });
 
   it('allows the selection once bound delivery is on', () => {
@@ -1256,10 +1267,12 @@ describe('GitHub watch events require bound delivery', () => {
     );
   });
 
-  it('reports invalidOption before the delivery dependency', () => {
+  it('accepts an unknown deprecated watch value', () => {
+    // The daemon accepts the deprecated key and warns at connect; blocking the
+    // save here would leave the editor stricter than the authority it mirrors.
     expect(
       validateChannelEditorDraft(BOUND, draftWithEvents('typo_event'), []),
-    ).toEqual({ prWatchEvents: 'invalidOption' });
+    ).toEqual({});
   });
 });
 
