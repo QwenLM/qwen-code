@@ -25,6 +25,7 @@ import {
   type PrWatchIdentity,
   type PrWatchState,
 } from './pr-watch-store.js';
+import type { BoundPromptLanguage } from '@qwen-code/channel-base';
 import { pullRequestKey } from './session-pr-url.js';
 
 /**
@@ -83,6 +84,38 @@ const TRANSITION_KEY_MAX_LENGTH = 200;
 const MAX_ROLE_GROUP_SUFFIX_LENGTH = ':untyped'.length;
 const FAILING_CHECKS_IN_SUMMARY = 5;
 
+/**
+ * The transition summaries, per language. Rendered at detection time and
+ * persisted, so a pending event keeps the language of its detection even when
+ * the daemon's locale changes before it is delivered.
+ *
+ * `state_change` is absent: its summary is the platform's own state token,
+ * which the shared contract never translates.
+ */
+const PR_WATCH_SUMMARY_COPY: Readonly<
+  Record<
+    BoundPromptLanguage,
+    {
+      headChange(prev: string, next: string): string;
+      ciFailing(names: readonly string[]): string;
+      mergeConflict(): string;
+    }
+  >
+> = {
+  en: {
+    headChange: (prev, next) => `head changed ${prev} → ${next}`,
+    ciFailing: (names) =>
+      names.length > 0 ? `CI failing: ${names.join(', ')}` : 'CI failing',
+    mergeConflict: () => 'merge conflict detected',
+  },
+  zh: {
+    headChange: (prev, next) => `head 前进 ${prev} → ${next}`,
+    ciFailing: (names) =>
+      names.length > 0 ? `CI 失败：${names.join('、')}` : 'CI 失败',
+    mergeConflict: () => '检测到合并冲突',
+  },
+};
+
 function transitionKey(
   identity: PrWatchIdentity,
   type: PrTransitionType,
@@ -121,7 +154,13 @@ export function detectPrTransitions(
    * and the listing write) so the two producers cannot drift apart.
    */
   events?: ReadonlySet<PrTransitionType>,
+  /**
+   * The language the summaries are rendered in. Absent means English, which
+   * keeps every existing caller byte-identical.
+   */
+  language?: BoundPromptLanguage,
 ): PrWatchDetection {
+  const summaryCopy = PR_WATCH_SUMMARY_COPY[language ?? 'en'];
   const transitions: DetectedPrTransition[] = [];
   const prevHead = previous?.headSha;
   // Once a file has a headSha it is baselined; a slim-only file (state and
@@ -143,7 +182,7 @@ export function detectPrTransitions(
           `${prevHead}→${observation.headSha}`,
           detectedAt,
         ),
-        summary: `head changed ${prevHead} → ${observation.headSha}`,
+        summary: summaryCopy.headChange(prevHead, observation.headSha),
         detectedAt,
         headSha: observation.headSha,
       });
@@ -172,8 +211,7 @@ export function detectPrTransitions(
           observation.headSha,
           detectedAt,
         ),
-        summary:
-          names.length > 0 ? `CI failing: ${names.join(', ')}` : 'CI failing',
+        summary: summaryCopy.ciFailing(names),
         detectedAt,
       });
     }
@@ -192,7 +230,7 @@ export function detectPrTransitions(
           observation.headSha,
           detectedAt,
         ),
-        summary: 'merge conflict detected',
+        summary: summaryCopy.mergeConflict(),
         detectedAt,
       });
     }
@@ -314,6 +352,8 @@ export interface PrWatchObservationDeps {
   env?: Readonly<Record<string, string | undefined>>;
   /** Test seam; defaults to {@link fetchGitHubPullRequestView}. */
   viewPullRequest?: typeof fetchGitHubPullRequestView;
+  /** The language the detected summaries are persisted in. Absent is English. */
+  language?: BoundPromptLanguage;
   /**
    * Asserts the swept workspace's generation is still open before each view,
    * so a retired generation never runs `gh` with its stale env (the refresh
@@ -544,6 +584,7 @@ export async function observeWorkspacePrBindings(
           observationFromView(result.view),
           detectedAt,
           target.events,
+          deps.language,
         );
         if (
           (previous?.pending?.length ?? 0) + detection.transitions.length >
@@ -574,6 +615,8 @@ export interface PrWatchObservationTickDeps {
   /** Per-host subscription; see {@link PrWatchObservationDeps.eventsForHost}. */
   eventsForHost?: (host: string) => ReadonlySet<PrTransitionType>;
   viewPullRequest?: typeof fetchGitHubPullRequestView;
+  /** The language the detected summaries are persisted in. Absent is English. */
+  language?: BoundPromptLanguage;
   now?: () => number;
   log?: (message: string) => void;
 }
@@ -661,6 +704,7 @@ export async function runPrWatchObservationTick(
             ? undefined
             : runtime.env.effectiveEnv,
         viewPullRequest: deps.viewPullRequest,
+        ...(deps.language ? { language: deps.language } : {}),
         assertGenerationOpen: () => runtime.generationGuard?.assertOpen(),
         now,
         log,

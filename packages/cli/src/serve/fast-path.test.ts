@@ -226,8 +226,18 @@ function pickServeFastPathComparable(
   if (settings.env) {
     out.env = settings.env;
   }
-  if (settings.general?.chatRecording !== undefined) {
-    out.general = { chatRecording: settings.general.chatRecording };
+  if (
+    settings.general?.chatRecording !== undefined ||
+    settings.general?.language !== undefined
+  ) {
+    out.general = {
+      ...(settings.general.chatRecording !== undefined
+        ? { chatRecording: settings.general.chatRecording }
+        : {}),
+      ...(settings.general.language !== undefined
+        ? { language: settings.general.language }
+        : {}),
+    };
   }
   if (settings.advanced?.excludedEnvVars !== undefined) {
     out.advanced = {

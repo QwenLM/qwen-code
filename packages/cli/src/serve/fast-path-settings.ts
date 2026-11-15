@@ -51,7 +51,10 @@ export type ServeFastPathSettings = Pick<
   Settings,
   'advanced' | 'context' | 'env' | 'security' | 'tools'
 > & {
-  general?: Pick<NonNullable<Settings['general']>, 'chatRecording'>;
+  general?: Pick<
+    NonNullable<Settings['general']>,
+    'chatRecording' | 'language'
+  >;
   policy?: ServeFastPathPolicyInput;
   serve?: {
     channels?: unknown;
@@ -526,8 +529,17 @@ function pickFastPathSettings(
         'Serve fast path settings general.chatRecording must be a boolean.',
       );
     }
-    if (chatRecording !== undefined) {
-      out.general = { chatRecording };
+    const language = general['language'];
+    if (language !== undefined && typeof language !== 'string') {
+      throw new Error(
+        'Serve fast path settings general.language must be a string.',
+      );
+    }
+    if (chatRecording !== undefined || language !== undefined) {
+      out.general = {
+        ...(chatRecording !== undefined ? { chatRecording } : {}),
+        ...(language !== undefined ? { language } : {}),
+      };
     }
   }
 
