@@ -1926,6 +1926,54 @@ describe('serve fast path environment bootstrap', () => {
     expect(settings.advanced?.runtimeOutputDir).toBe('.qwen-runtime');
   });
 
+  it('carries general.language so the daemon can resolve the prompt locale', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-language-')),
+    );
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ general: { language: 'zh' } }),
+    );
+
+    const settings = loadServeFastPathSettings(tempWorkspace);
+
+    expect(settings.general?.language).toBe('zh');
+  });
+
+  it('rejects a non-string general.language', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-language-bad-')),
+    );
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ general: { language: 42 } }),
+    );
+
+    expect(() => loadServeFastPathSettings(tempWorkspace)).toThrow(
+      'general.language must be a string',
+    );
+  });
+
+  it('keeps chatRecording when language is also set', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-language-both-')),
+    );
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ general: { chatRecording: false, language: 'zh-CN' } }),
+    );
+
+    const settings = loadServeFastPathSettings(tempWorkspace);
+
+    expect(settings.general).toEqual({
+      chatRecording: false,
+      language: 'zh-CN',
+    });
+  });
+
   it('retains unrelated boot settings when workspace startup channels are malformed', () => {
     useTempQwenHome();
     tempWorkspace = realpathSync(
