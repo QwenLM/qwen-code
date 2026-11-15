@@ -82,6 +82,9 @@ Every new field is optional and defaults to `en`. A caller that does not set it 
 4. **Keys are language-independent.** A transition key is built from identity, type and sha/state, never from the summary, so localizing cannot change idempotency or deduplication.
 5. **Structural markers stay English.** The shared contract keeps field labels and the trusted-block label English in every language; this increment does not touch them.
 
+6. **Platform data keeps its bytes; the prose around it localizes.** The shas interpolate unchanged and check names keep the `, ` join in both languages, as the prompt-language design pins. `state_change` localizes too: its `PR …` wrapper is authored prose, not the platform token, so a zh daemon reads `PR 已合并` / `PR 已关闭` while the transition key still uses the raw state pair.
+7. **A bad `general.language` is dropped, not thrown.** The fast-path reader's own policy is to pass values through and let consumers validate, because throwing discards the whole summary — taking the permission policy and the PR-watch subscription with it. `resolveChannelLocale` already reads a non-string as English, so the reader drops the value and the rest of the summary survives.
+
 ## Constraints and risks
 
 - The locale is frozen at boot. An operator who changes `general.language` sees the new language only after a daemon restart, which is the same trade the channel lane already documents.

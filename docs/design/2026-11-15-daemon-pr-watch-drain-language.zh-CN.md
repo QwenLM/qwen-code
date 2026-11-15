@@ -82,6 +82,9 @@
 4. **key 与语言无关。** 转换 key 由身份、类型与 sha/状态构成，绝不由摘要构成，因此本地化不会改变幂等性或去重。
 5. **结构性标记保持英文。** 共享契约在每种语言下都保持字段标签与 trusted-block 标签为英文；本增量不触碰它们。
 
+6. **平台数据保持字节，其周围的散文本地化。** sha 原样插值，检查名在两种语言下都保持 `, ` 连接，这是 prompt-language 设计钉住的。`state_change` 也本地化：其 `PR …` 外壳是撰写的散文、不是平台 token，因此 zh daemon 读到 `PR 已合并` / `PR 已关闭`，而转换 key 仍用原始状态对。
+7. **坏的 `general.language` 被丢弃，而不是抛错。** fast-path 读取器自身的政策是把值传过去、由消费方校验，因为抛错会丢弃整个 summary——把权限策略与 PR-watch 订阅一起带走。`resolveChannelLocale` 本就把非字符串读作英文，因此读取器丢弃该值，summary 的其余部分存活。
+
 ## 约束与风险
 
 - locale 在启动时冻结。修改 `general.language` 的运维者只有在 daemon 重启后才看到新语言，这与 channel 车道已记录的取舍相同。

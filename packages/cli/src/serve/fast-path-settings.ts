@@ -529,12 +529,11 @@ function pickFastPathSettings(
         'Serve fast path settings general.chatRecording must be a boolean.',
       );
     }
-    const language = general['language'];
-    if (language !== undefined && typeof language !== 'string') {
-      throw new Error(
-        'Serve fast path settings general.language must be a string.',
-      );
-    }
+    // Tolerated, not thrown: resolveChannelLocale already reads a non-string
+    // as English, and throwing here would discard the whole summary — taking
+    // the PR-watch subscription and the permission policy with it.
+    const language =
+      typeof general['language'] === 'string' ? general['language'] : undefined;
     if (chatRecording !== undefined || language !== undefined) {
       out.general = {
         ...(chatRecording !== undefined ? { chatRecording } : {}),

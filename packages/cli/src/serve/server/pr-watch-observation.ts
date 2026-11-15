@@ -89,8 +89,10 @@ const FAILING_CHECKS_IN_SUMMARY = 5;
  * persisted, so a pending event keeps the language of its detection even when
  * the daemon's locale changes before it is delivered.
  *
- * `state_change` is absent: its summary is the platform's own state token,
- * which the shared contract never translates.
+ * Platform-derived values keep their bytes: the shas interpolate unchanged, and
+ * check names keep the `, ` join in both languages, as the prompt-language
+ * design pins. Only the prose around them is localized — including
+ * `state_change`, whose `PR …` wrapper is authored prose, not the token.
  */
 const PR_WATCH_SUMMARY_COPY: Readonly<
   Record<
@@ -99,6 +101,7 @@ const PR_WATCH_SUMMARY_COPY: Readonly<
       headChange(prev: string, next: string): string;
       ciFailing(names: readonly string[]): string;
       mergeConflict(): string;
+      stateChange(state: string): string;
     }
   >
 > = {
@@ -107,12 +110,14 @@ const PR_WATCH_SUMMARY_COPY: Readonly<
     ciFailing: (names) =>
       names.length > 0 ? `CI failing: ${names.join(', ')}` : 'CI failing',
     mergeConflict: () => 'merge conflict detected',
+    stateChange: (state) => `PR ${state}`,
   },
   zh: {
     headChange: (prev, next) => `head 变更 ${prev} → ${next}`,
     ciFailing: (names) =>
-      names.length > 0 ? `CI 失败：${names.join('、')}` : 'CI 失败',
+      names.length > 0 ? `CI 失败：${names.join(', ')}` : 'CI 失败',
     mergeConflict: () => '检测到合并冲突',
+    stateChange: (state) => (state === 'merged' ? 'PR 已合并' : 'PR 已关闭'),
   },
 };
 
@@ -244,7 +249,7 @@ export function detectPrTransitions(
           `${previous.state}→${observation.state}`,
           detectedAt,
         ),
-        summary: `PR ${observation.state}`,
+        summary: summaryCopy.stateChange(observation.state),
         detectedAt,
       });
     }

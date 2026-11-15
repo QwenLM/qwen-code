@@ -2780,28 +2780,16 @@ describe('startSessionPrRefreshTimer', () => {
     const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
     const registry = createWorkspaceRegistry([trustedRuntime]);
     await seedPendingBinding(trustedRuntime, SESSION_A, 42);
-    const watchDir = await fsp.mkdtemp(
-      path.join(os.tmpdir(), 'qwen-pr-watch-drain-now-nodeps-'),
-    );
-    // A leftover watch file with an undelivered transition and a live binder.
-    // Enablement is deps presence, so reading the seam and finding it
-    // unprovisioned must stop delivery — not merely stop at the seam read.
-    // The entry has to survive untouched for a successor that does have deps.
-    const identity = { host: 'github.com', repo: 'o/r', number: 42 };
-    const pending = {
-      type: 'ci_failure' as const,
-      key: 'leftover-ci',
-      summary: 'CI failing: build',
-      detectedAt: '2026-08-01T00:00:00.000Z',
-    };
-    writePrWatchStateSync(watchDir, identity, {
-      pr: identity,
-      state: 'open',
-      headSha: 'a'.repeat(40),
-      checks: 'failing',
-      pending: [pending],
-    });
+    // The drain's watch directory has exactly one source — drainDeps.watchDir,
+    // reached only after the deps gate — so a fixture cannot place a file where
+    // a deps-less drain would look. Pin the effects instead, the way the tick's
+    // sibling case does: no owner claim and no watch-file write. A drainNow
+    // that fell back to a default directory and delivered a previous owner's
+    // entry would have to claim and write, and this would redden.
     const getPrDrainDeps = vi.fn(() => undefined);
+    const store = await import('./pr-watch-store.js');
+    const claim = vi.spyOn(store, 'claimPrWatchOwnershipSync');
+    const write = vi.spyOn(store, 'writePrWatchStateSync');
     const handle = startSessionPrRefreshTimer({
       workspaceRegistry: registry,
       env: {},
@@ -2810,14 +2798,12 @@ describe('startSessionPrRefreshTimer', () => {
     try {
       await handle?.drainNow(trustedCwd);
       expect(getPrDrainDeps).toHaveBeenCalled();
-      const after = readPrWatchStateSync(watchDir, identity);
-      expect(after.kind).toBe('state');
-      if (after.kind !== 'state') throw new Error('watch file vanished');
-      expect(after.state.pending).toEqual([pending]);
-      expect(after.state.delivered ?? []).toEqual([]);
+      expect(claim).not.toHaveBeenCalled();
+      expect(write).not.toHaveBeenCalled();
     } finally {
       handle?.dispose();
-      await removeTempTree(watchDir);
+      claim.mockRestore();
+      write.mockRestore();
     }
   });
 

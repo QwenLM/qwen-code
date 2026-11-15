@@ -1941,19 +1941,29 @@ describe('serve fast path environment bootstrap', () => {
     expect(settings.general?.language).toBe('zh');
   });
 
-  it('rejects a non-string general.language', () => {
+  it('tolerates a non-string general.language without discarding the summary', () => {
+    // Throwing here would take the whole summary down — the permission policy
+    // and the PR-watch subscription with it — so the reader drops the bad value
+    // and resolveChannelLocale reads the absence as English.
     const qwenHome = useTempQwenHome();
-    tempWorkspace = realpathSync(
+    const ws = realpathSync(
       mkdtempSync(join(os.tmpdir(), 'qws-fast-path-language-bad-')),
     );
+    tempWorkspace = ws;
     writeFileSync(
       join(qwenHome, 'settings.json'),
-      JSON.stringify({ general: { language: 42 } }),
+      JSON.stringify({
+        general: { language: 42 },
+        policy: { permissionStrategy: 'consensus', consensusQuorum: 3 },
+        advanced: { runtimeOutputDir: '.runtime' },
+      }),
     );
 
-    expect(() => loadServeFastPathSettings(tempWorkspace)).toThrow(
-      'general.language must be a string',
-    );
+    const settings = loadServeFastPathSettings(ws);
+
+    expect(settings.general?.language).toBeUndefined();
+    expect(settings.policy?.permissionStrategy).toBe('consensus');
+    expect(settings.advanced?.runtimeOutputDir).toBe('.runtime');
   });
 
   it('keeps chatRecording when language is also set', () => {
