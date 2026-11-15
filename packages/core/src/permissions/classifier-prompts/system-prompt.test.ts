@@ -14,6 +14,7 @@ import {
   BUILTIN_SOFT_DENY,
   STAGE1_SUFFIX,
   STAGE2_SUFFIX,
+  MAIN_MODEL_SUFFIX,
 } from './system-prompt.js';
 import { ANNOTATION_KEYS } from '../../tools/mcp-classifier-input.js';
 import type { Config } from '../../config/config.js';
@@ -26,6 +27,16 @@ function makeConfig(settings: AutoModeSettings): Config {
 
 const promptFor = (settings: AutoModeSettings = {}) =>
   buildClassifierSystemPrompt(makeConfig(settings));
+
+it('requests an independent main-model verdict without inventing a fast block', () => {
+  expect(MAIN_MODEL_SUFFIX).toContain('timed out without producing a verdict');
+  expect(MAIN_MODEL_SUFFIX).toContain('Independently evaluate');
+  expect(MAIN_MODEL_SUFFIX).toContain('using the rules above');
+  expect(MAIN_MODEL_SUFFIX).toContain('shouldBlock=false');
+  expect(MAIN_MODEL_SUFFIX).toContain('shouldBlock=true');
+  expect(MAIN_MODEL_SUFFIX).toContain('reason');
+  expect(MAIN_MODEL_SUFFIX).not.toContain('flagged this as potentially unsafe');
+});
 
 function expectContainsAll(prompt: string, needles: readonly string[]) {
   for (const needle of needles) {

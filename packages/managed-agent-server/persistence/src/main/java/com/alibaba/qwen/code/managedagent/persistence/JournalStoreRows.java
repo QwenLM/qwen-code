@@ -120,6 +120,16 @@ final class JournalStoreRows {
         return source != null && jdbc.getDataSource() == source;
     }
 
+    /** The Session's creator actor id; empty when the row or its key is absent. */
+    String creatorActor(String tenantId, String sessionId) {
+        return jdbc.query("SELECT creator_actor_key FROM ma_session"
+                        + " WHERE tenant_id = ? AND session_id = ?",
+                (result, row) -> {
+                    byte[] actor = result.getBytes("creator_actor_key");
+                    return actor == null ? "" : new String(actor, StandardCharsets.UTF_8);
+                }, tenantId, sessionId).stream().findFirst().orElse("");
+    }
+
     RestoreHead restoreHead(HeadRow head) {
         boolean renewed = "active".equals(head.activationPhase()) && !jdbc.queryForList(
                 "SELECT 1 FROM ma_session_journal_tx WHERE tenant_id = ? AND session_id = ?"

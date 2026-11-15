@@ -964,6 +964,7 @@ public class ManagedAgentProperties
         private String isolationClass = "session";
         private String boundSessionIsolationClass = "session";
         private boolean toolMeasurements;
+        private boolean webTerminal;
         private boolean sessionCreateWarm;
         private String stateDirectory = "";
         private boolean durableLocalProcess = true;
