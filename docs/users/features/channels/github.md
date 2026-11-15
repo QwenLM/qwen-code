@@ -266,8 +266,10 @@ thread is re-read once the turn settles.
   label `[Operator instruction — trusted]` and `Source:`) and platform-derived
   values (PR titles, comment bodies, check names) are never translated, and
   operator templates render verbatim in the language they were written in.
-  The language is read at channel startup; a watch summary already detected
-  keeps the language it was rendered with until it is delivered.
+  The channel reads the language at startup for the prompts it composes
+  itself. PR-state watch summaries are composed by the daemon's PR-state
+  watch, which reads the language once at daemon boot; a summary already
+  detected keeps the language it was rendered with until it is delivered.
 - Comment sender, repository and pairing gates still apply before delivery.
   When several sessions are bound to the same PR, the most recently updated
   non-archived session wins; channel-owned sessions are never candidates. With

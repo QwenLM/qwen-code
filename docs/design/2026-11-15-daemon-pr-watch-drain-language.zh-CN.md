@@ -103,7 +103,7 @@
 - 单元（启动设置与接线）：fast-path 读取器带出 `general.language`，并在不丢弃 summary 的前提下丢掉非字符串；受信任 workspace 的值覆盖 user 作用域，不受信任 workspace 的值被忽略（互为镜像臂，因此「完全忽略 workspace」无法让两者同时通过）；以 `general.language: zh` 与一个事件订阅真实启动 serve，解析出的 locale 到达 `getPrWatchDeps()` 与 `getPrDrainDeps()` 两者。
 - 单元（refresh）：两个 no-deps 用例通过对 store 下 spy 来断言其名字声称的效果——既不认领 owner 记录，也不写 watch 文件。夹具无法把文件种在无 deps 的 drain 会去看的位置，因为 `drainNow` 在 deps 门处返回，早于任何目录被解析。
 - 单元（adapter）：弃用告警测试同时断言 `prWatchLimit` 与 `prWatchBudgetReserve`，含一个只设 `prWatchLimit` 的用例。
-- 真实场景：场景套件用真实临时 watch 目录、真实 gh 子进程与真实 admission 驱动已发布的 observation 与 drain，locale 设在 deps 上，断言两种语言下投递的提示词文本。另有一个全链路探针从真实设置文件驱动已发布的解析器与 deps 构造器，因此启动路径也被覆盖。另一个用例在检测与投递之间切换 locale，断言同一条提示词里英文信封包着中文摘要。
+- 真实场景：场景套件用真实临时 watch 目录、真实 gh 子进程与真实 admission 驱动已发布的 observation 与 drain，locale 设在 deps 上，断言两种语言下投递的提示词文本。启动路径本身由上面的 serve 启动用例与读取器用例覆盖；本增量另跑了一个本地全链路探针（属验证探针，不是入库用例），从真实设置文件驱动已发布的解析器与 deps 构造器。另一个用例在检测与投递之间切换 locale，断言同一条提示词里英文信封包着中文摘要。
 
 ## 验收标准
 
