@@ -4,7 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -292,6 +298,44 @@ describe('managed DingTalk adapter inbound', () => {
     );
     await adapter.tick();
     expect(plane.submit.map((event) => event.senderId)).toEqual(['staff-1']);
+    await adapter.disconnect();
+  });
+
+  it('upgrades a pre-field state file without poisoning instanceRefusals (R2-8)', async () => {
+    const cwd = tempCwd();
+    const plane = fakeControlPlane();
+    const fake = fakeDeps();
+    const adapter = new ManagedDingtalkAdapter({
+      name: 'ding-1',
+      cwd,
+      config: CONFIG,
+      controlPlane: plane.controlPlane,
+      deps: fake.deps,
+      pollLoop: false,
+    });
+    // A state file written before instanceRefusals existed: the field is absent.
+    const store = (
+      adapter as unknown as { store: { directory: string; file: string } }
+    ).store;
+    mkdirSync(store.directory, { recursive: true });
+    writeFileSync(
+      store.file,
+      JSON.stringify({
+        version: 1,
+        generation: 1,
+        pending: [],
+        outbound: [],
+        recent: [],
+        webhooks: {},
+      }),
+    );
+    await adapter.connect();
+    plane.setRefuseSubmit({ status: 404, code: 'workspace_not_found' });
+    fake.push('m1', messageData({ msgId: 'm1' }));
+    await adapter.tick();
+    // The first refusal increments the absent counter to 1, never NaN.
+    const persisted = JSON.parse(readFileSync(store.file, 'utf8'));
+    expect(persisted.instanceRefusals).toBe(1);
     await adapter.disconnect();
   });
 
