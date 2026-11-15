@@ -646,30 +646,44 @@ cat "\${RUNNER_TEMP}/pulls.json"
       expect(evaluate(String(jobs.file_issue.if), needs)).toBe(true);
     });
 
-    it('does not double-file when the rerun was skipped rather than attempted', () => {
-      // A skipped rerun is a provisional or unreadable-annotation run, and
-      // both file through their own destination path. `!= 'success'` here
-      // would file every one of them a second time.
+    it('files a deferred timeout whose rerun job died without dispatching', () => {
+      // `rerun_infra` runs a blocking dispatch under a 5-minute cap, and a
+      // job that reaches a cap concludes `cancelled` — the premise this PR
+      // is built on. `== 'failure'` here left a deferred occurrence whose
+      // rerun job ended `cancelled` or `timed_out` with no issue, no comment
+      // and no rerun, so the arm takes the neighbouring clause's
+      // `!= 'success'`. A rerun that DID start converges into the same issue
+      // through the signature dedupe.
       const evaluate = (condition, needs) =>
         new Function('needs', 'always', `return (${condition.slice(3, -2)});`)(
           needs,
           () => true,
         );
-      const needs = {
-        analyze: {
-          result: 'success',
-          outputs: {
-            infra_only: 'false',
-            file_issue: 'false',
-            rerun_pending: 'true',
-            cancellation_kind: 'timeout',
-            timeout_attempts_exhausted: 'false',
-            provisional: 'false',
-          },
-        },
-        rerun_infra: { result: 'skipped' },
+      const outputs = {
+        infra_only: 'false',
+        file_issue: 'false',
+        rerun_pending: 'true',
+        cancellation_kind: 'timeout',
+        timeout_attempts_exhausted: 'false',
+        provisional: 'false',
       };
-      expect(evaluate(String(jobs.file_issue.if), needs)).toBe(false);
+      for (const result of ['failure', 'cancelled', 'timed_out']) {
+        expect(
+          evaluate(String(jobs.file_issue.if), {
+            analyze: { result: 'success', outputs },
+            rerun_infra: { result },
+          }),
+        ).toBe(true);
+      }
+      // A rerun that ran owns the outcome: its own completion re-enters this
+      // workflow and reports there, so the deferred occurrence must stay
+      // silent here.
+      expect(
+        evaluate(String(jobs.file_issue.if), {
+          analyze: { result: 'success', outputs },
+          rerun_infra: { result: 'success' },
+        }),
+      ).toBe(false);
     });
 
     it('degrades to no destination when the PR listing fails', () => {
@@ -778,10 +792,16 @@ fi
     // id 9001, so a URL built from the wrong variable 404s) and applies the
     // caller's --jq with real jq, so both the id extraction and the message
     // projection are exercised (review R1-7).
-    const classifyCancel = (messages, { unreadable = false } = {}) => {
+    const classifyCancel = (
+      messages,
+      { unreadable = false, withFailedJob = false, inline = false } = {},
+    ) => {
       const fixture = JSON.stringify(
         (messages ?? []).map((m) => ({ message: m })),
       );
+      const jobsFixture = withFailedJob
+        ? '{"jobs":[{"id":91234,"conclusion":"cancelled","steps":[{"name":"Set up job"}],"check_run_url":"https://api.github.com/repos/QwenLM/qwen-code/check-runs/9001"},{"id":91235,"conclusion":"failure","steps":[{"name":"Run tests","conclusion":"failure"}],"check_run_url":"https://api.github.com/repos/QwenLM/qwen-code/check-runs/9002"}],"total_count":2}'
+        : '{"jobs":[{"id":91234,"conclusion":"cancelled","steps":[{"name":"Set up job"}],"check_run_url":"https://api.github.com/repos/QwenLM/qwen-code/check-runs/9001"}],"total_count":1}';
       const ghScript = `#!/usr/bin/env bash
 if [[ "$*" == */check-runs/*/annotations* ]]; then
   ${unreadable ? 'exit 1' : ''}
@@ -796,12 +816,22 @@ if [[ "$*" == */check-runs/*/annotations* ]]; then
   exit 0
 fi
 if [[ "$*" == */attempts/*/jobs* ]]; then
-  printf '%s\\n' '{"jobs":[{"id":91234,"conclusion":"cancelled","steps":[{"name":"Set up job"}],"check_run_url":"https://api.github.com/repos/QwenLM/qwen-code/check-runs/9001"}],"total_count":1}'
+  printf '%s\\n' '${jobsFixture}'
   exit 0
 fi
 printf '%s\\n' '1'
 `;
-      return detect('1', { RUN_CONCLUSION: 'cancelled' }, { ghScript });
+      return detect(
+        '1',
+        {
+          RUN_CONCLUSION: 'cancelled',
+          // The workflow binds CONCLUSION and RUN_CONCLUSION to the same
+          // event field, so setting CONCLUSION exercises the inline
+          // annotation loop that precedes the shared classifier.
+          ...(inline ? { CONCLUSION: 'cancelled' } : {}),
+        },
+        { ghScript },
+      );
     };
 
     it('pins the RUN_CONCLUSION env input of the live step', () => {
@@ -851,6 +881,23 @@ printf '%s\\n' '1'
       ]);
       expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
       expect(resolved.stdout).toContain('concurrency supersede');
+    });
+
+    it('does not call a cancelled run with a failed job a supersede', () => {
+      // A lane can conclude failure before the cancelling event reaches the
+      // rest of the run. The inline annotation loop reads only the cancelled
+      // jobs, so its readable, timeout-free view of such a run reads as a
+      // deliberate supersede and the regression is dropped before the shared
+      // classifier — which admits the failed job and fails open — ever runs
+      // (#16280 R3-1).
+      const resolved = classifyCancel(['The operation was canceled.'], {
+        inline: true,
+        withFailedJob: true,
+      });
+      expect(resolved.output).toBe(
+        'superseded=false\nprovisional=false\ncancellation_kind=none\ntimeout_attempts_exhausted=false\ntimeout_annotations_readable=false\n',
+      );
+      expect(resolved.stdout).toContain('failing open');
     });
 
     it('skips a PR-triggered cancellation without trusting contributor annotations', () => {
@@ -3498,6 +3545,25 @@ printf '%s\\n' '{"jobs":[]}'
       );
     });
 
+    it('reruns only failed jobs for a timeout the destination did not grant', () => {
+      // The whole-run POST is the expensive arm, and a timeout the classifier
+      // merely GUESSED (unreadable annotations) reaches this job through the
+      // infra arm — `file_issue=true` with `rerun_pending=false` — when the
+      // run also carries infra-classified failed jobs. Keying the branch on
+      // the classification alone replayed the whole matrix on that guess,
+      // exactly what the destination step refuses to buy.
+      expect(rerunJob.steps[0].env.RERUN_PENDING).toBe(
+        '${{ needs.analyze.outputs.rerun_pending }}',
+      );
+      const run = oneLine(rerunJob.steps[0].run);
+      const guard = run.indexOf('"${RERUN_PENDING}" == \'true\'');
+      const wholeRun = run.indexOf('/rerun"');
+      const failedJobs = run.indexOf('/rerun-failed-jobs"');
+      expect(guard).toBeGreaterThan(-1);
+      expect(wholeRun).toBeGreaterThan(guard);
+      expect(failedJobs).toBeGreaterThan(wholeRun);
+    });
+
     it('files the issue unless the infra rerun actually ran', () => {
       // rerun_infra is SKIPPED on the ordinary path, and a skipped need is
       // not a success — without always() the file job would silently never
@@ -4108,6 +4174,25 @@ describe('timeout classification wiring', () => {
     expect(stepEnv('analyze', 'download').CANCELLATION_KIND).toBe(
       '${{ steps.live.outputs.cancellation_kind }}',
     );
+  });
+
+  it('carries the timeout flags on the analyze job outputs', () => {
+    // The step-level tests spawn each step with the value already in its
+    // environment, so deleting the `jobs.analyze.outputs` hop keeps them
+    // green while every `needs.analyze.outputs.*` consumer — the rerun gate,
+    // the filing gate, the writer — reads empty and the timeout path
+    // disappears silently.
+    const outputs = yml.jobs.analyze.outputs;
+    expect(outputs.cancellation_kind).toBe(
+      '${{ steps.live.outputs.cancellation_kind }}',
+    );
+    expect(outputs.timeout_attempts_exhausted).toBe(
+      '${{ steps.live.outputs.timeout_attempts_exhausted }}',
+    );
+    expect(outputs.timeout_annotations_readable).toBe(
+      '${{ steps.live.outputs.timeout_annotations_readable }}',
+    );
+    expect(outputs.provisional).toBe('${{ steps.live.outputs.provisional }}');
   });
 });
 

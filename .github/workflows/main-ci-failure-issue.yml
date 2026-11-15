@@ -181,6 +181,14 @@ jobs:
                 fi
                 annotations="${annotations}${job_annotations}"$'\n'
               done < <(jq -r '.jobs[] | select(.conclusion == "cancelled") | .check_run_url // ""' <<< "${jobs_json}")
+              # A cancelled run can still carry a job that concluded failure
+              # or timed_out: a lane dies, then the cancelling event reaches
+              # the rest of the run. This loop reads only the cancelled jobs'
+              # annotations, so a real failure under the cancellation is
+              # invisible here — declaring a supersede from that view would
+              # drop the regression before the shared classifier below,
+              # which does admit the failed job, ever runs (#16280 R3-1).
+              failed_job_count="$(jq -r '[.jobs[]?] | map(select(.conclusion == "failure" or .conclusion == "timed_out")) | length' <<< "${jobs_json}")"
             else
               annotations_readable=false
             fi
@@ -191,6 +199,10 @@ jobs:
             elif [[ "${annotations_readable}" != 'true' ]]; then
               echo "::warning::Could not read every cancelled job's annotations for run ${WORKFLOW_RUN_ID}; reporting it rather than assuming a supersede."
               cancellation_kind='timeout'
+            elif [[ "${failed_job_count:-0}" -gt 0 ]]; then
+              # Leave the verdict to classify-cancelled-run.sh: it sees the
+              # failed job and fails open to reporting.
+              :
             else
               superseded=true
               echo "Run ${WORKFLOW_RUN_ID} was cancelled without a job timeout; a concurrent run superseded it and owns the result."
@@ -761,8 +773,16 @@ jobs:
           REPO: '${{ github.repository }}'
           WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
           CANCELLATION_KIND: '${{ needs.analyze.outputs.cancellation_kind }}'
+          # The whole-run rerun is the expensive arm: only a destination that
+          # granted it may spend it. A timeout guessed from an unreadable
+          # annotation list reaches this job through the infra arm
+          # (`file_issue=true` with no `rerun_pending`) when the run also
+          # carries infra-classified failed jobs — keying the branch on the
+          # classification alone replayed the whole matrix on that guess,
+          # exactly what the destination step refuses to buy.
+          RERUN_PENDING: '${{ needs.analyze.outputs.rerun_pending }}'
         run: |-
-          if [[ "${CANCELLATION_KIND}" == 'timeout' ]]; then
+          if [[ "${CANCELLATION_KIND}" == 'timeout' && "${RERUN_PENDING}" == 'true' ]]; then
             # A timed-out run has no failed job for `rerun-failed-jobs` to
             # select, so rerun the whole run. Its own completion re-enters
             # this workflow and the break is filed then.
@@ -797,8 +817,12 @@ jobs:
     # reaches this gate with a `skipped` rerun and no other job to file it. A
     # skipped rerun cannot double-file — nothing was dispatched, so there is no
     # second occurrence — and the `rerun_pending` arm alone governs the
-    # deferred-timeout case, where the rerun does run.
-    if: "${{ always() && needs.analyze.result == 'success' && (needs.analyze.outputs.file_issue == 'true' || (needs.analyze.outputs.rerun_pending == 'true' && needs.rerun_infra.result == 'failure')) && (needs.analyze.outputs.infra_only != 'true' || needs.rerun_infra.result != 'success') }}"
+    # deferred-timeout case, where the rerun does run. That arm takes the same
+    # operator: a rerun job that dies `cancelled` (its own 5-minute cap or the
+    # queue) or `timed_out` around the blocking dispatch would otherwise leave
+    # the deferred occurrence with no issue, no comment and no rerun; the
+    # signature dedupe converges a rerun that did start into the same issue.
+    if: "${{ always() && needs.analyze.result == 'success' && (needs.analyze.outputs.file_issue == 'true' || (needs.analyze.outputs.rerun_pending == 'true' && needs.rerun_infra.result != 'success')) && (needs.analyze.outputs.infra_only != 'true' || needs.rerun_infra.result != 'success') }}"
     # Deliberately hosted, NOT the ECS pool: this job reports that CI broke,
     # and the pool being the REASON CI broke would queue the report behind
     # the very failure it documents.
