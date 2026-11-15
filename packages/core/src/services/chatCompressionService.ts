@@ -308,9 +308,7 @@ export async function firePostCompact(
       ?.firePostCompactEvent(
         trigger === 'manual'
           ? PostCompactTrigger.Manual
-          : trigger === 'model_requested'
-            ? PostCompactTrigger.ModelRequested
-            : PostCompactTrigger.Auto,
+          : PostCompactTrigger.Auto,
         candidate.summary,
         signal,
       );

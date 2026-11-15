@@ -229,7 +229,6 @@ export default {
   'toolDisplayName.CreateSubSession': '建立子會話',
   'toolDisplayName.ListAgents': '列出 Agent',
   'toolDisplayName.GetContextRemaining': '查詢剩餘上下文',
-  'toolDisplayName.RequestCompaction': '請求壓縮',
   'toolDisplayName.TaskCreate': '建立任務',
   'toolDisplayName.TaskUpdate': '更新任務',
   'toolDisplayName.TaskList': '任務列表',

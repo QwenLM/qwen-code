@@ -13896,12 +13896,7 @@ export class Config {
       );
       return new GetContextRemainingTool(this);
     });
-    await registerLazy(ToolNames.REQUEST_COMPACTION, async () => {
-      const { RequestCompactionTool } = await import(
-        '../tools/request-compaction.js'
-      );
-      return new RequestCompactionTool(this);
-    });
+
     await registerLazy(ToolNames.TASK_STOP, async () => {
       const { TaskStopTool } = await import('../tools/task-stop.js');
       return new TaskStopTool(this);

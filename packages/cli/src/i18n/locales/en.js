@@ -241,7 +241,6 @@ export default {
   'toolDisplayName.CreateSubSession': 'toolDisplayName.CreateSubSession',
   'toolDisplayName.ListAgents': 'toolDisplayName.ListAgents',
   'toolDisplayName.GetContextRemaining': 'toolDisplayName.GetContextRemaining',
-  'toolDisplayName.RequestCompaction': 'toolDisplayName.RequestCompaction',
   'toolDisplayName.TaskCreate': 'toolDisplayName.TaskCreate',
   'toolDisplayName.TaskUpdate': 'toolDisplayName.TaskUpdate',
   'toolDisplayName.TaskList': 'toolDisplayName.TaskList',

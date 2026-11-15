@@ -65,7 +65,6 @@ export const AGENT_TOOL_CLASSIFICATION = {
   // (#17320 review B1); re-enable get_context_remaining as 'allow' once
   // the tool reports the caller's own numbers.
   [ToolNames.GET_CONTEXT_REMAINING]: 'deny',
-  [ToolNames.REQUEST_COMPACTION]: 'deny',
   [ToolNames.TASK_STOP]: 'deny',
   [ToolNames.TASK_CREATE]: 'deny',
   [ToolNames.TASK_UPDATE]: 'deny',

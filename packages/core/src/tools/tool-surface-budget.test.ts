@@ -29,7 +29,6 @@ import { GrepTool } from './grep.js';
 import { ImageGenTool } from './image-gen.js';
 import { ListAgentsTool } from './list-agents.js';
 import { LoopWakeupTool } from './loop-wakeup.js';
-import { RequestCompactionTool } from './request-compaction.js';
 import { LSTool } from './ls.js';
 import { LspTool } from './lsp.js';
 import { ManageMemoryTool } from './manage-memory.js';
@@ -177,7 +176,6 @@ const RESIDENT: ReadonlyArray<[name: string, build: Build, budget: number]> = [
 const DEFERRED: ReadonlyArray<[name: string, build: Build]> = [
   ['get_goal', (c) => new GetGoalTool(c)],
   ['get_context_remaining', (c) => new GetContextRemainingTool(c)],
-  ['request_compaction', (c) => new RequestCompactionTool(c)],
   ['list_agents', (c) => new ListAgentsTool(c)],
   ['propose_goal', (c) => new ProposeGoalTool(c)],
   ['update_goal', (c) => new UpdateGoalTool(c)],
