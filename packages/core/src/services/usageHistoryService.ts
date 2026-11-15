@@ -14,6 +14,7 @@ import type { SessionMetrics } from '../telemetry/uiTelemetry.js';
 import type { UiEvent } from '../telemetry/uiTelemetry.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { openNoFollow } from '../utils/no-follow-open.js';
 import {
   extractJsonStringField,
   unescapeJsonString,
@@ -341,17 +342,16 @@ async function summarizeTranscriptFile(
   let lastLine = '';
   let lastTsFallback: string | undefined;
 
-  // Recheck on the opened fd, not just the Phase-1 stat: the check-then-use
-  // window spans the whole enumeration, so a path swapped to a writerless FIFO
-  // after Phase 1 would block open() in the libuv threadpool and park the load.
-  // O_NONBLOCK makes the open return immediately; the fd-level isFile() check
-  // is what refuses a non-regular file (e.g. one that never reaches EOF).
-  const handle = await fs.promises.open(
-    filePath,
-    fs.constants.O_RDONLY | (fs.constants.O_NONBLOCK ?? 0),
-  );
-  // Own the fd explicitly (autoClose: false + finally close), matching
-  // sessionService's open-revalidate-stream shape. The finally is what closes
+  // Open through the shared no-follow helper (read-only, O_NONBLOCK where
+  // available) and recheck the type on the opened fd: the check-then-use window
+  // spans the whole enumeration, so a path swapped to a writerless FIFO after
+  // Phase 1 must not park the load. O_NONBLOCK keeps the open from blocking; the
+  // fd-level isFile() check below is what refuses a non-regular file. Symlink
+  // policy: the helper refuses a symlinked final component (ELOOP), unlike the
+  // symlink-following Phase-1 statSync prefilter, so a symlinked transcript is
+  // skipped — the same no-follow posture as the other transcript readers.
+  const handle = await openNoFollow(filePath, { nonBlocking: true });
+  // Own the fd explicitly (autoClose: false + finally close). The finally closes
   // the descriptor on every exit — including a stat() that rejects before any
   // stream exists to close it, which would otherwise leak the fd on each retry.
   try {
@@ -636,10 +636,11 @@ async function rebuildFromSessionJsonl(
         );
         continue;
       }
-      // Only regular files are readable transcripts: a FIFO (or any other
-      // special file) passing the name filter would block open() forever
-      // and wedge the whole rebuild — the daemon's usage dashboard serves
-      // from this path.
+      // Cheap prefilter: skip non-regular entries here to avoid a wasted
+      // open/fstat/close per special file. It is not what keeps the load from
+      // wedging — the scan opens with O_NONBLOCK, so no open can block, and the
+      // fd-level isFile() recheck in summarizeTranscriptFile is what refuses a
+      // non-regular file swapped in after this enumeration.
       if (!stats.isFile()) {
         debugLogger.debug(
           `rebuildFromSessionJsonl: skipping non-regular entry ${filePath}`,

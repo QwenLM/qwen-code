@@ -717,11 +717,11 @@ describe('loadUsageHistory + persistSessionUsage (issue #4994 regression)', () =
   it.skipIf(process.platform === 'win32')(
     'withLive: skips and logs non-regular transcript entries',
     async () => {
-      // A FIFO passing the `*.jsonl` name filter must be skipped before any
-      // read: opening it would block forever (no writer ever arrives) and
-      // wedge the rebuild — the daemon usage dashboard serves from this path.
-      // Observed in the wild from a test-suite leftover. The mkfifo call is
-      // skipped on Windows, matching storage.test.ts.
+      // A FIFO passing the `*.jsonl` name filter must be skipped, not read.
+      // The open uses O_NONBLOCK so it cannot block; the Phase-1 stat here is
+      // only a cheap prefilter, and the fd-level isFile() recheck is what
+      // refuses the non-regular file. Observed in the wild from a test-suite
+      // leftover. The mkfifo call is skipped on Windows, matching storage.test.ts.
       plantChatJsonl('sess-real', 1600);
       const fifoPath = planted('sess-fifo');
       const mkfifo = spawnSync('mkfifo', [fifoPath], { stdio: 'inherit' });
@@ -1025,98 +1025,112 @@ describe('loadUsageHistoryWithLive — replay cache + selective scan', () => {
     }
   });
 
-  it('does not cache a failed scan: a read error after a successful open recovers on the next load', async () => {
-    // The open succeeds and the fd recheck passes; the failure lands mid-read
-    // (the `for await` catch -> rethrow branch), which an open-time rejection
-    // never exercises. A failed scan must not be memoized as "no usage".
-    const filePath = plant('sess-read-err', 1000);
-    const orig = fs.promises.open;
-    let failedOnce = false;
-    let closeCalls = 0;
-    const spy = vi.spyOn(fs.promises, 'open').mockImplementation(((
-      p: fs.PathLike,
-      flags?: string | number,
-      mode?: fs.Mode,
-    ) => {
-      if (!failedOnce && String(p) === filePath) {
-        failedOnce = true;
-        const fakeHandle = {
-          stat: async () => ({ isFile: () => true }) as unknown as fs.Stats,
-          createReadStream: () =>
-            new Readable({
-              read() {
-                this.destroy(
-                  Object.assign(new Error('EIO: simulated'), { code: 'EIO' }),
-                );
-              },
-            }),
-          close: async () => {
-            closeCalls++;
-          },
-        };
-        return Promise.resolve(fakeHandle as unknown as fs.promises.FileHandle);
+  // POSIX-only: the fake handle witnesses the fd-level read/close semantics;
+  // openNoFollow's Windows fallback inserts an lstat/fstat identity step that a
+  // bare fake handle cannot satisfy (the helper's own tests cover that path).
+  it.skipIf(process.platform === 'win32')(
+    'does not cache a failed scan: a read error after a successful open recovers on the next load',
+    async () => {
+      // The open succeeds and the fd recheck passes; the failure lands mid-read
+      // (the `for await` catch -> rethrow branch), which an open-time rejection
+      // never exercises. A failed scan must not be memoized as "no usage".
+      const filePath = plant('sess-read-err', 1000);
+      const orig = fs.promises.open;
+      let failedOnce = false;
+      let closeCalls = 0;
+      const spy = vi.spyOn(fs.promises, 'open').mockImplementation(((
+        p: fs.PathLike,
+        flags?: string | number,
+        mode?: fs.Mode,
+      ) => {
+        if (!failedOnce && String(p) === filePath) {
+          failedOnce = true;
+          const fakeHandle = {
+            stat: async () => ({ isFile: () => true }) as unknown as fs.Stats,
+            createReadStream: () =>
+              new Readable({
+                read() {
+                  this.destroy(
+                    Object.assign(new Error('EIO: simulated'), { code: 'EIO' }),
+                  );
+                },
+              }),
+            close: async () => {
+              closeCalls++;
+            },
+          };
+          return Promise.resolve(
+            fakeHandle as unknown as fs.promises.FileHandle,
+          );
+        }
+        return orig(p, flags as number, mode);
+      }) as typeof fs.promises.open);
+      try {
+        const first = await loadUsageHistoryWithLive();
+        expect(
+          first.find((r) => r.sessionId === 'sess-read-err'),
+        ).toBeUndefined();
+        // The fd is owned explicitly, so it is closed even on the read-error path.
+        expect(closeCalls).toBe(1);
+        // The failure was not cached, so the next load rescans and recovers.
+        const second = await loadUsageHistoryWithLive();
+        expect(tokensOf(second, 'sess-read-err')).toBe(1000);
+      } finally {
+        spy.mockRestore();
       }
-      return orig(p, flags as number, mode);
-    }) as typeof fs.promises.open);
-    try {
-      const first = await loadUsageHistoryWithLive();
-      expect(
-        first.find((r) => r.sessionId === 'sess-read-err'),
-      ).toBeUndefined();
-      // The fd is owned explicitly, so it is closed even on the read-error path.
-      expect(closeCalls).toBe(1);
-      // The failure was not cached, so the next load rescans and recovers.
-      const second = await loadUsageHistoryWithLive();
-      expect(tokensOf(second, 'sess-read-err')).toBe(1000);
-    } finally {
-      spy.mockRestore();
-    }
-  });
+    },
+  );
 
-  it('closes the handle when stat() rejects before a stream exists, and does not cache the failure', async () => {
-    // stat() can reject (EIO/ESTALE on a network- or FUSE-backed home) after a
-    // successful open but before any stream exists to inherit the fd. The
-    // handle must still be closed, and the failed scan must not be memoized.
-    const filePath = plant('sess-stat-err', 1000);
-    const orig = fs.promises.open;
-    let failedOnce = false;
-    let closeCalls = 0;
-    const spy = vi.spyOn(fs.promises, 'open').mockImplementation(((
-      p: fs.PathLike,
-      flags?: string | number,
-      mode?: fs.Mode,
-    ) => {
-      if (!failedOnce && String(p) === filePath) {
-        failedOnce = true;
-        const fakeHandle = {
-          stat: async () => {
-            throw Object.assign(new Error('EIO: simulated'), { code: 'EIO' });
-          },
-          createReadStream: () => {
-            throw new Error(
-              'createReadStream must not run when stat() rejects',
-            );
-          },
-          close: async () => {
-            closeCalls++;
-          },
-        };
-        return Promise.resolve(fakeHandle as unknown as fs.promises.FileHandle);
+  // POSIX-only for the same reason as the read-error companion above.
+  it.skipIf(process.platform === 'win32')(
+    'closes the handle when stat() rejects before a stream exists, and does not cache the failure',
+    async () => {
+      // stat() can reject (EIO/ESTALE on a network- or FUSE-backed home) after a
+      // successful open but before any stream exists to inherit the fd. The
+      // handle must still be closed, and the failed scan must not be memoized.
+      const filePath = plant('sess-stat-err', 1000);
+      const orig = fs.promises.open;
+      let failedOnce = false;
+      let closeCalls = 0;
+      const spy = vi.spyOn(fs.promises, 'open').mockImplementation(((
+        p: fs.PathLike,
+        flags?: string | number,
+        mode?: fs.Mode,
+      ) => {
+        if (!failedOnce && String(p) === filePath) {
+          failedOnce = true;
+          const fakeHandle = {
+            stat: async () => {
+              throw Object.assign(new Error('EIO: simulated'), { code: 'EIO' });
+            },
+            createReadStream: () => {
+              throw new Error(
+                'createReadStream must not run when stat() rejects',
+              );
+            },
+            close: async () => {
+              closeCalls++;
+            },
+          };
+          return Promise.resolve(
+            fakeHandle as unknown as fs.promises.FileHandle,
+          );
+        }
+        return orig(p, flags as number, mode);
+      }) as typeof fs.promises.open);
+      try {
+        const first = await loadUsageHistoryWithLive();
+        expect(
+          first.find((r) => r.sessionId === 'sess-stat-err'),
+        ).toBeUndefined();
+        expect(closeCalls).toBe(1);
+        const second = await loadUsageHistoryWithLive();
+        expect(tokensOf(second, 'sess-stat-err')).toBe(1000);
+      } finally {
+        spy.mockRestore();
       }
-      return orig(p, flags as number, mode);
-    }) as typeof fs.promises.open);
-    try {
-      const first = await loadUsageHistoryWithLive();
-      expect(
-        first.find((r) => r.sessionId === 'sess-stat-err'),
-      ).toBeUndefined();
-      expect(closeCalls).toBe(1);
-      const second = await loadUsageHistoryWithLive();
-      expect(tokensOf(second, 'sess-stat-err')).toBe(1000);
-    } finally {
-      spy.mockRestore();
-    }
-  });
+    },
+  );
 
   it('serves unchanged transcripts from the replay cache without re-reading them', async () => {
     const paths = [
@@ -1591,6 +1605,70 @@ describe('loadUsageHistoryWithLive — replay cache + selective scan', () => {
       } finally {
         statSpy.mockRestore();
         fs.rmSync(fifoPath, { force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a symlinked transcript rather than replaying its target (no-follow open)',
+    async () => {
+      // The no-follow open refuses a symlinked final component, so a symlink
+      // planted in chats must not replay its target's usage. The target lives
+      // outside the chats enumeration with a distinct sessionId: if the open
+      // followed symlinks, that session would appear; refused, it must not.
+      const real = plant('sess-real', 1000);
+      const targetPath = path.join(
+        process.env['QWEN_HOME']!,
+        'symlink-target.jsonl',
+      );
+      const at = (m: number) => `2026-06-11T00:0${m}:00.000Z`;
+      const targetRecords = [
+        {
+          sessionId: 'sess-link-target',
+          cwd: '/real/project',
+          uuid: 'u1',
+          parentUuid: null,
+          timestamp: at(0),
+          type: 'user',
+          message: { role: 'user', content: 'hi' },
+        },
+        {
+          sessionId: 'sess-link-target',
+          cwd: '/real/project',
+          uuid: 'u2',
+          parentUuid: 'u1',
+          timestamp: at(1),
+          type: 'system',
+          subtype: 'ui_telemetry',
+          systemPayload: {
+            uiEvent: {
+              'event.name': 'qwen-code.api_response',
+              'event.timestamp': at(1),
+              response_id: 'r1',
+              model: 'qwen-max',
+              duration_ms: 1200,
+              input_token_count: 600,
+              output_token_count: 300,
+              cached_content_token_count: 0,
+              thoughts_token_count: 100,
+              total_token_count: 1000,
+              prompt_id: 'p1',
+            },
+          },
+        },
+      ];
+      fs.writeFileSync(
+        targetPath,
+        targetRecords.map((r) => JSON.stringify(r)).join('\n') + '\n',
+      );
+      const linkPath = path.join(path.dirname(real), 'sess-link.jsonl');
+      fs.symlinkSync(targetPath, linkPath);
+      try {
+        const merged = await loadUsageHistoryWithLive();
+        expect(merged.map((r) => r.sessionId)).toEqual(['sess-real']);
+      } finally {
+        fs.rmSync(linkPath, { force: true });
+        fs.rmSync(targetPath, { force: true });
       }
     },
   );
