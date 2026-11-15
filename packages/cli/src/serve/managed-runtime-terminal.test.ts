@@ -64,10 +64,11 @@ afterEach(async () => {
   if (server) {
     const closing = server;
     server = undefined;
-    await new Promise<void>((resolve) => {
-      closing.close(() => resolve());
-      closing.closeAllConnections();
-    });
+    // An unanswered upgrade counts against close() but is not destroyed by
+    // closeAllConnections(), so awaiting the callback would burn another
+    // full timeout after the test already reported.
+    closing.close();
+    closing.closeAllConnections();
   }
 });
 
@@ -195,6 +196,43 @@ describe('ManagedRuntimeTerminals', () => {
     expect(TEST_TIMEOUT_MS).toBeGreaterThanOrEqual(
       WAIT_TIMEOUT_MS * MAX_CHAIN_WINDOWS,
     );
+  });
+
+  it('does not hold teardown on an upgrade the server never answers', async () => {
+    // The hook must not await close(): Node counts a socket handed to an
+    // 'upgrade' listener against close() but closeAllConnections() does not
+    // destroy it, so this upgrade never lets the callback fire. With an
+    // awaited close this test fails as a hook timeout; without it the suite
+    // moves on and this body completes.
+    server = createServer((_req, res) => {
+      res.writeHead(404);
+      res.end();
+    });
+    const upgraded = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('upgrade was not delivered')),
+        WAIT_TIMEOUT_MS,
+      );
+      server!.on('upgrade', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+    await new Promise<void>((resolve) =>
+      server!.listen(0, '127.0.0.1', resolve),
+    );
+    const socket = netConnect(
+      (server!.address() as AddressInfo).port,
+      '127.0.0.1',
+      () => {
+        socket.write(
+          'GET /unknown HTTP/1.1\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n',
+        );
+      },
+    );
+    socket.on('error', () => {});
+    await upgraded;
+    socket.destroy();
   });
 
   it('refuses upgrades without the worker bearer/lease identity', async () => {
