@@ -49,3 +49,15 @@ for (const [profile, file] of targets) {
   // eslint-disable-next-line no-console
   console.log(`${file}: ${Buffer.byteLength(out, 'utf8')} bytes`);
 }
+
+// The verbatim bundled body, so admission can tell the Web Shell's bundled
+// `loop` import apart from a user-authored `loop` and only replace the former.
+const bundledOut = JSON.stringify({ body }, null, 2) + '\n';
+writeFileSync(
+  join(contractsDir, 'managed-loop-skill-bundled-body.json'),
+  bundledOut,
+);
+// eslint-disable-next-line no-console
+console.log(
+  `managed-loop-skill-bundled-body.json: ${Buffer.byteLength(bundledOut, 'utf8')} bytes`,
+);

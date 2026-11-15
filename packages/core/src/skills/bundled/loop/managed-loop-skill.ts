@@ -8,8 +8,9 @@
  * Derives the Managed `/loop` skill (description + body) from the bundled local
  * SKILL.md. The Managed variant differs from the local skill in three ways:
  *  - wording: a Managed schedule is always durable, runs until cancelled (no
- *    7-day expiry), defaults to UTC, and reads only the user-owned home
- *    `~/.qwen/loop.md` (the workspace project copy is never read);
+ *    7-day expiry), defaults to UTC, and reads only the global
+ *    `$QWEN_HOME/loop.md` the wakeup fire resolves (the workspace project copy
+ *    is never read);
  *  - surface: it describes only the creators the Session's tool profile
  *    declares, so it never steers the model toward a refused tool;
  *  - fire mechanics: a Managed cron fire does NOT expand loop sentinels and the
@@ -122,7 +123,7 @@ function managedLoopMdIntro(section: string): string {
   let out = sub(
     intro,
     "Tasks live in `.qwen/loop.md` (project) or `~/.qwen/loop.md` (home; project wins). Instead of a natural-language prompt, set the loop's `prompt` to a sentinel so each fire re-reads the file:",
-    'Tasks live in `~/.qwen/loop.md` (the user-owned home file; the workspace project copy is not read on Managed).',
+    'Tasks live in `$QWEN_HOME/loop.md` (the global loop.md the wakeup fire reads; the workspace project copy is not read on Managed).',
   );
   // Drop the project-path trigger phrase too: the body must not advertise a
   // file it then says is not read.
@@ -214,27 +215,41 @@ function parsingEveryGrammar(parsing: string): string {
   return parsing.slice(start, end);
 }
 
-/** The union body keeps the source Parsing's rule titles and example inputs, so
- * a rule or example added to SKILL.md that the hand-composed union shell does
- * not carry reddens the generator instead of silently stale-ing the body. */
+/** Source Parsing rules each profile shell intentionally does not carry: cron
+ * has no self-paced route, wakeup folds the two interval rules into one
+ * "Interval requested" rule. Every other source rule's full text must appear in
+ * the body, so a reworded or newly added rule reddens the generator. */
+const PARSING_OMITTED_RULES: Record<ManagedLoopProfile, ReadonlySet<string>> = {
+  union: new Set(),
+  cron: new Set(['Empty input', 'Prompt-only input']),
+  wakeup: new Set(['Leading interval token', 'Trailing "every" clause']),
+};
+
 function assertParsingDriftCovered(
   parsingSource: string,
-  unionBody: string,
+  body: string,
+  profile: ManagedLoopProfile,
 ): void {
-  for (const match of parsingSource.matchAll(/\*\*([^*]+)\*\*/g)) {
-    if (!unionBody.includes(`**${match[1]}**`)) {
-      throw new Error(
-        `Bundled Parsing rule not carried into the union body: ${match[1]}`,
-      );
-    }
-  }
+  const omitted = PARSING_OMITTED_RULES[profile];
   for (const line of parsingSource.split('\n')) {
-    if (!line.startsWith('- ')) continue;
-    const input = line.slice(2).split('→')[0].trim();
-    if (input && !unionBody.includes(input)) {
-      throw new Error(
-        `Bundled Parsing example not carried into the union body: ${input}`,
-      );
+    const rule = /^\d+\. \*\*([^*]+)\*\*/.exec(line);
+    if (rule) {
+      if (omitted.has(rule[1])) continue;
+      const text = line.replace(/^\d+\. /, '');
+      if (!body.includes(text)) {
+        throw new Error(
+          `Bundled Parsing rule not carried into the ${profile} body: ${rule[1]}`,
+        );
+      }
+      continue;
+    }
+    if (profile === 'union' && line.startsWith('- ')) {
+      const input = line.slice(2).split('→')[0].trim();
+      if (input && !body.includes(input)) {
+        throw new Error(
+          `Bundled Parsing example not carried into the union body: ${input}`,
+        );
+      }
     }
   }
 }
@@ -271,12 +286,12 @@ export function buildManagedLoopSkill(
   const loopMdSource = get(LOOP_MD);
   const autonomousSource = get(AUTONOMOUS);
   // The cut fire prose carries no file path; the home-only fallback and
-  // confirmation appended per profile name only ~/.qwen/loop.md.
+  // confirmation appended per profile name only $QWEN_HOME/loop.md.
   const fireProse = loopMdFireProse(loopMdSource);
   const steward = stewardProse(autonomousSource, profile === 'cron');
   const homeIntro = managedLoopMdIntro(loopMdSource);
   const loopMdFallback =
-    'If `~/.qwen/loop.md` is absent at fire time, the loop falls back to autonomous mode; a recreated file is picked up on the next fire.';
+    'If `$QWEN_HOME/loop.md` is absent at fire time, the loop falls back to autonomous mode; a recreated file is picked up on the next fire.';
 
   const parts: string[] = [preamble, get('Subcommands')];
   let description: string;
@@ -333,7 +348,7 @@ export function buildManagedLoopSkill(
     parts.push(
       `## ${LOOP_MD}\n\n${homeIntro} Set the loop's \`prompt\` to a sentinel so each wakeup re-reads the file:\n\n` +
         '- Self-paced (no interval) → LoopWakeup `prompt`: `<<loop.md-dynamic>>`\n\n' +
-        `${fireProse} ${loopMdFallback} Confirm to the user in plain language ("looping over your \`~/.qwen/loop.md\` task list…"), not the raw sentinel.`,
+        `${fireProse} ${loopMdFallback} Confirm to the user in plain language ("looping over your \`$QWEN_HOME/loop.md\` task list…"), not the raw sentinel.`,
     );
     parts.push(
       `## ${AUTONOMOUS}\n\nUse this for a bare \`/loop\` (no prompt, no file) — the user wants you to keep their work moving while they're away. Arm the loop with an autonomous sentinel and run the first check now:\n\n` +
@@ -366,7 +381,7 @@ export function buildManagedLoopSkill(
     parts.push(
       `## ${LOOP_MD}\n\n${homeIntro} Set the loop's \`prompt\` to a sentinel so each wakeup re-reads the file:\n\n` +
         '- Self-paced (no interval) → LoopWakeup `prompt`: `<<loop.md-dynamic>>`\n\n' +
-        `${fireProse} ${loopMdFallback} Confirm to the user in plain language ("looping over your \`~/.qwen/loop.md\` task list…").`,
+        `${fireProse} ${loopMdFallback} Confirm to the user in plain language ("looping over your \`$QWEN_HOME/loop.md\` task list…").`,
     );
     parts.push(
       `## ${AUTONOMOUS}\n\nUse this for a bare \`/loop\` (no prompt, no file) — the user wants you to keep their work moving while they're away. Run the first check now:\n\n` +
@@ -378,9 +393,7 @@ export function buildManagedLoopSkill(
   if (sections.has('Input')) parts.push(get('Input'));
 
   const body = parts.join('\n').replace(/^\n+/, '');
-  if (profile === 'union') {
-    assertParsingDriftCovered(parsingSource, body);
-  }
+  assertParsingDriftCovered(parsingSource, body, profile);
   const absent =
     profile === 'cron' ? /loop_wakeup|LoopWakeup/ : /cron_create|CronCreate/;
   if (profile !== 'union' && absent.test(body)) {

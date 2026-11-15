@@ -69,73 +69,96 @@ class ManagedLoopSkillTest {
         assertThat(body).doesNotContain("CronCreate").doesNotContain("cron_create");
     }
 
-    @Test
-    void reselectDropsTheServerLoopForAReadOnlyChildAndKeepsOtherSkills() {
-        var serverLoop = ManagedLoopSkill.forProfile(WorkspaceToolProfiles.SHELL_V4);
-        var other = Map.<String, Object>of("name", "review", "description", "d", "body", "b");
-        var inherited = java.util.List.of(serverLoop, other);
-        var readChild = ManagedLoopSkill.reselectForProfile(inherited, WorkspaceToolProfiles.READ);
-        assertThat(readChild).extracting(s -> s.get("name")).containsExactly("review");
-        var cronChild = ManagedLoopSkill.reselectForProfile(inherited, WorkspaceToolProfiles.FILES_V4);
-        assertThat(cronChild).extracting(s -> s.get("name")).containsExactly("review", "loop");
-        assertThat((String) cronChild.get(1).get("body")).contains("CronCreate").doesNotContain("LoopWakeup");
+    private static Map<String, Object> bundledCallerLoop() throws Exception {
+        return Map.of("name", "loop", "description", "bundled",
+                "body", asset("managed-loop-skill-bundled-body.json"));
     }
 
     @Test
-    void reselectPreservesADefinitionAuthoredLoopForAChild() {
+    void childCatalogDropsTheServerLoopForAReadOnlyChildAndKeepsOtherSkills() {
+        var serverLoop = ManagedLoopSkill.forProfile(WorkspaceToolProfiles.SHELL_V4);
+        var other = Map.<String, Object>of("name", "review", "description", "d", "body", "b");
+        var inherited = java.util.List.of(serverLoop, other);
+        // No definition loop: the inherited loop is the server variant, dropped for READ.
+        var readChild = ManagedLoopSkill.childCatalog(inherited, WorkspaceToolProfiles.READ, false);
+        assertThat(readChild).extracting(s -> s.get("name")).containsExactly("review");
+    }
+
+    @Test
+    void childCatalogPreservesADefinitionAuthoredLoopForAReadOnlyChild() {
         var defLoop = Map.<String, Object>of("name", "loop", "description", "def", "body", "DEFINITION_LOOP");
         var other = Map.<String, Object>of("name", "review", "description", "d", "body", "b");
         var inherited = java.util.List.of(defLoop, other);
-        var readChild = ManagedLoopSkill.reselectForProfile(inherited, WorkspaceToolProfiles.READ);
+        var readChild = ManagedLoopSkill.childCatalog(inherited, WorkspaceToolProfiles.READ, true);
         assertThat(readChild).extracting(s -> s.get("name")).containsExactly("loop", "review");
         assertThat((String) readChild.get(0).get("body")).isEqualTo("DEFINITION_LOOP");
-        // A creator-bearing child keeps the definition loop and gets no rival variant.
-        var cronChild = ManagedLoopSkill.reselectForProfile(inherited, WorkspaceToolProfiles.FILES_V4);
-        assertThat(cronChild).extracting(s -> s.get("name")).containsExactly("loop", "review");
-        assertThat((String) cronChild.get(0).get("body")).isEqualTo("DEFINITION_LOOP");
+    }
+
+    @Test
+    void childCatalogClassifiesAStaleServerBodyByDefinitionProvenanceNotBodyText() {
+        // A row written by an earlier build: its loop body matches no current sidecar.
+        var staleLoop = Map.<String, Object>of("name", "loop", "description", "old", "body", "RELEASE_N_BODY");
+        var other = Map.<String, Object>of("name", "review", "description", "d", "body", "b");
+        var inherited = java.util.List.of(staleLoop, other);
+        // No definition loop: the stale server variant is still dropped for READ.
+        assertThat(ManagedLoopSkill.childCatalog(inherited, WorkspaceToolProfiles.READ, false))
+                .extracting(s -> s.get("name")).containsExactly("review");
+        // Definition-authored: preserved even though the body matches no sidecar.
+        assertThat(ManagedLoopSkill.childCatalog(inherited, WorkspaceToolProfiles.READ, true))
+                .extracting(s -> s.get("name")).containsExactly("loop", "review");
     }
 
     @Test
     void childCatalogSavesNothingWhenAResolvedChildCatalogWouldBeEmpty() {
         var serverLoop = ManagedLoopSkill.forProfile(WorkspaceToolProfiles.SHELL_V4);
-        var other = Map.<String, Object>of("name", "review", "description", "d", "body", "b");
-        assertThat(ManagedLoopSkill.childCatalog(null, WorkspaceToolProfiles.READ)).isNull();
-        var inherited = java.util.List.of(serverLoop, other);
-        assertThat(ManagedLoopSkill.childCatalog(inherited, null)).isSameAs(inherited);
+        assertThat(ManagedLoopSkill.childCatalog(null, WorkspaceToolProfiles.READ, false)).isNull();
+        var inherited = java.util.List.of(serverLoop);
+        assertThat(ManagedLoopSkill.childCatalog(inherited, null, false)).isSameAs(inherited);
         // A read-only child of a server-loop-only parent resolves to nothing: no empty row.
-        assertThat(ManagedLoopSkill.childCatalog(java.util.List.of(serverLoop), WorkspaceToolProfiles.READ)).isNull();
-        assertThat(ManagedLoopSkill.childCatalog(inherited, WorkspaceToolProfiles.READ))
-                .extracting(s -> s.get("name")).containsExactly("review");
-        // A definition-authored loop is not the server's to drop: the child keeps it.
-        var defLoop = Map.<String, Object>of("name", "loop", "description", "def", "body", "DEFINITION_LOOP");
-        assertThat(ManagedLoopSkill.childCatalog(java.util.List.of(defLoop), WorkspaceToolProfiles.READ))
-                .extracting(s -> s.get("name")).containsExactly("loop");
+        assertThat(ManagedLoopSkill.childCatalog(inherited, WorkspaceToolProfiles.READ, false)).isNull();
     }
 
     @Test
-    void mergeIntoPreservesADefinitionAuthoredLoopAndOnlyReplacesTheCallerLoop() {
+    void mergeIntoPreservesADefinitionAuthoredLoopAndOnlyReplacesTheBundledCallerLoop() throws Exception {
         var defLoop = Map.<String, Object>of("name", "loop", "description", "def", "body", "DEFINITION_LOOP");
-        var callerLoop = Map.<String, Object>of("name", "loop", "description", "local", "body", "LOCAL");
-        // Definition already owns a loop: the server neither replaces it nor injects a rival.
+        // Definition owns a loop: the bundled caller import is dropped, no rival variant.
         var merged = new java.util.ArrayList<>(java.util.List.of(defLoop));
-        var injected = ManagedLoopSkill.mergeInto(merged, java.util.List.of(callerLoop),
+        var injected = ManagedLoopSkill.mergeInto(merged, java.util.List.of(bundledCallerLoop()),
                 WorkspaceToolProfiles.FILES_V4, true);
         assertThat(injected).isNull();
         assertThat(merged).extracting(s -> s.get("name")).containsExactly("loop");
         assertThat((String) merged.get(0).get("body")).isEqualTo("DEFINITION_LOOP");
-        // No definition loop: the caller's loop is replaced by the server variant.
+        // No definition loop: the bundled caller import is replaced by the server variant.
         var merged2 = new java.util.ArrayList<Map<String, Object>>();
-        var injected2 = ManagedLoopSkill.mergeInto(merged2, java.util.List.of(callerLoop),
+        var injected2 = ManagedLoopSkill.mergeInto(merged2, java.util.List.of(bundledCallerLoop()),
                 WorkspaceToolProfiles.FILES_V4, true);
         assertThat(injected2).isNotNull();
         assertThat(merged2).hasSize(1);
-        assertThat((String) merged2.get(0).get("body")).contains("CronCreate").doesNotContain("LOCAL");
+        assertThat((String) merged2.get(0).get("body")).contains("CronCreate");
     }
 
     @Test
-    void mergeIntoCarriesTheCallerLoopInvocationFlagsOntoTheVariant() {
-        var callerLoop = Map.<String, Object>of("name", "loop", "description", "local", "body", "LOCAL",
-                "model_invocable", false);
+    void mergeIntoPreservesAUserAuthoredCallerLoop() {
+        var userLoop = Map.<String, Object>of("name", "loop", "description", "mine", "body", "MY_CUSTOM_LOOP");
+        // Creator-bearing: the user's loop is kept and no server variant is injected.
+        var merged = new java.util.ArrayList<Map<String, Object>>();
+        var injected = ManagedLoopSkill.mergeInto(merged, java.util.List.of(userLoop),
+                WorkspaceToolProfiles.FILES_V4, true);
+        assertThat(injected).isNull();
+        assertThat(merged).extracting(s -> s.get("name")).containsExactly("loop");
+        assertThat((String) merged.get(0).get("body")).isEqualTo("MY_CUSTOM_LOOP");
+        // Creator-less: only the bundled import is dropped; a user-authored loop stays.
+        var merged2 = new java.util.ArrayList<Map<String, Object>>();
+        var injected2 = ManagedLoopSkill.mergeInto(merged2, java.util.List.of(userLoop),
+                WorkspaceToolProfiles.FILES, true);
+        assertThat(injected2).isNull();
+        assertThat((String) merged2.get(0).get("body")).isEqualTo("MY_CUSTOM_LOOP");
+    }
+
+    @Test
+    void mergeIntoCarriesTheBundledCallerLoopInvocationFlagsOntoTheVariant() throws Exception {
+        var callerLoop = new java.util.LinkedHashMap<String, Object>(bundledCallerLoop());
+        callerLoop.put("model_invocable", false);
         var merged = new java.util.ArrayList<Map<String, Object>>();
         var injected = ManagedLoopSkill.mergeInto(merged, java.util.List.of(callerLoop),
                 WorkspaceToolProfiles.FILES_V4, true);
@@ -156,6 +179,22 @@ class ManagedLoopSkillTest {
         assertThat(injected).isNull();
         assertThat(merged).hasSize(256);
         assertThat(merged).extracting(s -> s.get("name")).doesNotContain("loop");
+    }
+
+    @Test
+    void overCapacitySkipKeepsTheCallersBundledLoop() throws Exception {
+        // A definition skill plus a full caller catalog puts the merged catalog over
+        // the entry cap once the variant is added; the skip must keep the caller loop.
+        var defSkill = Map.<String, Object>of("name", "def", "description", "d", "body", "b");
+        var caller = new java.util.ArrayList<Map<String, Object>>();
+        for (int i = 0; i < 255; i++) {
+            caller.add(Map.of("name", "s" + i, "description", "d", "body", "b"));
+        }
+        caller.add(bundledCallerLoop());
+        var merged = new java.util.ArrayList<>(java.util.List.of(defSkill));
+        var injected = ManagedLoopSkill.mergeInto(merged, caller, WorkspaceToolProfiles.FILES_V4, true);
+        assertThat(injected).isNull();
+        assertThat(merged).extracting(s -> s.get("name")).contains("loop");
     }
 
     @Test

@@ -122,7 +122,8 @@ final class AgentSessionPolicies {
      * its digest and the approval mode and tool profile compiled from its content (D8c-1).
      */
     record AgentPin(String revision, String digest,
-            String approvalMode, String toolProfile, boolean hooks, boolean mcp) {
+            String approvalMode, String toolProfile, boolean hooks, boolean mcp,
+            List<Map<String, Object>> skills) {
     }
 
     boolean isSshWorkspace(ContextBinding binding) {
@@ -175,7 +176,8 @@ final class AgentSessionPolicies {
             throw new ManagedAgentException(400, "unsupported_approval_mode",
                     "The selected approval mode is not available for this Agent.");
         }
-        return new AgentPin(pin.revision(), pin.digest(), requested, pin.toolProfile(), pin.hooks(), pin.mcp());
+        return new AgentPin(pin.revision(), pin.digest(), requested, pin.toolProfile(), pin.hooks(), pin.mcp(),
+                pin.skills());
     }
 
     // Called only for a new admission; a retry has already replayed and
@@ -192,7 +194,7 @@ final class AgentSessionPolicies {
                     ? (workspaceShellEnabled ? WorkspaceToolProfiles.SHELL
                             : WorkspaceToolProfiles.FILES)
                     : null;
-            return new AgentPin(agentRevision, null, approvalMode, toolProfile, false, false);
+            return new AgentPin(agentRevision, null, approvalMode, toolProfile, false, false, List.of());
         }
         if (definitions == null) {
             throw ManagedAgentDefinitionStore.notFound();
@@ -207,7 +209,8 @@ final class AgentSessionPolicies {
         return new AgentPin(Long.toString(revision.revision()),
                 revision.digest(), compiled.approvalMode(),
                 compiled.toolProfile(), content.containsKey("hook_catalog"),
-                !AgentDefinitionExtensions.mcpServers(content.get("mcp_servers"), compiled.toolProfile()).isEmpty());
+                !AgentDefinitionExtensions.mcpServers(content.get("mcp_servers"), compiled.toolProfile()).isEmpty(),
+                AgentDefinitionExtensions.skills(content.get("skills"), true));
     }
 
     boolean hasMcpServers(SessionRecord session) {

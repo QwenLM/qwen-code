@@ -23,6 +23,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.bean.override.convention.TestBean;
 import org.springframework.test.web.servlet.MockMvc;
 
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.List;
@@ -413,7 +414,7 @@ class ManagedSessionCreationSkillsTest {
             assertThat(snapshots.effective(store.requireSession(tenant, filesSession))).isEmpty();
             // The Web Shell imports the bundled "loop" verbatim; the authoritative
             // server variant replaces it rather than refusing the creation.
-            var localLoop = Map.<String, Object>of("name", "loop", "description", "Local", "body", "LOCAL");
+            var localLoop = Map.<String, Object>of("name", "loop", "description", "Local", "body", bundledLoopBody());
             String overrideSession = create(request(cronAgent, List.of(localLoop)), "override-loop", false).get("id").asText();
             var overrideCatalog = snapshots.effective(store.requireSession(tenant, overrideSession));
             assertThat(overrideCatalog).hasSize(1);
@@ -448,9 +449,35 @@ class ManagedSessionCreationSkillsTest {
             // A creator-less profile strips a caller-imported bundled loop so it
             // never publishes a body naming tools the profile lacks.
             String filesAgent = defineProfile("hosted-workspace-files/1", "strip-agent", List.of());
-            var localLoop = Map.<String, Object>of("name", "loop", "description", "Local", "body", "LOCAL");
+            var localLoop = Map.<String, Object>of("name", "loop", "description", "Local", "body", bundledLoopBody());
             String stripSession = create(request(filesAgent, List.of(localLoop)), "strip-loop", false).get("id").asText();
             assertThat(snapshots.effective(store.requireSession(tenant, stripSession))).isEmpty();
+        } finally {
+            com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles", previousProfiles);
+        }
+    }
+
+    @Test
+    void aUserAuthoredCallerLoopIsPreservedNotReplacedOrDropped() throws Exception {
+        Object target = org.springframework.test.util.AopTestUtils.getUltimateTargetObject(store);
+        Object previousProfiles = com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "definitionToolProfiles");
+        com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles",
+                List.of("hosted-workspace-files/1", "hosted-workspace-files/4"));
+        try {
+            // A caller loop whose body is not the bundled import is user-authored:
+            // it is preserved on a creator-bearing profile (no server variant) and
+            // on a creator-less profile (only the bundled import would be dropped).
+            var userLoop = Map.<String, Object>of("name", "loop", "description", "Mine", "body", "MY_CUSTOM_LOOP_BODY");
+            String cronAgent = defineProfile("hosted-workspace-files/4", "user-loop-cron", List.of());
+            String cronSession = create(request(cronAgent, List.of(userLoop)), "user-loop-cron", false).get("id").asText();
+            var cronCatalog = snapshots.snapshot(tenant, cronSession);
+            assertThat(cronCatalog).extracting(s -> s.get("name")).containsExactly("loop");
+            assertThat(loopBody(cronCatalog)).isEqualTo("MY_CUSTOM_LOOP_BODY");
+            String filesAgent = defineProfile("hosted-workspace-files/1", "user-loop-files", List.of());
+            String filesSession = create(request(filesAgent, List.of(userLoop)), "user-loop-files", false).get("id").asText();
+            var filesCatalog = snapshots.snapshot(tenant, filesSession);
+            assertThat(filesCatalog).extracting(s -> s.get("name")).containsExactly("loop");
+            assertThat(loopBody(filesCatalog)).isEqualTo("MY_CUSTOM_LOOP_BODY");
         } finally {
             com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles", previousProfiles);
         }
@@ -487,6 +514,18 @@ class ManagedSessionCreationSkillsTest {
     private static String loopBody(List<Map<String, Object>> catalog) {
         return (String) catalog.stream().filter(s -> "loop".equals(s.get("name")))
                 .findFirst().orElseThrow().get("body");
+    }
+
+    /** The verbatim bundled loop body the Web Shell imports (the only caller loop
+     * the server may replace); read from the committed reference sidecar. */
+    private static String bundledLoopBody() throws Exception {
+        try (InputStream stream = ManagedSessionCreationSkillsTest.class
+                .getResourceAsStream("/contracts/managed-loop-skill-bundled-body.json")) {
+            assertThat(stream).isNotNull();
+            return (String) new ObjectMapper()
+                    .readValue(new String(stream.readAllBytes(), StandardCharsets.UTF_8), Map.class)
+                    .get("body");
+        }
     }
 
     @Test

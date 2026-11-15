@@ -15,12 +15,19 @@ import java.util.Map;
 
 /**
  * The Managed /loop skill variant injected at creation admission. The
- * description and body are read from a committed JSON sidecar generated from the
+ * description and body are read from committed JSON sidecars generated from the
  * bundled local SKILL.md (packages/core/src/skills/bundled/loop/
  * managed-loop-skill.ts); a TypeScript parity test pins each sidecar to the
  * bundled source. This class is a pure selector: it maps the Session's tool
  * profile to the sidecar whose body names only the creators that profile
  * declares, and does no string composition.
+ *
+ * <p>Provenance: the server only ever replaces the Web Shell's bundled {@code
+ * loop} import (body equal to the committed bundled-body reference). A
+ * user-authored or definition-authored {@code loop} is preserved and suppresses
+ * the server variant. For a child, provenance comes from the parent's pinned
+ * definition, not from body text, so it stays correct across sidecar
+ * regeneration.
  *
  * <p>See docs/design/2026-11-14-managed-loop-skill-asset.md. The deployment
  * gates are operation gates that leave the tool declaration in place, so the
@@ -29,8 +36,29 @@ import java.util.Map;
 final class ManagedLoopSkill {
     static final String NAME = "loop";
     private static final ObjectMapper JSON = new ObjectMapper();
+    private static volatile Map<String, Map<String, Object>> sidecarCache;
 
     private ManagedLoopSkill() {
+    }
+
+    /** The parsed sidecars are immutable classpath constants pinned by the
+     * parity test; read them once, not per admission. */
+    private static Map<String, Map<String, Object>> sidecars() {
+        Map<String, Map<String, Object>> cache = sidecarCache;
+        if (cache == null) {
+            synchronized (ManagedLoopSkill.class) {
+                cache = sidecarCache;
+                if (cache == null) {
+                    cache = Map.of(
+                            "union", readSidecar("managed-loop-skill-union.json"),
+                            "cron", readSidecar("managed-loop-skill-cron.json"),
+                            "wakeup", readSidecar("managed-loop-skill-wakeup.json"),
+                            "bundled", readSidecar("managed-loop-skill-bundled-body.json"));
+                    sidecarCache = cache;
+                }
+            }
+        }
+        return cache;
     }
 
     /**
@@ -38,23 +66,30 @@ final class ManagedLoopSkill {
      * creator (cron_create or loop_wakeup) and so must not receive the skill.
      */
     static Map<String, Object> forProfile(String profile) {
-        String asset;
+        String key;
         if (WorkspaceToolProfiles.SHELL_V4.equals(profile)) {
-            asset = "managed-loop-skill-union.json";
+            key = "union";
         } else if (WorkspaceToolProfiles.FILES_V4.equals(profile)
                 || WorkspaceToolProfiles.INTERNAL_TEAM_LEAD_V2.equals(profile)) {
-            asset = "managed-loop-skill-cron.json";
+            key = "cron";
         } else if (WorkspaceToolProfiles.SHELL_V3.equals(profile)) {
-            asset = "managed-loop-skill-wakeup.json";
+            key = "wakeup";
         } else {
             return null;
         }
-        Map<String, Object> sidecar = readSidecar(asset);
+        Map<String, Object> sidecar = sidecars().get(key);
         Map<String, Object> skill = new LinkedHashMap<>();
         skill.put("name", NAME);
         skill.put("description", sidecar.get("description"));
         skill.put("body", sidecar.get("body"));
         return skill;
+    }
+
+    /** Whether a caller entry is the Web Shell's verbatim bundled import (the
+     * only loop the server may replace), as opposed to a user-authored skill. */
+    private static boolean isBundledLoop(Map<String, Object> skill) {
+        return NAME.equals(skill.get("name"))
+                && sidecars().get("bundled").get("body").equals(skill.get("body"));
     }
 
     /**
@@ -64,19 +99,16 @@ final class ManagedLoopSkill {
      * returned catalog is the single validated/serialized pass — the admission
      * reuses it instead of re-validating. {@code merged} already holds the pinned
      * definition's skills; the caller skills are appended after them. The variant
-     * is a server contribution added even when the caller supplies no skills. It
-     * replaces a caller-imported "loop" skill (the Web Shell imports the bundled
-     * one verbatim from the daemon snapshot), not refuses it, so the default
-     * creation path is not broken by a duplicate name; the replaced entry's
-     * model_invocable / user_invocable flags carry over to the variant. A
-     * definition-authored "loop" is the definition author's artifact and is
-     * preserved: the server neither replaces it nor injects a rival entry. On a
-     * profile with no loop creator the caller's "loop" entry is still dropped, so
-     * a creator-less Session never publishes a body naming tools it lacks. The
-     * injection is gated on the negotiated Session Skills capability and on the
-     * catalog capacity: if the variant cannot fit within the published 256-entry
-     * / 2 MiB limits it is skipped rather than refusing the creation. Kept here
-     * so the admission class does not grow.
+     * replaces only the Web Shell's bundled {@code loop} import, carrying over
+     * that entry's model_invocable / user_invocable flags; a user-authored or
+     * definition-authored {@code loop} is preserved and suppresses the variant
+     * (names must stay unique). On a profile with no loop creator the bundled
+     * caller import is dropped so a creator-less Session never publishes a body
+     * naming tools it lacks. The injection is gated on the negotiated Session
+     * Skills capability and on the catalog capacity: if the variant cannot fit
+     * within the published 256-entry / 2 MiB limits it is skipped and the caller's
+     * bundled loop is kept, rather than refusing the creation or losing a skill.
+     * Kept here so the admission class does not grow.
      */
     static List<Map<String, Object>> mergeInto(List<Map<String, Object>> merged,
             List<Map<String, Object>> callerSkills, String profile,
@@ -88,10 +120,14 @@ final class ManagedLoopSkill {
         }
         boolean definitionHasLoop = merged.subList(0, definitionCount).stream()
                 .anyMatch(skill -> NAME.equals(skill.get("name")));
-        // Only the caller segment's "loop" is the server's to replace; keep its
-        // invocation flags so a manual-only loop stays manual-only.
         Map<String, Object> callerLoop = merged.subList(definitionCount, merged.size()).stream()
                 .filter(skill -> NAME.equals(skill.get("name"))).findFirst().orElse(null);
+        // A user-authored caller loop is not the server's to replace: keep it and
+        // inject no rival variant.
+        if (callerLoop != null && !isBundledLoop(callerLoop)) {
+            return null;
+        }
+        // Only the bundled caller import is the server's to replace.
         merged.subList(definitionCount, merged.size())
                 .removeIf(skill -> NAME.equals(skill.get("name")));
         if (definitionHasLoop) {
@@ -114,6 +150,11 @@ final class ManagedLoopSkill {
         try {
             validated = AgentDefinitionExtensions.sessionSkills(candidate);
         } catch (ManagedAgentException overCapacity) {
+            // Skip the injection but keep the caller's bundled loop: the catalog
+            // must not lose a skill just because the variant could not fit.
+            if (callerLoop != null) {
+                merged.add(callerLoop);
+            }
             return null;
         }
         merged.add(loop);
@@ -121,62 +162,30 @@ final class ManagedLoopSkill {
     }
 
     /**
-     * Re-select the loop entry for a child whose tool profile differs from the
-     * parent's (a snapshot child is read-only). Only the server-injected variant
-     * is dropped and replaced by the child profile's own variant, or by nothing
-     * when the child declares no loop creator, so a read-only child never
-     * publishes a body naming tools it lacks. A definition-authored "loop" is not
-     * the server's to remove: it inherits unchanged (and suppresses a rival server
-     * variant, keeping names unique), mirroring mergeInto's provenance split.
-     */
-    static List<Map<String, Object>> reselectForProfile(
-            List<Map<String, Object>> inherited, String childProfile) {
-        List<Map<String, Object>> result = new ArrayList<>(inherited);
-        List<Object> serverBodies = serverLoopBodies();
-        boolean hasDefinitionLoop = result.stream()
-                .anyMatch(skill -> NAME.equals(skill.get("name"))
-                        && !serverBodies.contains(skill.get("body")));
-        result.removeIf(skill -> NAME.equals(skill.get("name"))
-                && serverBodies.contains(skill.get("body")));
-        if (!hasDefinitionLoop) {
-            Map<String, Object> loop = forProfile(childProfile);
-            if (loop != null) {
-                result.add(loop);
-            }
-        }
-        return result;
-    }
-
-    /** The committed sidecar bodies: a loop entry whose body is one of these is
-     * the server variant, not a definition-authored skill. */
-    private static List<Object> serverLoopBodies() {
-        List<Object> bodies = new ArrayList<>();
-        for (String asset : new String[] {
-                "managed-loop-skill-union.json",
-                "managed-loop-skill-cron.json",
-                "managed-loop-skill-wakeup.json"}) {
-            bodies.add(readSidecar(asset).get("body"));
-        }
-        return bodies;
-    }
-
-    /**
      * The catalog to save for a child, or null when there is nothing to save. A
      * null inherited catalog saves nothing; a null child profile inherits the
-     * parent catalog unchanged; otherwise the loop entry is re-selected by the
-     * child's profile. An empty result (a read-only child whose inherited catalog
-     * was only the injected loop) saves nothing rather than an empty row, which
-     * every later snapshot read would reject with a conflict.
+     * parent catalog unchanged. The only non-null child profile is READ (a
+     * snapshot child): the server loop variant is dropped because it names
+     * creators READ does not declare, while a definition-authored loop (the
+     * parent's pinned definition owns a {@code loop}) inherits unchanged.
+     * Provenance comes from the parent's definition, not body text, so a row
+     * written by an earlier build is still classified correctly after the
+     * sidecars are regenerated. An empty resolved catalog saves nothing rather
+     * than an empty row, which every later snapshot read would reject.
      */
     static List<Map<String, Object>> childCatalog(
-            List<Map<String, Object>> inherited, String childProfile) {
+            List<Map<String, Object>> inherited, String childProfile,
+            boolean definitionHasLoop) {
         if (inherited == null) {
             return null;
         }
         if (childProfile == null) {
             return inherited;
         }
-        List<Map<String, Object>> result = reselectForProfile(inherited, childProfile);
+        List<Map<String, Object>> result = new ArrayList<>(inherited);
+        if (!definitionHasLoop) {
+            result.removeIf(skill -> NAME.equals(skill.get("name")));
+        }
         return result.isEmpty() ? null : result;
     }
 

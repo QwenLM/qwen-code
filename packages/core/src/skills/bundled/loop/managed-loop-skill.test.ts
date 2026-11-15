@@ -116,8 +116,22 @@ describe('managed loop skill parity', () => {
       // The project-path trigger phrase must not be advertised either.
       expect(b).not.toContain('the tasks in .qwen/loop.md');
     }
-    expect(asset('union').body).toContain('~/.qwen/loop.md');
-    expect(asset('wakeup').body).toContain('~/.qwen/loop.md');
+    // The wakeup fire resolves <QWEN_HOME>/loop.md (every managed deployment
+    // sets QWEN_HOME), so the bodies must name that spelling, not ~/.qwen.
+    expect(asset('union').body).toContain('$QWEN_HOME/loop.md');
+    expect(asset('wakeup').body).toContain('$QWEN_HOME/loop.md');
+    expect(asset('union').body).not.toContain('~/.qwen/loop.md');
+    expect(asset('wakeup').body).not.toContain('~/.qwen/loop.md');
+  });
+
+  it('the bundled-body reference sidecar equals the verbatim bundled body', () => {
+    const reference = JSON.parse(
+      readFileSync(
+        join(contractsDir, 'managed-loop-skill-bundled-body.json'),
+        'utf8',
+      ),
+    );
+    expect(reference.body).toBe(body);
   });
 
   it('the cron body carries no loop.md task-file mode and no sentinel at all', () => {
@@ -236,14 +250,42 @@ describe('managed loop skill parity', () => {
     );
   });
 
-  it('throws when a Parsing rule is added that the union shell does not carry', () => {
+  it('throws when a Parsing rule is added that a profile shell does not carry', () => {
     const mutated = body.replace(
       'Examples:',
       '5. **Stop keyword**: a new rule.\n\nExamples:',
     );
     expect(mutated).not.toBe(body);
+    for (const profile of ['union', 'cron', 'wakeup'] as const) {
+      expect(() =>
+        buildManagedLoopSkill(profile, mutated, description),
+      ).toThrow(
+        new RegExp(
+          `Parsing rule not carried into the ${profile} body: Stop keyword`,
+        ),
+      );
+    }
+  });
+
+  it('throws when a carried Parsing rule sentence is reworded', () => {
+    const mutated = body.replace(
+      'Only match when what follows "every" is a time expression',
+      'Only match when "every" is followed by a duration',
+    );
+    expect(mutated).not.toBe(body);
     expect(() => buildManagedLoopSkill('union', mutated, description)).toThrow(
-      /Parsing rule not carried into the union body: Stop keyword/,
+      /Parsing rule not carried into the union body: Trailing "every" clause/,
+    );
+  });
+
+  it('throws when the short-reminder marker drifts (fail-closed cut, cron)', () => {
+    const mutated = body.replace(
+      'The first fire (and the first after a compaction) delivers fuller guidance',
+      'The first fire (and the first after a compaction) delivers full guidance',
+    );
+    expect(mutated).not.toBe(body);
+    expect(() => buildManagedLoopSkill('cron', mutated, description)).toThrow(
+      /short-reminder marker/,
     );
   });
 });

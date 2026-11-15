@@ -212,14 +212,15 @@ deterministic in the profile, preserving replay under the idempotency key.
 body wording and the profile-conditional sections differ. The Web Shell imports
 the bundled `loop` skill verbatim from the daemon snapshot, so a caller catalog
 already contains a `loop` entry on the default creation path. `mergeInto`
-therefore **replaces the caller's** `loop` entry rather than refusing the request
+therefore **replaces the bundled caller import** rather than refusing the request
 — rejecting would 409 every Web Shell creation on a loop-bearing profile. The
-replacement is scoped to the caller segment: a **definition-authored** `loop`
-skill is the definition author's artifact and is preserved — the server neither
-replaces it nor injects a rival entry (the catalog must keep unique names). Both
-behaviours are pinned by admission tests (a caller-imported local `loop` body is
-replaced by the server variant; a definition-authored `loop` body survives on
-creator-less and creator-bearing profiles alike).
+replacement is provenance-scoped: only the entry whose body equals the committed
+bundled-body reference is the server's to replace. A **user-authored** caller
+`loop` (any other body) and a **definition-authored** `loop` are preserved — the
+server neither replaces them nor injects a rival entry (the catalog must keep
+unique names). These behaviours are pinned by admission tests (the bundled import
+is replaced by the server variant; a user-authored or definition-authored `loop`
+body survives on creator-less and creator-bearing profiles alike).
 
 The injection is gated on the negotiated Session Skills capability
 (`sessionSkillsSupported`, threaded through `SessionCreationCommand` like the
@@ -228,16 +229,21 @@ gets no server row, keeping the failure at creation time rather than at dispatch
 The save guard is D1's: a row is written only for a caller contribution or the
 injected variant (never a definition-only catalog, never an empty one), so an
 injected row carries the definition's skills plus `loop` and never shadows the
-definition catalog on the consumer side. A child catalog is re-selected by the
-child's profile before save, and an empty resolved child catalog (a read-only
-child whose inherited catalog was only the injected `loop`) saves nothing rather
-than an empty row that every later snapshot read would reject.
+definition catalog on the consumer side. A child catalog is re-selected before
+save: the only non-null child profile is READ (a snapshot child), and the server
+loop variant is dropped because it names creators READ does not declare, while a
+definition-authored loop inherits unchanged. Provenance comes from the parent's
+pinned definition (does it own a `loop`), not from body text, so a row written by
+an earlier build is still classified correctly after the sidecars are regenerated.
+An empty resolved child catalog saves nothing rather than an empty row that every
+later snapshot read would reject.
 
 ### Files affected
 
 - `packages/core/src/managed-runtime/contracts/` — the three generated managed
-  loop JSON sidecars (description + body; union / cron-only / wakeup-only),
-  copied to Java.
+  loop JSON sidecars (description + body; union / cron-only / wakeup-only) plus a
+  verbatim bundled-body reference used to identify the Web Shell import, copied
+  to Java.
 - `packages/core/src/skills/bundled/loop/managed-loop-skill.ts` — the
   `buildManagedLoopSkill(profile, bundledBody, frontmatterDescription)` generator
   (wording substitutions + section selection); a collocated parity test binds the
@@ -245,15 +251,17 @@ than an empty row that every later snapshot read would reject.
   profile (no change to `SKILL.md` itself). `regenerate-managed-loop-assets.ts` is
   the committed regeneration entry point.
 - `packages/managed-agent-server/persistence/.../ManagedLoopSkill.java` — the
-  pure profile-to-sidecar selector, `mergeInto` (override + capability gate +
-  capacity skip), and `reselectForProfile` for children; reads the classpath
-  sidecar, no string composition.
+  pure profile-to-sidecar selector (memoized), `mergeInto` (bundled-only override
+  - capability gate + capacity skip that keeps the caller loop), and
+    `childCatalog` (definition-provenance re-selection for children); reads the
+    classpath sidecars, no string composition.
 - `packages/managed-agent-server/persistence/.../AgentSessionAdmissions.java` —
-  merge the pinned definition's skills, call `mergeInto` (reusing its validated
-  catalog), write the row only when the effective catalog is non-empty AND there
-  is a caller contribution or the variant was injected, and re-select the
-  inherited loop entry by the child's profile before saving a child catalog (an
-  empty resolved child catalog saves nothing).
+  merge the pinned definition's skills (carried on `AgentPin`, parsed once in
+  `resolveAgentPin`), call `mergeInto` (reusing its validated catalog), write the
+  row only when the effective catalog is non-empty AND there is a caller
+  contribution or the variant was injected, and re-select the inherited loop for
+  a child by the parent's definition provenance before saving (an empty resolved
+  child catalog saves nothing).
 - `packages/managed-agent-server/contracts/.../SessionCreationCommand.java` and
   `control-plane/.../ManagedAgentService.java` — thread the
   `sessionSkillsSupported` capability flag from the negotiated Harness.
@@ -292,14 +300,16 @@ than an empty row that every later snapshot read would reject.
   replay outcomes. Mitigation: a replay test asserts the identical snapshot.
 - **Caller-imported local `loop`.** The Web Shell posts the bundled `loop`
   verbatim, so the server variant replaces it (D5); a test pins the replacement.
-  On a creator-less profile the caller's `loop` is dropped, so no body naming
-  undeclared tools is published.
-- **Catalog capacity.** The injection is skipped (not refused) when the caller
-  catalog is already at the published 256-entry / 2 MiB cap; a unit test pins the
-  skip at 256 entries.
-- **Snapshot children.** A child admitted on a different profile (a snapshot
-  child is read-only) re-selects the loop entry by its own profile before save,
-  so a read-only child never inherits a body naming tools it lacks.
+  Only the bundled import is replaced: a user-authored caller `loop` is preserved
+  on every profile, and on a creator-less profile only the bundled import is
+  dropped, so no body naming undeclared tools is published.
+- **Catalog capacity.** The injection is skipped (not refused) when the variant
+  cannot fit the published 256-entry / 2 MiB cap, and the caller's bundled loop is
+  kept rather than lost; unit tests pin the skip at 256 entries and the keep.
+- **Snapshot children.** A snapshot child is read-only; the server loop variant is
+  dropped before save (it names creators READ lacks) while a definition-authored
+  loop inherits unchanged. Provenance comes from the parent's pinned definition,
+  not body text, so it stays correct across sidecar regeneration.
 
 ## Validation plan
 
@@ -328,7 +338,7 @@ clear` retires it.
 - A Managed Session on a creator-bearing profile has a `loop` skill in its
   published catalog whose body uses Managed durable/expiry/UTC wording, names
   only the creators the profile declares, teaches no non-expanding cron
-  sentinel, and claims only the home `~/.qwen/loop.md` file.
+  sentinel, and names only the `$QWEN_HOME/loop.md` file the wakeup fire reads.
 - A definition pinned to a creator-bearing profile with no caller skills
   receives the variant; the built-in `qwen-code` agent (shell/1 / files/1)
   receives none.
@@ -356,13 +366,15 @@ Resolved during design (kept here for the record):
   refuses the call at runtime. Decided: gates do not affect the body.
 - **Coexistence with a caller-imported local `loop`.** The Web Shell imports the
   bundled `loop` verbatim from the daemon snapshot, so rejecting the duplicate
-  would 409 every creation on a loop-bearing profile. The server variant
-  replaces the caller's same-named entry (carrying over its invocation flags);
-  on a creator-less profile the caller's `loop` is dropped. A definition-authored
-  `loop` is preserved and suppresses the server variant, so a caller `loop` that
-  collides with it is superseded, not rejected — the one carve-out from the
-  merged-catalog duplicate rule. Decided: replace + document (refined from the
-  initial reject proposal after the default-path 409 was found).
+  would 409 every creation on a loop-bearing profile. The server variant replaces
+  only the bundled import (body equal to the committed bundled-body reference),
+  carrying over its invocation flags; on a creator-less profile the bundled import
+  is dropped. A user-authored caller `loop` or a definition-authored `loop` is
+  preserved and suppresses the server variant — the carve-out from the
+  merged-catalog duplicate rule. Decided: replace the bundled import only +
+  document (refined from the initial reject proposal after the default-path 409
+  was found, then scoped to the bundled import so a user-authored loop is never
+  silently overwritten or deleted).
 - **Cron fire mechanics.** A Managed cron fire does not expand loop sentinels
   (only the self-paced wakeup fire does), and the model cannot open the
   Harness-host home file (reads are confined to the Session working directory),
