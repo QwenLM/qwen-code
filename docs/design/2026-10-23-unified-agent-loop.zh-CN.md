@@ -205,7 +205,7 @@ ACP 只传入一个策略：Todo Stop Guard。当前轮次的后台结果和中�
 
 `experimental.unifiedAgentLoop` 是布尔值，默认 `false`，重启后生效。`QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP` 环境变量按入口覆盖它：`1` 强制所有入口开启，`0` 强制所有入口关闭，逗号分隔的列表（如 `headless,acp=0`）强制指定入口。这便于 CI 和脚本在共享 loop 下运行测试，也让操作者能把某个入口强制关回。它在 `experimental.agentTeam` / `QWEN_CODE_ENABLE_AGENT_TEAM` 只强制开启的写法之上，增加了强制关闭与按入口控制；新增 loop 开关应沿用此文法，而非 agentTeam 的写法。
 
-由 `Config.isUnifiedAgentLoopEnabled(surface)` 暴露该设置。每个入口在其 loop 的启动处读取它并写明自己的入口（`headless`、`acp`、`ink`、`opentui`、`agent-core`、`speculation`）：
+由 `Config.isUnifiedAgentLoopEnabled(surface)` 暴露该设置。每个入口在其 loop 的启动处读取它并写明自己的入口（`headless`、`acp`、`ink`、`opentui`、`agent-core`、`speculation`、`hosted`）：
 
 ```ts
 if (config.isUnifiedAgentLoopEnabled('headless')) {

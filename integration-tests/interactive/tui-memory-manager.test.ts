@@ -31,8 +31,13 @@ if (override) assert(path.isAbsolute(command.bin));
 const profile = override
   ? `explicit-${renderer}`
   : `${command.bin}-${renderer}`;
-const outputRoot = process.env['QWEN_TUI_ACCEPTANCE_OUT'] ?? '';
-assert(outputRoot && path.isAbsolute(outputRoot));
+// Every lane that collects `interactive/` reaches this module, and only the
+// tui-parity legs export QWEN_TUI_ACCEPTANCE_OUT. Fall back to a repo-relative
+// directory like the sibling suites do, so an unset variable is not a
+// collection-time failure that reddens the whole lane.
+const outputRoot =
+  process.env['QWEN_TUI_ACCEPTANCE_OUT'] ??
+  path.join(root, '.qwen/e2e-tests/tui-memory-manager');
 const names = ['OWNED-CONTEXT-A.md', 'OWNED-CONTEXT-B.md'];
 const editMarker = '\nOWNED_MEMORY_EDITOR_PROOF\n';
 const toggleKeys = [
@@ -269,6 +274,9 @@ async function fixture(
     path.join(projectMemory, AUTO_MEMORY_INDEX_FILENAME),
   ];
   const externalScript = `#!${process.execPath}\nconst fs=require('node:fs'),path=require('node:path');const kind=path.basename(process.argv[1]);const args=process.argv.slice(2);fs.appendFileSync(process.env.QWEN_OWNED_MEMORY_EXEC_LOG,JSON.stringify({kind,argv:args,cwd:process.cwd(),pid:process.pid,ppid:process.ppid})+'\\n');if(args.length!==1||!JSON.parse(process.env.QWEN_OWNED_MEMORY_ALLOWED_TARGETS).includes(args[0]))process.exit(91);if(kind==='vim'){if(process.env.QWEN_OWNED_MEMORY_EDITOR_FAILURE==='1')process.exit(7);fs.appendFileSync(args[0],${JSON.stringify(editMarker)});}process.exit(0);\n`;
+  // The fixtures use CommonJS `require`; the output root can live inside the
+  // repository's ESM package scope, so pin the bin directory's module type.
+  fs.writeFileSync(path.join(bin, 'package.json'), '{"type":"commonjs"}\n');
   for (const name of ['vim', 'open', 'xdg-open'])
     fs.writeFileSync(path.join(bin, name), externalScript, { mode: 0o700 });
   const events = (): ExecEvent[] =>
