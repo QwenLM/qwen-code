@@ -274,24 +274,69 @@ export function getFunctionResponseParts(part: Part): Part[] | undefined {
  */
 function estimateInlineImageTokenChars(
   part: Part,
-  fallbackTokenEstimate: number,
+  resolvedTokenEstimate: number,
 ): number {
+  // An explicitly configured estimate (env `QWEN_IMAGE_TOKEN_ESTIMATE` or
+  // `chatCompression.imageTokenEstimate`) is an override — it must keep
+  // having an effect. Resolution-derived costing runs only when the
+  // resolved value IS the default, so any other number is the user's
+  // deliberate answer (#17321 maintainer call).
+  if (resolvedTokenEstimate !== DEFAULT_IMAGE_TOKEN_ESTIMATE) {
+    return resolvedTokenEstimate;
+  }
   const inline = part.inlineData;
   if (!inline?.data || !inline.mimeType?.startsWith('image/')) {
-    return fallbackTokenEstimate;
+    return resolvedTokenEstimate;
   }
   try {
     const buffer = Buffer.from(inline.data, 'base64');
-    const dimensions = parseImageDimensions(
-      new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength),
+    const bytes = new Uint8Array(
+      buffer.buffer,
+      buffer.byteOffset,
+      buffer.byteLength,
     );
-    if (!dimensions) return fallbackTokenEstimate;
+    // Animated payloads (multi-frame GIF, animated WebP) bill the flat
+    // estimate until frame counting lands: a 60-frame GIF at the static
+    // formula would be a 27x regression in the unsafe direction
+    // (#17321 maintainer call).
+    if (isPotentiallyAnimated(bytes, inline.mimeType)) {
+      return resolvedTokenEstimate;
+    }
+    const dimensions = parseImageDimensions(bytes);
+    if (!dimensions) return resolvedTokenEstimate;
     return Math.ceil(
       (dimensions.width * dimensions.height) / VISUAL_PIXELS_PER_TOKEN,
     );
   } catch {
-    return fallbackTokenEstimate;
+    return resolvedTokenEstimate;
   }
+}
+
+/**
+ * Conservative animation check: a GIF with more than one image descriptor
+ * or a WebP with the ANIM flag or ANMF chunks is potentially animated.
+ * Static forms continue on the resolution path.
+ */
+function isPotentiallyAnimated(bytes: Uint8Array, mime: string): boolean {
+  if (mime === 'image/gif') {
+    // Count image descriptors (0x2C) after the logical screen descriptor;
+    // more than one means multi-frame. Header-only scan of the first 4 KiB.
+    let descriptors = 0;
+    const limit = Math.min(bytes.length, 4096);
+    for (let i = 6; i < limit - 1 && descriptors <= 1; i++) {
+      if (bytes[i] === 0x2c) descriptors++;
+    }
+    return descriptors > 1;
+  }
+  if (mime === 'image/webp' && bytes.length > 16) {
+    // VP8X flags byte at payload offset 0: bit 1 (value 2) is ANIM.
+    const tag = String.fromCharCode(bytes[12], bytes[13], bytes[14], bytes[15]);
+    if (tag === 'VP8X' && bytes.length > 20) {
+      return (bytes[20] & 0x02) !== 0;
+    }
+    return false;
+  }
+  return false;
 }
 
 export function estimateContentChars(
