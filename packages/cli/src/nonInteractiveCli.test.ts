@@ -8304,8 +8304,8 @@ describe('runNonInteractive', () => {
       async (bus) => {
         setupMetricsMock();
         Object.assign(mockConfig, {
-          isUnifiedAgentLoopEnabled: () => true,
-          isEventBusAgentLoopEnabled: () => bus,
+          isUnifiedAgentLoopEnabled: vi.fn(() => true),
+          isEventBusAgentLoopEnabled: vi.fn(() => bus),
         });
         // Execution marker: the bus path publishes loop events, the
         // procedural shared loop never touches the bus.
@@ -8317,6 +8317,21 @@ describe('runNonInteractive', () => {
         ).resolves.toBe(0);
 
         expect(mockLlmClient.sendMessageStream).toHaveBeenCalledOnce();
+        // Headless must resolve both switches for the 'headless' surface.
+        expect(
+          (
+            mockConfig as unknown as {
+              isUnifiedAgentLoopEnabled: ReturnType<typeof vi.fn>;
+            }
+          ).isUnifiedAgentLoopEnabled,
+        ).toHaveBeenCalledWith('headless');
+        expect(
+          (
+            mockConfig as unknown as {
+              isEventBusAgentLoopEnabled: ReturnType<typeof vi.fn>;
+            }
+          ).isEventBusAgentLoopEnabled,
+        ).toHaveBeenCalledWith('headless');
         if (bus) {
           expect(publishSpy).toHaveBeenCalled();
         } else {
