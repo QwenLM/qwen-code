@@ -94,7 +94,7 @@ Local `gh` authentication requires an HTTPS `baseUrl` so the daemon host credent
 | `deliverToBoundSessions`  | `false`                  | Deliver events for PRs bound to a live session into that session as a prompt instead of a channel-owned session (daemon-managed channels only)                                                                                                                                                                                                                                                                                                                              |
 | `requireBoundWatch`       | `false`                  | Only deliver bound events to `review`/`verify` sessions while the same session holds an active watch on that PR (an `/autofix-pr` watch or `/verify-pr <n> --watch`). One-shot `/review` and `/verify-pr` sessions stay bound but receive nothing; events with no eligible session retire privately, never as a public reply. `fix` and untyped bindings are unaffected, and an unknown watch state (detection failure) keeps delivering. Requires `deliverToBoundSessions` |
 | `prCommentWatch`          | `true`                   | Poll same-account conversation and inline review comments on bound PRs and deliver each new one to every bound session that did not post it (comments posted under the channel's GitHub account by another session/agent). Other-account comments stay with the notification lanes. Set `false` to disable. Requires `deliverToBoundSessions`                                                                                                                               |
-| `prWatchEvents`           | unset                    | **Deprecated.** The daemon now detects PR-state transitions; configure `serve.sessionPrWatch` in the daemon settings (see the [settings reference](../../configuration/settings.md)). This channel no longer watches bound PRs for them. For one minor release the key is accepted and read as a per-host alias when that setting is unset, for PRs on this channel's web host, and only while `deliverToBoundSessions` is on                                               |
+| `prWatchEvents`           | unset                    | **Deprecated.** The daemon now detects PR-state transitions; configure `serve.sessionPrWatch` in the daemon settings (see the [settings reference](../../configuration/settings.md)). This channel no longer watches bound PRs for them. For one minor release the key is accepted and read as a per-host alias when that setting and its environment override are unset, for PRs on this channel's web host, and only while `deliverToBoundSessions` is on                 |
 | `prWatchLimit`            | unset                    | **Deprecated and ignored.** The old state watch's per-sweep cap. The channel no longer detects PR state, so this has no effect; the pass uses its built-in budget. Accepted with a warning for one minor release, then will be rejected at `connect()`                                                                                                                                                                                                                      |
 | `prWatchBudgetReserve`    | unset                    | **Deprecated and ignored.** The old state watch's REST budget reserve gate. No effect for the same reason; accepted with a warning for one minor release, then will be rejected at `connect()`                                                                                                                                                                                                                                                                              |
 | `boundSessionActions`     | unset                    | Optional operator instruction templates for bound-session delivery, keyed by event class with optional role prefixes (`review:`, `verify:`, `fix:`). Enables role-aware fan-out. The `watch:*` keys are deprecated: configure `serve.sessionPrWatch.actions` for state transitions. Requires `deliverToBoundSessions`                                                                                                                                                       |
@@ -389,15 +389,17 @@ For one minor release this channel still accepts all four deprecated keys —
 `prWatchEvents`, the `watch:*` keys of `boundSessionActions`, `prWatchLimit` and
 `prWatchBudgetReserve` — and logs one warning naming `serve.sessionPrWatch` and
 those four keys. Only the first two are read as aliases: the two limit knobs are
-ignored, and the pass uses its built-in budget. When that setting is unset,
-the daemon reads each hosted channel's keys as a per-host alias: the channel's
+ignored, and the pass uses its built-in budget. When that setting and its
+environment override are unset, the daemon reads each hosted channel's keys as
+a per-host alias: the channel's
 `prWatchEvents` are the event set for PRs on its web host, and its `watch:*`
 templates become the daemon's actions (`watch:<type>` → `<type>`,
 `<role>:watch:<type>` → `<role>:<type>`; `default` and `<role>:default` are
 kept). Two channels on one host take the union of their events; each type
 takes its actions from the first channel by name that can deliver it, with a
-logged conflict. An explicit `serve.sessionPrWatch` wins. The alias ends one
-minor release after this change, when the keys are rejected at `connect()`.
+logged conflict. An explicit `serve.sessionPrWatch`, or a non-blank
+`QWEN_SESSION_PR_WATCH_EVENTS`, wins. The alias ends one minor release after
+this change, when the keys are rejected at `connect()`.
 
 One visible consequence: treat `%title%` in a comment template as
 deprecated. It renders the last title the old state watch recorded and is
