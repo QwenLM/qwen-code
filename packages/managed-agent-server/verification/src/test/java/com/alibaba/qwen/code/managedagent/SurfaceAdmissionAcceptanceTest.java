@@ -6,6 +6,8 @@ import com.alibaba.qwen.code.managedagent.api.SurfaceRegistry.Capability;
 import com.alibaba.qwen.code.managedagent.api.SurfaceRegistry.RuleClass;
 import com.alibaba.qwen.code.managedagent.api.SurfaceRegistry.Surface;
 import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
+import com.alibaba.qwen.code.managedagent.api.TerminalTicketController;
+import com.alibaba.qwen.code.managedagent.api.TerminalTicketStore;
 import com.alibaba.qwen.code.managedagent.api.ToolPublicationController;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ManagedArtifactPolicy;
@@ -21,6 +23,7 @@ import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.repository.SshWorkspaceStore;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceTerminalRelayService;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -105,6 +108,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
             "qwen.managed-agent.session-store.binding-key=" + "0123456789abcdef0123456789abcdef",
             "qwen.managed-agent.client-files.enabled=true",
             "qwen.managed-agent.runtime-broker.ssh.enabled=false",
+            "qwen.managed-agent.runtime-broker.web-terminal=true",
             "qwen.managed-agent.tool-publication.entry-concurrency=4",
             "qwen.managed-agent.artifacts.enabled=true",
             // The scheduled projector would race the publication-chain fixture
@@ -1743,6 +1747,8 @@ public class SurfaceAdmissionAcceptanceTest {
             case SESSION_RENAME -> publicSurface ? "{\"title\":\"probe\"}"
                     : "{\"sessionId\":\"" + session + "\",\"title\":\"probe\","
                             + "\"idempotencyKey\":\"" + nextKey() + "\"}";
+            case SESSION_TERMINAL_TICKET -> "{\"sessionId\":\"" + session
+                    + "\",\"terminalId\":\"terminal-probe\"}";
             case SESSION_CONTEXT_COMPRESSION -> publicSurface
                     ? "{\"expected_compaction_revision\":0}"
                     : "{\"sessionId\":\"" + session + "\",\"idempotencyKey\":\""
@@ -2086,6 +2092,22 @@ public class SurfaceAdmissionAcceptanceTest {
                     new ToolPublicationAdmissionStore(jdbc, manager, sessions,
                             acceptancePublicationData),
                     properties);
+        }
+
+        // The terminal ticket route is broker-gated; mount it here so the
+        // admission probes reach a real handler instead of a 404. The relay
+        // runs the real Session admission (read/Shell/OPERATOR); only the
+        // binding lookup is mocked, which answers the admitted arm with the
+        // workspace_unavailable refusal the OPERATOR probes expect.
+        @Bean
+        public TerminalTicketController acceptanceTerminalTicket(
+                com.alibaba.qwen.code.managedagent.session.ManagedAgentService sessions,
+                com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings settings) {
+            return new TerminalTicketController(
+                    new WorkspaceTerminalRelayService(sessions,
+                            mock(com.alibaba.qwen.code.runtimebroker.RuntimeBrokerOperations.class),
+                            settings),
+                    new TerminalTicketStore(java.time.Clock.systemUTC()));
         }
     }
 
