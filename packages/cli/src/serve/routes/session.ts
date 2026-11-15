@@ -20,6 +20,7 @@ import {
   APPROVAL_MODES,
   AGENT_WORKTREE_SLUG_PATTERN,
   BTW_MAX_INPUT_LENGTH,
+  CARRIED_PATHS_MAX_BYTES,
   GROUP_COLOR_OPTIONS,
   GitWorktreeService,
   clearWorktreeSessionDurable,
@@ -219,6 +220,7 @@ import {
   branchExists,
   isDirtyTree,
   getHeadCommit,
+  isCommitAncestor,
   createBranch,
   checkoutRef,
   deleteBranch,
@@ -3479,7 +3481,10 @@ export function registerSessionRoutes(
         // and inFlightBranchWorkspaces permanently blocks the workspace.
         if (worktreeMeta) {
           await new GitWorktreeService(workspaceCwd)
-            .removeUserWorktree(worktreeMeta.slug, { deleteBranch: true })
+            .removeUserWorktree(worktreeMeta.slug, {
+              deleteBranch: true,
+              baseCommit: worktreeBaseCommit,
+            })
             .catch(() => {});
         }
         if (branchMeta) {
@@ -3527,7 +3532,10 @@ export function registerSessionRoutes(
         if (worktreeMeta) {
           const rollbackSlug = worktreeMeta.slug;
           await new GitWorktreeService(workspaceCwd)
-            .removeUserWorktree(rollbackSlug, { deleteBranch: true })
+            .removeUserWorktree(rollbackSlug, {
+              deleteBranch: true,
+              baseCommit: worktreeBaseCommit,
+            })
             .catch((removalError) => {
               // A failed removal here recreates the exact orphan this block
               // exists to prevent, and the caller only sees the generation
@@ -3606,7 +3614,10 @@ export function registerSessionRoutes(
               // Clean up the worktree if one was created for this session.
               if (worktreeMeta) {
                 await new GitWorktreeService(workspaceCwd)
-                  .removeUserWorktree(worktreeMeta.slug, { deleteBranch: true })
+                  .removeUserWorktree(worktreeMeta.slug, {
+                    deleteBranch: true,
+                    baseCommit: worktreeBaseCommit,
+                  })
                   .catch(() => {});
               }
               // Roll back the branch if one was created for this session.
@@ -3721,7 +3732,10 @@ export function registerSessionRoutes(
           // session was definitively removed.
           if (removedSession) {
             await new GitWorktreeService(workspaceCwd)
-              .removeUserWorktree(worktreeMeta.slug, { deleteBranch: true })
+              .removeUserWorktree(worktreeMeta.slug, {
+                deleteBranch: true,
+                baseCommit: worktreeBaseCommit,
+              })
               .catch(() => {});
           }
           res.status(500).json({
@@ -3776,7 +3790,10 @@ export function registerSessionRoutes(
           }
           if (removed) {
             await new GitWorktreeService(workspaceCwd)
-              .removeUserWorktree(worktreeMeta.slug, { deleteBranch: true })
+              .removeUserWorktree(worktreeMeta.slug, {
+                deleteBranch: true,
+                baseCommit: worktreeBaseCommit,
+              })
               .catch(() => {});
           } else {
             daemonLog?.warn(
@@ -5151,12 +5168,19 @@ export function registerSessionRoutes(
               const wtService = new GitWorktreeService(workspaceCwd);
               const wtCheckoutService = new GitWorktreeService(realTarget);
               const base = sidecar.originalHeadCommit;
-              // A clean-but-moved-ahead local checkout would conflict the
-              // stash apply (a diff against the old base) and leave the
-              // user's checkout with conflict markers. Refuse up front.
+              // The local checkout may have moved ahead of the recorded
+              // base — committing locally while the agent works in the
+              // worktree is the normal reason to use one. A descendant is
+              // reconcilable: the snapshot applies on top of it (and a
+              // conflicting apply is refused below, never left as
+              // markers). Only a divergent or unreadable HEAD is terminal.
               if (base) {
                 const localHead = await getHeadCommit(localCwd);
-                if (!localHead || localHead !== base) {
+                if (
+                  !localHead ||
+                  (localHead !== base &&
+                    !(await isCommitAncestor(base, localHead, localCwd)))
+                ) {
                   res.status(409).json({
                     error:
                       'Local checkout HEAD moved past the recorded handoff base',
@@ -5317,7 +5341,24 @@ export function registerSessionRoutes(
               let relocatedCwd: string;
               try {
                 if (snapshot) {
-                  await localService.applyStashSnapshot(localCwd, snapshot);
+                  try {
+                    await localService.applyStashSnapshot(localCwd, snapshot);
+                  } catch (error) {
+                    // A conflicting 3-way apply writes markers and unmerged
+                    // index entries into the user's checkout. Rollback
+                    // restores it; refuse with a typed code rather than
+                    // relocate into a poisoned tree or a bare 500.
+                    await rollback();
+                    res.status(409).json({
+                      error:
+                        'The worktree snapshot conflicts with the local checkout',
+                      code: 'handoff_snapshot_conflict',
+                      detail:
+                        error instanceof Error ? error.message : String(error),
+                      sessionId: storageSessionId,
+                    });
+                    return;
+                  }
                 }
                 copiedUntracked =
                   await wtCheckoutService.carryUntrackedFilesTo(localCwd);
@@ -5497,13 +5538,38 @@ export function registerSessionRoutes(
                 currentCwd: changed.newCwd,
               });
             } catch (error) {
+              // A bridge timeout is caller-facing: the queued cd can still
+              // land the session in the worktree after this await rejects.
+              // Decide by observed state — deleting a checkout the session
+              // now lives in would strand it in a vanished directory with
+              // the sidecar gone and every route failing on realpath.
+              const observedCwd =
+                runtime.bridge.getSessionExecutionSnapshot(
+                  storageSessionId,
+                ).effectiveCwd;
+              if (observedCwd === worktree.path) {
+                runtime.bridge.setSessionWorktree?.(storageSessionId, {
+                  slug,
+                  path: worktree.path,
+                  branch: '',
+                });
+                res.status(200).json({
+                  sessionId: storageSessionId,
+                  worktree: { slug, path: worktree.path, branch: '' },
+                  currentCwd: worktree.path,
+                });
+                return;
+              }
               // Roll back the fresh worktree, sidecar, and marker; the
               // session stays in the local checkout.
               await clearWorktreeSessionDurable(sidecarPath).catch(
                 () => undefined,
               );
               await placementService
-                .removeUserWorktree(slug, { deleteBranch: true })
+                .removeUserWorktree(slug, {
+                  deleteBranch: true,
+                  baseCommit,
+                })
                 .catch(() => undefined);
               throw error;
             }
@@ -5920,6 +5986,12 @@ export function registerSessionRoutes(
                     // which may differ from the main checkout's: capture
                     // the session's own dirty state, not the main's.
                     dirtyStateSource: base.checkoutCwd,
+                    // This route persists carriedPaths in the preparation
+                    // journal, whose reader refuses oversized records;
+                    // bound the carry so the journal stays readable. The
+                    // handoff and POST /session write no journal and carry
+                    // any size.
+                    maxCarriedPathsBytes: CARRIED_PATHS_MAX_BYTES,
                   },
                 );
                 if (!worktreeResult.success || !worktreeResult.worktree) {
@@ -5960,7 +6032,13 @@ export function registerSessionRoutes(
                   originalCwd: base.repoTop,
                   workspaceCwd: runtime.workspaceCwd,
                   originalBranch: base.branch,
-                  originalHeadCommit: base.headCommit,
+                  // The base must describe the SAME checkout as
+                  // originalCwd (the repo top): the handoff's
+                  // local_head_moved gate compares originalCwd's HEAD
+                  // against it. base.headCommit is the source worktree's
+                  // commit — a different checkout — and would 409 every
+                  // return handoff even though the local never moved.
+                  originalHeadCommit: (await getHeadCommit(base.repoTop)) ?? '',
                 });
                 journal = await updateBranchWorktreeJournal(
                   journalPath,

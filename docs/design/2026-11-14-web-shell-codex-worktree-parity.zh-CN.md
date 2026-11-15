@@ -128,12 +128,22 @@ overlay 并发告警，而非静默丢失每一次复制。
 会把文件链接物化成可提交进仓库的仓库外内容，目录链接则 EISDIR 丢失。
 tracked 路径捕获用 `stash show --name-only --no-renames -z`，被识别的
 重命名给出两侧——apply 后的 overlay 呈现 `A new` 加 ` D old`，回滚豁免
-必须同时命名两侧。daemon 自己的簿记名（会话 marker 与其 staged `.tmp`
-兄弟）从 untracked 列表过滤，绝不能作为用户内容被携带。整个 overlay 有
-界：序列化 UTF-8 大小超过 `CARRIED_PATHS_MAX_BYTES`（32 KiB，为准备
-journal 64 KiB 读取上限的一半）时完全跳过携带（fail-open 到已提交状态，
-带告警）——读不回的 journal 会让此后每次阶段转换（包括回滚自身）抛错，
-把工作树与 journal 一起搁死。
+必须同时命名两侧。untracked 列表在仓库顶层（而非服务根）运行，使 overlay
+两半即使会话根在子目录也覆盖同一仓库级集合。daemon 自己的簿记名（会话
+marker 与其 staged `.tmp` 兄弟）从 untracked 列表过滤，绝不能作为用户
+内容被携带。
+
+冲突的三方 `stash apply`（捕获检出的 HEAD 与工作树 base 在同几行分叉）
+会写入冲突标记与未合并索引条目；按索引状态检测——simple-git 的 raw 模式
+即使非零退出也可能 resolve——并 fail-closed：工作树复位到已提交状态、
+创建返回失败，绝不把会话迁进被污染的树。干净拒绝仍 fail-open。
+
+携带界限按调用方而非全局。只有 branch-preparation 路由持久化
+`carriedPaths`（journal 读取端拒绝超 64 KiB 的记录），故传入
+`maxCarriedPathsBytes = CARRIED_PATHS_MAX_BYTES`（32 KiB）；超界跳过携带
+（fail-open 到已提交状态）使 journal 可读回。handoff 与 POST /session 不
+写 journal，携带任意大小——在那里静默丢弃大 overlay 会让会话失去用户
+的工作。
 
 provisioning 通过仓库的 `info/exclude` 忽略托管 worktrees 目录，而不是
 写 `.qwen/.gitignore`：检出里的簿记文件本身就是 untracked 工作，曾让
@@ -217,26 +227,37 @@ worktree-branch 路由带繁忙门（`branch_while_prompt_active`）。能力标
 `session_worktree_handoff_v1`。
 
 - **Worktree → Local**（`to: 'local'`）：本地检出（`sidecar.originalCwd`）
-  不干净时拒绝（`local_checkout_dirty`）。先携带工作：命名 worktree 分支在
-  本地检出 checkout；detached 且有超出 base 的 commit 时先建分支（`name`，
-  否则 `worktree-<slug>`）；detached 停在 base 且无工作则不携带。先 detach
-  worktree 释放分支——git 禁止同一分支同时在两个 worktree 检出。worktree
-  的未提交改动以 `git stash create` 快照在 checkout 后应用于本地检出。然后
-  把会话 cwd 迁回本地检出，清除 sidecar 与 bridge worktree 关联，worktree
-  目录（连同 marker）留给保留清理（P6）或手动删除。每条 worktree 创建路径
-  （会话创建与 Local → Worktree 移交）都把 base 分支与 HEAD commit 记入
-  sidecar（`originalBranch` / `originalHeadCommit`）；超出 base 的判定读取
-  该记录 base。worktree HEAD 或记录 base 无法核实时，移交以
+  不干净时拒绝（`local_checkout_dirty`）。记录 base（`originalHeadCommit`）
+  必须与 `originalCwd` 描述同一检出：本地 HEAD 可等于它或为其后代（用户在
+  agent 工作期间于本地提交——这正是用 worktree 的常态），以快照叠加其上
+  调和；分叉或不可读的本地 HEAD 以 `local_head_moved` 拒绝。与本地检出冲突
+  的快照在还原本地检出后以 `handoff_snapshot_conflict` 拒绝——绝不留下冲突
+  标记。先携带工作：命名 worktree 分支在本地检出 checkout；detached 且有
+  超出 base 的 commit 时先建分支（`name`，否则 `worktree-<slug>`）；detached
+  停在 base 且无工作则不携带。先 detach worktree 释放分支——git 禁止同一
+  分支同时在两个 worktree 检出。worktree 的未提交改动以 `git stash create`
+  快照在 checkout 后应用于本地检出。然后把会话 cwd 迁回本地检出，清除
+  sidecar 与 bridge worktree 关联，worktree 目录（连同 marker）留给保留清理
+  （P6）或手动删除。每条 worktree 创建路径都把 base 分支与 HEAD commit 记入
+  sidecar（`originalBranch` / `originalHeadCommit`）；超出 base 的提升判定
+  读取该记录 base。晚期失败回滚：自动分支仅在删除成功时删（否则 sidecar
+  继续命名它并重挂 worktree），使重试始终与检出匹配，而非卡死在
+  `worktree_branch_mismatch`。worktree HEAD 或记录 base 无法核实时，移交以
   `worktree_handoff_base_unavailable` 拒绝，而不是在工作留在原处时报告成功。
-- **Local → Worktree**（`to: 'worktree'`）：会话已有 worktree sidecar 时
-  拒绝。从本地 HEAD 创建 detached 托管 worktree 并施加 dirty overlay（D3），
-  写 sidecar + marker，把会话迁入，设置 bridge worktree 元数据。迁移失败时
-  回滚新建的 worktree、sidecar、marker。本地检出保持原样。base 直接读源
-  检出的 HEAD（`getHeadCommit`），不走只在检出根才应答的 registered-worktree
-  探针——合法的子目录 workspace 也必须记下可用 base；HEAD 不可读时以
-  `worktree_handoff_base_unavailable` 拒绝移交。自动创建的分支名与显式名字
-  一样获得类型化 `branch_already_exists` 拒绝；「移入 worktree」动作带提示：
-  本地检出保留其 dirty 状态，移交回本地需要本地检出干净。
+- **Local → Worktree**（`to: 'worktree'`）：sidecar 判定（`valid` 拒绝、
+  `invalid` 以 `worktree_reset_invalid_state` 拒绝、仅 `missing` 创建）在
+  worktree 键所有权锁内做出，使并发请求不能孤儿化检出。创建 detached 托管
+  worktree 并施加 dirty overlay（D3），写 sidecar + marker，把会话迁入，
+  设置 bridge worktree 元数据。base 读 workspace 根——即 sidecar 记为
+  `originalCwd` 的检出——使 base/cwd 对描述同一检出，回程不会误 409
+  `local_head_moved`；cd 进兄弟检出的会话以 workspace HEAD 为其 worktree
+  起点（兄弟自己的提交留在兄弟中），dirty 文件仍从会话检出携带。HEAD 不可读
+  时以 `worktree_handoff_base_unavailable` 拒绝。迁移失败时回滚按观测状态
+  决定：bridge 超时是 caller-facing，排队的 cd 仍可能把会话落入 worktree，
+  故路由重读 effective cwd，会话已住在其中时保留检出 + sidecar；仅当 cwd
+  仍是移交前检出时才删除新建 worktree、sidecar、marker。自动创建的分支名与
+  显式名字一样获得类型化 `branch_already_exists` 拒绝；「移入 worktree」动作
+  带提示：本地检出保留其 dirty 状态，移交回本地需要本地检出干净。
 
 v1 限制（成文而非静默）：以「本地干净」要求代替「无其他活跃会话占用本地
 检出」（bridge 无会话列表探针可查占用）；handoff 不实现 `worktree-reset` 的崩溃窗口原子回滚——中途崩溃
@@ -336,16 +357,16 @@ A. 创建与元数据生产者
 
 B. 生命周期门（风险最高——漏掉即 fail-closed 泄漏）
 
-| 站点                                                                         | 现状                                                                 | P3 迁移                                                                                                                                                                                                             |
-| ---------------------------------------------------------------------------- | -------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `gitWorktreeService.ts` `removePreparedUserWorktree` `checkoutMatches`       | `HEAD == base && branch == worktree-<slug>`                          | `HEAD == base`；分支等值仅限命名模式                                                                                                                                                                                |
-| `gitWorktreeService.ts` `removePreparedUserWorktree` `atBase` tip 检查（×2） | `for-each-ref refs/heads/worktree-<slug>` tip `== base`              | detached：由 HEAD 等值覆盖；命名：不变                                                                                                                                                                              |
-| `gitWorktreeService.ts` `finalizePreparedUserWorktreeBranch`                 | tip null → no-op；否则 `branch -d`                                   | journal 推导 `branchOwned`：命名 preparation 拥有其分支（`worktree add -b` 拒绝既有名）；detached preparation 绝不删除按 slug 推导的 ref                                                                            |
-| `gitWorktreeService.ts` `removeUserWorktree`                                 | `-d`/`-D worktree-<slug>`；`branchPreserved`                         | detached：HEAD 携带未合并 commit 时拒绝删除（force 可退出）；绝不删除按 slug 推导的分支（从未拥有）；检出已离开 slug 分支但 ref 仍在时报告 `branchSkipped`，调用方说「保留」而非「已删除」；命名：不变              |
-| `gitWorktreeService.ts` `hasUnmergedWorktreeCommits`                         | `rev-parse worktree-<slug>`，出错 fail-closed `true`                 | 按检出自身 HEAD tip 与实际分支判定（`--abbrev-ref HEAD` → `ownRef`），从 `for-each-ref --contains <tip> refs/heads refs/remotes` 中排除该 ref；检出不可读时回退 slug ref。detached 与就地建分支的 worktree 同样覆盖 |
-| `cli/serve/server/worktree-orphan-cleanup.ts` `executeWorktreeCleanup`       | `worktreeHasWork` 门 + `removeUserWorktree` + `branchPreserved` 日志 | P3 门不变（dirty 工作保留，见 D3）；detached 删除被拒时重察文件系统并记录保留；P6 快照解除该门                                                                                                                      |
-| `cli/serve/branch-worktree-preparation.ts` journal 身份                      | `worktreeBranch === worktreeBranchForSlug(slug)`                     | 在命名形式之外接受 `''` detached 约定                                                                                                                                                                               |
-| `cli/startup/worktreeStartup.ts` `setupStartupWorktree` 重附着门             | 期望分支；null → 「Worktree already exists」                         | `getRegisteredWorktreeBranch` 将 detached 报告为 `{branch: '', headCommit}`；门继续拒绝不在 `worktree-<slug>` 上的任何占用者（含 detached）——会话重附着走 session-restore 而非该参数                                |
+| 站点                                                                         | 现状                                                                 | P3 迁移                                                                                                                                                                                                                                                                                                                                                               |
+| ---------------------------------------------------------------------------- | -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `gitWorktreeService.ts` `removePreparedUserWorktree` `checkoutMatches`       | `HEAD == base && branch == worktree-<slug>`                          | `HEAD == base`；分支等值仅限命名模式                                                                                                                                                                                                                                                                                                                                  |
+| `gitWorktreeService.ts` `removePreparedUserWorktree` `atBase` tip 检查（×2） | `for-each-ref refs/heads/worktree-<slug>` tip `== base`              | detached：由 HEAD 等值覆盖；命名：不变                                                                                                                                                                                                                                                                                                                                |
+| `gitWorktreeService.ts` `finalizePreparedUserWorktreeBranch`                 | tip null → no-op；否则 `branch -d`                                   | journal 推导 `branchOwned`：命名 preparation 拥有其分支（`worktree add -b` 拒绝既有名）；detached preparation 绝不删除按 slug 推导的 ref                                                                                                                                                                                                                              |
+| `gitWorktreeService.ts` `removeUserWorktree`                                 | `-d`/`-D worktree-<slug>`；`branchPreserved`                         | detached：HEAD 携带自身未合并 commit 时拒绝删除（force 可退出）；给定创建 `baseCommit` 时，HEAD 停在/落后 base 即无 agent 工作，即使 base 不被任何分支可达。所有权显式（命名创建传 `branchOwned`，即使检出移走也证明拥有 slug ref）或按当前分支推断（detached/就地建分支从不拥有）。报告 `deletedBranch`/`keptBranch`，调用方陈述实际发生的事，绝不按 slug 名推断删除 |
+| `gitWorktreeService.ts` `hasUnmergedWorktreeCommits`                         | `rev-parse worktree-<slug>`，出错 fail-closed `true`                 | 按检出自身 HEAD tip 与实际分支判定（`--abbrev-ref HEAD` → `ownRef`），从 `for-each-ref --contains <tip> refs/heads refs/remotes` 中排除该 ref；检出不可读时回退 slug ref。detached 与就地建分支的 worktree 同样覆盖                                                                                                                                                   |
+| `cli/serve/server/worktree-orphan-cleanup.ts` `executeWorktreeCleanup`       | `worktreeHasWork` 门 + `removeUserWorktree` + `branchPreserved` 日志 | P3 门不变（dirty 工作保留，见 D3）；detached 删除被拒时重察文件系统并记录保留；P6 快照解除该门                                                                                                                                                                                                                                                                        |
+| `cli/serve/branch-worktree-preparation.ts` journal 身份                      | `worktreeBranch === worktreeBranchForSlug(slug)`                     | 在命名形式之外接受 `''` detached 约定                                                                                                                                                                                                                                                                                                                                 |
+| `cli/startup/worktreeStartup.ts` `setupStartupWorktree` 重附着门             | 期望分支；null → 「Worktree already exists」                         | `getRegisteredWorktreeBranch` 将 detached 报告为 `{branch: '', headCommit}`；门继续拒绝不在 `worktree-<slug>` 上的任何占用者（含 detached）——会话重附着走 session-restore 而非该参数                                                                                                                                                                                  |
 
 C. Sidecar、恢复与展示
 

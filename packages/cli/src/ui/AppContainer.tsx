@@ -84,6 +84,7 @@ import {
   GitWorktreeService,
   readWorktreeSessionMarker,
   isSessionRuntimeActive,
+  worktreeBranchForSlug,
   type GoalTurnHost,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -2457,6 +2458,11 @@ export const AppContainer = (props: AppContainerProps) => {
           const result = await svc.removeUserWorktree(activeWorktree.slug, {
             deleteBranch: true,
             forceDeleteBranch: true,
+            branchOwned:
+              activeWorktree.branch !== '' &&
+              activeWorktree.branch ===
+                worktreeBranchForSlug(activeWorktree.slug),
+            baseCommit: activeWorktree.originalHeadCommit,
           });
           // removeUserWorktree returns {success, error} on failure — it
           // does NOT throw — so the previous try/catch never tripped on

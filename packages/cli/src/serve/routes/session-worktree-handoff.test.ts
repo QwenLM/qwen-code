@@ -96,6 +96,7 @@ function makeFixture(opts: { subdir?: string } = {}) {
   let effectiveCwd = workspaceDir;
   let cdGate: Promise<void> | null = null;
   let cdReject = false;
+  let cdLandThenReject = false;
   const bridge = {
     getSessionSummary: (id: string) => {
       gateOrder.push(`summary:${id}`);
@@ -129,6 +130,16 @@ function makeFixture(opts: { subdir?: string } = {}) {
         };
       }
       const previousCwd = effectiveCwd;
+      if (cdLandThenReject) {
+        // A caller-facing timeout: the queued cd lands the session in the
+        // target directory, but the route's await still rejects.
+        effectiveCwd = req.path;
+        return {
+          previousCwd,
+          newCwd: `${req.path}-rejected`,
+          warnings: [],
+        };
+      }
       effectiveCwd = req.path;
       return { previousCwd, newCwd: req.path, warnings: [] };
     },
@@ -200,6 +211,9 @@ function makeFixture(opts: { subdir?: string } = {}) {
     },
     setCdReject(reject: boolean) {
       cdReject = reject;
+    },
+    setCdLandThenReject(landThenReject: boolean) {
+      cdLandThenReject = landThenReject;
     },
     setEffectiveCwd(cwd: string) {
       effectiveCwd = cwd;
@@ -589,14 +603,16 @@ describe('POST /session/:id/worktree-handoff', () => {
     );
   });
 
-  it('refuses handoff when the local HEAD moved past the base', async () => {
+  it('reconciles a moved-ahead local checkout and carries the agent work', async () => {
     const fixture = makeFixture();
     fixture.writeTranscript();
     await fixture.createDetachedWorktree();
     writeFileSync(path.join(fixture.worktreeDir, 'work.txt'), 'work\n');
     git(fixture.worktreeDir, 'add', 'work.txt');
     git(fixture.worktreeDir, 'commit', '-qm', 'agent work', '--no-verify');
-    // A clean but moved-ahead local checkout.
+    // A clean local checkout that committed ahead of the base: a
+    // descendant is reconcilable (R5-22), so the handoff proceeds and
+    // promotes the agent's work rather than refusing forever.
     writeFileSync(path.join(fixture.workspaceDir, 'local.txt'), 'local\n');
     git(fixture.workspaceDir, 'add', 'local.txt');
     git(fixture.workspaceDir, 'commit', '-qm', 'local work', '--no-verify');
@@ -605,11 +621,12 @@ describe('POST /session/:id/worktree-handoff', () => {
       .post(`/session/${fixture.sessionId}/worktree-handoff`)
       .send({ to: 'local' });
 
-    expect(res.status).toBe(409);
-    expect(res.body.code).toBe('local_head_moved');
-    expect(git(fixture.workspaceDir, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(
-      'main',
-    );
+    expect(res.status).toBe(200);
+    expect(res.body.worktree).toBeNull();
+    // The agent's work is carried into the local checkout.
+    expect(existsSync(path.join(fixture.workspaceDir, 'work.txt'))).toBe(true);
+    // The local commit is preserved on main (not lost).
+    expect(git(fixture.workspaceDir, 'show', 'main:local.txt')).toBe('local');
   });
 
   it('rejects an empty branch name with 400', async () => {
@@ -1152,5 +1169,132 @@ describe('POST /session/:id/worktree-handoff', () => {
       .post(`/session/${fixture.sessionId}/worktree-handoff`)
       .send({ to: 'local' });
     expect(retry.status).toBe(200);
+  });
+
+  it('hands back to local after the local checkout committed ahead', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    await fixture.createDetachedWorktree();
+    // The user commits locally while the agent works in the worktree —
+    // the normal reason to use one. A descendant base is reconcilable.
+    writeFileSync(path.join(fixture.workspaceDir, 'local.txt'), 'local\n');
+    git(fixture.workspaceDir, 'add', 'local.txt');
+    git(fixture.workspaceDir, 'commit', '-qm', 'local work', '--no-verify');
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'local' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.worktree).toBeNull();
+  });
+
+  it('refuses handoff when the local checkout diverged from the base', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    await fixture.createDetachedWorktree();
+    // An unrelated root commit: not a descendant of the recorded base.
+    git(fixture.workspaceDir, 'checkout', '-q', '--orphan', 'unrelated');
+    git(
+      fixture.workspaceDir,
+      'commit',
+      '--allow-empty',
+      '-qm',
+      'unrelated',
+      '--no-verify',
+    );
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'local' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('local_head_moved');
+  });
+
+  it('keeps the checkout when a caller-facing timeout still landed the cd', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    fixture.setCdLandThenReject(true);
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'worktree' });
+
+    // The queued cd landed the session in the worktree even though the
+    // route's await rejected: the checkout and sidecar must survive.
+    expect(res.status).toBe(200);
+    expect(existsSync(res.body.worktree.path)).toBe(true);
+    const sidecar = await fixture.readSidecar();
+    expect(sidecar.state).toBe('valid');
+  });
+
+  it('hands back a branch-route sidecar whose base names the repo top', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    // The branch route creates a NAMED worktree at the source checkout's
+    // commit but records originalCwd = repo top with the repo top's HEAD
+    // as the base. The worktree sits at a different commit than the root.
+    const result = await fixture.service.createUserWorktree(
+      fixture.slug,
+      'main',
+    );
+    expect(result.success).toBe(true);
+    git(fixture.worktreeDir, 'checkout', '-q', 'worktree-task');
+    writeFileSync(path.join(fixture.worktreeDir, 'agent.txt'), 'work\n');
+    git(fixture.worktreeDir, 'add', 'agent.txt');
+    git(fixture.worktreeDir, 'commit', '-qm', 'agent work', '--no-verify');
+    await createWorktreeSessionMarkerExclusive(
+      fixture.worktreeDir,
+      fixture.sessionId,
+    );
+    const rootHead = git(fixture.workspaceDir, 'rev-parse', 'HEAD');
+    await writeWorktreeSession(
+      fixture.sessionService.getWorktreeSessionPath(fixture.sessionId),
+      {
+        slug: fixture.slug,
+        worktreePath: fixture.worktreeDir,
+        worktreeBranch: 'worktree-task',
+        originalCwd: fixture.workspaceDir,
+        workspaceCwd: fixture.workspaceDir,
+        originalBranch: 'main',
+        originalHeadCommit: rootHead,
+      },
+    );
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'local' });
+
+    // The local never moved; the base describes the repo top, so the gate
+    // must pass (pre-fix it compared the root HEAD to the worktree commit).
+    expect(res.status).toBe(200);
+    expect(res.body.worktree).toBeNull();
+  });
+
+  it('carries a large dirty overlay into the worktree (no journal bound)', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    const filler = 'x'.repeat(60);
+    for (let i = 0; i < 600; i++) {
+      writeFileSync(
+        path.join(
+          fixture.workspaceDir,
+          `bulk-${String(i).padStart(4, '0')}-${filler}.txt`,
+        ),
+        'bulk\n',
+      );
+    }
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'worktree' });
+
+    expect(res.status).toBe(200);
+    // The handoff writes no journal: the >32KiB overlay must be carried,
+    // not silently dropped.
+    expect(
+      existsSync(path.join(res.body.worktree.path, `bulk-0000-${filler}.txt`)),
+    ).toBe(true);
   });
 });

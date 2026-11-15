@@ -29602,7 +29602,14 @@ describe('createServeApp', () => {
         expect(createWorktreeCalls[0]).toEqual([
           slug,
           baseCommit,
-          { carryDirtyState: true, detached: true, dirtyStateSource: repo },
+          expect.objectContaining({
+            carryDirtyState: true,
+            detached: true,
+            dirtyStateSource: repo,
+            // The branch route persists carriedPaths in the journal, so it
+            // bounds the carry (CARRIED_PATHS_MAX_BYTES = 32 KiB).
+            maxCarriedPathsBytes: 32 * 1024,
+          }),
         ]);
         expect(res.body.sourceWarnings).toEqual([
           'Session sources could not be copied.',

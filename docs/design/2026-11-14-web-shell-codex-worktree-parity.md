@@ -143,15 +143,29 @@ The carry preserves symlinks as links (`lstat` + `readlink` + `symlink`):
 content and drop a directory link with `EISDIR`. The tracked-path capture
 uses `stash show --name-only --no-renames -z` so a detected rename yields
 both sides — the applied overlay presents `A new` plus ` D old`, and the
-rollback's exemption must name both. The daemon's own bookkeeping names
-(the session marker and its staged `.tmp` siblings) are filtered from the
-untracked list so they can never be carried as user content. The whole
-overlay is bounded: if its serialized UTF-8 size exceeds
-`CARRIED_PATHS_MAX_BYTES` (32 KiB, half the preparation journal's 64 KiB
-read cap), the carry is skipped entirely (fail-open to committed state,
-with a warning) — a journal that cannot be read back would strand the
-worktree and its journal on every later phase transition, including the
-rollback's own.
+rollback's exemption must name both. The untracked listing runs at the
+repository top (not the service root) so both halves of the overlay cover
+the same repository-wide set even when the session is rooted at a
+subdirectory. The daemon's own bookkeeping names (the session marker and
+its staged `.tmp` siblings) are filtered from the untracked list so they
+can never be carried as user content.
+
+A conflicting 3-way `stash apply` (the capture checkout's HEAD diverged
+from the worktree base on the same lines) writes conflict markers and
+unmerged index entries; it is detected by the index state — simple-git's
+raw mode may resolve even on the non-zero exit — and fails closed: the
+worktree is restored to committed state and creation returns failure, so
+a session is never relocated into a poisoned tree. A clean refusal stays
+fail-open.
+
+The carry bound is per call site, not universal. Only the branch-
+preparation route persists `carriedPaths` (in a journal whose reader
+refuses records above 64 KiB), so it passes `maxCarriedPathsBytes =
+CARRIED_PATHS_MAX_BYTES` (32 KiB); above the bound the carry is skipped
+(fail-open to committed state) so the journal stays readable. The handoff
+and `POST /session` write no journal and carry any size — silently
+dropping a large overlay there would move the session without the user's
+work.
 
 Provisioning ignores the managed worktrees directory through the
 repository's `info/exclude`, not a daemon-written `.qwen/.gitignore`: a
@@ -257,32 +271,52 @@ worktree-branch route carries the busy gate (`branch_while_prompt_active`).
 Capability: `session_worktree_handoff_v1`.
 
 - **Worktree → Local** (`to: 'local'`): refuse unless the local checkout
-  (`sidecar.originalCwd`) is clean (`local_checkout_dirty`). Carry the work
-  first: a named worktree branch is checked out in the local checkout; a
-  detached worktree with commits beyond base gets a branch first
-  (`name`, else `worktree-<slug>`); a detached worktree at base with no work
-  carries nothing. The worktree is detached first to release the branch —
-  git forbids the same branch checked out in two worktrees at once. Uncommitted worktree changes travel as a `git stash
-create` snapshot applied in the local checkout after the checkout. Then
-  relocate the session cwd to the local checkout, clear the sidecar and the
-  bridge worktree association, and leave the worktree directory (with its
-  marker) for retention cleanup (P6) or manual removal. Every worktree
-  creation path (session create and Local → Worktree handoff) records the
-  base branch and HEAD commit in the sidecar (`originalBranch` /
-  `originalHeadCommit`); the beyond-base test reads that recorded base.
-  When the worktree HEAD or the recorded base cannot be verified, the
-  handoff refuses with `worktree_handoff_base_unavailable` instead of
-  reporting success while the work stays behind.
-- **Local → Worktree** (`to: 'worktree'`): refuse if the session already has
-  a worktree sidecar. Create a detached managed worktree from the local
-  HEAD with the dirty overlay (D3), write the sidecar + marker, relocate the
-  session into it, and set the bridge worktree metadata. On relocation
-  failure the fresh worktree, sidecar, and marker are rolled back. The local
-  checkout is left as it was. The base is read straight from the source
-  checkout's HEAD (`getHeadCommit`), not from the registered-worktree probe
-  that only answers at a checkout root — a legitimate subdirectory workspace
-  must still record a usable base; an unreadable HEAD refuses the handoff
-  with `worktree_handoff_base_unavailable`. The auto-created branch name
+  (`sidecar.originalCwd`) is clean (`local_checkout_dirty`). The recorded
+  base (`originalHeadCommit`) must describe the SAME checkout as
+  `originalCwd`: the local HEAD may equal it or be a descendant (the user
+  committed locally while the agent worked — the normal reason to use a
+  worktree), reconciled by applying the snapshot on top; a divergent or
+  unreadable local HEAD refuses with `local_head_moved`. A snapshot that
+  conflicts with the local checkout is refused with
+  `handoff_snapshot_conflict` after restoring the local checkout — never
+  left as conflict markers. Carry the work first: a named worktree branch
+  is checked out in the local checkout; a detached worktree with commits
+  beyond base gets a branch first (`name`, else `worktree-<slug>`); a
+  detached worktree at base with no work carries nothing. The worktree is
+  detached first to release the branch — git forbids the same branch
+  checked out in two worktrees at once. Uncommitted worktree changes travel
+  as a `git stash create` snapshot applied in the local checkout after the
+  checkout. Then relocate the session cwd to the local checkout, clear the
+  sidecar and the bridge worktree association, and leave the worktree
+  directory (with its marker) for retention cleanup (P6) or manual removal.
+  Every worktree creation path records the base branch and HEAD commit in
+  the sidecar (`originalBranch` / `originalHeadCommit`); the beyond-base
+  promotion test reads that recorded base. A late failure rolls back: the
+  auto branch is deleted only when the delete succeeds (otherwise the
+  sidecar keeps naming it and the worktree is re-attached), so a retry
+  always matches the checkout instead of wedging in
+  `worktree_branch_mismatch`. When the worktree HEAD or the recorded base
+  cannot be verified, the handoff refuses with
+  `worktree_handoff_base_unavailable` instead of reporting success while
+  the work stays behind.
+- **Local → Worktree** (`to: 'worktree'`): the sidecar decision (refuse a
+  `valid` sidecar, refuse an `invalid` one with `worktree_reset_invalid_state`,
+  create only on `missing`) is taken INSIDE the worktree-keyed ownership
+  lock, so concurrent requests cannot orphan a checkout. Create a detached
+  managed worktree with the dirty overlay (D3), write the sidecar + marker,
+  relocate the session into it, and set the bridge worktree metadata. The
+  base is read from the workspace root — the checkout the sidecar records
+  as `originalCwd` — so the base/cwd pair describes one checkout and the
+  return leg cannot false-409 `local_head_moved`; a session cd'd into a
+  sibling checkout starts its worktree at the workspace HEAD (the sibling's
+  own commits stay in the sibling) while its dirty files are still carried
+  from the session checkout. An unreadable HEAD refuses with
+  `worktree_handoff_base_unavailable`. On relocation failure the rollback
+  decides by OBSERVED state: a bridge timeout is caller-facing and the
+  queued cd may still land the session in the worktree, so the route re-reads
+  the effective cwd and keeps the checkout + sidecar when the session already
+  lives there; only when the cwd is still the pre-handoff checkout are the
+  fresh worktree, sidecar, and marker removed. The auto-created branch name
   receives the same typed `branch_already_exists` refusal as an explicit
   name, and the "Move to worktree" action carries a hint that the local
   checkout keeps its dirty state and handing back requires a clean local
@@ -411,16 +445,16 @@ A. Creation and metadata producers
 
 B. Lifecycle gates (highest risk — fail-closed leaks if missed)
 
-| Site                                                                     | Today                                                                 | P3 migration                                                                                                                                                                                                                                                                       |
-| ------------------------------------------------------------------------ | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `gitWorktreeService.ts` `removePreparedUserWorktree` `checkoutMatches`   | `HEAD == base && branch == worktree-<slug>`                           | `HEAD == base`; branch equality only in named mode                                                                                                                                                                                                                                 |
-| `gitWorktreeService.ts` `removePreparedUserWorktree` `atBase` tip checks | `for-each-ref refs/heads/worktree-<slug>` tip `== base`               | Detached: covered by HEAD equality; named: unchanged                                                                                                                                                                                                                               |
-| `gitWorktreeService.ts` `finalizePreparedUserWorktreeBranch`             | Tip null → no-op; else `branch -d`                                    | `branchOwned` from the journal: named preparation owns its branch (`worktree add -b` refused a pre-existing one); detached preparation never deletes the slug-derived ref                                                                                                          |
-| `gitWorktreeService.ts` `removeUserWorktree`                             | `-d`/`-D worktree-<slug>`; `branchPreserved`                          | Detached: refuse removal when HEAD carries unmerged commits (force opts out); never delete the slug-derived branch (never owned); when the checkout left the slug branch but the ref survives, report `branchSkipped` so callers say "kept", not "deleted"; named: unchanged       |
-| `gitWorktreeService.ts` `hasUnmergedWorktreeCommits`                     | `rev-parse worktree-<slug>`, fail-closed `true` on error              | Judge by the checkout's own HEAD tip and actual branch (`--abbrev-ref HEAD` → `ownRef`), excluding that ref from `for-each-ref --contains <tip> refs/heads refs/remotes`; slug-ref fallback when the checkout is unreadable. Covers detached and in-place-branched worktrees alike |
-| `cli/serve/server/worktree-orphan-cleanup.ts` `executeWorktreeCleanup`   | `worktreeHasWork` gate + `removeUserWorktree` + `branchPreserved` log | Gate unchanged in P3 (dirty work preserved, see D3); a refused detached removal re-observes the filesystem and logs the preserve; P6 snapshot lifts the gate                                                                                                                       |
-| `cli/serve/branch-worktree-preparation.ts` journal identity              | `worktreeBranch === worktreeBranchForSlug(slug)`                      | Accept the `''` detached convention alongside the named form                                                                                                                                                                                                                       |
-| `cli/startup/worktreeStartup.ts` `setupStartupWorktree` reattach gate    | Expected branch; null → "Worktree already exists"                     | `getRegisteredWorktreeBranch` reports detached as `{branch: '', headCommit}`; the gate keeps refusing any occupant not on `worktree-<slug>`, including detached — session re-attach goes through session-restore, not this flag                                                    |
+| Site                                                                     | Today                                                                 | P3 migration                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ------------------------------------------------------------------------ | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `gitWorktreeService.ts` `removePreparedUserWorktree` `checkoutMatches`   | `HEAD == base && branch == worktree-<slug>`                           | `HEAD == base`; branch equality only in named mode                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `gitWorktreeService.ts` `removePreparedUserWorktree` `atBase` tip checks | `for-each-ref refs/heads/worktree-<slug>` tip `== base`               | Detached: covered by HEAD equality; named: unchanged                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `gitWorktreeService.ts` `finalizePreparedUserWorktreeBranch`             | Tip null → no-op; else `branch -d`                                    | `branchOwned` from the journal: named preparation owns its branch (`worktree add -b` refused a pre-existing one); detached preparation never deletes the slug-derived ref                                                                                                                                                                                                                                                                                                                                                                      |
+| `gitWorktreeService.ts` `removeUserWorktree`                             | `-d`/`-D worktree-<slug>`; `branchPreserved`                          | Detached: refuse removal when HEAD carries unmerged commits of its own (force opts out); with the creation `baseCommit`, a HEAD at/behind base is no agent work even when the base is unreachable from any branch. Ownership is explicit (`branchOwned` for named creations, which provably own their slug ref even after the checkout moves) or inferred from the current branch (detached/in-place never own it). Reports `deletedBranch`/`keptBranch` so callers state what actually happened, never a deletion inferred from the slug name |
+| `gitWorktreeService.ts` `hasUnmergedWorktreeCommits`                     | `rev-parse worktree-<slug>`, fail-closed `true` on error              | Judge by the checkout's own HEAD tip and actual branch (`--abbrev-ref HEAD` → `ownRef`), excluding that ref from `for-each-ref --contains <tip> refs/heads refs/remotes`; slug-ref fallback when the checkout is unreadable. Covers detached and in-place-branched worktrees alike                                                                                                                                                                                                                                                             |
+| `cli/serve/server/worktree-orphan-cleanup.ts` `executeWorktreeCleanup`   | `worktreeHasWork` gate + `removeUserWorktree` + `branchPreserved` log | Gate unchanged in P3 (dirty work preserved, see D3); a refused detached removal re-observes the filesystem and logs the preserve; P6 snapshot lifts the gate                                                                                                                                                                                                                                                                                                                                                                                   |
+| `cli/serve/branch-worktree-preparation.ts` journal identity              | `worktreeBranch === worktreeBranchForSlug(slug)`                      | Accept the `''` detached convention alongside the named form                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `cli/startup/worktreeStartup.ts` `setupStartupWorktree` reattach gate    | Expected branch; null → "Worktree already exists"                     | `getRegisteredWorktreeBranch` reports detached as `{branch: '', headCommit}`; the gate keeps refusing any occupant not on `worktree-<slug>`, including detached — session re-attach goes through session-restore, not this flag                                                                                                                                                                                                                                                                                                                |
 
 C. Sidecar, restore, and display
 

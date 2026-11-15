@@ -422,4 +422,87 @@ describe('GitWorktreeService — detached managed worktrees', () => {
       ),
     ).toBe('feat/hooked');
   });
+
+  it('removes a zero-commit detached worktree whose base is unreachable', async () => {
+    // The base sha is reachable from no branch (main moved past it via a
+    // force-reset to an unrelated root): the plain reachability guard
+    // would refuse a worktree with zero commits of its own. With the
+    // creation base in hand, removal proceeds.
+    const base = git(repoRoot, 'rev-parse', 'HEAD');
+    const worktree = await createDetached('sess-unreachable');
+    git(repoRoot, 'checkout', '-q', '--orphan', 'fresh');
+    git(repoRoot, 'commit', '--allow-empty', '-qm', 'unrelated', '--no-verify');
+    git(repoRoot, 'branch', '-M', 'fresh', 'main');
+    // base is now unreachable from any branch.
+    expect(
+      git(
+        repoRoot,
+        'for-each-ref',
+        '--contains',
+        base,
+        '--format=%(refname)',
+        'refs/heads',
+      ),
+    ).toBe('');
+
+    const withBase = await service.removeUserWorktree('sess-unreachable', {
+      deleteBranch: true,
+      baseCommit: base,
+    });
+    expect(withBase.success).toBe(true);
+    await expect(fs.lstat(worktree.path)).rejects.toThrow();
+  });
+
+  it('still refuses a detached worktree with its own unmerged commits', async () => {
+    const base = git(repoRoot, 'rev-parse', 'HEAD');
+    const worktree = await createDetached('sess-agent-commits');
+    await fs.writeFile(path.join(worktree.path, 'agent.txt'), 'work\n');
+    git(worktree.path, 'add', 'agent.txt');
+    git(worktree.path, 'commit', '-qm', 'agent work', '--no-verify');
+    const result = await service.removeUserWorktree('sess-agent-commits', {
+      deleteBranch: true,
+      baseCommit: base,
+    });
+    expect(result.success).toBe(false);
+    expect(result.branchPreserved).toBe(true);
+    await expect(fs.lstat(worktree.path)).resolves.toBeDefined();
+  });
+
+  it('deletes the owned slug branch even when the checkout moved away', async () => {
+    // A named creation owns its slug ref provably; switching branches
+    // inside the worktree must not leak the ref (which would block a
+    // later enter_worktree of the same name).
+    const created = await service.createUserWorktree(
+      'sess-named-drift',
+      'main',
+    );
+    expect(created.success).toBe(true);
+    git(created.worktree!.path, 'checkout', '-q', '-b', 'fix');
+    const result = await service.removeUserWorktree('sess-named-drift', {
+      deleteBranch: true,
+      branchOwned: true,
+    });
+    expect(result.success).toBe(true);
+    expect(result.deletedBranch).toBe('worktree-sess-named-drift');
+    expect(result.keptBranch).toBe('fix');
+    expect(git(repoRoot, 'branch', '--list', 'worktree-sess-named-drift')).toBe(
+      '',
+    );
+  });
+
+  it('reports the surviving branch for an in-place-branched detached worktree', async () => {
+    // No slug ref was ever created: the removal deletes no branch and
+    // must name the branch that survives (the handle to the work).
+    const worktree = await createDetached('sess-inplace');
+    await service.createWorktreeBranch(worktree.path, 'feat/x');
+    const result = await service.removeUserWorktree('sess-inplace', {
+      deleteBranch: true,
+    });
+    expect(result.success).toBe(true);
+    expect(result.deletedBranch).toBeUndefined();
+    expect(result.keptBranch).toBe('feat/x');
+    expect(
+      git(repoRoot, 'branch', '--list', 'feat/x', '--format=%(refname:short)'),
+    ).toBe('feat/x');
+  });
 });

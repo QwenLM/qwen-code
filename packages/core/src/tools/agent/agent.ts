@@ -2942,6 +2942,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       try {
         const result = await wtService.removeUserWorktree(isolation.slug, {
           deleteBranch: true,
+          // Isolation worktrees are created named, so the slug ref is
+          // provably theirs even if the agent switched branches.
+          branchOwned: true,
         });
         if (!result.success) {
           // Removal itself failed (could not delete the directory). The
@@ -2975,16 +2978,17 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             preservedBranch: isolation.branch,
           };
         }
-        if (result.branchSkipped) {
-          // The checkout no longer sat on the slug branch, so the ref was
-          // kept. Same shape as branchPreserved: the directory is gone,
-          // only the branch survives.
+        if (result.branchSkipped || result.keptBranch) {
+          // A branch survived the removal (the checkout's own branch, or
+          // a refused slug delete). Same shape as branchPreserved: the
+          // directory is gone, only the branch survives.
+          const kept = result.keptBranch ?? isolation.branch;
           debugLogger.warn(
             `[Agent] Removed worktree directory ${isolation.path} but kept ` +
-              `branch ${isolation.branch} (checkout no longer on it)`,
+              `branch ${kept} (checkout no longer on the slug branch)`,
           );
           return {
-            preservedBranch: isolation.branch,
+            preservedBranch: kept,
           };
         }
       } catch (error) {

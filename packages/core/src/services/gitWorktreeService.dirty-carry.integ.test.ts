@@ -17,7 +17,10 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { GitWorktreeService } from './gitWorktreeService.js';
+import {
+  CARRIED_PATHS_MAX_BYTES,
+  GitWorktreeService,
+} from './gitWorktreeService.js';
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -506,6 +509,7 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
     const created = await service.createUserWorktree('bulk', 'main', {
       detached: true,
       carryDirtyState: true,
+      maxCarriedPathsBytes: CARRIED_PATHS_MAX_BYTES,
     });
     expect(created.success).toBe(true);
     expect(created.carriedPaths).toBeUndefined();
@@ -539,6 +543,7 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
     const created = await service.createUserWorktree('bulk-cjk', 'main', {
       detached: true,
       carryDirtyState: true,
+      maxCarriedPathsBytes: CARRIED_PATHS_MAX_BYTES,
     });
     expect(created.success).toBe(true);
     expect(created.carriedPaths).toBeUndefined();
@@ -567,5 +572,155 @@ describe('GitWorktreeService.createUserWorktree() — carryDirtyState', () => {
     // checkout reads clean and the managed directory stays ignored.
     expect(git(repoRoot, 'status', '--porcelain')).toBe('');
     expect(gitOk(repoRoot, 'check-ignore', '-q', worktree.path)).toBe(true);
+  });
+
+  it('fails closed when the carried snapshot conflicts with the base', async () => {
+    // A sibling checkout dirty on the same lines the workspace HEAD
+    // touched: the 3-way stash apply conflicts. The worktree must not
+    // survive with conflict markers / unmerged index entries.
+    await fs.writeFile(path.join(repoRoot, 'f.txt'), 'line1\nBASE\nline3\n');
+    git(repoRoot, 'add', 'f.txt');
+    git(repoRoot, 'commit', '-qm', 'f base', '--no-verify');
+    const service = new GitWorktreeService(repoRoot);
+    const sibling = await service.createUserWorktree('sibling', 'main', {
+      detached: true,
+    });
+    expect(sibling.success).toBe(true);
+    const siblingPath = sibling.worktree!.path;
+    await fs.writeFile(
+      path.join(siblingPath, 'f.txt'),
+      'line1\nDIRTY\nline3\n',
+    );
+    // Advance the workspace HEAD on the same lines.
+    await fs.writeFile(path.join(repoRoot, 'f.txt'), 'line1\nOTHER\nline3\n');
+    git(repoRoot, 'add', 'f.txt');
+    git(repoRoot, 'commit', '-qm', 'f other', '--no-verify');
+
+    const created = await service.createUserWorktree('conflict', 'main', {
+      detached: true,
+      carryDirtyState: true,
+      dirtyStateSource: siblingPath,
+    });
+    expect(created.success).toBe(false);
+    expect(created.error).toContain('conflicted');
+    // No poisoned checkout left behind.
+    await expect(
+      fs.lstat(service.getUserWorktreePath('conflict')),
+    ).rejects.toThrow();
+  });
+
+  it('carries repo-root untracked files when rooted at a subdirectory', async () => {
+    const sub = path.join(repoRoot, 'sub');
+    await fs.mkdir(sub);
+    await fs.writeFile(path.join(sub, 't.txt'), 'clean\n');
+    git(repoRoot, 'add', '.');
+    git(repoRoot, 'commit', '-qm', 'sub', '--no-verify');
+    // Untracked at the repo root AND in the subtree: both halves of the
+    // overlay must cover the same repository-wide set.
+    await fs.writeFile(path.join(repoRoot, 'root-untracked.txt'), 'root\n');
+    await fs.writeFile(path.join(sub, 'sub-untracked.txt'), 'sub\n');
+
+    const service = new GitWorktreeService(sub);
+    const created = await service.createUserWorktree('subroot', 'main', {
+      detached: true,
+      carryDirtyState: true,
+    });
+    expect(created.success).toBe(true);
+    const wt = created.worktree!.path;
+    expect(await read(path.join(wt, 'root-untracked.txt'))).toBe('root\n');
+    expect(await read(path.join(wt, 'sub', 'sub-untracked.txt'))).toBe('sub\n');
+    expect(created.carriedPaths).toContain('root-untracked.txt');
+  });
+
+  it('skips an uncopyable entry without aborting the carry', async () => {
+    // The source holds an untracked DIRECTORY x/y.txt while the worktree
+    // base has a tracked FILE x: mkdir(x) in the worktree fails, the loop
+    // must skip that entry and still carry the rest.
+    await fs.writeFile(path.join(repoRoot, 'x'), 'tracked-file\n');
+    git(repoRoot, 'add', 'x');
+    git(repoRoot, 'commit', '-qm', 'x file', '--no-verify');
+    const service = new GitWorktreeService(repoRoot);
+    const sibling = await service.createUserWorktree('sibling2', 'main', {
+      detached: true,
+    });
+    expect(sibling.success).toBe(true);
+    const siblingPath = sibling.worktree!.path;
+    await fs.rm(path.join(siblingPath, 'x'));
+    await fs.mkdir(path.join(siblingPath, 'x'));
+    await fs.writeFile(path.join(siblingPath, 'x', 'y.txt'), 'nested\n');
+    await fs.writeFile(path.join(siblingPath, 'ok.txt'), 'ok\n');
+
+    const created = await service.createUserWorktree('skipfail', 'main', {
+      detached: true,
+      carryDirtyState: true,
+      dirtyStateSource: siblingPath,
+    });
+    expect(created.success).toBe(true);
+    const wt = created.worktree!.path;
+    expect(await read(path.join(wt, 'ok.txt'))).toBe('ok\n');
+    // x stays the tracked file; the uncopyable directory entry was skipped.
+    expect(await read(path.join(wt, 'x'))).toBe('tracked-file\n');
+  });
+
+  it('writes the exclude rule for an in-root directory named ..cache', async () => {
+    // A '..' PREFIX is not a parent segment: a service rooted under an
+    // in-root '..cache' directory yields rel '..cache/sub/.qwen/worktrees',
+    // which must still get a working rule (the old prefix test skipped it).
+    const cacheSub = path.join(repoRoot, '..cache', 'sub');
+    await fs.mkdir(cacheSub, { recursive: true });
+    const service = new GitWorktreeService(cacheSub);
+    const created = await service.createUserWorktree('dotdot', 'main', {
+      detached: true,
+    });
+    expect(created.success).toBe(true);
+    expect(gitOk(repoRoot, 'check-ignore', '-q', created.worktree!.path)).toBe(
+      true,
+    );
+  });
+
+  it('keeps the legacy file when the exclude rule cannot be established', async () => {
+    // A newline-bearing component cannot be represented in info/exclude;
+    // the migration must keep the legacy file (the only hiding mechanism)
+    // rather than unlink it and leave .qwen/ permanently untracked.
+    const nlSub = path.join(repoRoot, 'nl\nsub');
+    await fs.mkdir(nlSub);
+    const service = new GitWorktreeService(nlSub);
+    const legacy = path.join(nlSub, '.qwen', '.gitignore');
+    await fs.mkdir(path.join(nlSub, '.qwen'), { recursive: true });
+    await fs.writeFile(legacy, '# Auto-generated by qwen-code.\nworktrees/\n');
+    await service.migrateLegacyWorktreeGitignore();
+    // The rule was not representable: the legacy file survives.
+    expect(await read(legacy)).toBe(
+      '# Auto-generated by qwen-code.\nworktrees/\n',
+    );
+  });
+
+  it('carries a large overlay when no journal bound is set', async () => {
+    // The handoff and POST /session write no journal: a >32KiB overlay
+    // must still be carried, not silently dropped.
+    const prefix = 'long-';
+    const filler = 'x'.repeat(60);
+    for (let i = 0; i < 500; i++) {
+      await fs.writeFile(
+        path.join(
+          repoRoot,
+          `${prefix}${String(i).padStart(4, '0')}-${filler}.txt`,
+        ),
+        'bulk\n',
+      );
+    }
+    const service = new GitWorktreeService(repoRoot);
+    const created = await service.createUserWorktree('bigcarry', 'main', {
+      detached: true,
+      carryDirtyState: true,
+    });
+    expect(created.success).toBe(true);
+    expect(created.carriedPaths).toBeDefined();
+    expect(created.carriedPaths!.length).toBeGreaterThanOrEqual(500);
+    expect(
+      await read(
+        path.join(created.worktree!.path, `${prefix}0000-${filler}.txt`),
+      ),
+    ).toBe('bulk\n');
   });
 });

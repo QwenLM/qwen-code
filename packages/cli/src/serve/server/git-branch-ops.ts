@@ -58,6 +58,28 @@ export async function isDirtyTree(cwd: string): Promise<boolean> {
   return stdout.trim().length > 0;
 }
 
+/**
+ * Whether `ancestor` is an ancestor of `descendant` (git merge-base
+ * --is-ancestor). False on any git error — callers treat that as "not
+ * reconcilable" and refuse, fail-closed.
+ */
+export async function isCommitAncestor(
+  ancestor: string,
+  descendant: string,
+  cwd: string,
+): Promise<boolean> {
+  try {
+    await execFileAsync(
+      'git',
+      [...NO_EXEC_CONFIG, 'merge-base', '--is-ancestor', ancestor, descendant],
+      { cwd, timeout: GIT_BRANCH_TIMEOUT_MS, env: gitEnv() },
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function getHeadCommit(cwd: string): Promise<string | undefined> {
   try {
     const { stdout } = await execFileAsync(
