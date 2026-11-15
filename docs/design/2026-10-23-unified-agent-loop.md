@@ -181,11 +181,11 @@ All temporary host-bypass options have been removed or replaced with explicit in
 
 - PR 2c-1 removed `stopHookRunByHost`, with which ACP fired the Stop hook in its own Stop loop.
 - The ACP host-input slice of #17045 (#17070) replaced `interactionSpanByHost` with the caller-owned `interactionSpan` and `userTurnRecordedByHost` with `userTurn` (see [ACP host turn inputs](2026-11-13-acp-host-turn-inputs.md)).
-- PR 2d ([ACP live-tool and Agent Host sessions on the shared tool batch](2026-11-14-acp-live-agent-host-shared-batch.md)) moved live-tool and read-only Agent Host sessions onto the shared tool batch and removed `toolLoopGuardsByHost`.
+- PR 2d ([ACP live-tool and Agent Host sessions on the shared tool batch](2026-11-14-acp-live-agent-host-shared-batch.md)) moved live-tool and read-only Agent Host sessions onto the shared tool batch and removed `toolLoopGuardsByHost`. With the switch off an ACP turn never enters the client — it sends through the session's own chat — so nothing can run twice without the option.
 
 `toolCallPreparations`, `memoryRecallQuery`, `stopPolicies` and `historyPromptId` are lasting inputs rather than temporary bypass flags: the first asks for an extra event, the second gives recall the prompt's text, which the host expanded before the send, the third adds the host's reasons to continue at a stop point ([Stop-point continuations](#stop-point-continuations)), and the fourth gives a `Retry` the history identity of the attempt it replaces; none turns anything off. `skipMemoryExtraction` is a lasting input too: it turns off the client's memory extraction and Dream because the turn relays a channel's message, not because the host does that part itself.
 
-A new option that turns off part of the client's work for one host needs a row here, and a surface's default does not change while it has an open row.
+A new option that turns off part of the client's work for one host needs an entry in this list with the step that closes it, and a surface's default does not change while an option of that surface is still open here.
 
 ### Stop-point continuations
 
@@ -256,13 +256,13 @@ PR 2 moves ACP in steps. PR 2a moves the model round of a fresh user prompt: one
 | the StopFailure hook and the 429 mapping when a request fails                                     | ACP, as today, also for a stream `Error` event, with the error the provider threw                                                                                                                                     |
 | the managed memory tasks after the turn                                                           | ACP, when the turn ends as today, through the client's `runManagedAutoMemoryBackgroundTasks`; until PR 2c-1 the client skipped them under `stopHookRunByHost`, since ACP's Stop loop could still continue the turn    |
 | the interaction span                                                                              | ACP starts and ends the span; the round passes `interactionSpan` for the client to join                                                                                                                               |
-| the daemon tool-loop guards: the per-turn tool-call cap, repeated calls, the exploration reminder | ACP's, as today; the round tells the client with `toolLoopGuardsByHost`, so the client checks no tool-call patterns and adds neither the exploration reminder nor the todo reminder ACP's message carries             |
+| the daemon tool-loop guards: the per-turn tool-call cap, repeated calls, the exploration reminder | the client's, from PR 2b for a fresh prompt's tool batches and from PR 2d for every session kind, which removed `toolLoopGuardsByHost`; ACP keeps only the stops no one else has as its policy                        |
 | no content or thought loop heuristics, no session turn cap                                        | the client's content and thought heuristics when `model.skipLoopDetection` is false, whose `LoopDetected` rejects the prompt as a loop (`LOOP_DETECTED`); `MaxSessionTurns` ends it with `max_turn_requests`          |
 
 The core changes of this step are additive and change nothing for a caller that does not use them:
 
 - `Turn` gives `Thought` the chunk's raw `text` and `ToolCallRequest` the `functionCall` it was built from, and yields `ToolCallPreparation` for a call the model started streaming when the send asks for it with `toolCallPreparations`;
-- `SendMessageOptions.userTurnRecordedByHost`, `stopHookRunByHost`, `interactionSpanByHost` and `toolLoopGuardsByHost`, and the loop detector's `toolCallPatterns` check option;
+- `SendMessageOptions.userTurnRecordedByHost`, `stopHookRunByHost`, `interactionSpanByHost` and `toolLoopGuardsByHost`, and the loop detector's `toolCallPatterns` check option (all since removed; see [Send options a host owns](#send-options-a-host-owns));
 - `SendMessageOptions.memoryRecallQuery`, what a `UserQuery`'s memory recall searches for in place of the request;
 - `getStructuredErrorCause` returns the error a `Turn` `Error` event was built from;
 - `admitUserPrompt` takes the hook's `submitted_prompt` and a signal;
@@ -287,7 +287,7 @@ ACP's part is a translation of the scheduler's state changes:
 | the PermissionPrompt Notification hook's terminal sequence                                                                                                                                                      | the scheduler's hook; ACP forwards the sequence it reports                                                                                                                                          |
 | a Managed session's batch close, the memory refresh after a memory write                                                                                                                                        | ACP's, after the batch                                                                                                                                                                              |
 
-In PR 2d, sessions with live tools (trusted by tool-instance identity via `isTrustedTool`) and read-only Agent Host sessions (which enforce workspace confinement via `invocationGuard` and refuse approval-needing calls via `readOnlyRefusalMessage`) also run on the shared tool batch, and `toolLoopGuardsByHost` is removed.
+In PR 2d, sessions with live tools (trusted by tool-instance identity via the scheduler's `isTrustedTool` option) and read-only Agent Host sessions (whose workspace confinement stays on `Config.getToolInvocationGuard()` and whose approval-needing calls are refused via the scheduler's `readOnlyRefusalMessage` option) also run on the shared tool batch, and `toolLoopGuardsByHost` is removed.
 
 The core changes of this step are additive:
 

@@ -41,13 +41,18 @@ integration point:
 ### Live-tools trust
 
 An `AcpToolBatchHost` input (`isTrustedLiveTool`, forwarded to
-`CoreToolSchedulerOptions.isTrustedTool`) carries the session's three trusted
-live tool instances (by identity, not name). Inside `CoreToolScheduler`, a
-trusted tool instance bypasses the L1 `PermissionManager.isToolEnabled` /
-legacy deny check and the L3→L4 `evaluatePermissionFlow` check so it schedules
-directly without interactive approval. Their execution channel is the
-session's daemon `extMethod`,
-already constrained by lifecycle (`setLiveConversationActive`), so no
+`CoreToolSchedulerOptions.isTrustedTool`) carries the session's trusted live
+tool instances (by identity, not name): `capture_screen_context` and the five
+live-task tools (`list_threads`, `read_thread`, `wait_threads`,
+`send_message_to_thread`, `create_thread`) — the same set ACP's own executor
+bypassed. `speak_to_user` is not in it: it stays on the permission flow, as it
+did there, so a user's `permissions.deny` / `permissions.ask` rule for it still
+applies. Inside `CoreToolScheduler`, a trusted tool instance bypasses the L1
+`PermissionManager.isToolEnabled` / legacy deny check and the L3→L4
+`evaluatePermissionFlow` check so it schedules directly without interactive
+approval. A PreToolUse hook's `ask` is the user's own request for confirmation
+and is not bypassed. Their execution channel is the session's daemon
+`extMethod`, already constrained by lifecycle (`setLiveConversationActive`), so no
 genuine approval prompt can come from the model calling them. The trust is by
 tool-instance reference, so a same-named MCP tool or ordinary tool in the
 same live session still goes through the normal permission flow.
@@ -65,9 +70,13 @@ second guard.
 `AcpToolBatchHost` to `CoreToolSchedulerOptions`, and it is checked only when
 a call actually reaches the interactive approval gate (right before
 `awaiting_approval`, after auto-allowed read checks and permission hooks).
-Auto-allowed in-workspace read tools (`read_file`, `ls`, `grep`, `glob`)
-execute normally; any call that still requires interactive approval settles as
-`EXECUTION_DENIED` (`not_started`) with `Tool "<name>" requires approval, which
+Auto-allowed in-workspace reads — `read_file`, `grep_search` without a `glob`
+filter, `list_directory`, the session's whole registered set
+(`AGENT_HOST_TOOL_NAMES`) — execute normally. `glob`, `grep_search` with a
+`glob` filter, `zoom_image` and `display_image` are refused outright by the
+guard, in or out of the workspace: glob expansion happens after the guard and
+can traverse a symlink or a brace branch. Any call that still requires
+interactive approval settles as `EXECUTION_DENIED` (`not_started`) with `Tool "<name>" requires approval, which
 is unavailable on this read-only Agent Host.` without emitting
 `session/request_permission` or aborting the rest of the turn.
 
@@ -75,13 +84,24 @@ is unavailable on this read-only Agent Host.` without emitting
 
 Both session kinds moved onto the shared batch, so `#runsToolsOnSharedBatch()`
 is removed outright (its two call sites collapse to the shared path).
-`toolLoopGuardsByHost` is removed from `SendMessageOptions` and the core
-client runs its loop guards, todo reminder and duplicate recording for every
-ACP turn. `checkAlwaysOnSafeties` (the per-turn cap, the
-consecutive-identical guard including background-task allowance) then covers
-the turn; the duplicate stop the TUI relies on (#14590, including YOLO
-background tasks) has parity under the unified loop through
-`keepCancelledResults: true` on the batch.
+`toolLoopGuardsByHost` is removed from `SendMessageOptions`, and on the shared
+loop the client runs its loop guards, todo reminder and duplicate recording for
+every ACP turn. `checkAlwaysOnSafeties` (the per-turn cap, the
+consecutive-identical guard, argument-keyed with only the result-aware
+`task_list` exemption) then covers the turn; the duplicate stop the TUI relies
+on (#14590, including YOLO background tasks) has parity under the unified loop
+through `keepCancelledResults: true` on the batch.
+
+Removing it cannot double anything on the shipping default
+(`UNIFIED_SURFACE_DEFAULTS.acp === false`) either, because that path does not
+reach `LlmClient` at all: a turn with the switch off sends through the session's
+own chat (`#sendMessageStreamWithAutoCompression` → `chat.sendMessageStream`),
+builds its own tool-result message and runs only ACP's guards. The client's
+reminder and guard branches are reachable only through a round the session
+starts with `startSharedLoopRound` / `runModelRound`, which is exactly the
+`sharedModelRound` branch — and there every session kind now takes the shared
+batch. So the option's last reader was already unreachable before this change
+removed it; guard ownership follows the round, not the session kind.
 
 ### Test plan
 
@@ -103,6 +123,11 @@ suites with end-to-end shared-batch integration scenarios:
      approval-needing in-workspace `read_file` via `readOnlyRefusalMessage`
      with zero `requestPermission` calls before continuing to the next model
      round.
+  3. A second instance registered under `capture_screen_context`'s name, which
+     must reach `isToolEnabled` while the live instance does not — the case
+     goes red if the predicate ever compares names instead of instances.
+  4. A `speak_to_user` call in a live session under a matching deny rule, which
+     must be refused by the permission flow rather than trusted.
 - `acp-tool-batch.test.ts` verifies that `runAcpToolBatch` forwards
   `isTrustedLiveTool` and `readOnlyRefusalMessage` to
   `createSchedulerExecutor`.
@@ -121,16 +146,19 @@ suites with end-to-end shared-batch integration scenarios:
   tool-instance reference in the batch's duplicate handling rather than
   broadening core's exemptions: trust is by instance identity, so a
   same-named tool inherits none of it.
-- **Agent Host glob/grep.** The session `Config.getToolInvocationGuard()` is
+- **Agent Host reads.** The session `Config.getToolInvocationGuard()` is
   applied by `CoreToolScheduler` at the execution boundary, so out-of-workspace
-  paths in `read_file`, `glob`, `grep`, and `ls` are denied before execution.
+  paths in `read_file`, `grep_search` and `list_directory` are denied before
+  execution, and `glob`, `grep_search` with a `glob` filter, `zoom_image` and
+  `display_image` are refused wherever they point.
 - **#17181 dependency.** The branch bases on #17181's `SharedLoopRound`
   handoff shape and merges cleanly with `main`.
 
 ## Acceptance
 
 - `#runsToolsOnSharedBatch()` is gone; `toolLoopGuardsByHost` is gone from
-  `SendMessageOptions` and its read sites.
+  `SendMessageOptions` and its read sites. The default path keeps ACP's guards
+  because it never enters the client, not because a round asks for them.
 - Live-tool sessions and Agent Host sessions both take the shared batch, with
   shared-batch integration scenarios covering trusted live-tool execution,
   ordinary-tool permission prompts, auto-allowed Agent Host reads,

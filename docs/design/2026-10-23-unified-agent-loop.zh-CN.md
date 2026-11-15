@@ -175,17 +175,17 @@ headless 的主循环以 `maxRounds: 1` 运行。因此它为每一轮做的准�
 
 ### 宿主自持的发送选项
 
-有些入口在迁移前自己做了交互步骤中的一部分工作，迁到共享路径后还会继续自己做一段时间。这时用一个发送选项告诉 client 跳过这部分，避免执行两次。这类选项只是迁移期的过渡手段，不是长期 API。下表逐项列出，并写明由哪一步把它删除或改成输入。
+有些入口在迁移前自己做了交互步骤中的一部分工作，迁到共享路径后还会继续自己做一段时间。这时用一个发送选项告诉 client 跳过这部分，避免执行两次。这类选项只是迁移期的过渡手段，不是长期 API。下面逐项列出，并写明由哪一步把它删除或改成输入。
 
 所有过渡期的宿主旁路选项均已移除或替换为显式输入：
 
 - PR 2c-1 删除了 `stopHookRunByHost`，ACP 原来用它在自己的 Stop 循环里触发 Stop hook。
 - #17045 的 ACP 宿主输入改动（#17070）用调用方持有的 `interactionSpan` 替代 `interactionSpanByHost`，用 `userTurn` 替代 `userTurnRecordedByHost`（见 [ACP 宿主轮次输入](2026-11-13-acp-host-turn-inputs.zh-CN.md)）。
-- PR 2d（[ACP live 工具与 Agent Host 会话迁到共享工具批](2026-11-14-acp-live-agent-host-shared-batch.zh-CN.md)）把带 live 工具的会话和只读的 Agent Host 会话迁到共享工具批，并删除了 `toolLoopGuardsByHost`。
+- PR 2d（[ACP live 工具与 Agent Host 会话迁到共享工具批](2026-11-14-acp-live-agent-host-shared-batch.zh-CN.md)）把带 live 工具的会话和只读的 Agent Host 会话迁到共享工具批，并删除了 `toolLoopGuardsByHost`。开关关闭时 ACP 的轮次根本不进 client——它经会话自己的 chat 发送——所以没有这个选项也不会重复跑守卫。
 
 `toolCallPreparations`、`memoryRecallQuery`、`stopPolicies` 和 `historyPromptId` 是长期输入而非过渡旁路标记：第一个只是请求一个额外的事件，第二个把宿主在发送前展开的 prompt 原文交给召回，第三个加入宿主在 stop 点继续的理由（见 [stop 点续发](#stop-点续发)），第四个让 `Retry` 沿用它所替代那次尝试的历史标识；四者都不关闭任何行为。`skipMemoryExtraction` 同样是长期输入：它关闭 client 的记忆提取与 Dream 是因为这一轮转发的是 channel 的消息，而不是宿主自己做了这部分工作。
 
-新增任何为某个宿主关闭 client 部分工作的选项，都必须在这里登记一行。入口在表中还有未关闭的行时，不修改它的默认值。
+新增任何为某个宿主关闭 client 部分工作的选项，都必须在这份清单里登记一条，并写明由哪一步关闭它。某个入口在这里还有未关闭的选项时，不修改它的默认值。
 
 ### stop 点续发
 
@@ -256,13 +256,13 @@ PR 2 分步迁移 ACP。PR 2a 迁移全新用户 prompt 的模型轮：不是 re
 | 请求失败时的 StopFailure hook 和 429 映射                                   | 仍由 ACP 处理，流中的 `Error` 事件也一样，抛出的是 provider 原本抛出的错误                                                                                                                      |
 | 轮次结束后的托管记忆任务                                                    | 轮次按现有条件结束时由 ACP 通过 client 的 `runManagedAutoMemoryBackgroundTasks` 安排；PR 2c-1 之前，在 `stopHookRunByHost` 下 client 不安排，因为 ACP 的 Stop 循环还可能继续这个轮次            |
 | interaction span                                                            | ACP 开始和结束 span；模型轮通过 `interactionSpan` 传入供 client 加入                                                                                                                            |
-| daemon 工具循环守卫：每轮工具调用上限、重复调用、探索提醒                   | 仍由 ACP 处理；模型轮用 `toolLoopGuardsByHost` 告知 client，client 因此不检查工具调用模式，也不添加探索提醒和 ACP 消息里已有的 todo 提醒                                                        |
+| daemon 工具循环守卫：每轮工具调用上限、重复调用、探索提醒                   | 由 client 处理（新 prompt 的工具批自 PR 2b 起，所有会话种类自 PR 2d 起，该 PR 删除了 `toolLoopGuardsByHost`）；ACP 只保留别处没有的停止作为自己的策略                                           |
 | 没有内容和 thought 循环启发式检测，也没有会话轮数上限                       | `model.skipLoopDetection` 为 false 时启用 client 的内容和 thought 启发式检测，它的 `LoopDetected` 以循环为由拒绝这个 prompt（`LOOP_DETECTED`）；`MaxSessionTurns` 以 `max_turn_requests` 结束它 |
 
 这一步对 core 的改动都是增量的，不使用它们的调用方不受影响：
 
 - `Turn` 给 `Thought` 带上 chunk 的原始 `text`，给 `ToolCallRequest` 带上它所依据的 `functionCall`；发送时用 `toolCallPreparations` 要求后，模型开始流式输出一个调用时会产出 `ToolCallPreparation`；
-- `SendMessageOptions.userTurnRecordedByHost`、`stopHookRunByHost`、`interactionSpanByHost` 和 `toolLoopGuardsByHost`，以及循环检测器的检查选项 `toolCallPatterns`；
+- `SendMessageOptions.userTurnRecordedByHost`、`stopHookRunByHost`、`interactionSpanByHost` 和 `toolLoopGuardsByHost`，以及循环检测器的检查选项 `toolCallPatterns`（均已删除，见 [宿主自持的发送选项](#宿主自持的发送选项)）；
 - `SendMessageOptions.memoryRecallQuery`：`UserQuery` 的记忆召回用它代替请求作为查询；
 - `getStructuredErrorCause` 返回 `Turn` 的 `Error` 事件所依据的原始错误；
 - `admitUserPrompt` 接受 hook 的 `submitted_prompt` 和取消信号；
@@ -287,7 +287,7 @@ ACP 这边只负责翻译 scheduler 的状态变化：
 | PermissionPrompt Notification hook 返回的终端序列                                                                                                                       | hook 由 scheduler 触发；ACP 转发它报告的序列                                                                                                                        |
 | Managed 会话的批次收尾、记忆写入后的记忆刷新                                                                                                                            | 仍由 ACP 处理，在这一批之后                                                                                                                                         |
 
-在 PR 2d 中，带 live 工具的会话（经 `isTrustedTool` 按工具实例身份授信）和只读的 Agent Host 会话（经 `invocationGuard` 执行工作区围栏、经 `readOnlyRefusalMessage` 拒绝需要审批的调用）也迁到共享工具批，并移除 `toolLoopGuardsByHost`。
+在 PR 2d 中，带 live 工具的会话（经 scheduler 的 `isTrustedTool` 选项按工具实例身份授信）和只读的 Agent Host 会话（工作区围栏仍在 `Config.getToolInvocationGuard()` 上，需审批的调用经 scheduler 的 `readOnlyRefusalMessage` 选项拒绝）也迁到共享工具批，并移除 `toolLoopGuardsByHost`。
 
 这一步对 core 的改动都是增量的：
 
