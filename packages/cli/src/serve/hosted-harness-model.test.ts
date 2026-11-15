@@ -3704,10 +3704,12 @@ describe('Hosted model-round-only migration parity (#17248)', () => {
     offSpy.mockRestore();
 
     const on = config(events);
-    state.config['isUnifiedAgentLoopEnabled'] = () => true;
+    const flag = vi.fn(() => true);
+    state.config['isUnifiedAgentLoopEnabled'] = flag;
     const onSpy = vi.spyOn(agentLoop, 'runModelRound');
     const onResult = await runHostedHarnessTextTurn(input);
     expect(onSpy).toHaveBeenCalledTimes(1);
+    expect(flag).toHaveBeenCalledWith('hosted');
     onSpy.mockRestore();
 
     expect(offResult.text).toBe('hello world');
@@ -3726,8 +3728,13 @@ describe('Hosted model-round-only migration parity (#17248)', () => {
     const off = config(events);
     const offResult = await runHostedHarnessTextTurn(input);
     const on = config(events);
-    state.config['isUnifiedAgentLoopEnabled'] = () => true;
+    const flag = vi.fn(() => true);
+    state.config['isUnifiedAgentLoopEnabled'] = flag;
+    const onSpy = vi.spyOn(agentLoop, 'runModelRound');
     const onResult = await runHostedHarnessTextTurn(input);
+    expect(onSpy).toHaveBeenCalledTimes(1);
+    expect(flag).toHaveBeenCalledWith('hosted');
+    onSpy.mockRestore();
     expect(offResult.text).toBe('final');
     expect(onResult.text).toBe(offResult.text);
     expect(on.requests).toEqual(off.requests);
@@ -3743,8 +3750,13 @@ describe('Hosted model-round-only migration parity (#17248)', () => {
     const off = config(events);
     const offResult = await runHostedHarnessTextTurn(input);
     const on = config(events);
-    state.config['isUnifiedAgentLoopEnabled'] = () => true;
+    const flag = vi.fn(() => true);
+    state.config['isUnifiedAgentLoopEnabled'] = flag;
+    const onSpy = vi.spyOn(agentLoop, 'runModelRound');
     const onResult = await runHostedHarnessTextTurn(input);
+    expect(onSpy).toHaveBeenCalledTimes(1);
+    expect(flag).toHaveBeenCalledWith('hosted');
+    onSpy.mockRestore();
     expect(offResult.text).toBe('keep more');
     expect(onResult.text).toBe(offResult.text);
     expect(on.requests).toEqual(off.requests);
@@ -3771,11 +3783,16 @@ describe('Hosted model-round-only migration parity (#17248)', () => {
       retract: vi.fn(async () => undefined),
     };
     config(events);
-    state.config['isUnifiedAgentLoopEnabled'] = () => true;
+    const flag = vi.fn(() => true);
+    state.config['isUnifiedAgentLoopEnabled'] = flag;
+    const onSpy = vi.spyOn(agentLoop, 'runModelRound');
     const onResult = await runHostedHarnessTextTurn({
       ...input,
       textDeltas: onDeltas,
     });
+    expect(onSpy).toHaveBeenCalledTimes(1);
+    expect(flag).toHaveBeenCalledWith('hosted');
+    onSpy.mockRestore();
     expect(offResult.text).toBe('final');
     expect(onResult.text).toBe(offResult.text);
     expect(offDeltas.retract).toHaveBeenCalledTimes(1);
@@ -3806,18 +3823,28 @@ describe('Hosted model-round-only migration parity (#17248)', () => {
       const offReplayCalls = replay.mock.calls.length;
 
       config([]);
-      state.config['isUnifiedAgentLoopEnabled'] = () => true;
+      const flag = vi.fn(() => true);
+      state.config['isUnifiedAgentLoopEnabled'] = flag;
       const onSpy = vi.spyOn(agentLoop, 'runModelRound');
       const onResult = await runHostedHarnessTextTurn({
         ...input,
         resumeModel,
       });
       expect(onSpy).toHaveBeenCalledTimes(1);
+      expect(flag).toHaveBeenCalledWith('hosted');
       onSpy.mockRestore();
 
       expect(offResult.text).toBe('recovered');
       expect(onResult.text).toBe(offResult.text);
       expect(replay.mock.calls.length).toBe(offReplayCalls * 2);
+      // Both arms must replay the persisted prepared request, not build a fresh
+      // one: same model, empty contents, the turn signal, and the saved request
+      // as the fourth argument. Dropping or substituting it turns these red.
+      expect(replay.mock.calls[1]).toEqual(replay.mock.calls[0]);
+      expect(replay.mock.calls[0][0]).toBe('saved-model');
+      expect(replay.mock.calls[0][1]).toEqual([]);
+      expect(replay.mock.calls[0][2]).toBe(input.signal);
+      expect(replay.mock.calls[0][3]).toBe(prepared);
     } finally {
       replay.mockRestore();
     }
