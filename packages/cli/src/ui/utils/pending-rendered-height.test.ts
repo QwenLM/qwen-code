@@ -171,6 +171,18 @@ describe('hasMermaidFence', () => {
     ).toBe(true);
   });
 
+  it('flags an info string that only starts with mermaid', () => {
+    // The renderer takes the language from the first token of the info
+    // string, so these draw a diagram and must not be charged by source lines.
+    expect(hasMermaidFence(['```mermaid title="flow"', 'A-->B', '```'])).toBe(
+      true,
+    );
+    expect(
+      hasMermaidFence(['```mermaid qwen-code:start-line=12', 'A-->B', '```']),
+    ).toBe(true);
+    expect(hasMermaidFence(['```Mermaid extra', 'A-->B', '```'])).toBe(true);
+  });
+
   it('ignores non-mermaid fences and fence-looking content', () => {
     expect(hasMermaidFence(['```ts', 'const x = 1;', '```'])).toBe(false);
     expect(hasMermaidFence(['prose only'])).toBe(false);

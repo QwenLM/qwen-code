@@ -102,11 +102,30 @@ export function hasMermaidFence(lines: string[]): boolean {
       continue;
     }
     if (match) {
-      if (/^mermaid$/i.test(match[2]!.trim())) return true;
+      // The renderer takes the language from the first token of the info
+      // string, so a fence carrying anything after it — `mermaid title="x"`,
+      // `mermaid qwen-code:start-line=12` — still draws a diagram. Matching
+      // the whole string here would let that fence be charged by its source
+      // lines and then render a diagram past the budget the gate certified.
+      if (fenceLanguage(match[2]) === 'mermaid') return true;
       fence = match[1]!;
     }
   }
   return false;
+}
+
+const START_LINE_DIRECTIVE_RE = /\s*\bqwen-code:start-line=\d+\b/;
+
+/**
+ * The language a fence's info string names, resolved the way the renderer
+ * resolves it: the start-line directive stripped, then the first token.
+ */
+function fenceLanguage(info: string): string | null {
+  const token = info
+    .replace(START_LINE_DIRECTIVE_RE, '')
+    .trim()
+    .split(/\s+/)[0];
+  return token ? token.toLowerCase() : null;
 }
 
 function readTableInlineMathSpan(row: string, index: number): string | null {
