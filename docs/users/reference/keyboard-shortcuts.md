@@ -16,6 +16,8 @@ This document lists the available keyboard shortcuts in Qwen Code.
 | `Alt/Option+M`                 | Toggle Markdown output between rich rendered previews and raw/source mode. On macOS, the terminal must send Option as Meta.                                                                                                                        |
 | `Shift+Tab` (`Tab` on Windows) | Cycle approval modes (`plan` → `default` → `auto-edit` → `auto` → `yolo`)                                                                                                                                                                          |
 
+When confirming an exit with `Ctrl+C` or `Ctrl+D`, press the same shortcut again within one second. This confirmation window also applies while the authentication dialog is open. While a sign-in attempt is in progress, `Ctrl+C` is ignored; with an empty input buffer, press `Ctrl+D` twice within the same window to exit.
+
 ## Input Prompt
 
 | Shortcut                                              | Description                                                                                                                                                                                                                                                                                                               |
@@ -68,6 +70,8 @@ These shortcuts apply while an interactive foreground shell command is running.
 ## Background tasks dialog
 
 Focus the Background tasks pill in the footer (use `Down Arrow` from an empty composer — this moves through the live-agent panel and, if present, the Arena tab bar first) and press `Enter` to open the dialog. It lists background agents, shells, monitors, workflow runs, and memory dreams.
+
+A workflow approval that opens the list automatically stays selected when other tasks start or finish and the list reorders.
 
 | Shortcut                  | Description                                                                                                                                              |
 | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |

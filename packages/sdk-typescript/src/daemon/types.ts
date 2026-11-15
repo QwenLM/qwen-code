@@ -2767,9 +2767,10 @@ export interface DaemonWorkspaceMemoryFile {
    */
   content?: string;
   /**
-   * True when the served text is not the file's full content: `content`
-   * stopped at the daemon's read cap, or the read raced a concurrent
-   * write (byte count differed from `bytes`; `content` omitted).
+   * Present and true when `content` stops at the daemon's read cap, the
+   * read raced a concurrent write, or the on-disk bytes are not BOM-free
+   * UTF-8. `content` is omitted for the latter two cases; retrying
+   * unchanged bytes cannot repair an encoding issue.
    */
   truncated?: boolean;
 }
