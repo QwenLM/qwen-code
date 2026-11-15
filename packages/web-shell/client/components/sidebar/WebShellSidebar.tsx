@@ -6288,6 +6288,7 @@ export function WebShellSidebar({
       startRename,
       splitSessionIds,
       t,
+      loopWakeups,
     ],
   );
 
