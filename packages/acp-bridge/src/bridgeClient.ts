@@ -1295,17 +1295,35 @@ export class BridgeClient implements Client {
     const backgroundTurn = backgroundWorkflowApproval
       ? undefined
       : parseBackgroundNotificationTurn(executionMeta?.['backgroundTurn']);
+    const toolPromptId = executionMeta?.['promptId'];
+    const explicitToolPromptId =
+      params.update.sessionUpdate === 'tool_call_update' &&
+      typeof toolPromptId === 'string' &&
+      toolPromptId.length > 0
+        ? toolPromptId
+        : undefined;
     const promptId = outsideTurn
       ? undefined
-      : (backgroundTurn?.turnId ?? entry?.activePromptId);
-    const turn = {
-      ...(promptId ? { promptId } : {}),
-      ...(!outsideTurn &&
-      !backgroundTurn &&
+      : (backgroundTurn?.turnId ??
+        explicitToolPromptId ??
+        entry?.activePromptId);
+    const toolOriginator = executionMeta?.['originatorClientId'];
+    const activeOriginator =
       (entry?.promptActive || !entry?.backgroundTurn) &&
       entry?.activePromptOriginatorClientId
-        ? { originatorClientId: entry.activePromptOriginatorClientId }
-        : {}),
+        ? entry.activePromptOriginatorClientId
+        : undefined;
+    const toolOriginatorClientId =
+      typeof toolOriginator === 'string' ? toolOriginator : undefined;
+    const originatorClientId =
+      outsideTurn || backgroundTurn
+        ? undefined
+        : explicitToolPromptId
+          ? toolOriginatorClientId
+          : activeOriginator;
+    const turn = {
+      ...(promptId ? { promptId } : {}),
+      ...(originatorClientId ? { originatorClientId } : {}),
     };
     const frames: Array<Omit<BridgeEvent, 'id' | 'v'>> = [];
     // A2UI-over-MCP: tool_call_update results from an A2UI UI server carry

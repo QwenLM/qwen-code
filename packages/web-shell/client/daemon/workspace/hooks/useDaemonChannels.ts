@@ -13,7 +13,7 @@ import type {
 import { useDaemonWorkspace } from '../DaemonWorkspaceProvider.js';
 import type {
   DaemonChannelPairingActions,
-  DaemonChannelQrLoginActions,
+  DaemonChannelQrLoginHandlers,
   DaemonChannelsResource,
   DaemonResourceOptions,
 } from '../types.js';
@@ -183,42 +183,26 @@ export function useDaemonChannels(options: DaemonChannelsOptions = {}) {
     [actions.channelPairing, workspaceClient],
   );
 
-  const qrLogin = useMemo<DaemonChannelQrLoginActions>(() => {
-    const attributed = (explicit?: string) => explicit ?? clientId;
+  const qrLogin = useMemo<DaemonChannelQrLoginHandlers>(() => {
     return workspaceClient
       ? {
-          start: (name, cid) =>
-            workspaceClient.startWorkspaceChannelQrLogin(name, {
-              clientId: attributed(cid),
-            }),
-          state: (loginId, cid) =>
-            workspaceClient.workspaceChannelQrLogin(loginId, {
-              clientId: attributed(cid),
-            }),
-          cancel: (loginId, cid) =>
+          start: (name) =>
+            workspaceClient.startWorkspaceChannelQrLogin(name, { clientId }),
+          state: (loginId) =>
+            workspaceClient.workspaceChannelQrLogin(loginId, { clientId }),
+          cancel: (loginId) =>
             workspaceClient.cancelWorkspaceChannelQrLogin(loginId, {
-              clientId: attributed(cid),
+              clientId,
             }),
-          release: (loginId, cid) =>
-            actions.channelQrLogin.release(
-              loginId,
-              attributed(cid),
-              workspaceCwd,
-            ),
+          release: (loginId) =>
+            actions.channelQrLogin.release(loginId, clientId, workspaceCwd),
         }
       : {
-          start: (name, cid) =>
-            actions.channelQrLogin.start(name, attributed(cid)),
-          state: (loginId, cid) =>
-            actions.channelQrLogin.state(loginId, attributed(cid)),
-          cancel: (loginId, cid) =>
-            actions.channelQrLogin.cancel(loginId, attributed(cid)),
-          release: (loginId, cid) =>
-            actions.channelQrLogin.release(
-              loginId,
-              attributed(cid),
-              workspaceCwd,
-            ),
+          start: (name) => actions.channelQrLogin.start(name, clientId),
+          state: (loginId) => actions.channelQrLogin.state(loginId, clientId),
+          cancel: (loginId) => actions.channelQrLogin.cancel(loginId, clientId),
+          release: (loginId) =>
+            actions.channelQrLogin.release(loginId, clientId, workspaceCwd),
         };
   }, [actions.channelQrLogin, workspaceClient, clientId, workspaceCwd]);
 

@@ -129,6 +129,12 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'GET',
+    path: '/session/:id/turns/:promptId/hooks',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/turns/:promptId/hooks',
+  },
+  {
+    method: 'GET',
     path: '/session/:id/context',
     attribution: 'handler_resolved',
     route: 'GET /session/:id/context',
@@ -730,6 +736,15 @@ export function resolveDaemonTelemetryRoute(
     return {
       route: 'GET /workspaces/:workspace/session/:id/turn-index',
       sessionId: decodePathSegment(workspaceTurnIndex[1]),
+    };
+  }
+  const workspaceTurnHooks = path.match(
+    /^\/workspaces\/[^/]+\/session\/([^/]+)\/turns\/[^/]+\/hooks$/,
+  );
+  if (workspaceTurnHooks?.[1] && req.method === 'GET') {
+    return {
+      route: 'GET /workspaces/:workspace/session/:id/turns/:promptId/hooks',
+      sessionId: decodePathSegment(workspaceTurnHooks[1]),
     };
   }
   const workspaceToolCalls = path.match(
