@@ -64,7 +64,7 @@ final class JournalResourceWrites {
             throw JournalStoreRows.invalid("Native snapshot resources require fenced snapshot publication.");
         }
         ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
-        if (!Set.of("managed-extension-config-bundle", "managed-extension-contributions", "managed-extension-contributions-part").contains(source.kind())
+        if (!ManagedSessionStoreModels.INHERITED_EXTENSION_KINDS.contains(source.kind())
                 || source.schemaVersion() != 1 || source.byteLength() > ManagedSessionStoreModels.MAX_INLINE_RESOURCE_BYTES
                 || source.bytes().length != source.byteLength() || !JournalStoreRows.sha256(source.bytes()).equals(source.digest())) {
             throw JournalStoreRows.invalid("Invalid inherited extension resource");
