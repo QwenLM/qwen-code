@@ -72,7 +72,13 @@ export interface AcpToolBatchHost {
   readonly client: AgentSideConnection;
   readonly toolCallEmitter: ToolCallEmitter;
   readonly messageEmitter: MessageEmitter;
-  /** The session's three trusted live tool instances, trusted by identity. */
+  /**
+   * The session's trusted live tool instances — `capture_screen_context` and
+   * the five live-task tools (`list_threads`, `read_thread`, `wait_threads`,
+   * `send_message_to_thread`, `create_thread`) — trusted by instance identity,
+   * so a same-named tool inherits none of it. `speak_to_user` is not in the
+   * set: it stays on the permission flow so a user's deny / ask rule applies.
+   */
   isTrustedLiveTool?(tool: unknown): boolean;
   /**
    * The session's read-only response to a request that reached approval:

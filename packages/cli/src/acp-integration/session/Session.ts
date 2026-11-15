@@ -7634,7 +7634,9 @@ export class Session implements SessionContext {
             // the batch host carries live-tool trust and read-only refusal,
             // while the Agent Host invocation guard stays on the session
             // Config and is evaluated by the scheduler at its execution
-            // boundary.
+            // boundary. With the switch off the turn never reaches LlmClient
+            // at all: it sends through the session's own chat, so no client
+            // guard or reminder can run twice.
             const sharedToolBatch = sharedModelRound;
             let promptAdmission: UserPromptAdmission | undefined;
             // A continue, a restore or a runtime continuation runs no
@@ -15783,11 +15785,15 @@ export class Session implements SessionContext {
       client: this.client,
       toolCallEmitter: this.toolCallEmitter,
       messageEmitter: this.messageEmitter,
+      // The tools ACP's own executor bypassed the permission flow for:
+      // `capture_screen_context` and the five live-task tools, matched by
+      // instance so a same-named tool inherits none of it. `speak_to_user`
+      // stays on the flow, as it did there: its own default is `allow`, and a
+      // user's `permissions.deny` / `permissions.ask` rule still applies.
       isTrustedLiveTool: (tool) =>
         tool !== undefined &&
         (tool === this.liveScreenContextTool ||
-          this.liveTaskTools.some((live) => live === tool) ||
-          tool === this.liveSpeakToUserTool),
+          this.liveTaskTools.some((live) => live === tool)),
       readOnlyRefusalMessage:
         this.config.getSessionSourceType?.() === 'agent-host'
           ? 'Tool "__name__" requires approval, which is unavailable on this read-only Agent Host.'

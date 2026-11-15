@@ -3516,15 +3516,9 @@ export class CoreToolScheduler {
             }
           }
 
-          const ensuredTool = await runInRequestGoalContext(reqInfo, () =>
+          const toolInstance = await runInRequestGoalContext(reqInfo, () =>
             this.toolRegistry.ensureTool(canonicalName),
           );
-          const toolInstance =
-            typeof ensuredTool === 'object' && ensuredTool !== null
-              ? ensuredTool
-              : ensuredTool === true
-                ? this.toolRegistry.getTool?.(canonicalName)
-                : undefined;
           resolvedTool = toolInstance;
           if (recordPrevalidationCancellation()) continue;
           if (!toolInstance) {
@@ -3847,9 +3841,14 @@ export class CoreToolScheduler {
           // origin/descriptor pairing was enforced before buildInvocation,
           // and PreToolUse hooks fired (a hook deny or ask failed the call
           // closed) before validation.
+          //
+          // A host-trusted tool instance takes the same bypass, except when a
+          // PreToolUse hook asked for confirmation: that ask is the user's and
+          // still needs an answer.
           if (
             reqInfo.executionOrigin?.kind === 'fixed_policy' ||
-            this.schedulerOptions.isTrustedTool?.(toolCall.tool) === true
+            (this.schedulerOptions.isTrustedTool?.(toolCall.tool) === true &&
+              !preToolUseAsk)
           ) {
             this.setToolCallOutcome(
               reqInfo.callId,
