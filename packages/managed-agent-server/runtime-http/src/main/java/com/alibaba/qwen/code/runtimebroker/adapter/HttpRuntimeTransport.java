@@ -500,8 +500,10 @@ public final class HttpRuntimeTransport implements WorkspacePhysicalTransport {
         HttpRequest stop = externalPublicationRequest(lease, seed, registrationRevision,
                 EXTERNAL_STOP_PATH, encodeToolRequest(
                         Map.of("protocolVersion", 2, "channel", "all"), EXTERNAL_STOP_LIMIT));
-        return externalExchange(lease, request, seed, stop, EXTERNAL_STOP_LIMIT,
-                HttpRuntimeTransport::validateExternalDrain);
+        return externalExchange(lease, request, seed, stop, EXTERNAL_STOP_LIMIT, bytes -> {
+            validateExternalDrain(bytes);
+            return null;
+        });
     }
 
     /**

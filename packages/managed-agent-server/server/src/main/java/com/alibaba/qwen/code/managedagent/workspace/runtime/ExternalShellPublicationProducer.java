@@ -248,13 +248,14 @@ public final class ExternalShellPublicationProducer
         // digest and length must come from the same published bytes, not from
         // the worker's own stream, whose block boundaries need not match.
         MessageDigest aggregate = DigestUtils.getSha256Digest();
-        long length = 0;
+        long total = 0;
         for (long sequence = 0; sequence < endSequence; sequence++) {
             byte[] block = publications.readSegment(key, publicationId, stream,
                     Math.toIntExact(sequence));
             aggregate.update(block);
-            length += block.length;
+            total += block.length;
         }
+        final long length = total;
         String hex = HexFormat.of().formatHex(aggregate.digest());
         ObjectNode body = JSON.createObjectNode().put("segmentCount", endSequence)
                 .put("byteLength", length).put("digest", hex);

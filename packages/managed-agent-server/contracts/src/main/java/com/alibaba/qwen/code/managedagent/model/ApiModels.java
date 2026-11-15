@@ -388,7 +388,7 @@ public final class ApiModels {
                 Boolean planMode, String modelId, List<Map<String, Object>> skills, List<Pin> extensionPins,
                 JsonNode worktree, JsonNode modelConfig) {
             this(requestId, idempotencyKey, agentId, title, input, metadata, workspace, approvalMode,
-                    planMode, modelId, skills, extensionPins, worktree, modelConfig, null);
+                    planMode, modelId, skills, extensionPins, worktree, modelConfig, null, null);
         }
         public WebShellCreateRequest(String requestId, String idempotencyKey, String agentId, String title,
                 List<InputBlock> input, Map<String, Object> metadata, JsonNode workspace, String approvalMode,
