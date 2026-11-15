@@ -86,7 +86,7 @@
 5. **结构性标记保持英文。** 共享契约在每种语言下都保持字段标签与 trusted-block 标签为英文；本增量不触碰它们。
 
 6. **平台数据保持字节，其周围的散文本地化。** sha 原样插值，检查名在两种语言下都保持 `, ` 连接，这是 prompt-language 设计钉住的。`state_change` 也本地化：其 `PR …` 外壳是撰写的散文、不是平台 token，因此 zh daemon 读到 `PR 已合并` / `PR 已关闭`，而转换 key 仍用原始状态对。
-7. **坏的 `general.language` 被丢弃，而不是抛错。** 这是逐键的选择，不是读取器一刀切的政策：读取器对 `general.chatRecording`、`advanced.excludedEnvVars`、`advanced.runtimeOutputDir` 与 `security.folderTrust.enabled` 的畸形值会抛错，另有 legacy 顶层 `folderTrust`（无 `security` 段的 legacy 键文件）——`pickFastPathSettings` 内共五处。对这个键，`resolveChannelLocale` 本就把非字符串读作英文，丢弃该值不损失任何东西，而抛错会丢弃整个 summary——把权限策略与 PR-watch 订阅一起带走。
+7. **坏的 `general.language` 被丢弃，而不是抛错。** 这是逐键的选择，不是读取器一刀切的政策：读取器对 `general.chatRecording`、`advanced.excludedEnvVars`、`advanced.runtimeOutputDir` 与 `security.folderTrust.enabled` 的畸形值会抛错，另有 legacy 顶层 `folderTrust`（legacy 键文件且未取到 `security.folderTrust.enabled` 时）——`pickFastPathSettings` 内共五处。对这个键，`resolveChannelLocale` 本就把非字符串读作英文，丢弃该值不损失任何东西，而抛错会丢弃整个 summary——把权限策略与 PR-watch 订阅一起带走。
 
 ## 约束与风险
 

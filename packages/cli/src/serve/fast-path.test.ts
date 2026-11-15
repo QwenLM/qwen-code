@@ -1865,8 +1865,10 @@ describe('serve fast path environment bootstrap', () => {
           advanced: {
             excludedEnvVars: ['FAST_PATH_USER_EXCLUDED'],
           },
-          // Exercises the projection's language arm, and the per-key merge of
-          // general across scopes: the workspace below sets chatRecording only.
+          // Exercises the projection's language arm. This fixture's user
+          // scope enables folder trust and the workspace is not trusted, so the
+          // workspace's general is dropped before the merge: the arm is
+          // exercised by the user-scope value alone.
           general: { language: 'zh-CN' },
           security: { folderTrust: { enabled: true } },
           tools: { approvalMode: 'auto' },
