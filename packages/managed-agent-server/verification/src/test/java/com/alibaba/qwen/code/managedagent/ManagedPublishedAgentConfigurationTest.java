@@ -27,7 +27,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * The two Agent-configuration kinds are published once at Session creation and stay PUBLISHED for
+ * The Agent-configuration kinds are published once at Session creation and stay PUBLISHED for
  * the Session's whole life: {@code JournalResourceWrites.publishAgentResource} writes that state
  * and no writer ever promotes them to REFERENCED. The transaction reader already treats PUBLISHED
  * as their committed terminal state ({@code JournalStoreRows.storedResource} and
@@ -42,6 +42,14 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * strict, which the negative arms below prove rather than assert. The REFERENCED path and the
  * capture guards are pinned as well: admitting a captured receipt leaves capture_state='VERIFIED'
  * on a REFERENCED row and that reader accepts it, so this one has to accept it too.
+ *
+ * <p>#17207 fixed that for the two Agent-definition kinds only. The three inherited
+ * extension-package kinds a content-only child copies from its parent
+ * ({@code ManagedSessionStoreModels.INHERITED_EXTENSION_KINDS}) stayed refused, which is the same
+ * defect one layer over and is pinned by {@code ManagedInheritedExtensionConfigurationTest}. All
+ * readers now consult one predicate,
+ * {@code ManagedSessionStoreModels.publishedConfigurationByteLimit}, so the whitelist cannot drift
+ * between the SQL reader, the transaction reader and the owner read again.
  */
 @SpringBootTest(properties = {
         "spring.datasource.url=jdbc:h2:mem:published-agent-configuration;"
@@ -116,9 +124,13 @@ class ManagedPublishedAgentConfigurationTest {
                 "body", "Read the diff.", "base_directory", ".qwen/skills/review"));
         var publishedSkills = sessionStore.publishAgentSkills(TENANT, WORKSPACE, sessionId, skills);
         // A PUBLISHED row of any other kind stays unreadable even inside its own byte ceiling.
+        // The three inherited extension kinds are NOT in this list: they are published
+        // configuration too, and refusing them here is exactly what wedged every content-only
+        // child launch (#17261). ManagedInheritedExtensionConfigurationTest pins them readable.
         byte[] body = "{}".getBytes(StandardCharsets.UTF_8);
         for (String kind : List.of("managed-tool-result-content", "managed-tool-result-page",
-                "managed-tool-result-manifest", "managed-extension-config-bundle", "managed-child_run")) {
+                "managed-tool-result-manifest", "managed-child_run", "managed-input",
+                "managed-root")) {
             String resourceId = "published-" + UUID.randomUUID();
             insertPublished(sessionId, resourceId, kind, 1, body);
             assertThatThrownBy(() -> records.readCommittedResource(TENANT, sessionId,
