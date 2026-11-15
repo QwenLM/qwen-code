@@ -572,6 +572,7 @@ describe('reply selection range at row edges', () => {
   // the chrome, outside the body.
   function rowFixture(chromeAfter: boolean) {
     const row = document.createElement('div');
+    row.setAttribute('data-web-shell-message-row', '');
     const body = document.createElement('div');
     body.className = '_contentBody_9f2ab';
     const line = document.createElement('p');
@@ -586,6 +587,26 @@ describe('reply selection range at row edges', () => {
     bodies.push(row);
     return { row, body, line, tip };
   }
+  // A user message row: its text sits under .chatBubble/.chatContent with
+  // data-web-shell-user-bubble — no contentBody class, so the clamp's only
+  // cross-message defence is the row-ownership guard.
+  function userRowFixture() {
+    const row = document.createElement('div');
+    row.setAttribute('data-web-shell-message-row', '');
+    const bubble = document.createElement('div');
+    bubble.className = 'chatBubble';
+    const content = document.createElement('div');
+    content.className = 'chatContent';
+    content.setAttribute('data-web-shell-user-bubble', '');
+    const q = document.createElement('span');
+    q.textContent = 'question text';
+    content.append(q);
+    bubble.append(content);
+    row.append(bubble);
+    document.body.append(row);
+    bodies.push(row);
+    return { row, text: q };
+  }
   const fullBodyRange = (body: HTMLElement) => {
     const range = document.createRange();
     range.selectNodeContents(body);
@@ -596,15 +617,27 @@ describe('reply selection range at row edges', () => {
     const { body, line, tip } = rowFixture(true);
     const text = line.firstChild! as Text;
     const range = document.createRange();
-    range.setStart(text, 0);
+    range.setStart(text, 9);
     range.setEnd(tip, 1);
     window.getSelection()!.addRange(range);
     const result = getReplySelectionRange(body);
     expect(result).not.toBeNull();
-    expect(result!.toString()).toBe('Selected line text');
+    expect(result!.toString()).toBe('line text');
+    // the preserved inner boundary survives the clamp
+    const preserved = document.createRange();
+    preserved.setStart(text, 9);
+    preserved.setEnd(text, 9);
+    expect(result!.compareBoundaryPoints(Range.START_TO_START, preserved)).toBe(
+      0,
+    );
     expect(
       result!.compareBoundaryPoints(Range.END_TO_END, fullBodyRange(body)),
     ).toBe(0);
+    // the clamped range passes the menu gate on the copy path
+    expect(getSelectedReplyContent(body, result!)).toEqual({
+      text: 'line text',
+      markdown: 'line text',
+    });
     // the live selection keeps its original boundaries
     expect(window.getSelection()!.getRangeAt(0).endContainer).toBe(tip);
   });
@@ -614,14 +647,24 @@ describe('reply selection range at row edges', () => {
     const text = line.firstChild! as Text;
     const range = document.createRange();
     range.setStart(tip, 0);
-    range.setEnd(text, text.data.length);
+    range.setEnd(text, 8);
     window.getSelection()!.addRange(range);
     const result = getReplySelectionRange(body);
     expect(result).not.toBeNull();
-    expect(result!.toString()).toBe('Selected line text');
+    expect(result!.toString()).toBe('Selected');
+    // the preserved inner boundary survives the clamp
+    const preserved = document.createRange();
+    preserved.setStart(text, 8);
+    preserved.setEnd(text, 8);
+    expect(result!.compareBoundaryPoints(Range.END_TO_END, preserved)).toBe(0);
     expect(
       result!.compareBoundaryPoints(Range.START_TO_START, fullBodyRange(body)),
     ).toBe(0);
+    // the clamped range passes the menu gate on the copy path
+    expect(getSelectedReplyContent(body, result!)).toEqual({
+      text: 'Selected',
+      markdown: 'Selected',
+    });
     expect(window.getSelection()!.getRangeAt(0).startContainer).toBe(tip);
   });
 
@@ -650,6 +693,24 @@ describe('reply selection range at row edges', () => {
     window.getSelection()!.removeAllRanges();
     const leading = document.createRange();
     leading.setStart(prevText, 0);
+    leading.setEnd(firstText, 4);
+    window.getSelection()!.addRange(leading);
+    expect(getReplySelectionRange(first.body)).toBeNull();
+  });
+
+  it('rejects a boundary inside a user-message row (no contentBody)', () => {
+    const userBefore = userRowFixture();
+    const first = rowFixture(true);
+    const userAfter = userRowFixture();
+    const firstText = first.line.firstChild! as Text;
+    const trailing = document.createRange();
+    trailing.setStart(firstText, 0);
+    trailing.setEnd(userAfter.text, 4);
+    window.getSelection()!.addRange(trailing);
+    expect(getReplySelectionRange(first.body)).toBeNull();
+    window.getSelection()!.removeAllRanges();
+    const leading = document.createRange();
+    leading.setStart(userBefore.text, 0);
     leading.setEnd(firstText, 4);
     window.getSelection()!.addRange(leading);
     expect(getReplySelectionRange(first.body)).toBeNull();

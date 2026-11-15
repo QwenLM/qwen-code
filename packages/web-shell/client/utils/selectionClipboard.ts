@@ -34,12 +34,14 @@ export function getReplySelectionRange(body: HTMLElement): Range | null {
   // was suppressed even though the selection visibly covers the whole line.
   // Clamp that boundary to the body edge on a clone; the live selection is
   // never mutated. Clamping is only safe when the boundary sits on the
-  // correct side of the body and does not belong to another message's body —
-  // cross-message selections stay rejected.
+  // correct side of the body, stays inside the body's own message row, and
+  // does not belong to another message's body — cross-message selections
+  // stay rejected, and a body with no resolvable row keeps rejecting.
   if (
     startInside &&
     !endInside &&
     !otherMessageBody(range.endContainer) &&
+    sameMessageRow(body, range.endContainer) &&
     (body.compareDocumentPosition(range.endContainer) &
       Node.DOCUMENT_POSITION_FOLLOWING) !==
       0
@@ -53,6 +55,7 @@ export function getReplySelectionRange(body: HTMLElement): Range | null {
     !startInside &&
     endInside &&
     !otherMessageBody(range.startContainer) &&
+    sameMessageRow(body, range.startContainer) &&
     (body.compareDocumentPosition(range.startContainer) &
       Node.DOCUMENT_POSITION_PRECEDING) !==
       0
@@ -68,6 +71,15 @@ export function getReplySelectionRange(body: HTMLElement): Range | null {
 function otherMessageBody(node: Node): HTMLElement | null {
   const element = node instanceof Element ? node : node.parentElement;
   return element?.closest('div[class*=contentBody]') ?? null;
+}
+
+// Clamping only narrows a selection whose outer boundary is chrome of the
+// body's own message row (triple-click, drag to the row edge). A boundary in
+// a different row belongs to another message — reject it. Without a
+// resolvable row the guard fails closed.
+function sameMessageRow(body: HTMLElement, node: Node): boolean {
+  const row = body.closest('[data-web-shell-message-row]');
+  return row ? row.contains(node) : false;
 }
 
 function cloneSelected(node: Node, range: Range): Node | null {
