@@ -254,10 +254,13 @@ thread is re-read once the turn settles.
   automatically, and the session may act on GitHub through its own tools.
 - The product-authored text of the injected prompt (the envelope, the
   built-in role guidance, the delivery provenance, and watch summaries)
-  follows the channel's UI language: it is Chinese when `general.language`'s
-  trimmed, lowercased form with `_` read as `-` is `zh`, starts with `zh-`, or is
-  `chinese` or `中文`, and keeps the previous English wording for every other
-  value. Structural markers (the
+  follows the prompt locale resolved from `general.language`, which is not the
+  UI language actually rendered: the public GitHub lane stays English, and
+  `auto` resolves to English here even when the UI detects another language.
+  It is Chinese when `general.language`'s trimmed, lowercased form with `_`
+  read as `-` is `zh`, starts with `zh-`, or is `chinese` or `中文`, and keeps the
+  previous English wording for every other value. The zh strings are Simplified
+  Chinese, so a `zh-TW` setting renders Simplified too. Structural markers (the
   `Type:`/`Title:`/`URL:`/`Trigger:`/`Event:`/`Author:`/`Role:` data lines, the
   `File:` and `Comment:` labels used by the comment watch, the trusted-block
   label `[Operator instruction — trusted]` and `Source:`) and platform-derived

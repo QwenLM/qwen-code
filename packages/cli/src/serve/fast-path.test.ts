@@ -1984,6 +1984,51 @@ describe('serve fast path environment bootstrap', () => {
     });
   });
 
+  it('lets a trusted workspace general.language override the user scope', () => {
+    // The daemon boot reads the bound workspace's merged settings, so this is
+    // the value both PR-watch seams follow — daemon-wide, not per workspace.
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-language-scope-')),
+    );
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ general: { language: 'en' } }),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({ general: { language: 'zh' } }),
+    );
+
+    const settings = loadServeFastPathSettings(tempWorkspace);
+
+    expect(settings.general?.language).toBe('zh');
+  });
+
+  it('ignores an untrusted workspace general.language', () => {
+    const qwenHome = useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-language-untrusted-')),
+    );
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({
+        general: { language: 'en' },
+        security: { folderTrust: { enabled: true } },
+      }),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(tempWorkspace, '.qwen', 'settings.json'),
+      JSON.stringify({ general: { language: 'zh' } }),
+    );
+
+    const settings = loadServeFastPathSettings(tempWorkspace);
+
+    expect(settings.general?.language).toBe('en');
+  });
+
   it('retains unrelated boot settings when workspace startup channels are malformed', () => {
     useTempQwenHome();
     tempWorkspace = realpathSync(
