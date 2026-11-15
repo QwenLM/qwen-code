@@ -45,6 +45,16 @@ if (!EXPECT_MODES.includes(expectMode)) {
   );
   process.exit(2);
 }
+// An unrecognized --group must fail loudly too: it seeds no comments, so an
+// unknown group would otherwise report PASS on the none arm having verified
+// nothing.
+const GROUPS = ['g1', 'g2', 'g4', 'g5'];
+if (!GROUPS.includes(group)) {
+  console.error(
+    `[fixture] FAIL: unknown --group ${group} (want ${GROUPS.join('|')})`,
+  );
+  process.exit(2);
+}
 const g = Number(group.slice(1));
 const MOCK_PORT = 8790 + 10 * g;
 const DAEMON_PORT = 4199 + 10 * g;

@@ -24504,6 +24504,11 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
           expect(recorded).toEqual(
             expect.arrayContaining(['IC_555', 'IC_556', 'IC_557']),
           );
+          // The successful delivery resets the permanent-retirement streak, so
+          // a later retirement starts counting from zero again.
+          expect(
+            readWatchState().entries['owner/repo#42']!['digestRetiredCount'],
+          ).toBe(0);
         });
 
         it('a permanently-retired digest is consumed with a trace after the retry bound', async () => {
@@ -24904,6 +24909,16 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
               digestPending: true,
               digestRendered: 'IC_555',
             },
+            'owner/repo#46': {
+              ...base,
+              digestPending: true,
+              digestRetiredCount: 'many',
+            },
+            'owner/repo#47': {
+              ...base,
+              digestPending: true,
+              digestRendered: [123],
+            },
             'owner/repo#45': { ...base, digestPending: true },
           });
           await initChannel(commentOnlyConfig, { boundSessions });
@@ -24926,6 +24941,8 @@ describe('GithubChannel bound-session delivery and PR watch', () => {
           expect(entries['owner/repo#42']).toBeUndefined();
           expect(entries['owner/repo#43']).toBeUndefined();
           expect(entries['owner/repo#44']).toBeUndefined();
+          expect(entries['owner/repo#46']).toBeUndefined();
+          expect(entries['owner/repo#47']).toBeUndefined();
           expect(entries['owner/repo#45']).toBeDefined();
         });
 

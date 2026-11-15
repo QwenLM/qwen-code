@@ -96,10 +96,13 @@ later is a silent first observation.
 Digest mode is also armed by BACKLOG SIZE: a deliverable window larger than
 `MAX_WATCH_COMMENTS_PER_PASS` digests regardless of the heartbeat, because a
 healed endpoint after sustained per-PR fetch failures keeps the heartbeat fresh
-while the cursor stays hours back — the gap alone would never arm it. The
-size-armed digest uses a neutral lead (it must not claim an outage that did not
-happen) and persists its own arm when it omits members, so the remainder
-follows as further digests. The size-triggered origin is remembered per entry
+while the cursor stays hours back — the gap alone would never arm it. The cap is
+the PASS-WIDE per-comment budget, deliberately reused as a PER-PR flood
+threshold: a single PR whose window alone exceeds the whole pass budget would
+otherwise drain one prompt per comment across many passes, so it digests
+instead. The size-armed digest uses a neutral lead (it must not claim an outage
+that did not happen) and persists its own arm when it omits members, so the
+remainder follows as further digests. The size-triggered origin is remembered per entry
 (`digestSizeArmed`), so the follow-ups — which re-enter through the persisted
 arm — keep the neutral lead too; only a genuine downtime gap uses the
 offline-backlog wording. A detected gap RESETS the size origin, so an outage
@@ -233,10 +236,13 @@ for `en`).
 
 ## Constraints
 
-- Per-comment delivery (no gap, window within the cap) is byte-identical to
-  today; the digest is an additive path.
-- Nothing is consumed without being delivered: a held cursor never advances
-  past an undelivered member, and a retired verdict never advances the cursor.
+- Per-comment delivery (no gap, window within the cap, no persisted arm) is
+  byte-identical to today; the digest is an additive path.
+- Nothing is consumed silently: a held cursor never advances past an undelivered
+  member, and a TRANSIENT retired/deferred verdict never advances the cursor. A
+  PERMANENT retirement (preflight keeps rejecting the digest) is the one bounded
+  exception: after `MAX_DIGEST_RETIREMENT_RETRIES` consecutive retirements the
+  backlog is consumed WITH a visible journal trace, never silently.
 - Role routing, authorship-attribution direction, and the notification lane are
   unchanged.
 - The digest never decrements the pass-wide burst budget.
@@ -249,6 +255,21 @@ for `en`).
 - Two channel instances watching the same PR through the same gap each deliver
   their own digest (instance-local hash identity), matching
   at-least-once-per-subscription semantics.
+- The permanent-retirement bound consumes a backlog that was never delivered
+  (preflight keeps rejecting it). This is deliberate — the alternative is an
+  unbounded hold that spends the watch budget every poll — and it is never
+  silent: a `comment_digest_retired` journal row names the consumed digest. The
+  member keys stay recorded, so the comments do not re-list; an operator who
+  fixes the route/sender gate after the bound must re-trigger the backlog.
+- A startup-unreadable delivery ring keeps the public-fallback suppression
+  fail-closed for the process lifetime, even after a successful write repairs
+  the ring: the keys lost with the file stay unknown, so a brand-new `pr:` event
+  that was never delivered is indistinguishable from a lost key and is also
+  suppressed from the public fallback until a restart. This trades a
+  recoverable cost (public replies on unbound PRs pause after a corrupt ring
+  until restart) for closing the irreversible duplicate direction; the digest's
+  own acceptance is gated on the repaired ring plus its freshly written key, so
+  the digest lane itself drains normally.
 
 ## Validation plan
 
@@ -291,13 +312,16 @@ backlog)` suite): gap digest vs per-comment no-gap, legacy cursor, interval
    digest prompts with class `comment` — one per body-budget window, the newest
    members within the budget, exactly the rendered member dedupe keys recorded,
    full-context authors excluded over the rendered slice and follower set, the
-   channel-account identity admitted by the sender allowlist, a retired verdict
-   never advancing the cursor, and any omitted members following as further
-   digests (cursor held, arm retained, nothing lost).
-2. Without a gap (or on first observation) AND with a deliverable window within
-   the per-comment pass cap, comment delivery is byte-identical to today:
-   per-comment prompts, silent baselines, no digest. A window over the cap
-   digests even without a gap (the size arm).
+   channel-account identity admitted by the sender allowlist, a transient
+   retired/deferred verdict never advancing the cursor (a permanent retirement
+   is consumed only at the retry bound, with a visible trace), and any omitted
+   members following as further digests (cursor held, arm retained, nothing
+   lost).
+2. Without a gap (or on first observation), with no persisted digest arm, AND
+   with a deliverable window within the per-comment pass cap, comment delivery
+   is byte-identical to today: per-comment prompts, silent baselines, no digest.
+   A window over the cap digests even without a gap (the size arm), and a
+   persisted arm from an earlier gap still digests a within-cap window.
 3. Role-aware routing, authorship-attribution direction, the notification lane,
    and the public publication contract are unchanged.
 

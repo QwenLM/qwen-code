@@ -2868,9 +2868,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             entry.digestSizeArmed = false;
           }
           this.savePrWatchState();
-        } catch {
-          // Watch state unreadable: the in-memory flag still arms the next
-          // successful pass.
+        } catch (err) {
+          // Watch state unreadable or the arm write failed: the in-memory flag
+          // still arms the next successful pass. Surface it so a persisted-arm
+          // write failure is not swallowed silently.
+          process.stderr.write(
+            `[Channel:${this.name}] could not persist the downtime-gap digest arm (the in-memory flag still arms the next pass): ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
+          );
         }
         process.stderr.write(
           `[Channel:${this.name}] downtime gap detected (${Math.round(gapMs / 1000)}s since the last successful poll); each bound PR's comment backlog digests into one prompt\n`,
@@ -8188,9 +8192,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
                 thread: threadId,
                 number,
                 messageId: digestId,
+                detail: {
+                  consumedComments: rendered.length,
+                  retirements: retiredCount,
+                },
               });
               process.stderr.write(
-                `[Channel:${this.name}] comment digest for ${key} retired at preflight ${retiredCount} times; consuming the backlog with a trace instead of retrying\n`,
+                `[Channel:${this.name}] comment digest for ${key} retired at preflight ${retiredCount} times; consuming ${rendered.length} comment(s) with a trace instead of retrying\n`,
               );
               commitCursor(nowIso, true);
               return;
