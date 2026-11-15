@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import path from 'node:path';
+import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
 import { it } from 'vitest';
 import { InteractiveSession } from './interactive-session.js';
@@ -186,9 +187,13 @@ async function fixture(
     runtime = path.join(output, 'runtime'),
     tmp = path.join(output, 'tmp');
   const workspace = path.join(output, 'workspace'),
-    bin = path.join(output, 'bin'),
     memoryBase = path.join(output, 'memory-base');
-  for (const dir of [home, runtime, tmp, workspace, bin, memoryBase])
+  // Extensionless CommonJS stubs take their module type from the nearest
+  // package.json; inside the repo that is `"type": "module"`, so `require` is
+  // undefined and each stub exits 1 before logging anything. Keep them
+  // outside the repo, as tui-editor-parity does.
+  const bin = fs.mkdtempSync(path.join(tmpdir(), 'qwen-memory-owned-bin-'));
+  for (const dir of [home, runtime, tmp, workspace, memoryBase])
     fs.mkdirSync(dir);
   fs.mkdirSync(path.join(workspace, '.qwen'));
   const save = (name: string, value: unknown) =>
@@ -574,6 +579,11 @@ async function fixture(
       zero();
     } catch (error) {
       cleanupErrors.push('server/late model: ' + String(error));
+    }
+    try {
+      fs.rmSync(bin, { recursive: true, force: true });
+    } catch (error) {
+      cleanupErrors.push('owned bin: ' + String(error));
     }
     save('frames.json', frames);
     save('panels.json', panels);
