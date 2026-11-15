@@ -96,7 +96,7 @@ Every new field is optional and defaults to `en`. A caller that does not set it 
 - Unit (observation): each of the four transitions renders its zh summary; the `en` render is byte-identical to today; an absent language renders English; the transition key is unchanged between languages.
 - Unit (drain): a zh language selects the zh envelope, the zh role guidance and the zh provenance; the summary passes through unchanged; an absent language is byte-identical to today.
 - Unit (deps): the sources' language reaches both seams; absent stays absent.
-- Unit (refresh): the two no-deps cases assert the effects their names claim — no delivery from a leftover watch file, and no owner claim, no view and no watch-file write.
+- Unit (refresh): the two no-deps cases assert the effects their names claim by spying the store — neither claims an owner record nor writes a watch file. A fixture cannot seed a file where a deps-less drain would look, because `drainNow` returns at the deps gate before any directory is resolved.
 - Unit (adapter): the deprecation warning test asserts `prWatchLimit` as well as `prWatchBudgetReserve`, including a case that sets only `prWatchLimit`.
 - Real scenario: drive the shipped resolver, deps builder, observation and drain with a real temporary watch directory and a real bindings scan, and assert the delivered prompt text in both languages.
 

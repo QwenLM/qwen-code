@@ -3174,6 +3174,80 @@ describe('startSessionPrRefreshTimer', () => {
     }
   });
 
+  it('threads the language into the listing write producer', async () => {
+    // The listing write is the second summary producer. Pin the hop directly:
+    // the timer's watchSeam must carry watchDeps.language into prWatch.language
+    // and from there into the detector. A lost hop persists an English
+    // state_change while the view producer persists zh, and the drain passes
+    // the persisted summary through verbatim.
+    const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
+    const registry = createWorkspaceRegistry([trustedRuntime]);
+    await seedPendingBinding(trustedRuntime, SESSION_A, 42);
+    const watchDir = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-pr-watch-listing-lang-'),
+    );
+    const identity = { host: 'github.com', repo: 'o/r', number: 42 };
+    const now = () => Date.parse('2026-11-08T00:00:00.000Z');
+    writePrWatchStateSync(watchDir, identity, {
+      pr: identity,
+      state: 'open',
+      headSha: 'a'.repeat(40),
+      checks: 'passing',
+      observedAt: '2026-11-07T00:00:00.000Z',
+    });
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'closed')],
+    });
+    const observation = await import('./pr-watch-observation.js');
+    const detect = vi.spyOn(observation, 'detectPrTransitions');
+    vi.useFakeTimers();
+    const handle = startSessionPrRefreshTimer({
+      workspaceRegistry: registry,
+      env: {},
+      now,
+      observationEnabled: true,
+      getPrWatchDeps: () => ({
+        watchDir,
+        locks: new PathMutexRegistry(),
+        allowedHosts: new Set(['github.com']),
+        language: 'zh' as const,
+        viewPullRequest: async (url: string) => ({
+          kind: 'ok' as const,
+          view: {
+            url,
+            title: 'PR 42',
+            headSha: 'a'.repeat(40),
+            state: 'open' as const,
+            checks: 'passing' as const,
+            failingChecks: [] as string[],
+          },
+        }),
+        now,
+      }),
+    });
+    try {
+      await vi.advanceTimersByTimeAsync(60_000);
+      await vi.waitFor(() => {
+        expect(detect).toHaveBeenCalled();
+      });
+      // Every call the listing write makes carries the language; the view
+      // path's calls carry it too, so both producers are pinned at once.
+      const listingCalls = detect.mock.calls.filter(
+        (c) =>
+          c[2] !== undefined && (c[2] as { state: string }).state === 'closed',
+      );
+      expect(listingCalls.length).toBeGreaterThan(0);
+      for (const call of listingCalls) {
+        expect(call[5]).toBe('zh');
+      }
+    } finally {
+      handle?.dispose();
+      detect.mockRestore();
+      await removeTempTree(watchDir);
+    }
+  });
+
   it('threads the watch log into the listing write seam', async () => {
     const trustedRuntime = timerRuntime('trusted', trustedCwd, true);
     const registry = createWorkspaceRegistry([trustedRuntime]);

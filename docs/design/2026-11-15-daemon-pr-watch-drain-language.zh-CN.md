@@ -96,7 +96,7 @@
 - 单元（observation）：四种转换各自渲染其 zh 摘要；`en` 渲染与今天逐字节相同；缺省语言渲染英文；两种语言下转换 key 不变。
 - 单元（drain）：zh 语言选择 zh 信封、zh 角色指引与 zh 来源说明；摘要原样透传；缺省语言与今天逐字节相同。
 - 单元（deps）：sources 的语言到达两个接缝；缺省保持缺省。
-- 单元（refresh）：两个 no-deps 用例断言其名字声称的效果——不从遗留 watch 文件投递，以及不认领 owner、不建 view、不写 watch 文件。
+- 单元（refresh）：两个 no-deps 用例通过对 store 下 spy 来断言其名字声称的效果——既不认领 owner 记录，也不写 watch 文件。夹具无法把文件种在无 deps 的 drain 会去看的位置，因为 `drainNow` 在 deps 门处返回，早于任何目录被解析。
 - 单元（adapter）：弃用告警测试同时断言 `prWatchLimit` 与 `prWatchBudgetReserve`，含一个只设 `prWatchLimit` 的用例。
 - 真实场景：用真实临时 watch 目录与真实绑定扫描驱动已发布的解析器、deps 构造器、observation 与 drain，断言两种语言下投递的提示词文本。
 

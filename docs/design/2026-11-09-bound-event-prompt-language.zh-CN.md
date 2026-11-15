@@ -2,7 +2,7 @@
 
 [English](2026-11-09-bound-event-prompt-language.md) | [简体中文](2026-11-09-bound-event-prompt-language.zh-CN.md)
 
-状态：已实现（#16773；2026-11-09 提案）。下文按当时的设计描述。此后有两处变化：daemon drain 的语言仍未穿线（决策 7），且 PR B（#17214）移除了 channel 的状态检测，因此下文点名的 watch 摘要现在属于 daemon。
+状态：已实现（#16773；2026-11-09 提案）。下文按当时的设计描述。此后有两处变化：daemon drain 的语言现已穿线（决策 7），且 PR B（#17214）移除了 channel 的状态检测，因此下文点名的 watch 摘要现在属于 daemon。
 
 ## 问题陈述
 
@@ -200,8 +200,9 @@ channel 撰写的字符串：
    副本与剥英文标签完全一致。副本测试扩展到 zh 信封。
 7. **daemon 生产方的语言不接线。** 给 `PrWatchDrainDeps` 加一个没有
    生产调用方设置的 language 字段会是死开关。drain 保持英文缺省。启用增量
-   此后已落地（#17032）但未穿语言——`PrWatchDrainDeps` 仍未声明 language
-   字段——因此这项穿线仍欠着，而不是已排到别处。共享构造器已经支持。
+   已落地（#17032）但未穿语言；[Daemon PR watch：提示词语言](2026-11-15-daemon-pr-watch-drain-language.zh-CN.md)
+   此后已把它穿上，因此 drain 跟随 `general.language`，而 pending 事件
+   保留其检测时的语言。
 
 ## 受影响文件
 

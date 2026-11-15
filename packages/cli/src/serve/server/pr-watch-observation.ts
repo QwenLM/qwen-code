@@ -101,7 +101,7 @@ const PR_WATCH_SUMMARY_COPY: Readonly<
       headChange(prev: string, next: string): string;
       ciFailing(names: readonly string[]): string;
       mergeConflict(): string;
-      stateChange(state: string): string;
+      stateChange(state: 'merged' | 'closed'): string;
     }
   >
 > = {

@@ -2,7 +2,7 @@
 
 [English](2026-11-09-bound-event-prompt-language.md) | [简体中文](2026-11-09-bound-event-prompt-language.zh-CN.md)
 
-Status: implemented as #16773 (proposed 2026-11-09). The body below describes the change as designed. Two things have moved since: the daemon drain's language is still not threaded (decision 7), and PR B (#17214) removed the channel's state detection, so the watch summaries named below belong to the daemon now.
+Status: implemented as #16773 (proposed 2026-11-09). The body below describes the change as designed. Two things have moved since: the daemon drain's language is now threaded (decision 7), and PR B (#17214) removed the channel's state detection, so the watch summaries named below belong to the daemon now.
 
 ## Problem statement
 
@@ -237,10 +237,10 @@ Check names keep their `, ` join in both languages; they are platform data.
    extended to run against the zh envelope as well.
 7. **The daemon producer's language is not wired.** Adding a language field
    to `PrWatchDrainDeps` that no production caller sets would be a dead switch.
-   The drain keeps the English default. The enablement increment has since
-   landed (#17032) without threading it — `PrWatchDrainDeps` still declares no
-   language field — so the threading is still owed rather than scheduled
-   elsewhere. The shared builder already supports it.
+   The drain keeps the English default. The enablement increment landed
+   (#17032) without threading it; [Daemon PR watch: prompt language](2026-11-15-daemon-pr-watch-drain-language.md)
+   has since threaded it, so the drain follows `general.language` while a
+   pending event keeps the language of its detection.
 
 ## Files affected
 

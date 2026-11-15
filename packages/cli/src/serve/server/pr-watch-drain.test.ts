@@ -607,6 +607,37 @@ describe('runPrWatchDrainTick', () => {
     }
   });
 
+  it('builds a dormant recipient prompt in the deps language', async () => {
+    // The restore path composes its own prompt; losing the language hop here
+    // would deliver English to a restored session while the tick path is zh.
+    writePrWatchStateSync(dir, identity, pendingState());
+    const admit = vi.fn(
+      async (
+        _runtime: WorkspaceRuntime,
+        _sessionId: string,
+        _promptText: string,
+        _idempotencyKey: string,
+      ) => ({ deduplicated: false }),
+    );
+    const release = vi.fn(async () => {});
+    const deps = makeDeps({
+      language: 'zh',
+      isSessionLive: () => false,
+      wakeSession: async () => ({ kind: 'restored', release }),
+      admitPrompt: admit,
+    });
+    await runPrWatchDrainTick([runtime()], deps, state);
+    await vi.waitFor(() => {
+      expect(admit).toHaveBeenCalledTimes(1);
+    });
+    await vi.waitFor(() => {
+      expect(state.restoring.size).toBe(0);
+    });
+    const text = String(admit.mock.calls[0][2]);
+    expect(text).toContain('由 daemon PR 状态监视检测。');
+    expect(text).not.toContain('Detected by the daemon PR-state watch.');
+  });
+
   it('leaves the entry pending when a restore is temporarily unavailable', async () => {
     writePrWatchStateSync(dir, identity, pendingState());
     const admit = vi.fn(
