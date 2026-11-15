@@ -14,6 +14,7 @@ import wrapAnsi from 'wrap-ansi';
 import { DiffRenderer } from './DiffRenderer.js';
 import { RenderInline } from '../../utils/InlineMarkdownRenderer.js';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
+import { sanitizeTerminalText } from '../../utils/textUtils.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type {
   ToolCallConfirmationDetails,
@@ -408,7 +409,7 @@ export const ToolConfirmationMessage: React.FC<
       confirmationDetails as ToolExecuteConfirmationDetails;
 
     question = t("Allow execution of: '{{command}}'?", {
-      command: executionProps.rootCommand,
+      command: sanitizeTerminalText(executionProps.rootCommand),
     });
     options.push({
       label: t('Yes, allow once'),
@@ -486,7 +487,9 @@ export const ToolConfirmationMessage: React.FC<
             overflowDirection="bottom"
           >
             <Box>
-              <Text color={theme.text.link}>{executionProps.command}</Text>
+              <Text color={theme.text.link}>
+                {sanitizeTerminalText(executionProps.command)}
+              </Text>
             </Box>
           </MaxSizedBox>
         </Box>
@@ -494,7 +497,7 @@ export const ToolConfirmationMessage: React.FC<
           <Box flexDirection="column" paddingX={1} marginLeft={1} marginTop={1}>
             {warnings.map((warning, idx) => (
               <Text key={idx} color={theme.status.warning}>
-                ⚠ {warning}
+                ⚠ {sanitizeTerminalText(warning)}
               </Text>
             ))}
           </Box>
