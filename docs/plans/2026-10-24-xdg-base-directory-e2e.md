@@ -14,12 +14,13 @@ qwen() { node "$REPO/scripts/cli-entry.js" "$@"; }
 # For each group.
 export HOME=$(mktemp -d)
 unset QWEN_HOME XDG_CONFIG_HOME QWEN_USAGE_STATISTICS_ENABLED QWEN_CODE_SIMPLE
+unset QWEN_OAUTH GOOGLE_CLOUD_PROJECT GOOGLE_MODEL GOOGLE_APPLICATION_CREDENTIALS
 for var in $(compgen -e | grep -E '_API_KEY$|_AUTH_TOKEN$'); do unset "$var"; done
 ```
 
 On Windows, Node reads the home directory from `USERPROFILE`, not `HOME`, so also set `export USERPROFILE="$HOME"` (and `HOMEDRIVE`/`HOMEPATH` for cmd or PowerShell), or use a throwaway user account. Otherwise the run reads and writes the real profile.
 
-`qwen -p "say hi"` without credentials is enough. The run performs first-run setup and then stops at "No auth type is selected", so no model is called. Credentials left in the environment would reach a real model, which is why the setup clears them.
+`qwen -p "say hi"` without credentials is enough. The run performs first-run setup and then stops at "No auth type is selected", so no model is called. Credentials left in the environment would reach a real model, which is why the setup clears them, along with the variables that pick an auth type without a key: `QWEN_OAUTH`, and `GOOGLE_CLOUD_PROJECT` with `GOOGLE_MODEL` for Vertex AI, which can use `GOOGLE_APPLICATION_CREDENTIALS`.
 
 ## Test groups
 

@@ -14,12 +14,13 @@ qwen() { node "$REPO/scripts/cli-entry.js" "$@"; }
 # 每个测试组执行一次。
 export HOME=$(mktemp -d)
 unset QWEN_HOME XDG_CONFIG_HOME QWEN_USAGE_STATISTICS_ENABLED QWEN_CODE_SIMPLE
+unset QWEN_OAUTH GOOGLE_CLOUD_PROJECT GOOGLE_MODEL GOOGLE_APPLICATION_CREDENTIALS
 for var in $(compgen -e | grep -E '_API_KEY$|_AUTH_TOKEN$'); do unset "$var"; done
 ```
 
 在 Windows 上，Node 从 `USERPROFILE` 而不是 `HOME` 读取主目录，因此还需设置 `export USERPROFILE="$HOME"`（使用 cmd 或 PowerShell 时还需设置 `HOMEDRIVE`/`HOMEPATH`），或者使用一个一次性的用户账户。否则运行会读写真实的用户目录。
 
-不带凭据运行 `qwen -p "say hi"` 即可。该运行会完成首次运行的初始化，然后停在 "No auth type is selected"，因此不会调用任何模型。环境中残留的凭据会让运行调用真实模型，因此上述准备步骤会清除它们。
+不带凭据运行 `qwen -p "say hi"` 即可。该运行会完成首次运行的初始化，然后停在 "No auth type is selected"，因此不会调用任何模型。环境中残留的凭据会让运行调用真实模型，因此上述准备步骤会清除它们，以及不需要密钥就能选定认证方式的变量：`QWEN_OAUTH`，以及用于 Vertex AI 的 `GOOGLE_CLOUD_PROJECT` 与 `GOOGLE_MODEL`（它可以使用 `GOOGLE_APPLICATION_CREDENTIALS`）。
 
 ## 测试组
 
