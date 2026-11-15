@@ -2344,6 +2344,11 @@ describe('ModelsConfig', () => {
             {
               ...entry('dual-wire', 'Dual Wire', API_URL, 'DUAL_KEY', {
                 timeout: 222,
+                // Declared only on the responses entry: if the lookup settled
+                // for the first `id` + `baseUrl` match, this field's source
+                // degrades to `default` even though the applied value is the
+                // same 222 the registry resolved from this entry.
+                maxRetries: 7,
               }),
               wireApi: 'responses',
             },
@@ -2361,6 +2366,13 @@ describe('ModelsConfig', () => {
       expect(modelsConfig.getGenerationConfigSources()['timeout']?.kind).toBe(
         'modelProviders',
       );
+      // The per-field stamp is what tells the two entries apart: `maxRetries`
+      // is declared only on the responses entry, so kind `modelProviders`
+      // proves the lookup reached the second wired entry.
+      expect(
+        modelsConfig.getGenerationConfigSources()['maxRetries']?.kind,
+      ).toBe('modelProviders');
+      expect(gc.maxRetries).toBe(7);
     });
   });
 });

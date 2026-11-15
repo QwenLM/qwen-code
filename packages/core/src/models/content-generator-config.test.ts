@@ -740,6 +740,55 @@ describe('createRuntimeContentGeneratorView modalities source', () => {
     });
   });
 
+  it('finds the second wired entry when one id and baseUrl serve two wires', async () => {
+    // The documented dual-wire config declares the same `id` and `baseUrl`
+    // twice, once per wire; only `wireApi` tells the entries apart. Matching
+    // the endpoint first and testing the protocol afterwards would skip the
+    // responses entry and report the declared modalities as name-inferred.
+    const config = {
+      getContentGeneratorConfig: () => primary,
+      getContentGeneratorConfigSources: () => sessionSources,
+      getModelProvidersConfig: () => ({
+        openai: [
+          {
+            id: 'dual-wire-model',
+            baseUrl: 'https://local.example/v1',
+            generationConfig: { modalities: { image: true } },
+          },
+          {
+            id: 'dual-wire-model',
+            baseUrl: 'https://local.example/v1',
+            wireApi: 'responses',
+            generationConfig: { modalities: { audio: true } },
+          },
+        ],
+      }),
+      getModelsConfig: () => ({
+        getResolvedModel: () => ({
+          id: 'dual-wire-model',
+          authType: 'openai-responses',
+          registryBaseUrl: 'https://local.example/v1',
+          generationConfig: { modalities: { audio: true } },
+          capabilities: {},
+        }),
+      }),
+    } as unknown as Config;
+
+    const view = await createRuntimeContentGeneratorView(
+      config,
+      config,
+      'dual-wire-model',
+      { authType: 'openai-responses' },
+    );
+
+    expect(view.configSources?.['modalities']).toEqual({
+      kind: 'modelProviders',
+      authType: 'openai-responses',
+      modelId: 'dual-wire-model',
+      detail: 'generationConfig.modalities',
+    });
+  });
+
   it('omits via for a built-in model with no provider entry', async () => {
     // A qwen-oauth session pinned to a built-in model has no `modelProviders`
     // entry to declare the value on, so naming that route as `via` would aim

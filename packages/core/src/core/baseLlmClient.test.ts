@@ -1102,8 +1102,14 @@ describe('BaseLlmClient', () => {
       // A frame around this view must not read the session's sources: those
       // describe the primary model, and this generator serves another one
       // (QwenLM/qwen-code#16185).
-      getResolvedModel.mockReturnValue(anthropicKey());
-      const resolved = await resolve('other-model');
+      // The provider entry declares no modalities, so the value stays the
+      // name-based `computed` default while `via` still records the provider
+      // route the frame was resolved through.
+      getResolvedModel.mockReturnValue(anthropicKey({ id: fastModel }));
+      crossProviderConfig.getModelProvidersConfig.mockReturnValue({
+        anthropic: [{ id: fastModel, baseUrl: undefined }],
+      } as never);
+      const resolved = await resolve(fastModel);
 
       // The view carries its own map, derived from the target's provider
       // entry rather than the session's `settings` source. `Config` returns

@@ -326,20 +326,22 @@ function findProviderEntry(
 ): ModelConfig | undefined {
   for (const [providerId, entries] of Object.entries(providers)) {
     if (!Array.isArray(entries)) continue;
+    // One `id` + `baseUrl` can be declared twice to serve two wires, and only
+    // the protocol tells the entries apart; testing the protocol after picking
+    // the first match would never reach the second entry.
     const entry = entries.find(
       (candidate) =>
         candidate.id === resolvedModel.id &&
-        (candidate.baseUrl ?? undefined) === resolvedModel.registryBaseUrl,
+        (candidate.baseUrl ?? undefined) === resolvedModel.registryBaseUrl &&
+        // The registry resolves this entry's protocol with the user's map, so
+        // a custom provider id routed through `providerProtocol` must be
+        // matched the same way. The lenient resolver keeps an invalid entry
+        // from aborting view creation — the registry already rejected it at
+        // startup.
+        (tryResolveModelProtocol(providerId, candidate, protocolMap) ??
+          resolvedModel.authType) === resolvedModel.authType,
     );
-    if (!entry) continue;
-    // The registry resolves this entry's protocol with the user's map, so a
-    // custom provider id routed through `providerProtocol` must be matched the
-    // same way. The lenient resolver keeps an invalid entry from aborting view
-    // creation — the registry already rejected it at startup.
-    const protocol =
-      tryResolveModelProtocol(providerId, entry, protocolMap) ??
-      resolvedModel.authType;
-    if (protocol === resolvedModel.authType) return entry;
+    if (entry) return entry;
   }
   return undefined;
 }
