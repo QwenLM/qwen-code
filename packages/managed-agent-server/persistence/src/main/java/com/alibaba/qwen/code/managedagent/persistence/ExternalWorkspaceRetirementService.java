@@ -20,6 +20,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -113,11 +114,20 @@ public final class ExternalWorkspaceRetirementService {
             verifyProof(identity, proof);
             // placement、Workspace、Session/head 和 binding 的原生锁覆盖整个检查与提交，不留新准入空窗。
             requireIdle(request, current);
+            // The live provision/recovery lease on the binding itself is the
+            // one refusal requireIdle does not cover; it must answer 409 like
+            // the others, not surface as the repository's IllegalStateException.
+            require(!current.hasLiveOperationAt(databaseNow()));
             require(jdbc.update("UPDATE ma_workspace SET state = 'DRAINING' WHERE tenant_id = ? AND workspace_id = ?"
                     + " AND workspace_generation = ? AND state = 'ACTIVE'", request.tenantId(), request.workspaceId(),
                     request.workspaceGeneration()) == 1);
-            RuntimeBindingRecord released = jdbc.execute((ConnectionCallback<RuntimeBindingRecord>) connection ->
-                    bindings.retireUnacquiredExternal(connection, current));
+            RuntimeBindingRecord released;
+            try {
+                released = jdbc.execute((ConnectionCallback<RuntimeBindingRecord>) connection ->
+                        bindings.retireUnacquiredExternal(connection, current));
+            } catch (IllegalStateException unavailable) {
+                throw blocked();
+            }
             String digest = proofDigest(request, proof);
             operations.create(KIND, request.retirementId(), WorkspaceOperations.values(
                     "state", "DRAINING", "binding_id", current.getBindingId(),
@@ -147,7 +157,10 @@ public final class ExternalWorkspaceRetirementService {
             require(original != null && original.getState() == RuntimeBindingRecord.State.RELEASED
                     && original.getGeneration() == request.runtimeGeneration()
                     && original.getVersion() == receipt.fencedVersion());
-            requireNoOtherBinding(request, null);
+            // A successor generation admitted after the retirement commit does
+            // not block resume: the original binding is pinned to the fenced
+            // version above, and this decision is about the workspace state
+            // only, not about which generation currently serves it.
             require(jdbc.update("UPDATE ma_workspace SET state = 'ACTIVE' WHERE tenant_id = ? AND workspace_id = ?"
                     + " AND workspace_generation = ? AND state = 'DRAINING'", request.tenantId(), request.workspaceId(),
                     request.workspaceGeneration()) == 1);
@@ -289,6 +302,14 @@ public final class ExternalWorkspaceRetirementService {
         var active = jdbc.queryForList("SELECT binding_id FROM ma_runtime_binding WHERE tenant_id = ? AND workspace_id = ?"
                 + " AND binding_state <> 'RELEASED' FOR UPDATE", String.class, request.tenantId(), request.workspaceId());
         require(active.stream().allMatch(id -> id.equals(allowed)));
+    }
+
+    // The full JDBC row mapping is unnecessary here; the operation columns are
+    // exactly what the fenced binding row carries.
+    private Instant databaseNow() {
+        Long micros = jdbc.queryForObject("SELECT UNIX_TIMESTAMP() * 1000000"
+                + " + EXTRACT(MICROSECOND FROM CURRENT_TIMESTAMP(6))", Long.class);
+        return Instant.ofEpochSecond(0, micros * 1000).truncatedTo(ChronoUnit.MICROS);
     }
     private void empty(String sql, Object... parameters) { require(WorkspaceOperations.rows(jdbc, sql, parameters).isEmpty()); }
     private WorkspaceOperations operations(Request request) { return new WorkspaceOperations(jdbc, request.tenantId()); }

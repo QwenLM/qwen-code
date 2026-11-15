@@ -621,11 +621,18 @@ public class JdbcWorkspaceExecutionStore
 
     public boolean canStopExternalDrained(RuntimeBindingRecord saved, RuntimeBindingRepository repository) {
         if (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(saved.getRequest())
-                || HarnessOwnership.sharesRuntimeSessions(saved.getRequest())
                 || saved.getState() != RuntimeBindingRecord.State.DRAINING && saved.getState() != RuntimeBindingRecord.State.LOST
                 || !saved.isDrainRequested()
                 || saved.getOperationOwner() == null) {
             return false;
+        }
+        if (HarnessOwnership.sharesRuntimeSessions(saved.getRequest())) {
+            // A workspace-isolated external binding has no per-session proof to
+            // check; the shared storage fence below is its drain evidence.
+            return external(null, saved, repository,
+                    saved.getRequest().getScope(),
+                    saved.getRequest().getIsolationKey(), false,
+                    (connection, owner, current) -> noActiveExecutions(current));
         }
         return external(null, saved, repository,
                 saved.getRequest().getScope(),

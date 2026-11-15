@@ -210,7 +210,15 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
                 // endpoint; never enter provisioning or mint a replacement.
                 if (observation.getOutcome() == RuntimeObservation.Outcome.UNKNOWN
                         && lastLease != null && supportsReattach(request)) {
-                    observation = reattach(request, seed, handle, originalEndpoint);
+                    try {
+                        observation = reattach(request, seed, handle, originalEndpoint);
+                    } catch (RuntimeBrokerException failure) {
+                        // A failing reattach proves nothing about identity:
+                        // the observed worker may still be running, so this
+                        // must stay retryable and never reach the conflict arm
+                        // that permanently fences the binding.
+                        return RuntimeObservation.unknown(handle);
+                    }
                 }
                 if (observation.getOutcome() == RuntimeObservation.Outcome.READY
                         && originalEndpoint != null && !originalEndpoint.equals(observation.getEndpoint())) {
