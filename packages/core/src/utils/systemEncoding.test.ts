@@ -15,6 +15,7 @@ vi.mock('chardet');
 
 import {
   getCachedEncodingForBuffer,
+  getCachedSystemEncoding,
   getSystemEncoding,
   windowsCodePageToEncoding,
   detectEncodingFromBuffer,
@@ -269,6 +270,17 @@ describe('Shell Command Processor - Encoding Functions', () => {
       expect(getCachedEncodingForBuffer(buffer)).toBe('utf-8');
     });
 
+    it('should read the system encoding once, shared with buffer detection', () => {
+      mockedOsPlatform.mockReturnValue('win32');
+      mockedExecSync.mockReturnValue('Active code page: 936');
+      mockedExecSync.mockClear();
+
+      expect(getCachedSystemEncoding()).toBe('gbk');
+      expect(getCachedEncodingForBuffer(notUtf8(0xb9, 0xdc))).toBe('gbk');
+      expect(getCachedSystemEncoding()).toBe('gbk');
+      expect(mockedExecSync).toHaveBeenCalledTimes(1);
+    });
+
     it('should fall back to buffer detection when system encoding fails', () => {
       throwOnCall(mockedExecSync, 'locale command failed');
       const buffer = notUtf8(0x80, 0x81, 0x82);
@@ -400,6 +412,15 @@ describe('Shell Command Processor - Encoding Functions', () => {
       expect(label).toBe('ibm866');
       const bytes = Buffer.from([0x8e, 0xe9, 0xa8, 0xa1, 0xaa, 0xa0]);
       expect(new TextDecoder(label!).decode(bytes)).toBe('Ощибка');
+    });
+
+    it('should map code page 54936 to the WHATWG gb18030 label and decode GB18030 bytes correctly', () => {
+      const label = windowsCodePageToEncoding(54936);
+      expect(label).toBe('gb18030');
+      // 管理员 (two bytes a character, as in GBK) and ¥, which GB18030
+      // encodes in four bytes.
+      const bytes = Buffer.from('b9dcc0edd4b181308436', 'hex');
+      expect(new TextDecoder(label!).decode(bytes)).toBe('管理员¥');
     });
   });
 

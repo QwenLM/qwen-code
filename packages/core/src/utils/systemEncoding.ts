@@ -39,6 +39,17 @@ export function resetEncodingCache(): void {
 }
 
 /**
+ * Returns the system encoding (see {@link getSystemEncoding}), detected once
+ * per process. Shares its cache with {@link getCachedEncodingForBuffer}.
+ */
+export function getCachedSystemEncoding(): string | null {
+  if (cachedSystemEncoding === undefined) {
+    cachedSystemEncoding = getSystemEncoding();
+  }
+  return cachedSystemEncoding;
+}
+
+/**
  * Detects the encoding of a buffer.
  *
  * Strategy: try UTF-8 first, then a non-UTF-8 system encoding, then chardet.
@@ -180,6 +191,7 @@ export function windowsCodePageToEncoding(cp: number): string | null {
     1256: 'windows-1256',
     1257: 'windows-1257',
     1258: 'windows-1258',
+    54936: 'gb18030',
     65001: 'utf-8',
   };
 
