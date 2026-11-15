@@ -215,11 +215,17 @@ export function RecentSessions({
     retry,
   ]);
 
+  const workspaceCwds = new Set(JSON.parse(workspaceKey) as string[]);
+  const scopedEntries = entries.filter((entry) =>
+    entry.workspaceCwd === undefined
+      ? includeStandalone
+      : workspaceCwds.has(entry.workspaceCwd),
+  );
   // Count renderable rows, not raw entries: renderSession returns null for
   // entries this list does not draw (e.g. an optimistically pinned session),
   // and the expand label must promise only rows the click actually reveals.
   const renderableRows = expanded
-    ? entries
+    ? scopedEntries
         .map((entry) => ({
           key: JSON.stringify([entry.workspaceCwd, entry.session.sessionId]),
           node: renderSession(entry),
