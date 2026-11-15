@@ -319,7 +319,9 @@ drain 失败会让执行停在 `UNKNOWN`，而在本通道上，这个状态不�
 这条规则必须在本通道**每一条**能结算的路径上都成立，而不只是 reconcile：
 
 - **结算带的是已发布的 envelope，不是 worker 那份。**drain 完成之后，执行用控制面自己的 `/finished` 结果结算——也就是按真正搬过去的字节重建出来的 manifest。worker 那份 envelope 指向它私有的 manifest ref，而 Harness 会把结算结果与 `/finished` 逐字节比对，所以结算 worker 那份会让每一次成功的调用都被拒。
-- **cancel 只做物理取消，不结算。**cancel 一定会到达 worker，但只要 publication 还没 finished，它的回答就不能用来结算本通道——被取消的进程在 abort 之前仍可能已经写出过输出。记录保留自己的 claim，由 dispatcher 的搬运来收尾，和没被取消的调用完全一样。
+- **cancel 只做物理取消，不结算。**cancel 一定会到达 worker，但只要 publication 还没 finished，它的回答就不能用来结算本通道——被取消的进程在 abort 之前仍可能已经写出过输出。记录保留自己的 claim，由 dispatcher 的搬运来收尾，和没被取消的调用完全一样。如果 drain 在 cancel 与它的回答之间完成了，结算用耐久信封而不是 worker 的那份，理由同上。
+- **worker 证明"没启动过"时不需要 drain 证明。**不带 capture 的 `not_started` 回答是唯一的例外，cancel 和 reconciliation 两条路都一样。没有进程跑过，就没有通道存着字节，也永远不会有 finished 的 publication；把这个答案也拦下来，记录就彻底没有出路了——dispatch 拒绝 `UNKNOWN` 行，close 又拒绝未结算的行。**已启动**的调用永远不豁免，无论 capture 是什么状态，只有 drain 自己 finished 的 publication 才能证明那些字节到达了。reconciliation 这条路是从它用来结算的同一次 status 回答里读出这一点的，所以豁免不会多打一次 worker。
+- **publication 已 finished 时不需要 worker 就能结算。**如果 drain 已经完成、只是结算没落盘，reconciliation 直接用那份耐久信封结算，不再向 worker 要 status。这条路恰恰是在原始 worker 可能已经消失时才走的，而 worker 的回答也只能给出它自己本地的 manifest。
 - **已经开始、但 capture 不完整的调用选择拒绝，而不是结算。**`finish` 只接受完整的 capture，所以任何重试都发不出这些字节。把它结算掉，会让 worker 永远报 `capture_incomplete`，而那条已结算的记录又让 close 走到一个它永远证明不了的 stop；拒绝则让执行保持可恢复。
 - **drain 已经 finished 的恢复 dispatch 不再搬一次。**在 `FINISHED` 通道上重新发布只会被拒，所以那份持久 envelope 已经就是结果，直接把结算落下去即可。
 

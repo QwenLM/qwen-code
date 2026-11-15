@@ -465,6 +465,21 @@ final class RuntimeBrokerSupport {
     }
 
     /**
+     * The one answer on the external Shell lane that owes no drain proof: the
+     * worker proved no process ever started, so no channel holds bytes and no
+     * publication will ever finish. Fencing it would strand the record with no
+     * exit — the dispatch refuses an already-UNKNOWN row, and the close keeps
+     * refusing an unsettled one — while there is nothing left to move.
+     *
+     * <p>A started call is never exempt, whatever its capture status: only the
+     * drain's own finished publication proves those bytes arrived.
+     */
+    static boolean externalShellNoStartAnswer(Map<?, ?> result) {
+        return result != null && "not_started".equals(result.get("executionStatus"))
+                && result.get("capture") == null;
+    }
+
+    /**
      * Verifies that a drain receipt matches the claimed binding's identity,
      * including the external-workspace seed/lease/handle chain.
      */

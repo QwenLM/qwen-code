@@ -27,6 +27,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.MAX_CAS_ATTEMPTS;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.conflict;
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.externalShellNoStartAnswer;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.isPublicationV3;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.mapFailure;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.mapStoreFailure;
@@ -340,13 +341,19 @@ final class RuntimeExecutionCancellation {
         if (!"settled".equals(state)) {
             return;
         }
-        if (drainProofLane
-                && (publicationVerifier == null
-                        || publicationVerifier.finished(requested) == null)) {
-            return;
-        }
         Map<String, Object> result = runtimeMap(status.get("result"),
                 "cancellation result");
+        if (drainProofLane && !externalShellNoStartAnswer(result)) {
+            Map<String, Object> durable = publicationVerifier == null
+                    ? null : publicationVerifier.finished(requested);
+            if (durable == null) {
+                return;
+            }
+            // The drain finished on its own between the cancel and this
+            // answer. The worker's copy still names its local manifest, so the
+            // durable envelope is what this record settles with.
+            result = durable;
+        }
         try {
             executionState.settleExecution(requested, result);
         } catch (IllegalArgumentException exception) {

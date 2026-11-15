@@ -28,6 +28,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
@@ -149,6 +150,65 @@ class ExternalShellDispatchLaneTest {
         assertTrue(fixture.events.stream().noneMatch("published"::equals));
     }
 
+    @Test
+    @Timeout(15)
+    void refusedChannelBeginNeverStartsTheShellAndLeavesTheCallUnknown() {
+        var fixture = new Fixture();
+        fixture.failBegin = true;
+        fixture.dispatch();
+
+        // The worker prepares against a channel that already exists, so a
+        // refused begin must stop the Shell rather than run a command whose
+        // output has nowhere to go.
+        assertNull(fixture.settled.get());
+        assertEquals("execution", fixture.unknown.get());
+        assertEquals(List.of("begin"), fixture.events);
+    }
+
+    @Test
+    @Timeout(15)
+    void claimLostBeforeTheMoveLeavesTheCallUnknownWithoutPublishing() {
+        var fixture = new Fixture();
+        // A takeover re-granted the claim between the Shell's answer and the
+        // move. The new owner is the one that has to move these bytes; writing
+        // over its claim would publish a result it does not own.
+        var taken = mock(ToolExecutionRecord.class);
+        when(taken.getExecutionCallId()).thenReturn("execution");
+        when(taken.getDispatchOwner()).thenReturn("broker");
+        when(taken.getDispatchGeneration()).thenReturn(8L);
+        fixture.answer.complete(Map.of("state", "settled", "result", fixture.workerEnvelope()));
+        when(fixture.executions.findByExecutionCallId("execution")).thenReturn(taken);
+        fixture.dispatch();
+
+        assertNull(fixture.settled.get());
+        assertEquals("execution", fixture.unknown.get());
+        assertEquals(List.of("begin", "execute"), fixture.events);
+    }
+
+    @Test
+    @Timeout(15)
+    void renewalPushesTheGrantsHorizonToTheWorkerChannelAndTheShellStillSettles() throws Exception {
+        var fixture = new Fixture();
+        // A foreground command longer than one dispatch lease: the tick renews
+        // the claim, and the channel's own horizon has to move with it or the
+        // capture closes mid-command and the drain can never finish.
+        var renewed = new CountDownLatch(1);
+        fixture.onRenew = renewed::countDown;
+        fixture.holdExecute = true;
+        var dispatched = Thread.ofPlatform().start(fixture::dispatch);
+        assertTrue(fixture.shellStarted.await(5, TimeUnit.SECONDS), "The Shell never started");
+
+        fixture.tick.run();
+        assertTrue(renewed.await(5, TimeUnit.SECONDS), "The channel horizon was never pushed");
+        assertEquals(fixture.grant, fixture.renewedGrant.get(),
+                "The renewal rechecks the grant and pushes that grant's current horizon");
+
+        fixture.answer.complete(Map.of("state", "settled", "result", fixture.workerEnvelope()));
+        dispatched.join(10_000);
+        assertEquals(fixture.publishedEnvelope(), fixture.settled.get());
+        assertTrue(fixture.events.contains("drain"));
+    }
+
     @SuppressWarnings("unchecked")
     private static Map<String, Object> capture(Map<String, Object> envelope) {
         return (Map<String, Object>) envelope.get("capture");
@@ -165,7 +225,8 @@ class ExternalShellDispatchLaneTest {
         private static final Map<String, Object> REFERENCE = Map.of(
                 "sessionId", "runtime", "promptId", "turn", "callId", "call",
                 "argsDigest", "sha256:" + "a".repeat(64),
-                "dispatchMode", "deferred_v3", "publicationId", "publication");
+                "dispatchMode", "deferred_v3", "publicationId", "publication",
+                "payloadDigest", "sha256:" + "b".repeat(64));
         private static final Map<String, Object> PAYLOAD = Map.of(
                 "toolName", "run_shell_command", "input", Map.of("command", "printf witness"));
 
@@ -176,6 +237,12 @@ class ExternalShellDispatchLaneTest {
         private final List<CompletableFuture<Map<String, Object>>> statusAnswers = new ArrayList<>();
         private boolean finished;
         private boolean failDrain;
+        private boolean failBegin;
+        private boolean holdExecute;
+        private Runnable onRenew = () -> { };
+        private final CountDownLatch shellStarted = new CountDownLatch(1);
+        private final AtomicReference<RuntimePublicationGrant> renewedGrant = new AtomicReference<>();
+        private Runnable tick = () -> { };
 
         private final RuntimeLease lease = mock(RuntimeLease.class);
         private final RuntimeSession session = mock(RuntimeSession.class);
@@ -218,6 +285,10 @@ class ExternalShellDispatchLaneTest {
                 when(record.getDispatchGeneration()).thenReturn(7L);
                 when(record.getBindingId()).thenReturn("binding");
                 when(record.getRuntimeGeneration()).thenReturn(1L);
+                // The claim's own owner and generation are what fence the
+                // move; identity is not what these cases vary.
+                when(record.sameIdentity(any())).thenReturn(true);
+                when(record.sameAuthorization(any())).thenReturn(true);
             }
             when(binding.getBindingId()).thenReturn("binding");
             when(binding.getGeneration()).thenReturn(1L);
@@ -231,8 +302,11 @@ class ExternalShellDispatchLaneTest {
             when(transport.executeV3(eq(lease), eq(session), eq(REFERENCE), eq(PAYLOAD), any()))
                     .thenAnswer(call -> {
                         events.add("execute");
+                        shellStarted.countDown();
                         return answer;
                     });
+            when(executions.renewDispatch("execution", "broker", 7L, LEASE))
+                    .thenReturn(executing);
             when(transport.statusV3(lease, session, REFERENCE, 0)).thenAnswer(call -> {
                 events.add("status");
                 return statusAnswers.isEmpty()
@@ -247,8 +321,13 @@ class ExternalShellDispatchLaneTest {
                         return mock(ScheduledFuture.class);
                     });
             var renewalScheduler = mock(ScheduledExecutorService.class);
+            // The tick is driven by hand: a case decides when a lease has
+            // elapsed instead of waiting a third of one.
             when(renewalScheduler.scheduleWithFixedDelay(any(Runnable.class), anyLong(), anyLong(),
-                    eq(TimeUnit.MILLISECONDS))).thenAnswer(call -> mock(ScheduledFuture.class));
+                    eq(TimeUnit.MILLISECONDS))).thenAnswer(call -> {
+                        tick = call.getArgument(0);
+                        return mock(ScheduledFuture.class);
+                    });
 
             org.mockito.Mockito.doAnswer(call -> {
                 settled.set(call.getArgument(1));
@@ -284,11 +363,18 @@ class ExternalShellDispatchLaneTest {
                 public CompletableFuture<String> begin(RuntimeLease lease, RuntimeBindingRecord binding,
                         ToolExecutionRecord execution, RuntimePublicationGrant grant) {
                     events.add("begin");
-                    return CompletableFuture.completedFuture("channel");
+                    return failBegin
+                            ? CompletableFuture.failedFuture(new RuntimeBrokerException(
+                                    409, "external_shell_publication_unavailable",
+                                    "Channel refused", false))
+                            : CompletableFuture.completedFuture("channel");
                 }
 
                 public CompletableFuture<Void> renew(RuntimeLease lease, RuntimeBindingRecord binding,
                         RuntimePublicationGrant grant, String channelId) {
+                    assertEquals("channel", channelId);
+                    renewedGrant.set(grant);
+                    onRenew.run();
                     return CompletableFuture.completedFuture(null);
                 }
 
@@ -327,7 +413,7 @@ class ExternalShellDispatchLaneTest {
         }
 
         private void dispatch() {
-            if (!answer.isDone()) {
+            if (!holdExecute && !answer.isDone()) {
                 answer.complete(Map.of("state", "settled", "result", workerEnvelope()));
             }
             dispatcher.beginDispatch(context, prepared, PAYLOAD, grant, null, null);
