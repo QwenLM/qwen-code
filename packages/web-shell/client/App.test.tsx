@@ -52079,7 +52079,8 @@ describe('App view navigation shortcuts (#13175)', () => {
     const field = document.createElement('div');
     field.tabIndex = 0;
     field.addEventListener('keydown', (event) => event.stopPropagation());
-    document.body.appendChild(field);
+    const appRoot = document.querySelector('[data-web-shell-root]');
+    (appRoot ?? document.body).appendChild(field);
     try {
       const event = await press(OVERVIEW_CHORD, field);
       expect(event.defaultPrevented).toBe(true);
@@ -52103,7 +52104,8 @@ describe('App view navigation shortcuts (#13175)', () => {
     content.setAttribute('contenteditable', 'true');
     editor.appendChild(content);
     composer.appendChild(editor);
-    document.body.appendChild(composer);
+    const appRoot = document.querySelector('[data-web-shell-root]');
+    (appRoot ?? document.body).appendChild(composer);
     try {
       const overview = await press(OVERVIEW_CHORD, content);
       expect(overview.defaultPrevented).toBe(true);
@@ -52124,7 +52126,8 @@ describe('App view navigation shortcuts (#13175)', () => {
     await flush();
     const search = document.createElement('input');
     search.type = 'search';
-    document.body.appendChild(search);
+    const appRoot = document.querySelector('[data-web-shell-root]');
+    (appRoot ?? document.body).appendChild(search);
     try {
       const overview = await press(OVERVIEW_CHORD, search);
       const split = await press(SPLIT_CHORD, search);
@@ -52189,7 +52192,8 @@ describe('App view navigation shortcuts (#13175)', () => {
     const screen = document.createElement('div');
     screen.tabIndex = 0;
     terminal.appendChild(screen);
-    document.body.appendChild(terminal);
+    const appRoot = document.querySelector('[data-web-shell-root]');
+    (appRoot ?? document.body).appendChild(terminal);
     try {
       const event = await press(OVERVIEW_CHORD, screen);
       expect(event.defaultPrevented).toBe(false);
@@ -52238,12 +52242,15 @@ describe('App view navigation hotkeys — surface chords', () => {
     });
   }
 
-  // A fixture host outside the React tree; removed after each test.
+  // A fixture host inside the shell root — the surfaces these chords act
+  // on are rendered there, and the scoped lookups only reach that tree;
+  // removed after each test.
   function fixture(html: string): HTMLElement {
     const host = document.createElement('div');
     host.setAttribute('data-hk-fixture', '');
     host.innerHTML = html;
-    document.body.appendChild(host);
+    const appRoot = document.querySelector('[data-web-shell-root]');
+    (appRoot ?? document.body).appendChild(host);
     return host;
   }
 

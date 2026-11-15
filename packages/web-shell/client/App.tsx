@@ -471,6 +471,7 @@ import {
 } from './utils/copyCommand';
 import { getShadowAwareActiveElement, isEditableTarget } from './utils/dom';
 import {
+  eventFromShellScope,
   hideNavDigitPreview,
   isOverviewCheckboxChord,
   modifierDigit,
@@ -20400,17 +20401,22 @@ export function App({
     };
     const onViewShortcut = (e: KeyboardEvent) => {
       if (e.repeat || e.isComposing) return;
+      // The listener is window-wide but this App instance owns only its
+      // own tree: a key pressed in another mounted shell (or outside
+      // every shell in a shadow-rooted host) must not run this handler.
+      const scope = appRootRef.current;
+      if (!scope || !eventFromShellScope(scope, e)) return;
       // Option+Shift+1..9 has no modifier key, so it runs before the
       // Cmd/Ctrl gate below and is exempt from it.
       if (isOverviewCheckboxChord(e) && shellHotkeyTargetsClear(e)) {
-        pressOverviewRowCheckbox(e);
+        pressOverviewRowCheckbox(e, scope);
         return;
       }
       // Alt held while Cmd/Ctrl is down ends the number preview before
       // the chord gates: an Alt keydown with Meta held still carries
       // metaKey, and the Alt+digit chords are not digit navigation.
       if (e.altKey && (e.metaKey || e.ctrlKey)) {
-        hideNavDigitPreview();
+        hideNavDigitPreview(scope);
         return;
       }
       if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
@@ -20421,7 +20427,7 @@ export function App({
       // stages, so the badges follow the chain the next press takes.
       if (e.key === 'Meta' || e.key === 'Control' || e.key === 'Shift') {
         if (shellHotkeyTargetsClear(e, { composerExempt: true })) {
-          showNavDigitPreview({ shift: e.shiftKey });
+          showNavDigitPreview({ shift: e.shiftKey }, scope);
         }
         return;
       }
@@ -20447,7 +20453,7 @@ export function App({
       // decides whether each one consumes the event.
       if (e.shiftKey && e.code === 'KeyF') {
         if (shellHotkeyTargetsClear(e, { composerExempt: true }))
-          pressPaneMaximizeToggle(e);
+          pressPaneMaximizeToggle(e, scope);
         return;
       }
       if (
@@ -20455,17 +20461,17 @@ export function App({
         (e.code === 'Backslash' || e.code === 'IntlBackslash')
       ) {
         if (shellHotkeyTargetsClear(e, { composerExempt: true }))
-          pressSelectedRowsSplit(e);
+          pressSelectedRowsSplit(e, scope);
         return;
       }
       if (!e.shiftKey && e.code === 'KeyT') {
         if (shellHotkeyTargetsClear(e, { composerExempt: true }))
-          pressNewTask(e);
+          pressNewTask(e, scope);
         return;
       }
       if (modifierDigit(e) > 0) {
         if (shellHotkeyTargetsClear(e, { composerExempt: true }))
-          pressNavigationDigit(e);
+          pressNavigationDigit(e, scope);
         return;
       }
     };
@@ -20474,6 +20480,10 @@ export function App({
     // modifier (a naive !metaKey && !ctrlKey never fires on a real
     // release); window blur covers switching away with the modifier held.
     const onNavPreviewKeyup = (e: KeyboardEvent): void => {
+      // Teardown is not gated on the key's origin: a released modifier
+      // ends this shell's preview wherever the release happened.
+      const scope = appRootRef.current;
+      if (!scope) return;
       // Shift released while the modifier is still held: back to the
       // plain-digit chain.
       if (e.key === 'Shift') {
@@ -20482,15 +20492,17 @@ export function App({
           !e.altKey &&
           shellHotkeyTargetsClear(e, { composerExempt: true })
         ) {
-          showNavDigitPreview({ shift: false });
+          showNavDigitPreview({ shift: false }, scope);
         }
         return;
       }
       if (e.key !== 'Meta' && e.key !== 'Control') return;
       if (e.key === 'Meta' ? e.ctrlKey : e.metaKey) return;
-      hideNavDigitPreview();
+      hideNavDigitPreview(scope);
     };
-    const onNavPreviewBlur = (): void => hideNavDigitPreview();
+    const onNavPreviewBlur = (): void => {
+      if (appRootRef.current) hideNavDigitPreview(appRootRef.current);
+    };
     window.addEventListener('keydown', onViewShortcut, true);
     window.addEventListener('keyup', onNavPreviewKeyup, true);
     window.addEventListener('blur', onNavPreviewBlur);

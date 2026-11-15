@@ -10,7 +10,13 @@
 // it acted, or when it deliberately swallows the key (for example Cmd+4
 // with three Overview rows); otherwise the key is left to the browser,
 // mirroring the existing Overview/Split chords.
+//
+// Every lookup is scoped to the shell that owns the listener: App passes
+// its root element, so a host mounting several shells — or a shell inside
+// a ShadowRoot — cannot have one shell's chord act on another shell's DOM,
+// and the preview style and badges live in the same tree as the surface.
 
+import { getShadowAwareActiveElement } from './dom';
 import { parseSessionId } from './sessionPath';
 
 /** 1–9 for the main number row (`Digit1`–`Digit9`), 0 otherwise. Numpad
@@ -24,6 +30,42 @@ export function isOverviewCheckboxChord(e: KeyboardEvent): boolean {
   return (
     e.altKey && e.shiftKey && !e.metaKey && !e.ctrlKey && modifierDigit(e) > 0
   );
+}
+
+/**
+ * Whether a window-wide key event belongs to the shell rooted at `scope`.
+ * App registers one capture listener per instance on window, so without
+ * this gate a chord pressed in one shell would run every mounted shell's
+ * handler: the key is attributed to the shell whose tree the innermost
+ * event target sits in, or — when nothing inside any shell is focused
+ * (the document body, the document itself, or no element target at all) —
+ * to the top-level shells, keeping the chord alive before the first
+ * in-shell focus.
+ */
+export function eventFromShellScope(scope: Element, e: KeyboardEvent): boolean {
+  // composedPath[0] is the innermost target (a shadow-retargeted event
+  // reports its host as `target` at window); the fallback covers engines
+  // that do not implement composedPath.
+  const target =
+    (e.composedPath()[0] as Node | null | undefined) ??
+    (e.target as Node | null | undefined);
+  if (target instanceof Node) {
+    if (scope.contains(target)) return true;
+    // A Node target outside this tree belongs to another shell (or to no
+    // shell) unless it is the document body, html, or the document itself
+    // — the "nothing focused" shapes.
+    if (
+      target !== document.body &&
+      target !== document.documentElement &&
+      target !== document
+    ) {
+      return false;
+    }
+  }
+  // No element is focused: a bare keydown lands on the body, the document,
+  // or window itself (dispatchers and engines that do not normalize it to
+  // body). Attribute it to the top-level shells.
+  return scope.getRootNode() instanceof Document;
 }
 
 function consume(e: KeyboardEvent): void {
@@ -86,9 +128,12 @@ function focusPaneComposer(pane: HTMLElement): void {
  * the focus (a composer focus sits outside every card of its pane),
  * otherwise the first visible panel.
  */
-function pickVisiblePanel(panels: NodeListOf<Element>): Element | null {
+function pickVisiblePanel(
+  panels: NodeListOf<Element>,
+  scope: Element,
+): Element | null {
   const visible = Array.from(panels).filter(isVisible);
-  const active = document.activeElement;
+  const active = getShadowAwareActiveElement(scope);
   const contained = visible.find((panel) => panel.contains(active));
   if (contained) return contained;
   const pane =
@@ -107,8 +152,8 @@ function pickVisiblePanel(panels: NodeListOf<Element>): Element | null {
  * survives any active locale (`ru` is user-selectable and currently
  * reads the English label through the i18n fallback).
  */
-function findPinnedHeader(): HTMLButtonElement | null {
-  const headers = document.querySelectorAll<HTMLElement>(
+function findPinnedHeader(scope: Element): HTMLButtonElement | null {
+  const headers = scope.querySelectorAll<HTMLElement>(
     'button[data-web-shell-pinned-header]',
   );
   for (const header of Array.from(headers)) {
@@ -125,8 +170,8 @@ function findPinnedHeader(): HTMLButtonElement | null {
  * the option loses focus, so the ring follows the focus like
  * :focus-visible does.
  */
-function markHotkeyFocused(option: HTMLElement): void {
-  document
+function markHotkeyFocused(option: HTMLElement, scope: Element): void {
+  scope
     .querySelectorAll('[data-web-shell-hotkey-focused]')
     .forEach((el) => el.removeAttribute('data-web-shell-hotkey-focused'));
   option.setAttribute('data-web-shell-hotkey-focused', '');
@@ -146,9 +191,12 @@ function markHotkeyFocused(option: HTMLElement): void {
  * than role="dialog": non-modal popovers (session details) carry that
  * role too and must not disable the chord.
  */
-export function pressOverviewRowCheckbox(e: KeyboardEvent): boolean {
+export function pressOverviewRowCheckbox(
+  e: KeyboardEvent,
+  scope: Element = document.body,
+): boolean {
   const n = modifierDigit(e);
-  const viewport = document.querySelector(
+  const viewport = scope.querySelector(
     '[data-web-shell-session-table-viewport]',
   );
   if (!isVisible(viewport)) return false;
@@ -175,11 +223,12 @@ type DigitStage =
  * it, so the preview cannot drift from what the next press does (Shift
  * included).
  */
-function resolveDigitStage(shift: boolean): DigitStage | null {
+function resolveDigitStage(shift: boolean, scope: Element): DigitStage | null {
   // 1. Approval card (without Shift).
   if (!shift) {
     const panel = pickVisiblePanel(
-      document.querySelectorAll('[data-web-shell-permission-panel]'),
+      scope.querySelectorAll('[data-web-shell-permission-panel]'),
+      scope,
     );
     if (panel) {
       const group = panel.querySelector('[role="radiogroup"]');
@@ -195,7 +244,7 @@ function resolveDigitStage(shift: boolean): DigitStage | null {
   }
 
   // 2. Session Overview.
-  const viewport = document.querySelector(
+  const viewport = scope.querySelector(
     '[data-web-shell-session-table-viewport]',
   );
   if (isVisible(viewport)) {
@@ -204,7 +253,7 @@ function resolveDigitStage(shift: boolean): DigitStage | null {
 
   // 3. Pinned section (without Shift).
   if (!shift) {
-    const header = findPinnedHeader();
+    const header = findPinnedHeader(scope);
     if (header) {
       if (header.getAttribute('aria-expanded') === 'false') {
         return { kind: 'pinned', header, rows: null };
@@ -221,7 +270,7 @@ function resolveDigitStage(shift: boolean): DigitStage | null {
   // sibling mounted (their sessions keep streaming), so only the visible
   // ones are numbered.
   const panes = Array.from(
-    document.querySelectorAll<HTMLElement>('[data-pane-session-id]'),
+    scope.querySelectorAll<HTMLElement>('[data-pane-session-id]'),
   ).filter(isVisible);
   return panes.length > 1 ? { kind: 'panes', panes } : null;
 }
@@ -245,25 +294,39 @@ function resolveDigitStage(shift: boolean): DigitStage | null {
  *
  * Returns whether the event was consumed.
  */
-export function pressNavigationDigit(e: KeyboardEvent): boolean {
+export function pressNavigationDigit(
+  e: KeyboardEvent,
+  scope: Element = document.body,
+): boolean {
   const n = modifierDigit(e);
-  const stage = resolveDigitStage(e.shiftKey);
+  const stage = resolveDigitStage(e.shiftKey, scope);
   if (!stage) return false;
+  // While the preview is live, the badge is the number's identity, not a
+  // position: React re-sorts the Overview (status, then updatedAt) by
+  // moving the keyed rows, and a moved node keeps its badge with it. Act
+  // on the target still carrying n; with no badge live (no preview) the
+  // positional target of index n-1 stands, as before.
+  const badged = navPreviewTargets(e.shiftKey, scope).find(
+    (target) =>
+      target !== null && target.getAttribute(NAV_PREVIEW_ATTR) === String(n),
+  );
   switch (stage.kind) {
     case 'approval': {
       // Focus, not click. A disabled option cannot take focus, so it is
       // neither marked nor focused; the card still claims the key.
       consume(e);
-      const option = stage.options[n - 1];
+      const option = badged ?? stage.options[n - 1];
       if (option && !isDisabled(option)) {
-        markHotkeyFocused(option);
+        markHotkeyFocused(option, scope);
         option.focus();
       }
       return true;
     }
     case 'overview':
       consume(e);
-      stage.rows[n - 1]?.click();
+      // The badge sits on the row's last cell (or the row itself): the
+      // pressed key follows the row the badge names, wherever it moved.
+      (badged ? badged.closest('tr') : stage.rows[n - 1])?.click();
       return true;
     case 'pinned': {
       if (stage.rows === null) {
@@ -271,7 +334,7 @@ export function pressNavigationDigit(e: KeyboardEvent): boolean {
         consume(e);
         return true;
       }
-      const row = stage.rows[n - 1];
+      const row = badged ?? stage.rows[n - 1];
       // The section is present but nothing matches: leave the key
       // unconsumed and do not touch the panes.
       if (!row) return false;
@@ -281,7 +344,7 @@ export function pressNavigationDigit(e: KeyboardEvent): boolean {
     }
     case 'panes': {
       consume(e);
-      const pane = stage.panes[n - 1];
+      const pane = badged ?? stage.panes[n - 1];
       if (pane) focusPaneComposer(pane);
       return true;
     }
@@ -292,8 +355,13 @@ const NAV_PREVIEW_STYLE_ID = 'webShellNavPreviewStyle';
 const NAV_PREVIEW_ATTR = 'data-web-shell-nav-preview';
 const NAV_PREVIEW_ANCHOR_ATTR = 'data-web-shell-nav-preview-anchor';
 
-function ensureNavPreviewStyle(): void {
-  if (document.getElementById(NAV_PREVIEW_STYLE_ID)) return;
+function ensureNavPreviewStyle(scope: Element): void {
+  const root = scope.getRootNode();
+  const present =
+    root instanceof ShadowRoot
+      ? root.querySelector(`#${NAV_PREVIEW_STYLE_ID}`) !== null
+      : document.getElementById(NAV_PREVIEW_STYLE_ID) !== null;
+  if (present) return;
   const style = document.createElement('style');
   style.id = NAV_PREVIEW_STYLE_ID;
   style.textContent = `
@@ -320,7 +388,10 @@ function ensureNavPreviewStyle(): void {
   pointer-events: none;
   z-index: 1;
 }`;
-  document.head.appendChild(style);
+  // A shadow-rooted shell keeps the style in its own tree, where the
+  // badges live; top-level shells share the one document style.
+  if (root instanceof ShadowRoot) root.appendChild(style);
+  else document.head.appendChild(style);
 }
 
 /**
@@ -332,8 +403,11 @@ function ensureNavPreviewStyle(): void {
  * position that the press would not act on (a disabled approval option)
  * unnumbered without renumbering the ones after it.
  */
-function navPreviewTargets(shift: boolean): Array<HTMLElement | null> {
-  const stage = resolveDigitStage(shift);
+function navPreviewTargets(
+  shift: boolean,
+  scope: Element,
+): Array<HTMLElement | null> {
+  const stage = resolveDigitStage(shift, scope);
   if (!stage) return [];
   switch (stage.kind) {
     case 'approval':
@@ -361,12 +435,17 @@ function navPreviewTargets(shift: boolean): Array<HTMLElement | null> {
  * so the badges name what the next press does. The badge is a CSS ::after
  * driven by a data attribute, not an extra DOM node: React re-renders of
  * the rows cannot drop or duplicate it mid-hold. At most nine targets are
- * numbered, in DOM order; the numbers are positions, matching the chord.
+ * numbered, in DOM order at stamp time; a target renumbered by a reorder
+ * during the hold keeps its badge, and pressNavigationDigit follows the
+ * badge (identity), so the key stays on the target the number names.
  */
-export function showNavDigitPreview(opts: { shift?: boolean } = {}): void {
-  ensureNavPreviewStyle();
-  hideNavDigitPreview();
-  navPreviewTargets(opts.shift ?? false)
+export function showNavDigitPreview(
+  opts: { shift?: boolean } = {},
+  scope: Element = document.body,
+): void {
+  ensureNavPreviewStyle(scope);
+  hideNavDigitPreview(scope);
+  navPreviewTargets(opts.shift ?? false, scope)
     .slice(0, 9)
     .forEach((el, i) => {
       if (!el) return;
@@ -383,9 +462,9 @@ export function showNavDigitPreview(opts: { shift?: boolean } = {}): void {
     });
 }
 
-/** Removes any number-preview badges. */
-export function hideNavDigitPreview(): void {
-  document
+/** Removes any number-preview badges of the shell. */
+export function hideNavDigitPreview(scope: Element = document.body): void {
+  scope
     .querySelectorAll(`[${NAV_PREVIEW_ATTR}], [${NAV_PREVIEW_ANCHOR_ATTR}]`)
     .forEach((el) => {
       el.removeAttribute(NAV_PREVIEW_ATTR);
@@ -399,8 +478,11 @@ export function hideNavDigitPreview(): void {
  * contains the focused element, the pane is hidden, or it has no
  * maximize button.
  */
-export function pressPaneMaximizeToggle(e: KeyboardEvent): boolean {
-  const active = document.activeElement;
+export function pressPaneMaximizeToggle(
+  e: KeyboardEvent,
+  scope: Element = document.body,
+): boolean {
+  const active = getShadowAwareActiveElement(scope);
   const pane =
     active instanceof Element ? active.closest('[data-pane-session-id]') : null;
   if (!isVisible(pane)) return false;
@@ -421,13 +503,16 @@ export function pressPaneMaximizeToggle(e: KeyboardEvent): boolean {
  * selection is active) is clicked; with no rows selected there is no
  * button and the key is swallowed.
  */
-export function pressSelectedRowsSplit(e: KeyboardEvent): boolean {
-  const viewport = document.querySelector(
+export function pressSelectedRowsSplit(
+  e: KeyboardEvent,
+  scope: Element = document.body,
+): boolean {
+  const viewport = scope.querySelector(
     '[data-web-shell-session-table-viewport]',
   );
   if (!isVisible(viewport)) return false;
   consume(e);
-  document
+  scope
     .querySelector<HTMLElement>('[data-web-shell-session-split-button]')
     ?.click();
   return true;
@@ -442,9 +527,19 @@ export function pressSelectedRowsSplit(e: KeyboardEvent): boolean {
  * aware parser (the URL is `${basePath}/session/<id>`), not a prefix
  * match on the raw pathname.
  */
-export function pressNewTask(e: KeyboardEvent): boolean {
-  if (parseSessionId(window.location.pathname) !== undefined) {
-    const buttons = document.querySelectorAll(
+export function pressNewTask(
+  e: KeyboardEvent,
+  scope: Element = document.body,
+): boolean {
+  // The split view deliberately keeps the base-path URL while panes of
+  // real sessions are mounted (the chat's connection is left untouched),
+  // so a mounted pane marks the session surface as well as the session
+  // route does — the URL scheme is not the place to carry that.
+  const onSessionSurface =
+    parseSessionId(window.location.pathname) !== undefined ||
+    scope.querySelector('[data-pane-session-id]') !== null;
+  if (onSessionSurface) {
+    const buttons = scope.querySelectorAll(
       'button[data-web-shell-new-task-button]',
     );
     for (const button of Array.from(buttons) as HTMLButtonElement[]) {
@@ -455,7 +550,7 @@ export function pressNewTask(e: KeyboardEvent): boolean {
     }
     return false;
   }
-  const triggers = document.querySelectorAll(
+  const triggers = scope.querySelectorAll(
     'button[data-web-shell-workspace-select-trigger]',
   );
   for (const trigger of Array.from(triggers) as HTMLButtonElement[]) {

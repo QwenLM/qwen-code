@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  eventFromShellScope,
   hideNavDigitPreview,
   isOverviewCheckboxChord,
   modifierDigit,
@@ -195,6 +196,7 @@ function makeApprovalPanels(
     disabled?: number[];
   }>,
   panes: Element[] = [],
+  parent?: Element,
 ): Element[] {
   return specs.map((spec) => {
     const panel = document.createElement('div');
@@ -211,9 +213,10 @@ function makeApprovalPanels(
       panel.appendChild(group);
     }
     setWidth(panel, spec.visible === false ? 0 : 800);
-    (spec.pane != null ? panes[spec.pane - 1] : document.body).appendChild(
-      panel,
-    );
+    (spec.pane != null
+      ? panes[spec.pane - 1]
+      : (parent ?? document.body)
+    ).appendChild(panel);
     return panel;
   });
 }
@@ -622,6 +625,24 @@ describe('pressNewTask (Cmd/Ctrl+T)', () => {
     expect(radix.opened()).toBe(false);
   });
 
+  it('treats a mounted split view at the base path as a session screen', () => {
+    // openSplitView sets React state only; the ?split= param is stripped
+    // on load, so the panes of real sessions sit at '/' where
+    // parseSessionId finds nothing. The mounted pane marks the surface.
+    window.history.pushState({}, '', '/');
+    makePanes(2);
+    const button = makeEligibleButton('data-web-shell-new-task-button');
+    const clicks: number[] = [];
+    button.addEventListener('click', () => clicks.push(1));
+    const radix = makeRadixTrigger();
+    const event = press({ code: 'KeyT', key: 't', metaKey: true });
+    expect(pressNewTask(event)).toBe(true);
+    expect(event.defaultPrevented).toBe(true);
+    expect(clicks).toEqual([1]);
+    // The workspace picker stage is not attempted while panes are up.
+    expect(radix.opened()).toBe(false);
+  });
+
   it('skips hidden, disabled, and data-disabled candidates', () => {
     window.history.pushState({}, '', '/session/abc123');
     makeEligibleButton('data-web-shell-new-task-button', { visible: false });
@@ -688,6 +709,27 @@ describe('pressNavigationDigit (Cmd/Ctrl+1..9)', () => {
       }
       expect(clicks).toEqual([1, 2, 9, 1, 2]);
       expect(checkboxClicks).toEqual([]);
+    });
+
+    it('follows the badge, not the DOM position, after a reorder during the hold', () => {
+      // While Cmd is held the Overview re-sorts (status, then updatedAt):
+      // React moves the keyed rows, and each moved row carries its
+      // stamped badge with it. The digit must keep naming the row the
+      // badge sits on, not whatever row moved into that position.
+      const { clicks } = makeOverviewRows(3);
+      showNavDigitPreview();
+      const tbody = document.querySelector('tbody')!;
+      const row1 = tbody.children.item(0) as Element;
+      const row3 = tbody.children.item(2) as Element;
+      // row3 jumps to the top; the badges now read 3,1,2 in DOM order.
+      tbody.insertBefore(row3, row1);
+      expect(row1.getAttribute('data-web-shell-nav-preview')).toBe('1');
+      const event = press({ code: 'Digit1', key: '1', metaKey: true });
+      expect(pressNavigationDigit(event)).toBe(true);
+      expect(event.defaultPrevented).toBe(true);
+      // The row still carrying badge 1 (row1, now second) is pressed,
+      // not the row now first (row3, badge 3).
+      expect(clicks).toEqual([1]);
     });
 
     it('swallows the key with more digits than rows', () => {
@@ -1522,5 +1564,136 @@ describe('nav digit preview (Cmd/Ctrl hold)', () => {
     expect(badges()).toHaveLength(4);
     hideNavDigitPreview();
     expect(badges()).toEqual([]);
+  });
+});
+
+describe('shell scoping (multi-shell and ShadowRoot hosts)', () => {
+  it('attributes a window keydown to the shell whose tree it came from', () => {
+    const shellA = document.createElement('div');
+    document.body.appendChild(shellA);
+    const keyA = document.createElement('button');
+    shellA.appendChild(keyA);
+    const shellB = document.createElement('div');
+    document.body.appendChild(shellB);
+    const keyB = document.createElement('button');
+    shellB.appendChild(keyB);
+    const inA = new KeyboardEvent('keydown', {
+      bubbles: true,
+      cancelable: true,
+    });
+    keyA.dispatchEvent(inA);
+    expect(eventFromShellScope(shellA, inA)).toBe(true);
+    expect(eventFromShellScope(shellB, inA)).toBe(false);
+    const inB = new KeyboardEvent('keydown', {
+      bubbles: true,
+      cancelable: true,
+    });
+    keyB.dispatchEvent(inB);
+    expect(eventFromShellScope(shellB, inB)).toBe(true);
+    expect(eventFromShellScope(shellA, inB)).toBe(false);
+    // Nothing inside any shell is focused (the key lands on the body):
+    // top-level shells keep the chord alive.
+    const onBody = new KeyboardEvent('keydown', {
+      bubbles: true,
+      cancelable: true,
+    });
+    document.body.dispatchEvent(onBody);
+    expect(eventFromShellScope(shellA, onBody)).toBe(true);
+    expect(eventFromShellScope(shellB, onBody)).toBe(true);
+  });
+
+  it('attributes a bare keydown (no focused element) to top-level shells', () => {
+    const shellA = document.createElement('div');
+    document.body.appendChild(shellA);
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const shadow = host.attachShadow({ mode: 'open' });
+    shadow.appendChild(document.createElement('div'));
+    // Dispatchers (and engines) that do not normalize an unfocused
+    // keydown to the body target it at window or the document itself.
+    const onWindow = new KeyboardEvent('keydown', { cancelable: true });
+    window.dispatchEvent(onWindow);
+    expect(eventFromShellScope(shellA, onWindow)).toBe(true);
+    expect(eventFromShellScope(shadow, onWindow)).toBe(false);
+    const onDocument = new KeyboardEvent('keydown', {
+      bubbles: true,
+      cancelable: true,
+    });
+    document.dispatchEvent(onDocument);
+    expect(eventFromShellScope(shellA, onDocument)).toBe(true);
+    expect(eventFromShellScope(shadow, onDocument)).toBe(false);
+  });
+
+  it('does not let a key pressed in one shell act on another', () => {
+    const shellA = document.createElement('div');
+    const shellB = document.createElement('div');
+    document.body.append(shellA, shellB);
+    // Shell A alone has a visible approval card; shell B has a focused
+    // composer and no digit stage of its own.
+    const [card] = makeApprovalPanels([{ buttons: 2 }], [], shellA);
+    const composer = document.createElement('div');
+    composer.tabIndex = -1;
+    shellB.appendChild(composer);
+    composer.focus();
+    // The key belongs to shell B: no stage there, nothing consumed, and
+    // shell A's card is untouched.
+    const inB = press({ code: 'Digit1', key: '1', metaKey: true });
+    expect(pressNavigationDigit(inB, shellB)).toBe(false);
+    expect(inB.defaultPrevented).toBe(false);
+    expect(document.activeElement).toBe(composer);
+    const option = card.querySelector('[role="radiogroup"] > button')!;
+    expect(option.hasAttribute('data-web-shell-hotkey-focused')).toBe(false);
+    // The same key pressed inside shell A acts on shell A's card only.
+    const inA = press({ code: 'Digit1', key: '1', metaKey: true });
+    expect(pressNavigationDigit(inA, shellA)).toBe(true);
+    expect(inA.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(option);
+  });
+
+  it('resolves the digit stage and the preview inside a ShadowRoot shell', () => {
+    const host = document.createElement('div');
+    document.body.appendChild(host);
+    const shadow = host.attachShadow({ mode: 'open' });
+    const scope = document.createElement('div');
+    shadow.appendChild(scope);
+    const viewport = document.createElement('div');
+    viewport.setAttribute('data-web-shell-session-table-viewport', '');
+    const table = document.createElement('table');
+    const tbody = document.createElement('tbody');
+    const clicks: number[] = [];
+    for (let i = 0; i < 2; i++) {
+      const row = document.createElement('tr');
+      row.addEventListener('click', () => clicks.push(i + 1));
+      tbody.appendChild(row);
+    }
+    table.appendChild(tbody);
+    viewport.appendChild(table);
+    setWidth(viewport, 800);
+    scope.appendChild(viewport);
+    // The document sees nothing of the shadow surface.
+    expect(
+      document.querySelector('[data-web-shell-session-table-viewport]'),
+    ).toBeNull();
+    const event = press({ code: 'Digit2', key: '2', metaKey: true });
+    expect(pressNavigationDigit(event, scope)).toBe(true);
+    expect(event.defaultPrevented).toBe(true);
+    expect(clicks).toEqual([2]);
+    // The preview style and the badges live in the shadow tree, not in
+    // the document (a style left by an earlier top-level test is removed
+    // so the head stays a clean control).
+    document.getElementById('webShellNavPreviewStyle')?.remove();
+    showNavDigitPreview({}, scope);
+    expect(shadow.querySelector('style')).not.toBeNull();
+    expect(document.head.querySelector('style')).toBeNull();
+    expect(
+      shadow.querySelectorAll('[data-web-shell-nav-preview]'),
+    ).toHaveLength(2);
+    expect(
+      document.querySelectorAll('[data-web-shell-nav-preview]'),
+    ).toHaveLength(0);
+    hideNavDigitPreview(scope);
+    expect(
+      shadow.querySelectorAll('[data-web-shell-nav-preview]'),
+    ).toHaveLength(0);
   });
 });
