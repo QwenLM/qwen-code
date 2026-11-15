@@ -455,6 +455,60 @@ describe('ToolConfirmationMessage', () => {
     expect(frame).not.toContain('\x1b[1G');
   });
 
+  // permissionRules feeds the two persistent "Always allow ..." choice labels
+  // through buildHumanReadableRuleLabel(), which embeds a rule's specifier
+  // (ultimately sourced from the same untrusted command text, via
+  // extractCommandRules/getCommandName) into the visible label untouched.
+  // Only the DISPLAY copy is sanitized here: the permissionRules array itself
+  // must reach the persistence/authorization layer unchanged, so two rules
+  // that differ only by a control byte stay distinguishable there.
+  it('sanitizes terminal control sequences in the Always-allow labels, without changing permissionRules itself', () => {
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Shell Command',
+      command: 'probe arg',
+      rootCommand: 'probe',
+      permissionRules: ['Bash(probe\x07 *)'],
+      onConfirm: vi.fn(),
+    };
+
+    const { lastFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={30}
+        contentWidth={80}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    // All four choices (Yes once, both Always-allow labels, No) are visible,
+    // none of them carry the raw BEL byte.
+    expect(frame).toContain('Yes, allow once');
+    expect(frame).toContain("run 'probe *' commands");
+    expect(frame).toContain('No, suggest changes');
+    expect(frame).not.toContain('\x07');
+
+    // The rule string itself is untouched: a clean positive control renders
+    // the same label shape, so the display fix did not also rewrite the
+    // persisted rule (which would make two different rules print identically
+    // and would change what "Always allow" actually grants).
+    const cleanDetails: ToolCallConfirmationDetails = {
+      ...confirmationDetails,
+      permissionRules: ['Bash(probe *)'],
+      onConfirm: vi.fn(),
+    };
+    const { lastFrame: cleanFrame } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={cleanDetails}
+        config={mockConfig}
+        availableTerminalHeight={30}
+        contentWidth={80}
+      />,
+    );
+    expect(cleanFrame() ?? '').toContain("run 'probe *' commands");
+  });
+
   it('renders classifier fallback guidance and the Default Mode option', async () => {
     const onConfirm = vi.fn();
     const confirmationDetails: ToolCallConfirmationDetails = {

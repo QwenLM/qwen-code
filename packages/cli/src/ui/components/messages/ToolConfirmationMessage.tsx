@@ -418,7 +418,7 @@ export const ToolConfirmationMessage: React.FC<
     });
     if (isTrustedFolder && !confirmationDetails.hideAlwaysAllow) {
       const friendlyLabel = executionProps.permissionRules?.length
-        ? ` ${buildHumanReadableRuleLabel(executionProps.permissionRules)}`
+        ? ` ${sanitizeTerminalText(buildHumanReadableRuleLabel(executionProps.permissionRules))}`
         : '';
       options.push({
         label: friendlyLabel
