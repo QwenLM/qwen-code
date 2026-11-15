@@ -93,15 +93,20 @@ export class WorktreeSessionMarkerOwnerChangedError extends Error {
 }
 
 /**
- * The dirty carry's tracked snapshot conflicted with the worktree base
- * (a 3-way `stash apply` that wrote conflict markers and unmerged index
- * entries). The worktree has been restored to committed state; callers
- * must not present the overlay as carried.
+ * The dirty carry's tracked snapshot could not be applied cleanly. Either
+ * it conflicted with the worktree base (a 3-way `stash apply` that wrote
+ * conflict markers and unmerged index entries, `conflict: true`) or it
+ * failed for an environment reason such as an unwritable index
+ * (`conflict: false`). The worktree has been restored to committed state;
+ * callers must not present the overlay as carried, and may distinguish a
+ * content conflict from an environment failure via `conflict`.
  */
 export class WorktreeDirtyCarryConflictError extends Error {
-  constructor(message: string) {
+  readonly conflict: boolean;
+  constructor(message: string, options?: { conflict?: boolean }) {
     super(message);
     this.name = 'WorktreeDirtyCarryConflictError';
+    this.conflict = options?.conflict ?? true;
   }
 }
 
@@ -1710,6 +1715,7 @@ export class GitWorktreeService {
                   ? applyError.message
                   : String(applyError)
               }`,
+          { conflict: unmerged.length > 0 },
         );
       }
     }
@@ -3082,15 +3088,20 @@ export class GitWorktreeService {
         }`,
       );
     }
-    if (applyError) {
+    if (applyError || unmergedRaw === null) {
       // A non-conflict apply failure (e.g. an unwritable index), or an index
       // state that could not be read to confirm a clean apply: the handoff
       // must not move the session without the user's work. Fail closed —
       // unlike the worktree-creation path, there is no fail-open here.
       throw new WorktreeDirtyCarryConflictError(
-        `Stash snapshot failed to apply: ${
-          applyError instanceof Error ? applyError.message : String(applyError)
-        }`,
+        applyError
+          ? `Stash snapshot failed to apply: ${
+              applyError instanceof Error
+                ? applyError.message
+                : String(applyError)
+            }`
+          : 'Stash snapshot applied but the index state could not be read to confirm a clean apply',
+        { conflict: false },
       );
     }
   }
@@ -3679,7 +3690,14 @@ export class GitWorktreeService {
           .realpath(path.resolve(repoTop, match[1]))
           .catch(() => path.resolve(repoTop, match[1]))
       : null;
-    if (!match || reportedSource !== realExclude || match[3] !== rule) {
+    // Attribute by SOURCE, not by exact pattern: git reports only the first
+    // matching pattern, so a broader rule already in this exclude file
+    // (e.g. an older `.qwen/`) answers for the probe even though the rule
+    // just written also matches. The path is ignored by this file either
+    // way, so the migration may complete; requiring pattern equality would
+    // strand the legacy file in that shape. A verdict sourced from any
+    // OTHER file (a user .gitignore re-include) still fails.
+    if (!match || reportedSource !== realExclude) {
       debugLogger.warn(
         `ensureWorktreesGitignored: rule ${rule} does not ignore the worktrees directory`,
       );

@@ -23,6 +23,7 @@ import {
   CARRIED_PATHS_MAX_BYTES,
   GROUP_COLOR_OPTIONS,
   GitWorktreeService,
+  WorktreeDirtyCarryConflictError,
   clearWorktreeSessionDurable,
   createWorktreeSession,
   createWorktreeSessionMarker,
@@ -5390,14 +5391,22 @@ export function registerSessionRoutes(
                     await localService.applyStashSnapshot(localCwd, snapshot);
                   } catch (error) {
                     // A conflicting 3-way apply writes markers and unmerged
-                    // index entries into the user's checkout. Rollback
-                    // restores it; refuse with a typed code rather than
-                    // relocate into a poisoned tree or a bare 500.
+                    // index entries into the user's checkout; an environment
+                    // failure (unwritable index, unreadable index state) did
+                    // not land the work at all. Rollback restores the checkout
+                    // either way; refuse with a typed code that distinguishes
+                    // content to resolve from a carry that could not apply.
                     await rollback();
+                    const isConflict =
+                      error instanceof WorktreeDirtyCarryConflictError &&
+                      error.conflict;
                     res.status(409).json({
-                      error:
-                        'The worktree snapshot conflicts with the local checkout',
-                      code: 'handoff_snapshot_conflict',
+                      error: isConflict
+                        ? 'The worktree snapshot conflicts with the local checkout'
+                        : 'The worktree snapshot could not be applied to the local checkout',
+                      code: isConflict
+                        ? 'handoff_snapshot_conflict'
+                        : 'handoff_carry_failed',
                       detail:
                         error instanceof Error ? error.message : String(error),
                       sessionId: storageSessionId,

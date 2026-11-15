@@ -29787,9 +29787,12 @@ describe('createServeApp', () => {
         mockWt.impl = (cwd?: string) => ({
           isGitRepository: async () => true,
           // The mock must distinguish the two checkouts: flattening them
-          // would hide the very divergence under test.
+          // would hide the very divergence under test. Compare canonical
+          // paths on both sides — macOS's default TMPDIR is a /var ->
+          // /private/var symlink, so the raw mkdtemp siblingPath would
+          // never equal the realpath'd cwd there.
           getRepoTopLevel: async () =>
-            cwd !== undefined && realpathSync(cwd) === siblingPath
+            cwd !== undefined && realpathSync(cwd) === realpathSync(siblingPath)
               ? siblingPath
               : repo,
           getCurrentBranch: async () => 'main',

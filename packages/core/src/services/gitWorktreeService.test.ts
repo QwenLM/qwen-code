@@ -10,6 +10,7 @@ import type * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import {
   GitWorktreeService,
+  WorktreeDirtyCarryConflictError,
   carryApplyErrorDetection,
 } from './gitWorktreeService.js';
 import type { WorktreeInfo } from './gitWorktreeService.js';
@@ -692,5 +693,40 @@ describe('carryApplyErrorDetection', () => {
     const prior = new Error('prior');
     expect(carryApplyErrorDetection(prior, result(0))).toBe(prior);
     expect(carryApplyErrorDetection(prior, result(1))).toBe(prior);
+  });
+});
+
+describe('applyStashSnapshot index-state verification', () => {
+  it('fails closed when the index cannot be read after a clean apply (R9)', async () => {
+    // The apply itself succeeds (exit 0), but ls-files -u fails, so the
+    // index state cannot be confirmed clean. The handoff must not move the
+    // session without that confirmation.
+    git.raw.mockImplementation(async (args: string[]) => {
+      if (args[0] === 'ls-files') throw new Error('index unreadable');
+      return '';
+    });
+    const service = new GitWorktreeService('/repo');
+    await expect(
+      service.applyStashSnapshot('/repo', 'snap'),
+    ).rejects.toBeInstanceOf(WorktreeDirtyCarryConflictError);
+  });
+
+  it('marks an environment failure as non-conflict (R9)', async () => {
+    git.raw.mockImplementation(async (args: string[]) => {
+      if (args[0] === 'stash') throw new Error('could not write index');
+      return '';
+    });
+    const service = new GitWorktreeService('/repo');
+    await expect(
+      service.applyStashSnapshot('/repo', 'snap'),
+    ).rejects.toMatchObject({ conflict: false });
+  });
+
+  it('resolves on a clean apply with a readable empty index', async () => {
+    git.raw.mockResolvedValue('');
+    const service = new GitWorktreeService('/repo');
+    await expect(
+      service.applyStashSnapshot('/repo', 'snap'),
+    ).resolves.toBeUndefined();
   });
 });

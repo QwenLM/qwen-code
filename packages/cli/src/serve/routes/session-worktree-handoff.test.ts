@@ -26,6 +26,7 @@ import { afterAll, describe, expect, it, vi } from 'vitest';
 import {
   GitWorktreeService,
   SessionService,
+  WorktreeDirtyCarryConflictError,
   createWorktreeSessionMarkerExclusive,
   readWorktreeSessionStrict,
   writeWorktreeSession,
@@ -1670,5 +1671,29 @@ describe('POST /session/:id/worktree-handoff', () => {
       'main',
     );
     expect(existsSync(path.join(fixture.workspaceDir, 'local.txt'))).toBe(true);
+  });
+
+  it('types an environment carry failure as handoff_carry_failed, not a conflict (R9)', async () => {
+    const fixture = makeFixture();
+    fixture.writeTranscript();
+    await fixture.createDetachedWorktree();
+    writeFileSync(path.join(fixture.worktreeDir, 'README.md'), 'dirty\n');
+    // An environment failure (unwritable index) is not content to resolve;
+    // it must not be presented as handoff_snapshot_conflict.
+    const spy = vi
+      .spyOn(GitWorktreeService.prototype, 'applyStashSnapshot')
+      .mockRejectedValueOnce(
+        new WorktreeDirtyCarryConflictError('could not write index', {
+          conflict: false,
+        }),
+      );
+
+    const res = await request(fixture.app)
+      .post(`/session/${fixture.sessionId}/worktree-handoff`)
+      .send({ to: 'local' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('handoff_carry_failed');
+    spy.mockRestore();
   });
 });
