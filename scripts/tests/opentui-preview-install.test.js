@@ -293,12 +293,32 @@ function fixture() {
     archive,
     initializeProfile() {
       if (!windows) return;
-      expect(launch()).toBe('OLD_PREVIEW');
+      const readiness = checked(
+        powershell,
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          `$ErrorActionPreference = 'Stop'; & ${psQuote(entry(live))}; if ($null -eq $LASTEXITCODE) { throw 'Launcher did not report a native exit code' }; exit $LASTEXITCODE`,
+        ],
+        { env },
+      );
+      const readinessEvidence = {
+        executable: powershell,
+        status: readiness.status,
+        stdout: readiness.stdout,
+        stderr: readiness.stderr,
+      };
+      const evidence = JSON.stringify(readinessEvidence);
+      expect(readiness.status, evidence).toBe(0);
+      expect(readiness.stderr.trim(), evidence).toBe('');
+      expect(readiness.stdout.trim(), evidence).toBe('OLD_PREVIEW');
       const initializedHome = tree(path.join(root, 'home'));
       console.info(
         JSON.stringify({
           state: 'WINDOWS_FIXTURE_PROFILE_INITIALIZATION_NOT_INSTALLER',
           installerInvoked: false,
+          readiness: readinessEvidence,
           coldHome,
           initializedHome,
           addedEntries: Object.fromEntries(

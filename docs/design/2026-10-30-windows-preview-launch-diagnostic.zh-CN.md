@@ -63,3 +63,9 @@ hosted Windows 不是原 ECS 主机。新的完整文件成功只能资格化已
 与 main `de865b41` 的集成保留其 owned `APPDATA`、`LOCALAPPDATA` 环境提示，以及通过命令 shell 检查 `.cmd` 启动的方式。这些提示不能证明 Windows known-folder 已重定向。独立 raw PowerShell 观测仍要求全部七条诊断记录及原始 `OLD_PREVIEW` 输出。冷 HOME 图与初始化 HOME 图均保留全部已有条目保护，以及上文四个精确路径的条件新增合同。
 
 此前移除环境覆盖及已记录的 `b79e4f1` Windows 通过均描述对应历史候选，不能资格化本次新集成候选；本次仍需重新安装依赖、构建、类型检查、相关完整文件测试及精确 head 的 Windows 验证。
+
+## main 集成后恢复 PowerShell readiness
+
+[精确 `3bb83353` 的 Windows 运行](https://github.com/chiga0/qwen-code/actions/runs/43872027572/job/133315528511) 在零次安装器调用时失败：0 通过、1 失败、三个声明的 POSIX 跳过及 15 个 bail 未达。raw 启动器返回 `OLD_PREVIEW`、status 0，七条环境记录全部合格，包括 owned 模块缓存路径。随后 HOME 守卫拒绝新增的 `AppData/Roaming` 目录，全部已有条目保持不变；初始化图此前只有原 profile 和根目录。
+
+合并保留了 `initializeProfile()` 对 `launch()` 的原调用，但 main 将该共用启动器从 PowerShell 改为 cmd，无意中丢失了 PowerShell host 的初态前提。现在仅在原有的一次 readiness 位置恢复此前精确的严格 PowerShell 命令，要求 status 0、stderr 为空及输出 `OLD_PREVIEW`，之后才冻结初始化图，并记录 readiness 结果。普通启动器检查继续使用 main 的 cmd 路径。这是替换 readiness 调用，不增加预热或重试，不扩展四项允许新增域，也不改变任何冷图、初始化条目、raw 见证或超时要求。新候选仍需真实 Windows 验证，`3bb83353` 的原失败保持。
