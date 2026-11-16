@@ -291,6 +291,10 @@ describe('isAutoModeProtectedWritePath', () => {
   it('matches self-modification surfaces in a default global dir outside .qwen', () => {
     restoringQwenHome(() => {
       delete process.env['QWEN_HOME'];
+      // The prefix cache is keyed on these, not on the mocked dir, so give this
+      // case its own key: otherwise a neighbour that warmed the cache for the
+      // same environment answers before the mock is read.
+      vi.stubEnv('XDG_CONFIG_HOME', '/home/user/.config');
       const globalDir = vi
         .spyOn(Storage, 'getGlobalQwenDir')
         .mockReturnValue('/home/user/.config/qwen');
@@ -304,6 +308,7 @@ describe('isAutoModeProtectedWritePath', () => {
         expectProtected(['/home/user/.config/qwen/tmp/notes.md'], false);
       } finally {
         globalDir.mockRestore();
+        vi.unstubAllEnvs();
       }
     });
   });
