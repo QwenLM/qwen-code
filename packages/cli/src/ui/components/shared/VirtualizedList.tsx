@@ -256,24 +256,20 @@ function VirtualizedList<T>(
   // `Math.max(0, terminalHeight - controlsHeight - mainContentHeightReservation
   // - tabBarHeight)`, which MainContent and AgentChatContent forward unchanged.
   // `0` is a steady state, not only a settling frame: the controls region can
-  // fill a short terminal for as long as it stays open. The component's own
-  // measurement cannot stand in for the viewport — the root box sits under
-  // auto-height ancestors, so its height is the content's, and feeding that
-  // back would make the render window cover every row and `maxScroll` collapse
-  // to 0. Hold the last height the host actually constrained to instead.
-  const lastConstrainedHeight = useRef<number | undefined>(undefined);
-  if (props.containerHeight !== undefined && props.containerHeight > 0) {
-    lastConstrainedHeight.current = props.containerHeight;
-  }
-  const hostHeight =
-    props.containerHeight === undefined
-      ? undefined
-      : props.containerHeight > 0
-        ? props.containerHeight
-        : lastConstrainedHeight.current;
-
-  const containerHeight = hostHeight ?? measuredContainerHeight;
+  // fill a short terminal for as long as it stays open. A held height is not a
+  // substitute for it — repainting the last viewport under an open controls
+  // region runs the frame past the terminal — so 0 stays 0. The component's own
+  // measurement cannot stand in for the viewport either: the root box sits
+  // under auto-height ancestors, so its height is the content's, and feeding
+  // that back would cover every row and collapse `maxScroll` to 0.
+  const containerHeight =
+    props.containerHeight ?? measuredContainerHeight;
   const containerWidth = measuredContainerWidth;
+  // A host that budgeted zero rows constrains the height just as one that
+  // budgeted twenty-two; the root must collapse with it instead of falling
+  // back to `100%`. An absent host height leaves the root unconstrained.
+  const hostHeight = props.containerHeight;
+  const hostConstrainsHeight = hostHeight !== undefined;
 
   const [heights, setHeights] = useState<Record<string, number>>({});
   const measureAtFullHeight = props.measureAtFullHeight === true;
@@ -1010,7 +1006,6 @@ function VirtualizedList<T>(
   // measurement so short content does not leave a gap above the composer.
   // `scrollableContainerHeight` (the scroll math) still uses the full
   // `containerHeight`, so scrolling is unaffected.
-  const hostConstrainsHeight = hostHeight !== undefined;
   const rootHeight = hostConstrainsHeight
     ? fullHeightMeasurementPending
       ? hostHeight

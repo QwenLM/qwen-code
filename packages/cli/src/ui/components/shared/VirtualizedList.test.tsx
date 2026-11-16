@@ -1417,7 +1417,7 @@ describe('<VirtualizedList /> zero-height host measurement', () => {
   // treated as a measured viewport: `rootHeight` would resolve to the content
   // height, the render window would cover every row and the scroll math would
   // collapse. The measured box height keeps the row window bounded instead.
-  it('keeps the row window bounded when the host passes 0', () => {
+  it('paints no rows when the host has budgeted none', () => {
     const { lastFrame } = render(
       <Box height={12} flexDirection="column">
         <VirtualizedList<Item>
@@ -1431,21 +1431,13 @@ describe('<VirtualizedList /> zero-height host measurement', () => {
       </Box>,
     );
 
-    const frame = lastFrame() ?? '';
-    expect(frame).toMatch(/item-0/);
-    // The host has never reported a positive height, so there is nothing to
-    // hold and the list falls back to its measured box: the 12-row parent, not
-    // the 500-row content.
-    expect(frame).not.toMatch(/item-499/);
-    expect(frame.split('\n').length).toBeLessThanOrEqual(13);
+    // A zero budget is a steady state, not only a settling frame: the controls
+    // region can fill a short terminal while it stays open, and any row painted
+    // under it runs the frame past the terminal.
+    expect(lastFrame() ?? '').not.toMatch(/item-\d+/);
   });
 
-  // A zero from the host is a steady state while the controls region fills a
-  // short terminal, so the viewport has to come from the last height the host
-  // actually constrained to. Sizing from the component's own measurement does
-  // not work here: the root box sits under auto-height ancestors, so that
-  // measurement is the content's, and using it renders every row.
-  it('holds the last constrained viewport when the host drops to 0', () => {
+  it('collapses the viewport again when the host drops to 0', () => {
     const list = (height: number) => (
       <Box flexDirection="column">
         <VirtualizedList<Item>
@@ -1463,24 +1455,17 @@ describe('<VirtualizedList /> zero-height host measurement', () => {
     const { lastFrame, rerender } = render(list(10));
     expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(11);
 
-    // Anchored at the tail, so a hold that clamps to a constant or re-sticks
-    // the scroll to the top cannot pass: the same tail window must survive.
+    // The host's live value wins: an open controls region that budgets zero
+    // rows must not be repainted over by the last viewport the host allowed.
     rerender(list(0));
-    const frame = lastFrame() ?? '';
-    expect(frame).toMatch(/item-199/);
-    // Falling back to the measured box height would size the list to its
-    // content and mount the whole 200-row history.
-    expect(frame.split('\n').length).toBeLessThanOrEqual(11);
+    expect(lastFrame() ?? '').not.toMatch(/item-\d+/);
 
-    // Release: the host's live value wins again, not the held one.
+    // Release: the host's live value wins again.
     rerender(list(3));
     expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(4);
   });
 
-  // The host re-derives its height every frame, so the hold has to be the
-  // latest positive value, not the largest ever seen: after a legitimate
-  // shrink, a zero frame must not resurrect the old, larger viewport.
-  it('holds the latest constrained viewport, not the largest', () => {
+  it('does not resurrect a larger viewport after a legitimate shrink', () => {
     const list = (height: number) => (
       <Box flexDirection="column">
         <VirtualizedList<Item>
@@ -1497,6 +1482,6 @@ describe('<VirtualizedList /> zero-height host measurement', () => {
     const { lastFrame, rerender } = render(list(40));
     rerender(list(12));
     rerender(list(0));
-    expect((lastFrame() ?? '').split('\n').length).toBeLessThanOrEqual(13);
+    expect(lastFrame() ?? '').not.toMatch(/item-\d+/);
   });
 });
