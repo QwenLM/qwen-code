@@ -102,6 +102,10 @@ import {
 } from '../../mcpAppHostContext.js';
 import { createTrajectoryLiveStore } from '../../trajectory/trajectory-live-store.js';
 import { TrajectoryLiveContext } from '../../trajectory/trajectory-live-context.js';
+import {
+  HookStatisticsContext,
+  type HookStatisticsSource,
+} from '../../components/messages/hook-statistics-context.js';
 import { getTranslator } from '../../i18n.js';
 import {
   getDaemonErrorCode,
@@ -6069,6 +6073,46 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   );
 
   const appSession = sessionRef.current;
+  const hookStatistics = useMemo<HookStatisticsSource | undefined>(() => {
+    const session = appSession;
+    if (
+      !session ||
+      !session.workspaceCwd ||
+      session.sessionId !== connection.sessionId
+    )
+      return undefined;
+    const workspace =
+      connection.sessionContext?.kind === 'workspace'
+        ? connection.sessionContext.cwd
+        : undefined;
+    return {
+      sessionId: session.sessionId,
+      navigation: turnNavigationStore,
+      async readPage(promptId, options) {
+        if (sessionRef.current !== session)
+          throw new Error('Hook session changed');
+        const client = workspace
+          ? session.client.workspaceByCwd(workspace)
+          : session.client;
+        const page = await client.getSessionTurnHooksPage(
+          session.sessionId,
+          promptId,
+          {
+            ...options,
+            clientId: session.clientId,
+          },
+        );
+        if (sessionRef.current !== session)
+          throw new Error('Hook session changed');
+        return page;
+      },
+    };
+  }, [
+    appSession,
+    connection.sessionId,
+    connection.sessionContext,
+    turnNavigationStore,
+  ]);
   const generatedUi = appSession?.session?.generatedUi;
   const generatedUiClientId = appSession?.clientId;
   const generatedUiEventEpoch = appSession?.eventEpoch;
@@ -6224,7 +6268,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                                 <DaemonPromptSettlementContext.Provider
                                   value={subscribeToPromptSettlement}
                                 >
-                                  {children}
+                                  <HookStatisticsContext.Provider
+                                    value={hookStatistics}
+                                  >
+                                    {children}
+                                  </HookStatisticsContext.Provider>
                                 </DaemonPromptSettlementContext.Provider>
                               </DaemonTranscriptHistoryContext.Provider>
                             </DaemonSessionOwnerGuardContext.Provider>
