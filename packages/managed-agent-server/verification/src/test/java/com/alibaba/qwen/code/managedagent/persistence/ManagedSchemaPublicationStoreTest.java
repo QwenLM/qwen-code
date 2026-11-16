@@ -45,7 +45,7 @@ public class ManagedSchemaPublicationStoreTest {
         DataSource source = dataSource();
         ManagedSchema.initialize(source);
         var bucket = new Bucket();
-        var fixture = PublicationJournalFixture.create(source, null, bucket, null);
+        var fixture = PublicationJournalFixture.create(source, bucket, null);
         fixture.reserve();
         var data = new ToolPublicationDataStore(fixture.jdbc, fixture.manager, fixture.store, fixture.sessions, bucket,
                 Duration.ofMinutes(2), Duration.ofSeconds(30),

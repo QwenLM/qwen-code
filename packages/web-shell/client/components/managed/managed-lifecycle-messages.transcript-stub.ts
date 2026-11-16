@@ -1,2 +1,3 @@
 export const MANAGED_LIFECYCLE_MESSAGES_EN = {};
 export const MANAGED_LIFECYCLE_MESSAGES_ZH = {};
+export const MANAGED_LIFECYCLE_MESSAGES_RU = {};

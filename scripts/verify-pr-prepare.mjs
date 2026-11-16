@@ -49,17 +49,19 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { basename, join } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { isEntryPoint } from './lib/entry-point.js';
 
 const OID = /^[0-9a-f]{40}$/;
@@ -340,6 +342,7 @@ export function parseArgs(argv) {
     repo: null,
     requireIsolation: false,
     artifactDir: null,
+    contextOut: null,
     help: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
@@ -352,6 +355,11 @@ export function parseArgs(argv) {
       options.artifactDir = argv[(index += 1)] ?? null;
       if (!options.artifactDir) {
         return { error: '--artifact-dir needs <round-dir>' };
+      }
+    } else if (arg === '--context-out') {
+      options.contextOut = argv[(index += 1)] ?? null;
+      if (!options.contextOut) {
+        return { error: '--context-out needs <host-snapshot-path>' };
       }
     } else if (arg === '--repo') {
       options.repo = argv[(index += 1)] ?? null;
@@ -691,6 +699,22 @@ function main(argv) {
   const contextDir = join(root, 'tmp', 'verify-context');
   const contextPath = join(contextDir, `pr${context.pr}.json`);
   const artifacts = join(root, 'tmp', artifactDirName(context.pr));
+  // The tmp/ container is PR-controlled: a PR-committed symlink there would
+  // redirect every mkdir/write below before any leaf guard runs (R5-1). Refuse
+  // it before anything is created. A fresh clone has no tmp/ — that is fine.
+  const tmpDir = join(root, 'tmp');
+  try {
+    if (lstatSync(tmpDir).isSymbolicLink()) {
+      return fail(
+        3,
+        `refusing to write the host snapshot through a symlink: ${tmpDir}`,
+      );
+    }
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      return fail(3, `could not inspect ${tmpDir}: ${error.message}`);
+    }
+  }
   try {
     mkdirSync(contextDir, { recursive: true });
     // Recursive, so a retry within the same second lands in the directory this
@@ -700,14 +724,99 @@ function main(argv) {
   } catch (error) {
     return fail(3, `could not create the artifact directory: ${error.message}`);
   }
+  // The snapshot dir/file live in the PR-controlled tree: a symlink at either
+  // path redirects the host-side write, and a hard link at the snapshot path
+  // would make writeFileSync truncate a file the round does not own (R5-4).
+  // Refuse both rather than follow them.
+  for (const p of [contextDir, contextPath]) {
+    let st;
+    try {
+      st = lstatSync(p);
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        return fail(
+          3,
+          `could not inspect the snapshot path ${p}: ${error.message}`,
+        );
+      }
+      continue; // not created yet (first run) — nothing to redirect
+    }
+    if (st.isSymbolicLink()) {
+      return fail(
+        3,
+        `refusing to write the host snapshot through a symlink: ${p}`,
+      );
+    }
+    if (p === contextPath && (!st.isFile() || st.nlink !== 1)) {
+      return fail(
+        3,
+        `refusing to write the host snapshot through a non-single-link file: ${p}`,
+      );
+    }
+  }
   // The host-held snapshot carries the slug too: the checker compares a
   // waiver's approval permalink against these coordinates, and gh's field
   // selector has no repo member, so it is added where the snapshot is
   // written, not to FIELDS.
-  writeFileSync(
-    contextPath,
-    `${JSON.stringify({ ...snapshot, repo: slug }, null, 2)}\n`,
-  );
+  const contextBytes = `${JSON.stringify({ ...snapshot, repo: slug }, null, 2)}\n`;
+  writeFileSync(contextPath, contextBytes);
+  // Structural fix (R5-1): the authoritative snapshot also goes to a host
+  // destination outside the clone (--context-out), so the trusted source the
+  // checker reads never depends on the PR-writable in-tree copy, which stays
+  // only as the checker's untrusted no---context default.
+  let reportedContextPath = contextPath;
+  if (options.contextOut) {
+    // The host destination must be outside the PR-writable clone: step 1 runs
+    // with the clone as cwd, so a relative --context-out resolves inside it,
+    // where a PR-committed symlink would redirect this host-side write (R7-1).
+    // Apply the same containment + leaf guards the in-tree snapshot path uses.
+    const outPath = resolve(options.contextOut);
+    const realRoot = realpathSync(root);
+    if (outPath === realRoot || outPath.startsWith(realRoot + sep)) {
+      return fail(
+        3,
+        `refusing to write the host snapshot inside the PR clone: ${outPath}`,
+      );
+    }
+    try {
+      const st = lstatSync(outPath);
+      if (st.isSymbolicLink()) {
+        return fail(
+          3,
+          `refusing to write the host snapshot through a symlink: ${outPath}`,
+        );
+      }
+      if (!st.isFile() || st.nlink !== 1) {
+        return fail(
+          3,
+          `refusing to write the host snapshot through a non-single-link file: ${outPath}`,
+        );
+      }
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        return fail(
+          3,
+          `could not inspect the host snapshot path ${outPath}: ${error.message}`,
+        );
+      }
+    }
+    try {
+      mkdirSync(dirname(outPath), { recursive: true });
+      writeFileSync(outPath, contextBytes);
+    } catch (error) {
+      return fail(
+        3,
+        `could not write the host snapshot to ${outPath}: ${error.message}`,
+      );
+    }
+    reportedContextPath = outPath;
+  }
+  // The digest binds the snapshot's content for the checker (--context-sha256):
+  // it is computed here host-side, before the round runs, so a later rewrite of
+  // the clone-side file cannot produce matching bytes (R2-1).
+  const contextSha256 = createHash('sha256')
+    .update(contextBytes, 'utf8')
+    .digest('hex');
   // Best-effort, like the lane: the round reads a missing file as "review
   // state unknown", so an earlier prepare's copy must not outlive a failed
   // fetch.
@@ -738,7 +847,8 @@ function main(argv) {
     `  base       ${context.base}`,
     `  head       ${context.head}`,
     '  tree       at PR head, clean — reuse this tree; verify or refresh its install/build first',
-    `  context    ${contextPath}`,
+    `  context    ${reportedContextPath}`,
+    `  context-sha256  ${contextSha256}`,
     review.state
       ? `  review     ${reviewPath} (${review.state.threads.filter((thread) => !thread.resolved).length} of ${review.state.threads.length} threads unresolved, ${review.state.changeRequests.length} change requests)`
       : `  review     not written — ${printable(review.error)}; the round lists review findings as not covered`,

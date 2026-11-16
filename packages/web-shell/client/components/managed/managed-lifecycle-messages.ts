@@ -93,3 +93,54 @@ export const MANAGED_LIFECYCLE_MESSAGES_ZH = {
   'managed.lifecycle.storageUnavailable':
     '浏览器存储不可用，无法可靠保存本次操作。',
 };
+
+export const MANAGED_LIFECYCLE_MESSAGES_RU = {
+  'managed.sessionActions': 'Действия сессии',
+  'managed.historyFilter': 'Фильтр истории сессий',
+  'managed.history.unarchived': 'Сессии',
+  'managed.history.archived': 'Архив',
+  'managed.exportHtml': 'Экспорт HTML',
+  'managed.exportMarkdown': 'Экспорт Markdown',
+  'managed.exportHtmlDescription':
+    'Офлайн-чтение; скрипты и удалённые изображения блокируются.',
+  'managed.exportMarkdownDescription':
+    'Исходный текст может содержать HTML и ссылки на удалённые изображения. Используйте просмотрщик, который блокирует скрипты и удалённые запросы.',
+  'managed.exportFailed':
+    'Не удалось экспортировать этот разговор. Проверьте доступ и соединение, затем повторите.',
+  'managed.exporting': 'Подготовка экспорта…',
+  'managed.exportNotReady':
+    'История разговора ещё синхронизируется. Повторите чуть позже.',
+  'managed.exportTooLarge': 'Этот разговор превышает лимит экспорта 32 MiB.',
+  'managed.exportChanged':
+    'Снимок экспорта больше недоступен. Начните новый экспорт.',
+  'managed.sessionState.active': 'Активна',
+  'managed.sessionState.closing': 'Закрывается',
+  'managed.sessionState.closed': 'Закрыта · только чтение',
+  'managed.sessionState.archived': 'В архиве · только чтение',
+  'managed.sessionState.deleting': 'Удаляется',
+  'managed.sessionState.deleted': 'Удалена',
+  'managed.lifecycle.close': 'Закрыть сессию',
+  'managed.lifecycle.close_archive': 'Закрыть и архивировать',
+  'managed.lifecycle.archive': 'Архивировать',
+  'managed.lifecycle.unarchive': 'Восстановить из архива',
+  'managed.lifecycle.delete': 'Удалить сессию',
+  'managed.lifecycle.submitting': 'Отправка операции',
+  'managed.lifecycle.pending': 'Операция принята',
+  'managed.lifecycle.running': 'Обработка',
+  'managed.lifecycle.recovery_blocked': 'Ожидание восстановления',
+  'managed.lifecycle.failed': 'Операция не удалась',
+  'managed.lifecycle.unconfirmed': 'Результат не подтверждён',
+  'managed.lifecycle.retry': 'Повторить операцию',
+  'managed.lifecycle.confirm': 'Проверить операцию',
+  'managed.lifecycle.deleteDescription':
+    'Удалить эту сессию безвозвратно? Общие файлы Workspace и другие сессии сохраняются.',
+  'managed.lifecycle.closeDescription':
+    'Сессия станет только для чтения. Можно просматривать и экспортировать историю, но нельзя продолжить разговор. Общие файлы Workspace сохраняются.',
+  'managed.lifecycle.archiveIncomplete':
+    'Сессия закрыта; архивирование не завершено.',
+  'managed.lifecycle.openTask': 'Открыть задачу',
+  'managed.lifecycle.stopFirst':
+    'Сначала остановите выполняющуюся задачу, затем повторите.',
+  'managed.lifecycle.storageUnavailable':
+    'Хранилище браузера недоступно. Операцию нельзя было безопасно сохранить.',
+};
