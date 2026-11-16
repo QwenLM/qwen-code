@@ -37,15 +37,6 @@ export interface ModelAvailabilitySnapshot {
   reason?: UnavailabilityReason;
 }
 
-export interface ModelSelectionResult {
-  selectedModel: ModelId | null;
-  attempts?: number;
-  skipped: Array<{
-    model: ModelId;
-    reason: UnavailabilityReason;
-  }>;
-}
-
 export class ModelAvailabilityService {
   private readonly health = new Map<ModelId, HealthState>();
   private lastTurnKey: string | undefined;
@@ -121,33 +112,12 @@ export class ModelAvailabilityService {
     return { available: true };
   }
 
-  selectFirstAvailable(models: ModelId[]): ModelSelectionResult {
-    const skipped: ModelSelectionResult['skipped'] = [];
-
-    for (const model of models) {
-      const snapshot = this.snapshot(model);
-      if (snapshot.available) {
-        const state = this.health.get(model);
-        // A sticky model is being attempted, so note that.
-        const attempts = state?.status === 'sticky_retry' ? 1 : undefined;
-        return { selectedModel: model, skipped, attempts };
-      } else {
-        skipped.push({ model, reason: snapshot.reason ?? 'unknown' });
-      }
-    }
-    return { selectedModel: null, skipped };
-  }
-
   resetTurn() {
     for (const [model, state] of this.health.entries()) {
       if (state.status === 'sticky_retry') {
         this.setState(model, { ...state, consumed: false });
       }
     }
-  }
-
-  reset() {
-    this.health.clear();
   }
 
   private setState(model: ModelId, nextState: HealthState) {

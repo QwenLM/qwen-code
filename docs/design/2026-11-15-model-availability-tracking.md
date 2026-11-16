@@ -6,9 +6,8 @@
 - **Status**: Proposed
 - **Tracker**: Qoder→main integration, Option B (main architecture wins; port
   differentiated capabilities). First ported capability: `availability`.
-- **Source**: preview `packages/core/src/availability/` (tag `587e3429ca`),
-  classified NEW-adjacent / load-bearing ALTERNATIVE in the integration
-  inventory. Self-contained (4 files / 393 lines, pure state machine).
+- **Source**: preview `packages/core/src/availability/` (tag `587e3429ca`).
+  Self-contained (4 files / 393 lines, pure state machine).
 
 ## Problem
 
@@ -48,10 +47,13 @@ no zod / no external deps, so no zod-4 migration is needed for it:
 - States: `terminal` (reason `quota`|`capacity`) and `sticky_retry`
   (`retry_once_per_turn`, with a `consumed` flag).
 - API: `markTerminal`, `markHealthy`, `markRetryOncePerTurn`,
-  `consumeStickyAttempt`, `snapshot`, `selectFirstAvailable`, `resetTurn`,
-  `reset`, plus a main-specific `beginTurn(turnKey)` that resets consumed state
-  only when the turn key (the user prompt id) changes — main has no explicit
-  turn-boundary hook, so the prompt id serves as the turn key.
+  `consumeStickyAttempt`, `snapshot`, `resetTurn`, plus a main-specific
+  `beginTurn(turnKey)` that resets consumed state only when the turn key (the
+  user prompt id) changes — main has no explicit turn-boundary hook, so the
+  prompt id serves as the turn key. Preview's `selectFirstAvailable` and
+  `reset` helpers are deliberately not ported: nothing in the fallback-skipping
+  wiring calls them (primary selection is out of scope), so they would be dead
+  surface.
 - Invariants preserved from preview: a terminal failure is never downgraded to
   transient; `markRetryOncePerTurn` keeps `consumed` if already sticky (no
   infinite same-turn loop); `snapshot` reports unavailable for terminal or
@@ -77,6 +79,11 @@ no zod / no external deps, so no zod-4 migration is needed for it:
     `isExplicitRetry` through `LlmClient` → `Turn` → `LlmChatSendOptions`) is a
     turn boundary: it calls `resetTurn()` so a retry re-probes fallbacks the
     failed attempt consumed, even though a retry reuses the prompt id.
+- Turn-key limitation: `lastTurnKey` is a single scalar on the session-scoped
+  service, so two prompts sharing one `Config` concurrently (a side query, a
+  forked agent) can reset each other's consumed state. This fails open — models
+  are re-probed, i.e. pre-PR behaviour — so the skip optimization simply does
+  not apply under concurrency; it is not a correctness risk.
 - Error mapping for this first port is deliberately narrow: only the
   capacity statuses already admitted by `isFallbackEligible` feed the ledger
   (`sticky_retry`). Terminal/quota marking is deferred to a follow-up so the
@@ -91,13 +98,13 @@ reversible; a later PR can flip the default once nightly evidence is in.
 
 ## Key design decisions
 
-| Decision                                                | Rationale                                                                                                 |
-| ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| Port the service verbatim (logic), rename to kebab-case | Pure state machine, well-tested in preview; no zod dependency so no zod-4 rework.                         |
-| Session-scoped on Config                                | Matches main's per-session Config and preview's ownership; avoids a process-global health singleton.      |
-| Only capacity → sticky_retry in this port               | `isFallbackEligible` already bounds the scope; terminal/quota marking would touch auth/billing, deferred. |
-| Setting gate default off                                | Behavior change to the fallback chain must be opt-in and reversible first.                                |
-| resetTurn at turn start                                 | A new turn should re-probe a sticky model once; matches preview semantics.                                |
+| Decision                                                 | Rationale                                                                                                                                                     |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Port the service logic (drop unused helpers), kebab-case | Pure state machine, well-tested in preview; no zod dependency so no zod-4 rework. `selectFirstAvailable`/`reset` have no caller here, so they are not ported. |
+| Session-scoped on Config                                 | Matches main's per-session Config and preview's ownership; avoids a process-global health singleton.                                                          |
+| Only capacity → sticky_retry in this port                | `isFallbackEligible` already bounds the scope; terminal/quota marking would touch auth/billing, deferred.                                                     |
+| Setting gate default off                                 | Behavior change to the fallback chain must be opt-in and reversible first.                                                                                    |
+| resetTurn at turn start                                  | A new turn should re-probe a sticky model once; matches preview semantics.                                                                                    |
 
 ## Files affected
 
@@ -115,7 +122,7 @@ reversible; a later PR can flip the default once nightly evidence is in.
 ## Acceptance criteria
 
 - Service unit tests port and pass (terminal not downgraded; sticky consumed
-  once per turn; selectFirstAvailable skips unavailable; resetTurn re-probes).
+  once per turn; resetTurn/beginTurn re-probe).
 - With the gate off, fallback-chain behavior is byte-for-byte unchanged
   (existing llm-chat fallback suites stay green).
 - With the gate on, a model exhausted on a capacity error is skipped on the

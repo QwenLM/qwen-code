@@ -5,7 +5,7 @@
 - **日期**：2026-11-15
 - **状态**：提案
 - **跟踪**：Qoder→main 集成，选项 B（main 架构赢，移植差异化能力）。首个移植能力：`availability`。
-- **来源**：preview `packages/core/src/availability/`（tag `587e3429ca`），集成清单中归为 NEW-相邻 / 承重 ALTERNATIVE。自包含（4 文件 / 393 行，纯状态机）。
+- **来源**：preview `packages/core/src/availability/`（tag `587e3429ca`）。自包含（4 文件 / 393 行，纯状态机）。
 
 ## 问题
 
@@ -26,7 +26,7 @@ main 的模型 fallback（`core/llm-chat.ts`「Model fallback chain」）是**�
 `packages/core/src/core/model-availability-service.ts`（按 main 约定用 kebab-case；preview 文件为 `modelAvailabilityService.ts`）。纯状态机，无 zod、无外部依赖，故无需 zod-4 改造：
 
 - 状态：`terminal`（reason `quota`|`capacity`）与 `sticky_retry`（`retry_once_per_turn`，带 `consumed` 标志）。
-- API：`markTerminal`、`markHealthy`、`markRetryOncePerTurn`、`consumeStickyAttempt`、`snapshot`、`selectFirstAvailable`、`resetTurn`、`reset`，另加 main 特有的 `beginTurn(turnKey)`——仅当轮键（用户 prompt id）变化时重置 consumed 状态；main 没有显式轮边界钩子，故用 prompt id 作轮键。
+- API：`markTerminal`、`markHealthy`、`markRetryOncePerTurn`、`consumeStickyAttempt`、`snapshot`、`resetTurn`，另加 main 特有的 `beginTurn(turnKey)`——仅当轮键（用户 prompt id）变化时重置 consumed 状态；main 没有显式轮边界钩子，故用 prompt id 作轮键。preview 的 `selectFirstAvailable` 与 `reset` 助手刻意不移植：fallback-跳过接线中没有任何调用方（primary 选择不在范围内），移植它们只会是死代码。
 - 保留 preview 的不变量：terminal 失败绝不降级为 transient；`markRetryOncePerTurn` 在已 sticky 时保持 `consumed`（避免同轮死循环）；`snapshot` 对 terminal 或已消费的 sticky 报不可用。
 
 ### 归属与接线
@@ -38,6 +38,7 @@ main 的模型 fallback（`core/llm-chat.ts`「Model fallback chain」）是**�
   - 某 fallback 在 fallback-eligible 容量错误上耗尽重试时，调 `markRetryOncePerTurn(model)` 再 `consumeStickyAttempt(model)`，使其在本轮剩余被跳过。
   - fallback 响应成功时 `markHealthy(model)`。
   - 显式用户 Retry（`SendMessageType.Retry`，经 `LlmClient` → `Turn` → `LlmChatSendOptions` 穿为 `isExplicitRetry`）是一个轮边界：调 `resetTurn()`，使 Retry 重探失败尝试已消费的 fallback——尽管 Retry 复用 prompt id。
+- 轮键局限：`lastTurnKey` 是会话级服务上的单个标量，共享同一 `Config` 的两个并发 prompt（旁路查询、forked agent）可能互相重置对方的 consumed 状态。这是失败即放开——模型被重探，即改动前的行为——因此并发下跳过优化不生效；并非正确性风险。
 - 本次移植的错误映射刻意收窄：只有 `isFallbackEligible` 已放行的容量状态喂台账（`sticky_retry`）。terminal/quota 标记延后到 follow-up，首个 PR 不改 auth/billing 行为。
 
 ### 功能门
@@ -46,13 +47,13 @@ main 的模型 fallback（`core/llm-chat.ts`「Model fallback chain」）是**�
 
 ## 关键设计决策
 
-| 决策                                | 理由                                                                        |
-| ----------------------------------- | --------------------------------------------------------------------------- |
-| 逐字移植服务逻辑，重命名 kebab-case | 纯状态机、preview 已充分测试；无 zod 依赖故无需 zod-4 改造。                |
-| 会话级挂 Config                     | 与 main 的按会话 Config 及 preview 归属一致；避免进程级健康单例。           |
-| 本次仅容量→sticky_retry             | `isFallbackEligible` 已限定范围；terminal/quota 会触碰 auth/billing，延后。 |
-| 设置门默认关                        | fallback 链的行为变更须先 opt-in、可回退。                                  |
-| 轮首 resetTurn                      | 新一轮应对 sticky 模型重探一次；与 preview 语义一致。                       |
+| 决策                                   | 理由                                                                                                                |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| 移植服务逻辑（删无用助手），kebab-case | 纯状态机、preview 已充分测试；无 zod 依赖故无需 zod-4 改造。`selectFirstAvailable`/`reset` 在此无调用方，故不移植。 |
+| 会话级挂 Config                        | 与 main 的按会话 Config 及 preview 归属一致；避免进程级健康单例。                                                   |
+| 本次仅容量→sticky_retry                | `isFallbackEligible` 已限定范围；terminal/quota 会触碰 auth/billing，延后。                                         |
+| 设置门默认关                           | fallback 链的行为变更须先 opt-in、可回退。                                                                          |
+| 轮首 resetTurn                         | 新一轮应对 sticky 模型重探一次；与 preview 语义一致。                                                               |
 
 ## 涉及文件
 
@@ -64,7 +65,7 @@ main 的模型 fallback（`core/llm-chat.ts`「Model fallback chain」）是**�
 
 ## 验收标准
 
-- 服务单测移植并通过（terminal 不降级；sticky 每轮消费一次；selectFirstAvailable 跳过不可用；resetTurn 重探）。
+- 服务单测移植并通过（terminal 不降级；sticky 每轮消费一次；resetTurn/beginTurn 重探）。
 - 门关闭时 fallback 链行为逐字节不变（既有 llm-chat fallback 套件保持绿）。
 - 门开启时，容量错误耗尽的模型在同轮下一请求被跳过、下一轮重探一次。
 - build + typecheck + 受影响套件绿；多轮自审。

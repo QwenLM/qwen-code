@@ -329,6 +329,34 @@ describe('Turn', () => {
       );
     });
 
+    it('forwards isExplicitRetry to the chat send options', async () => {
+      // client.ts passes the explicit-Retry flag as Turn's 10th positional
+      // argument; pin that slot so a constructor reorder cannot misroute it.
+      turn = new Turn(
+        {
+          sendMessageStream: mockSendMessageStream,
+          getHistory: mockGetHistory,
+          getHistoryLength: mockGetHistoryLength,
+          getHistoryTailShallow: mockGetHistoryTailShallow,
+          maybeIncludeSchemaDepthContext: mockMaybeIncludeSchemaDepthContext,
+        } as unknown as LlmChat,
+        'prompt-id-1',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      );
+      await run([textChunk('Hello')]);
+
+      expect(mockSendMessageStream.mock.lastCall?.[4]).toEqual({
+        isExplicitRetry: true,
+      });
+    });
+
     it('should preserve ordered image parts in content events', async () => {
       const png = {
         inlineData: {

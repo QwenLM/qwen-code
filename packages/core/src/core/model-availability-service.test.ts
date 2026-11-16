@@ -50,67 +50,6 @@ describe('ModelAvailabilityService', () => {
     });
   });
 
-  it('selects models respecting terminal and sticky states', () => {
-    const stickyModel = 'stick-model';
-    const healthyModel = 'healthy-model';
-
-    service.markTerminal(model, 'capacity');
-    service.markRetryOncePerTurn(stickyModel);
-
-    const first = service.selectFirstAvailable([
-      model,
-      stickyModel,
-      healthyModel,
-    ]);
-    expect(first).toEqual({
-      selectedModel: stickyModel,
-      attempts: 1,
-      skipped: [
-        {
-          model,
-          reason: 'capacity',
-        },
-      ],
-    });
-
-    service.consumeStickyAttempt(stickyModel);
-    const second = service.selectFirstAvailable([
-      model,
-      stickyModel,
-      healthyModel,
-    ]);
-    expect(second).toEqual({
-      selectedModel: healthyModel,
-      skipped: [
-        {
-          model,
-          reason: 'capacity',
-        },
-        {
-          model: stickyModel,
-          reason: 'retry_once_per_turn',
-        },
-      ],
-    });
-
-    service.resetTurn();
-    const third = service.selectFirstAvailable([
-      model,
-      stickyModel,
-      healthyModel,
-    ]);
-    expect(third).toEqual({
-      selectedModel: stickyModel,
-      attempts: 1,
-      skipped: [
-        {
-          model,
-          reason: 'capacity',
-        },
-      ],
-    });
-  });
-
   it('preserves consumed state when marking retry-once-per-turn again', () => {
     service.markRetryOncePerTurn(model);
     service.consumeStickyAttempt(model);
@@ -160,14 +99,6 @@ describe('ModelAvailabilityService', () => {
       available: false,
       reason: 'quota',
     });
-  });
-
-  it('reset clears all recorded state', () => {
-    service.markTerminal(model, 'quota');
-    service.markRetryOncePerTurn('other');
-    service.reset();
-    expect(service.snapshot(model)).toEqual({ available: true });
-    expect(service.snapshot('other')).toEqual({ available: true });
   });
 
   it('beginTurn re-probes sticky models only when the turn key changes', () => {

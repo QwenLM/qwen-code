@@ -5843,6 +5843,8 @@ export class LlmChat {
               // attempted each request (it may have recovered); only fallback
               // selection consults the ledger. An explicit Retry is a turn
               // boundary so it re-probes fallbacks the failed attempt consumed.
+              // Optional-chain the gate: llm-chat's partial Config mocks omit
+              // the new accessor, and an absent gate must read as "off".
               const availability =
                 self.config.isModelAvailabilityTrackingEnabled?.()
                   ? self.config.getModelAvailabilityService()

@@ -12826,6 +12826,23 @@ Other open files:
         }
       });
 
+      it('passes the explicit-Retry turn-boundary flag only for a Retry', async () => {
+        retryChat({
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        mockTurnRunFn.mockImplementation(() => textTurn('response'));
+
+        for (const [type, expectedRetryFlag] of [
+          [SendMessageType.UserQuery, false],
+          [SendMessageType.Retry, true],
+        ] as const) {
+          await run([{ text: 'my prompt' }], 'session########5', { type });
+          expect(mockTurnConstructorFn.mock.calls.at(-1)?.[9]).toBe(
+            expectedRetryFlag,
+          );
+        }
+      });
+
       it('restores stripped retry entries when only a concurrent send pushes', async () => {
         const orphanedPrompt: Content = userText('retry me');
         const mockChat = retryChat({
