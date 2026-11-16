@@ -69,7 +69,8 @@ They are the two things a user would do in a terminal, and nothing more:
 - `force`: refuse when the workspace cwd is below the repository root
   (`409 force_unsupported`, because a forced checkout acts on the whole
   repository and would erase changes outside the workspace), read the
-  completion probes (HEAD identity and tracked-tree dirtiness), refuse a
+  completion probes (HEAD identity, tracked-tree dirtiness, and a
+  tracked-diff snapshot), refuse a
   parked operation as the last statement before the destructive command,
   then run the same checkout as the plain path **with `-f`**, and finally
   `git clean -fd` for the untracked residue the forced checkout leaves
@@ -92,19 +93,23 @@ They are the two things a user would do in a terminal, and nothing more:
   for a detached target (tag, SHA, or a full ref such as `refs/heads/x` —
   git detaches HEAD for those), or exactly unmoved for `HEAD` itself.
   On top of that attribution, either HEAD's identity (name and commit)
-  changed, or the tracked tree went dirty→clean — forcing a target HEAD
-  already sits on discards without changing the identity. Identity
-  evidence is trusted only when both probes resolved a commit, so a
-  failed probe cannot certify a switch. A concurrent actor moving HEAD
+  changed, or the tracked tree witnessed the reset: it went dirty→clean,
+  or its diff against HEAD changed — forcing a target HEAD already sits
+  on discards without changing the identity, and a refusing hook that
+  re-dirties a tracked file turns the clean-tree read off but leaves the
+  user's edit gone from the diff (blob ids included), so the in-place
+  discard is still reported as completed and its residue cleaned. A
+  pre-touch refusal leaves the diff byte-identical and never qualifies;
+  only a hook restoring the user's exact edit bytes stays
+  indistinguishable and is conservatively refused with the residue kept.
+  Identity evidence is trusted only when both probes resolved a commit,
+  and the diff witness only when both diff probes succeeded, so a failed
+  probe cannot certify a switch. A concurrent actor moving HEAD
   elsewhere therefore never turns a pre-touch refusal into a claimed
-  switch (an actor landing on exactly the requested target is
-  indistinguishable from this call's own switch — the tree is where the
-  user asked it to be); a hook leaving dirt `checkout -f` never resets (a
-  rewritten tracked file, a dirty submodule) does not demote a completed
-  switch whose move the identity witnesses. A same-branch discard the
-  hook re-dirties has no witness left (identity unchanged, dirty→clean
-  destroyed) and is indistinguishable from a pre-touch refusal, so it
-  stays conservatively refused with the residue kept. The attribution is
+  switch (an actor landing on exactly the requested target — or editing
+  a tracked file during the failure window — is indistinguishable from
+  this call's own discard, the same confirmed-discard exposure the
+  concurrent-session risk below covers). The attribution is
   post-hoc only: git's own
   checkout remains the authority that performs the switch, so a
   resolution diverging from git's can under-report a completed switch
@@ -265,16 +270,19 @@ omission:
   no destructive step hangs on attributing the move to this call, and
   restoring onto a moved HEAD is the hazard. The force flow gates its
   residue clean on attribution to the requested target (see Behavior),
-  with the identity change or the tracked-tree dirty→clean transition as
-  the completion witness — so forcing a target HEAD already sits on
+  with the identity change or the tracked-tree reset (dirty→clean, or a
+  changed diff against HEAD) as the completion witness — so forcing a
+  target HEAD already sits on
   (identity unchanged) is still reported as a completed discard, while a
   concurrent actor moving HEAD elsewhere, or a failed identity probe,
   never turns a pre-touch refusal into a claimed switch. A hook that
   leaves dirt the forced checkout never resets does not demote a
-  completed switch whose move the identity witnesses; the residue clean
-  still runs, and the hook's own edits stay (they are the hook's doing,
-  not the user's uncommitted work). A same-branch discard the hook
-  re-dirties stays conservatively refused (see Behavior).
+  completed switch: an identity-changing move is witnessed by the
+  identity, an in-place discard by the tracked-diff change (or
+  dirty→clean); the residue clean still runs, and the hook's own edits
+  stay (they are the hook's doing, not the user's uncommitted work).
+  Only a hook restoring the user's exact edit bytes on an in-place
+  discard stays conservatively refused (see Behavior).
 
 ## Validation plan
 
@@ -295,7 +303,12 @@ omission:
   actor lands on exactly the requested target; a refusing hook that
   rewrites a tracked file still reports the completed switch and cleans
   the residue; untracked-only dirt with a refusing hook completes via the
-  identity witness; a detached target (tag) whose hook refuses reports
+  identity witness; an in-place discard (current branch and `HEAD`)
+  whose refusing hook re-dirties a tracked file still reports the
+  completed discard and cleans the residue; a pre-touch refusal of the
+  current branch keeps the edit and the residue (the dirty tree alone
+  certifies nothing); a failed before-diff probe is not trusted; a
+  detached target (tag) whose hook refuses reports
   the completed switch, as does a full ref (`refs/heads/x`, detached) and
   a remote-tracking ref (completed on the remapped local branch); a merge
   parked while the completion probes run is still refused; a concurrent request's labelled entry is

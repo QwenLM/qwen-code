@@ -1560,6 +1560,110 @@ describe('gitCheckout with a dirty working tree', () => {
     expect(read(dir, 'a.txt')).toBe('one\n');
   });
 
+  it('force checkout of the current branch reports the completed discard when a refusing hook re-dirties a tracked file', async () => {
+    const dir = dirtyCheckoutFixture();
+    write(dir, { 'new.txt': 'untracked\n' });
+    // The in-place discard completes, but the hook turns the dirty->clean
+    // witness off: the tracked-diff change must still witness the reset.
+    installHook(dir, 'post-checkout', 'echo hook-edit > a.txt\nexit 1');
+
+    const failure = await checkoutFails(
+      dir,
+      'master',
+      { force: true },
+      'checkout_failed',
+    );
+
+    expect(failure.message).toContain(
+      'switched, but the checkout reported a failure',
+    );
+    expect(currentBranch(dir)).toBe('master');
+    expect(read(dir, 'a.txt')).toBe('hook-edit\n');
+    expect(has(dir, 'new.txt')).toBe(false);
+  });
+
+  it('force checkout of HEAD reports the completed discard when a refusing hook re-dirties a tracked file', async () => {
+    const dir = dirtyCheckoutFixture();
+    write(dir, { 'new.txt': 'untracked\n' });
+    installHook(dir, 'post-checkout', 'echo hook-edit > a.txt\nexit 1');
+
+    const failure = await checkoutFails(
+      dir,
+      'HEAD',
+      { force: true },
+      'checkout_failed',
+    );
+
+    expect(failure.message).toContain(
+      'switched, but the checkout reported a failure',
+    );
+    expect(currentBranch(dir)).toBe('master');
+    expect(read(dir, 'a.txt')).toBe('hook-edit\n');
+    expect(has(dir, 'new.txt')).toBe(false);
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'force checkout does not trust a failed tracked-diff probe',
+    async () => {
+      const dir = dirtyCheckoutFixture();
+      write(dir, { 'new.txt': 'untracked\n' });
+      installHook(dir, 'post-checkout', 'echo hook-edit > a.txt\nexit 1');
+      const counter = path.join(tmpDir('qwen-diff-probe-'), 'n');
+      const env = gitShim(hermeticEnv(), [
+        // Only the BEFORE diff probe fails: a null before-snapshot must
+        // not compare unequal to the real after-patch and certify the
+        // discard. The hook turned the clean-tree witness off, so the
+        // completed in-place discard stays conservatively refused.
+        {
+          match: '"diff HEAD"*',
+          script: `n=$(cat "${counter}" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "${counter}"; if [ "$n" = 1 ]; then echo "error: diff probe failure" >&2; exit 1; fi; exec "$REAL" "$@"`,
+        },
+      ]);
+
+      const failure = await checkoutFails(
+        dir,
+        'master',
+        { force: true },
+        'checkout_failed',
+        env,
+      );
+
+      expect(failure.message).toContain('cannot discard and switch');
+      expect(currentBranch(dir)).toBe('master');
+      expect(read(dir, 'a.txt')).toBe('hook-edit\n');
+      expect(read(dir, 'new.txt')).toBe('untracked\n');
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'force checkout of the current branch keeps everything when git refuses before touching',
+    async () => {
+      const dir = dirtyCheckoutFixture();
+      write(dir, { 'new.txt': 'untracked\n' });
+      const env = gitShim(hermeticEnv(), [
+        // A pre-touch refusal leaves the tracked diff byte-identical: the
+        // dirty tree alone must not certify a completed discard.
+        {
+          match: '"checkout -f master"*',
+          script: 'echo "error: simulated pre-touch refusal" >&2; exit 1',
+        },
+      ]);
+
+      const failure = await checkoutFails(
+        dir,
+        'master',
+        { force: true },
+        'checkout_failed',
+        env,
+      );
+
+      expect(failure.message).toContain('cannot discard and switch');
+      expect(currentBranch(dir)).toBe('master');
+      expect(read(dir, 'a.txt')).toBe('local edit\n');
+      expect(read(dir, 'new.txt')).toBe('untracked\n');
+    },
+  );
+
   it('force checkout of a remote-tracking ref reports the completed switch when a hook refuses', async () => {
     const dir = makeRepo();
     addRemote(dir, 'origin', '-u', 'origin', 'HEAD');

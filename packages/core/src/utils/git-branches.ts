@@ -1521,6 +1521,26 @@ async function headAtCheckoutTarget(
   return false;
 }
 
+/**
+ * Patch text of the tracked tree against HEAD, blob ids included: a hook
+ * rewriting a file changes it even when the status codes stay the same.
+ * null means the probe failed; a completion witness must not trust it.
+ */
+async function trackedDiff(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string | null> {
+  try {
+    return await runGit(
+      cwd,
+      ['diff', 'HEAD', '--no-ext-diff', '--no-textconv', '--no-color'],
+      env,
+    );
+  } catch {
+    return null;
+  }
+}
+
 const SWITCH_COMPLETED_FAILURE =
   'switched, but the checkout reported a failure (a post-checkout hook may have refused)';
 
@@ -1560,6 +1580,7 @@ async function forceCheckout(
         env,
       ).catch(() => '')
     ).trim() !== '';
+  const trackedBefore = await trackedDiff(cwd, env);
   await refuseCheckoutOperationInProgress(cwd, env);
   let result: GitCheckoutResult;
   try {
@@ -1572,12 +1593,14 @@ async function forceCheckout(
     // certify a switch git refused, and the residue clean cannot run for
     // it. The identity change witnesses the move; a target HEAD already
     // sits on (same branch, same commit, HEAD itself) discards without
-    // changing the identity, so the dirty->clean transition is the second
-    // witness. Identity evidence is trusted only when both probes resolved
-    // a commit. A hook leaving dirt `checkout -f` never resets (a rewritten
-    // tracked file, a dirty submodule) must not demote a completed switch
-    // to a pre-touch refusal, so the clean-tree read gates only the
-    // same-identity witness, not the whole arm.
+    // changing the identity, so the tracked tree must witness the reset:
+    // either it went dirty->clean, or its diff against HEAD changed (a
+    // refusing hook that re-dirties a tracked file turns the clean-tree
+    // read off, but the user's edit is still gone from the diff). A
+    // pre-touch refusal leaves the diff byte-identical, so it never
+    // qualifies; only a hook restoring the user's exact edit bytes stays
+    // indistinguishable. Identity evidence is trusted only when both
+    // probes resolved a commit.
     const headAfter = await headState(cwd, env);
     const nowClean =
       (
@@ -1587,6 +1610,11 @@ async function forceCheckout(
           env,
         ).catch(() => '?')
       ).trim() === '';
+    const trackedAfter = await trackedDiff(cwd, env);
+    const trackedDirtChanged =
+      trackedBefore !== null &&
+      trackedAfter !== null &&
+      trackedBefore !== trackedAfter;
     const atTarget = await headAtCheckoutTarget(
       cwd,
       ref,
@@ -1600,7 +1628,8 @@ async function forceCheckout(
     const identityTrusted = headBefore.sha !== '' && headAfter.sha !== '';
     if (
       atTarget &&
-      ((identityTrusted && identityChanged) || (wasDirty && nowClean))
+      ((identityTrusted && identityChanged) ||
+        (wasDirty && (nowClean || trackedDirtChanged)))
     ) {
       await runGit(cwd, ['clean', '-fd'], env).catch(() => undefined);
       throw new GitCheckoutFailure(
