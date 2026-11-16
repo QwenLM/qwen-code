@@ -38,6 +38,8 @@ import type {
   DaemonMemoryImportSource,
   DaemonMemoryImportTask,
   DaemonMcpAppToolCall,
+  DaemonGeneratedUiState,
+  DaemonGeneratedUiStateWriteResult,
   DaemonMcpAppToolResult,
   DaemonAuthProviderId,
   DaemonAuthProviderCatalog,
@@ -7954,6 +7956,58 @@ export class DaemonClient {
         timeoutMs: 310_000,
         mode: 'rest',
       },
+    );
+  }
+
+  getGeneratedUiState(
+    sessionId: string,
+    cardId: string,
+    clientId: string,
+  ): Promise<DaemonGeneratedUiState> {
+    return this.jsonRequest(
+      `/session/${urlEncode(sessionId)}/generated-ui/state/${urlEncode(cardId)}`,
+      'GET /session/:id/generated-ui/state/:cardId',
+      { clientId, mode: 'rest' },
+    );
+  }
+
+  /** Stale and oversized writes resolve with their outcome; other failures throw. */
+  async setGeneratedUiState(
+    sessionId: string,
+    cardId: string,
+    write: { baseRevision: number; value: unknown },
+    clientId: string,
+  ): Promise<DaemonGeneratedUiStateWriteResult> {
+    const label = 'PUT /session/:id/generated-ui/state/:cardId';
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/generated-ui/state/${urlEncode(cardId)}`,
+      {
+        method: 'PUT',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify(write),
+      },
+      async (res) => {
+        // 409 also covers the card limit, which is an error without an outcome.
+        if (res.status !== 409 && res.status !== 413 && !res.ok)
+          throw await this.failOnError(res, label);
+        const body = (await res.json()) as {
+          outcome?: unknown;
+          error?: unknown;
+        };
+        if (
+          body.outcome === 'saved' ||
+          body.outcome === 'stale' ||
+          body.outcome === 'too_large'
+        )
+          return body as DaemonGeneratedUiStateWriteResult;
+        throw new DaemonHttpError(
+          res.status,
+          body,
+          `${label}: ${typeof body.error === 'string' ? body.error : `HTTP ${res.status}`}`,
+        );
+      },
+      undefined,
+      'rest',
     );
   }
 

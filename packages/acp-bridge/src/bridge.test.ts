@@ -7298,6 +7298,9 @@ describe('createAcpSessionBridge', () => {
     expect(loaded.artifactWarnings).toEqual([
       'skipped corrupt artifact record',
     ]);
+    expect(loaded.artifacts).toMatchObject([
+      { id: artifactId, title: 'Restored link', url: artifactUrl },
+    ]);
 
     await expect(
       bridge.getSessionArtifacts(loaded.sessionId),
@@ -7311,6 +7314,18 @@ describe('createAcpSessionBridge', () => {
         },
       ],
     });
+
+    // A warm re-attach (page reload / second tab on the still-live session)
+    // takes the already-live restore branch; it must carry the same snapshot
+    // so the header entry is early on the most common re-open path too.
+    const reattached = await bridge.loadSession({
+      sessionId,
+      workspaceCwd: WS_A,
+    });
+    expect(reattached.attached).toBe(true);
+    expect(reattached.artifacts).toMatchObject([
+      { id: artifactId, title: 'Restored link', url: artifactUrl },
+    ]);
 
     await bridge.shutdown();
   });
@@ -7345,6 +7360,7 @@ describe('createAcpSessionBridge', () => {
       'skipped artifact without id/title',
       'kept warning',
     ]);
+    expect(loaded).not.toHaveProperty('artifacts');
     await expect(
       bridge.getSessionArtifacts(loaded.sessionId),
     ).resolves.toMatchObject({
@@ -12373,6 +12389,57 @@ describe('createAcpSessionBridge', () => {
       expect.objectContaining({ type: 'history_truncated' }),
     );
     expect(restored.liveJournal?.map((event) => event.id)).toEqual([1, 3]);
+
+    await bridge.shutdown();
+  });
+
+  it('embeds the artifact snapshot when a restore loses the registration race', async () => {
+    const load = deferred<LoadSessionResponse>();
+    const handle = makeChannel({
+      loadSessionImpl: () => load.promise,
+      newSessionImpl: () => ({ sessionId: 'raced-artifacts' }),
+    });
+    const bridge = makeBridge({
+      sessionScope: 'thread',
+      maxSessions: 5,
+      channelFactory: async () => handle.channel,
+    });
+
+    const restoring = bridge.loadSession({
+      sessionId: 'raced-artifacts',
+      workspaceCwd: WS_A,
+    });
+    await vi.waitFor(() => {
+      expect(handle.agent.loadSessionCalls).toHaveLength(1);
+    });
+    // Another caller registers the session while the restore is in flight.
+    await bridge.spawnOrAttach({
+      workspaceCwd: WS_A,
+      sessionScope: 'thread',
+    });
+    await bridge.addSessionArtifact(
+      'raced-artifacts',
+      {
+        title: 'Raced artifact',
+        kind: 'link',
+        storage: 'external_url',
+        source: 'client',
+        url: 'https://example.com/raced',
+        retention: 'restorable',
+        clientRetained: true,
+      },
+      {},
+    );
+
+    load.resolve({});
+    const restored = await restoring;
+
+    // The raced attach return must carry the live snapshot, like the fresh
+    // restore and warm re-attach returns do.
+    expect(restored.attached).toBe(true);
+    expect(restored.artifacts).toMatchObject([
+      { title: 'Raced artifact', url: 'https://example.com/raced' },
+    ]);
 
     await bridge.shutdown();
   });

@@ -45,8 +45,16 @@ import {
   AGENT_LOOP_SURFACES,
   UNIFIED_SURFACE_DEFAULTS,
   EVENT_BUS_SURFACE_DEFAULTS,
+  type AgentLoopSurface,
 } from './agent-loop-rollout.js';
 import { GOAL_DEFAULT_TOKEN_BUDGET } from '../goals/goal-protocol.js';
+
+/** The surfaces the shared loop is on for when nothing sets it. */
+const ON_BY_DEFAULT: ReadonlySet<AgentLoopSurface> = new Set([
+  'headless',
+  'ink',
+  'agent-core',
+]);
 import { Storage } from './storage.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { SshExecutionEnvironment } from '../services/ssh-execution-environment.js';
@@ -7438,15 +7446,15 @@ describe('Server Config (config.ts)', () => {
       });
       afterEach(() => vi.unstubAllEnvs());
 
-      it('defaults to on for headless and the Ink TUI and off for every other surface', () => {
+      it('defaults to on for headless, the Ink TUI and AgentCore and off for every other surface', () => {
         for (const surface of AGENT_LOOP_SURFACES) {
           expect(makeConfig().isUnifiedAgentLoopEnabled(surface)).toBe(
-            surface === 'headless' || surface === 'ink',
+            ON_BY_DEFAULT.has(surface),
           );
         }
       });
 
-      it.each(['headless', 'ink'] as const)(
+      it.each(['headless', 'ink', 'agent-core'] as const)(
         'keeps %s on its own loop when the setting is false',
         (surface) => {
           expect(
@@ -7457,7 +7465,7 @@ describe('Server Config (config.ts)', () => {
         },
       );
 
-      it.each(['headless', 'ink'] as const)(
+      it.each(['headless', 'ink', 'agent-core'] as const)(
         'keeps %s on its own loop when the environment turns it off',
         (surface) => {
           vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', `${surface}=0`);
@@ -7512,7 +7520,7 @@ describe('Server Config (config.ts)', () => {
         vi.stubEnv('QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP', 'opentui');
         const config = makeConfig();
         expect(config.isUnifiedAgentLoopEnabled('opentui')).toBe(true);
-        expect(config.isUnifiedAgentLoopEnabled('agent-core')).toBe(false);
+        expect(config.isUnifiedAgentLoopEnabled('acp')).toBe(false);
         expect(config.isUnifiedAgentLoopEnabled('speculation')).toBe(false);
       });
     });
@@ -7563,10 +7571,10 @@ describe('Server Config (config.ts)', () => {
       });
       afterEach(() => vi.unstubAllEnvs());
 
-      it('defaults to shared for headless and the Ink TUI and legacy for every other surface', () => {
+      it('defaults to shared for headless, the Ink TUI and AgentCore and legacy for every other surface', () => {
         for (const surface of AGENT_LOOP_SURFACES) {
           expect(makeConfig().getAgentLoopPath(surface)).toBe(
-            surface === 'headless' || surface === 'ink' ? 'shared' : 'legacy',
+            ON_BY_DEFAULT.has(surface) ? 'shared' : 'legacy',
           );
         }
       });
