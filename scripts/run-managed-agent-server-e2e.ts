@@ -3370,13 +3370,15 @@ try {
   if (loopSkill) {
     // The managed /loop skill model-turn arm. A creator-bearing definition
     // (files/4) makes the Java admission inject the committed cron loop sidecar
-    // into the Session catalog. The Session-create body carries the Web Shell's
-    // verbatim bundled loop import, so admission's replace path runs as in a
-    // real creation: the caller entry is removed and its invocable flags move
-    // onto the variant. The client-initiated skill call loads that body before
-    // the model's first round, and the scripted model drives the real cron
-    // tools (create -> list -> clear). The model is fake, but the skill loading
-    // and tool execution run through the full managed pipeline.
+    // into the Session catalog. The Session-create body carries a caller `loop`
+    // import whose body is the verbatim bundled reference, so admission's
+    // replace path runs as in a real creation: the caller entry is removed and
+    // its invocable flags move onto the variant. The import's description is a
+    // marker the arm asserts is gone, attesting the replace path ran. The
+    // client-initiated skill call loads the variant body before the model's
+    // first round, and the scripted model drives the real cron tools
+    // (create -> list -> clear). The model is fake, but the skill loading and
+    // tool execution run through the full managed pipeline.
     const contractsDir = path.join(
       root,
       'packages/core/src/managed-runtime/contracts',
@@ -3389,19 +3391,14 @@ try {
         ),
       ) as { description?: string; body: string };
     const bundledLoopImport = readSidecar('bundled-body');
-    // The reference sidecar carries only the trimmed body (the byte-comparison
-    // contract isBundledLoop applies); the skill's visible description lives
-    // in the bundled SKILL.md frontmatter.
-    const bundledSkillSource = readFileSync(
-      path.join(root, 'packages/core/src/skills/bundled/loop/SKILL.md'),
-      'utf8',
-    );
-    const bundledDescription = /^description:[ \t]*(.+)$/m
-      .exec(bundledSkillSource)?.[1]
-      ?.trim();
-    if (bundledDescription === undefined || bundledDescription.length === 0) {
-      throw new Error('Bundled loop SKILL.md declares no description');
-    }
+    // The caller import's body is the verbatim bundled reference (the exact
+    // bytes isBundledLoop matches, so admission takes the replace path). Its
+    // description carries a marker instead of the bundled prose: the replace
+    // path swaps in the server variant's own description, so the marker leaves
+    // the catalog; a preserve branch would keep the caller entry and its
+    // marker. The arm asserts the marker is gone from the first round,
+    // attesting the replace path ran rather than the caller body being served.
+    const callerImportMarker = 'CALLER-LOOP-IMPORT-MARKER';
     const definitionResponse = await fetch(`${springUrl}/v1/agents`, {
       method: 'POST',
       headers: {
@@ -3438,7 +3435,7 @@ try {
         skills: [
           {
             name: 'loop',
-            description: bundledDescription,
+            description: callerImportMarker,
             body: bundledLoopImport.body,
             model_invocable: true,
             user_invocable: true,
@@ -3537,6 +3534,16 @@ try {
         ? loopRequests[0].body['messages']
         : []
     ) as { role?: string }[];
+    // The caller import's marker description must be gone: the replace path
+    // swaps in the server variant's own description. A preserved caller entry
+    // (e.g. the import body swapped to a non-bundled sidecar) keeps the marker
+    // in the session-start skill listing, so its presence means the replace
+    // path did not run and the caller's body was merely served.
+    if (JSON.stringify(firstRoundMessages).includes(callerImportMarker)) {
+      throw new Error(
+        'Caller loop import survived admission; the replace path did not run',
+      );
+    }
     if (
       JSON.stringify(firstRoundMessages).includes('defaults to session-only')
     ) {

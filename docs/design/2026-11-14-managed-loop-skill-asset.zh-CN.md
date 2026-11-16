@@ -112,7 +112,7 @@ skill 发布有两个生产者、一个消费者；Harness 只是消费者。
 - 重放：重驱动的创建注入相同变体、复现相同 receipt digest。
 - 一致性：TS 测试断言每个 profile 的 sidecar 等于生成器输出，并钉住共享 steward 段、home-only loop.md 路径、无不可展开 cron 哨兵、UTC 措辞；漂移任一的变异使其变红。
 - 镜像：scripts 测试把 Dockerfile COPY 集钉回 contracts pom includes，缺资产拷贝即红。
-- Skill E2E（`npm run test:e2e:managed-loop-skill`，全栈 runner 的 `--loop-skill` 模式）：Session 以 Web Shell 的逐字 bundled `loop` 导入创建，使准入的替换路径像真实创建一样执行；携带 creator 的 `files/4` definition 在准入时收到 cron 变体，模型第一流式回合的 Skill 工具结果承载该正文，`cron_list` 回显创建的 prompt，`cron_delete` 退役自动化存储铸造的 id 且删除结果声明退役。观察实际触发与把该模式接入 CI 仍不在范围内。
+- Skill E2E（`npm run test:e2e:managed-loop-skill`，全栈 runner 的 `--loop-skill` 模式）：Session 以一个调用方 `loop` 导入创建，其正文是逐字 bundled 参考，使准入的替换路径像真实创建一样执行；导入上的标记 description 让分支断言调用方条目被替换而非仅被投递。携带 creator 的 `files/4` definition 在准入时收到 cron 变体，模型第一流式回合的 Skill 工具结果承载该正文，`cron_list` 回显创建的 prompt，`cron_delete` 退役自动化存储铸造的 id 且删除结果声明退役。该臂作为完整 tier `hosted-failover-e2e` CI job 的一个步骤运行；观察实际触发仍不在范围内。
 
 ## 验收标准
 

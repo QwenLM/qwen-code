@@ -3424,13 +3424,23 @@ describe('managed-agent-server e2e runner', () => {
     expect(source).toMatch(
       /\['create', created\],\s*\['list', listed\],\s*\['clear', cleared\],/,
     );
-    // The Session-create body carries the Web Shell's verbatim bundled import,
-    // so admission's replace path runs; a creator-less caller slice would
-    // leave that code unexercised. The description comes from the bundled
-    // SKILL.md because the byte-comparison sidecar carries only the body.
+    // The Session-create body carries a caller loop import whose body is the
+    // verbatim bundled reference (readSidecar('bundled-body')), so admission's
+    // replace path runs; swapping that argument to another sidecar would take
+    // the preserve branch and silently stop exercising the replace path. The
+    // import's description is a marker the arm asserts is gone from the first
+    // round — a preserved caller entry would keep it.
     expect(source).toMatch(/skills: \[/);
-    expect(source).toMatch(/description: bundledDescription/);
+    expect(source).toMatch(/readSidecar\('bundled-body'\)/);
     expect(source).toMatch(/body: bundledLoopImport\.body/);
+    expect(source).toMatch(
+      /const callerImportMarker = 'CALLER-LOOP-IMPORT-MARKER';/,
+    );
+    expect(source).toMatch(/description: callerImportMarker/);
+    expect(source).toMatch(
+      /JSON\.stringify\(firstRoundMessages\)\.includes\(callerImportMarker\)/,
+    );
+    expect(source).toMatch(/Caller loop import survived admission/);
     // The body checks read the first streamed round, and the positive
     // requires the Skill tool result (role 'tool'), not the session prelude.
     expect(source).toMatch(/loopRequests\[0\]\?\.body\['messages'\]/);
