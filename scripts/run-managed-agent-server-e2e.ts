@@ -98,6 +98,7 @@ let sessionFailover = false;
 let inflightFailover = false;
 let continuationFailover = false;
 let bigOutput = false;
+let loopSkill = false;
 let harnessOnly = false;
 let freeze = false;
 let modelRoundFailover = false;
@@ -143,6 +144,8 @@ for (let index = 0; index < argumentsList.length; index += 1) {
     inflightFailover = true;
   } else if (argument === '--big-output') {
     bigOutput = true;
+  } else if (argument === '--loop-skill') {
+    loopSkill = true;
   } else if (argument === '--continuation-failover') {
     continuationFailover = true;
   } else if (argument === '--harness-only') {
@@ -223,6 +226,7 @@ if (
     continuationFailover,
     modelRoundFailover,
     bigOutput,
+    loopSkill,
   ].filter(Boolean).length > 1
 ) {
   throw new Error('The deterministic E2E modes are exclusive');
@@ -321,7 +325,7 @@ const springJar = path.join(
 for (const required of [
   cliBundle,
   springJar,
-  ...(durableFailover ? [] : [settingsPath]),
+  ...(durableFailover || loopSkill ? [] : [settingsPath]),
 ]) {
   if (!existsSync(required)) {
     throw new Error(`Required file is missing: ${required}`);
@@ -1060,8 +1064,10 @@ try {
         : {}),
     });
   }
-  if (durableFailover) {
-    for (const home of [harnessHome, replacementHarnessHome]) {
+  if (durableFailover || loopSkill) {
+    for (const home of durableFailover
+      ? [harnessHome, replacementHarnessHome]
+      : [harnessHome]) {
       writeFileSync(
         path.join(home, '.qwen', 'settings.json'),
         JSON.stringify({ ui: { enableFollowupSuggestions: false } }),
@@ -2722,7 +2728,9 @@ try {
             ? 'managed-frozen-control-plane-e2e'
             : modelRoundFailover
               ? 'managed-model-round-failover-e2e'
-              : 'real-model-e2e';
+              : loopSkill
+                ? 'managed-loop-skill-e2e'
+                : 'real-model-e2e';
   const springArguments = ['-jar', springJar];
   springArguments.push(
     `--qwen.managed-agent.runtime-broker.workspace-mounts[0].tenant-id=${tenant}`,
@@ -2931,8 +2939,98 @@ try {
       return { content: 'UNEXPECTED_FAILOVER_PROMPT' };
     });
   }
+  if (loopSkill) {
+    // The /loop skill model-turn arm: the client-initiated skill call loads the
+    // committed loop body before the model's first round, then the model drives
+    // the real cron tools. Branch on the latest user text (create/list/clear);
+    // a cron tool's own call id in the history means it already executed, so the
+    // round after it confirms. The skill tool result alone must not confirm.
+    fake = await startFakeOpenAIServer(({ body }) => {
+      // The cron admission classifier (and the loop fire classifier) are
+      // structured side queries delivered as a respond_in_schema synthetic tool.
+      // Answer them with an allow so cron_create is admitted; without this the
+      // classifier reports unavailable and cron_create is denied unreviewed.
+      const tools = Array.isArray(body['tools']) ? body['tools'] : [];
+      const schemaTool = tools.find(
+        (tool) =>
+          (tool as { function?: { name?: string } }).function?.name ===
+          'respond_in_schema',
+      ) as
+        | {
+            function?: {
+              parameters?: { properties?: Record<string, unknown> };
+            };
+          }
+        | undefined;
+      if (schemaTool) {
+        // Answer the classifier side query with an allow, matching the stage's
+        // schema exactly: stage 1 permits only shouldBlock (additionalProperties
+        // is false), stage 2 adds thinking/reason. Extra keys fail validation
+        // and report the classifier unavailable, denying cron_create unreviewed.
+        const properties = schemaTool.function?.parameters?.properties ?? {};
+        const answer: Record<string, unknown> = { shouldBlock: false };
+        if ('thinking' in properties) answer['thinking'] = '';
+        if ('reason' in properties) answer['reason'] = '';
+        return {
+          toolCalls: [
+            fakeToolCall('respond_in_schema', answer, 'loop-classifier'),
+          ],
+        };
+      }
+      if (body['stream'] !== true) return { content: 'fixture' };
+      const messages = Array.isArray(body['messages']) ? body['messages'] : [];
+      const serialized = JSON.stringify(messages);
+      let text = '';
+      for (let i = messages.length - 1; i >= 0; i -= 1) {
+        const message = messages[i] as { role?: string; content?: unknown };
+        if (message.role !== 'user') continue;
+        text =
+          typeof message.content === 'string'
+            ? message.content
+            : JSON.stringify(message.content ?? '');
+        break;
+      }
+      // Each /loop turn drives one cron tool; only that tool's own call id in
+      // the history means it executed (a prior turn's cron id must not confirm
+      // this turn). The skill tool result alone never confirms.
+      if (/\/loop\s+list/.test(text)) {
+        return serialized.includes('loop-cron-list')
+          ? { content: 'LOOP_DONE' }
+          : { toolCalls: [fakeToolCall('cron_list', {}, 'loop-cron-list')] };
+      }
+      if (/\/loop\s+clear/.test(text)) {
+        return serialized.includes('loop-cron-delete')
+          ? { content: 'LOOP_DONE' }
+          : {
+              toolCalls: [
+                fakeToolCall(
+                  'cron_delete',
+                  { id: 'loop-cron-created' },
+                  'loop-cron-delete',
+                ),
+              ],
+            };
+      }
+      return serialized.includes('loop-cron-create')
+        ? { content: 'LOOP_DONE' }
+        : {
+            toolCalls: [
+              fakeToolCall(
+                'cron_create',
+                {
+                  cron: '*/5 * * * *',
+                  prompt: '/loop check the deploy',
+                  recurring: true,
+                  durable: true,
+                },
+                'loop-cron-create',
+              ),
+            ],
+          };
+    });
+  }
   const fakeBaseUrl = fake?.baseUrl;
-  if (durableFailover && fakeBaseUrl === undefined) {
+  if ((durableFailover || loopSkill) && fakeBaseUrl === undefined) {
     throw new Error('Fake model server did not start');
   }
 
@@ -3052,6 +3150,12 @@ try {
           : {}),
         QWEN_MANAGED_AGENT_TRUSTED_ACTOR_HEADER: trustedActorHeader,
         QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED: 'true',
+        ...(loopSkill
+          ? {
+              QWEN_MANAGED_AGENT_DEFINITION_TOOL_PROFILES:
+                'hosted-workspace-files/4',
+            }
+          : {}),
         ...(commandRewriteRecovery
           ? commandRewriteSpringEnvironment(
               commandRewriteCgroupRoot!,
@@ -3208,7 +3312,7 @@ try {
         QWEN_CODE_TRUSTED_FOLDERS_PATH: trustedFolders,
         QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST: capabilityDigest,
         QWEN_SERVER_TOKEN: harnessToken,
-        ...(durableFailover
+        ...(durableFailover || loopSkill
           ? {
               OPENAI_API_KEY: 'fake-key',
               OPENAI_BASE_URL: fakeBaseUrl,
@@ -3237,6 +3341,167 @@ try {
     60_000,
     harness,
   );
+
+  if (loopSkill) {
+    // The managed /loop skill model-turn arm. A creator-bearing definition
+    // (files/4) makes the Java admission inject the committed cron loop sidecar
+    // into the Session catalog; the client-initiated skill call loads that body
+    // before the model's first round, and the scripted model drives the real
+    // cron tools (create -> list -> clear). The model is fake, but the skill
+    // loading and tool execution run through the full managed pipeline.
+    const definitionResponse = await fetch(`${springUrl}/v1/agents`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': `loop-skill-definition-${Date.now()}`,
+        ...tenantHeaders(tenant),
+      },
+      body: JSON.stringify({
+        model: {},
+        instructions: '',
+        tools: [
+          { type: 'hosted_profile', profile: 'hosted-workspace-files/4' },
+        ],
+        permission_policy: {},
+      }),
+    });
+    if (definitionResponse.status !== 202) {
+      throw new Error(
+        `Loop skill definition create returned ${definitionResponse.status}: ${await definitionResponse.text()}`,
+      );
+    }
+    const definition = (await definitionResponse.json()) as { id: string };
+    const loopCreate = await fetch(`${springUrl}/v1/agents/sessions`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'idempotency-key': `loop-skill-create-${Date.now()}`,
+        ...tenantHeaders(tenant),
+      },
+      body: JSON.stringify({
+        agent_id: definition.id,
+        input: [{ type: 'text', text: '/loop 5m check the deploy' }],
+        workspace: { workspace_id: boundWorkspaceId },
+        metadata: { title: 'Managed /loop skill model-turn E2E' },
+      }),
+    });
+    if (loopCreate.status !== 202) {
+      throw new Error(
+        `Loop skill Session create returned ${loopCreate.status}: ${await loopCreate.text()}`,
+      );
+    }
+    const loopSession = (await loopCreate.json()) as { id: string };
+    const created = await waitForTerminal(
+      springUrl,
+      tenant,
+      loopSession.id,
+      0,
+      harness,
+      120_000,
+    );
+    const sendLoopInput = async (text: string, after: number) => {
+      const response = await fetch(
+        `${springUrl}/v1/agents/sessions/${loopSession.id}/events`,
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'idempotency-key': `loop-skill-${text.replace(/\W+/g, '-')}-${Date.now()}`,
+            ...tenantHeaders(tenant),
+          },
+          body: JSON.stringify({
+            type: 'agent.session.input.message',
+            input: [{ type: 'text', text }],
+          }),
+        },
+      );
+      if (response.status !== 202) {
+        throw new Error(
+          `Loop skill input returned ${response.status}: ${await response.text()}`,
+        );
+      }
+      return waitForTerminal(
+        springUrl,
+        tenant,
+        loopSession.id,
+        after,
+        harness,
+        120_000,
+      );
+    };
+    const listed = await sendLoopInput('/loop list', created.lastSequence);
+    await sendLoopInput('/loop clear', listed.lastSequence);
+
+    // The model received the Managed loop body (not the local bundled wording)
+    // and drove the real cron tools; each tool's result reached a later round.
+    const loopRequests = (fake?.requests ?? []).filter(
+      (request) => request.body['stream'] === true,
+    );
+    const loopMessages = JSON.stringify(
+      loopRequests.map((request) => request.body['messages']),
+    );
+    if (!loopMessages.includes('a Managed schedule is always durable')) {
+      throw new Error('Loop skill body never reached the model');
+    }
+    if (loopMessages.includes('defaults to session-only')) {
+      throw new Error(
+        'Model received the local bundled loop body, not the Managed variant',
+      );
+    }
+    // The cron tools are native harness tools (not broker-mediated), so their
+    // execution is witnessed by the tool results reaching the model, not by
+    // ma_tool_execution. Each call id must appear with a tool result, and the
+    // created schedule's prompt must echo back in the cron_list result — proving
+    // create -> list lifecycle, not just that the model emitted the calls.
+    const loopToolResults = loopRequests.flatMap((request) =>
+      (Array.isArray(request.body['messages'])
+        ? request.body['messages']
+        : []
+      ).filter((message) => (message as { role?: string }).role === 'tool'),
+    );
+    for (const callId of [
+      'loop-cron-create',
+      'loop-cron-list',
+      'loop-cron-delete',
+    ]) {
+      if (!loopMessages.includes(callId)) {
+        throw new Error(`Cron tool ${callId} was never called`);
+      }
+      if (
+        !loopToolResults.some((message) =>
+          JSON.stringify(message).includes(callId),
+        )
+      ) {
+        throw new Error(`Cron tool ${callId} produced no tool result`);
+      }
+    }
+    const createResult = loopToolResults.find((message) =>
+      JSON.stringify(message).includes('loop-cron-create'),
+    );
+    const listResult = loopToolResults.find((message) =>
+      JSON.stringify(message).includes('loop-cron-list'),
+    );
+    if (!JSON.stringify(listResult ?? {}).includes('/loop check the deploy')) {
+      throw new Error(
+        `cron_list did not echo the created schedule; create -> list lifecycle not witnessed. createResult=${JSON.stringify(createResult ?? {}).slice(0, 800)} listResult=${JSON.stringify(listResult ?? {}).slice(0, 800)}`,
+      );
+    }
+    resultJson = JSON.stringify(
+      {
+        mode: 'loop-skill',
+        sessionId: loopSession.id,
+        definitionId: definition.id,
+        modelRounds: loopRequests.length,
+        cronToolResults: loopToolResults.length,
+        managedSkillBody: true,
+        cronCreate: true,
+        cronList: true,
+        cronDelete: true,
+      },
+      null,
+      2,
+    );
+  }
 
   if (durableFailover) {
     const createResponse = await fetch(`${springUrl}/v1/agents/sessions`, {
@@ -6736,7 +7001,7 @@ try {
       saveEvidence('summary.json', summary);
       g3SummaryJson = JSON.stringify(summary, null, 2);
     }
-  } else {
+  } else if (!loopSkill) {
     const idempotencyKey = `create-${Date.now()}`;
     const prompt = [
       'Before using any tool, emit the visible text MODEL_READY.',
