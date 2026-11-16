@@ -567,7 +567,8 @@ describe('review regressions', () => {
 
 describe('reply selection range at row edges', () => {
   // A transcript row: the message content body (CSS-module class, as rendered
-  // by AssistantMessage) plus the row chrome (timestamp tip) as a sibling.
+  // by AssistantMessage) plus the row chrome (timestamp tip, marked
+  // data-selection-copy-chrome as rendered by MessageTimestamp) as a sibling.
   // A triple-click selects the whole line but parks the outer boundary on
   // the chrome, outside the body.
   function rowFixture(chromeAfter: boolean) {
@@ -580,6 +581,7 @@ describe('reply selection range at row edges', () => {
     body.append(line);
     const tip = document.createElement('span');
     tip.className = 'tip';
+    tip.setAttribute('data-selection-copy-chrome', '');
     tip.textContent = '12:34';
     row.append(chromeAfter ? body : tip);
     row.append(chromeAfter ? tip : body);
@@ -705,7 +707,8 @@ describe('reply selection range at row edges', () => {
     const firstText = first.line.firstChild! as Text;
     const trailing = document.createRange();
     trailing.setStart(firstText, 0);
-    trailing.setEnd(userAfter.text, 4);
+    const userAfterText = userAfter.text.firstChild! as Text;
+    trailing.setEnd(userAfterText, 4);
     window.getSelection()!.addRange(trailing);
     expect(getReplySelectionRange(first.body)).toBeNull();
     window.getSelection()!.removeAllRanges();
@@ -714,6 +717,37 @@ describe('reply selection range at row edges', () => {
     leading.setEnd(firstText, 4);
     window.getSelection()!.addRange(leading);
     expect(getReplySelectionRange(first.body)).toBeNull();
+  });
+
+  it('rejects a boundary in a content-bearing sibling of the body inside the same row', () => {
+    const { row, body, line } = rowFixture(true);
+    // steps/details block rendered after the body in the same row
+    // (AssistantMessage's AgentMessageDetails): content-bearing, no
+    // contentBody class, no chrome mark
+    const details = document.createElement('div');
+    const step = document.createElement('span');
+    step.textContent = 'Bash ran ok';
+    details.append(step);
+    row.append(details);
+    const text = line.firstChild! as Text;
+    const range = document.createRange();
+    range.setStart(text, 0);
+    range.setEnd(step.firstChild! as Text, 4);
+    window.getSelection()!.addRange(range);
+    expect(getReplySelectionRange(body)).toBeNull();
+  });
+
+  it('rejects a leading boundary in an unmarked author span of the same row', () => {
+    const { row, body, line } = rowFixture(false);
+    const author = document.createElement('span');
+    author.textContent = 'Orion';
+    row.insertBefore(author, row.firstChild);
+    const text = line.firstChild! as Text;
+    const range = document.createRange();
+    range.setStart(author, 0);
+    range.setEnd(text, 4);
+    window.getSelection()!.addRange(range);
+    expect(getReplySelectionRange(body)).toBeNull();
   });
 
   it('rejects boundaries outside the body on the wrong side or collapsed', () => {

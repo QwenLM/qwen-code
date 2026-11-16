@@ -230,14 +230,22 @@ export function MessageTimestamp({
           className={styles.chatActions}
           data-menu-open={menuOpen || undefined}
         >
-          <span className={styles.chatTip} aria-hidden="true">
+          <span
+            className={styles.chatTip}
+            aria-hidden="true"
+            data-selection-copy-chrome
+          >
             {formatTimestamp(timestamp)}
           </span>
           {copyButton}
           {moreActions}
         </span>
       ) : (
-        <span className={styles.tip} aria-hidden="true">
+        <span
+          className={styles.tip}
+          aria-hidden="true"
+          data-selection-copy-chrome
+        >
           {formatTimestamp(timestamp)}
         </span>
       )}
