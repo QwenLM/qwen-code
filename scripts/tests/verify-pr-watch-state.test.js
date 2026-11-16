@@ -24,11 +24,13 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   completeRound,
   duplicateHead,
+  IDENTITY_KEYS,
   readState,
   releaseRound,
   sameCommit,
   startRound,
   statePath,
+  STATE_BEARING_KEYS,
   withStateLock,
 } from '../../scripts/verify-pr-watch-state.mjs';
 import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
@@ -1168,6 +1170,76 @@ describe('readState', () => {
     // A legacy string inFlight head is still migratable.
     writeFileSync(statePath(root, 1), JSON.stringify({ inFlight: HEAD }));
     expect(() => readState(root, 1)).not.toThrow();
+  });
+
+  // R16-2 (residual): an identity key alone must not satisfy the guard. One
+  // identity key plus a misspelled head marker reads as "no state" under the
+  // old STATE_KEYS set and lets --start erase the operator's intended marker.
+  it('refuses an identity-only body even alongside an unknown head spelling', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    // The exact reported shape: pr + startedAt + a misspelled inFlightHead.
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({
+        pr: 1,
+        startedAt: '2026-11-16T00:00:00.000Z',
+        inflightHead: HEAD,
+      }),
+    );
+    expect(() => readState(root, 1)).toThrow(/no recognised state key/);
+    // Each identity key on its own (plus an unknown key) is still refused.
+    for (const key of IDENTITY_KEYS) {
+      writeFileSync(
+        statePath(root, 1),
+        JSON.stringify({ [key]: 'x', weirdHead: HEAD }),
+      );
+      expect(() => readState(root, 1)).toThrow(/no recognised state key/);
+    }
+  });
+
+  // Every state-bearing key alone admits the body: the guard requires one of
+  // these, and every state the helper writes carries at least one.
+  it('admits a body carrying any single state-bearing key', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    for (const key of STATE_BEARING_KEYS) {
+      const value = key === 'inFlight' ? HEAD : [];
+      writeFileSync(
+        statePath(root, 1),
+        JSON.stringify({ pr: 1, [key]: value }),
+      );
+      expect(() => readState(root, 1)).not.toThrow();
+    }
+    // A legitimate written state always reads back.
+    const root2 = makeRoot();
+    startRound(root2, { pr: 1, head: HEAD, round: 11, artifactDir: 'r11' });
+    expect(() => readState(root2, 1)).not.toThrow();
+  });
+
+  // D17-3: the widened legacy migration is bounded. A non-empty string
+  // inFlight/inFlightHead migrates and blocks; an empty string, the old flag,
+  // or an object alone is not a migratable marker and fails closed.
+  it('bounds the legacy inFlight migration to a non-empty string head', () => {
+    const root = makeRoot();
+    mkdirSync(join(root, '.qwen', 'tmp'), { recursive: true });
+    for (const body of [
+      JSON.stringify({ pr: 1, inFlight: '' }),
+      JSON.stringify({ pr: 1, inFlight: true }),
+      JSON.stringify({ pr: 1, inFlight: { head: HEAD } }),
+    ]) {
+      writeFileSync(statePath(root, 1), body);
+      expect(() => readState(root, 1)).toThrow(/no recognised state key/);
+    }
+    // A string inFlight head migrates and blocks a second round on that head.
+    writeFileSync(
+      statePath(root, 1),
+      JSON.stringify({ pr: 1, inFlight: HEAD }),
+    );
+    expect(
+      startRound(root, { pr: 1, head: HEAD, round: 11, artifactDir: 'r11' })
+        .duplicate,
+    ).toBe('in-flight');
   });
 
   it('--start refuses an unknown-key body exit 1 and leaves it byte-identical', () => {

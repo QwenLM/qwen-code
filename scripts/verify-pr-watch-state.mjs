@@ -135,17 +135,21 @@ export function readState(stateRoot, prNumber) {
       `state file ${path} is not a JSON object; inspect or remove it before the next round`,
     );
   }
-  // A well-formed object whose keys are ALL unknown is not a state this
-  // helper can migrate: reading it as "no state" would let --start rewrite
-  // the file from empty lists and erase a live in-flight record (R16-2).
-  // Fail closed on shape, like corrupt JSON, rather than silently reset.
-  // The legacy `inFlight` key counts only as a string head: `inFlight:true`
-  // (the old flag) or `inFlight:{…}` alone is not a migratable marker.
+  // A well-formed object that carries no state-bearing key is not a state
+  // this helper can migrate: reading it as "no state" would let --start
+  // rewrite the file from empty lists and erase a live in-flight record
+  // (R16-2). Identity keys (pr/repo/startedAt/…) name the round but carry no
+  // head, so one identity key plus a misspelled head marker must fail closed
+  // like corrupt JSON, not silently reset. The legacy `inFlight` key counts
+  // only as a non-empty string head: `inFlight:true` (the old flag),
+  // `inFlight:{…}`, or `inFlight:""` alone is not a migratable marker.
   const keys = Object.keys(parsed);
-  const knownPresent = keys.some((key) =>
-    key === 'inFlight' ? typeof parsed[key] === 'string' : STATE_KEYS.has(key),
+  const bearingPresent = keys.some((key) =>
+    key === 'inFlight'
+      ? typeof parsed[key] === 'string' && parsed[key] !== ''
+      : STATE_BEARING_KEYS.has(key),
   );
-  if (keys.length > 0 && !knownPresent) {
+  if (keys.length > 0 && !bearingPresent) {
     throw new Error(
       `state file ${path} has no recognised state key; inspect or remove it before the next round`,
     );
@@ -153,8 +157,11 @@ export function readState(stateRoot, prNumber) {
   return parsed;
 }
 
-/** The state keys the migration ladder recognises (R16-2 shape guard). */
-const STATE_KEYS = new Set([
+/**
+ * Identity keys name the round but carry no migratable head/list/seq state
+ * (R16-2 shape guard). A body holding only these plus unknown keys is refused.
+ */
+export const IDENTITY_KEYS = new Set([
   'pr',
   'repo',
   'round',
@@ -163,6 +170,14 @@ const STATE_KEYS = new Set([
   'completedAt',
   'verdict',
   'commentId',
+]);
+
+/**
+ * State-bearing keys carry the head/list/seq state the migration ladder uses
+ * (R16-2 shape guard). Every state this helper writes carries at least one, so
+ * requiring one never refuses a legitimate state.
+ */
+export const STATE_BEARING_KEYS = new Set([
   'seqCounter',
   'verifiedHeads',
   'verifiedHead',

@@ -1,0 +1,110 @@
+# verify-pr：加固 watch-state 形状守卫、容器 nonce 与 VM 文案
+
+语言：[English](verify-pr-residual-hardening.md) | 中文
+
+跟踪 issue：#17371（#17185 的 land-with-residual-risk 决定与 #17375 第 8 轮接受所
+接受的残余风险）。本改动关闭该清单中三个便宜、自包含的簇：**A**（watch-state 形状
+守卫，R16-2 / D17-3）、**B**（容器 nonce 完整性，R16-1 / D17-1 / D17-2）、**C**
+（VM 文案矛盾，R16-4）。核心信任边界（宿主持有的权威 `--context` 快照 + sha256 内容
+绑定）已在 #17375 落地，本改动不触碰。
+
+## 问题陈述与现状
+
+### A —— watch-state 形状守卫被纯身份键满足
+
+`readState`（`scripts/verify-pr-watch-state.mjs`）对「键全未知」的良构对象 fail
+closed，使手写正文不会被读作「无状态」而让 `--start` 从空列表重写文件。但已知集合
+`STATE_KEYS` 把**身份**键（`pr`、`repo`、`round`、`artifactDir`、`startedAt`、
+`completedAt`、`verdict`、`commentId`）与**承载状态**键（`inFlightHeads`、
+`verifiedHeads`、`seqCounter`……）混在一起。形如
+`{"pr":1,"startedAt":"…","inflightHead":"abc"}`（一个身份键加一个拼错的 head 标记）
+的正文即可满足守卫、产出无可迁移的在飞 head，随后 `--start` 重置文件——抹掉操作者
+本想用该拼错标记阻挡的内容。这是 R16-2；D17-3 是同簇 `inFlightEntries` 加宽的遗留
+迁移（接受字符串 `inFlight` head）。
+
+本助手写出的每个状态都带承载状态键：`startRound` 与 `completeRound` 总是产出
+`inFlightHeads`、`verifiedHeads`、`deferredHeads`、`releasedHeads`、`retiredSeqs`、
+`seqCounter`，`deriveView` 再补派生的 `verifiedHead` / `previousHead` /
+`inFlightHead` / `inFlight`。因此要求一个承载状态键绝不会拒掉合法状态。
+
+### B —— 容器 nonce 明文随 PR 可写的 gate 记录一起落盘
+
+`requireBoundary`（`scripts/verify-pr-prepare.mjs`）把每轮 nonce 写到容器本地
+`$HOME/.qwen-verify-nonce`，**并**把同一明文存进 `boundary-gate.json`（`nonce`）。
+产物树是 PR 可写的，所以在宿主上跑的电池可以把明文从记录里抄进日志、伪造
+`mode:"container"`，根本不必读容器本地文件。step-7 的 shell 配方*从那份同一 PR 可写
+记录*取出期望 nonce 再在轮目录里 grep 它，判据来源由攻击者提供：该检查佐证的是「某个
+值被抄进了日志」，而非「电池跑在容器内」（R16-1）。D17-1 是 step 7 为判据读取 PR 可写
+记录；D17-2 是拒绝文案里的逃生口措辞。
+
+记录自身的正文已承认它「不是对抗同时伪造记录与日志的轮的证明」。它*应当*关闭的威胁
+是事故形状：操作者在宿主上跑了轮、跳过了容器门禁。
+
+### C —— VM 文案与 VM 条目矛盾
+
+preflight 段（`.qwen/skills/verify-pr/SKILL.md`，约 280 行）在紧接着为容器路径规定
+`--require-isolation --artifact-dir <round-dir>` 之后说「a VM boundary runs the
+same file from the trusted checkout instead」。其上方的 VM 条目（约 208 行）明说
+VM 路径**不跑** `--require-isolation` 门禁。这句未限定的话可能把 VM 操作者推向跑容器
+门禁（R16-4）。
+
+## 提议改动
+
+### A —— 要求承载状态键（fail closed）
+
+把 `STATE_KEYS` 拆成 `IDENTITY_KEYS` 与 `STATE_BEARING_KEYS`。形状守卫仅在至少一个
+**承载状态**键存在时才接纳正文（遗留 `inFlight` 键仍只按非空字符串 head 计）。纯身份
+键不再满足守卫，于是「身份键 + 未识别 head 拼写」像损坏 JSON 一样 fail closed。
+`STATE_BEARING_KEYS` = `inFlightHeads`、`inFlightHead`、`inFlight`、`verifiedHeads`、
+`verifiedHead`、`previousHead`、`deferredHeads`、`releasedHeads`、`retiredSeqs`、
+`seqCounter`。`IDENTITY_KEYS` = `pr`、`repo`、`round`、`artifactDir`、`startedAt`、
+`completedAt`、`verdict`、`commentId`。迁移梯（`inFlightEntries`、`verifiedEntries`
+……）不变；D17-3 由钉住其边界的见证关闭（字符串 `inFlight`/`inFlightHead` 可迁移并
+阻挡；`inFlight:true` 或单独对象不行）。
+
+### B —— 记录只存 nonce 哈希；佐证由 checker 强制
+
+- `requireBoundary` 在记录里存 `nonceSha256`（明文的 sha256）而非明文 `nonce`。明文
+  只写到容器本地 `$HOME/.qwen-verify-nonce`。宿主电池无法从哈希还原明文，因此产不出
+  匹配的日志行。
+- `verify-pr-check.mjs` 成为权威强制点：对 `mode:"container"` 声明，要求
+  `gate.nonceSha256`（64 位十六进制串）**且**轮日志里有一行 `container-nonce:
+<value>`，其值的 sha256 等于它。扫描遍历轮目录，跳过 `boundary.json` /
+  `boundary-gate.json` 与非常规文件，并对每个文件读取设上限。哈希缺失/不匹配或无匹配
+  行即拒绝容器声明。
+- 移除 step-7 的 shell nonce grep（改由 checker 强制）；step-5 与 boundary-gate 正文
+  说明记录携带哈希、绝不携带明文，电池须*echo* 一行从容器本地文件读出的
+  `container-nonce:`。
+- D17-2：拒绝文案明确 `mode:"waived"` 需要维护者批准——不是免费绕过。
+
+这在关闭宿主抄录路径的同时保持已承认的边界诚实：同时伪造记录哈希与匹配日志行的轮仍
+在范围外（记录佐证的是跳过门禁的操作者，而非同时伪造两者的 PR 代码）。
+
+### C —— 限定 VM 句
+
+把 preflight 句改写为「a VM boundary runs the same file from the trusted checkout
+**without the `--require-isolation` gate** instead」，与 VM 条目一致。
+
+## 涉及文件
+
+- `scripts/verify-pr-watch-state.mjs` —— 拆分键集合；收紧形状守卫。
+- `scripts/verify-pr-prepare.mjs` —— 记录 `nonceSha256`，去掉明文 `nonce`。
+- `scripts/verify-pr-check.mjs` —— 容器声明的 nonce 哈希 + 日志行佐证。
+- `.qwen/skills/verify-pr/SKILL.md` —— step-5/step-7 nonce 正文、VM 句。
+- `scripts/tests/verify-pr-watch-state.test.js` —— 纯身份 fail-closed + 逐承载键
+  接纳 + 迁移边界见证。
+- `scripts/tests/verify-pr-prepare.test.js` —— 记录携带哈希、无明文；哈希与容器本地
+  文件一致。
+- `scripts/tests/verify-pr-check.test.js` —— 匹配行接纳；哈希/行缺失或不匹配拒绝。
+- `scripts/tests/qwen-triage-workflow.test.js` —— step-5/step-7 原始 skill 钉。
+
+## 范围边界
+
+- 簇 D（R17-2 活性）、E（R8 长尾）、F（D17-4…14）仍由 #17371 跟踪；本改动不触碰。
+- 核心 `--context` 信任边界与 sha256 内容绑定（#17375）不变。
+- 不新增脚本或 CLI 面；nonce 检查从 shell 移入既有 checker，而非新入口。
+
+## 待决问题
+
+- 无阻塞项。nonce 强制位置（checker vs shell）已决定取 checker，以获得可测试、可见证
+  的强制；shell 配方仅保留 `container-nonce:` echo 指示。
