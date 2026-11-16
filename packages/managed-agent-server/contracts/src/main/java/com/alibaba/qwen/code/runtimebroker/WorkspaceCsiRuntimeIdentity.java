@@ -8,6 +8,8 @@ import com.fasterxml.jackson.databind.SerializationFeature;
 import org.apache.commons.codec.digest.DigestUtils;
 
 import java.net.URI;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -128,7 +130,7 @@ public final class WorkspaceCsiRuntimeIdentity {
             require(value.get("artifacts") instanceof List<?>);
             var artifacts = (List<?>) value.get("artifacts");
             require(artifacts.size() <= 48);
-            var names = new java.util.HashSet<String>();
+            var names = new HashSet<String>();
             for (Object item : artifacts) {
                 var artifact = map(item);
                 require(artifact.keySet().equals(Set.of("configMapName", "uid", "sha256")));
@@ -203,7 +205,7 @@ public final class WorkspaceCsiRuntimeIdentity {
     }
 
     public static boolean same(Object first, Object second) {
-        return java.util.Arrays.equals(bytes(first), bytes(second));
+        return Arrays.equals(bytes(first), bytes(second));
     }
 
     @SuppressWarnings("unchecked")

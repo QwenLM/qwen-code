@@ -1,10 +1,13 @@
 // @vitest-environment jsdom
 
-import { act } from 'react';
+import { act, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
-import { ManagedQuestionForm } from './ManagedQuestionForm';
+import {
+  ManagedQuestionForm,
+  type ManagedQuestionDraft,
+} from './ManagedQuestionForm';
 import { pendingQuestion } from './managed-question.test-fixtures';
 
 let root: Root;
@@ -26,14 +29,34 @@ afterEach(async () => {
   vi.useRealTimers();
 });
 
+function ControlledForm({ disabled }: { disabled: boolean }) {
+  const [draft, setDraft] = useState<ManagedQuestionDraft>({});
+  const [submitting, setSubmitting] = useState(false);
+  return (
+    <ManagedQuestionForm
+      action={action}
+      draft={draft}
+      onDraftChange={setDraft}
+      submitting={submitting}
+      onSubmit={async (response) => {
+        setSubmitting(true);
+        try {
+          await onSubmit(response);
+        } finally {
+          setSubmitting(false);
+        }
+      }}
+      disabled={disabled}
+    />
+  );
+}
+
 async function render(disabled = false) {
   await act(async () =>
     root.render(
       <I18nProvider language="en">
-        <ManagedQuestionForm
+        <ControlledForm
           key={`${action.actionId}:${action.inputRevision}`}
-          action={action}
-          onSubmit={onSubmit}
           disabled={disabled}
         />
       </I18nProvider>,

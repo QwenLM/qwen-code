@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ArrowLeftIcon, PlusIcon, RefreshCwIcon } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { Button } from '../ui/button';
@@ -37,12 +37,19 @@ import {
   managedRequestId,
 } from './managed-session-storage';
 import { useManagedMcpManagement } from './use-managed-mcp-management';
+import { ManagedExtensionInstaller } from './ManagedExtensionInstaller';
+import type {
+  ManagedExtensionCatalog,
+  ManagedExtensionInspection,
+  ManagedExtensionSnapshot,
+} from './managed-extension-types';
 
 export interface ManagedMcpManagerPageProps {
   provider: ManagedAgentProvider;
   sessionId?: string;
   workspaceId?: string;
   onClose?: () => void;
+  onOpenExtensions?: () => void;
 }
 
 function pinKey(pin: ManagedMcpServerPin) {
@@ -171,6 +178,7 @@ function ManagedMcpManagerContent({
   sessionId,
   workspaceId,
   onClose,
+  onOpenExtensions,
 }: ManagedMcpManagerPageProps & { clientId: string }) {
   const { t } = useI18n();
   const management = useManagedMcpManagement(
@@ -184,6 +192,38 @@ function ManagedMcpManagerContent({
     action: 'add' | 'edit';
     serverId?: string;
   }>();
+  const [packages, setPackages] = useState<{
+    catalog: ManagedExtensionCatalog;
+    snapshot: ManagedExtensionSnapshot;
+  }>();
+  const [showInstaller, setShowInstaller] = useState(false);
+  const [packageEditor, setPackageEditor] = useState<{
+    extensionId: string;
+    inspection: ManagedExtensionInspection;
+  }>();
+  const [packageError, setPackageError] = useState(false);
+  const [unopenableExtensionIds, setUnopenableExtensionIds] = useState<
+    string[]
+  >([]);
+  const loadPackages = useCallback(
+    async (signal?: AbortSignal) => {
+      if (!provider.extensions || !workspaceId || !sessionId) return;
+      const [catalog, snapshot] = await Promise.all([
+        provider.extensions.list(workspaceId, { clientId, signal }),
+        provider.extensions.query(sessionId, { clientId, signal }),
+      ]);
+      if (!signal?.aborted) setPackages({ catalog, snapshot });
+    },
+    [provider, workspaceId, sessionId, clientId],
+  );
+  useEffect(() => {
+    const abort = new AbortController();
+    setUnopenableExtensionIds([]);
+    void loadPackages(abort.signal).catch(() => {
+      if (!abort.signal.aborted) setPackageError(true);
+    });
+    return () => abort.abort();
+  }, [loadPackages]);
   const snapshot = management.snapshot;
   const server = snapshot?.servers.find(
     (entry) => entry.serverId === selectedServer,
@@ -191,6 +231,57 @@ function ManagedMcpManagerContent({
   const catalog = management.catalog?.servers.find(
     (entry) => entry.server_id === selectedServer,
   );
+  const owned =
+    server &&
+    packages?.snapshot.extensions.find((pin) =>
+      server.serverId.startsWith(`${pin.extensionId}:`),
+    );
+  const openPackage = async (extensionId: string) => {
+    const reject = () => {
+      setUnopenableExtensionIds((current) =>
+        current.includes(extensionId) ? current : [...current, extensionId],
+      );
+      setPackageError(true);
+    };
+    if (!provider.extensions?.inspect || !workspaceId) {
+      reject();
+      return;
+    }
+    const pin =
+      packages?.snapshot.extensions.find(
+        (entry) => entry.extensionId === extensionId,
+      ) ??
+      packages?.catalog.extensions.find(
+        (entry) => entry.pin.extensionId === extensionId,
+      )?.pin;
+    if (!pin) {
+      reject();
+      return;
+    }
+    setPackageError(false);
+    try {
+      const inspection = await provider.extensions.inspect(workspaceId, pin, {
+        clientId,
+      });
+      if (
+        inspection.mcpServers.length !== 1 ||
+        inspection.manifest.components.some(
+          (component) => !['mcp', 'settings'].includes(component),
+        )
+      ) {
+        if (onOpenExtensions) onOpenExtensions();
+        else reject();
+        return;
+      }
+      setUnopenableExtensionIds((current) =>
+        current.filter((candidate) => candidate !== extensionId),
+      );
+      setPackageEditor({ extensionId, inspection });
+      setShowInstaller(true);
+    } catch {
+      reject();
+    }
+  };
   const disabled =
     management.busy || management.needsRetry || !snapshot?.supported;
   const operation = snapshot?.operation;
@@ -215,6 +306,21 @@ function ManagedMcpManagerContent({
     }
     return t(`managed.mcp.state.${entry.state}`);
   };
+  const canInstallPackages = Boolean(
+    packages?.catalog.selfService?.canPublish &&
+      packages.snapshot.selfService?.canApply &&
+      provider.extensions?.importPackage &&
+      provider.extensions.previewPackage &&
+      provider.extensions.lookupPackageOperation &&
+      provider.extensions.lookupApplyOperation &&
+      workspaceId &&
+      sessionId,
+  );
+  const canEditPackage = canInstallPackages && !!provider.extensions?.inspect;
+  const canOpenOwnedPackage =
+    owned &&
+    canEditPackage &&
+    !unopenableExtensionIds.includes(owned.extensionId);
 
   return (
     <div className="flex min-w-0 flex-col gap-5 pb-6" data-managed-mcp-manager>
@@ -256,6 +362,69 @@ function ManagedMcpManagerContent({
           </div>
         )}
       </div>
+      {canInstallPackages && packages && workspaceId && sessionId && (
+        <div className="grid gap-3">
+          <Button
+            variant="outline"
+            onClick={() => {
+              setPackageEditor(undefined);
+              setShowInstaller((old) => !old);
+            }}
+          >
+            {t('managed.install.createMcp')}
+          </Button>
+          {showInstaller && (
+            <ManagedExtensionInstaller
+              key={packageEditor?.extensionId ?? 'new'}
+              provider={provider}
+              workspaceId={workspaceId}
+              sessionId={sessionId}
+              catalog={packages.catalog}
+              snapshot={packages.snapshot}
+              initialKind="mcp"
+              editing={packageEditor}
+              onExitEdit={() => setPackageEditor(undefined)}
+              onChanged={() => {
+                void loadPackages().catch(() => setPackageError(true));
+                void management.refresh();
+              }}
+            />
+          )}
+          {packages.catalog.extensions
+            .filter((entry) => entry.manifest.components.includes('mcp'))
+            .map((entry) => (
+              <div
+                key={entry.pin.extensionId}
+                className="flex flex-wrap items-center gap-2 rounded-md border p-3 text-sm"
+              >
+                <span>{entry.manifest.name}</span>
+                <Badge variant="outline">
+                  {t('managed.install.packageSource')}
+                </Badge>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => void openPackage(entry.pin.extensionId)}
+                >
+                  {t('managed.install.editMcp')}
+                </Button>
+              </div>
+            ))}
+        </div>
+      )}
+      {packageError && (
+        <Alert variant="destructive">
+          <AlertDescription>
+            {t('managed.install.packageEditUnavailable')}
+            {onOpenExtensions && (
+              <Button variant="outline" onClick={onOpenExtensions}>
+                {t('managed.extensions.title')}
+              </Button>
+            )}
+          </AlertDescription>
+        </Alert>
+      )}
+
       {!sessionId ? (
         <p role="status">{t('managed.mcp.selectSession')}</p>
       ) : !workspaceId ? (
@@ -335,7 +504,20 @@ function ManagedMcpManagerContent({
                 <code className="break-all text-xs text-muted-foreground">
                   {server.definitionDigest}
                 </code>
-                {server.state !== 'removed' && (
+                {canOpenOwnedPackage && (
+                  <div className="grid gap-2">
+                    <p className="text-sm text-muted-foreground">
+                      {t('managed.install.ownedMcp')}
+                    </p>
+                    <Button
+                      variant="outline"
+                      onClick={() => void openPackage(owned.extensionId)}
+                    >
+                      {t('managed.install.editMcp')}
+                    </Button>
+                  </div>
+                )}
+                {server.state !== 'removed' && !canOpenOwnedPackage && (
                   <div className="flex flex-wrap gap-2">
                     <Button
                       variant="outline"

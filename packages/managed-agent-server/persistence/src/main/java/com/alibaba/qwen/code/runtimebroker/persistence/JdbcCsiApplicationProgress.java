@@ -12,6 +12,8 @@ import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.time.Instant;
 
+import static com.alibaba.qwen.code.runtimebroker.persistence.JdbcRepositorySupport.statement;
+
 public final class JdbcCsiApplicationProgress {
     private JdbcCsiApplicationProgress() {
     }
@@ -95,7 +97,7 @@ public final class JdbcCsiApplicationProgress {
             throws SQLException {
         String physicalKey;
         long registrationRevision;
-        String alias = JdbcRuntimeBindingRepository.storageAliasKey(original.request().getScope().getTenantId(), original.request().getStorageId());
+        String alias = RuntimeAdmissionFences.storageAliasKey(original.request().getScope().getTenantId(), original.request().getStorageId());
         try (PreparedStatement statement = statement(connection,
                 "SELECT tenant_id, storage_id, physical_key, registration_revision"
                         + " FROM ma_storage WHERE alias_key = ? AND storage_kind = 'CSI' AND registration_state = 'REGISTERED' FOR UPDATE")) {
@@ -126,12 +128,6 @@ public final class JdbcCsiApplicationProgress {
                         && original.generation() == row.getLong("runtime_generation") && !row.next());
             }
         }
-    }
-
-    private static PreparedStatement statement(Connection connection, String sql) throws SQLException {
-        PreparedStatement statement = connection.prepareStatement(sql);
-        statement.setQueryTimeout(10);
-        return statement;
     }
 
     private static void require(boolean condition) {

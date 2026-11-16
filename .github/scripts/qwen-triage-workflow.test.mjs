@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -17,9 +18,9 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import { after, before, describe, it } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parse } from 'yaml';
 
 const workflowPath = join(
@@ -60,6 +61,25 @@ const publisherPath = join(
   dirname(fileURLToPath(import.meta.url)),
   'triage-publish.mjs',
 );
+const scriptsDir = dirname(fileURLToPath(import.meta.url));
+const repoRoot = join(scriptsDir, '..', '..');
+// The sparse-checkout list is the pool job's entire world: it carries no
+// node_modules, so anything the publisher needs must be listed. Read the
+// list once; the guard below materializes exactly it and loads the module.
+const sparseCheckoutEntries = () => {
+  const checkout = publishTriageJob.steps.find((s) => /^Checkout/.test(s.name));
+  assert.ok(checkout, 'publish-triage must checkout its scripts');
+  assert.equal(
+    checkout.with['sparse-checkout-cone-mode'],
+    false,
+    'the sparse list is a set of exact paths, not cone-mode directories',
+  );
+  return String(checkout.with['sparse-checkout'])
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .sort();
+};
 // The triage agent is a direct CLI launch now; its settings travel as the
 // heredoc the host writes into the fresh per-run QWEN_HOME. Extract and parse
 // them the same way the runtime will read them.
@@ -771,6 +791,83 @@ describe('qwen-triage: runner routing under token isolation', () => {
     assert.doesNotMatch(authorizeRunsOn, /needs\./);
   });
 
+  it('routes the payload-less command triggers to ECS and keeps the gate hardened', () => {
+    // Same fix as qwen-code-pr-review.yml's authorize: issue_comment
+    // (/triage, /tmux, /verify) and workflow_dispatch carry no
+    // github.event.pull_request payload, so the same-repo guard alone fell
+    // through to ubuntu-latest for every command. Route them to the pool,
+    // keeping the hosted fallback and the kill switch.
+    // Exact pin, not substrings: a regrouping that defeats the repo guard or
+    // the kill switch must red this, like the review-workflow gate pin.
+    assert.equal(
+      authorizeRunsOn,
+      "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && ((github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) || github.event_name == 'issue_comment' || github.event_name == 'workflow_dispatch')) && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}",
+    );
+    // The gate stays checkout-free and splices no event value into a shell
+    // (everything arrives through env:). Pin the step inventory too, so a new
+    // step cannot be added unnoticed.
+    assert.deepEqual(
+      authorizeJob.steps.map((s) => s.name),
+      [
+        'Sanitize the triage budget',
+        'Check principal write permission',
+        'Acknowledge verify request',
+        'Report disabled verify lane',
+      ],
+    );
+    assert.ok(authorizeJob.steps.every((s) => s.uses === undefined));
+    for (const s of authorizeJob.steps) {
+      assert.ok(
+        !String(s.run ?? '').includes('${{'),
+        `step splices an expression into the shell: ${s.name}`,
+      );
+      // No step may execute repository code: on the pool the cwd is the
+      // reused $GITHUB_WORKSPACE, which other lanes fill with contributor
+      // files. This holds for EVERY step, not just the PAT-bearing ones —
+      // even a credential-free step that runs a planted file leaves a
+      // survivor on the persistent host. Evaluate the live
+      // (comment-stripped) lines so a commented-out example cannot red
+      // this, and a live execution line cannot hide behind a comment.
+      const live = String(s.run ?? '')
+        .split('\n')
+        .filter((l) => !l.trim().startsWith('#'))
+        .join('\n');
+      assert.doesNotMatch(live, /(^|[\s;&|(`'"])(\.{1,2}\/)/m, s.name);
+      assert.doesNotMatch(
+        live,
+        /(^|[\s;&|(`])(?:[^\s;&|()`'"]*\/)?(source|bash|sh|node|python[0-9.]*|npx|npm|pnpm|yarn)(\s|$)/m,
+        s.name,
+      );
+    }
+    // Every step that spends CI_BOT_PAT on gh pins gh's config resolution
+    // (GH_HOST + a private, guarded GH_CONFIG_DIR), like the sibling pool
+    // jobs; a planted shared ~/.config/gh must not receive the PAT.
+    // Identify PAT-spending steps by the credential in their env, not by the
+    // spelling of a gh subcommand, so a differently-spelled gh call cannot
+    // slip past the hardening check.
+    const ghSteps = authorizeJob.steps.filter((s) => s.env && s.env.GH_TOKEN);
+    assert.ok(ghSteps.length >= 1, 'expected at least one PAT-bearing step');
+    const guard =
+      'if ! GH_CONFIG_DIR="$(mktemp -d "${RUNNER_TEMP}/triage-authorize-gh-config.XXXXXX")"; then';
+    for (const s of ghSteps) {
+      // Evaluate the live (comment-stripped) lines, not mere substrings: an
+      // unguarded mktemp one-liner or a preamble moved below the first gh
+      // call must red this. (The no-repository-code invariant above covers
+      // every step, including this one.)
+      const live = String(s.run)
+        .split('\n')
+        .filter((l) => !l.trim().startsWith('#'))
+        .join('\n');
+      assert.ok(live.includes('export GH_HOST=github.com'), s.name);
+      assert.ok(live.includes(guard), s.name);
+      assert.match(live, /exit 1\n\s*fi\n\s*export GH_CONFIG_DIR\n/, s.name);
+      const firstGh = live.search(/gh (api|pr) /);
+      assert.ok(firstGh > -1, s.name);
+      assert.ok(live.indexOf('export GH_HOST=github.com') < firstGh, s.name);
+      assert.ok(live.indexOf(guard) < firstGh, s.name);
+    }
+  });
+
   it('retires author_can_write (its only consumer was triage routing)', () => {
     assert.equal(authorizeJob.outputs.author_can_write, undefined);
     const perm = authorizeJob.steps.find((s) => s.id === 'perm');
@@ -928,6 +1025,135 @@ describe('qwen-triage: token isolation contract', () => {
     assert.ok(
       !steps.some((s) => s.name === 'Notify silent triage re-run'),
       'notify must not remain in the agent job',
+    );
+  });
+
+  it('restores workspace ownership with the full fallback chain', () => {
+    // The header names TWO workspace controls for this job; the .git reset
+    // is pinned by qwen-runner-checkout-workflow.test.js, and this pins the
+    // other one. Without the sudo fallback a root-owned .git on the pool
+    // survives the restore, the reset step then dies, and the job never
+    // reaches the drafts download — silently.
+    const restore = publishTriageJob.steps.find(
+      (s) => s.name === 'Restore workspace ownership',
+    );
+    assertUnconditional(
+      publishTriageJob.steps,
+      restore,
+      'qwen-triage publish-triage',
+    );
+    // assertUnconditional anchors the sudo CHOWN arm but matches chmod
+    // unanchored, so the non-sudo chmod alone satisfies it. Pin the sudo
+    // chmod arm here rather than in the shared helper (five other call
+    // sites): without it a root-owned workspace fails the plain chmod,
+    // the download step's continue-on-error swallows it, and the publish
+    // step exits 0 on "nothing to publish" — drafts silently never land.
+    assert.match(
+      restore.run,
+      /sudo -n chmod -R u\+rwX "\$GITHUB_WORKSPACE"/,
+      'publish-triage must keep the sudo chmod fallback that recovers root-owned files',
+    );
+  });
+});
+
+describe('qwen-triage: the sparse checkout is exactly what the publisher needs', () => {
+  // No model of JS syntax here. The pool job checks out ONLY the sparse list
+  // into a workspace with no node_modules, so the guard recreates that world
+  // and loads the publisher in it: a bare specifier, a wrapped import of any
+  // length, an out-of-tree helper, and a helper missing from the list all
+  // fail the load with ERR_MODULE_NOT_FOUND — the job's actual failure mode.
+  // A regex scanner previously stood in for this and kept finding new holes
+  // (statement layout, length bounds, prose that looks like an import).
+  const entryPath = '/.github/scripts/triage-publish.mjs';
+
+  // A node_modules anywhere above the temp tree would silently satisfy a
+  // bare specifier and make the sufficiency check falsely green.
+  const assertNoResolvableModules = (root) => {
+    for (let dir = root; ; dir = dirname(dir)) {
+      assert.ok(
+        !existsSync(join(dir, 'node_modules')),
+        `${join(dir, 'node_modules')} exists above the isolated tree; the sparse-checkout guard cannot prove bare-specifier freedom here`,
+      );
+      if (dirname(dir) === dir) break;
+    }
+  };
+
+  const withSparseTree = async (entries, body) => {
+    const root = mkdtempSync(join(tmpdir(), 'qwen-sparse-'));
+    try {
+      assertNoResolvableModules(root);
+      for (const entry of entries) {
+        const from = join(repoRoot, entry);
+        assert.ok(
+          existsSync(from),
+          `sparse-checkout entry ${entry} does not exist in the repository`,
+        );
+        const to = join(root, entry);
+        mkdirSync(dirname(to), { recursive: true });
+        copyFileSync(from, to);
+      }
+      // Each tree gets a unique URL, so the ESM cache never serves a
+      // previous case's module.
+      return await body(pathToFileURL(join(root, entryPath)).href);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  };
+
+  it('loads the publisher with exactly the sparse set and nothing else', async () => {
+    const entries = sparseCheckoutEntries();
+    assert.ok(entries.includes(entryPath), 'the publisher must be listed');
+    await withSparseTree(entries, async (url) => {
+      await assert.doesNotReject(
+        import(url),
+        /ERR_MODULE_NOT_FOUND|ERR_UNSUPPORTED/,
+        'the sparse checkout must be sufficient to load the publisher: the pool workspace has no node_modules, so a bare specifier or an unlisted helper dies here',
+      );
+    });
+  });
+
+  it('every sparse entry is load-bearing', async () => {
+    const entries = sparseCheckoutEntries();
+    // The owner policy is read at call time, not import time; its necessity
+    // is pinned by the resolved-path test below instead.
+    const modules = entries.filter((entry) => entry.endsWith('.mjs'));
+    assert.ok(modules.length >= 2, 'expected the publisher and its helper');
+    for (const omitted of modules) {
+      await withSparseTree(
+        entries.filter((entry) => entry !== omitted),
+        async (url) => {
+          await assert.rejects(
+            import(url),
+            /ERR_MODULE_NOT_FOUND/,
+            `${omitted} is listed in the sparse checkout but the publisher loads without it; drop the stale entry`,
+          );
+        },
+      );
+    }
+  });
+
+  it('carries the owner policy at the path the publisher resolves', async () => {
+    // Tie the two together instead of hard-coding the expected entry: read
+    // the URL literal the publisher resolves against its own module URL,
+    // resolve it the same way, and require that exact path in the list.
+    const src = readFileSync(publisherPath, 'utf8');
+    const literals = [
+      ...src.matchAll(/new URL\(\s*'([^']+)'\s*,\s*import\.meta\.url\s*\)/g),
+    ]
+      .map((m) => m[1])
+      .filter((spec) => spec.endsWith('.json'));
+    assert.equal(
+      literals.length,
+      1,
+      'expected exactly one owner-policy URL literal in the publisher',
+    );
+    const resolved = fileURLToPath(
+      new URL(literals[0], pathToFileURL(publisherPath)),
+    );
+    const repoRelative = `/${relative(repoRoot, resolved).split(sep).join('/')}`;
+    assert.ok(
+      sparseCheckoutEntries().includes(repoRelative),
+      `the sparse checkout must carry the owner policy the publisher resolves (${repoRelative})`,
     );
   });
 });
@@ -2884,12 +3110,13 @@ describe('qwen-triage: flakiness gate (#9125)', () => {
     // agent 120m + install/build 15m + gate ~40m (the 15m round budget is
     // checked BEFORE each reset, so the last invocation drags its reset
     // plus its -k 30 600 cap; add the OID pin and the post-gate reset)
-    // + misc ~5m + java toolchain/repo/modules ≤ ~20m (Java diffs only,
-    // each download and mvn install capped) ≈ 200m — the job limit must
-    // stay comfortably above the sum or the container is killed mid-run
-    // and the ship-what-ran path is bypassed (see the budget comment).
+    // + misc ~5m + deepen history ≤ 3m + java toolchain/repo/modules
+    // ≤ ~20m (Java diffs only, each download and mvn install capped)
+    // ≈ 203m — the job limit must stay comfortably above the sum or the
+    // container is killed mid-run and the ship-what-ran path is bypassed
+    // (see the budget comment).
     assert.ok(
-      verifyJob['timeout-minutes'] >= 210,
+      verifyJob['timeout-minutes'] >= 213,
       `timeout-minutes must cover the gate budget (got ${verifyJob['timeout-minutes']})`,
     );
   });

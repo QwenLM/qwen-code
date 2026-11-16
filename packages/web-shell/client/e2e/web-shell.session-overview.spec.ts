@@ -352,6 +352,73 @@ test('reopened details yield focus when another title replaces them @smoke', asy
   ).toBeFocused();
 });
 
+for (const footerPosition of ['static', 'sticky'] as const) {
+  test(`keeps footer Archive clickable when canceling a rename with a ${footerPosition} footer @smoke`, async ({
+    page,
+  }) => {
+    await page.setViewportSize({
+      width: 1440,
+      height: footerPosition === 'sticky' ? 420 : 1000,
+    });
+    const renameRequests: string[] = [];
+    page.on('request', (request) => {
+      if (
+        request.method() === 'PATCH' &&
+        new URL(request.url()).pathname.endsWith(
+          '/session/idle-session/metadata',
+        )
+      ) {
+        renameRequests.push(request.url());
+      }
+    });
+    const panel = page.locator('[data-web-shell-session-panel]');
+    const row = panel.getByRole('row', { includeHidden: true }).filter({
+      has: page.getByRole('checkbox', {
+        name: 'Select Idle fixture',
+        exact: true,
+        includeHidden: true,
+      }),
+    });
+    await row.getByRole('checkbox').click();
+    const footer = panel.locator('[data-web-shell-session-footer]');
+    await expect(footer).toHaveCSS('position', footerPosition);
+    const archive = footer.getByRole('button', {
+      name: 'Archive',
+      exact: true,
+    });
+    await expect(archive).toBeEnabled();
+
+    // Preserve the fixture's resting density as well as rename stability.
+    const restingRow = await row.boundingBox();
+    expect(restingRow).not.toBeNull();
+    expect(restingRow!.height).toBe(68.5);
+
+    for (const edge of ['bottom', 'top']) {
+      await row.getByRole('button', { name: 'Rename', exact: true }).click();
+      const editor = panel.locator('input[aria-label="Rename: Idle fixture"]');
+      await editor.fill('Unsaved rename');
+      await expect(editor).toBeFocused();
+      const editingRow = await row.boundingBox();
+      expect(editingRow).not.toBeNull();
+      const bounds = await archive.boundingBox();
+      expect(bounds).not.toBeNull();
+      await page.mouse.click(
+        bounds!.x + bounds!.width / 2,
+        edge === 'bottom' ? bounds!.y + bounds!.height - 1 : bounds!.y + 4,
+      );
+      await expect(editor).toHaveCount(0);
+      const canceledRow = await row.boundingBox();
+      expect(canceledRow).not.toBeNull();
+      expect(canceledRow!.height).toBe(editingRow!.height);
+      const confirmation = page.getByRole('alertdialog');
+      await expect(confirmation).toBeVisible();
+      await confirmation.getByRole('button', { name: /^cancel$/i }).click();
+      await expect(confirmation).toHaveCount(0);
+      expect(renameRequests).toEqual([]);
+    }
+  });
+}
+
 for (const count of [4, 11]) {
   test(`sorting during rename preserves keyboard navigation with ${count} sessions @smoke`, async ({
     page,
@@ -436,7 +503,7 @@ test('shadow portal details keep focus in the overview after hover replacement @
   page,
 }) => {
   await page.goto('/e2e/session-overview-shadow-dom.html');
-  await page.getByRole('button', { name: 'More', exact: true }).click();
+  // A footer-only shell renders footer actions inline; there is no More menu.
   await page
     .getByRole('button', { name: 'Session Overview', exact: true })
     .click();

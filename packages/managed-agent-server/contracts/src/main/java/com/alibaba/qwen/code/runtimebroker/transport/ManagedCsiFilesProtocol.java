@@ -5,8 +5,10 @@ import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
 import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocol;
+import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
+import com.fasterxml.jackson.core.StreamReadConstraints;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -33,8 +35,8 @@ public final class ManagedCsiFilesProtocol {
     private static final Set<String> BOOT_KEYS = Set.of("type", "version", "managedCsi", "identity", "context", "storage");
     private static final Set<String> AUTHORITY_BOOT_KEYS = Set.of("type", "version", "managedCsi", "identity", "context", "storage", "authority");
     private static final Set<String> FINALIZATION_BOOT_KEYS = Set.of("type", "version", "managedCsi", "identity", "context", "storage", "authority", "finalization");
-    private static final ObjectMapper JSON = new ObjectMapper(com.fasterxml.jackson.core.JsonFactory.builder()
-            .streamReadConstraints(com.fasterxml.jackson.core.StreamReadConstraints.builder()
+    private static final ObjectMapper JSON = new ObjectMapper(JsonFactory.builder()
+            .streamReadConstraints(StreamReadConstraints.builder()
                     .maxNestingDepth(64).maxStringLength(32 * 1024 * 1024).build()).build())
             .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
@@ -43,7 +45,7 @@ public final class ManagedCsiFilesProtocol {
     }
 
     public static boolean selects(RuntimeProvisionRequest request) {
-        if (request == null || !CsiFilesRetirementProfile.CAPABILITY_DIGEST.equals(request.getScope().getCapabilityDigest())) {
+        if (request == null || !CsiFilesRetirementProfile.isProfile(request.getScope())) {
             return false;
         }
         identity(request);
@@ -53,12 +55,12 @@ public final class ManagedCsiFilesProtocol {
     public static Map<String, Object> identity(RuntimeProvisionRequest request) {
         require(request != null && request.isManagedContext()
                 && CsiFilesRetirementProfile.PROVISIONER_KIND.equals(request.getProvisionerKind())
-                && CsiFilesRetirementProfile.CAPABILITY_DIGEST.equals(request.getScope().getCapabilityDigest())
+                && CsiFilesRetirementProfile.isProfile(request.getScope())
                 && "session".equals(request.getScope().getIsolationClass())
                 && request.getIsolationKey() != null && request.getIsolationKey().matches(
                         "[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"));
-        return Map.of("profile", CsiFilesRetirementProfile.PROFILE, "sessionId", request.getIsolationKey(),
-                "capabilityDigest", CsiFilesRetirementProfile.CAPABILITY_DIGEST);
+        return Map.of("profile", CsiFilesRetirementProfile.profile(request.getScope()), "sessionId", request.getIsolationKey(),
+                "capabilityDigest", request.getScope().getCapabilityDigest());
     }
 
     public static Map<String, Object> boot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
@@ -188,8 +190,7 @@ public final class ManagedCsiFilesProtocol {
         var identity = map(boot.get("identity"));
         var context = map(boot.get("context"));
         require(identity.keySet().equals(Set.of("profile", "sessionId", "capabilityDigest"))
-                && CsiFilesRetirementProfile.PROFILE.equals(identity.get("profile"))
-                && CsiFilesRetirementProfile.CAPABILITY_DIGEST.equals(identity.get("capabilityDigest"))
+                && CsiFilesRetirementProfile.matches(identity.get("profile"), identity.get("capabilityDigest"))
                 && identity.get("sessionId") instanceof String sessionId && sessionId.matches(
                         "[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
                 && "session".equals(context.get("isolationClass"))

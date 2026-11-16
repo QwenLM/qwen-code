@@ -74,3 +74,21 @@ export function moveWorkspace(
   next[target] = orderedCwds[index]!;
   return next;
 }
+
+export function reorderWorkspace(
+  orderedCwds: readonly string[],
+  cwd: string,
+  targetCwd: string,
+  after: boolean,
+): string[] | undefined {
+  if (
+    cwd === targetCwd ||
+    !orderedCwds.includes(cwd) ||
+    !orderedCwds.includes(targetCwd)
+  ) {
+    return undefined;
+  }
+  const next = orderedCwds.filter((entry) => entry !== cwd);
+  next.splice(next.indexOf(targetCwd) + (after ? 1 : 0), 0, cwd);
+  return next;
+}

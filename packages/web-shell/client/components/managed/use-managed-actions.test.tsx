@@ -61,13 +61,14 @@ describe('useManagedActions', () => {
       sessionId?: string;
       includeChildren?: boolean;
       clientId?: string;
+      provider?: ManagedAgentProvider;
     },
   ) {
     let latest: ReturnType<typeof useManagedActions> | undefined;
     let props = initial;
     function Probe(current: typeof initial) {
       latest = useManagedActions(
-        provider,
+        current.provider ?? provider,
         current.sessionId ?? 'session-1',
         current.clientId ?? 'client-1',
         current.enabled,
@@ -119,11 +120,340 @@ describe('useManagedActions', () => {
       expect.objectContaining({ includeChildren: true }),
     );
     await act(async () => {
-      await hook.latest!.respond(child.actionId, 'allow');
+      await hook.latest!.respond(child, 'allow');
     });
     expect(respond).toHaveBeenCalledWith(child, 'allow', expect.anything());
     expect(hook.latest?.answerError).toBeUndefined();
   });
+
+  it('selects the oldest request, preserves selection across new arrivals, and advances when it ends', async () => {
+    const first = { ...pending, sessionId: 'child-a', createdAt: 10 };
+    const second = { ...pending, sessionId: 'child-b', createdAt: 20 };
+    const earlier = { ...pending, sessionId: 'child-c', createdAt: 5 };
+    let listed = [second, first];
+    const listPending = vi.fn(async () => listed);
+    const hook = mount(
+      {
+        actions: { listPending, respond: vi.fn() },
+      } as unknown as ManagedAgentProvider,
+      { enabled: true, events: [], includeChildren: true },
+    );
+    await act(async () => Promise.resolve());
+    expect(hook.latest?.actions).toEqual([first, second]);
+    expect(hook.latest?.action).toEqual(first);
+    act(() => hook.latest!.select(second));
+    listed = [earlier, first, second];
+    await act(async () => hook.latest!.retry());
+    expect(hook.latest?.actions).toEqual([earlier, first, second]);
+    expect(hook.latest?.action).toEqual(second);
+    listed = [first, earlier];
+    await act(async () => hook.latest!.retry());
+    expect(hook.latest?.action).toEqual(earlier);
+  });
+
+  it('uses Session and Action identity for ties or missing creation times, without inferring from expiry', async () => {
+    const first = {
+      ...pending,
+      sessionId: 'a',
+      actionId: 'a',
+      expiresAt: pending.expiresAt + 10_000,
+    };
+    const second = { ...pending, sessionId: 'a', actionId: 'b' };
+    const third = { ...pending, sessionId: 'b', actionId: 'a' };
+    const hook = mount(
+      {
+        actions: {
+          listPending: vi.fn().mockResolvedValue([third, second, first]),
+          respond: vi.fn(),
+        },
+      } as unknown as ManagedAgentProvider,
+      { enabled: true, events: [] },
+    );
+    await act(async () => Promise.resolve());
+    expect(hook.latest?.actions).toEqual([first, second, third]);
+    expect(hook.latest?.action).toEqual(first);
+  });
+
+  it('requires the exact target Session and revisions when Action IDs overlap', async () => {
+    const child = {
+      ...pending,
+      sessionId: 'child',
+      inputRevision: 2,
+      policyRevision: 'child-policy',
+    };
+    const respond = vi.fn().mockResolvedValue(undefined);
+    const hook = mount(
+      {
+        actions: {
+          listPending: vi.fn().mockResolvedValue([pending, child]),
+          respond,
+        },
+      } as unknown as ManagedAgentProvider,
+      { enabled: true, events: [], includeChildren: true },
+    );
+    await act(async () => Promise.resolve());
+    await act(async () => {
+      await hook.latest!.respond({ ...child, inputRevision: 1 }, 'allow');
+      await hook.latest!.respond(
+        { ...child, policyRevision: pending.policyRevision },
+        'allow',
+      );
+      await hook.latest!.respond({ ...child, sessionId: 'missing' }, 'allow');
+    });
+    expect(respond).not.toHaveBeenCalled();
+    const captured = hook.latest!;
+    await act(async () => captured.respond(child, 'deny'));
+    await act(async () => captured.respond(child, 'deny'));
+    expect(respond).toHaveBeenCalledExactlyOnceWith(
+      child,
+      'deny',
+      expect.anything(),
+    );
+    expect(hook.latest?.action).toEqual(pending);
+  });
+
+  it('keeps a child refusal scoped to that Session while another child remains answerable', async () => {
+    const first = { ...pending, sessionId: 'child-a', createdAt: 1 };
+    const second = { ...pending, sessionId: 'child-b', createdAt: 2 };
+    const refusal = new JavaManagedAgentHttpError(
+      403,
+      'action_forbidden',
+      'Forbidden',
+    );
+    const respond = vi
+      .fn()
+      .mockRejectedValueOnce(refusal)
+      .mockResolvedValue(undefined);
+    const hook = mount(
+      {
+        actions: {
+          listPending: vi.fn().mockResolvedValue([first, second]),
+          respond,
+        },
+      } as unknown as ManagedAgentProvider,
+      { enabled: true, events: [], includeChildren: true },
+    );
+    await act(async () => Promise.resolve());
+    await act(async () => {
+      await expect(hook.latest!.respond(first, 'allow')).rejects.toBe(refusal);
+    });
+    act(() => hook.latest!.select(first));
+    expect(hook.latest?.respondForbidden).toBe(true);
+    expect(hook.latest?.answerError).toBe(refusal);
+    act(() => hook.latest!.select(second));
+    expect(hook.latest?.respondForbidden).toBe(false);
+    expect(hook.latest?.answerError).toBeUndefined();
+    await act(async () => hook.latest!.respond(second, 'allow'));
+    expect(respond).toHaveBeenLastCalledWith(
+      second,
+      'allow',
+      expect.anything(),
+    );
+    expect(hook.latest?.action).toEqual(first);
+    expect(hook.latest?.respondForbidden).toBe(true);
+  });
+
+  it('keeps separate drafts while switching and drops them when revisions or pending membership change', async () => {
+    const first = { ...pendingQuestion(), sessionId: 'child-a', createdAt: 1 };
+    const second = { ...first, sessionId: 'child-b', createdAt: 2 };
+    let listed = [first, second];
+    const hook = mount(
+      {
+        actions: { listPending: vi.fn(async () => listed), respond: vi.fn() },
+      } as unknown as ManagedAgentProvider,
+      { enabled: true, events: [], includeChildren: true },
+    );
+    await act(async () => Promise.resolve());
+    const firstDraft = { q1: { optionIds: [], text: 'A answer' } };
+    const secondDraft = { q1: { optionIds: ['q1o2'], text: '' } };
+    act(() => hook.latest!.setQuestionDraft(first, firstDraft));
+    act(() => hook.latest!.select(second));
+    expect(hook.latest?.questionDraft).toEqual({});
+    act(() => hook.latest!.setQuestionDraft(second, secondDraft));
+    act(() => hook.latest!.select(first));
+    expect(hook.latest?.questionDraft).toEqual(firstDraft);
+    listed = [{ ...first, inputRevision: 2 }, second];
+    await act(async () => hook.latest!.retry());
+    expect(hook.latest?.action?.inputRevision).toBe(2);
+    expect(hook.latest?.questionDraft).toEqual({});
+    act(() => hook.latest!.setQuestionDraft(first, firstDraft));
+    expect(hook.latest?.questionDraft).toEqual({});
+    act(() => hook.latest!.select(second));
+    expect(hook.latest?.questionDraft).toEqual(secondDraft);
+    listed = [listed[0]];
+    await act(async () => hook.latest!.retry());
+    listed = [...listed, second];
+    await act(async () => hook.latest!.retry());
+    act(() => hook.latest!.select(second));
+    expect(hook.latest?.questionDraft).toEqual({});
+  });
+
+  it('keeps the selected child when polling replaces only its question revision', async () => {
+    vi.useFakeTimers();
+    const first = { ...pendingQuestion(), sessionId: 'child-a', createdAt: 1 };
+    const second = { ...first, sessionId: 'child-b', createdAt: 2 };
+    let listed = [first, second];
+    const hook = mount(
+      {
+        actions: { listPending: vi.fn(async () => listed), respond: vi.fn() },
+      } as unknown as ManagedAgentProvider,
+      { enabled: true, events: [], includeChildren: true },
+    );
+    await act(async () => Promise.resolve());
+    const firstDraft = { q1: { optionIds: [], text: 'Keep A draft' } };
+    act(() => hook.latest!.setQuestionDraft(first, firstDraft));
+    act(() => hook.latest!.select(second));
+    act(() =>
+      hook.latest!.setQuestionDraft(second, {
+        q1: { optionIds: ['q1o2'], text: 'Discard old B draft' },
+      }),
+    );
+    const revised = { ...second, inputRevision: 2 };
+    listed = [first, revised];
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect.soft(hook.latest?.action).toEqual(revised);
+    expect.soft(hook.latest?.questionDraft).toEqual({});
+    act(() => hook.latest!.select(first));
+    expect(hook.latest?.questionDraft).toEqual(firstDraft);
+  });
+
+  it('isolates drafts, in-flight answers, and errors between child questions', async () => {
+    vi.stubGlobal('crypto', webcrypto);
+    const first = { ...pendingQuestion(), sessionId: 'child-a', createdAt: 1 };
+    const second = { ...first, sessionId: 'child-b', createdAt: 2 };
+    let rejectFirst!: (failure: Error) => void;
+    const respond = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((_resolve, reject) => {
+            rejectFirst = reject;
+          }),
+      )
+      .mockResolvedValue(undefined);
+    const hook = mount(
+      {
+        actions: {
+          listPending: vi.fn().mockResolvedValue([first, second]),
+          respond,
+        },
+      } as unknown as ManagedAgentProvider,
+      { enabled: true, events: [], includeChildren: true },
+    );
+    await act(async () => Promise.resolve());
+    const response = {
+      kind: 'question' as const,
+      answers: [
+        { questionId: 'q1', text: 'A' },
+        { questionId: 'q2', text: 'B' },
+      ],
+    };
+    let answer!: Promise<unknown>;
+    act(() =>
+      hook.latest!.setQuestionDraft(first, {
+        q1: { optionIds: [], text: 'Keep A' },
+      }),
+    );
+    await act(async () => {
+      answer = hook
+        .latest!.respond(first, response)
+        .catch((failure: unknown) => failure);
+    });
+    await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(1));
+    expect(hook.latest?.submitting).toBe(true);
+    act(() => hook.latest!.select(second));
+    expect(hook.latest?.submitting).toBe(false);
+    expect(hook.latest?.answerError).toBeUndefined();
+    await act(async () => hook.latest!.respond(second, response));
+    expect(respond).toHaveBeenLastCalledWith(
+      second,
+      response,
+      expect.anything(),
+    );
+    expect(hook.latest?.action).toEqual(first);
+    expect(hook.latest?.submitting).toBe(true);
+    await act(async () => {
+      rejectFirst(new Error('A offline'));
+      await answer;
+    });
+    expect(hook.latest?.submitting).toBe(false);
+    expect(hook.latest?.answerError).toEqual(new Error('A offline'));
+    expect(hook.latest?.questionDraft.q1.text).toBe('Keep A');
+  });
+
+  it.each(['sessionId', 'clientId', 'provider'] as const)(
+    'fences old callbacks and responses when the page %s changes',
+    async (changed) => {
+      vi.stubGlobal('crypto', webcrypto);
+      const question = pendingQuestion();
+      let rejectOld!: (failure: Error) => void;
+      const respond = vi.fn().mockImplementationOnce(
+        () =>
+          new Promise<void>((_resolve, reject) => {
+            rejectOld = reject;
+          }),
+      );
+      const hook = mount(
+        {
+          actions: {
+            listPending: vi.fn().mockResolvedValue([question]),
+            respond,
+          },
+        } as unknown as ManagedAgentProvider,
+        { enabled: true, events: [] },
+      );
+      await act(async () => Promise.resolve());
+      const stale = hook.latest!;
+      const response = {
+        kind: 'question' as const,
+        answers: [
+          { questionId: 'q1', text: 'A' },
+          { questionId: 'q2', text: 'B' },
+        ],
+      };
+      act(() =>
+        stale.setQuestionDraft(question, {
+          q1: { optionIds: [], text: 'old' },
+        }),
+      );
+      let answer!: Promise<unknown>;
+      await act(async () => {
+        answer = stale
+          .respond(question, response)
+          .catch((failure: unknown) => failure);
+      });
+      await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(1));
+      await act(async () =>
+        hook.rerender({
+          [changed]:
+            changed === 'provider'
+              ? {
+                  actions: {
+                    listPending: vi.fn().mockResolvedValue([question]),
+                    respond: vi.fn(),
+                  },
+                }
+              : 'new-owner',
+        }),
+      );
+      expect(hook.latest?.questionDraft).toEqual({});
+      expect(hook.latest?.submitting).toBe(false);
+      await act(async () => {
+        stale.setQuestionDraft(question, {
+          q1: { optionIds: [], text: 'stale' },
+        });
+        await stale.respond(question, response);
+        rejectOld(new Error('old failure'));
+        await answer;
+      });
+      expect(respond).toHaveBeenCalledTimes(1);
+      expect(hook.latest?.questionDraft).toEqual({});
+      expect(hook.latest?.answerError).toBeUndefined();
+      expect(hook.latest?.submitting).toBe(false);
+    },
+  );
 
   it('keeps a question visible while answering and reuses the canonical response key on retry and reload', async () => {
     vi.stubGlobal('crypto', webcrypto);
@@ -154,8 +484,8 @@ describe('useManagedActions', () => {
     };
     let first!: Promise<void>;
     await act(async () => {
-      first = hook.latest!.respond(question.actionId, response);
-      await hook.latest!.respond(question.actionId, response);
+      first = hook.latest!.respond(question, response);
+      await hook.latest!.respond(question, response);
     });
     await vi.waitFor(() => expect(respond).toHaveBeenCalledTimes(1));
     expect(hook.latest?.action).toEqual(question);
@@ -167,7 +497,7 @@ describe('useManagedActions', () => {
     });
     await act(async () => {
       await expect(
-        hook.latest!.respond(question.actionId, {
+        hook.latest!.respond(question, {
           ...response,
           answers: [...response.answers].reverse().map((answer) => ({
             ...answer,
@@ -182,9 +512,7 @@ describe('useManagedActions', () => {
     const reloaded = mount(provider, { enabled: true, events: [] });
     await vi.waitFor(() => expect(reloaded.latest?.action).toEqual(question));
     respond.mockResolvedValueOnce(undefined);
-    await act(async () =>
-      reloaded.latest!.respond(question.actionId, response),
-    );
+    await act(async () => reloaded.latest!.respond(question, response));
     expect(respond.mock.calls[2][2].idempotencyKey).toBe(key);
     expect(reloaded.latest?.action).toBeUndefined();
   });
@@ -206,7 +534,7 @@ describe('useManagedActions', () => {
     );
     await vi.waitFor(() => expect(hook.latest?.action).toEqual(question));
     await act(async () =>
-      hook.latest!.respond(question.actionId, {
+      hook.latest!.respond(question, {
         kind: 'question',
         answers: [
           { questionId: 'q1', text: 'custom' },
@@ -291,15 +619,15 @@ describe('useManagedActions', () => {
     await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
 
     await act(async () => {
-      await expect(
-        hook.latest!.respond('tool_approval_1', 'deny'),
-      ).rejects.toThrow('offline');
+      await expect(hook.latest!.respond(pending, 'deny')).rejects.toThrow(
+        'offline',
+      );
     });
     expect(hook.latest?.action).toEqual(pending);
     expect(hook.latest?.answerError).toEqual(new Error('offline'));
     expect(hook.latest?.loadError).toBeUndefined();
 
-    await act(() => hook.latest!.respond('tool_approval_1', 'allow'));
+    await act(() => hook.latest!.respond(pending, 'allow'));
     expect(respond).toHaveBeenLastCalledWith(pending, 'allow', {
       clientId: 'client-1',
       idempotencyKey: 'tool_approval_1:allow',
@@ -376,7 +704,7 @@ describe('useManagedActions', () => {
       let oldAnswer!: Promise<unknown>;
       await act(async () => {
         oldAnswer = hook
-          .latest!.respond(pending.actionId, 'allow')
+          .latest!.respond(pending, 'allow')
           .catch((failure: unknown) => failure);
       });
       hook.rerender(
@@ -386,9 +714,9 @@ describe('useManagedActions', () => {
       );
       await vi.waitFor(() => expect(hook.latest?.action).toEqual(next));
       await act(async () => {
-        await expect(
-          hook.latest!.respond(next.actionId, 'allow'),
-        ).rejects.toThrow('current-offline');
+        await expect(hook.latest!.respond(next, 'allow')).rejects.toThrow(
+          'current-offline',
+        );
       });
       expect(hook.latest?.answerError).toEqual(new Error('current-offline'));
 
@@ -449,9 +777,9 @@ describe('useManagedActions', () => {
     await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
 
     await act(async () => {
-      await expect(
-        hook.latest!.respond('tool_approval_1', 'allow'),
-      ).rejects.toThrow('offline');
+      await expect(hook.latest!.respond(pending, 'allow')).rejects.toThrow(
+        'offline',
+      );
     });
     expect(hook.latest?.answerError).toEqual(new Error('offline'));
 
@@ -486,9 +814,9 @@ describe('useManagedActions', () => {
     expect(hook.latest?.respondForbidden).toBe(false);
 
     await act(async () => {
-      await expect(
-        hook.latest!.respond('tool_approval_1', 'allow'),
-      ).rejects.toThrow('Forbidden');
+      await expect(hook.latest!.respond(pending, 'allow')).rejects.toThrow(
+        'Forbidden',
+      );
     });
     expect(hook.latest?.respondForbidden).toBe(true);
 
@@ -534,7 +862,7 @@ describe('useManagedActions', () => {
     let oldAnswer!: Promise<unknown>;
     await act(async () => {
       oldAnswer = hook
-        .latest!.respond(pending.actionId, 'allow')
+        .latest!.respond(pending, 'allow')
         .catch((failure: unknown) => failure);
     });
 
@@ -570,9 +898,7 @@ describe('useManagedActions', () => {
     await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
 
     await act(async () => {
-      await hook
-        .latest!.respond(pending.actionId, 'allow')
-        .catch(() => undefined);
+      await hook.latest!.respond(pending, 'allow').catch(() => undefined);
     });
     expect(hook.latest?.respondForbidden).toBe(true);
 
@@ -603,7 +929,7 @@ describe('useManagedActions', () => {
     let refusedAnswer!: Promise<unknown>;
     await act(async () => {
       refusedAnswer = hook
-        .latest!.respond(pending.actionId, 'allow')
+        .latest!.respond(pending, 'allow')
         .catch((failure: unknown) => failure);
     });
 
@@ -716,7 +1042,7 @@ describe('useManagedActions', () => {
     hook.rerender({ enabled: true });
     await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
     hook.rerender({ enabled: undefined });
-    await act(() => hook.latest!.respond('tool_approval_1', 'allow'));
+    await act(() => hook.latest!.respond(pending, 'allow'));
     expect(respond).toHaveBeenCalledTimes(1);
     expect(listPending).toHaveBeenCalledTimes(2);
   });
@@ -779,9 +1105,9 @@ describe('useManagedActions', () => {
     await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
 
     await act(async () => {
-      await expect(
-        hook.latest!.respond('tool_approval_1', 'allow'),
-      ).rejects.toThrow('offline');
+      await expect(hook.latest!.respond(pending, 'allow')).rejects.toThrow(
+        'offline',
+      );
     });
     expect(hook.latest?.answerError).toEqual(new Error('offline'));
 
@@ -792,7 +1118,7 @@ describe('useManagedActions', () => {
     expect(hook.latest?.loaded).toBe(false);
     expect(listPending).toHaveBeenCalledTimes(2);
     // The previous Session's Action is not answerable from the new one.
-    await act(() => hook.latest!.respond('tool_approval_1', 'allow'));
+    await act(() => hook.latest!.respond(pending, 'allow'));
     expect(respond).toHaveBeenCalledTimes(1);
   });
 
@@ -833,7 +1159,7 @@ describe('useManagedActions', () => {
     const hook = mount(provider, { enabled: true, events: [] });
     await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
 
-    await act(() => hook.latest!.respond('tool_approval_1', 'allow'));
+    await act(() => hook.latest!.respond(pending, 'allow'));
     expect(hook.latest?.action).toBeUndefined();
     expect(hook.latest?.answerError).toBeUndefined();
     await vi.waitFor(() => expect(listPending).toHaveBeenCalledTimes(2));
@@ -861,9 +1187,7 @@ describe('useManagedActions', () => {
     await vi.waitFor(() => expect(hook.latest?.action).toEqual(expired));
 
     await act(async () => {
-      await expect(
-        hook.latest!.respond('tool_approval_1', 'allow'),
-      ).rejects.toBe(ended);
+      await expect(hook.latest!.respond(pending, 'allow')).rejects.toBe(ended);
     });
     expect(hook.latest?.action).toEqual(expired);
     expect(hook.latest?.answerError).toBe(ended);
@@ -896,7 +1220,7 @@ describe('useManagedActions', () => {
     const hook = mount(provider, { enabled: true, events: [] });
     await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
 
-    await act(() => hook.latest!.respond('tool_approval_1', 'deny'));
+    await act(() => hook.latest!.respond(pending, 'deny'));
     expect(hook.latest?.action).toBeUndefined();
     expect(hook.latest?.answerError).toBeUndefined();
     await vi.waitFor(() => expect(listPending).toHaveBeenCalledTimes(2));
@@ -915,7 +1239,7 @@ describe('useManagedActions', () => {
     const hook = mount(provider, { enabled: true, events: [] });
     await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
 
-    await act(() => hook.latest!.respond('tool_approval_1', 'allow'));
+    await act(() => hook.latest!.respond(pending, 'allow'));
     await vi.waitFor(() => expect(listPending).toHaveBeenCalledTimes(2));
     await vi.waitFor(() => expect(hook.latest?.action).toEqual(pending));
     expect(hook.latest?.answerError).toBeUndefined();

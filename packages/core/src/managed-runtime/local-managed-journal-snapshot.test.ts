@@ -197,6 +197,48 @@ function pinStatTimestamps() {
   }) as typeof fsSync.fstatSync);
 }
 
+/**
+ * Runs `change` once the first readSync has read its bytes and before it
+ * returns them, so before the read's second stat; later reads, the growth
+ * check's among them, are left alone.
+ */
+function changeDuringFirstRead(change: () => void) {
+  const readSync = fsSync.readSync;
+  return vi.spyOn(fsSync, 'readSync').mockImplementationOnce((...args) => {
+    const count = Reflect.apply(readSync, fsSync, args) as number;
+    change();
+    return count;
+  });
+}
+
+function flipByte(bytes: Buffer, index: number): Buffer {
+  const changed = Buffer.from(bytes);
+  changed[index] ^= 1;
+  return changed;
+}
+
+/**
+ * A plain file several times the 64 KiB chunk the growth check compares in,
+ * with bytes that differ along it, so comparing the wrong offsets shows.
+ */
+async function largeGeneration() {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-local-snapshot-'));
+  roots.push(root);
+  const file = path.join(root, 'large.jsonl');
+  const original = Buffer.alloc(200_000);
+  for (let index = 0; index < original.length; index++) {
+    original[index] = index % 251;
+  }
+  await fs.writeFile(file, original);
+  return { file, original };
+}
+
+/** Moves the file's mtime a minute ahead, past any clock tick. */
+function moveTimestamps(file: string) {
+  const later = new Date(Date.now() + 60_000);
+  fsSync.utimesSync(file, later, later);
+}
+
 describe('local native journal snapshots', () => {
   it('converts only sealed resume, preserves original bytes and command replay, then never rotates', async () => {
     const f = await fixture();
@@ -287,52 +329,19 @@ describe('local native journal snapshots', () => {
     const f = await fixture();
     await f.first.authority.close();
     const original = await fs.readFile(f.transcriptPath);
-    const readSync = fsSync.readSync;
-    const spy = vi
-      .spyOn(fsSync, 'readSync')
-      .mockImplementationOnce((...args) => {
-        const count = Reflect.apply(readSync, fsSync, args) as number;
-        fsSync.appendFileSync(
-          f.transcriptPath,
-          'a concurrent uncommitted tail',
-        );
-        return count;
-      });
+    const read = changeDuringFirstRead(() =>
+      fsSync.appendFileSync(f.transcriptPath, 'a concurrent uncommitted tail'),
+    );
     try {
       const frozen = await LocalJsonlManagedSessionJournalStore.read({
         ...f,
         maxBytes: original.length,
       });
+      expect(read).toHaveBeenCalled();
       expect(frozen.committed).toBe(f.receipt.committedSequence);
       expect(frozen.uncommitted).toBe(0);
     } finally {
-      spy.mockRestore();
-    }
-  });
-
-  it('refuses a frozen prefix rewrite even when the file also grows', async () => {
-    const f = await fixture();
-    await f.first.authority.close();
-    const original = await fs.readFile(f.transcriptPath);
-    const readSync = fsSync.readSync;
-    const spy = vi
-      .spyOn(fsSync, 'readSync')
-      .mockImplementationOnce((...args) => {
-        const count = Reflect.apply(readSync, fsSync, args) as number;
-        const modified = Buffer.from(original);
-        modified[0] ^= 1;
-        fsSync.writeFileSync(
-          f.transcriptPath,
-          Buffer.concat([modified, Buffer.from('a concurrent tail')]),
-        );
-        return count;
-      });
-    try {
-      expect(() =>
-        readLocalJournalBytes(f.transcriptPath, original.length),
-      ).toThrow(/file changed while reading/);
-    } finally {
-      spy.mockRestore();
+      read.mockRestore();
     }
   });
 
@@ -345,20 +354,13 @@ describe('local native journal snapshots', () => {
       const f = await fixture();
       await f.first.authority.close();
       const original = await fs.readFile(f.transcriptPath);
-      const readSync = fsSync.readSync;
       const stats = pinStatTimestamps();
-      const read = vi
-        .spyOn(fsSync, 'readSync')
-        .mockImplementationOnce((...args) => {
-          const count = Reflect.apply(readSync, fsSync, args) as number;
-          const modified = Buffer.from(original);
-          modified[0] ^= 1;
-          fsSync.writeFileSync(
-            f.transcriptPath,
-            Buffer.concat([modified, Buffer.from('a concurrent tail')]),
-          );
-          return count;
-        });
+      const read = changeDuringFirstRead(() =>
+        fsSync.writeFileSync(
+          f.transcriptPath,
+          Buffer.concat([flipByte(original, 0), Buffer.from('a tail')]),
+        ),
+      );
       try {
         expect(() =>
           readLocalJournalBytes(
@@ -373,34 +375,136 @@ describe('local native journal snapshots', () => {
     },
   );
 
+  it('reads a bound below the file size while a writer rewrites beyond it and appends', async () => {
+    const f = await fixture();
+    await f.first.authority.close();
+    const original = await fs.readFile(f.transcriptPath);
+    const bound = Math.floor(original.length / 2);
+    const read = changeDuringFirstRead(() =>
+      fsSync.writeFileSync(
+        f.transcriptPath,
+        Buffer.concat([
+          flipByte(original, original.length - 1),
+          Buffer.from('a tail'),
+        ]),
+      ),
+    );
+    try {
+      expect(readLocalJournalBytes(f.transcriptPath, bound)).toEqual(
+        original.subarray(0, bound),
+      );
+      expect(read).toHaveBeenCalled();
+    } finally {
+      read.mockRestore();
+    }
+  });
+
+  it('refuses a bounded read whose file shrinks but stays above the bound within one timestamp tick', async () => {
+    const f = await fixture();
+    await f.first.authority.close();
+    const original = await fs.readFile(f.transcriptPath);
+    const stats = pinStatTimestamps();
+    const read = changeDuringFirstRead(() =>
+      fsSync.truncateSync(
+        f.transcriptPath,
+        Math.floor((original.length * 3) / 4),
+      ),
+    );
+    try {
+      expect(() =>
+        readLocalJournalBytes(
+          f.transcriptPath,
+          Math.floor(original.length / 2),
+        ),
+      ).toThrow(/file changed while reading/);
+    } finally {
+      read.mockRestore();
+      stats.mockRestore();
+    }
+  });
+
+  it('refuses a same-length rewrite once the timestamps move', async () => {
+    const f = await fixture();
+    await f.first.authority.close();
+    const original = await fs.readFile(f.transcriptPath);
+    const read = changeDuringFirstRead(() => {
+      fsSync.writeFileSync(f.transcriptPath, flipByte(original, 0));
+      moveTimestamps(f.transcriptPath);
+    });
+    try {
+      expect(() => readLocalJournalBytes(f.transcriptPath)).toThrow(
+        /file changed while reading/,
+      );
+    } finally {
+      read.mockRestore();
+    }
+  });
+
+  it('reads an unbounded generation as its first stat saw it while a writer appends', async () => {
+    const f = await fixture();
+    await f.first.authority.close();
+    const original = await fs.readFile(f.transcriptPath);
+    const read = changeDuringFirstRead(() => {
+      fsSync.appendFileSync(f.transcriptPath, 'a concurrent tail');
+      moveTimestamps(f.transcriptPath);
+    });
+    try {
+      expect(readLocalJournalBytes(f.transcriptPath)).toEqual(original);
+      expect(read).toHaveBeenCalled();
+    } finally {
+      read.mockRestore();
+    }
+  });
+
+  it('refuses a grown file that comes up short when it is compared again', async () => {
+    const f = await fixture();
+    await f.first.authority.close();
+    const read = changeDuringFirstRead(() =>
+      fsSync.appendFileSync(f.transcriptPath, 'a concurrent tail'),
+    ).mockImplementationOnce(() => 0);
+    try {
+      expect(() => readLocalJournalBytes(f.transcriptPath)).toThrow(
+        /file changed while reading/,
+      );
+      expect(read).toHaveBeenCalledTimes(2);
+    } finally {
+      read.mockRestore();
+    }
+  });
+
+  it('returns the first generation of a file larger than one compared chunk after an append', async () => {
+    const { file, original } = await largeGeneration();
+    const read = changeDuringFirstRead(() =>
+      fsSync.appendFileSync(file, 'a concurrent tail'),
+    );
+    try {
+      expect(readLocalJournalBytes(file)).toEqual(original);
+      // The first read, then a comparison in more than one chunk.
+      expect(read.mock.calls.length).toBeGreaterThan(2);
+    } finally {
+      read.mockRestore();
+    }
+  });
+
   it.each([
-    ['within one timestamp tick', true],
-    ['across timestamp ticks', false],
+    ['a middle chunk', 100_000],
+    ['the last, partial chunk', 199_999],
   ] as const)(
-    'reads an unbounded generation as its first stat saw it while a writer appends %s',
-    async (_label, pinned) => {
-      const f = await fixture();
-      await f.first.authority.close();
-      const original = await fs.readFile(f.transcriptPath);
-      const readSync = fsSync.readSync;
-      const stats = pinned ? pinStatTimestamps() : undefined;
-      const read = vi
-        .spyOn(fsSync, 'readSync')
-        .mockImplementationOnce((...args) => {
-          const count = Reflect.apply(readSync, fsSync, args) as number;
-          fsSync.appendFileSync(f.transcriptPath, 'a concurrent tail');
-          // Make the append visible to the timestamps when they are not pinned.
-          if (!pinned) {
-            const later = new Date(Date.now() + 60_000);
-            fsSync.utimesSync(f.transcriptPath, later, later);
-          }
-          return count;
-        });
+    'refuses a growth that rewrites a byte in %s of the comparison',
+    async (_label, index) => {
+      const { file, original } = await largeGeneration();
+      const read = changeDuringFirstRead(() =>
+        fsSync.writeFileSync(
+          file,
+          Buffer.concat([flipByte(original, index), Buffer.from('a tail')]),
+        ),
+      );
       try {
-        expect(readLocalJournalBytes(f.transcriptPath)).toEqual(original);
+        expect(() => readLocalJournalBytes(file)).toThrow(
+          /file changed while reading/,
+        );
       } finally {
         read.mockRestore();
-        stats?.mockRestore();
       }
     },
   );

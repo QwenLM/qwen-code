@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.contracts.workspace;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
+import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 public final class PrivateCsiSession {
     private PrivateCsiSession() { }
     public record Request(WorkspaceCsiRegistration registration, String actorId,
@@ -12,7 +13,7 @@ public final class PrivateCsiSession {
                     || title != null && title.length() > 512) {
                 throw new IllegalArgumentException("Invalid private CSI Session creation request");
             }
-            com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey(registration.tenantId(), actorId);
+            ManagedWorkspaceRegistry.actorKey(registration.tenantId(), actorId);
         }
     }
 

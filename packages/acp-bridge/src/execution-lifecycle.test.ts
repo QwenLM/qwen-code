@@ -6,6 +6,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   createTranscriptExecutionLifecycleUpdate,
+  createTranscriptHookLifecycleUpdate,
   createTranscriptReplayMachine,
   parseExecutionLifecycle,
   type TranscriptExecutionLifecycle,
@@ -35,6 +36,38 @@ const record = (event: Record<string, unknown>): TranscriptRecordInput => ({
 });
 
 describe('execution lifecycle replay', () => {
+  it('replays safe hook records as inert metadata and excludes them from text exports', () => {
+    const hook = {
+      v: 1 as const,
+      kind: 'hook' as const,
+      runtimeId: 'runtime',
+      executionId: 'hook',
+      sessionId: 'session',
+      promptId: 'turn',
+      agentId: null,
+      eventName: 'Stop',
+      hookType: 'command' as const,
+      name: 'safe',
+      source: 'user' as const,
+      startedAt: 100,
+      phase: 'started' as const,
+    };
+    const input = record({
+      ...hook,
+      'event.name': 'hook_lifecycle',
+      command: 'SECRET',
+    });
+    const frames = [
+      ...createTranscriptReplayMachine({ includeTiming: true }).project(input),
+    ];
+    expect(frames).toHaveLength(1);
+    expect(frames[0]?.update).toMatchObject(
+      createTranscriptHookLifecycleUpdate(hook),
+    );
+    expect(JSON.stringify(frames)).not.toContain('SECRET');
+    expect([...createTranscriptReplayMachine().project(input)]).toEqual([]);
+  });
+
   it('constructs inert frames without usage or timing', () => {
     expect(createTranscriptExecutionLifecycleUpdate(started)).toMatchObject({
       sessionUpdate: 'agent_message_chunk',

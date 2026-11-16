@@ -10,6 +10,7 @@ import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocol;
 
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -84,7 +85,7 @@ public final class CsiFileFinalizeProtocol {
         require((observe ? "FROZEN_CANDIDATE" : "DRAINED").equals(value.get("state")));
         if (observe) {
             require(value.get("execution") instanceof Map<?, ?> && value.get("files") instanceof Map<?, ?>
-                    && value.get("preparations") instanceof java.util.List<?>);
+                    && value.get("preparations") instanceof List<?>);
         } else {
             digest(value.get("preCutObservationSha256"));
             var cleanup = map(value.get("cleanup"));
@@ -93,7 +94,7 @@ public final class CsiFileFinalizeProtocol {
             var backend = map(cleanup.get("backend"));
             require(backend.keySet().equals(Set.of("closed", "blocked", "pendingOperations", "openDescriptors"))
                     && Boolean.TRUE.equals(backend.get("closed")) && Boolean.FALSE.equals(backend.get("blocked"))
-                    && zero(backend.get("pendingOperations")) && java.util.List.of().equals(backend.get("openDescriptors")));
+                    && zero(backend.get("pendingOperations")) && List.of().equals(backend.get("openDescriptors")));
             var mount = map(cleanup.get("mount"));
             require(mount.keySet().equals(Set.of("admissionClosed", "pendingOperations", "closeFailed", "root"))
                     && Boolean.TRUE.equals(mount.get("admissionClosed")) && Boolean.FALSE.equals(mount.get("closeFailed"))

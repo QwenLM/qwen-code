@@ -19,7 +19,12 @@ describe('model-facing argument errors', () => {
     if (result.success) throw new Error('Expected invalid keys');
 
     const error = invalidArguments('cua.keypress', result.error);
-    expect(error.message).toContain('keys: Expected array, received string');
+    // invalidArguments republishes Zod's own sentence behind the field prefix,
+    // so take the sentence from the error instead of restating it: what this
+    // module owes the model is the named field plus the library's complaint,
+    // whichever wording the installed Zod major uses.
+    const [issue] = result.error.issues;
+    expect(error.message).toContain(`keys: ${issue.message}`);
     expect(error.message).toContain('cua.keypress({ keys: ["Enter"] })');
     expect(error.message).not.toContain('private input');
     expect(error.details).toMatchObject({
@@ -40,7 +45,10 @@ describe('model-facing argument errors', () => {
 
     const error = invalidArguments('dom_cua.type', result.error);
     expect(error.message.length).toBeLessThan(400);
-    expect(error.message).toContain('Unrecognized key');
+    // Same rule, and the same trap: "Unrecognized key" is Zod's phrasing too.
+    // The offending key in the text is what proves the unknown-key issue reached
+    // the model; `details.issues` keeps the code and the path.
+    expect(error.message).toContain('unknownunknownunknown');
     expect(error.message).toContain('dom_cua.click({ node_id })');
     expect(error.message).toContain('dom_cua.type({ text })');
   });

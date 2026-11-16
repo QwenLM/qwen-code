@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act } from 'react';
+import { act, type ReactNode } from 'react';
 import type { DaemonTranscriptBlock } from '@qwen-code/sdk/daemon';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -48,6 +48,7 @@ function render(
     hasActivePrompt?: boolean;
     startedAt?: number;
     backgroundLabel?: string;
+    trailing?: ReactNode;
   } = {},
 ): HTMLElement {
   const container = document.createElement('div');
@@ -428,5 +429,17 @@ describe('StreamingStatus response speed', () => {
     });
     expect(container.textContent).toContain('20 tokens');
     expect(container.textContent).not.toContain('t/s');
+  });
+});
+
+describe('StreamingStatus trailing slot', () => {
+  it('renders the trailing control after the status metadata', () => {
+    pinPhraseSelection();
+    const container = render(
+      {},
+      { trailing: <button type="button">game</button> },
+    );
+    const status = container.firstElementChild;
+    expect(status?.lastElementChild?.textContent).toBe('game');
   });
 });

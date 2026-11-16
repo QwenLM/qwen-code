@@ -74,16 +74,30 @@ jobs:
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
     strategy:
       matrix:
+        # One leg per MACHINE, not per runner process: every runner on a
+        # host shares the same global npm install. The hk legs carry a
+        # dedicated ecs-update-hk-N label on the first runner of each host.
+        # GitHub schedules jobs by runner LABEL, never by runner name, so
+        # the hz legs carry dedicated ecs-update-hz-N labels too (added to
+        # each host's first runner via the labels API — no re-registration,
+        # pool labels intact). The static array keeps every label visible
+        # to actionlint. hz4 and hz5 have only ephemeral container runners
+        # whose image carries the CLI — nothing persistent to update there,
+        # and no runner to hang the per-host label on.
         runner:
-          [
-            'ecs-update-hk-1',
-            'ecs-update-hk-2',
-            'ecs-update-hk-3',
-            'ecs-update-hk-4',
-            'ecs-update-hk-5',
-          ]
+          - 'ecs-update-hk-1'
+          - 'ecs-update-hk-2'
+          - 'ecs-update-hk-3'
+          - 'ecs-update-hk-4'
+          - 'ecs-update-hk-5'
+          - 'ecs-update-hz-1'
+          - 'ecs-update-hz-2'
+          - 'ecs-update-hz-3'
+          - 'ecs-update-hz-6'
       fail-fast: false
-    runs-on: ['self-hosted', 'linux', 'x64', '${{ matrix.runner }}']
+    # No arch label: hk hosts are x64, hz hosts are arm64; the dedicated
+    # per-host label already pins the machine.
+    runs-on: ['self-hosted', 'linux', '${{ matrix.runner }}']
     concurrency:
       group: 'update-ecs-runner-qwen-${{ matrix.runner }}'
       cancel-in-progress: false
@@ -98,16 +112,45 @@ jobs:
           # carry a runner user's custom npm prefix into the sudo install.
           (
             cd "${RUNNER_TEMP:?}"
+            # Snapshot the legacy copy BEFORE the loop so every attempt
+            # gates the /usr install on the host's state at step start,
+            # and verify can catch a legacy copy that vanished mid-run.
+            if [ -e /usr/bin/qwen ] || [ -L /usr/bin/qwen ]; then
+              legacy_present=1
+            else
+              legacy_present=0
+            fi
+            echo "LEGACY_PRESENT=${legacy_present}" >> "${GITHUB_ENV}"
             # All runner processes of a region share one machine, so another
             # job's concurrent `npm install -g` can race npm's rename of the
             # package dir (ENOTEMPTY). Clear trash left by crashed installs
             # and retry through the seconds-long race window.
-            PKG_DIR='/usr/local/lib/node_modules/@qwen-code'
+            # Install into BOTH global prefixes in use across the fleet: hk
+            # hosts resolve /usr/local/bin/qwen, while the hz hosts carry a
+            # legacy /usr/bin/qwen symlink from their image build. Updating
+            # only /usr/local left hz serving the old version through
+            # /usr/bin whenever PATH order or a cached hash favored it
+            # (observed: every hz host stuck on 0.26.0 after 0.27.0 shipped).
+            # The second install only runs where the legacy copy exists —
+            # hk hosts have no /usr/bin/qwen and must not pay for a second
+            # 156 MB tree nothing reads. -L catches a dangling symlink too,
+            # which -e alone would silently skip.
             for attempt in 1 2 3; do
-              sudo rm -rf "${PKG_DIR}"/.qwen-code-* 2>/dev/null || true
-              # --prefix pins the install to /usr/local: on the hk-4/hk-5
-              # machines root's npm global prefix is a custom Node directory
-              if sudo env -u NPM_CONFIG_PREFIX npm install -g --prefix /usr/local --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}"; then
+              sudo rm -rf /usr/local/lib/node_modules/@qwen-code/.qwen-code-* /usr/lib/node_modules/@qwen-code/.qwen-code-* 2>/dev/null || true
+              # --prefix pins the install: on the hk-4/hk-5 machines root's
+              # npm global prefix is a custom Node directory.
+              if ! sudo env -u NPM_CONFIG_PREFIX npm install -g --prefix /usr/local --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}"; then
+                :
+              elif [ "${legacy_present}" -eq 0 ]; then
+                exit 0
+              # npm refuses (EEXIST) to replace a /usr/bin/qwen that is a
+              # regular file or a symlink into another prefix, so --force
+              # lets npm do the replacement itself — and only on success.
+              # A pre-emptive rm would delete the binary even when all
+              # three attempts fail, and the NEXT run would snapshot
+              # "no legacy copy", skip /usr entirely and verify green:
+              # a permanent silent loss no rerun could repair.
+              elif sudo env -u NPM_CONFIG_PREFIX npm install -g --force --prefix /usr --registry=https://registry.npmjs.org "@qwen-code/qwen-code@${VERSION}"; then
                 exit 0
               fi
               if [[ "${attempt}" -lt 3 ]]; then
@@ -125,11 +168,29 @@ jobs:
           VERSION: '${{ needs.resolve.outputs.version }}'
         run: |-
           set -euo pipefail
+          # A legacy copy that existed when the update started must exist
+          # when it ends: a vanished binary must fail the leg, not skip
+          # the pinned check below.
+          if [ "${LEGACY_PRESENT:-0}" -eq 1 ] && [ ! -e /usr/bin/qwen ] && [ ! -L /usr/bin/qwen ]; then
+            echo "::error::/usr/bin/qwen existed before the update but is missing now"
+            exit 1
+          fi
           qwen_path="$(command -v qwen)"
           actual="$("${qwen_path}" --version)"
           echo "qwen path: ${qwen_path}"
           echo "qwen version: ${actual}"
           test "${actual}" = "${VERSION}"
+          # Every absolute path a service could resolve must agree too — a
+          # fresh PATH lookup alone hid the stale /usr/bin copy on hz.
+          for pinned in /usr/local/bin/qwen /usr/bin/qwen; do
+            # -L aligns with the update step's definition of "exists": a
+            # dangling symlink must fail here, not silently skip the pin.
+            if [ -e "${pinned}" ] || [ -L "${pinned}" ]; then
+              pinned_actual="$("${pinned}" --version)"
+              echo "${pinned}: ${pinned_actual}"
+              test "${pinned_actual}" = "${VERSION}"
+            fi
+          done
 
   # A failed fleet update is otherwise invisible. `qwen-code-pr-review.yml` and
   # `qwen-triage.yml` install the CLI only when it is absent, and on a

@@ -17,23 +17,30 @@ import org.apache.rocketmq.client.java.exception.LiteTopicQuotaExceededException
 import org.apache.rocketmq.client.java.exception.ProxyTimeoutException;
 import org.apache.rocketmq.client.java.exception.TooManyRequestsException;
 import org.apache.rocketmq.client.java.exception.UnauthorizedException;
+
+import java.io.Closeable;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.Optional;
+import java.util.function.BiFunction;
+import java.util.function.Consumer;
 public final class RocketMqEventClients {
     public static final String CAPABILITY_PROBE_LITE = "capability-probe";
     private final ClientServiceProvider provider;
     public RocketMqEventClients() { this(ClientServiceProvider.loadService()); }
     public RocketMqEventClients(ClientServiceProvider provider) { this.provider = provider; }
-    public static final class Publisher implements java.io.Closeable {
+    public static final class Publisher implements Closeable {
         private final Producer producer;
         private Publisher(Producer producer) { this.producer = producer; }
         @Override
-        public void close() throws java.io.IOException { producer.close(); }
+        public void close() throws IOException { producer.close(); }
     }
     public LiteTopicEventTransport journal(Publisher publisher, ManagedAgentSettings properties) {
         var config = properties.getEventTransport();
         return new LiteTopicEventTransport(publisher.producer, provider, config.getTopic(), config.getWakeBootstrapLiteTopic());
     }
     public LiteTopicPublicEventTransport publicEvents(Publisher publisher, ManagedAgentSettings properties,
-            ObjectMapper json, java.util.function.BiFunction<String, String, java.util.Optional<String>> workspaceOf) {
+            ObjectMapper json, BiFunction<String, String, Optional<String>> workspaceOf) {
         return new LiteTopicPublicEventTransport(publisher.producer, provider, properties.getEventTransport().getTopic(), json, workspaceOf);
     }
     public Publisher producer(ManagedAgentSettings properties) throws ClientException {
@@ -58,16 +65,16 @@ public final class RocketMqEventClients {
     public EventSubscriptions owner(
             ManagedAgentSettings properties,
             EventMessageListener listener,
-            java.util.function.Consumer<EventSubscriptions> bind)
+            Consumer<EventSubscriptions> bind)
             throws ClientException {
         var config = properties.getEventTransport();
         LitePushConsumer consumer = provider.newLitePushConsumerBuilder()
                 .setClientConfiguration(clientConfiguration(config))
                 .setConsumerGroup(config.getOwnerGroup())
                 .bindTopic(config.getTopic())
-                .setMessageListener(message -> com.alibaba.qwen.code.managedagent.adapters.event.RocketMqMessages.consume(listener, message))
+                .setMessageListener(message -> RocketMqMessages.consume(listener, message))
                 .build();
-        bind.accept(com.alibaba.qwen.code.managedagent.adapters.event.RocketMqMessages.subscriptions(consumer));
+        bind.accept(RocketMqMessages.subscriptions(consumer));
         return RocketMqMessages.subscriptions(consumer);
     }
 
@@ -78,7 +85,7 @@ public final class RocketMqEventClients {
                 .setClientConfiguration(clientConfiguration(config))
                 .setConsumerGroup(config.getWakeBootstrapGroup())
                 .bindTopic(config.getTopic())
-                .setMessageListener(message -> com.alibaba.qwen.code.managedagent.adapters.event.RocketMqMessages.consume(listener, message))
+                .setMessageListener(message -> RocketMqMessages.consume(listener, message))
                 .build();
         try {
             consumer.subscribeLite(config.getWakeBootstrapLiteTopic());
@@ -103,7 +110,7 @@ public final class RocketMqEventClients {
                 .build();
     }
 
-    private static void closeQuietly(java.io.Closeable closeable,
+    private static void closeQuietly(Closeable closeable,
             Throwable failure) {
         try {
             closeable.close();
@@ -142,7 +149,7 @@ public final class RocketMqEventClients {
                     .setTopic(topic)
                     .setLiteTopic(CAPABILITY_PROBE_LITE)
                     .setKeys(CAPABILITY_PROBE_LITE)
-                    .setBody("{}".getBytes(java.nio.charset.StandardCharsets.UTF_8))
+                    .setBody("{}".getBytes(StandardCharsets.UTF_8))
                     .build());
         } catch (InternalErrorException | ProxyTimeoutException unavailable) {
             // The write failed below the topic's message type — a full disk,

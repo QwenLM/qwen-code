@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.adapter.HttpRuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.host.RuntimeStateFiles;
 import com.alibaba.qwen.code.runtimebroker.spi.OperatorRuntimeRecovery;
 import com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderDependencies;
 import com.alibaba.qwen.code.runtimebroker.spi.RuntimeProviderFactory;
@@ -73,7 +74,7 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
         }
         Path stateDirectory = Path.of(settings.getStateDirectory()).toAbsolutePath().normalize();
         try {
-            com.alibaba.qwen.code.runtimebroker.host.RuntimeStateFiles.validateDirectory(stateDirectory);
+            RuntimeStateFiles.validateDirectory(stateDirectory);
         } catch (IOException error) {
             throw new IllegalStateException("Original Runtime state directory is unavailable", error);
         }
@@ -111,7 +112,7 @@ public final class LocalRuntimeProviderFactory implements RuntimeProviderFactory
     private static void requireRecoveryDirectoryOutsideWorkspaces(ManagedAgentSettings.RuntimeBroker broker,
             Path directory) {
         try {
-            Path candidate = java.nio.file.Files.exists(directory) ? directory.toRealPath()
+            Path candidate = Files.exists(directory) ? directory.toRealPath()
                     : directory.getParent().toRealPath().resolve(directory.getFileName());
             if (candidate.startsWith(Path.of(broker.getWorkspaceCwd()).toRealPath())) {
                 throw new IllegalStateException(recoveryDirectoryOutsideRootsMessage());

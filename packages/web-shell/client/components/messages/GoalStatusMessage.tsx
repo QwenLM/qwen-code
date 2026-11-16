@@ -1,7 +1,13 @@
 import { DAEMON_GOAL_STATUS_SENTINEL_PREFIX } from '@qwen-code/sdk/daemon';
+import { useState } from 'react';
 import { useI18n } from '../../i18n';
 import { formatRuntime } from '../../utils/formatRuntime';
 import { createSentinelSerializer } from '../../utils/sentinelMessage';
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '../ui/collapsible';
 import styles from './GoalStatusMessage.module.css';
 
 export type GoalStatusKind =
@@ -156,6 +162,7 @@ export function GoalStatusMessage({
   status: SerializedGoalStatusMessage;
 }) {
   const { t } = useI18n();
+  const [expanded, setExpanded] = useState(false);
 
   const title = getTitle(status, t);
   const stats: string[] = [];
@@ -187,15 +194,23 @@ export function GoalStatusMessage({
           {title.title}
           {subtitle && <span className={styles.muted}>{subtitle}</span>}
         </div>
-        <div className={styles.row}>
-          <span className={styles.label}>{t('goal.label')}:</span>
-          <span className={styles.value}>{status.condition}</span>
-        </div>
-        {showReason && (
-          <div className={styles.muted}>
-            {reasonLabel}: {showReason}
+        <Collapsible open={expanded} onOpenChange={setExpanded}>
+          <div className={styles.row}>
+            <span className={styles.label}>{t('goal.label')}:</span>
+            <span className={styles.preview}>{status.condition}</span>
+            <CollapsibleTrigger className={styles.toggle}>
+              {t(expanded ? 'goal.collapseDetails' : 'goal.expandDetails')}
+            </CollapsibleTrigger>
           </div>
-        )}
+          <CollapsibleContent className={styles.details}>
+            <div>{status.condition}</div>
+            {showReason && (
+              <div className={styles.muted}>
+                {reasonLabel}: {showReason}
+              </div>
+            )}
+          </CollapsibleContent>
+        </Collapsible>
       </div>
     </div>
   );
