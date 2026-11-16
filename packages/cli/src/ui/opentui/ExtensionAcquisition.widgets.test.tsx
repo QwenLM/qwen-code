@@ -124,6 +124,56 @@ it('edits pasted setting text in the middle and submits its exact bytes once', a
   expect(p.cancel).not.toHaveBeenCalled();
 });
 
+async function controlC(shift = false) {
+  await act(async () => {
+    for (const fn of [...native.keys])
+      fn({ ...catalogKey('c', '\x03'), ctrl: true, shift });
+  });
+}
+
+it('clears only the active non-sensitive draft on Ctrl+C before replacement', async () => {
+  const p = setting();
+  const ui = render(widget(p));
+  await paste('old-value');
+  expect(ui.container.textContent).toContain('old-value');
+  await controlC();
+  expect(ui.container.textContent).not.toContain('old-value');
+  expect(p.resolve).not.toHaveBeenCalled();
+  expect(p.cancel).not.toHaveBeenCalled();
+  await paste('owned-value');
+  await key('return');
+  expect(p.resolve).toHaveBeenCalledExactlyOnceWith('owned-value');
+});
+
+it('inserts plain c without clearing the non-sensitive draft', async () => {
+  const p = setting();
+  render(widget(p));
+  await paste('old-');
+  await key('c');
+  await key('return');
+  expect(p.resolve).toHaveBeenCalledExactlyOnceWith('old-c');
+});
+
+it('leaves the non-sensitive draft unchanged on Shift+Ctrl+C', async () => {
+  const p = setting();
+  render(widget(p));
+  await paste('old-value');
+  await controlC(true);
+  await key('return');
+  expect(p.resolve).toHaveBeenCalledExactlyOnceWith('old-value');
+});
+
+it('preserves the sensitive password policy instead of clearing on Ctrl+C', async () => {
+  const p = setting(true);
+  const ui = render(widget(p));
+  await paste('secret-value');
+  await controlC();
+  expect(ui.container.textContent).not.toContain('secret-value');
+  await key('return');
+  expect(p.resolve).toHaveBeenCalledExactlyOnceWith('secret-value');
+  expect(p.cancel).not.toHaveBeenCalled();
+});
+
 it('masks sensitive pasted and typed input while retaining the actual edited value', async () => {
   const p = setting(true);
   const ui = render(widget(p));

@@ -24,8 +24,10 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeToolMeasurements;
 import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
+import com.alibaba.qwen.code.runtimebroker.TerminalHoldAdmission;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.BindingContext;
 import com.alibaba.qwen.code.runtimebroker.service.RuntimeBindingRegistry.SessionContext;
@@ -48,7 +50,6 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -64,9 +65,11 @@ import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.i
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.isPublicationV3;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.mapFailure;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.mapStoreFailure;
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.newScheduler;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.prepareExecutionReference;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.referenceString;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.requireOpen;
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.requireDuration;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.requireSameSession;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.safeStage;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.sameReceipt;
@@ -109,6 +112,8 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
     private final AtomicBoolean closed = new AtomicBoolean();
     private final RuntimeBindingRegistry bindingRegistry;
     private final RuntimeBindingProvisioning bindingProvisioning;
+    private final TerminalHolds terminalHolds;
+    private final BackgroundProcessAdmission backgroundProcessAdmission;
     private final RuntimeExecutionState executionState;
     private final RuntimeExecutionDispatcher executionDispatcher;
     private final RuntimeExecutionReconciler executionReconciler;
@@ -266,6 +271,10 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         this.bindingProvisioning = new RuntimeBindingProvisioning(bindingRegistry, bindingRepository,
                 sessionRepository, executionRepository, provisioner, transport, this.brokerOwnerId,
                 this.operationLeaseDuration, clock, scheduler, closed, this::newBindingRenewal);
+        this.terminalHolds = new TerminalHolds(this, bindingRegistry, bindingRepository,
+                sessionRepository, executionRepository, clock, closed);
+        this.backgroundProcessAdmission = new BackgroundProcessAdmission(bindingRepository,
+                sessionRepository, executionRepository);
         this.executionState = new RuntimeExecutionState(bindingRepository, sessionRepository, executionRepository,
                 this.brokerOwnerId, this.dispatchLeaseDuration, clock);
         this.executionDispatcher = new RuntimeExecutionDispatcher(bindingRegistry, executionState,
@@ -295,6 +304,10 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
 
     public boolean supportsDrainedStop() {
         return provisioner.supportsDrainedStop();
+    }
+
+    public boolean supportsDrainedStopKind(String kind) {
+        return provisioner.supportsDrainedStopKind(kind);
     }
 
     public boolean supportsDrainedStop(RuntimeBindingRecord binding) {
@@ -346,19 +359,7 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         String harnessId = BrokerValues.requireId(harnessSessionId, "harnessSessionId");
         return resolveScope(harnessId, true, null).thenCompose(scope -> {
             bindingRepository.requireHarnessAdmission(scope, harnessId, null);
-            RuntimeSessionRecord owner = runtimeSessionId == null ? null
-                    : sessionRepository.findHistorical(scope.getTenantId(), harnessId,
-                            BrokerValues.requireId(runtimeSessionId, "runtimeSessionId"));
-            if (runtimeSessionId != null && owner == null) {
-                throw conflict("managed_mcp_owner_unavailable", "The original MCP owner is unavailable.");
-            }
-            if (owner == null) {
-                var active = sessionRepository.findActiveByHarnessSession(scope.getTenantId(), harnessId, null, 2);
-                if (active.size() > 1) {
-                    throw conflict("managed_mcp_owner_unavailable", "The original MCP owner is ambiguous.");
-                }
-                owner = active.isEmpty() ? null : active.getFirst();
-            }
+            RuntimeSessionRecord owner = McpOwners.resolve(sessionRepository, scope, harnessId, runtimeSessionId);
             CompletionStage<RuntimeBindingRecord> selected;
             if (owner != null) {
                 RuntimeBindingRecord original = bindingRepository.findById(owner.getBindingId());
@@ -836,6 +837,24 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                 idempotencyKey, reference, null);
     }
 
+    @Override
+    public CompletionStage<TerminalHoldAdmission> admitTerminalHold(
+            String harnessSessionId, String terminalId) {
+        return terminalHolds.admit(harnessSessionId, terminalId);
+    }
+
+    @Override
+    public CompletionStage<ToolExecutionRecord> abandonTerminalHold(
+            String harnessSessionId, String terminalId, String executionCallId) {
+        return terminalHolds.abandon(harnessSessionId, terminalId, executionCallId);
+    }
+
+    @Override
+    public CompletionStage<Void> markTerminalPtyEstablished(
+            String harnessSessionId, String terminalId) {
+        return terminalHolds.markPtyEstablished(harnessSessionId, terminalId);
+    }
+
     /** A v3 reservation keeps the raw payload digest distinct from canonical input. */
     public CompletionStage<ToolExecutionRecord> prepareExecution(
             String harnessSessionId, String runtimeSessionId,
@@ -915,6 +934,15 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
                                 || isProtocolV3(record.getReference())
                                     && !"run_shell_command".equals(toolName) && !"monitor".equals(toolName)) {
                             throw invalid("runtime_payload_invalid", "Tool payload is invalid");
+                        }
+                        if (WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
+                                && (v3 || record.getReference().containsKey("runtimeProtocol")
+                                        || !Set.of("read_file", "write_file", "edit", "glob").contains(toolName))) {
+                            executionRepository.settlePrepared(record, Map.of(
+                                    "executionStatus", "not_started", "responseParts", List.of(),
+                                    "error", Map.of("type", "workspace_tool_unsupported",
+                                            "message", "External Workspace requires a file Tool v2 payload")), clock.instant());
+                            throw invalid("runtime_payload_invalid", "External Workspace requires a file Tool v2 payload");
                         }
                         if (v3) {
                             if (!"run_shell_command".equals(payload.get("toolName"))
@@ -1515,41 +1543,9 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
     // admitted at start, carrying no model result and staying non-terminal
     // until physical proof — that is what `hasActiveBy*` counts while it
     // lives.
-    private void admitBackgroundProcess(SessionContext context,
+    void admitBackgroundProcess(SessionContext context,
             ToolExecutionRecord invocation, ManagedHoldFamily family) {
-        context.lock();
-        try {
-            Map<String, Object> invocationReference = invocation.getReference();
-            String callId = referenceString(invocationReference, "callId");
-            Map<String, Object> reference = Map.of(
-                    "dispatchMode", family.dispatchMode(),
-                    "processOf", invocation.getExecutionCallId(),
-                    "sessionId", referenceString(invocationReference, "sessionId"),
-                    "promptId", referenceString(invocationReference, "promptId"),
-                    "callId", callId,
-                    "argsDigest", invocation.getRequestDigest());
-            ToolExecutionRecord candidate = ToolExecutionRecord.prepared(
-                    invocation.getExecutionCallId() + ":process",
-                    invocation.getExecutionCallId() + ":process",
-                    invocation.getBindingId(),
-                    invocation.getRuntimeGeneration(),
-                    invocation.getHarnessSessionId(),
-                    invocation.getRuntimeSessionId(),
-                    referenceString(invocationReference, "promptId"),
-                    callId,
-                    invocation.getRequestDigest(),
-                    reference);
-            try {
-                bindingRepository.admitExecution(sessionRepository,
-                        executionRepository, candidate);
-            } catch (IllegalArgumentException exception) {
-                throw conflict("runtime_execution_conflict",
-                        "background process identity is already in use", exception);
-            }
-            context.backgroundProcesses().add(candidate.getExecutionCallId());
-        } finally {
-            context.unlock();
-        }
+        backgroundProcessAdmission.admit(context, invocation, family);
     }
 
     /**
@@ -1741,23 +1737,6 @@ public final class RuntimeBrokerService implements AutoCloseable, RuntimeBrokerO
         // alone and fences a lapsed EXECUTING or CANCEL_REQUESTED record.
         return !record.isTerminal()
                 && record.getState() != ToolExecutionRecord.State.UNKNOWN;
-    }
-
-    private static Duration requireDuration(Duration duration,
-            String name) {
-        if (duration == null || duration.isZero() || duration.isNegative()) {
-            throw new IllegalArgumentException(name + " must be positive");
-        }
-        return duration;
-    }
-
-    private static ScheduledExecutorService newScheduler() {
-        return Executors.newSingleThreadScheduledExecutor(runnable -> {
-            Thread thread = new Thread(runnable,
-                    "qwen-runtime-broker-coordination");
-            thread.setDaemon(true);
-            return thread;
-        });
     }
 
     // Renewals run their synchronous JDBC on their own pool, so a stalled

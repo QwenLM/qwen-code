@@ -103,6 +103,25 @@ public class ToolPublicationAsyncVerificationTest {
                 bytes, ToolPublicationContract.sha256(bytes));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"stdout", "stderr"})
+    void asynchronousSegmentVerificationPreservesTheSegmentReceipt(String stream) {
+        byte[] bytes = "captured output".getBytes(StandardCharsets.UTF_8);
+        String digest = ToolPublicationContract.sha256(bytes);
+        assertThat(data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "segment-receipt", stream, 0,
+                bytes, digest).path("state").asText()).isEqualTo("PENDING");
+        try (var verifier = manualVerifier(data)) {
+            assertThat(verifier.runOnce()).isTrue();
+        }
+        JsonNode verified = status("segment-receipt");
+        assertThat(verified.path("state").asText()).isEqualTo("SUCCEEDED");
+        JsonNode expected = JSON.createObjectNode().put("captureId", "capture-1").put("streamId", stream)
+                .put("ordinal", 0).put("byteLength", bytes.length).put("digest", digest);
+        assertThat(verified.path("receipt")).isEqualTo(expected);
+        assertThat(data.publishSegment(key, "pub-1", PUBLICATION_TOKEN, "segment-receipt", stream, 0,
+                bytes, digest)).isEqualTo(verified);
+    }
+
     private void due(String operation) {
         fixture.jdbc.update("UPDATE ma_operation SET verification_next_at = " + ManagedSchemaTime.SQL_NOW + " WHERE operation_id = ?", operation);
     }

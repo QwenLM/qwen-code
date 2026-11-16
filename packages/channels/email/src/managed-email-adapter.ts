@@ -3,7 +3,16 @@ import { setTimeout as delay } from 'node:timers/promises';
 import type { ImapFlow } from 'imapflow';
 import type { ParsedMail, simpleParser } from 'mailparser';
 import type { Transporter } from 'nodemailer';
-import { resolvePrivatePolicy } from '@qwen-code/channel-base';
+import {
+  MANAGED_OUTBOUND_LIMIT,
+  resolvePrivatePolicy,
+} from '@qwen-code/channel-base';
+import type {
+  ManagedChannelPolicy,
+  ManagedInboundEvent,
+  ManagedClaimedDelivery,
+  ManagedChannelControlPlane,
+} from '@qwen-code/channel-base';
 import { addressList, emailSettings } from './config.js';
 import type { EmailSettings } from './config.js';
 import {
@@ -30,36 +39,12 @@ export type { ManagedReceipt } from './managed-state.js';
 // never a second input, never a second send. See
 // docs/design/2026-10-07-managed-channel-runtime.md.
 
-/** The route policy pinned with the first binding of each route. */
-export interface ManagedChannelPolicy {
-  adapter: 'email';
-  senderPolicy: 'allowlist' | 'open' | 'disabled';
-  allowedSenders: string[];
-  dispatchMode: 'followup' | 'steer';
-}
-
-export interface ManagedInboundEvent {
-  accountGeneration: number;
-  platformEventId: string;
-  semanticRevision: 1;
-  scope: {
-    kind: 'chat_thread';
-    senderId: null;
-    chatId: string;
-    threadId: string;
-  };
-  senderId: string;
-  chatId: string;
-  threadId: string;
-  subject: string | null;
-  text: string;
-  attachments: Array<{
-    fileName: string;
-    mimeType: string;
-    bytesBase64: string;
-  }>;
-  replyContext: EmailReplyContext;
-}
+export type {
+  ManagedChannelPolicy,
+  ManagedInboundEvent,
+  ManagedClaimedDelivery,
+  ManagedChannelControlPlane,
+};
 
 /** What a reply needs, committed with the input and echoed by the outbox. */
 export interface EmailReplyContext {
@@ -68,28 +53,6 @@ export interface EmailReplyContext {
   parent: string;
   references: string[];
   subject: string;
-}
-
-export interface ManagedClaimedDelivery {
-  deliveryId: string;
-  replyContext: unknown;
-  segments: Array<{ ordinal: number; segmentId: string; text: string }>;
-}
-
-/** The trusted control-plane surface the adapter talks to. */
-export interface ManagedChannelControlPlane {
-  register(request: {
-    platform: 'email';
-    accountId: string;
-    accountGeneration: number;
-    policy: ManagedChannelPolicy;
-  }): Promise<void>;
-  disconnect(): Promise<void>;
-  submitInbound(
-    event: ManagedInboundEvent,
-  ): Promise<{ inputId: string; sessionId: string; replayed: boolean }>;
-  claimDeliveries(limit: number): Promise<ManagedClaimedDelivery[]>;
-  receipt(deliveryId: string, receipt: ManagedReceipt): Promise<void>;
 }
 
 export interface ManagedEmailAdapterDeps {
@@ -181,6 +144,7 @@ export class ManagedEmailAdapter {
   private parse?: typeof simpleParser;
   private releaseLock?: () => Promise<void>;
   private running = false;
+  private ownershipLost = false;
   private abort = new AbortController();
   private loop?: Promise<void>;
   /**
@@ -244,7 +208,10 @@ export class ManagedEmailAdapter {
     try {
       this.releaseLock = await this.deps.lock(this.store.directory, () => {
         // A reaped stale lock means a second owner won the mailbox: stop
-        // rather than keep polling as its silent twin.
+        // rather than keep polling as its silent twin, and stop persisting —
+        // an in-flight tick or the shutdown drain must not rewrite the state
+        // file the new owner now holds (parity with DingTalk R7-2, #17173).
+        this.ownershipLost = true;
         this.log(
           'Managed email state ownership was lost to another process; adapter stopped.',
         );
@@ -399,6 +366,9 @@ export class ManagedEmailAdapter {
   }
 
   private persist(): void {
+    // Once the lock is compromised the state file belongs to another process;
+    // never rewrite it, even from an in-flight tick's post-await persist.
+    if (this.ownershipLost) return;
     if (!this.state) throw new Error('Managed email state is unavailable.');
     this.store.save(this.state);
   }
@@ -1117,7 +1087,7 @@ export class ManagedEmailAdapter {
           ordinal: segment.ordinal,
           messageId,
         },
-      ].slice(-64);
+      ].slice(-MANAGED_OUTBOUND_LIMIT);
       this.persist();
       let outcome: ManagedReceipt;
       try {

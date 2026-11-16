@@ -7,6 +7,7 @@ import java.util.Map;
 public interface ManagedAgentSettings {
     public Harness getHarness();
     public boolean admitsPublicChildAgents();
+    public boolean isExternalWorkspaceFilesConfigured();
     public Automation getAutomation();
     public Channels getChannels();
     public EventTransport getEventTransport();
@@ -171,6 +172,11 @@ public interface ManagedAgentSettings {
         public String getIsolationClass();
         public String getBoundSessionIsolationClass();
         public default boolean isToolMeasurements() {
+            return false;
+        }
+
+        /** Whether placed Workspaces gain the user-terminal surface. */
+        public default boolean isWebTerminal() {
             return false;
         }
 

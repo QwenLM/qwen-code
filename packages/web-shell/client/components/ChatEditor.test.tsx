@@ -22,6 +22,7 @@ import type {
 } from '../hooks/useComposerCore';
 import type { AtMentionWorkspaceActions } from '../hooks/useAtMentionSources';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
+import type { VoiceButtonHandle } from '../voice/VoiceButton';
 import type {
   WebShellUnavailableModel,
   WebShellUnavailableModelTooltipMount,
@@ -169,6 +170,8 @@ const composerCoreState = vi.hoisted(() => ({
   setShellMode: vi.fn(),
   toggleShellMode: vi.fn(),
   submitText: vi.fn(),
+  submitPreparing: false,
+  submitBlocked: false,
   onFileUploadRequest: undefined as
     | ((targetDir: string, restoreQuery?: () => void) => void)
     | undefined,
@@ -201,6 +204,7 @@ const uploadWorkspaceState = vi.hoisted(() => ({
 
 const voiceButtonState = vi.hoisted(() => ({
   onActiveChange: undefined as ((active: boolean) => void) | undefined,
+  flush: vi.fn(async () => ''),
 }));
 
 Object.defineProperty(window, 'matchMedia', {
@@ -251,9 +255,15 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
           mockComposerCoreState.composerTags.length > 0,
         hasContent: composerCoreState.hasContent,
         canSubmit:
+          !composerCoreState.submitBlocked &&
           !options?.disabled &&
           !options?.workspaceUploadBusy &&
           composerCoreState.hasContent,
+        submitBlocked:
+          composerCoreState.submitBlocked ||
+          Boolean(options?.disabled) ||
+          Boolean(options?.workspaceUploadBusy),
+        submitPreparing: composerCoreState.submitPreparing,
         pendingImageBatchCount: composerCoreState.pendingImageBatchCount,
         imageDragActive: composerCoreState.imageDragActive,
         clearImageDragState: composerCoreState.clearImageDragState,
@@ -331,16 +341,26 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
   };
 });
 
-vi.mock('../voice/VoiceButton', () => ({
-  VoiceButton: ({
-    onActiveChange,
-  }: {
-    onActiveChange?: (active: boolean) => void;
-  }) => {
-    voiceButtonState.onActiveChange = onActiveChange;
-    return <span data-testid="voice-button" />;
-  },
-}));
+vi.mock('../voice/VoiceButton', async () => {
+  const React = await import('react');
+  return {
+    VoiceButton: ({
+      ref,
+      onActiveChange,
+    }: {
+      ref?: React.Ref<VoiceButtonHandle>;
+      onActiveChange?: (active: boolean) => void;
+    }) => {
+      voiceButtonState.onActiveChange = onActiveChange;
+      React.useImperativeHandle(
+        ref,
+        () => ({ flush: voiceButtonState.flush }),
+        [],
+      );
+      return <span data-testid="voice-button" />;
+    },
+  };
+});
 
 const liveVoiceState = vi.hoisted(() => ({ supported: false }));
 vi.mock('../live/LiveVoiceButton', async () => {
@@ -387,6 +407,8 @@ afterEach(() => {
   composerCoreState.setShellMode.mockReset();
   composerCoreState.toggleShellMode.mockReset();
   composerCoreState.submitText.mockReset();
+  composerCoreState.submitPreparing = false;
+  composerCoreState.submitBlocked = false;
   composerCoreState.shellMode = false;
   composerCoreState.hasContent = false;
   composerCoreState.pendingImageBatchCount = 0;
@@ -394,6 +416,7 @@ afterEach(() => {
   composerCoreState.imageDragActive = false;
   composerCoreState.onFileUploadRequest = undefined;
   voiceButtonState.onActiveChange = undefined;
+  voiceButtonState.flush.mockReset().mockResolvedValue('');
   liveVoiceState.supported = false;
   for (const { root, container, portalRoot } of mounted.splice(0)) {
     act(() => root.unmount());
@@ -854,6 +877,205 @@ describe('ChatEditor voice toolbar integration', () => {
     expect(
       hidden.querySelector('[data-testid="live-voice-button"]'),
     ).toBeNull();
+  });
+
+  it('finalizes active dictation into the composer before a submit proceeds', async () => {
+    composerCoreState.hasContent = true;
+    voiceButtonState.flush.mockResolvedValue('  dictated tail  ');
+    renderChatEditor({ visibleToolbarActions: ['voice'] });
+    act(() => voiceButtonState.onActiveChange?.(true));
+
+    const prepareSubmit = latestComposerCoreOptions.current?.prepareSubmit as
+      | (() => Promise<void>)
+      | undefined;
+    expect(prepareSubmit).toBeTypeOf('function');
+    await act(async () => {
+      await prepareSubmit!();
+    });
+    expect(voiceButtonState.flush).toHaveBeenCalledOnce();
+    expect(composerCoreState.insertText).toHaveBeenCalledWith('dictated tail ');
+    expect(composerCoreState.focus).toHaveBeenCalled();
+  });
+
+  it('does not insert anything when the finalized dictation is empty', async () => {
+    composerCoreState.hasContent = true;
+    voiceButtonState.flush.mockResolvedValue('   ');
+    renderChatEditor({ visibleToolbarActions: ['voice'] });
+    act(() => voiceButtonState.onActiveChange?.(true));
+
+    const prepareSubmit = latestComposerCoreOptions.current?.prepareSubmit as
+      | (() => Promise<void>)
+      | undefined;
+    expect(prepareSubmit).toBeTypeOf('function');
+    await act(async () => {
+      await prepareSubmit!();
+    });
+    expect(voiceButtonState.flush).toHaveBeenCalledOnce();
+    expect(composerCoreState.insertText).not.toHaveBeenCalled();
+  });
+
+  it('shows the send button as preparing while a submit finalizes dictation', () => {
+    composerCoreState.hasContent = true;
+    composerCoreState.submitPreparing = true;
+    const container = renderChatEditor({ visibleToolbarActions: ['voice'] });
+    const submit = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-submit]',
+    )!;
+    expect(submit.disabled).toBe(true);
+    expect(submit.getAttribute('aria-label')).toBe('Loading...');
+    act(() => submit.click());
+    expect(composerCoreState.submitText).not.toHaveBeenCalled();
+  });
+
+  it('keeps the running-agent stop button usable while a submit finalizes dictation', () => {
+    composerCoreState.hasContent = true;
+    composerCoreState.submitPreparing = true;
+    const onCancel = vi.fn();
+    const container = renderChatEditor({
+      customization: { composerVariant: 'simple' },
+      visibleToolbarActions: ['voice'],
+      isRunning: true,
+      onCancel,
+    });
+    const stop = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-stop]',
+    )!;
+    expect(stop.disabled).toBe(false);
+    act(() => stop.click());
+    expect(onCancel).toHaveBeenCalledOnce();
+    const submit = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-submit]',
+    )!;
+    expect(submit.disabled).toBe(true);
+  });
+
+  it('keeps the desktop stop affordance usable while a submit finalizes dictation', () => {
+    // Empty draft during a run: the submit button doubles as the Stop control.
+    composerCoreState.hasContent = false;
+    composerCoreState.submitPreparing = true;
+    const onCancel = vi.fn();
+    const container = renderChatEditor({
+      visibleToolbarActions: ['voice'],
+      isRunning: true,
+      onCancel,
+    });
+    const submit = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-submit]',
+    )!;
+    expect(submit.disabled).toBe(false);
+    expect(submit.getAttribute('aria-label')).toBe('esc to cancel');
+    act(() => submit.click());
+    expect(onCancel).toHaveBeenCalledOnce();
+    expect(composerCoreState.submitText).not.toHaveBeenCalled();
+  });
+
+  it('enables Send for an active dictation even with an empty draft', () => {
+    composerCoreState.hasContent = false;
+    const container = renderChatEditor({ visibleToolbarActions: ['voice'] });
+    const submit = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-submit]',
+    )!;
+    expect(submit.disabled).toBe(true);
+
+    act(() => voiceButtonState.onActiveChange?.(true));
+    expect(submit.disabled).toBe(false);
+    act(() => submit.click());
+    expect(composerCoreState.submitText).toHaveBeenCalledOnce();
+
+    act(() => voiceButtonState.onActiveChange?.(false));
+    expect(submit.disabled).toBe(true);
+  });
+
+  it('installs the submit finalizer only while a capture is active', () => {
+    renderChatEditor({ visibleToolbarActions: ['voice'] });
+    expect(latestComposerCoreOptions.current?.prepareSubmit).toBeUndefined();
+
+    act(() => voiceButtonState.onActiveChange?.(true));
+    expect(latestComposerCoreOptions.current?.prepareSubmit).toBeTypeOf(
+      'function',
+    );
+
+    act(() => voiceButtonState.onActiveChange?.(false));
+    expect(latestComposerCoreOptions.current?.prepareSubmit).toBeUndefined();
+  });
+
+  it('sends the dictation instead of cancelling when a capture is active during a run', () => {
+    // Touch layouts have no Enter-to-submit: with an active dictation the
+    // button must send (queue) it, not take the Stop role.
+    composerCoreState.hasContent = false;
+    const onCancel = vi.fn();
+    const container = renderChatEditor({
+      visibleToolbarActions: ['voice'],
+      isRunning: true,
+      onCancel,
+    });
+    act(() => voiceButtonState.onActiveChange?.(true));
+    const submit = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-submit]',
+    )!;
+    expect(submit.disabled).toBe(false);
+    expect(submit.getAttribute('aria-label')).toBe('Send message');
+    act(() => submit.click());
+    expect(composerCoreState.submitText).toHaveBeenCalledOnce();
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it('keeps Send disabled while submit guards block even with an active capture', () => {
+    composerCoreState.hasContent = false;
+    composerCoreState.submitBlocked = true;
+    const container = renderChatEditor({ visibleToolbarActions: ['voice'] });
+    act(() => voiceButtonState.onActiveChange?.(true));
+    const submit = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-submit]',
+    )!;
+    expect(submit.disabled).toBe(true);
+  });
+
+  it('keeps a stop control reachable during dictation on an empty draft', () => {
+    composerCoreState.hasContent = false;
+    composerCoreState.submitPreparing = true;
+    const onCancel = vi.fn();
+    const container = renderChatEditor({
+      customization: { composerVariant: 'simple' },
+      visibleToolbarActions: ['voice'],
+      isRunning: true,
+      onCancel,
+    });
+    act(() => voiceButtonState.onActiveChange?.(true));
+    const stop = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-composer-stop]',
+    );
+    expect(stop).not.toBeNull();
+    expect(stop!.disabled).toBe(false);
+    act(() => stop!.click());
+    expect(onCancel).toHaveBeenCalledOnce();
+  });
+
+  it('inserts the finalized transcript directly in the simple variant', async () => {
+    voiceButtonState.flush.mockResolvedValue('simple tail');
+    // Record whether the finalizer was still installed when the insertion
+    // happened: direct insertion runs while voiceActive is true; the
+    // deferred review path only inserts after the voiceActive=false render
+    // uninstalls it — too late for the submit in the same continuation.
+    let prepareSubmitAtInsert: unknown;
+    composerCoreState.insertText.mockImplementation(() => {
+      prepareSubmitAtInsert = latestComposerCoreOptions.current?.prepareSubmit;
+    });
+    renderChatEditor({
+      customization: { composerVariant: 'simple' },
+      visibleToolbarActions: ['voice'],
+    });
+    act(() => voiceButtonState.onActiveChange?.(true));
+
+    const prepareSubmit = latestComposerCoreOptions.current?.prepareSubmit as
+      | (() => Promise<void>)
+      | undefined;
+    expect(prepareSubmit).toBeTypeOf('function');
+    await act(async () => {
+      await prepareSubmit!();
+    });
+    expect(composerCoreState.insertText).toHaveBeenCalledWith('simple tail ');
+    expect(prepareSubmitAtInsert).toBeTypeOf('function');
   });
 });
 
@@ -5488,6 +5710,20 @@ describe('ChatEditor mobile composer actions', () => {
     ].find((b) => b.textContent === 'Stop')!;
     act(() => stop.click());
     expect(onCancel).toHaveBeenCalledTimes(2);
+    expect(composerCoreState.submitText).not.toHaveBeenCalled();
+
+    // The expanded Stop must survive submit finalization too — while the
+    // modal is open it is the only reachable stop control.
+    composerCoreState.submitPreparing = true;
+    rerenderChatEditor(container, { isRunning: true, onCancel });
+    const stopDuringFlush = [
+      ...document.querySelectorAll<HTMLButtonElement>(
+        '[data-web-shell-expanded-editor] button',
+      ),
+    ].find((b) => b.textContent === 'Stop')!;
+    expect(stopDuringFlush.disabled).toBe(false);
+    act(() => stopDuringFlush.click());
+    expect(onCancel).toHaveBeenCalledTimes(3);
     expect(composerCoreState.submitText).not.toHaveBeenCalled();
   });
 

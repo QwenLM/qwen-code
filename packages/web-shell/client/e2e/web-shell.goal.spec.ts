@@ -251,8 +251,20 @@ for (const width of [1280, 390]) {
     await expect(page.getByText(lastReason, { exact: false })).toHaveCount(0);
     await capture(page, testInfo, 'goal-collapsed.png');
 
-    await toggle.focus();
-    await page.keyboard.press('Enter');
+    const timestamp = page
+      .locator('span[aria-hidden="true"]')
+      .filter({ hasText: /^(?:\d{4}-\d{2}-\d{2} )?\d{2}:\d{2}:\d{2}$/ });
+    await expect(timestamp).toHaveCount(1);
+    await expect(timestamp).toHaveCSS('opacity', '0');
+    await toggle.hover();
+    await capture(page, testInfo, 'goal-collapsed-hover.png');
+    expect(await toggle.boundingBox()).toEqual(buttonBox);
+    await expect(timestamp).toHaveCSS('opacity', '0');
+    await preview.hover();
+    await expect(timestamp).toHaveCSS('opacity', '1');
+    await page.mouse.move(0, 0);
+
+    await toggle.click();
     const collapse = page.getByRole('button', { name: 'Collapse details' });
     await expect(collapse).toHaveAttribute('aria-expanded', 'true');
     const details = page.locator(
@@ -272,6 +284,10 @@ for (const width of [1280, 390]) {
     );
     expect(expandedLayout.overflowing).toBe(true);
     await capture(page, testInfo, 'goal-expanded.png');
+    await collapse.hover();
+    await capture(page, testInfo, 'goal-expanded-hover.png');
+    await expect(timestamp).toHaveCSS('opacity', '0');
+    await page.mouse.move(0, 0);
     const beforeScroll = await collapse.boundingBox();
     await details.hover();
     await page.mouse.wheel(0, 800);

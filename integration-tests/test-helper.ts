@@ -1110,3 +1110,44 @@ export async function runForcedToolCallScenario(options: {
     await fakeServer.close();
   }
 }
+
+/**
+ * The debug-log line `runModelRound` writes on the shared agent loop. Its
+ * presence proves a round ran on the shared loop; a surface's legacy loop
+ * never calls `runModelRound`, so the line is absent there. The wording is
+ * distinct from the TUI surfaces' own "model round on the shared agent loop"
+ * marker so this count does not double-count the TUI parity's marker.
+ */
+export const SHARED_LOOP_ROUND_MARKER =
+  /runModelRound on the shared agent loop/g;
+
+/**
+ * Concatenates a runtime dir's debug logs, marker-agnostic. Skips `latest`,
+ * which points at the session's own log. Shared by every arm-identity and
+ * debug-marker probe so the scan exists once.
+ */
+export function readDebugLogs(runtimeDir: string): string {
+  const debugDir = join(runtimeDir, 'debug');
+  if (!fs.existsSync(debugDir)) return '';
+  return fs
+    .readdirSync(debugDir, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name !== 'latest')
+    .map((entry) => readFileSync(join(entry.parentPath, entry.name), 'utf8'))
+    .join('');
+}
+
+/**
+ * Counts the shared-loop round markers in a runtime dir's debug logs. Run the
+ * child with `QWEN_DEBUG_LOG_FILE=1` and `QWEN_RUNTIME_DIR` pointing at the
+ * returned dir, then assert the count is > 0 for a shared arm and 0 for a
+ * legacy arm — so an arm label is verified, not assumed.
+ *
+ * The count is process-wide: it sums the markers of every surface in the run
+ * (a subagent on the shared loop counts too). It is a valid per-arm identity
+ * only when the arms force every surface together (whole-value `1`/`0` env).
+ * Under a per-surface force-off, a surface that stayed on the shared loop
+ * would keep the count non-zero even though the forced-off surface ran legacy.
+ */
+export function sharedLoopRoundCount(runtimeDir: string): number {
+  return readDebugLogs(runtimeDir).match(SHARED_LOOP_ROUND_MARKER)?.length ?? 0;
+}

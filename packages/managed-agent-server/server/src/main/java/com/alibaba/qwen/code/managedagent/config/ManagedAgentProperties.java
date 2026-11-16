@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.config;
 
 import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds;
 import jakarta.annotation.PostConstruct;
 import lombok.AccessLevel;
 import lombok.Getter;
@@ -401,7 +402,8 @@ public class ManagedAgentProperties
                 && (!harness.isEnabled()
                         || !sessionStore.isEnabled()
                         || !runtimeBroker.isEnabled()
-                        || !sshFiles && (!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(runtimeBroker.getProvisioner())
+                        || !sshFiles && !isExternalWorkspaceFilesConfigured()
+                        && (!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(runtimeBroker.getProvisioner())
                         || !WorkspaceExecutionProfile.admitsIsolationClass(runtimeBroker.getIsolationClass())
                         || (runtimeBroker.getWorkspaceMounts().isEmpty()
                                 && runtimeBroker.getWorkspaceCreationRoot().isBlank()
@@ -511,6 +513,24 @@ public class ManagedAgentProperties
                         + " under a UTF-8 locale (sun.jnu.encoding is "
                         + System.getProperty("sun.jnu.encoding") + ")");
             }
+        }
+    }
+
+    /** Static configuration eligibility, never negotiated readiness or worker proof. */
+    public boolean isExternalWorkspaceFilesConfigured() {
+        if (!ExternalRuntimeKinds.isWorkspace(runtimeBroker.getProvisioner())
+                || !harness.isWorkspaceFilesEnabled() || !harness.isEnabled()
+                || !sessionStore.isEnabled() || !runtimeBroker.isEnabled()) {
+            return false;
+        }
+        try {
+            new com.alibaba.qwen.code.managedagent.config.runtime.RuntimeProviderRegistry()
+                    .require(runtimeBroker.getProvisioner())
+                    .validate(this);
+            return harness.getApprovalMode() != null
+                    && Set.of("yolo", "default", "auto-edit").contains(harness.getApprovalMode().toLowerCase(Locale.ROOT));
+        } catch (IllegalStateException | IllegalArgumentException invalid) {
+            return false;
         }
     }
 
@@ -938,6 +958,7 @@ public class ManagedAgentProperties
         private String isolationClass = "session";
         private String boundSessionIsolationClass = "session";
         private boolean toolMeasurements;
+        private boolean webTerminal;
         private boolean sessionCreateWarm;
         private String stateDirectory = "";
         private boolean durableLocalProcess = true;
