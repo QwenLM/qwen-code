@@ -1,6 +1,9 @@
 package com.alibaba.qwen.code.cli.session;
 
+import java.util.Locale;
 import java.util.Optional;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeoutException;
 
 import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONObject;
@@ -235,20 +238,59 @@ public class Session {
                     }
                     return false;
                 } else if ("control_request".equals(messageType)) {
-                    CLIControlResponse<? extends ControlResponsePayload> controlResponse;
+                    String requestId = jsonObject.getString("request_id");
+                    CLIControlResponse<? extends ControlResponsePayload> controlResponse = null;
+                    Timeout controlRequestTimeout = defaultEventTimeout;
+                    String error = null;
                     try {
                         CLIControlRequest<? extends ControlRequestPayload> controlRequest = jsonObject.to(
                                 new TypeReference<CLIControlRequest<? extends ControlRequestPayload>>() {});
+                        controlRequestTimeout = Optional.ofNullable(sessionEventConsumers.onControlRequestTimeout(this, controlRequest))
+                                .orElse(defaultEventTimeout);
                         controlResponse = MyConcurrentUtils.runAndWait(
-                                () -> sessionEventConsumers.onControlRequest(this, controlRequest),
-                                Optional.ofNullable(sessionEventConsumers.onControlRequestTimeout(this, controlRequest)).orElse(defaultEventTimeout));
+                                () -> sessionEventConsumers.onControlRequest(this, controlRequest), controlRequestTimeout);
                     } catch (Exception e) {
-                        log.error("Failed to process control request", e);
+                        Throwable cause = e;
+                        if (cause instanceof ExecutionException && cause.getCause() != null) {
+                            cause = cause.getCause();
+                            // MyConcurrentUtils adds one RuntimeException below ExecutionException.
+                            if (cause.getClass() == RuntimeException.class && cause.getCause() != null) {
+                                cause = cause.getCause();
+                            }
+                        }
+                        error = e instanceof TimeoutException
+                                ? "Control request handler timed out after " + controlRequestTimeout.getValue() + " "
+                                        + controlRequestTimeout.getUnit().name().toLowerCase(Locale.ROOT)
+                                : "Control request handler failed (" + cause.getClass().getSimpleName() + "); see SDK logs for details";
+                        log.error(error, e);
+                    }
+                    if (error == null) {
+                        if (controlResponse == null || controlResponse.getResponse() == null) {
+                            error = "Control request handler returned no response";
+                        } else {
+                            CLIControlResponse.Response<? extends ControlResponsePayload> response = controlResponse.getResponse();
+                            if (response.getRequestId() == null || !response.getRequestId().equals(requestId)) {
+                                error = "Control request handler returned an uncorrelated response: expected request_id="
+                                        + requestId + ", got " + response.getRequestId();
+                            } else if ("success".equals(response.getSubtype()) && response.getResponse() == null) {
+                                error = "Control request handler returned success without a response payload";
+                            } else if (!"success".equals(response.getSubtype()) && !"error".equals(response.getSubtype())) {
+                                error = "Control request handler returned an unknown response subtype; expected success or error";
+                            }
+                        }
+                        if (error != null) {
+                            log.error(error);
+                        }
+                    }
+                    if (error != null) {
                         controlResponse = new CLIControlResponse<>();
+                        controlResponse.createResponse()
+                                .setRequestId(requestId)
+                                .setSubtype("error")
+                                .setError(error);
                     }
                     try {
-                        transport.inputNoWaitResponse(Optional.ofNullable(controlResponse).map(CLIControlResponse::toString)
-                                .orElse(new CLIControlResponse<ControlResponsePayload>().toString()));
+                        transport.inputNoWaitResponse(controlResponse.toString());
                     } catch (Exception e) {
                         throw new RuntimeException("Failed to send control response", e);
                     }
