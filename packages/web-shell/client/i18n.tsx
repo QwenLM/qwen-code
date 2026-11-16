@@ -82,8 +82,9 @@ import {
   MANAGED_MCP_MESSAGES_EN,
   MANAGED_MCP_MESSAGES_ZH,
 } from './components/managed/managed-mcp-messages.js';
+import { ZH_TW } from './i18n-zh-tw.js';
 
-export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN', 'ru'] as const;
+export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN', 'zh-TW', 'ru'] as const;
 
 export type WebShellLanguage = (typeof WEB_SHELL_LANGUAGES)[number];
 
@@ -10366,12 +10367,14 @@ const RU: Messages = {
 const MESSAGES: Record<WebShellLanguage, Messages> = {
   en: EN,
   'zh-CN': ZH,
+  'zh-TW': ZH_TW,
   ru: RU,
 };
 
 const LANGUAGE_LABELS: Record<WebShellLanguage, string> = {
   en: 'English [en]',
   'zh-CN': '中文 [zh-CN]',
+  'zh-TW': '繁體中文 [zh-TW]',
   ru: 'Русский [ru]',
 };
 
@@ -10383,12 +10386,27 @@ const Context = createContext<{
   t: (key) => key,
 });
 
+function isTraditionalChineseTag(normalized: string): boolean {
+  return (
+    normalized === 'zh-tw' ||
+    normalized.startsWith('zh-tw-') ||
+    normalized === 'zh-hant' ||
+    normalized.startsWith('zh-hant-') ||
+    normalized === 'zh-hk' ||
+    normalized.startsWith('zh-hk-') ||
+    normalized === 'zh-mo' ||
+    normalized.startsWith('zh-mo-')
+  );
+}
+
 export function normalizeLanguage(
   value: string | undefined | null,
 ): WebShellLanguage {
-  const normalized = value?.trim().toLowerCase();
+  const normalized = value?.trim().toLowerCase().replace(/_/g, '-');
   if (!normalized) return 'en';
-  if (normalized === 'zh' || normalized === 'zh-cn' || normalized === 'zh_cn') {
+  // zh-TW is a full catalog. Do not fold it into zh-CN or English.
+  if (isTraditionalChineseTag(normalized)) return 'zh-TW';
+  if (normalized === 'zh' || normalized === 'zh-cn') {
     return 'zh-CN';
   }
   // Prefix match: ru, region-qualified ru (ru-RU, ru-UA, ru-KZ, …) and the
@@ -10410,6 +10428,13 @@ export function languageSettingToWebShellLanguage(
     return normalizeLanguage(
       typeof navigator !== 'undefined' ? navigator.language : undefined,
     );
+  }
+  if (
+    isTraditionalChineseTag(normalized) ||
+    normalized === '繁體中文' ||
+    normalized === '繁体中文'
+  ) {
+    return 'zh-TW';
   }
   if (
     normalized === 'zh' ||

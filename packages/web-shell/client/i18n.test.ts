@@ -589,6 +589,10 @@ describe('web-shell ru locale', () => {
     expect(normalizeLanguage('zh')).toBe('zh-CN');
     expect(normalizeLanguage('zh-cn')).toBe('zh-CN');
     expect(normalizeLanguage('zh_cn')).toBe('zh-CN');
+    expect(normalizeLanguage('zh-TW')).toBe('zh-TW');
+    expect(normalizeLanguage('zh_TW')).toBe('zh-TW');
+    expect(normalizeLanguage('zh-Hant')).toBe('zh-TW');
+    expect(normalizeLanguage('zh-HK')).toBe('zh-TW');
     // Unrelated locales still collapse to en (fr, ja, … are not shipped).
     expect(normalizeLanguage('fr-FR')).toBe('en');
     expect(normalizeLanguage('ja-JP')).toBe('en');
@@ -608,12 +612,14 @@ describe('web-shell ru locale', () => {
       expect(languageSettingToWebShellLanguage(value)).toBe('ru');
     }
     expect(languageSettingToWebShellLanguage('zh')).toBe('zh-CN');
+    expect(languageSettingToWebShellLanguage('zh-TW')).toBe('zh-TW');
+    expect(languageSettingToWebShellLanguage('zh_HK')).toBe('zh-TW');
     expect(languageSettingToWebShellLanguage('en')).toBe('en');
     expect(languageSettingToWebShellLanguage('fr')).toBeUndefined();
   });
 
   it('lists ru in the picker with the "Русский [ru]" label', () => {
-    expect(WEB_SHELL_LANGUAGES).toEqual(['en', 'zh-CN', 'ru']);
+    expect(WEB_SHELL_LANGUAGES).toEqual(['en', 'zh-CN', 'zh-TW', 'ru']);
     expect(languageLabel('ru')).toBe('Русский [ru]');
   });
 
@@ -622,8 +628,8 @@ describe('web-shell ru locale', () => {
     // the error/usage copy must carry the same set, in both locales.
     for (const language of ['en', 'zh-CN'] as const) {
       const t = getTranslator(language);
-      expect(t('language.invalid')).toContain('en, zh-CN, ru');
-      expect(t('language.usage')).toContain('en|zh-CN|ru');
+      expect(t('language.invalid')).toContain('en, zh-CN, zh-TW, ru');
+      expect(t('language.usage')).toContain('en|zh-CN|zh-TW|ru');
       expect(t('language.usage')).toContain('[--project|--global]');
     }
   });
@@ -715,5 +721,26 @@ describe('web-shell ru locale', () => {
     );
     // Unknown in every catalog: the key itself, as in all locales.
     expect(t('no.such.key')).toBe('no.such.key');
+  });
+});
+
+describe('web-shell zh-TW locale', () => {
+  it('uses Taiwan Traditional Chinese instead of the Simplified catalog', () => {
+    const tw = getTranslator('zh-TW');
+    const zh = getTranslator('zh-CN');
+    expect(tw('files.title')).toBe('檔案');
+    expect(zh('files.title')).toBe('文件');
+    expect(tw('files.delete')).toBe('刪除檔案');
+    expect(
+      tw(
+        "You've used up your weekly credits.{{reset}} Please try again after the reset.",
+        { reset: '' },
+      ),
+    ).toContain('週額度');
+    expect(languageLabel('zh-TW')).toBe('繁體中文 [zh-TW]');
+    expect(tw('language.invalid')).toContain('zh-TW');
+    for (const forbidden of ['服务器', '软件', '设置', '为了']) {
+      expect(tw('files.delete')).not.toContain(forbidden);
+    }
   });
 });

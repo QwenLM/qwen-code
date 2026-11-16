@@ -95,6 +95,48 @@ const EN_COPY = {
 
 const COPY = {
   en: EN_COPY,
+  'zh-TW': {
+    'desktopRelay.title': '這臺電腦',
+    'desktopRelay.trigger': '使用這臺電腦',
+    'desktopRelay.hint':
+      '讓當前會話在這臺電腦上執行程式碼、檢視並操作螢幕，用於 Computer Use。每次連線都要在這臺電腦彈出的對話方塊裡確認。',
+    'desktopRelay.connect': '連線這臺電腦',
+    'desktopRelay.disconnect': '斷開',
+    'desktopRelay.checkAgain': '重新檢測',
+    'desktopRelay.copy': '複製命令',
+    'desktopRelay.copied': '已複製',
+    'desktopRelay.setupHint':
+      '若尚未安裝，請在這臺電腦的終端裡執行下面的命令，然後重新檢測；若已安裝，請檢查瀏覽器的連線錯誤。它註冊一個 macOS launchd socket，平時沒有程序在後臺執行。',
+    'desktopRelay.approveHint': '請在這臺電腦彈出的對話方塊裡確認。',
+    'desktopRelay.otherSessionHint':
+      '這臺電腦已連線到另一個會話。在這裡連線會替換那個連線。',
+    'desktopRelay.needsSessionHint': '請先建立一個會話。連線只繫結一個會話。',
+    'desktopRelay.status.checking': '檢測中…',
+    'desktopRelay.status.permissionRequired': '需要瀏覽器權限',
+    'desktopRelay.status.missing': '未檢測到中繼',
+    'desktopRelay.status.unknown': '連線狀態未知',
+    'desktopRelay.unknownHint':
+      '如果此前連線過，該會話可能仍能操作這臺電腦。可在這臺電腦的終端執行已安裝的中繼，請求本地斷開，無需瀏覽器或網路（自定義安裝路徑請替換命令路徑並新增 --home <目錄>）：',
+    'desktopRelay.status.idle': '未連線',
+    'desktopRelay.status.awaitingApproval': '等待確認',
+    'desktopRelay.status.connecting': '連線中…',
+    'desktopRelay.status.connected': '已連線',
+    'desktopRelay.status.otherSession': '被其他會話使用中',
+    'desktopRelay.status.failed': '連線失敗',
+    'desktopRelay.status.unavailable': '當前環境不可用',
+    'desktopRelay.status.needsSession': '等待會話',
+    'desktopRelay.blocker.insecureContext':
+      '瀏覽器只允許安全頁面訪問這臺電腦。請透過 https 訪問 Web Shell，或用 SSH 轉發 daemon 埠後開啟 http://localhost:<port>。',
+    'desktopRelay.blocker.unsupportedDaemon':
+      '該 daemon 未啟用反向工具通道（client_mcp_over_ws）。請以 QWEN_SERVE_CLIENT_MCP_OVER_WS=1 啟動它。',
+    'desktopRelay.blocker.workspaceIneligible':
+      '該會話的工作區不能使用這臺電腦（不受信任或 live 工作區）。',
+    'desktopRelay.blocker.workspaceResolving': '尚不能確定該會話所屬的工作區。',
+    'desktopRelay.permissionHint':
+      '請在瀏覽器提示或網站設定中允許本地網路訪問，然後重新檢測。',
+    'desktopRelay.error.denied': '請求在這臺電腦上被拒絕。',
+    'desktopRelay.error.unreachable': '無法連線到這臺電腦上的桌面中繼。',
+  },
   'zh-CN': {
     'desktopRelay.title': '这台电脑',
     'desktopRelay.trigger': '使用这台电脑',

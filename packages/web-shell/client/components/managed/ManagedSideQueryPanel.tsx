@@ -16,50 +16,60 @@ import { isManagedSideQueryActive } from './managed-side-query-types';
 import type { useManagedSideQueries } from './use-managed-side-queries';
 
 const messages = {
-  btw: ['BTW', 'BTW 追问'],
-  recap: ['Session recap', '会话回顾'],
+  btw: ['BTW', 'BTW 追问', 'BTW 追問'],
+  recap: ['Session recap', '会话回顾', '會話回顧'],
   private: [
     'Saved privately for your account. The main task keeps running.',
     '记录仅当前账号可见，主任务继续执行。',
+    '記錄僅當前帳號可見，主任務繼續執行。',
   ],
-  empty: ['No saved answers yet.', '暂无已保存的回答。'],
-  older: ['Older answers', '更早的回答'],
-  question: ['Ask a follow-up question', '继续追问'],
-  send: ['Ask', '提问'],
-  generate: ['Generate recap', '生成回顾'],
-  stop: ['Stop', '停止'],
-  retry: ['Retry', '重试'],
-  confirm: ['Confirm original submission', '确认原提交结果'],
+  empty: ['No saved answers yet.', '暂无已保存的回答。', '暫無已儲存的回答。'],
+  older: ['Older answers', '更早的回答', '更早的回答'],
+  question: ['Ask a follow-up question', '继续追问', '繼續追問'],
+  send: ['Ask', '提问', '提問'],
+  generate: ['Generate recap', '生成回顾', '生成回顧'],
+  stop: ['Stop', '停止', '停止'],
+  retry: ['Retry', '重试', '重試'],
+  confirm: ['Confirm original submission', '确认原提交结果', '確認原提交結果'],
   unconfirmed: [
     'The submission is not confirmed. Confirm it using the original request.',
     '提交结果尚未确认，可使用原请求再次确认。',
+    '提交結果尚未確認，可使用原請求再次確認。',
   ],
-  preparing: ['Preparing', '准备中'],
-  running: ['Answering', '回答中'],
-  completed: ['Completed', '已完成'],
-  failed: ['Failed', '失败'],
-  cancelled: ['Stopped', '已停止'],
-  interrupted: ['Interrupted', '已中断'],
+  preparing: ['Preparing', '准备中', '準備中'],
+  running: ['Answering', '回答中', '回答中'],
+  completed: ['Completed', '已完成', '已完成'],
+  failed: ['Failed', '失败', '失敗'],
+  cancelled: ['Stopped', '已停止', '已停止'],
+  interrupted: ['Interrupted', '已中断', '已中斷'],
   insufficient: [
     'There is not enough completed conversation to recap.',
     '已完成的对话不足，暂时无法生成回顾。',
+    '已完成的對話不足，暫時無法生成回顧。',
   ],
-  partial: ['This answer is incomplete.', '此回答不完整。'],
+  partial: ['This answer is incomplete.', '此回答不完整。', '此回答不完整。'],
   unavailable: [
     'Generation is unavailable for this session.',
     '此会话暂不支持生成。',
+    '此會話暫不支援生成。',
   ],
   storage: [
     'Browser storage is unavailable. The question was not submitted.',
     '浏览器存储不可用，问题尚未提交。',
+    '瀏覽器儲存不可用，問題尚未提交。',
   ],
-  automatic: ['Recap after I am away for five minutes', '离开五分钟后自动回顾'],
+  automatic: [
+    'Recap after I am away for five minutes',
+    '离开五分钟后自动回顾',
+    '離開五分鐘後自動回顧',
+  ],
   automaticHint: [
     'Off by default. Runs after the main task and queue are idle.',
     '默认关闭，主任务与队列空闲后生成。',
+    '預設關閉，主任務與佇列空閒後生成。',
   ],
-  source: ['Completed user turns', '已完成的用户轮次'],
-  boundary: ['Source message boundary', '来源消息边界'],
+  source: ['Completed user turns', '已完成的用户轮次', '已完成的使用者輪次'],
+  boundary: ['Source message boundary', '来源消息边界', '來源訊息邊界'],
 } as const;
 
 export function ManagedSideQueryPanel({
@@ -71,7 +81,7 @@ export function ManagedSideQueryPanel({
 }) {
   const { language } = useI18n();
   const t = (key: keyof typeof messages) =>
-    messages[key][language === 'zh-CN' ? 1 : 0];
+    messages[key][language === 'zh-TW' ? 2 : language === 'zh-CN' ? 1 : 0];
   const kind = sideQueries.open;
   const [question, setQuestion] = useState('');
   useEffect(() => setQuestion(''), [sideQueries.identity]);

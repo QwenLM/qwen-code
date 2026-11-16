@@ -33,6 +33,12 @@ const EN_COPY: FallbackCopy = {
 
 const COPY: Record<WebShellLanguage, FallbackCopy> = {
   en: EN_COPY,
+  'zh-TW': {
+    title: '出了點問題',
+    body: '發生意外錯誤，無法顯示此內容。',
+    retry: '重試',
+    reload: '重新載入',
+  },
   'zh-CN': {
     title: '出了点问题',
     body: '发生意外错误，无法显示此内容。',
