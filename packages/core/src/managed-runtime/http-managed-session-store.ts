@@ -4048,6 +4048,7 @@ export function collectNestedResourceRefs(
   }
   if (
     EXTENSION_RECORD_KINDS.has(ref.kind) ||
+    ref.kind === 'managed-config_install' ||
     ref.kind === 'managed-extension-config-bundle' ||
     ref.kind === 'managed-extension-contributions' ||
     ref.kind === 'managed-definition' ||
@@ -4055,6 +4056,12 @@ export function collectNestedResourceRefs(
     ref.kind === 'managed-hook-plan' ||
     ref.kind === 'managed-hook-message-chunks'
   ) {
+    // A config_install record names its own bundle, root snapshot and the
+    // stage/enable acknowledgements (managed-session-resource-references.ts),
+    // and its predecessor through previousRecordRef. The commit closes over
+    // them exactly like an extension bundle's contributions, or a reopened
+    // reader finds the record but 404s on the hop the settings history and
+    // the package selection both walk.
     const record = parseManagedSessionRecordJson(
       bytes.toString('utf8'),
       MANAGED_SESSION_LIMITS.maxEventBytes,
@@ -4102,6 +4109,7 @@ function isReferenceContainer(kind: string): boolean {
     EXTENSION_RECORD_KINDS.has(kind) ||
     HOSTED_RECOVERY_RESOURCE_KINDS.has(kind) ||
     [
+      'managed-config_install',
       'managed-extension-config-bundle',
       'managed-extension-contributions',
       'managed-definition',
