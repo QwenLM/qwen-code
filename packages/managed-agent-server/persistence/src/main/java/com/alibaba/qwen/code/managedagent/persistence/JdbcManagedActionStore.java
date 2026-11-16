@@ -484,8 +484,9 @@ public class JdbcManagedActionStore
             long now) {
         ManagedLegacySessionGuard.requireLegacyMutation(jdbc, tenantId, sessionId);
         // Serialize admission with journal projection and other Session commands.
-        jdbc.queryForObject(
-                "SELECT session_id FROM ma_session WHERE tenant_id = ? AND session_id ="
+        // The guard may have opened an older repeatable-read snapshot.
+        String sessionStatus = jdbc.queryForObject(
+                "SELECT status FROM ma_session WHERE tenant_id = ? AND session_id ="
                         + " ? AND session_kind = 'PUBLIC' FOR UPDATE",
                 String.class,
                 tenantId,
@@ -544,15 +545,11 @@ public class JdbcManagedActionStore
                 Optional<Action> action = failedResponse.actionId() == null
                         ? Optional.empty()
                         : find(tenantId, sessionId, failedResponse.actionId());
-                var replaySession = jdbc.queryForMap(
-                        "SELECT status, workspace_storage_id FROM"
+                String replayStorage = jdbc.queryForObject(
+                        "SELECT workspace_storage_id FROM"
                                 + " ma_session WHERE tenant_id = ?"
                                 + " AND session_id = ?",
-                        tenantId, sessionId);
-                String replaySessionStatus =
-                        (String) replaySession.get("status");
-                String replayStorage =
-                        (String) replaySession.get("workspace_storage_id");
+                        String.class, tenantId, sessionId);
                 // A workspace migration holding the storage fence blocks a
                 // resurrected delivery exactly like a fresh admission
                 // (requireSessionOpen below): the fence is the migration's
@@ -565,7 +562,7 @@ public class JdbcManagedActionStore
                         && "requested".equals(action.get().state())
                         && now < action.get().options().path("expiresAt")
                                 .asLong()
-                        && "ACTIVE".equals(replaySessionStatus)
+                        && "ACTIVE".equals(sessionStatus)
                         && (replayStorage == null
                                 || WorkspaceMigrationAdmission.owner(jdbc,
                                         tenantId, replayStorage) == null)) {
@@ -673,8 +670,6 @@ public class JdbcManagedActionStore
                     "Hosted Workspace execution is not available.");
         }
         WorkspaceMigrationAdmission.requireSessionOpenForAdmission(jdbc, tenantId, sessionId);
-        String sessionStatus = jdbc.queryForObject("SELECT status FROM ma_session"
-                + " WHERE tenant_id = ? AND session_id = ?", String.class, tenantId, sessionId);
         if (!"ACTIVE".equals(sessionStatus)) {
             throw new ManagedAgentException(409, "session_inactive", "The Session does not accept responses.");
         }
