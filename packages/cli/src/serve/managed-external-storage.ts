@@ -13,7 +13,10 @@ import {
 } from './managed-context-envelope.js';
 import { publisherFields } from './managed-shell-publisher.js';
 import { realpathDeepestExisting } from './managed-runtime-tool-executor.js';
-import { isWorkspaceToolCapability } from './managed-workspace-activation.js';
+import {
+  EXTERNAL_SHELL_CAPABILITY_DIGEST,
+  isWorkspaceToolCapability,
+} from './managed-workspace-activation.js';
 
 const INVALID = 'Managed Runtime external storage admission failed.';
 const directories = new WeakMap<ManagedExternalContextBoot, string>();
@@ -144,6 +147,15 @@ export async function readManagedExternalBoot(
         boot.isolationClass !== 'workspace') ||
       boot.mountRoot !== storage.mountRoot ||
       !isWorkspaceToolCapability(boot.capabilityDigest)
+    )
+      throw new Error(INVALID);
+    // The external Shell lane drains one worker's foreground captures before
+    // its storage may be released, so it is session-isolated over durable
+    // registered storage: neither a shared worker nor a sandbox-owned
+    // directory can produce that proof.
+    if (
+      boot.capabilityDigest === EXTERNAL_SHELL_CAPABILITY_DIGEST &&
+      (boot.isolationClass !== 'session' || storage.kind !== 'external')
     )
       throw new Error(INVALID);
     const directory = path.dirname(bootPath);

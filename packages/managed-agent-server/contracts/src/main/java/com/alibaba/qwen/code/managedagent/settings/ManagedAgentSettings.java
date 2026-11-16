@@ -12,6 +12,14 @@ public interface ManagedAgentSettings {
     public Harness getHarness();
     public boolean admitsPublicChildAgents();
     public boolean isExternalWorkspaceFilesConfigured();
+    /**
+     * Static configuration eligibility for the external foreground-Shell
+     * profile (#15512 slice C). Separate from the files verdict: it requires
+     * its own explicit switch, so enabling files never enables Shell.
+     */
+    public default boolean isExternalWorkspaceShellConfigured() {
+        return false;
+    }
     public Automation getAutomation();
     public Channels getChannels();
     public EventTransport getEventTransport();
@@ -44,6 +52,15 @@ public interface ManagedAgentSettings {
         public boolean isWorkspaceFilesEnabled();
         public boolean isWorkspaceChildAgentsEnabled();
         public boolean isWorkspaceShellEnabled();
+        /**
+         * Explicit switch for the external foreground-Shell profile (#15512
+         * slice C). Deliberately separate from {@link #isWorkspaceShellEnabled()},
+         * which enables the local Workspace Shell surface (background
+         * commands, monitors) that external workers must never gain.
+         */
+        public default boolean isExternalWorkspaceShellEnabled() {
+            return false;
+        }
         public String getBaseUrl();
         public String getToken();
         public String getCapabilityDigest();
