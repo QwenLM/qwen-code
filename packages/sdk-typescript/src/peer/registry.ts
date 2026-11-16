@@ -124,6 +124,33 @@ export function resolveQwenHome(explicit?: string): string {
     : legacyDir;
 }
 
+/**
+ * Writes the marker resolveQwenHome() looks for when the XDG directory is the
+ * default home in use, as the CLI does (Storage.markDefaultGlobalQwenDir() in
+ * packages/core). A peer can be the first thing to store anything there, and
+ * without the marker a ~/.qwen created later would move every new peer away
+ * from the sessions registered here. Never under QWEN_HOME, and not while
+ * ~/.qwen exists in any form, including a symlink it cannot follow.
+ */
+export function markDefaultQwenHome(): void {
+  const home = os.homedir();
+  if (process.env['QWEN_HOME'] || !home) return;
+  const dir = resolveQwenHome();
+  const marker = path.join(dir, GLOBAL_DIR_MARKER);
+  const legacyDir = path.join(home, '.qwen');
+  if (dir === legacyDir || fsSync.existsSync(marker)) return;
+  try {
+    if (fsSync.lstatSync(legacyDir, { throwIfNoEntry: false })) return;
+    fsSync.mkdirSync(dir, { recursive: true, mode: REGISTRY_DIR_MODE });
+    fsSync.writeFileSync(
+      marker,
+      'Qwen Code keeps its global directory here even if ~/.qwen exists.\n',
+    );
+  } catch {
+    // Best effort, as in the CLI: the next registration tries again.
+  }
+}
+
 export function sessionRegistryDir(qwenHome: string): string {
   return path.join(qwenHome, 'sessions');
 }

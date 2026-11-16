@@ -15,6 +15,7 @@ import {
   readProcStartToken,
 } from '../../../src/peer/identity.js';
 import {
+  markDefaultQwenHome,
   pidOfRecordFilename,
   readLiveSessionRecords,
   removeOwnRecord,
@@ -292,6 +293,34 @@ describe('resolveQwenHome', () => {
     it.each(['darwin', 'win32'])('keeps ~/.qwen on %s', (value) => {
       Object.defineProperty(process, 'platform', { value });
       expect(resolveQwenHome()).toBe(legacyDir());
+    });
+
+    it('claims the XDG directory so a later ~/.qwen does not move peers', () => {
+      markDefaultQwenHome();
+      expect(fs.existsSync(path.join(xdgDir(), '.qwen-global-dir'))).toBe(true);
+      if (isPosix) {
+        expect(fs.statSync(xdgDir()).mode & 0o777).toBe(0o700);
+      }
+      fs.mkdirSync(legacyDir());
+      expect(resolveQwenHome()).toBe(xdgDir());
+      expect(resolveQwenHome()).toBe(Storage.getGlobalQwenDir());
+    });
+
+    it('claims nothing while ~/.qwen exists, or under QWEN_HOME', () => {
+      fs.mkdirSync(legacyDir());
+      markDefaultQwenHome();
+      expect(fs.existsSync(xdgDir())).toBe(false);
+      fs.rmdirSync(legacyDir());
+
+      process.env['QWEN_HOME'] = xdgDir();
+      markDefaultQwenHome();
+      expect(fs.existsSync(xdgDir())).toBe(false);
+    });
+
+    it.each(['darwin', 'win32'])('claims nothing on %s', (value) => {
+      Object.defineProperty(process, 'platform', { value });
+      markDefaultQwenHome();
+      expect(fs.existsSync(path.join(home, '.config'))).toBe(false);
     });
 
     // Peers only find each other when they resolve the directory the CLI
