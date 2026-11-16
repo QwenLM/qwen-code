@@ -93,6 +93,7 @@ const mocks = vi.hoisted(() => {
     return {
       on: (event: string, fn: () => void) => void listeners(event).add(fn),
       off: (event: string, fn: () => void) => void listeners(event).delete(fn),
+      requestRender: vi.fn(),
       emit: (event: string) => {
         for (const fn of [...listeners(event)]) fn();
       },
@@ -1647,7 +1648,7 @@ describe('OpenTuiTranscriptView scroll host', () => {
     };
   }
 
-  it('watches an expanded thought only when its mounted row enters the viewport', async () => {
+  it('watches an expanded thought only after layout puts it in the viewport', async () => {
     const rewrite = { text: 'REWRITTEN_THOUGHT' };
     let answered = false;
     const release = vi.fn();
@@ -1673,9 +1674,10 @@ describe('OpenTuiTranscriptView scroll host', () => {
       durationMs: 12_000,
     };
     const items = [session[0], session[1], thought, session[3]];
+    const rows = [3, 3, 3, 3];
     const view = mountHosted({
       items,
-      rows: [3, 3, 3, 3],
+      rows,
       viewportRows: 5,
       modRows: { config: {} as Config, sessionId: 'session-1' },
       itemRows: (text) => (text.includes('Thought for 12s') ? 3 : undefined),
@@ -1684,7 +1686,18 @@ describe('OpenTuiTranscriptView scroll host', () => {
 
     try {
       view.frame();
+      view.jump(9);
+      view.frame();
+      expect(view.visibleLines().join('\n')).toContain('Thought for 12s');
       await act(async () => view.setThoughtsExpanded(true));
+      expect(watchRow).not.toHaveBeenCalled();
+
+      // A scroll event can arrive while Yoga still has the collapsed layout.
+      view.jump(10);
+      expect(watchRow).not.toHaveBeenCalled();
+
+      // The same expansion grows a preceding row and pushes the thought out.
+      rows[0] += 10;
       view.frame();
       const mounted = markdown();
       expect(mounted?.getAttribute('content')).toBe('THOUGHT_BODY');
@@ -1694,7 +1707,7 @@ describe('OpenTuiTranscriptView scroll host', () => {
       // The composer can leave Yoga with no transcript rows even when the
       // renderable reports a one-row viewport over the thought.
       view.setViewportRows(0);
-      view.jump(11);
+      view.jump(21);
       view.frame();
       expect(markdown()).toBe(mounted);
       expect(watchRow).not.toHaveBeenCalled();
@@ -1702,7 +1715,9 @@ describe('OpenTuiTranscriptView scroll host', () => {
       view.jump(0);
       view.setViewportRows(5);
       view.frame();
-      view.jump(9);
+      view.jump(19);
+      expect(watchRow).not.toHaveBeenCalled();
+      view.frame();
       expect(markdown()).toBe(mounted);
       expect(view.visibleLines().join('\n')).toContain('Thought for 12s');
       expect(watchRow).toHaveBeenCalledExactlyOnceWith(

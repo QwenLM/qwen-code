@@ -16,7 +16,15 @@
  * silent no-op, which the composition-root contract forbids.
  */
 
-import { useEffect, useMemo, useRef, useState, type ErrorInfo } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ErrorInfo,
+} from 'react';
 import { useRenderer } from '@opentui/react';
 import type { Renderable, ScrollBoxRenderable } from '@opentui/core';
 import { AgentStatus } from '@qwen-code/qwen-code-core';
@@ -239,6 +247,11 @@ interface MountedNode {
   node: Renderable;
 }
 
+interface ThoughtVisibility {
+  visible: ReadonlySet<ModThinkingInput>;
+  register: (input: ModThinkingInput) => () => void;
+}
+
 /** The rows Yoga laid out, or `undefined` for a node not laid out yet.
  *  `Renderable.height` is clamped to at least one row, so reading it back would
  *  charge a row to an item that paints nothing — which `renderNothing` and a
@@ -308,8 +321,21 @@ function useTranscriptWindow(
     rows: 0,
   });
   const [revision, setRevision] = useState(0);
-  const [visibleThoughts, setVisibleThoughts] = useState<ReadonlySet<string>>(
-    () => new Set(),
+  const expandedThoughts = useRef(new Map<string, ModThinkingInput>());
+  const [visibleThoughts, setVisibleThoughts] = useState<
+    ReadonlySet<ModThinkingInput>
+  >(() => new Set());
+  const registerThought = useCallback(
+    (input: ModThinkingInput) => {
+      const expanded = expandedThoughts.current;
+      expanded.set(input.requestId, input);
+      renderer?.requestRender();
+      return () => {
+        if (expanded.get(input.requestId) === input)
+          expanded.delete(input.requestId);
+      };
+    },
+    [renderer],
   );
 
   const offsets = useMemo(() => {
@@ -395,33 +421,43 @@ function useTranscriptWindow(
     // The mounted window includes overscan. Use the laid-out rows to decide
     // which thoughts may start a Mod render, even when scrolling leaves the
     // mounted window unchanged.
-    const syncVisibleThoughts = (host: ScrollBoxRenderable) => {
+    const syncVisibleThoughts = (
+      host: ScrollBoxRenderable,
+      afterLayout: boolean,
+    ) => {
       if (!trackThinkingVisibility) return;
       const top = host.viewport.y;
       const bottom = top + (laidOutRows(host.viewport) ?? 0);
-      const next = new Set<string>();
+      const next = new Set<ModThinkingInput>();
       if (bottom > top) {
-        for (const [key, { item, node }] of nodesRef.current) {
-          if (item.kind !== 'thinking' || !item.done) continue;
+        for (const { item, node } of nodesRef.current.values()) {
+          if (item.kind !== 'thinking') continue;
+          const input = expandedThoughts.current.get(item.id);
+          if (!input) continue;
           const height = laidOutRows(node) ?? 0;
           if (height > 0 && node.y < bottom && node.y + height > top) {
-            next.add(key);
+            next.add(input);
           }
         }
       }
-      setVisibleThoughts((previous) =>
-        previous.size === next.size &&
-        [...next].every((key) => previous.has(key))
+      setVisibleThoughts((previous) => {
+        // A scrollbar change can use the previous layout to withdraw rows.
+        // Only a frame can confirm that a newly expanded row is visible.
+        const visible = afterLayout
+          ? next
+          : new Set([...previous].filter((input) => next.has(input)));
+        return previous.size === visible.size &&
+          [...visible].every((input) => previous.has(input))
           ? previous
-          : next,
-      );
+          : visible;
+      });
     };
 
     const onScroll = () => {
       const found = locate();
       if (!found) return;
       if (syncWindow(found.root, found.host)) setRevision((value) => value + 1);
-      syncVisibleThoughts(found.host);
+      syncVisibleThoughts(found.host, false);
     };
 
     const onFrame = () => {
@@ -490,7 +526,7 @@ function useTranscriptWindow(
           if (from < tail && to < tail) host.scrollTop = to;
         }
         changed = syncWindow(found.root, host) || changed;
-        syncVisibleThoughts(host);
+        syncVisibleThoughts(host, true);
       }
       if (changed) setRevision((value) => value + 1);
     };
@@ -502,7 +538,11 @@ function useTranscriptWindow(
     };
   }, [renderer, trackThinkingVisibility]);
 
-  return { rootRef, nodesRef, win, visibleThoughts };
+  const thoughtVisibility: ThoughtVisibility = {
+    visible: visibleThoughts,
+    register: registerThought,
+  };
+  return { rootRef, nodesRef, win, thoughtVisibility };
 }
 
 type ToolPresentationRow = Extract<LiveHistoryItem, { kind: 'tool' }>;
@@ -620,7 +660,7 @@ export function OpenTuiTranscriptView({
       !item.done &&
       item.id === awaitingCallId,
   );
-  const { rootRef, nodesRef, win, visibleThoughts } = useTranscriptWindow(
+  const { rootRef, nodesRef, win, thoughtVisibility } = useTranscriptWindow(
     visibleItems,
     availableTerminalHeight,
     initialAnchor,
@@ -661,7 +701,7 @@ export function OpenTuiTranscriptView({
                 terminalHeight={availableTerminalHeight}
                 width={availableWidth}
                 thoughtsExpanded={thoughtsExpanded}
-                thoughtVisible={visibleThoughts.has(key)}
+                thoughtVisibility={thoughtVisibility}
                 showToolCallArgs={showToolCallArgs}
                 showTimestamps={showTimestamps}
                 showToolCallDetails={showToolCallDetails}
@@ -693,7 +733,7 @@ function TranscriptItem({
   terminalHeight,
   width,
   thoughtsExpanded,
-  thoughtVisible,
+  thoughtVisibility,
   showToolCallArgs,
   showTimestamps,
   showToolCallDetails,
@@ -707,7 +747,7 @@ function TranscriptItem({
   terminalHeight: number;
   width: number;
   thoughtsExpanded: boolean;
-  thoughtVisible: boolean;
+  thoughtVisibility: ThoughtVisibility;
   showToolCallArgs: boolean;
   showTimestamps: boolean;
   showToolCallDetails: boolean;
@@ -737,7 +777,7 @@ function TranscriptItem({
           allExpanded={thoughtsExpanded}
           mouseTracking={mouseTracking}
           modRows={modRows}
-          visible={thoughtVisible}
+          thoughtVisibility={thoughtVisibility}
         />
       );
     case 'tool':
@@ -933,13 +973,13 @@ function ThinkingRow({
   allExpanded,
   mouseTracking,
   modRows,
-  visible,
+  thoughtVisibility: { register, visible },
 }: {
   item: LiveThinkingItem;
   allExpanded: boolean;
   mouseTracking: boolean;
   modRows?: TranscriptViewProps['modRows'];
-  visible: boolean;
+  thoughtVisibility: ThoughtVisibility;
 }) {
   const [clickedOpen, setClickedOpen] = useState(false);
   // ink resolves a thought as the global ctrl+O toggle or its own clicked-open
@@ -953,10 +993,11 @@ function ThinkingRow({
   const meta = thinkingMeta(item.done, expanded, durationMs, mouseTracking);
   const text = item.text.trimEnd();
   // The Mods can rewrite how a complete, expanded block is drawn. The item
-  // keeps its original text.
+  // keeps its original text. Ctrl+O needs a fresh visibility sample even
+  // when a clicked-open thought stays expanded, since its neighbors can grow.
   const modInput = useMemo<ModThinkingInput | undefined>(
     () =>
-      modRows && item.done && expanded && text.trim().length > 0
+      modRows && item.done && (allExpanded || clickedOpen) && text.trim()
         ? {
             surface: 'terminal',
             component: 'Thinking',
@@ -964,13 +1005,17 @@ function ThinkingRow({
             props: { text },
           }
         : undefined,
-    [modRows, item.done, item.id, expanded, text],
+    [modRows, item.done, item.id, allExpanded, clickedOpen, text],
+  );
+  useLayoutEffect(
+    () => (modInput ? register(modInput) : undefined),
+    [modInput, register],
   );
   const modProps = useModRow(
     modRows?.config,
     modRows?.sessionId,
     modInput,
-    visible,
+    modInput !== undefined && visible.has(modInput),
   );
   const body = modProps?.text ?? text;
   return (
