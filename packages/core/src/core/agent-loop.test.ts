@@ -1170,7 +1170,7 @@ describe('runModelRound on a round source', () => {
       },
       'agent-prompt',
       undefined,
-      undefined,
+      { isSessionTurn: true },
     );
     expect(result.turn).toBeInstanceOf(Turn);
     // The attempt the retry replaced is dropped.
