@@ -1,0 +1,66 @@
+# Web Shell Sidebar Session Grouping
+
+[English](2026-11-16-web-shell-session-group-by.md) | [简体中文](2026-11-16-web-shell-session-group-by.zh-CN.md)
+
+**Status:** Implemented and verified on 2026-11-16.
+
+## Context
+
+The sidebar display-options menu added by [the workspace-filter design](2026-11-14-web-shell-workspace-filter.md) supports session sorting and workspace filtering. The main session catalog is always grouped by workspace. Users with many workspaces need an alternative chronological view so recently active sessions from different workspaces appear together.
+
+## Goals and scope
+
+- Add a `Group by` submenu with `Workspace` and `Activity date`; `Workspace` remains the default and preserves the existing rendering path.
+- In `Activity date`, group the focused host's workspace-bound active sessions by their local activity day, merging different workspaces into the same day sections.
+- Keep the existing workspace filter, both session sorts, full session-row actions, loading and retry behavior, and per-host preference persistence.
+- Keep Pinned, no-workspace, Recent, Live, archived, other-host, and custom managed surfaces on their existing paths.
+- Do not add `Custom group` in this phase, change daemon APIs, or alter the separate Activity attention view.
+
+## Interaction and persistence
+
+`Group by` is the first display-options submenu, followed by `Sort by` and `Workspace`. The trigger row shows the selected grouping label, and the submenu uses radio semantics. `Restore defaults` resets grouping to `Workspace`, sorting to `Recent activity`, and filtering to `All`.
+
+The preference uses `web-shell:session-group-by:<host>` with values `workspace` and `activityDate`. Missing or malformed values fall back to `workspace`. As with sorting and filtering, state is associated with its host so an A → B → A navigation cannot apply B's preference to A.
+
+The grouping submenu is available only for the ordinary non-channel surface (including legacy daemons whose source is `undefined`) with a non-empty project list where every visible project workspace can be read through the existing qualified activity catalog. Unsupported, managed, channel-only, standalone/Live-only, and no-workspace scopes use `Workspace`; their current surfaces are not replaced.
+
+## Data and grouping model
+
+Reuse the existing `useActivityCatalog` instance. Opening either the Activity attention view or the Activity date grouping follows every reachable `nextCursor`, deduplicates by workspace and session ID, and retains partial failures for retry. This avoids a second catalog implementation and does not impose the Recent section's twenty-row limit or the Activity view's seven-day cutoff.
+
+Activity time is `max(updatedAt, createdAt)`, matching `activityRecency`. Sessions are bucketed by local calendar day. Day sections are newest first and labeled `Today`, `Yesterday`, or the localized weekday/month/day. Within each section, rows follow the selected sort: recent activity or last question, with the existing missing-question-time fallback and stable workspace/session-ID tie breaking.
+
+The chronological list is flat, including child sessions, so every loaded session remains visible without constructing parent/child relationships across workspaces. It uses the shared full session-row renderer. Date entries come from the catalog after optimistic pin/unpin merging; every row whose merged state is pinned stays only in the existing Pinned section rather than duplicating in date sections. Existing custom groups and colors do not create additional sections in this mode.
+
+Each date section uses the existing group-section presentation, including a count, collapse control, five-row preview, and incremental Show more action. A section containing the active rename editor disables preview limiting so a reorder cannot unmount the editor; identity comparison includes both workspace and session ID. Group collapse state is local to the mounted view; only the grouping preference is newly persisted.
+
+## Compatibility and failure behavior
+
+Workspace mode keeps the current workspace sections, drag ordering, custom groups, expansion controls, and data queries unchanged. Activity date mode replaces only the focused host's `orderedProjectWorkspaces` list. The Workspaces header still owns display options and overall expansion; workspace-only count, drag, and collapse-all controls are hidden in date mode.
+
+Standalone sessions stay in their dedicated section because the activity catalog is workspace-qualified. Other-host projects also remain unchanged because the preference and catalog are focused-host scoped. Live, archived, Recent, and Pinned sections keep their current behavior.
+
+If any visible project workspace is untrusted, lacks an absolute qualified path, or the organized catalog capability is unavailable, the UI does not offer Activity date and the effective mode falls back to Workspace rather than silently dropping rows. Loaded date rows remain visible on partial catalog errors, with the existing retry action. Retry refreshes root queries and any failed cursor query immediately instead of waiting for the store's retry timer. Additional pages show loading progress while they are fetched automatically.
+
+## Accessibility and presentation
+
+Use the existing Radix nested-menu and portal primitives, with keyboard navigation, `menuitemradio`, and `aria-checked`. Reuse existing section headers and session rows rather than adding a new visual language. Add matching English and Chinese strings for `Group by`, `Workspace`, and `Activity date`.
+
+## Validation
+
+- Eight affected sidebar Vitest files: 261 tests passed, covering preferences, local-day bucketing, both sorts, rename protection, original and optimistic pin states, capability fallback, search selection, and all three unavailable cursor states.
+- Locale contract suite: 40 tests passed for English and Chinese strings.
+- `npm run build`: passed.
+- `npm run typecheck`: passed.
+- ESLint and Prettier checks for every changed implementation, test, localization, and documentation file: passed.
+- Chromium Playwright workspace-sidebar suite: six scenarios passed, including Activity date grouping, workspace filtering, reload persistence, Restore defaults, and the existing workspace-order regressions.
+- Menu and Activity date screenshots inspected for clipping, selected-state alignment, group counts, row layout, and stale/loading frames.
+
+## Acceptance criteria
+
+- [x] `Workspace` is the default and retains the existing sidebar behavior.
+- [x] `Activity date` merges workspace sessions into local-day sections without the Recent twenty-row or Activity seven-day limits.
+- [x] Workspace filtering, both sort modes, full row actions, and cursor pagination work in date mode.
+- [x] Pinned, no-workspace, Recent, Live, archived, other-host, and managed surfaces are not replaced.
+- [x] Grouping persists per host, malformed values and unsupported scopes fall back safely, and Restore defaults resets all display options.
+- [x] English, Chinese, keyboard interaction, loading, empty, and partial-failure states are verified.

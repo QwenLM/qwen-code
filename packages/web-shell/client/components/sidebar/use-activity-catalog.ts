@@ -260,9 +260,17 @@ export function useActivityCatalog({
   );
   const retry = useCallback(() => {
     setPages({ client, scope, queries: [] });
-    for (const query of initialQueries)
-      void store.refresh(query, { interactive: true }).catch(() => undefined);
-  }, [client, initialQueries, scope, store]);
+    queries.forEach((query, index) => {
+      const snapshot = snapshots[index];
+      if (
+        index < initialQueries.length ||
+        snapshot?.error ||
+        snapshot?.page?.truncated ||
+        snapshot?.page?.liveMergeFailed
+      )
+        void store.refresh(query, { interactive: true }).catch(() => undefined);
+    });
+  }, [client, initialQueries.length, queries, scope, snapshots, store]);
   const loading =
     enabled && snapshots.some((snapshot) => !snapshot.page && !snapshot.error);
   const unavailable = snapshots.some(

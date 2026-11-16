@@ -197,6 +197,49 @@ describe('activity controller', () => {
     await render();
     expect(fixtures.queries).toHaveLength(1);
   });
+  it.each(['error', 'truncated', 'liveMergeFailed'] as const)(
+    'retries a failed extra cursor page immediately: %s',
+    async (failure) => {
+      const failedPage: SessionCatalogSnapshot =
+        failure === 'error'
+          ? {
+              loading: false,
+              stale: true,
+              error: new Error('offline'),
+            }
+          : {
+              loading: false,
+              stale: true,
+              page: {
+                sessions: [],
+                ...(failure === 'truncated'
+                  ? { truncated: true }
+                  : { liveMergeFailed: true }),
+              },
+            };
+      fixtures.byCursor = new Map([
+        [
+          '',
+          {
+            loading: false,
+            stale: false,
+            page: { sessions: [], nextCursor: 'a' },
+          },
+        ],
+        ['a', failedPage],
+      ]);
+      await render();
+      const failedQuery = fixtures.queries.find(
+        (query) => query.options.cursor === 'a',
+      );
+      expect(failedQuery).toBeDefined();
+      await act(async () => controller.retry());
+      expect(fixtures.reload).toHaveBeenCalledWith(failedQuery, {
+        interactive: true,
+      });
+    },
+  );
+
   it('retries unavailable catalogs without writing session organization', async () => {
     fixtures.snapshots[0] = {
       ...fixtures.snapshots[0]!,
