@@ -499,51 +499,57 @@ test('hover details preserve a focused search field @smoke', async ({
   await expect(search).toBeFocused();
 });
 
-test('shadow portal details keep focus in the overview after hover replacement @smoke', async ({
-  page,
-}) => {
+test.describe('shadow portal details', () => {
   // This test boots the app twice — once in beforeEach and once on the
   // shadow-DOM harness page — which exceeds the default 60s budget on a
-  // loaded CI host even when every assertion passes.
-  test.setTimeout(120_000);
-  await page.goto('/e2e/session-overview-shadow-dom.html');
-  // A footer-only shell renders footer actions inline; there is no More menu.
-  await page
-    .getByRole('button', { name: 'Session Overview', exact: true })
-    .click();
-  const panel = page.locator('[data-web-shell-session-panel]');
-  await panel.getByRole('button', { name: 'Details for Idle fixture' }).click();
-  const copy = page.getByRole('button', { name: 'Copy session ID' });
-  await expect(copy).toBeFocused();
-  expect(
-    await copy.evaluate(
-      (element) => element.getRootNode() instanceof ShadowRoot,
-    ),
-  ).toBe(true);
-  const title = panel.getByRole('button', {
-    name: 'Approve fixture',
-    exact: true,
+  // loaded CI host even when every assertion passes. The raise is
+  // describe-scoped so it is in force before the beforeEach boot runs.
+  test.describe.configure({ timeout: 120_000 });
+
+  test('shadow portal details keep focus in the overview after hover replacement @smoke', async ({
+    page,
+  }) => {
+    await page.goto('/e2e/session-overview-shadow-dom.html');
+    // A footer-only shell renders footer actions inline; there is no More menu.
+    await page
+      .getByRole('button', { name: 'Session Overview', exact: true })
+      .click();
+    const panel = page.locator('[data-web-shell-session-panel]');
+    await panel
+      .getByRole('button', { name: 'Details for Idle fixture' })
+      .click();
+    const copy = page.getByRole('button', { name: 'Copy session ID' });
+    await expect(copy).toBeFocused();
+    expect(
+      await copy.evaluate(
+        (element) => element.getRootNode() instanceof ShadowRoot,
+      ),
+    ).toBe(true);
+    const title = panel.getByRole('button', {
+      name: 'Approve fixture',
+      exact: true,
+    });
+    await title.hover();
+    await expect(page.getByRole('dialog')).toHaveCount(1);
+    await expect(
+      page.getByRole('dialog', { name: 'Approve fixture', exact: true }),
+    ).toHaveAttribute('data-state', 'open');
+    await expect(title).toBeFocused();
+    await page.mouse.move(0, 0);
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(title).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(panel.getByRole('link', { name: /#4567/ })).toBeFocused();
+    const search = panel.getByRole('textbox', {
+      name: 'Search title, branch, PR or ID…',
+    });
+    await search.focus();
+    await title.hover();
+    await expect(
+      page.getByRole('dialog', { name: 'Approve fixture', exact: true }),
+    ).toHaveAttribute('data-state', 'open');
+    await expect(search).toBeFocused();
   });
-  await title.hover();
-  await expect(page.getByRole('dialog')).toHaveCount(1);
-  await expect(
-    page.getByRole('dialog', { name: 'Approve fixture', exact: true }),
-  ).toHaveAttribute('data-state', 'open');
-  await expect(title).toBeFocused();
-  await page.mouse.move(0, 0);
-  await expect(page.getByRole('dialog')).toHaveCount(0);
-  await expect(title).toBeFocused();
-  await page.keyboard.press('Tab');
-  await expect(panel.getByRole('link', { name: /#4567/ })).toBeFocused();
-  const search = panel.getByRole('textbox', {
-    name: 'Search title, branch, PR or ID…',
-  });
-  await search.focus();
-  await title.hover();
-  await expect(
-    page.getByRole('dialog', { name: 'Approve fixture', exact: true }),
-  ).toHaveAttribute('data-state', 'open');
-  await expect(search).toBeFocused();
 });
 
 test('overview details stay inside an embedded shell @smoke', async ({
