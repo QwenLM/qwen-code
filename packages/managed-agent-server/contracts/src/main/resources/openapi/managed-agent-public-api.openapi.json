@@ -1152,6 +1152,57 @@
         }
       }
     },
+    "/api/agent/web-shell/v1/sessions/terminal-ticket": {
+      "post": {
+        "tags": ["WebShell"],
+        "operationId": "webShellTerminalTicket",
+        "x-qwen-implementation-status": "implemented",
+        "description": "Mint the single-use, short-lived ticket a browser offers on the terminal WebSocket upgrade. The request travels the authenticated WebShell surface and runs the full terminal admission (readable, active, Shell capability and OPERATOR access) here, where the deployment authentication headers are available; the upgrade itself then only consumes the ticket. Mounted only with the Runtime Broker. The ticket is never carried in a URL and is consumed exactly once.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebShellTerminalTicketRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Single-use terminal upgrade ticket and its lifetime in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebShellTerminalTicket"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    },
     "/api/agent/web-shell/v1/sessions/rename": {
       "post": {
         "tags": ["WebShell"],
@@ -1531,14 +1582,14 @@
         "operationId": "createPublicWorkspace",
         "x-qwen-implementation-status": "implemented",
         "description": "Admits actor-scoped, idempotent creation of a Workspace from a source Workspace directory or an explicit local import. The Idempotency-Key header carries the idempotency key; a retry with the same content returns the original Workspace. Creation rechecks ACL, state and Agent/config compatibility and starts no Runtime worker.",
-        "parameters": [
-          { "$ref": "#/components/parameters/IdempotencyKey" }
-        ],
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/PublicWorkspaceCreateRequest" }
+              "schema": {
+                "$ref": "#/components/schemas/PublicWorkspaceCreateRequest"
+              }
             }
           }
         },
@@ -1547,11 +1598,15 @@
             "description": "The created Workspace summary.",
             "headers": {
               "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
-              "Cache-Control": { "schema": { "type": "string", "const": "no-store" } }
+              "Cache-Control": {
+                "schema": { "type": "string", "const": "no-store" }
+              }
             },
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/PublicWorkspaceSummary" }
+                "schema": {
+                  "$ref": "#/components/schemas/PublicWorkspaceSummary"
+                }
               }
             }
           },
@@ -1818,11 +1873,15 @@
             "description": "SSH registration capability and authorized machine display names.",
             "headers": {
               "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
-              "Cache-Control": { "schema": { "type": "string", "const": "no-store" } }
+              "Cache-Control": {
+                "schema": { "type": "string", "const": "no-store" }
+              }
             },
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/PublicRuntimeNodePage" }
+                "schema": {
+                  "$ref": "#/components/schemas/PublicRuntimeNodePage"
+                }
               }
             }
           },
@@ -1850,7 +1909,9 @@
           "required": true,
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/PublicWorkspaceDirectoryCheckRequest" }
+              "schema": {
+                "$ref": "#/components/schemas/PublicWorkspaceDirectoryCheckRequest"
+              }
             }
           }
         },
@@ -1859,11 +1920,15 @@
             "description": "Validated canonical directory on the selected Linux or macOS node.",
             "headers": {
               "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
-              "Cache-Control": { "schema": { "type": "string", "const": "no-store" } }
+              "Cache-Control": {
+                "schema": { "type": "string", "const": "no-store" }
+              }
             },
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/PublicWorkspaceDirectory" }
+                "schema": {
+                  "$ref": "#/components/schemas/PublicWorkspaceDirectory"
+                }
               }
             }
           },
@@ -1875,7 +1940,9 @@
           "502": {
             "description": "The SSH bootstrap response is invalid.",
             "content": {
-              "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } }
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }
+              }
             }
           },
           "503": { "$ref": "#/components/responses/Unavailable" }
@@ -1888,14 +1955,14 @@
         "operationId": "registerPublicWorkspace",
         "x-qwen-implementation-status": "implemented",
         "description": "Admits actor-scoped, idempotent registration of an existing remote directory. The Idempotency-Key header carries the idempotency key; a retry with the same node_id, path and display_name returns the original operation and its latest durable state, even after new registration is disabled or node admission is revoked. Reusing the key for different content answers 409 idempotency_conflict. Fresh admission requires an enabled deployment and an authorized node (404 ssh_runtime_disabled or 403 runtime_node_forbidden). A completed operation atomically creates the Workspace and creator OWNER grant. 202 does not mean registration is complete; query the operation, then read the Workspace and its can_create_session hint. This operation creates no Session and starts no Runtime worker.",
-        "parameters": [
-          { "$ref": "#/components/parameters/IdempotencyKey" }
-        ],
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
-              "schema": { "$ref": "#/components/schemas/PublicWorkspaceRegistrationRequest" }
+              "schema": {
+                "$ref": "#/components/schemas/PublicWorkspaceRegistrationRequest"
+              }
             }
           }
         },
@@ -1904,11 +1971,15 @@
             "description": "Durable registration operation; repeated requests retain the original identity.",
             "headers": {
               "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
-              "Cache-Control": { "schema": { "type": "string", "const": "no-store" } }
+              "Cache-Control": {
+                "schema": { "type": "string", "const": "no-store" }
+              }
             },
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/PublicWorkspaceRegistrationOperation" }
+                "schema": {
+                  "$ref": "#/components/schemas/PublicWorkspaceRegistrationOperation"
+                }
               }
             }
           },
@@ -1939,11 +2010,15 @@
             "description": "Latest durable state of the original actor-owned registration.",
             "headers": {
               "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
-              "Cache-Control": { "schema": { "type": "string", "const": "no-store" } }
+              "Cache-Control": {
+                "schema": { "type": "string", "const": "no-store" }
+              }
             },
             "content": {
               "application/json": {
-                "schema": { "$ref": "#/components/schemas/PublicWorkspaceRegistrationOperation" }
+                "schema": {
+                  "$ref": "#/components/schemas/PublicWorkspaceRegistrationOperation"
+                }
               }
             }
           },
@@ -1961,21 +2036,59 @@
         "x-qwen-implementation-status": "implemented",
         "description": "Lists a bounded directory page of the authorized Workspace or Session scope. Requires a trusted actor and a rechecked scope revision; refuses traversal and never starts a Runtime.",
         "parameters": [
-          { "name": "session_id", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 128 } },
-          { "name": "workspace_id", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 128 } },
-          { "name": "cwd_relative", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 1024 } },
-          { "name": "directory", "in": "query", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 1024 } },
-          { "name": "query", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 256 } },
-          { "name": "expected_scope_revision", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 64 } }
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 128 }
+          },
+          {
+            "name": "workspace_id",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 128 }
+          },
+          {
+            "name": "cwd_relative",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 1024 }
+          },
+          {
+            "name": "directory",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1, "maxLength": 1024 }
+          },
+          {
+            "name": "query",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 256 }
+          },
+          {
+            "name": "expected_scope_revision",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 64 }
+          }
         ],
         "responses": {
           "200": {
             "description": "Authorized directory page.",
             "headers": {
               "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
-              "Cache-Control": { "schema": { "type": "string", "const": "no-store" } }
+              "Cache-Control": {
+                "schema": { "type": "string", "const": "no-store" }
+              }
             },
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicFileQueryResult" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicFileQueryResult"
+                }
+              }
+            }
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
@@ -1992,20 +2105,51 @@
         "x-qwen-implementation-status": "implemented",
         "description": "Reads one bounded text file of the authorized Workspace or Session scope at the expected scope revision. Requires a trusted actor; refuses traversal and never starts a Runtime.",
         "parameters": [
-          { "name": "session_id", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 128 } },
-          { "name": "workspace_id", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 128 } },
-          { "name": "cwd_relative", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 1024 } },
-          { "name": "path", "in": "query", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 1024 } },
-          { "name": "expected_scope_revision", "in": "query", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 64 } }
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 128 }
+          },
+          {
+            "name": "workspace_id",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 128 }
+          },
+          {
+            "name": "cwd_relative",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 1024 }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1, "maxLength": 1024 }
+          },
+          {
+            "name": "expected_scope_revision",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1, "maxLength": 64 }
+          }
         ],
         "responses": {
           "200": {
             "description": "Authorized file content.",
             "headers": {
               "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
-              "Cache-Control": { "schema": { "type": "string", "const": "no-store" } }
+              "Cache-Control": {
+                "schema": { "type": "string", "const": "no-store" }
+              }
             },
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicFileResult" } } }
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PublicFileResult" }
+              }
+            }
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
@@ -2022,25 +2166,67 @@
         "x-qwen-implementation-status": "implemented",
         "description": "Uploads one bounded file into the authorized Workspace or Session scope as an idempotent upload operation. The body is application/octet-stream; encoded uploads are refused. Requires a trusted actor.",
         "parameters": [
-          { "name": "session_id", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 128 } },
-          { "name": "workspace_id", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 128 } },
-          { "name": "cwd_relative", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 1024 } },
-          { "name": "path", "in": "query", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 1024 } },
-          { "name": "expected_scope_revision", "in": "query", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 64 } },
-          { "name": "upload_id", "in": "query", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 36 } }
+          {
+            "name": "session_id",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 128 }
+          },
+          {
+            "name": "workspace_id",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 128 }
+          },
+          {
+            "name": "cwd_relative",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 1024 }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1, "maxLength": 1024 }
+          },
+          {
+            "name": "expected_scope_revision",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1, "maxLength": 64 }
+          },
+          {
+            "name": "upload_id",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1, "maxLength": 36 }
+          }
         ],
         "requestBody": {
           "required": true,
-          "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } }
+          "content": {
+            "application/octet-stream": {
+              "schema": { "type": "string", "format": "binary" }
+            }
+          }
         },
         "responses": {
           "200": {
             "description": "Durable upload result.",
             "headers": {
               "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
-              "Cache-Control": { "schema": { "type": "string", "const": "no-store" } }
+              "Cache-Control": {
+                "schema": { "type": "string", "const": "no-store" }
+              }
             },
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicFileUploadResult" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicFileUploadResult"
+                }
+              }
+            }
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
@@ -2049,14 +2235,23 @@
           "409": { "$ref": "#/components/responses/Conflict" },
           "415": {
             "description": "Encoded Workspace uploads are unsupported.",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ErrorEnvelope" }
+              }
+            }
           }
         }
       }
     },
     "/v1/agents/workspace-files/uploads/{uploadId}": {
       "parameters": [
-        { "name": "uploadId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 36 } }
+        {
+          "name": "uploadId",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "minLength": 1, "maxLength": 36 }
+        }
       ],
       "get": {
         "tags": ["Public Resources"],
@@ -2068,9 +2263,17 @@
             "description": "Latest durable upload state.",
             "headers": {
               "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
-              "Cache-Control": { "schema": { "type": "string", "const": "no-store" } }
+              "Cache-Control": {
+                "schema": { "type": "string", "const": "no-store" }
+              }
             },
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicFileUploadStatus" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicFileUploadStatus"
+                }
+              }
+            }
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
@@ -2086,18 +2289,41 @@
         "x-qwen-implementation-status": "implemented",
         "description": "Lists bounded immediate real directories on the selected Workspace storage host, or a local import root when local_path is given. Requires an authenticated OWNER of the ACTIVE ROOT Workspace and verified storage; refuses traversal, symlinks and reserved maintenance directories.",
         "parameters": [
-          { "name": "workspace_id", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 128 } },
-          { "name": "cwd_relative", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 1024 } },
-          { "name": "local_path", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 1024 } }
+          {
+            "name": "workspace_id",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 128 }
+          },
+          {
+            "name": "cwd_relative",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 1024 }
+          },
+          {
+            "name": "local_path",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 1024 }
+          }
         ],
         "responses": {
           "200": {
             "description": "Authorized directory page.",
             "headers": {
               "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
-              "Cache-Control": { "schema": { "type": "string", "const": "no-store" } }
+              "Cache-Control": {
+                "schema": { "type": "string", "const": "no-store" }
+              }
             },
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicWorkspaceDirectoryPage" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicWorkspaceDirectoryPage"
+                }
+              }
+            }
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
@@ -2109,7 +2335,12 @@
     "/v1/agents/sessions/{sessionId}/items/{itemId}/tool-details": {
       "parameters": [
         { "$ref": "#/components/parameters/SessionId" },
-        { "name": "itemId", "in": "path", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 128 } }
+        {
+          "name": "itemId",
+          "in": "path",
+          "required": true,
+          "schema": { "type": "string", "minLength": 1, "maxLength": 128 }
+        }
       ],
       "get": {
         "tags": ["Public Sessions"],
@@ -2121,9 +2352,15 @@
             "description": "Tool details for the authorized item.",
             "headers": {
               "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
-              "Cache-Control": { "schema": { "type": "string", "const": "private, no-store" } }
+              "Cache-Control": {
+                "schema": { "type": "string", "const": "private, no-store" }
+              }
             },
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicToolDetails" } } }
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PublicToolDetails" }
+              }
+            }
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
@@ -2139,16 +2376,29 @@
         "x-qwen-implementation-status": "implemented",
         "description": "Returns the approval, plan-mode, attachment, skill and model-selection options available when creating a Session for the given agent. Requires a trusted actor.",
         "parameters": [
-          { "name": "agent_id", "in": "query", "required": true, "schema": { "type": "string", "minLength": 1, "maxLength": 128 } }
+          {
+            "name": "agent_id",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string", "minLength": 1, "maxLength": 128 }
+          }
         ],
         "responses": {
           "200": {
             "description": "Session creation options for the agent.",
             "headers": {
               "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
-              "Cache-Control": { "schema": { "type": "string", "const": "no-store" } }
+              "Cache-Control": {
+                "schema": { "type": "string", "const": "no-store" }
+              }
             },
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicSessionOptions" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicSessionOptions"
+                }
+              }
+            }
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
@@ -2157,7 +2407,7 @@
       }
     },
     "/v1/agents/sessions/{sessionId}/models": {
-      "parameters": [ { "$ref": "#/components/parameters/SessionId" } ],
+      "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
       "get": {
         "tags": ["Public Sessions"],
         "operationId": "getPublicSessionModels",
@@ -2166,7 +2416,11 @@
         "responses": {
           "200": {
             "description": "Model options and current selection.",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicSessionModels" } } }
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PublicSessionModels" }
+              }
+            }
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
@@ -2179,15 +2433,27 @@
         "operationId": "changePublicSessionModel",
         "x-qwen-implementation-status": "implemented",
         "description": "Idempotently changes the Session model at the expected revision. Requires a trusted actor with operator access.",
-        "parameters": [ { "$ref": "#/components/parameters/IdempotencyKey" } ],
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
         "requestBody": {
           "required": true,
-          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicChangeModelRequest" } } }
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublicChangeModelRequest"
+              }
+            }
+          }
         },
         "responses": {
           "200": {
             "description": "The updated model selection.",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicModelChangeResult" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicModelChangeResult"
+                }
+              }
+            }
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
@@ -2198,7 +2464,7 @@
       }
     },
     "/v1/agents/sessions/{sessionId}/approval": {
-      "parameters": [ { "$ref": "#/components/parameters/SessionId" } ],
+      "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
       "get": {
         "tags": ["Public Sessions"],
         "operationId": "getPublicSessionApproval",
@@ -2207,7 +2473,13 @@
         "responses": {
           "200": {
             "description": "Approval selection and capabilities.",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicSessionApproval" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicSessionApproval"
+                }
+              }
+            }
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
@@ -2220,15 +2492,27 @@
         "operationId": "changePublicSessionApproval",
         "x-qwen-implementation-status": "implemented",
         "description": "Idempotently changes the approval mode, plan mode and permission rules at the expected revision. Requires the Session owner.",
-        "parameters": [ { "$ref": "#/components/parameters/IdempotencyKey" } ],
+        "parameters": [{ "$ref": "#/components/parameters/IdempotencyKey" }],
         "requestBody": {
           "required": true,
-          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicChangeApprovalRequest" } } }
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PublicChangeApprovalRequest"
+              }
+            }
+          }
         },
         "responses": {
           "200": {
             "description": "The updated approval selection.",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicApprovalChangeResult" } } }
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PublicApprovalChangeResult"
+                }
+              }
+            }
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
@@ -2239,7 +2523,7 @@
       }
     },
     "/v1/agents/sessions/{sessionId}/skills": {
-      "parameters": [ { "$ref": "#/components/parameters/SessionId" } ],
+      "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
       "get": {
         "tags": ["Public Sessions"],
         "operationId": "getPublicSessionSkills",
@@ -2250,9 +2534,15 @@
             "description": "Session skills.",
             "headers": {
               "X-Request-Id": { "$ref": "#/components/headers/RequestId" },
-              "Cache-Control": { "schema": { "type": "string", "const": "no-store" } }
+              "Cache-Control": {
+                "schema": { "type": "string", "const": "no-store" }
+              }
             },
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicSessionSkills" } } }
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PublicSessionSkills" }
+              }
+            }
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
@@ -2262,20 +2552,39 @@
       }
     },
     "/v1/agents/sessions/{sessionId}/transcript": {
-      "parameters": [ { "$ref": "#/components/parameters/SessionId" } ],
+      "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
       "get": {
         "tags": ["Public Sessions"],
         "operationId": "getPublicTranscript",
         "x-qwen-implementation-status": "implemented",
         "description": "Reads a bounded page of transcript items and projected events for the Session, with a cursor for older pages.",
         "parameters": [
-          { "name": "cursor", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 4096 } },
-          { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 100 } }
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 4096 }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 100
+            }
+          }
         ],
         "responses": {
           "200": {
             "description": "Transcript page.",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicTranscript" } } }
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PublicTranscript" }
+              }
+            }
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
@@ -2285,20 +2594,39 @@
       }
     },
     "/v1/agents/sessions/{sessionId}/transcript/items": {
-      "parameters": [ { "$ref": "#/components/parameters/SessionId" } ],
+      "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
       "get": {
         "tags": ["Public Sessions"],
         "operationId": "listPublicTranscriptItems",
         "x-qwen-implementation-status": "implemented",
         "description": "Reads a bounded reverse-ordered page of transcript items for the Session.",
         "parameters": [
-          { "name": "cursor", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 4096 } },
-          { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 100 } }
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 4096 }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 100
+            }
+          }
         ],
         "responses": {
           "200": {
             "description": "Transcript item page.",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicItemList" } } }
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PublicItemList" }
+              }
+            }
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
@@ -2308,20 +2636,39 @@
       }
     },
     "/v1/agents/sessions/{sessionId}/export": {
-      "parameters": [ { "$ref": "#/components/parameters/SessionId" } ],
+      "parameters": [{ "$ref": "#/components/parameters/SessionId" }],
       "get": {
         "tags": ["Public Sessions"],
         "operationId": "exportPublicSession",
         "x-qwen-implementation-status": "implemented",
         "description": "Reads a bounded forward page of Session items for export, with a snapshot watermark.",
         "parameters": [
-          { "name": "cursor", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 4096 } },
-          { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 100 } }
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "maxLength": 4096 }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 100
+            }
+          }
         ],
         "responses": {
           "200": {
             "description": "Export item page.",
-            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PublicItemList" } } }
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PublicItemList" }
+              }
+            }
           },
           "400": { "$ref": "#/components/responses/BadRequest" },
           "401": { "$ref": "#/components/responses/Unauthorized" },
@@ -4734,7 +5081,7 @@
         "tags": ["WebShell"],
         "operationId": "changeWebShellSessionApproval",
         "x-qwen-implementation-status": "implemented",
-        "description": "Change the execution approval policy of an eligible Workspace Session: built-in qwen-code or a stored AgentDefinition on exactly hosted-workspace-files/1, hosted-workspace-files/3, hosted-workspace-shell/1 or hosted-workspace-shell/3. With liveSupported, execution policy changes affect subsequent current-Turn permission checks and permit eligible pending ordinary tool approvals. Otherwise the Session must be idle. Plan changes remain idle-only. Requires its recorded owner, current OPERATOR or OWNER access and Session-specific Harness feature support. Changes are revision-checked and actor/session-scoped idempotent. Definition creation policy and pins remain immutable. Classifier auto requires auto-approval/1. Optional permissionRules requires permission-rules/1 and an idle Session. Omitted rules preserve the current selection; three empty arrays clear it. Mode, Plan and rules share one approval revision and receipt. Persisted rules are also snapshotted at Turn admission; replay preserves the original policy. Empty rules are omitted from responses and Harness payloads.",
+        "description": "Change the execution approval policy of an eligible Workspace Session: built-in qwen-code or a stored AgentDefinition on exactly hosted-workspace-files/1, hosted-workspace-files/3, hosted-workspace-files/4, hosted-workspace-shell/1, hosted-workspace-shell/3 or hosted-workspace-shell/4. With liveSupported, execution policy changes affect subsequent current-Turn permission checks and permit eligible pending ordinary tool approvals. Otherwise the Session must be idle. Plan changes remain idle-only. Requires its recorded owner, current OPERATOR or OWNER access and Session-specific Harness feature support. Changes are revision-checked and actor/session-scoped idempotent. Definition creation policy and pins remain immutable. Classifier auto requires auto-approval/1. Optional permissionRules requires permission-rules/1 and an idle Session. Omitted rules preserve the current selection; three empty arrays clear it. Mode, Plan and rules share one approval revision and receipt. Persisted rules are also snapshotted at Turn admission; replay preserves the original policy. Empty rules are omitted from responses and Harness payloads.",
         "requestBody": {
           "required": true,
           "content": {
@@ -11638,7 +11985,7 @@
             "items": {
               "$ref": "#/components/schemas/SessionCreationSkill"
             },
-            "description": "Optional static Skills imported from the enabled management catalog or added explicitly to the pinned AgentDefinition catalog. The merged catalog has unique names, at most 256 entries, 512 KiB per body and 2 MiB compact JSON. Requires session-skills/2; persisted immutably and included in creation idempotency."
+            "description": "Optional static Skills imported from the enabled management catalog or added explicitly to the pinned AgentDefinition catalog. The merged catalog has unique names, at most 256 entries, 512 KiB per body and 2 MiB compact JSON; a caller loop whose body is the verbatim bundled import is superseded by the definition's entry or the server variant rather than rejected; a user-authored caller loop that collides with a definition-authored loop is still rejected. On a creator-bearing tool profile the server also contributes a loop skill variant selected by the Session profile, replacing only the bundled caller import (carrying over its invocation flags) and added even when this array is empty; a user-authored caller loop or a definition-authored loop skill is preserved and suppresses the variant, and on a creator-less profile only the bundled caller import is dropped. Requires session-skills/2; persisted immutably and included in creation idempotency."
           },
           "extensionPins": {
             "type": "array",
@@ -12109,6 +12456,11 @@
             "type": "boolean",
             "default": false,
             "description": "Browser local-files registration is available for this Session: the Session is bound to a Workspace, the caller holds current execution authority, the deployment enables the client-files relay and the Harness supports it. A Workspace-less Session never advertises this capability. Registration admission still checks the actor grant and idle state separately.",
+            "x-qwen-implementation-status": "implemented"
+          },
+          "terminal": {
+            "type": ["boolean", "null"],
+            "description": "UI hint that this Session may open a Managed Web Terminal: the terminal deployment opt-in is enabled, the caller may submit (OPERATOR on the bound Workspace), and the Session is a Shell Session. The relay re-runs the full admission on the WebSocket attach; this field does not gate it. The ticket mint and WebSocket upgrade themselves travel the broker-mounted WebShell surface.",
             "x-qwen-implementation-status": "implemented"
           }
         }
@@ -12696,6 +13048,35 @@
           }
         }
       },
+      "WebShellTerminalTicketRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sessionId", "terminalId"],
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._-]{1,256}$"
+          },
+          "terminalId": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._-]{1,256}$"
+          }
+        }
+      },
+      "WebShellTerminalTicket": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ticket", "expiresInSeconds"],
+        "properties": {
+          "ticket": {
+            "type": "string"
+          },
+          "expiresInSeconds": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "WebShellTranscriptRequest": {
         "type": "object",
         "additionalProperties": false,
@@ -12797,7 +13178,7 @@
             "items": {
               "$ref": "#/components/schemas/SessionCreationSkill"
             },
-            "description": "Optional static Skills imported from the enabled management catalog or added explicitly to the pinned AgentDefinition catalog. The merged catalog has unique names, at most 256 entries, 512 KiB per body and 2 MiB compact JSON. Requires session-skills/2; persisted immutably and included in creation idempotency."
+            "description": "Optional static Skills imported from the enabled management catalog or added explicitly to the pinned AgentDefinition catalog. The merged catalog has unique names, at most 256 entries, 512 KiB per body and 2 MiB compact JSON; a caller loop whose body is the verbatim bundled import is superseded by the definition's entry or the server variant rather than rejected; a user-authored caller loop that collides with a definition-authored loop is still rejected. On a creator-bearing tool profile the server also contributes a loop skill variant selected by the Session profile, replacing only the bundled caller import (carrying over its invocation flags) and added even when this array is empty; a user-authored caller loop or a definition-authored loop skill is preserved and suppresses the variant, and on a creator-less profile only the bundled caller import is dropped. Requires session-skills/2; persisted immutably and included in creation idempotency."
           },
           "extensionPins": {
             "type": "array",
@@ -13194,7 +13575,7 @@
           },
           "approvalModeChange": {
             "type": "boolean",
-            "description": "The caller owns this eligible Workspace Session with current OPERATOR or OWNER access. Built-in qwen-code requires approval-selection/1; stored AgentDefinitions on exactly hosted-workspace-files/1, hosted-workspace-files/3, hosted-workspace-shell/1 or hosted-workspace-shell/3 also require agent-definition-approval-selection/1. Idle-state admission is checked separately. Missing means false."
+            "description": "The caller owns this eligible Workspace Session with current OPERATOR or OWNER access. Built-in qwen-code requires approval-selection/1; stored AgentDefinitions on exactly hosted-workspace-files/1, hosted-workspace-files/3, hosted-workspace-files/4, hosted-workspace-shell/1, hosted-workspace-shell/3 or hosted-workspace-shell/4 also require agent-definition-approval-selection/1. Idle-state admission is checked separately. Missing means false."
           },
           "inputAttachments": {
             "type": "boolean",
@@ -13229,6 +13610,11 @@
           "recap": {
             "type": "boolean",
             "default": false
+          },
+          "terminal": {
+            "type": ["boolean", "null"],
+            "description": "UI hint that this Session may open a Managed Web Terminal: the terminal deployment opt-in is enabled, the caller may submit (OPERATOR on the bound Workspace), and the Session is a Shell Session. The relay re-runs the full admission on the WebSocket attach; this field does not gate it.",
+            "x-qwen-implementation-status": "implemented"
           },
           "clientFiles": {
             "type": "boolean",
@@ -18330,10 +18716,20 @@
       "PublicSessionOptions": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["approval_mode", "available_approval_modes", "plan_mode_supported", "input_attachments", "skills_supported", "model_selection_supported"],
+        "required": [
+          "approval_mode",
+          "available_approval_modes",
+          "plan_mode_supported",
+          "input_attachments",
+          "skills_supported",
+          "model_selection_supported"
+        ],
         "properties": {
           "approval_mode": { "type": ["string", "null"] },
-          "available_approval_modes": { "type": "array", "items": { "type": "string" } },
+          "available_approval_modes": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
           "plan_mode_supported": { "type": "boolean" },
           "input_attachments": { "type": "boolean" },
           "skills_supported": { "type": "boolean" },
@@ -18422,8 +18818,13 @@
         "additionalProperties": false,
         "required": ["models", "model_selection", "supported"],
         "properties": {
-          "models": { "type": "array", "items": { "$ref": "#/components/schemas/PublicModelOption" } },
-          "model_selection": { "$ref": "#/components/schemas/PublicModelSelection" },
+          "models": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/PublicModelOption" }
+          },
+          "model_selection": {
+            "$ref": "#/components/schemas/PublicModelSelection"
+          },
           "supported": { "type": "boolean" }
         }
       },
@@ -18433,18 +18834,32 @@
         "required": ["session_id", "model_selection", "replayed"],
         "properties": {
           "session_id": { "type": "string" },
-          "model_selection": { "$ref": "#/components/schemas/PublicModelSelection" },
+          "model_selection": {
+            "$ref": "#/components/schemas/PublicModelSelection"
+          },
           "replayed": { "type": "boolean" }
         }
       },
       "PublicSessionApproval": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["approval_mode", "approval_revision", "available_approval_modes", "supported", "plan_mode", "plan_mode_supported", "live_supported", "permission_rules_supported"],
+        "required": [
+          "approval_mode",
+          "approval_revision",
+          "available_approval_modes",
+          "supported",
+          "plan_mode",
+          "plan_mode_supported",
+          "live_supported",
+          "permission_rules_supported"
+        ],
         "properties": {
           "approval_mode": { "type": ["string", "null"] },
           "approval_revision": { "type": "integer" },
-          "available_approval_modes": { "type": "array", "items": { "type": "string" } },
+          "available_approval_modes": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
           "supported": { "type": "boolean" },
           "plan_mode": { "type": "boolean" },
           "plan_mode_supported": { "type": "boolean" },
@@ -18452,14 +18867,23 @@
           "permission_rules_supported": { "type": "boolean" },
           "permission_rules": {
             "type": "object",
-            "additionalProperties": { "type": "array", "items": { "type": "string" } }
+            "additionalProperties": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
           }
         }
       },
       "PublicApprovalChangeResult": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["session_id", "approval_mode", "approval_revision", "replayed", "plan_mode"],
+        "required": [
+          "session_id",
+          "approval_mode",
+          "approval_revision",
+          "replayed",
+          "plan_mode"
+        ],
         "properties": {
           "session_id": { "type": "string" },
           "approval_mode": { "type": ["string", "null"] },
@@ -18468,7 +18892,10 @@
           "plan_mode": { "type": "boolean" },
           "permission_rules": {
             "type": "object",
-            "additionalProperties": { "type": "array", "items": { "type": "string" } }
+            "additionalProperties": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
           }
         }
       },
@@ -18478,7 +18905,11 @@
         "required": ["model_id", "expected_revision"],
         "properties": {
           "model_id": { "type": "string", "minLength": 1, "maxLength": 512 },
-          "expected_revision": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
         }
       },
       "PublicChangeApprovalRequest": {
@@ -18487,9 +18918,16 @@
         "required": ["approval_mode", "expected_revision"],
         "properties": {
           "approval_mode": { "type": "string", "minLength": 1 },
-          "expected_revision": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
           "plan_mode": { "type": ["boolean", "null"] },
-          "permission_rules": { "type": ["object", "null"], "additionalProperties": true }
+          "permission_rules": {
+            "type": ["object", "null"],
+            "additionalProperties": true
+          }
         }
       },
       "PublicSkill": {
@@ -18506,16 +18944,31 @@
         "additionalProperties": false,
         "required": ["skills"],
         "properties": {
-          "skills": { "type": "array", "items": { "$ref": "#/components/schemas/PublicSkill" } }
+          "skills": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/PublicSkill" }
+          }
         }
       },
       "PublicTranscript": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["items", "events", "covered_sequence", "has_more", "last_sequence"],
+        "required": [
+          "items",
+          "events",
+          "covered_sequence",
+          "has_more",
+          "last_sequence"
+        ],
         "properties": {
-          "items": { "type": "array", "items": { "$ref": "#/components/schemas/PublicItem" } },
-          "events": { "type": "array", "items": { "$ref": "#/components/schemas/PublicEvent" } },
+          "items": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/PublicItem" }
+          },
+          "events": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/PublicEvent" }
+          },
           "covered_sequence": { "type": "integer" },
           "older_cursor": { "type": ["string", "null"] },
           "has_more": { "type": "boolean" },
@@ -18539,7 +18992,10 @@
         "properties": {
           "scope_revision": { "type": "string" },
           "directory": { "type": "string" },
-          "entries": { "type": "array", "items": { "$ref": "#/components/schemas/PublicFileEntry" } },
+          "entries": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/PublicFileEntry" }
+          },
           "truncated": { "type": "boolean" },
           "max_upload_bytes": { "type": ["integer", "null"] }
         }
@@ -18547,7 +19003,15 @@
       "PublicFileResult": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["scope_revision", "path", "name", "mime_type", "text", "byte_length", "sha256"],
+        "required": [
+          "scope_revision",
+          "path",
+          "name",
+          "mime_type",
+          "text",
+          "byte_length",
+          "sha256"
+        ],
         "properties": {
           "scope_revision": { "type": "string" },
           "path": { "type": "string" },
@@ -18561,7 +19025,13 @@
       "PublicFileUploadResult": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["scope_revision", "upload_id", "path", "size_bytes", "sha256"],
+        "required": [
+          "scope_revision",
+          "upload_id",
+          "path",
+          "size_bytes",
+          "sha256"
+        ],
         "properties": {
           "scope_revision": { "type": "string" },
           "upload_id": { "type": "string" },
@@ -18573,7 +19043,13 @@
       "PublicFileUploadStatus": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["scope_revision", "upload_id", "state", "path", "size_bytes"],
+        "required": [
+          "scope_revision",
+          "upload_id",
+          "state",
+          "path",
+          "size_bytes"
+        ],
         "properties": {
           "scope_revision": { "type": "string" },
           "upload_id": { "type": "string" },
@@ -18589,8 +19065,15 @@
         "additionalProperties": false,
         "required": ["display_name"],
         "properties": {
-          "display_name": { "type": "string", "minLength": 1, "maxLength": 512 },
-          "source_workspace_id": { "type": ["string", "null"], "maxLength": 128 },
+          "display_name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "source_workspace_id": {
+            "type": ["string", "null"],
+            "maxLength": 128
+          },
           "cwd_relative": { "type": ["string", "null"], "maxLength": 1024 },
           "local_path": { "type": ["string", "null"], "maxLength": 1024 }
         }
@@ -18598,11 +19081,25 @@
       "PublicWorkspaceSummary": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["workspace_id", "display_name", "state", "can_create_session", "default_cwd_relative", "can_select_directory"],
+        "required": [
+          "workspace_id",
+          "display_name",
+          "state",
+          "can_create_session",
+          "default_cwd_relative",
+          "can_select_directory"
+        ],
         "properties": {
-          "workspace_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "workspace_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
           "display_name": { "type": "string", "maxLength": 512 },
-          "state": { "type": "string", "enum": ["active", "draining", "removed"] },
+          "state": {
+            "type": "string",
+            "enum": ["active", "draining", "removed"]
+          },
           "can_create_session": { "type": "boolean" },
           "default_cwd_relative": { "type": ["string", "null"] },
           "can_select_directory": { "type": "boolean" }
@@ -18624,7 +19121,12 @@
         "properties": {
           "root": { "type": "string" },
           "cwd_relative": { "type": "string" },
-          "directories": { "type": "array", "items": { "$ref": "#/components/schemas/PublicWorkspaceDirectoryEntry" } },
+          "directories": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PublicWorkspaceDirectoryEntry"
+            }
+          },
           "truncated": { "type": "boolean" }
         }
       },
@@ -18652,21 +19154,58 @@
       "PublicShellResult": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["type", "version", "text", "output", "directory", "exit_code", "signal", "pid", "error", "outcome", "notices", "truncated", "output_files"],
+        "required": [
+          "type",
+          "version",
+          "text",
+          "output",
+          "directory",
+          "exit_code",
+          "signal",
+          "pid",
+          "error",
+          "outcome",
+          "notices",
+          "truncated",
+          "output_files"
+        ],
         "properties": {
           "type": { "type": "string", "const": "shell_result" },
           "version": { "type": "integer", "const": 1 },
           "text": { "type": "string" },
           "output": { "type": "string" },
           "directory": { "type": "string" },
-          "exit_code": { "type": ["integer", "null"], "minimum": -9007199254740991, "maximum": 9007199254740991 },
-          "signal": { "type": ["integer", "null"], "minimum": -9007199254740991, "maximum": 9007199254740991 },
-          "pid": { "type": ["integer", "null"], "minimum": -9007199254740991, "maximum": 9007199254740991 },
+          "exit_code": {
+            "type": ["integer", "null"],
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "signal": {
+            "type": ["integer", "null"],
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
+          "pid": {
+            "type": ["integer", "null"],
+            "minimum": -9007199254740991,
+            "maximum": 9007199254740991
+          },
           "error": { "type": ["string", "null"] },
-          "outcome": { "type": "string", "enum": ["completed", "failed", "cancelled", "timed_out"] },
-          "notices": { "type": "array", "maxItems": 32, "items": { "type": "string" } },
+          "outcome": {
+            "type": "string",
+            "enum": ["completed", "failed", "cancelled", "timed_out"]
+          },
+          "notices": {
+            "type": "array",
+            "maxItems": 32,
+            "items": { "type": "string" }
+          },
           "truncated": { "type": "boolean" },
-          "output_files": { "type": "array", "maxItems": 32, "items": { "type": "string" } }
+          "output_files": {
+            "type": "array",
+            "maxItems": 32,
+            "items": { "type": "string" }
+          }
         }
       },
       "PublicClientFilesConnectionRequest": {
@@ -18833,13 +19372,28 @@
         "additionalProperties": false,
         "required": ["operation_id", "type", "status", "replayed"],
         "properties": {
-          "operation_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "operation_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
           "type": { "type": "string", "const": "workspace_create" },
           "status": {
             "type": "string",
-            "enum": ["pending", "running", "completed", "failed", "cancelled", "recovery_blocked"]
+            "enum": [
+              "pending",
+              "running",
+              "completed",
+              "failed",
+              "cancelled",
+              "recovery_blocked"
+            ]
           },
-          "workspace_id": { "type": ["string", "null"], "minLength": 1, "maxLength": 128 },
+          "workspace_id": {
+            "type": ["string", "null"],
+            "minLength": 1,
+            "maxLength": 128
+          },
           "failure_code": { "type": ["string", "null"] },
           "replayed": { "type": "boolean" }
         },

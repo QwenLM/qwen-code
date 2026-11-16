@@ -122,6 +122,7 @@ import type {
   WebShellTaskEventQueryRequest,
   WebShellTaskGetRequest,
   WebShellTaskQueryRequest,
+  WebShellTerminalTicket,
   WebShellTranscript,
   WebShellTranscriptRequest,
   WebShellTurn,
@@ -164,6 +165,8 @@ export type JavaAgentSessionPage = Omit<WebShellSessionPage, 'data'> & {
 export type JavaAgentEvent = WebShellEvent;
 
 export type JavaAgentResyncRequired = WebShellResyncRequired;
+
+export type JavaAgentTerminalTicket = WebShellTerminalTicket;
 
 const RESYNC_REQUIRED = 'agent.session.resync_required';
 
@@ -223,6 +226,12 @@ export class JavaManagedAgentHttpError extends Error {
 }
 
 const API_PREFIX = '/v1/agents';
+
+// The Managed Web Terminal ticket mint and WebSocket upgrade stay on the
+// broker-mounted WebShell surface: that is where the deployment authentication
+// headers are available and where the Runtime Broker mounts the relay. Every
+// other client method uses the Public surface above.
+const WEBSHELL_API_PREFIX = '/api/agent/web-shell/v1';
 
 /** Builds a Public query string, dropping null/undefined parameters. */
 function query(
@@ -340,6 +349,30 @@ export class JavaManagedAgentClient {
       signal,
     );
     return publicSessionToJava(session) as JavaAgentSession;
+  }
+
+  terminalTicket(
+    sessionId: string,
+    terminalId: string,
+    signal?: AbortSignal,
+  ): Promise<JavaAgentTerminalTicket> {
+    return this.post(
+      '/sessions/terminal-ticket',
+      { sessionId, terminalId },
+      signal,
+      undefined,
+      WEBSHELL_API_PREFIX,
+    );
+  }
+
+  terminalWebSocketUrl(sessionId: string, terminalId: string): string {
+    const url = new URL(
+      `${this.baseUrl}${WEBSHELL_API_PREFIX}/sessions/${encodeURIComponent(sessionId)}/terminal`,
+    );
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    url.searchParams.set('terminalId', terminalId);
+    url.searchParams.set('replay', '1');
+    return url.toString();
   }
 
   getRecovery(sessionId: string, signal?: AbortSignal) {
@@ -1798,6 +1831,7 @@ export class JavaManagedAgentClient {
     body: unknown,
     signal?: AbortSignal,
     idempotencyKey?: string,
+    prefix: string = API_PREFIX,
   ): Promise<T> {
     const response = await this.request(
       path,
@@ -1806,6 +1840,7 @@ export class JavaManagedAgentClient {
       false,
       'POST',
       idempotencyKey,
+      prefix,
     );
     return (await response.json()) as T;
   }
@@ -1829,6 +1864,7 @@ export class JavaManagedAgentClient {
     stream: boolean,
     method: string = 'POST',
     idempotencyKey?: string,
+    prefix: string = API_PREFIX,
   ): Promise<Response> {
     return this.fetchRequest(
       path,
@@ -1838,6 +1874,7 @@ export class JavaManagedAgentClient {
       'application/json',
       method,
       idempotencyKey,
+      prefix,
     );
   }
 
@@ -1849,6 +1886,7 @@ export class JavaManagedAgentClient {
     contentType: string,
     method: string = 'POST',
     idempotencyKey?: string,
+    prefix: string = API_PREFIX,
   ): Promise<Response> {
     const supplied = await this.options.getHeaders?.();
     const headers = new Headers(supplied);
@@ -1863,16 +1901,13 @@ export class JavaManagedAgentClient {
     if (idempotencyKey !== undefined) {
       headers.set('idempotency-key', idempotencyKey);
     }
-    const response = await this.fetchImpl(
-      `${this.baseUrl}${API_PREFIX}${path}`,
-      {
-        method,
-        headers,
-        credentials: this.credentials,
-        body,
-        signal,
-      },
-    );
+    const response = await this.fetchImpl(`${this.baseUrl}${prefix}${path}`, {
+      method,
+      headers,
+      credentials: this.credentials,
+      body,
+      signal,
+    });
     if (!response.ok) {
       throw await toHttpError(response);
     }

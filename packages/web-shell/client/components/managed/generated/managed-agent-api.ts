@@ -1742,7 +1742,7 @@ export interface components {
             stream?: boolean;
             /** @description W0. Only omission allows default resolution; null or an empty object is invalid. Resolve and persist an explicit authorized tenant default on first admission; no default means workspace_required. The caller request digest retains an omission marker; replay resolves the original receipt before defaults. A changed default must never rebind a retry. Unavailable W0 support rejects rather than ignores this field. */
             workspace?: components["schemas"]["WorkspaceSelection"];
-            /** @description Optional static Skills imported from the enabled management catalog or added explicitly to the pinned AgentDefinition catalog. The merged catalog has unique names, at most 256 entries, 512 KiB per body and 2 MiB compact JSON. Requires session-skills/2; persisted immutably and included in creation idempotency. */
+            /** @description Optional static Skills imported from the enabled management catalog or added explicitly to the pinned AgentDefinition catalog. The merged catalog has unique names, at most 256 entries, 512 KiB per body and 2 MiB compact JSON; a caller loop whose body is the verbatim bundled import is superseded by the definition's entry or the server variant rather than rejected; a user-authored caller loop that collides with a definition-authored loop is still rejected. On a creator-bearing tool profile the server also contributes a loop skill variant selected by the Session profile, replacing only the bundled caller import (carrying over its invocation flags) and added even when this array is empty; a user-authored caller loop or a definition-authored loop skill is preserved and suppresses the variant, and on a creator-less profile only the bundled caller import is dropped. Requires session-skills/2; persisted immutably and included in creation idempotency. */
             skills?: components["schemas"]["SessionCreationSkill"][];
             /** @description Optional immutable initial extension selection. Omission keeps the legacy configuration path; an explicit empty array starts the unified configuration format. Included in creation idempotency and applied before the first model request. Requires session-extension-packages/1 and an extension-capable original Runtime. */
             extensionPins?: components["schemas"]["ManagedExtensionPackagePin"][];
@@ -1940,6 +1940,8 @@ export interface components {
              * @default false
              */
             client_files?: boolean;
+            /** @description UI hint that this Session may open a Managed Web Terminal: the terminal deployment opt-in is enabled, the caller may submit (OPERATOR on the bound Workspace), and the Session is a Shell Session. The relay re-runs the full admission on the WebSocket attach; this field does not gate it. The ticket mint and WebSocket upgrade themselves travel the broker-mounted WebShell surface. */
+            terminal?: boolean | null;
         };
         PublicTurn: {
             id: string;

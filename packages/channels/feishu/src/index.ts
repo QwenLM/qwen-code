@@ -1,3 +1,5 @@
+export { FeishuWebhookChannel } from './FeishuWebhookChannel.js';
+export { webhookPlugin } from './webhook-plugin.js';
 export { FeishuChannel } from './FeishuAdapter.js';
 export { downloadMedia } from './media.js';
 

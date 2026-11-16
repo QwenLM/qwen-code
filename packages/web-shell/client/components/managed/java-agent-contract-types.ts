@@ -737,6 +737,8 @@ export type WebShellSessionCapabilities = {
   btw?: boolean;
   /** @default false */
   recap?: boolean;
+  /** @description UI hint that this Session may open a Managed Web Terminal: the terminal deployment opt-in is enabled, the caller may submit (OPERATOR on the bound Workspace), and the Session is a Shell Session. The relay re-runs the full admission on the WebSocket attach; this field does not gate it. */
+  terminal?: boolean | null;
   /**
    * @description Browser local-files registration is available for this Session: the Session is bound to a Workspace, the caller holds current execution authority, the deployment enables the client-files relay and the Harness supports it. A Workspace-less Session never advertises this capability. Registration admission still checks the actor grant and idle state separately.
    * @default false
@@ -1062,6 +1064,17 @@ export type WebShellToolDetails = {
   truncated: boolean;
   /** @description Validated saved Shell display, when available. Text fields share an 8 KiB/200-line budget; directory and output-file paths share an 8 KiB UTF-8 budget. Legacy text remains in output. */
   shellResult?: WebShellShellResult;
+};
+
+export type WebShellTerminalTicketRequest = {
+  sessionId: string;
+  terminalId: string;
+};
+
+export type WebShellTerminalTicket = {
+  ticket: string;
+  /** Format: int64 */
+  expiresInSeconds: number;
 };
 
 export type WebShellTranscript = {

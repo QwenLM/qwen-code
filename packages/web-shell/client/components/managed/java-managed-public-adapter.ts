@@ -216,6 +216,7 @@ function publicCapabilitiesToJava(
     diagnostics: capabilities.tasks,
     btw: capabilities.btw,
     recap: capabilities.recap,
+    terminal: capabilities.terminal,
     clientFiles: capabilities.client_files,
   };
 }

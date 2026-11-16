@@ -107,6 +107,20 @@ export type ManagedWorkspaceFileUploadRequest = ManagedWorkspaceFileLocator & {
   uploadId: string;
 };
 
+export interface ManagedAgentTerminalTicket {
+  ticket: string;
+  expiresInSeconds: number;
+}
+
+export interface ManagedAgentTerminalProvider {
+  ticket(
+    sessionId: string,
+    terminalId: string,
+    options: ManagedAgentRequestOptions,
+  ): Promise<ManagedAgentTerminalTicket>;
+  webSocketUrl(sessionId: string, terminalId: string): string;
+}
+
 export function isManagedApprovalMode(
   value: unknown,
 ): value is ManagedApprovalMode {
@@ -298,6 +312,7 @@ export interface ManagedAgentSessionSummary {
     inputAttachments?: boolean;
     btw?: boolean;
     recap?: boolean;
+    terminal?: boolean | null;
     clientFiles?: boolean;
   };
   failure?: { code: string; message: string };
@@ -651,6 +666,7 @@ export interface ManagedAgentProvider {
     ): Promise<void>;
   };
   readonly toolResults?: ManagedToolResultReader;
+  readonly terminal?: ManagedAgentTerminalProvider;
   readonly toolDetails?: {
     get(
       sessionId: string,
