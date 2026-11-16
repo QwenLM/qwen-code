@@ -658,6 +658,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                     .planModeSupported(harness.supportsPlanMode())
                     .skills(additions)
                     .publicChildrenSupported(harness.supportsPublicChildAgents())
+                    .sessionSkillsSupported(harness.supportsSessionSkills())
                     .modelId(modelId)
                     .extensionPins(extensionPins)
                     .extensionSelection(extensionSelection)
