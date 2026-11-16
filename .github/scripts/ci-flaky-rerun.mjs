@@ -349,7 +349,10 @@ export function skillLog(log) {
     .map((group) =>
       redactWeldedTokens(
         group
-          .map((index) => lines[index])
+          // Clamp to the shipped width BEFORE the repair: the output is sliced
+          // to 300 anyway, and redaction only shortens, so this is equivalent
+          // for what ships while bounding the quadratic keyword rule's input.
+          .map((index) => lines[index].slice(0, 300))
           .join('\n')
           .replace(TERMINAL_CONTROLS, ''),
       ),

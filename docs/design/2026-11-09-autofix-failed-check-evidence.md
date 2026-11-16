@@ -165,7 +165,9 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
    passes, so the welded value stays unredacted, and an empty-value header
    (`Cookie:` then CR) already loses the next line in the first pass, in base
    too; the `TOKEN`/`KEY`/… rule is quadratic on a long word run in base (about a
-   second at 40k characters), which running it twice doubles; a value cannot
+   second at 40k characters); the repair pass clamps its input to the shipped
+   300-character width so it does not add a second copy of that cost, leaving
+   only the first pass's base cost on an adversarial long line; a value cannot
    tell a weld INSIDE the credential from a weld BEFORE following word-like
    text, so a bare failure keyword (no `##[error]`) welded onto a value is still
    consumed (the message tail survives); and a `##[error]` inside a BEGIN…END
@@ -283,9 +285,10 @@ completed with exit code 1` on a noisy multi-error log), and an 8 MiB
   the cross-window BEGIN/END case; and deleting any one of the nine post-strip
   rules reds the per-family repair case; dropping the patrol's flag turns its
   witness red. The URL scheme length-bound is a cost fix, not a behavior one:
-  the isolated URL rule is linear (1–2 ms at 40k characters) with it; the
-  residual whole-call cost on a long word run is the base's own quadratic
-  `TOKEN`/`KEY`/… rule (about a second at 40k characters) running in both passes.
+  the isolated URL rule is linear (1–2 ms at 40k characters) with it. The repair
+  pass clamps its input to 300 characters, so an adversarial 100k-character word
+  run costs about what base costs (≈7 s, the first pass's quadratic
+  `TOKEN`/`KEY`/… rule) rather than double it.
 - `scripts/tests/ci-platform-lanes.test.js` re-runs because `ci.yml` changed.
 
 ## Acceptance criteria
