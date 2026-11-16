@@ -83,7 +83,9 @@ writer 清洗不可信 model/tool 转义。本候选不调用 updateDynamic/clea
 
 软件光标回归先因 `hello world` 被拆行且空白丢失而失败；七处真实输入行接入原始公开文字拼接后，原断言通过。准备失败另行保留：Root 的路径排序检查与输出父目录遗漏都发生在应用启动前，不是产品失败，也没有删除负面结果。
 
-Root 仍拥有以下后续项：完整流式修订可能重复前缀；真实 `/quit` 调用与 synthetic 退出回显目前以不同身份播报两次，但不重复执行命令；clear/resume、真实 reader 可用性、长历史及其他平台仍待验收。不能用全局文本去重吞掉有意重复的消息。发布边界与这些呈现取舍需维护者评审，不得据此宣称完整 screen-reader parity。
+旧候选曾重复播报 `/quit`。后续候选（源码 71b98f88a9f7eb7241b8f3bf0497243edabe7b0f，入口 e0acc54e80fd5b18bdfadb183d9dc58c4bc7542f6b43dfc36695080424dae816）的回归及正常检查通过（355 项相关测试及构建、类型检查、lint 和 bundle）；新 strict Native 工具/历史 PTY 流程观察到退出调用与摘要各播报一次，保留真实批准的 shell 文件效果及三次已关闭模型 HTTP 响应，并在 helper 前自然退出（新 owned PTY：自然退出 0，无 helper 终止）。原重复结果保留，不据此宣称全部历史或真实 reader 可用性。
+
+Root 仍拥有以下后续项：完整流式修订可能重复前缀；clear/resume、真实 reader 可用性、长历史及其他平台仍待验收。不能用全局文本去重吞掉有意重复的消息。发布边界与这些呈现取舍需维护者评审，不得据此宣称完整 screen-reader parity。
 
 install、build、typecheck、测试和公开 PTY 均由 Root 执行。真实辅助设备可能需要用户或设备会话，未取得不能宣称通过。维护者评审应决定呈现兼容性和发布边界，而不是让可审查候选停留 Draft 的理由。
 

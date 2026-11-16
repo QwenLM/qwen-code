@@ -189,8 +189,31 @@ describe('Generated UI view state through the daemon', () => {
         200,
       );
       expect(JSON.stringify(artifacts)).toContain('https://example.com/notes');
-      const second = await promptOf(session, 'second prompt');
-      expect(second.status, await second.text()).toBeLessThan(300);
+      const second = (await json(
+        await promptOf(session, 'second prompt'),
+        202,
+      )) as { promptId: string };
+      expect(second.promptId).toEqual(expect.any(String));
+      expect(second.promptId.length).toBeGreaterThan(0);
+      await expect
+        .poll(
+          async () =>
+            json(
+              await call(
+                'GET',
+                `/session/${session.sessionId}/turns/${encodeURIComponent(second.promptId)}`,
+                undefined,
+                session.clientId,
+              ),
+              200,
+            ),
+          { timeout: 30_000 },
+        )
+        .toMatchObject({
+          promptId: second.promptId,
+          state: 'completed',
+          resultText: 'done',
+        });
       await reload();
       expect(
         await json(

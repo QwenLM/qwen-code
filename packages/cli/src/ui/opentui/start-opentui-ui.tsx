@@ -194,6 +194,16 @@ function OpenTuiEntryApp({
     resetTranscript: resetLiveTranscript,
     settleWaitingCall,
   } = live;
+  const liveItemsRef = useRef(live.items);
+  liveItemsRef.current = live.items;
+  const appendTranscript = useCallback(
+    (event: OpenTuiStreamEvent) => {
+      const items = applyEvent(event);
+      if (items) liveItemsRef.current = items;
+      return items;
+    },
+    [applyEvent],
+  );
   // The session the transcript belongs to, taken each time it is replaced:
   // a session switch replaces it after the core adopted the new session.
   const [transcriptSessionId, setTranscriptSessionId] = useState(() =>
@@ -493,24 +503,39 @@ function OpenTuiEntryApp({
 
   const quitRequested = useRef(false);
   const handleQuit = useCallback(
-    (messages: readonly HistoryItem[]) => {
+    (messages: readonly HistoryItem[], invocationItemId?: number) => {
       if (quitRequested.current) return;
       quitRequested.current = true;
       if (!messages.length) {
         void exitSession(config, 0);
         return;
       }
-      setQuittingItems(
-        foldBatch(
-          projectHistoryToStreamEvents(messages, {
-            config,
-            stats: getSessionStats(),
-          }),
-        ),
+      let items = foldBatch(
+        projectHistoryToStreamEvents(messages, {
+          config,
+          stats: getSessionStats(),
+        }),
       );
+      if (screenReaderPresentation && invocationItemId !== undefined) {
+        const invocation = liveItemsRef.current.find(
+          (item) =>
+            item.kind === 'user' &&
+            (item.canonicalHistoryItem?.id ?? item.historyId) ===
+              invocationItemId,
+        );
+        const closingUser = messages[0];
+        if (invocation && closingUser?.type === 'user') {
+          items = items.map((item) =>
+            item.kind === 'user' && item.historyId === closingUser.id
+              ? invocation
+              : item,
+          );
+        }
+      }
+      setQuittingItems(items);
       config.getLlmClient()?.requestShutdown();
     },
-    [config, getSessionStats],
+    [config, getSessionStats, screenReaderPresentation],
   );
   useEffect(() => {
     if (quittingItems === null) return;
@@ -556,7 +581,7 @@ function OpenTuiEntryApp({
       onToggleVim={toggleVimEnabled}
       vimMode={vimEnabled ? vimMode : undefined}
       onTranscriptReset={resetTranscript}
-      onTranscriptEvent={applyEvent}
+      onTranscriptEvent={appendTranscript}
       onStartNewSession={handleStartNewSession}
       updateNotice={updateNotice}
       exitHint={exitHint}

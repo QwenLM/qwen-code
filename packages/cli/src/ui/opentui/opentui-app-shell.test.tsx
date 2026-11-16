@@ -2381,6 +2381,20 @@ describe('OpenTuiApp shell wiring', () => {
     });
   });
 
+  it('passes the builtin quit invocation identity to the entry', async () => {
+    const onQuit = vi.fn();
+    renderApp({ onQuit });
+    await settle();
+    const messages = [{ type: 'user', text: '/quit', id: 1 }] as never;
+    mocks.state.handleResult = {
+      kind: 'quit',
+      messages,
+      invocationItemId: 42,
+    } satisfies OpenTuiDispatchOutcome;
+    await submit('/quit');
+    expect(onQuit).toHaveBeenCalledExactlyOnceWith(messages, 42);
+  });
+
   it('reaches the entry seam on a quit outcome', async () => {
     const onQuit = vi.fn();
     renderApp({ onQuit });

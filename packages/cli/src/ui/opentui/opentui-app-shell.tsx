@@ -223,7 +223,10 @@ export interface OpenTuiAppProps {
   onRetryPrompt?: () => void;
   onInputProcessed?: () => void;
   /** Reaches the entry after `/quit`; receives the closing history rows. */
-  onQuit?: (messages: readonly HistoryItem[]) => void;
+  onQuit?: (
+    messages: readonly HistoryItem[],
+    invocationItemId?: number,
+  ) => void;
   /** Replays a transcript batch (session switch / resume). */
   onTranscriptReset?: (events: OpenTuiStreamEvent[]) => void;
   /**
@@ -1315,7 +1318,11 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           // cleanup chain (recording flush, config.shutdown) against a turn
           // that is still writing. A no-op when nothing is in flight.
           onInterrupt?.();
-          onQuit?.(outcome.messages);
+          if (outcome.invocationItemId === undefined) {
+            onQuit?.(outcome.messages);
+          } else {
+            onQuit?.(outcome.messages, outcome.invocationItemId);
+          }
           return true;
         default: {
           const exhaustive: never = outcome;
