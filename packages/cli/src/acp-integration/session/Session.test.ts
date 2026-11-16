@@ -637,6 +637,7 @@ describe('Session', () => {
     recordUiTelemetryEvent: ReturnType<typeof vi.fn>;
     recordToolResult: ReturnType<typeof vi.fn>;
     recordSlashCommand: ReturnType<typeof vi.fn>;
+    recordBackgroundTaskCompleted: ReturnType<typeof vi.fn>;
     recordNotification: ReturnType<typeof vi.fn>;
     recordNotificationStrict: ReturnType<typeof vi.fn>;
     recordExternalAgentRecordStrict: ReturnType<typeof vi.fn>;
@@ -1046,6 +1047,7 @@ describe('Session', () => {
       recordUiTelemetryEvent: vi.fn(),
       recordToolResult: vi.fn(),
       recordSlashCommand: vi.fn(),
+      recordBackgroundTaskCompleted: vi.fn(),
       recordNotification: vi.fn(),
       recordNotificationStrict: vi.fn().mockResolvedValue(undefined),
       recordExternalAgentRecordStrict: vi.fn().mockResolvedValue({
@@ -24007,6 +24009,193 @@ describe('Session', () => {
       expect(internals.notificationQueue).toHaveLength(0);
       expect(internals.droppedNotifications.count).toBe(0);
       internals.notificationProcessing = false;
+    });
+
+    it('gives peers a separate queue allowance and records them only when taken for a turn', () => {
+      vi.mocked(mockConfig.assertCanStartTurn).mockRejectedValue(
+        new Error('turn admission closed for peer queue test'),
+      );
+      const shellCallback = mockBackgroundShellRegistry.setNotificationCallback
+        .mock.calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { shellId: string; status: string },
+      ) => void;
+      const deliveries = Array.from(
+        { length: MAX_BACKGROUND_NOTIFICATION_QUEUE },
+        (_, index) => ({ msgId: `peer-${index}` }),
+      );
+      for (const delivery of deliveries) {
+        expect(
+          session.enqueuePeerMessage(
+            '<peer model />',
+            'peer display',
+            delivery,
+          ),
+        ).toBe(true);
+      }
+      // A waiting message keeps a conditional close from discarding it.
+      expect(session.collectActiveWorkHolds()).toContainEqual({
+        category: 'session',
+        id: 'session:active-turn',
+      });
+      expect(
+        mockChatRecordingService.recordBackgroundTaskCompleted,
+      ).not.toHaveBeenCalled();
+      expect(mockClient.sessionUpdate).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            content: { type: 'text', text: 'peer display' },
+            _meta: expect.objectContaining({
+              source: 'background_task_completed',
+              backgroundTask: expect.objectContaining({
+                kind: 'peer',
+              }),
+            }),
+          }),
+        }),
+      );
+
+      for (let index = 0; index <= MAX_BACKGROUND_NOTIFICATION_QUEUE; index++) {
+        shellCallback('shell done', `<shell-${index} />`, {
+          shellId: `shell-${index}`,
+          status: 'completed',
+        });
+      }
+      const internals = session as unknown as {
+        notificationQueue: Array<{ taskId: string; kind: string }>;
+      };
+      expect(
+        internals.notificationQueue.filter((item) => item.kind === 'shell'),
+      ).toHaveLength(MAX_BACKGROUND_NOTIFICATION_QUEUE);
+      expect(
+        session.enqueuePeerMessage('<peer model />', 'peer display', {
+          msgId: 'overflow',
+        }),
+      ).toBe(false);
+      expect(session.takeQueuedPeerDeliveries()).toEqual(deliveries);
+      expect(session.takeQueuedPeerDeliveries()).toEqual([]);
+      expect(internals.notificationQueue).toHaveLength(
+        MAX_BACKGROUND_NOTIFICATION_QUEUE,
+      );
+
+      session.dispose();
+      expect(
+        session.enqueuePeerMessage('<peer model />', 'peer display', {
+          msgId: 'peer-3',
+        }),
+      ).toBe(false);
+    });
+
+    it('gives a queued peer message to the model as a turn of its own', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      expect(
+        session.enqueuePeerMessage('<peer model />', 'peer display', {
+          msgId: 'peer-turn',
+        }),
+      ).toBe(true);
+
+      const sendMessageStream = vi.mocked(mockChat.sendMessageStream);
+      await vi.waitFor(() => {
+        expect(sendMessageStream).toHaveBeenCalledTimes(1);
+      });
+      const parts = (
+        sendMessageStream.mock.calls[0]![1] as {
+          message: Array<{ text: string }>;
+        }
+      ).message;
+      expect(parts.some((part) => part.text === '<peer model />')).toBe(true);
+      expect(session.takeQueuedPeerDeliveries()).toEqual([]);
+      // Clients that show a turn's label alone show who sent it.
+      expect(
+        vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.some(
+            ([{ update }]) =>
+              update._meta?.['backgroundTurn']?.kind === 'peer' &&
+              update._meta?.['backgroundTurn']?.label === 'peer display',
+          ),
+      ).toBe(true);
+    });
+
+    it('rejects new peer messages after Stop until the next prompt', async () => {
+      const internals = session as unknown as {
+        notificationProcessing: boolean;
+      };
+      internals.notificationProcessing = true;
+      await session.cancelPendingPrompt();
+
+      expect(
+        session.enqueuePeerMessage('model', 'display', { msgId: 'paused' }),
+      ).toBe(false);
+      expect(session.takeQueuedPeerDeliveries()).toEqual([]);
+      expect(session.collectActiveWorkHolds()).toEqual([]);
+
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'resume' }],
+      });
+      expect(
+        session.enqueuePeerMessage('model', 'display', { msgId: 'resumed' }),
+      ).toBe(true);
+      await vi.waitFor(() =>
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2),
+      );
+    });
+
+    it('expires queued peer deliveries from the old conversation on /clear', async () => {
+      const expired = vi.fn();
+      session.dispose();
+      session = new Session(
+        'test-session-id',
+        mockConfig,
+        mockClient,
+        mockSettings,
+        undefined,
+        undefined,
+        [],
+        undefined,
+        expired,
+      );
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      const previous = { msgId: 'previous-conversation' };
+      vi.mocked(
+        nonInteractiveCliCommands.handleSlashCommand,
+      ).mockImplementationOnce(
+        async (_query, _abort, _config, _settings, hooks) => {
+          expect(
+            session.enqueuePeerMessage('previous', 'previous', previous),
+          ).toBe(true);
+          vi.mocked(mockConfig.getSessionId).mockReturnValue('new-session-id');
+          expect(
+            session.enqueuePeerMessage('current', 'current', {
+              msgId: 'current',
+            }),
+          ).toBe(true);
+          hooks?.startNewSession?.('new-session-id');
+          return { type: 'message', messageType: 'info', content: 'Cleared.' };
+        },
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: '/clear' }],
+      });
+
+      expect(expired).toHaveBeenCalledExactlyOnceWith([previous]);
+      const send = vi.mocked(mockChat.sendMessageStream);
+      await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+      expect(send.mock.calls[0]![1]).toMatchObject({
+        message: expect.arrayContaining([{ text: 'current' }]),
+      });
     });
 
     it('tells the model what queue overflow discarded on the next notification turn', async () => {
