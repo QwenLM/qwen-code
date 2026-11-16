@@ -202,9 +202,12 @@ export function classifyPromptRequest(
     ? parseChannelWorkflowOrigin(workflowOrigin)
     : undefined;
   // Channel classification opts the turn out of loop-detected rejection,
-  // so it rides the same worker authorization as the display projection;
-  // a forged key from any other caller is dropped here and again at the
-  // bridge admission strip.
+  // so it rides worker authorization just like the recorded display
+  // projection; a forged key from any other caller is dropped here and
+  // again at the bridge admission strip. (A submission declaration below
+  // can still project the turn's transient live display — pending entry,
+  // echo, and the warm turn-status prompt text they feed — on a
+  // worker-attested channel session, but never the recorded display text.)
   return {
     forwardedBody,
     classification: {

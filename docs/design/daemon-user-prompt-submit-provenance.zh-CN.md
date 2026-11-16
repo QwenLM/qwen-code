@@ -8,7 +8,7 @@ main `1919ff97f5` 上的普通 daemon 提问会执行已配置的 UserPromptSubm
 
 ## 范围与归属
 
-保留所属会话的配置、消息总线、cwd、注册信息与环境。在现有客户端、daemon 准入、bridge 与 ACP 子进程边界之间显式传递提交文本。不改变旧 hook 调用策略、录制、provider 配置、凭证、默认扩展注册或托管记忆召回。
+保留所属会话的配置、消息总线、cwd、注册信息与环境。在现有客户端、daemon 准入、bridge 与 ACP 子进程边界之间显式传递提交文本。已声明提交仅在实时展示面（排队项、实时回显，以及由排队项派生的温热回合状态 prompt 文本）复用现有 Channel 显示投影；持久记录的显示文本仍仅由已认证 worker 投影提供。旧 hook 调用策略、provider 配置、凭证、默认扩展注册和托管记忆召回保持不变。
 
 REST prompt 准入属于 live-session-owner 范围，使用已解析的 owner bridge 和 runtime。ACP HTTP/WebSocket 准入使用已绑定的会话与 bridge。不增加路由，也不引入 primary-runtime 回退。
 
@@ -16,7 +16,9 @@ REST prompt 准入属于 live-session-owner 范围，使用已解析的 owner br
 
 受支持的客户端通过 `_meta["qwen.submittedPrompt"]` 声明原始提交文本。Web Shell 在宿主 `prepareSubmit`、斜杠命令改写及附件展开之前捕获输入框文本。普通队列独立保存原始声明与准备后的 payload。通用 action、定时任务手动运行、重试及服务端恢复的队列不会生成声明。用户从输入框重新提交恢复内容属于新的 Web Shell 提交；本次不增加 core TUI 式编辑器来源跟踪。既有 core TUI 生产方保持不变。Web Shell 普通提交与排队提交均保留既有准入行为。客户端必须在机器生成输入上省略声明。这是逐请求的显式契约，不证明由人撰写，不是身份认证或 DLP。
 
-REST 与 ACP 传输路由读取声明，通过 bridge context 的 `submittedPrompt` 传递。REST channel-worker 请求不会通过该路由获得来源，包括 worker 授权已失效的请求。bridge 从请求中删除公开与私有提交键，仅将 context 中声明的文本重新注入为 `qwen.daemon.submittedPrompt`；channel 和提升为普通回合的 mid-turn 派发省略该字段。内部定时任务、子会话、Live task 及其他自动派发不提供声明。实时语音委派同样省略声明：其请求文本来自模型生成的工具参数，而非独立核实的用户转写。
+REST 与 ACP 传输路由读取声明，通过 bridge context 的 `submittedPrompt` 传递。REST channel-worker 请求不会通过该路由获得来源，包括 worker 授权已失效的请求。bridge 从请求中删除公开与私有提交键，仅将 context 中声明的文本重新注入为 `qwen.daemon.submittedPrompt`；具有 worker 分类的 channel 回合和提升为普通回合的 mid-turn 派发省略该字段。内部定时任务、子会话、Live task 及其他自动派发不提供声明。实时语音委派同样省略声明：其请求文本来自模型生成的工具参数，而非独立核实的用户转写。
+
+`sourceType: "channel"` 会话在请求包含文本块、当前回合没有 channel-worker 分类、没有 worker 显示投影、且会话已被 worker 证实（已有 worker 分类回合获准进入该会话）时，可把 context 中声明的非空白 `submittedPrompt` 用作显示投影。该证实由 daemon 核验：bridge 会从调用方元数据中剥离分类键，仅从可信 context 标志位恢复它，而 REST prompt 路由只在验证 channel-worker 令牌后才设置该标志；仓库内 worker 会为每个转发回合附加分类，因此真正的 channel 会话在首个回合即被证实。该证实仅存活于内存：daemon 重启后，恢复的会话会由 worker 的下一个转发回合重新证实。这是对 #11645「每条 channel prompt 路径都展示送达模型的确切 prompt」契约的一项有意例外，服务于 #13747 跟踪的外部 Channel 网关 —— 它在准备后的包装文本旁转发第三方来文原文。Web Shell 已在仓库内走到该例外：其聊天面板在每次普通提交时都会声明输入框文本，不设来源类型门禁，且默认开启的 Channels 页签会把 `channel` 来源会话在同一个面板中打开。该例外仍属临时约定，等待维护者对 #13747 尚未回答的 triage 问题作出裁定。daemon 目前仍不保留 `channel` 来源标签，但自报标签已不再能换取投影：没有任何 worker 回合获准进入的会话，其声明仍从内容派生显示文本。裁定现在要权衡的是：外部网关应如何为其驱动的会话取得 worker 证实 —— 或为投影取得它自己的授权。bridge 在投影前先把 Unicode 格式字符、Default_Ignorable 集合、BRAILLE PATTERN BLANK、孤立代理项、行/段分隔符以及除 TAB 和 LF 外的 C0/C1/DEL 控制符中和为空格，再对完全中和后的形式做空白判定，因此纯不可见字符的声明按空白处理；投影出去的展示形式保留字形连接字符（ZWNJ/ZWJ、变体选择符与 CGJ），使连体文字与 emoji 序列完整渲染；有效声明除此之外保留原始空白。长度超过 `MAX_SUBMITTED_PROMPT_CHARS`（64K UTF-16 码元）的声明按缺失处理，以此为准入路径上的同步中和扫描设界。空白声明与纯附件请求继续从内容取得显示文本。bridge 将中和后的声明仅用于排队文本、实时用户回显，以及由排队项派生的温热回合状态 prompt 文本，绝不把声明写入私有显示文本字段，因此持久用户记录的显示文本 —— 以及所有把它读回为模型输入的消费方（自动标题生成与跨会话 `@session` 引用），加上由同一字段供给的回合结果记录 prompt 文本与 OTel input-message 属性 —— 始终来自真实 prompt 或已认证 worker 投影。因此温热的回合 API（存活会话上的 `turns/current`、`turns/:promptId`）仅在 bridge 的温热终态覆盖层仍持有该 promptId 期间显示声明 —— 每会话至多保留 64 个已结算回合；一旦该条目被逐出，或冷重启之后，相同端点返回的持久记录仍然从内容派生，且响应不携带区分两种投影的标记。bridge 向模型转发完整 prompt；来源字段为 hooks 逐字保留未改动的原始声明。来源标签与声明不授予 worker 权限：不会设置 `qwen.channel.prompt`、绕过循环检测或采信调用方自报的私有显示元数据。REST 请求只要携带 worker 分类、授权或显示键，仍不能回退到提交声明。普通会话的显示行为保持不变。
 
 在 ACP 进程准入处，可信父进程可以提供私有键；直接 ACP 客户端可以通过公开声明逐请求启用，但不能伪造私有键。公开键在准入处消费，不继续传入 Session。可信父进程缺少私有声明时，不能回退到公开键。
 
@@ -41,9 +43,12 @@ Direct Profile 的托管启动器仍仅支持 TTY；字段生产方扩展不会�
 - 修改前复现无声明非 channel 回合的问题，保留失败断言。
 - 在 Session 测试显式、缺失、非法、空串、纯空白、retry、channel 与模型专用输入；移除新的声明判定后，确认省略用例失败。
 - 测试准入处对伪造私有键和公开显式启用的处理；确认没有可信 context 的 bridge 请求不能获得来源。附件展开须保留原始文本；模型专用内容不得替换声明。
+- 测试已声明 Channel 文本在排队项与实时回显中的显示投影，并确认其不进入持久记录的显示文本，保留完整模型 prompt 且不附加 worker 分类。缺失、非法、空串、纯空白及纯不可见字符声明、纯附件请求、仅存在于调用方元数据的字段、已分类 worker 回合、普通会话，以及自报 channel 标签但尚无 worker 分类回合证实的会话维持原有显示行为；声明中的不安全显示控制符在投影前被中和；显式 worker 显示投影优先，包括空投影与非空白声明同时存在的情况。
 - 使用真实本地 daemon、观察 hook 和受控模型。显式普通提交必须发布声明文本；无标记的机器提交不得发布。验证重新构建的 bundle，不使用旧安装版作为修复证据。
 - 执行相关包测试、构建、打包、类型检查、格式检查、lint 和两轮完整自审。在 `.qwen/e2e-tests/` 记录证据，不保存凭证。
 
 ## 状态
+
+本次仅涉及显示投影的修正已在 macOS、Node 22.23.1 上通过 ACP Bridge 包全量测试套件、仓库类型检查、改动文件 lint 与格式检查、构建及打包。独立验证通过十项 bridge 场景，以及十九项真实本地 daemon 断言，覆盖实时展示、持久用户与回合结果记录、冷进程 `/load` 与 transcript 重放、完整准备后的模型输入及循环检测。隔离执行的 `??` 改为 `||` 变异会使空 worker 投影控制用例失败。后续评审再次收窄了投影边界：声明现在只驱动排队项、实时回显，以及由排队项派生的温热回合状态 prompt 文本，绝不进入持久记录的显示文本，因此自动标题生成与跨会话 `@session` 引用始终看到真实 prompt；上文引用的持久记录断言早于这次收窄。再之后的一轮评审把投影绑定到来源：投影现在要求会话已被 worker 证实，因此没有 channel-worker 授权而自报 `channel` 标签的调用方，无法再选择共同观察者看到的实时展示文本。daemon 使用合成消息、隔离运行状态及模拟模型；这些结果不代表外部网关或已部署服务验收。证据保留在 `.qwen/e2e-tests/pr-13748-*` 与 `.qwen/issues/pr-13748-review.md`。
 
 原实现 `4fb7d2f0a9` 通过了 869 项 Session 测试，以及本地与真实 Holo 各四项场景。这些结果早于显式声明修正，不能用作该修正的验证证据。两条合成 Holo 记录均已删除。记录直接通过 Holo 创建和删除，模型由本地控制，workspace B 验证的是排除而非第二个 profile。评审修正的复现与验证单独记录在 `.qwen/issues/pr-11455-provenance.md`。
