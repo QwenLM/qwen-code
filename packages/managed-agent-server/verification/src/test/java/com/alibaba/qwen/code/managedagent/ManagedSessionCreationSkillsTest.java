@@ -626,6 +626,42 @@ class ManagedSessionCreationSkillsTest {
         }
     }
 
+    @Test
+    void serverLoopProvenanceMarkerRoundTripsThroughTheSnapshot() throws Exception {
+        Object target = org.springframework.test.util.AopTestUtils.getUltimateTargetObject(store);
+        Object previousProfiles = com.alibaba.qwen.code.managedagent.VerificationFixtures.agentStoreField(target, "definitionToolProfiles");
+        com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles",
+                List.of("hosted-workspace-files/4"));
+        try {
+            // R3-1: an injected server variant records the provenance marker in the
+            // snapshot; a user-authored caller loop does not. The READ child drops the
+            // former by marker (even if its body were superseded) and keeps the latter.
+            String agent = defineProfile("hosted-workspace-files/4", "marker-agent", List.of());
+            String injectedParent = create(request(agent, List.of()), "marker-injected", false).get("id").asText();
+            assertThat(snapshots.serverLoopInjected(tenant, injectedParent)).isTrue();
+            var userLoop = Map.<String, Object>of("name", "loop", "description", "mine", "body", "MY_CUSTOM_LOOP_BODY");
+            String userAgent = defineProfile("hosted-workspace-files/4", "marker-user-agent", List.of());
+            String userParent = create(request(userAgent, List.of(userLoop)), "marker-user", false).get("id").asText();
+            assertThat(snapshots.serverLoopInjected(tenant, userParent)).isFalse();
+            // READ child of the injected parent: the server loop is dropped by marker.
+            String cwdA = ".qwen-child-workspaces/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+            readySnapshotChildWorkspace(injectedParent, "run-marker-a", cwdA);
+            var childA = store.insertChildSessionCommand(tenant, injectedParent, UUID.randomUUID().toString(),
+                    "marker-child-a", "audit", List.of(), null,
+                    new com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage(injectedParent, injectedParent, "run-marker-a", 1), cwdA);
+            assertThat(snapshots.snapshot(tenant, childA.sessionId())).isNull();
+            // READ child of the user-loop parent: the user loop is kept.
+            String cwdB = ".qwen-child-workspaces/ffffffffffffffffffffffffffffffff";
+            readySnapshotChildWorkspace(userParent, "run-marker-b", cwdB);
+            var childB = store.insertChildSessionCommand(tenant, userParent, UUID.randomUUID().toString(),
+                    "marker-child-b", "audit", List.of(), null,
+                    new com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage(userParent, userParent, "run-marker-b", 1), cwdB);
+            assertThat(loopBody(snapshots.snapshot(tenant, childB.sessionId()))).isEqualTo("MY_CUSTOM_LOOP_BODY");
+        } finally {
+            com.alibaba.qwen.code.managedagent.VerificationFixtures.setAgentStoreField(target, "definitionToolProfiles", previousProfiles);
+        }
+    }
+
     private void readySnapshotChildWorkspace(String parent, String run, String childCwd) {
         var parentBinding = store.requireSession(tenant, parent).workspace();
         childWorkspaces.admit(tenant, parent, run, parentBinding,

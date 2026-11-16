@@ -81,7 +81,7 @@ class ManagedLoopSkillTest {
         var other = Map.<String, Object>of("name", "review", "description", "d", "body", "b");
         var inherited = java.util.List.of(serverLoop, other);
         // No definition loop: the inherited loop is the server variant, dropped for READ.
-        var readChild = ManagedLoopSkill.childCatalog(inherited, WorkspaceToolProfiles.READ, false);
+        var readChild = ManagedLoopSkill.childCatalog(inherited, WorkspaceToolProfiles.READ, false, true);
         assertThat(readChild).extracting(s -> s.get("name")).containsExactly("review");
     }
 
@@ -90,41 +90,44 @@ class ManagedLoopSkillTest {
         var defLoop = Map.<String, Object>of("name", "loop", "description", "def", "body", "DEFINITION_LOOP");
         var other = Map.<String, Object>of("name", "review", "description", "d", "body", "b");
         var inherited = java.util.List.of(defLoop, other);
-        var readChild = ManagedLoopSkill.childCatalog(inherited, WorkspaceToolProfiles.READ, true);
+        var readChild = ManagedLoopSkill.childCatalog(inherited, WorkspaceToolProfiles.READ, true, false);
         assertThat(readChild).extracting(s -> s.get("name")).containsExactly("loop", "review");
         assertThat((String) readChild.get(0).get("body")).isEqualTo("DEFINITION_LOOP");
     }
 
     @Test
-    void childCatalogPreservesUnidentifiableLoopBodiesAndDropsOnlyServerSidecars() {
-        // A loop body that matches no current sidecar (user text, or a variant
-        // written by an earlier build) is never assumed to be the server's:
-        // deleting it would silently discard user content (R7-1). It is preserved
-        // whether or not the definition owns a loop. Only a body positively
-        // identified as a server sidecar is dropped for a READ child.
-        var unknownLoop = Map.<String, Object>of("name", "loop", "description", "old", "body", "RELEASE_N_BODY");
+    void childCatalogDropsByServerProvenanceMarkerNotBodyText() {
+        // R3-1: a superseded sidecar body (written by an earlier build, matching no
+        // current sidecar) is still dropped for a READ child when the snapshot's
+        // server-loop marker says the server injected it. Provenance comes from the
+        // marker, not body text, so regeneration cannot leak the variant to the child.
+        var supersededLoop = Map.<String, Object>of("name", "loop", "description", "old", "body", "RELEASE_N_BODY");
         var other = Map.<String, Object>of("name", "review", "description", "d", "body", "b");
-        var inherited = java.util.List.of(unknownLoop, other);
-        assertThat(ManagedLoopSkill.childCatalog(inherited, WorkspaceToolProfiles.READ, false))
+        var inherited = java.util.List.of(supersededLoop, other);
+        assertThat(ManagedLoopSkill.childCatalog(inherited, WorkspaceToolProfiles.READ, false, true))
+                .extracting(s -> s.get("name")).containsExactly("review");
+        // R7-1: the same unidentifiable body WITHOUT the marker is a user-authored
+        // loop and is preserved, not assumed to be the server's.
+        assertThat(ManagedLoopSkill.childCatalog(inherited, WorkspaceToolProfiles.READ, false, false))
                 .extracting(s -> s.get("name")).containsExactly("loop", "review");
-        // Definition-authored: preserved by the definition-provenance carve-out,
-        // classified by the parent's definition rather than by body text.
-        assertThat(ManagedLoopSkill.childCatalog(inherited, WorkspaceToolProfiles.READ, true))
+        // Definition-authored: preserved by the definition-provenance carve-out
+        // regardless of the marker.
+        assertThat(ManagedLoopSkill.childCatalog(inherited, WorkspaceToolProfiles.READ, true, false))
                 .extracting(s -> s.get("name")).containsExactly("loop", "review");
-        // A current server sidecar body is positively identified and dropped.
+        // A current server sidecar body is recognized as a fallback even without the marker.
         var serverLoop = ManagedLoopSkill.forProfile(WorkspaceToolProfiles.SHELL_V4);
-        assertThat(ManagedLoopSkill.childCatalog(java.util.List.of(serverLoop, other), WorkspaceToolProfiles.READ, false))
+        assertThat(ManagedLoopSkill.childCatalog(java.util.List.of(serverLoop, other), WorkspaceToolProfiles.READ, false, false))
                 .extracting(s -> s.get("name")).containsExactly("review");
     }
 
     @Test
     void childCatalogKeepsAUserAuthoredCallerLoopForAReadOnlyChild() {
         // R7-1: a user-authored caller loop saved on the parent (definition owns
-        // no loop) must survive into the READ snapshot child, not be deleted by
-        // name. Reverting to removeIf(name==loop) reddens this case.
+        // no loop, no server injection) must survive into the READ snapshot child,
+        // not be deleted by name. Reverting to removeIf(name==loop) reddens this case.
         var userLoop = Map.<String, Object>of("name", "loop", "description", "mine", "body", "MY_CUSTOM_LOOP_BODY");
         var other = Map.<String, Object>of("name", "review", "description", "d", "body", "b");
-        var readChild = ManagedLoopSkill.childCatalog(java.util.List.of(userLoop, other), WorkspaceToolProfiles.READ, false);
+        var readChild = ManagedLoopSkill.childCatalog(java.util.List.of(userLoop, other), WorkspaceToolProfiles.READ, false, false);
         assertThat(readChild).extracting(s -> s.get("name")).containsExactly("loop", "review");
         assertThat((String) readChild.get(0).get("body")).isEqualTo("MY_CUSTOM_LOOP_BODY");
     }
@@ -132,11 +135,11 @@ class ManagedLoopSkillTest {
     @Test
     void childCatalogSavesNothingWhenAResolvedChildCatalogWouldBeEmpty() {
         var serverLoop = ManagedLoopSkill.forProfile(WorkspaceToolProfiles.SHELL_V4);
-        assertThat(ManagedLoopSkill.childCatalog(null, WorkspaceToolProfiles.READ, false)).isNull();
+        assertThat(ManagedLoopSkill.childCatalog(null, WorkspaceToolProfiles.READ, false, true)).isNull();
         var inherited = java.util.List.of(serverLoop);
-        assertThat(ManagedLoopSkill.childCatalog(inherited, null, false)).isSameAs(inherited);
+        assertThat(ManagedLoopSkill.childCatalog(inherited, null, false, true)).isSameAs(inherited);
         // A read-only child of a server-loop-only parent resolves to nothing: no empty row.
-        assertThat(ManagedLoopSkill.childCatalog(inherited, WorkspaceToolProfiles.READ, false)).isNull();
+        assertThat(ManagedLoopSkill.childCatalog(inherited, WorkspaceToolProfiles.READ, false, true)).isNull();
     }
 
     @Test

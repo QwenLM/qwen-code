@@ -232,9 +232,11 @@ injected row carries the definition's skills plus `loop` and never shadows the
 definition catalog on the consumer side. A child catalog is re-selected before
 save: the only non-null child profile is READ (a snapshot child), and the server
 loop variant is dropped because it names creators READ does not declare, while a
-definition-authored loop inherits unchanged. Provenance comes from the parent's
-pinned definition (does it own a `loop`), not from body text, so a row written by
-an earlier build is still classified correctly after the sidecars are regenerated.
+definition-authored loop inherits unchanged. Server-variant provenance comes from
+a marker recorded in the parent's snapshot when the variant was injected, not from
+body text, so a variant written by an earlier build is still dropped after the
+sidecars are regenerated; the definition carve-out comes from the parent's pinned
+definition (does it own a `loop`). A user-authored caller loop is never deleted.
 An empty resolved child catalog saves nothing rather than an empty row that every
 later snapshot read would reject.
 
@@ -309,14 +311,14 @@ later snapshot read would reject.
   dropped so the creation succeeds within capacity rather than being refused.
   Tests pin the skip at 256 entries and that the admission accepts the resulting
   catalog (a catalog already over capacity without the variant is still refused).
-- **Snapshot children.** A snapshot child is read-only; a loop the server
-  publishes (a profile variant or the bundled import, identified by its sidecar
-  body) is dropped before save because it names creators READ lacks, while a
-  definition-authored loop inherits unchanged. A user-authored caller loop is the
-  user's content and is never deleted by name: a body that matches no sidecar is
-  kept rather than assumed to be the server's. The definition carve-out comes
-  from the parent's pinned definition, not body text, so it stays correct across
-  sidecar regeneration.
+- **Snapshot children.** A snapshot child is read-only; the server-injected loop
+  variant is dropped before save because it names creators READ lacks, while a
+  definition-authored loop inherits unchanged. Provenance is the marker recorded
+  in the parent's snapshot when the variant was injected (a current sidecar body
+  is a fallback), not body text alone, so a variant written by an earlier build is
+  still dropped after sidecar regeneration. A user-authored caller loop (no server
+  injection) is the user's content and is never deleted by name. The definition
+  carve-out comes from the parent's pinned definition.
 
 ## Validation plan
 
@@ -353,12 +355,16 @@ clear` retires it.
   receives the variant; the built-in `qwen-code` agent (shell/1 / files/1)
   receives none.
 - The READ profile and no-creator profiles publish no server loop variant, and a
-  read-only snapshot child inherits none; a definition-authored `loop` entry is
-  preserved on any profile and inherits to children unchanged.
+  read-only snapshot child inherits none — including a variant written by an
+  earlier build, dropped by the snapshot's server-provenance marker rather than by
+  body text; a definition-authored `loop` entry is preserved on any profile and
+  inherits to children unchanged, and a user-authored caller loop is never deleted.
 - A replayed creation produces the identical catalog snapshot.
 - The managed sidecar cannot drift from the bundled source without a red parity
   test.
-- No new wire field, resource kind, or journal change.
+- No new wire field, resource kind, or journal change; the server-loop provenance
+  marker lives in the internal creation snapshot (a snapshot version bump), not in
+  the published skill wire format.
 
 ## Open questions
 

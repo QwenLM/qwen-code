@@ -255,7 +255,7 @@ final class AgentSessionAdmissions {
                     tenantId, admission.sessionId());
         }
         if (!effectiveSkills.isEmpty() && (!skills.isEmpty() || injectedCatalog != null)) {
-            creationSkills.save(tenantId, admission.sessionId(), effectiveSkills);
+            creationSkills.save(tenantId, admission.sessionId(), effectiveSkills, injectedCatalog != null);
         }
         if (extensionPins != null) {
             creationSkills.saveInitialSelection(tenantId, admission.sessionId(), extensionPins);
@@ -604,14 +604,15 @@ final class AgentSessionAdmissions {
         ManagedReceipts.insertCreation(jdbc, tenantId,
                 ManagedWorkspaceRegistry.actorKey(tenantId, ChildSessionCreation.childActorOf(parentSessionId)),
                 idempotencyKey, requestDigest, sessionId, turnId, now);
-        var inheritedSkills = snapshot == null ? creationSkills.snapshot(tenantId, parentSessionId)
-                : creationSkills.fromLaunchReference(tenantId, parentSessionId, snapshot.path("skillsRef"));
+        var inheritedSkills = snapshot == null ? creationSkills.snapshot(tenantId, parentSessionId) : creationSkills.fromLaunchReference(tenantId, parentSessionId, snapshot.path("skillsRef"));
         boolean parentDefinitionHasLoop = toolProfile != null
                 && parent.agentDefinitionDigest() != null
                 && AgentDefinitionExtensions.skills(definitions.pinnedContent(parent).get("skills"), true).stream()
                         .anyMatch(skill -> ManagedLoopSkill.NAME.equals(skill.get("name")));
-        java.util.Optional.ofNullable(ManagedLoopSkill.childCatalog(inheritedSkills, toolProfile, parentDefinitionHasLoop))
-                .ifPresent(skills -> creationSkills.save(tenantId, sessionId, skills));
+        boolean parentServerLoop = creationSkills.serverLoopInjected(tenantId, parentSessionId);
+        boolean childServerLoop = toolProfile == null && parentServerLoop;
+        java.util.Optional.ofNullable(ManagedLoopSkill.childCatalog(inheritedSkills, toolProfile, parentDefinitionHasLoop, parentServerLoop))
+                .ifPresent(skills -> creationSkills.save(tenantId, sessionId, skills, childServerLoop));
         eventJournal.appendEvent(tenantId, sessionId, null, "session.created",
                 Map.of("sessionId", sessionId), false, null, now);
         if (turnId != null) {
