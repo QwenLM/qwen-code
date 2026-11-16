@@ -136,19 +136,6 @@ final class JournalLifecycleAuthorization {
         }
         var row = rows.getFirst();
         String profile = (String) row.get("tool_profile");
-        // A content-only external Session is admitted with public_child_agents_version=1: the
-        // pinned Skill catalog, the initial extension selection and the extension child agents all
-        // require it, and requireExternalTurn/canApplyExtensions gate on that same version being 1.
-        // Requiring version 0 here answered every content-only Session with null, and the Worker
-        // needs this selection twice per Turn - createHostedLiveApprovalReader refuses a missing
-        // selection outright and childAgentsOf.snapshot cannot pin a child's approval mode without
-        // it - so the first Skill call of every admitted default catalog blocked its Turn with
-        // "Hosted live approval selection is missing or regressed" and never returned the Skill
-        // body. This is a read of the Session's own persisted approval_mode and revision: it grants
-        // no new capability, and SET_APPROVAL keeps its own supportsApprovalSelection gate, so a
-        // content-only Session still cannot change its mode. Version 1 alone is not the admission:
-        // the profile, the qwen-code Agent, the absent definition digest and the absent parent are
-        // all still required, so an extension's own child Session stays refused.
         int publicChildAgentsVersion = ((Number) row.get("public_child_agents_version")).intValue();
         if (row.get("workspace_id") == null
                 || ("qwen-code".equals(row.get("agent_id"))
