@@ -316,15 +316,6 @@
   min-width: 0;
 }
 
-.topRowActionsSearching {
-  flex: 1 1 auto;
-}
-
-.topRowSearchRow {
-  flex: 0 0 auto;
-  padding: 0 4px 12px;
-}
-
 .searchToggle {
   display: inline-flex;
   flex: 0 0 auto;
@@ -609,35 +600,6 @@ button.livePendingSession:hover {
 .projectsHeaderAction:focus-visible {
   background: var(--sidebar-accent);
   color: var(--sidebar-accent-foreground);
-}
-
-.projectSearch {
-  position: relative;
-  flex: 0 0 auto;
-}
-
-.projectSearch > svg {
-  position: absolute;
-  z-index: 1;
-  top: 50%;
-  left: 10px;
-  width: 15px;
-  height: 15px;
-  color: var(--muted-foreground);
-  pointer-events: none;
-  transform: translateY(-50%);
-}
-
-.projectSearch input {
-  width: 100%;
-  padding-left: 32px;
-}
-
-/* After `.projectSearch`: the top row width is the search field's budget, so
-   it must be able to shrink instead of pushing the icon buttons out. */
-.topRowSearchField {
-  flex: 1 1 auto;
-  min-width: 0;
 }
 
 .addWorkspaceButton {
@@ -2146,6 +2108,51 @@ button.livePendingSession:hover {
 .collapsed .footerActions {
   flex-direction: column;
   margin-left: 0;
+}
+
+.sidebar:not(.railLayout) > .footer {
+  position: relative;
+  right: auto;
+  bottom: auto;
+  left: auto;
+  width: 100%;
+  margin-top: auto;
+}
+
+.sidebar:not(.railLayout) .body {
+  margin-bottom: 8px;
+}
+
+.sidebar.withVersion:not(.railLayout):not(.collapsed) .body {
+  margin-bottom: 40px;
+}
+
+.sidebar:not(.railLayout):not(.collapsed) > .footer > .footerActions {
+  flex: 1 1 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.sidebar:not(.railLayout).collapsed > .footer {
+  flex-shrink: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+
+.sidebar:not(.railLayout).collapsed > .footer > .footerVersion {
+  position: static;
+  min-height: 0;
+}
+
+.sidebar:not(.railLayout).collapsed
+  > .footer
+  > .footerActions
+  > [data-web-shell-sidebar-collapse] {
+  position: sticky;
+  bottom: 0;
+  background: var(--sidebar-background);
 }
 
 .resizeHandle {

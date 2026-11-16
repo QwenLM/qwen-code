@@ -185,7 +185,7 @@ public final class ManagedExtensionAgentLaunch {
         if (Set.of("write_file", "edit", "todo_write").contains(name)) {
             return true;
         }
-        if (WorkspaceToolProfiles.SHELL.equals(profile) && Set.of("run_shell_command", "monitor", "web_fetch").contains(name)) {
+        if (WorkspaceToolProfiles.isPublicShell(profile) && Set.of("run_shell_command", "monitor", "web_fetch").contains(name)) {
             return true;
         }
         return WorkspaceToolProfiles.isShellOrMcp(profile) && name.matches("mcp__[A-Za-z0-9_-]+__[A-Za-z0-9_.-]+");

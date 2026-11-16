@@ -1,7 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker.service;
 
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
-import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
@@ -25,6 +24,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.MAX_CAS_ATTEMPTS;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.conflict;
+import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.isPublicationV3;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.mapFailure;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.mapStoreFailure;
 import static com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerSupport.notFound;
@@ -121,18 +121,12 @@ final class RuntimeExecutionCancellation {
                                 throw conflict("runtime_execution_conflict",
                                         "A background process settles only on stop evidence");
                             }
-                            if (CsiFilesRetirementProfile.isProfile(context.binding().getRequest().getScope())
-                                    && current.getAuthorizedDispatchGeneration() != null) {
-                                throw conflict("csi_execution_cancel_unavailable",
-                                        "An authorized private CSI execution does not support cancellation");
-                            }
                             requested = requestCancel(current);
                             if (isPreparedProviderCancellation(requested)) {
                                 context.beginControl();
                                 return cancelPreparedProvider(context, requested);
                             }
-                            publicationV3 = "deferred_v3".equals(
-                                    requested.getReference().get("dispatchMode"));
+                            publicationV3 = isPublicationV3(requested.getReference());
                             // An UNKNOWN record may still have an invocation
                             // running in this process, or be one its original
                             // Runtime can still answer for; it gets the

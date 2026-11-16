@@ -142,7 +142,7 @@ this recovery exception.
 | Prompts    | `prompt.submit` and `$.prompt.submit` in headless runs and the Ink and OpenTUI terminals, described in [Submitted prompts](#submitted-prompts)                                                                         |
 | Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input                                |
 | Elements   | `$.ui.resolve`, `$.ui.invalidate` and the `h` and `Fragment` globals, described in [Elements](#elements)                                                                                                               |
-| Drawing    | `ui.render` for the band above the prompt in the Ink and OpenTUI terminals, and for reply rows in the Ink terminal, described in [The band above the prompt](#the-band-above-the-prompt) and [Reply rows](#reply-rows) |
+| Drawing    | `ui.render` for the band above the prompt in the Ink and OpenTUI terminals, and for reply blocks in both terminals, described in [The band above the prompt](#the-band-above-the-prompt) and [Reply rows](#reply-rows) |
 | Isolation  | Separate QuickJS environment per plugin inside a session worker; no Node, filesystem or network APIs; memory, stack, source/output and execution limits                                                                |
 
 This is a supported subset, not full compatibility with existing Claude Mods.
@@ -1094,8 +1094,8 @@ These differ from Claude Code:
 
 ## Reply rows
 
-The Ink terminal raises `ui.render` for the `AssistantMessage` site once for
-each complete block of a reply in the main transcript, so a hook can change how
+The Ink and OpenTUI terminals raise `ui.render` for the `AssistantMessage` site
+once for each complete block of a reply in the main transcript, so a hook can change how
 the reply reads. A hook receives:
 
 ```js
@@ -1134,18 +1134,21 @@ answer when switching sessions. The Mod sees rows from the new transcript once
 it is committed.
 Rows render one at a time, so while a row's hook waits, other Mod hooks wait for
 that row only. A render that takes more than 30 seconds is cancelled, including
-time spent waiting for a model call. A long reply is split into several blocks
-while it streams, and each block is its own row.
+time spent waiting for a model call. Ink can split long replies into several
+blocks as they stream. In both terminals, `isFirstOfReply` is `true` on the
+opening block and `false` on continuation blocks.
 
-In a rewritten row, a Mermaid or LaTeX block with one exact source match in the
-original row shows the original block's `/copy mermaid N` or `/copy latex N`
-hint. New, changed, or ambiguous blocks omit the hint.
+OpenTUI offers completed rows whose text contains non-whitespace characters.
 
-Reply rows are drawn only with the virtualized history (`ui.useTerminalBuffer`,
-on by default in interactive terminals). With history in the terminal
-scrollback, a printed row cannot change, so the site is not offered and its
-hooks are skipped. OpenTUI, subagent views and headless runs do not raise it
-yet. A row whose text is too large for a Mod payload is not raised.
+In Ink, a Mermaid or LaTeX block in a rewritten row shows the original block's
+`/copy mermaid N` or `/copy latex N` hint if it has one exact source match in the
+original row. New, changed, or ambiguous blocks omit the hint.
+
+In Ink, reply rows are drawn only with the virtualized history
+(`ui.useTerminalBuffer`, on by default in interactive terminals). With history
+in the terminal scrollback, a printed row cannot change, so the site is not
+offered and its hooks are skipped. OpenTUI always draws them. Subagent views,
+the session preview and headless runs do not raise the site yet. A row whose text is too large for a Mod payload is not raised.
 
 The host raises a site only when some hook may hear it: a hook that names a
 `component` in its matcher hears only the sites it names, and `ui.invalidate`

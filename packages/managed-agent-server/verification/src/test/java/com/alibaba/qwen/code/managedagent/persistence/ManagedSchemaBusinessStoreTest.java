@@ -241,6 +241,16 @@ public class ManagedSchemaBusinessStoreTest {
                 scope, ToolPublicationRetentionStore.hash(tenant), tenant, session, hash, hash, hash);
         var writes = new java.util.concurrent.atomic.AtomicInteger();
         ToolPublicationObjectStore unknown = new ToolPublicationObjectStore() {
+            @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
             @Override public void putIfAbsent(String object, byte[] bytes) {
                 writes.incrementAndGet();
                 throw new IllegalStateException("connection lost");
@@ -414,6 +424,16 @@ public class ManagedSchemaBusinessStoreTest {
         var body = new java.util.concurrent.atomic.AtomicReference<byte[]>();
         var staleProof = new java.util.concurrent.atomic.AtomicBoolean();
         ToolPublicationObjectStore objects = new ToolPublicationObjectStore() {
+            @Override
+            public InputStream openRange(String key, long offset, long length, Runnable guard) {
+                guard.run();
+                try (InputStream full = open(key)) {
+                    byte[] bytes = full.readAllBytes();
+                    return new java.io.ByteArrayInputStream(bytes, (int) offset, (int) length);
+                } catch (java.io.IOException error) {
+                    throw new IllegalStateException(error);
+                }
+            }
             @Override public void putIfAbsent(String object, byte[] bytes) {
                 assertThat(org.springframework.transaction.support.TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
                 writes.incrementAndGet();

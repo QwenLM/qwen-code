@@ -34,6 +34,11 @@ These commands help you save, restore, and summarize work progress.
 | `/export`        | Export session history to file                                           | `/export html`, `/export md`, `/export json`, `/export jsonl` |
 | `/rename`        | Rename or tag the current session                                        | `/rename My Feature` or `/tag`                                |
 | `/commit`        | Create a git commit with an AI-drafted message                           | `/commit` or `/commit only stage the parser changes`          |
+| `/pr`            | Bind a GitHub pull request to this session                               | `/pr 123`, `/pr #123`, or `/pr <PR URL>`                      |
+
+> [!note]
+>
+> `/pr` with a bare number resolves the PR in the session's target-directory repository, which may not be where your work happened — the success message prints the resolved URL so you can check it. A full PR URL names its own repository. There is no unbind command. To fix a bare-number bind, re-run `/pr` with the full URL of the PR you meant — when the intended PR carries the same number, that replaces the wrong entry in place; otherwise the wrong entry stays until you bind enough further PRs to push it past the session's 10-binding cap, or edit the session's PR sidecar file.
 
 > [!note]
 >

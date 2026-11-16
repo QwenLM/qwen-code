@@ -9,7 +9,7 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.Plan;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.host.WorkspaceFileProcess;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.junit.jupiter.api.AfterEach;
@@ -71,7 +71,7 @@ class WorkspaceStorageReadScopeMySqlIT extends WorkspaceFileStoreTest {
     @Timeout(30)
     void readsDoNotWaitForAnotherStorageReader(String route, String storageRow, String lockMode) throws Exception {
         var binding = files.readScope("tenant", "actor", new WorkspaceFileStore.Locator(null, workspace, ".")).binding();
-        String alias = JdbcRuntimeBindingRepository.storageAliasKey("tenant", binding.getStorageId());
+        String alias = RuntimeAdmissionFences.storageAliasKey("tenant", binding.getStorageId());
         String physical = jdbc.queryForObject("SELECT physical_key FROM ma_storage WHERE alias_key = ?", String.class, alias);
         Path root = Path.of(guard.fileRoot(binding).get("root"));
         String cwd = ".qwen-managed-worktrees/owned/src";

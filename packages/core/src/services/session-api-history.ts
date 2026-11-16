@@ -49,10 +49,14 @@ export function getRecordRewindId(record: ChatRecord): string | undefined {
 
 /**
  * A turn starts at its prompt entry; a tool-loop continuation carries the
- * turn's id but no prompt of its own.
+ * turn's id but no prompt of its own. A retained model response can also carry
+ * its summarized prompt's id, but is not a rewind target.
  */
 function isPromptEntry(content: Content): boolean {
-  return !content.parts?.some((part) => part.functionResponse);
+  return (
+    content.role === 'user' &&
+    !content.parts?.some((part) => part.functionResponse)
+  );
 }
 
 /** Returns the unique matching prompt entry at or after `startIndex`, or -1. */

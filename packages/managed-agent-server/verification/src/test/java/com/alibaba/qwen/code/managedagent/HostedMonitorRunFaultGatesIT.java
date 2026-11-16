@@ -7,7 +7,7 @@ import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.session.HarnessEventProjector;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
@@ -257,10 +257,10 @@ class HostedMonitorRunFaultGatesIT {
                         + " registration_revision, registration_json) VALUES"
                         + " (?, ?, ?, ?, ?, ?, 'LOCAL', 'REGISTERED', 1,"
                         + " '{}')",
-                        JdbcRuntimeBindingRepository.storageAliasKey(tenant,
+                        RuntimeAdmissionFences.storageAliasKey(tenant,
                                 "storage-" + index),
-                        JdbcRuntimeBindingRepository.storageFenceKey(tenant),
-                        JdbcRuntimeBindingRepository.storageFenceKey(
+                        RuntimeAdmissionFences.storageFenceKey(tenant),
+                        RuntimeAdmissionFences.storageFenceKey(
                                 "storage-" + index),
                         tenant, "storage-" + index, physical);
                 jdbc.update("INSERT INTO ma_storage_owner (storage_key,"

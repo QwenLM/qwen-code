@@ -2,7 +2,7 @@
 
 [English](2026-11-09-github-channel-conditional-requests.md) | [简体中文](2026-11-09-github-channel-conditional-requests.zh-CN.md)
 
-Status: proposed. Implements #16691. Baseline: `main` at `56ea1bc3fbb`.
+Status: implemented as #16741 (2026-11-10). Implements #16691. Baseline: `main` at `56ea1bc3fbb`. The body below describes the increment as designed.
 
 ## Problem statement
 

@@ -9,7 +9,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -371,9 +371,9 @@ public class WorkspaceStorageGuard {
                 + " ON DUPLICATE KEY UPDATE gmt_modified = CASE WHEN physical_key IS NULL OR registration_json IS NULL OR storage_kind = 'UNREGISTERED' THEN VALUES(gmt_modified) ELSE gmt_modified END, physical_key = COALESCE(physical_key, VALUES(physical_key)),"
                 + " storage_kind = CASE WHEN storage_kind = 'UNREGISTERED' THEN 'LOCAL' ELSE storage_kind END,"
                 + " registration_json = COALESCE(registration_json, VALUES(registration_json))",
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage),
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageFenceKey(tenant),
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageFenceKey(storage), tenant, storage, physical, request);
+                RuntimeAdmissionFences.storageAliasKey(tenant, storage),
+                RuntimeAdmissionFences.storageFenceKey(tenant),
+                RuntimeAdmissionFences.storageFenceKey(storage), tenant, storage, physical, request);
         var alias = LocalStorageOwners.alias(jdbc, tenant, storage, true);
         if (alias == null || !physical.equals(alias.get("physical_key")) || !"LOCAL".equals(alias.get("storage_kind"))
                 || !List.of("FENCE_ONLY", "REGISTERED").contains(alias.get("registration_state"))
@@ -385,7 +385,7 @@ public class WorkspaceStorageGuard {
 
     private void completeAlias(String tenant, String storage, String physical) {
         if (jdbc.update("UPDATE ma_storage SET gmt_modified = CASE WHEN registration_state <> 'REGISTERED' OR registration_revision IS NULL THEN " + ManagedSchemaTime.SQL_NOW + " ELSE gmt_modified END, registration_state = 'REGISTERED', registration_revision = COALESCE(registration_revision, 1) WHERE alias_key = ? AND physical_key = ? AND storage_kind = 'LOCAL'",
-                com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage), physical) != 1) {
+                RuntimeAdmissionFences.storageAliasKey(tenant, storage), physical) != 1) {
             throw WorkspaceExecutionStore.unavailable();
         }
     }
@@ -522,7 +522,7 @@ public class WorkspaceStorageGuard {
         var migrations = jdbc.query("SELECT " + ManagedSchemaProjection.OPERATION.columns() + " FROM ma_operation WHERE operation_kind = 'STORAGE_MIGRATION'"
                 + " AND tenant_id = ? AND storage_key = ? AND state = 'COMPLETED' ORDER BY gmt_modified DESC LIMIT 1",
                 (row, index) -> WorkspaceOperations.operation(row), tenantId,
-                JdbcRuntimeBindingRepository.storageAliasKey(tenantId, storageId));
+                RuntimeAdmissionFences.storageAliasKey(tenantId, storageId));
         if (!migrations.isEmpty()) {
             Identity expected;
             try {
@@ -779,7 +779,7 @@ public class WorkspaceStorageGuard {
                     physical, physical, source.tenantId(), source.storageId(), target.root(), target.hostId(), target.device(), target.inode(),
                     target.birthTime(), registration, source.mountRevision() + 1, operation);
             if (created != 1 || jdbc.update("UPDATE ma_storage SET gmt_modified = " + ManagedSchemaTime.SQL_NOW + ", physical_key = ?, registration_revision = registration_revision + 1 WHERE alias_key = ? AND physical_key = ? AND storage_kind = 'LOCAL'",
-                    physical, JdbcRuntimeBindingRepository.storageAliasKey(source.tenantId(), source.storageId()), previous) != 1) {
+                    physical, RuntimeAdmissionFences.storageAliasKey(source.tenantId(), source.storageId()), previous) != 1) {
                 throw WorkspaceExecutionStore.unavailable();
             }
         });

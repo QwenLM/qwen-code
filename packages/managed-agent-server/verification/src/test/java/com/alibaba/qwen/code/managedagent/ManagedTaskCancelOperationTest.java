@@ -20,7 +20,7 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.h2.jdbcx.JdbcDataSource;
@@ -310,8 +310,8 @@ class ManagedTaskCancelOperationTest {
         settle(admitted, TaskCancelOutcome.completed());
         jdbc.update("INSERT INTO ma_storage (alias_key, tenant_key, storage_key, tenant_id, storage_id, fence_operation_id) VALUES (?, ?, ?, ?,"
                 + " 'storage-1', ?)",
-                JdbcRuntimeBindingRepository.storageAliasKey(TENANT, "storage-1"), JdbcRuntimeBindingRepository.storageFenceKey(TENANT),
-                JdbcRuntimeBindingRepository.storageFenceKey("storage-1"),
+                RuntimeAdmissionFences.storageAliasKey(TENANT, "storage-1"), RuntimeAdmissionFences.storageFenceKey(TENANT),
+                RuntimeAdmissionFences.storageFenceKey("storage-1"),
                 TENANT, UUID.randomUUID().toString());
         assertThat(begin("key-1", "digest-1", RUNNING_CHILD).replayed())
                 .isTrue();

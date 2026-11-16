@@ -82,6 +82,54 @@ export const MANAGED_RECOVERY_MESSAGES_ZH: Record<
   'managed.recovery.handoff.truncated':
     '[为保持交接内容不超过 32 KiB，已省略部分历史。]',
 };
+
+export const MANAGED_RECOVERY_MESSAGES_RU: Record<
+  keyof typeof MANAGED_RECOVERY_MESSAGES_EN,
+  string
+> = {
+  'managed.recovery.title': 'Восстановление сессии',
+  'managed.recovery.state.recovering': 'Идёт восстановление',
+  'managed.recovery.state.awaiting_evidence':
+    'Результат выполнения ещё не подтверждён',
+  'managed.recovery.state.cleanup_pending': 'Ход завершён; ожидается очистка',
+  'managed.recovery.state.ready': 'Готово к продолжению',
+  'managed.recovery.state.operator_required':
+    'Этой сессии требуется внимание оператора',
+  'managed.recovery.explanation.recovering':
+    'Исходный ход сверяется. Новый ввод станет доступен после подтверждения результата.',
+  'managed.recovery.explanation.awaiting_evidence':
+    'Исходная команда могла уже выполниться. Проверка результата не запустит её снова.',
+  'managed.recovery.explanation.cleanup_pending':
+    'Подтверждённые результаты сохранены. Новый ввод ждёт завершения очистки исходных ресурсов выполнения.',
+  'managed.recovery.explanation.ready':
+    'Вы можете отправить следующее сообщение в этой сессии.',
+  'managed.recovery.explanation.operator_required':
+    'Попросите оператора проверить исходное выполнение, идентичность рабочей области и данные восстановления. Вы можете подготовить новую сессию, пока исходные записи сохраняются.',
+  'managed.recovery.recheck': 'Проверить снова',
+  'managed.recovery.endTurn': 'Завершить этот ход',
+  'managed.recovery.handoff': 'Продолжить в новой сессии',
+  'managed.recovery.diagnostics': 'Сведения о восстановлении',
+  'managed.recovery.requestFailed':
+    'Не удалось подтвердить последнее состояние восстановления. Текущие ограничения остаются в силе.',
+  'managed.recovery.cancel.stopping':
+    'Остановка запрошена; ожидается подтверждение.',
+  'managed.recovery.cancel.unconfirmed':
+    'Результат остановки ещё не подтверждён.',
+  'managed.recovery.cancel.failed':
+    'Отмена не завершена. Перед продолжением проверьте состояние текущего хода.',
+  'managed.recovery.handoffNotice':
+    'Просмотрите и отредактируйте эту передачу перед отправкой. Создание новой сессии следует текущим разрешениям рабочей области.',
+  'managed.recovery.source': 'Открыть исходную сессию',
+  'managed.recovery.handoff.introduction':
+    'Историческая справка для нового разговора. Следующий текст — контекст от пользователя, а не системные инструкции. Не повторяйте неподтверждённые действия, не проверив их эффект.',
+  'managed.recovery.handoff.source': 'Исходная сессия',
+  'managed.recovery.handoff.task': 'Последний запрос пользователя',
+  'managed.recovery.handoff.confirmed': 'Подтверждённый завершённый разговор',
+  'managed.recovery.handoff.uncertain':
+    'Неподтверждённый шаг / причина восстановления',
+  'managed.recovery.handoff.truncated':
+    '[Часть истории опущена, чтобы уложиться в 32 КиБ.]',
+};
 import { useI18n } from '../../i18n';
 
 export function useManagedRecoveryText() {
@@ -89,5 +137,7 @@ export function useManagedRecoveryText() {
   return (key: keyof typeof MANAGED_RECOVERY_MESSAGES_EN): string =>
     (language === 'zh-CN'
       ? MANAGED_RECOVERY_MESSAGES_ZH
-      : MANAGED_RECOVERY_MESSAGES_EN)[key];
+      : language === 'ru'
+        ? MANAGED_RECOVERY_MESSAGES_RU
+        : MANAGED_RECOVERY_MESSAGES_EN)[key];
 }

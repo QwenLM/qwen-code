@@ -300,14 +300,11 @@ if (!Number.isSafeInteger(runtimeDelayMs) || runtimeDelayMs < 0) {
 const cliBundle = path.join(root, 'dist', 'cli.js');
 const springModule = path.join(root, 'packages', 'managed-agent-server');
 const springTarget = path.join(springModule, 'server', 'target');
-// The pom attaches classified repackage executions alongside the
-// unclassified server jar, so a wildcard over target/ matches several
-// artifacts. Read the project version from the
-// pom and name the unclassified jar exactly — version-independent without
-// assuming it is the only packaged artifact. The <version> immediately
-// following the module's own <artifactId> (not the <parent> block's). The
-// capture itself is whitespace-tolerant, so a formatter wrapping or
-// re-indenting the element cannot flow newlines into the jar path.
+// Name the executable jar exactly by the project version read from the pom,
+// so the path is version-independent. The <version> immediately following the
+// module's own <artifactId> (not the <parent> block's). The capture itself is
+// whitespace-tolerant, so a formatter wrapping or re-indenting the element
+// cannot flow newlines into the jar path.
 const pomXml = readFileSync(path.join(springModule, 'pom.xml'), 'utf8');
 const pomVersion = pomXml.match(
   /<artifactId>qwen-managed-agent-parent<\/artifactId>\s*<version>\s*([^<]*?\S)\s*<\/version>/,

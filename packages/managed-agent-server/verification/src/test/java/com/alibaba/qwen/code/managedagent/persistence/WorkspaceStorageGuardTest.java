@@ -14,7 +14,7 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.RuntimeAdmissionFences;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -172,7 +172,7 @@ class WorkspaceStorageGuardTest {
         guard().verifyProbe(binding);
         var registrations = jdbc.queryForList("SELECT " + ManagedSchemaProjection.STORAGE_OWNER.columns() + " FROM ma_storage_owner ORDER BY storage_key");
         jdbc.update("UPDATE ma_storage SET fence_operation_id = ? WHERE alias_key = ?",
-                UUID.randomUUID().toString(), JdbcRuntimeBindingRepository.storageAliasKey("tenant", "storage"));
+                UUID.randomUUID().toString(), RuntimeAdmissionFences.storageAliasKey("tenant", "storage"));
         assertUnavailable(() -> guard().verify(binding));
         assertUnavailable(() -> guard().verifyProbe(binding));
         guard().verifyProbe(new ContextBinding("tenant", "other-workspace", 1, "other", ".", "config", 1));

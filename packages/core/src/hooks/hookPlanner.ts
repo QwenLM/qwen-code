@@ -169,6 +169,7 @@ export class HookPlanner {
     const plan: HookExecutionPlan = {
       eventName,
       hookConfigs,
+      hookSources: deduplicatedEntries.map((entry) => entry.source),
       sequential,
     };
 

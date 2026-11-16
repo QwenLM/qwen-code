@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.maintenance;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.config.ManagedDataSourceDefaults;
 import org.springframework.boot.SpringBootConfiguration;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.autoconfigure.flyway.FlywayAutoConfiguration;
@@ -12,14 +13,19 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 @EnableConfigurationProperties(ManagedAgentProperties.class)
 public class WorkspaceRecoveryApplication {
     @org.springframework.context.annotation.Bean(destroyMethod = "close")
-    @org.springframework.boot.context.properties.ConfigurationProperties("spring.datasource.druid")
     com.alibaba.druid.pool.DruidDataSource dataSource(org.springframework.core.env.Environment environment) {
         var source = new com.alibaba.druid.pool.DruidDataSource();
         source.setMaxActive(20);
         source.setMaxWait(30_000);
         source.setValidationQuery("SELECT 1");
-        org.springframework.boot.context.properties.bind.Binder.get(environment).bind(
-                "spring.datasource", org.springframework.boot.context.properties.bind.Bindable.ofInstance(source));
+        var binder = org.springframework.boot.context.properties.bind.Binder.get(environment);
+        binder.bind("spring.datasource",
+                org.springframework.boot.context.properties.bind.Bindable.ofInstance(source));
+        // Bound here, not through @ConfigurationProperties, so the statement cache
+        // defaults see the final URL and connection properties, as the standalone pool.
+        binder.bind("spring.datasource.druid",
+                org.springframework.boot.context.properties.bind.Bindable.ofInstance(source));
+        ManagedDataSourceDefaults.applyMySqlDefaults(source);
         return source;
     }
 }
