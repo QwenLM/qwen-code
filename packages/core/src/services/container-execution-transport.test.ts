@@ -238,6 +238,7 @@ describe.skipIf(process.platform === 'win32')(
       'uses security metadata for both worker UID mappings: %j',
       async (info, rootless) => {
         await environment.dispose();
+        initializations = [];
         runtime.execFile.mockClear();
         onExec((args, callback) => {
           callback(null, args[0] === 'info' ? JSON.stringify(info) : '{}', '');
