@@ -213,6 +213,26 @@ describe('AoneChannel', () => {
       await expect(channel.connect()).rejects.toThrow(/a1 auth login/);
     });
 
+    it('lowercases repo paths for the cursor key and the a1 argv', async () => {
+      // Pins the lowercasing (verify-round survivor M13): a mixed-case
+      // config must route through the canonical lowercase key.
+      const calls = installFakeA1({
+        events: pagedEvents([makeEvent({ id: 100 })]),
+      });
+      const ch = new TestableAoneChannel(
+        'test-aone',
+        makeConfig({ repos: ['Test/Repo'] }),
+        makeBridge(),
+      );
+      await ch.connect();
+      await ch.testPollOnce();
+      ch.disconnect();
+      expect(ch.cursor.repos['test/repo']).toBe(100);
+      expect(ch.cursor.repos['Test/Repo']).toBeUndefined();
+      const events = calls.find((argv) => argv[0] === 'events')!;
+      expect(events[2]).toBe('test/repo');
+    });
+
     it('warns when groupPolicy cannot dispatch', async () => {
       const stderr = vi
         .spyOn(process.stderr, 'write')
@@ -1023,6 +1043,14 @@ describe('AoneChannel', () => {
       ).rejects.toThrow(/threadId/);
       await expect(
         channel.testSendThreadMessage('test/repo', 'issue:42', 'x'),
+      ).rejects.toThrow(/threadId/);
+      // Pins the numeric-only defensive check (verify-round survivor M11:
+      // widening the regex to mr:(.*) must not let a non-numeric id through).
+      await expect(
+        channel.testSendThreadMessage('test/repo', 'mr:abc', 'x'),
+      ).rejects.toThrow(/threadId/);
+      await expect(
+        channel.testSendThreadMessage('test/repo', 'mr:12x', 'x'),
       ).rejects.toThrow(/threadId/);
       channel.disconnect();
     });
