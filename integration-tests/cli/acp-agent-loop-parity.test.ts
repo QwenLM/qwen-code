@@ -154,6 +154,8 @@ const countSharedRounds = (debugLog: string) =>
  */
 const DEBUG_LOG_QUIET_MS = 1_000;
 
+const DEBUG_LOG_DEADLINE_MS = 5_000;
+
 /**
  * The debug log is appended fire-and-forget, so a round's marker can still be
  * queued when the last prompt response arrives. Read it once it has stopped
@@ -166,7 +168,7 @@ async function readSettledDebugLog(
   runtimeDir: string,
   kernel = false,
 ): Promise<string> {
-  const deadline = Date.now() + 5_000;
+  const deadline = Date.now() + DEBUG_LOG_DEADLINE_MS;
   let quietSince = Date.now();
   let log = readDebugLog(runtimeDir);
   while (Date.now() < deadline) {
@@ -1223,17 +1225,38 @@ const allowOnce = () => ({
       });
     }, 10_000);
 
+    it('keeps waiting while the log is still growing', async () => {
+      await withDebugLogFixture(ROUND_MARKER, async (runtimeDir, logFile) => {
+        const settled = readSettledDebugLog(runtimeDir);
+        // The second append lands past the window the read started with, so
+        // a wait that never restarts its window returns without it.
+        await new Promise((resolve) =>
+          setTimeout(resolve, DEBUG_LOG_QUIET_MS / 2),
+        );
+        appendFileSync(logFile, ROUND_MARKER);
+        await new Promise((resolve) => setTimeout(resolve, DEBUG_LOG_QUIET_MS));
+        appendFileSync(logFile, ROUND_MARKER);
+        expect(countSharedRounds(await settled)).toBe(3);
+      });
+    }, 10_000);
+
     it('waits for the kernel markers a run owes too', async () => {
       await withDebugLogFixture(ROUND_MARKER, async (runtimeDir, logFile) => {
+        const started = Date.now();
         const settled = readSettledDebugLog(runtimeDir, true);
         // Past the quiet window, so only the kernel floor keeps the read
         // waiting: the shared marker alone has already gone quiet.
-        await new Promise((resolve) => setTimeout(resolve, 1_500));
+        await new Promise((resolve) =>
+          setTimeout(resolve, DEBUG_LOG_QUIET_MS + 500),
+        );
         appendFileSync(
           logFile,
           '[EVENT_BUS] runAgentLoopOnBus started run-1 (prompt first)\n',
         );
         expect(countKernelRounds(await settled)).toBe(1);
+        // An unsatisfiable floor spins to the deadline and returns this same
+        // log, which the count alone accepts.
+        expect(Date.now() - started).toBeLessThan(DEBUG_LOG_DEADLINE_MS);
       });
     }, 10_000);
 
