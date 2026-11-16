@@ -42,7 +42,7 @@
           "minimum": 1
         },
         "maxConcurrentSubSessionsTotal": {
-          "description": "Workspace-wide ceiling on concurrent in-flight sub-sessions across all callers.",
+          "description": "Workspace-wide ceiling on concurrent in-flight sub-sessions across all callers, including sessions in other workspaces that start sub-sessions in this one.",
           "type": "integer",
           "default": 24,
           "minimum": 1,

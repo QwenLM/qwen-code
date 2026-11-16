@@ -396,7 +396,7 @@ const SETTINGS_SCHEMA = {
         minimum: 1,
         maximum: 1024,
         description:
-          'Workspace-wide ceiling on concurrent in-flight sub-sessions across all callers.',
+          'Workspace-wide ceiling on concurrent in-flight sub-sessions across all callers, including sessions in other workspaces that start sub-sessions in this one.',
         showInDialog: false,
       },
       sessionPrWatch: {

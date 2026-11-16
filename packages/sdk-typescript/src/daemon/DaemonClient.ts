@@ -1749,11 +1749,18 @@ export class DaemonClient {
     );
   }
 
-  async workspaceGitCheckout(ref: string): Promise<DaemonGitCheckoutResult> {
+  async workspaceGitCheckout(
+    ref: string,
+    opts?: { stash?: boolean; force?: boolean },
+    // The stash/force flows chain several git commands server-side, each
+    // with its own budget, so callers can outsize the client's default
+    // fetch timeout instead of aborting mid-flow while the daemon runs on.
+    timeoutMs?: number,
+  ): Promise<DaemonGitCheckoutResult> {
     return await this.jsonRequest<DaemonGitCheckoutResult>(
       '/workspace/git/checkout',
       'POST /workspace/git/checkout',
-      { method: 'POST', body: { ref }, mode: 'rest' },
+      { method: 'POST', body: { ref, ...opts }, mode: 'rest', timeoutMs },
     );
   }
 
@@ -8910,6 +8917,11 @@ export class WorkspaceDaemonClient {
     ref: string,
     cwd?: string,
     sessionId?: string,
+    opts?: { stash?: boolean; force?: boolean },
+    // The stash/force flows chain several git commands server-side, each
+    // with its own budget, so callers can outsize the client's default
+    // fetch timeout instead of aborting mid-flow while the daemon runs on.
+    timeoutMs?: number,
   ): Promise<DaemonGitCheckoutResult> {
     const params = new URLSearchParams();
     if (cwd != null) params.set('cwd', cwd);
@@ -8920,7 +8932,12 @@ export class WorkspaceDaemonClient {
       this.workspaceSelector,
       suffix,
       'POST /workspaces/:workspace/git/checkout',
-      { method: 'POST', body: { ref }, mode: 'rest' },
+      {
+        method: 'POST',
+        body: { ref, ...opts },
+        mode: 'rest',
+        timeoutMs,
+      },
     );
   }
 

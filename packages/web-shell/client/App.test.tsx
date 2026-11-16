@@ -12786,6 +12786,7 @@ function makePendingPermissionBlock(
       raw: Record<string, unknown>;
     }>;
     content?: unknown[];
+    rawInput?: Record<string, unknown>;
   } = {},
 ): unknown {
   const toolName = overrides.toolName ?? 'run_shell_command';
@@ -12804,6 +12805,7 @@ function makePendingPermissionBlock(
         ...(overrides.todoPlan ? { qwenTodoApproval: overrides.todoPlan } : {}),
       },
       ...(overrides.content ? { content: overrides.content } : {}),
+      ...(overrides.rawInput ? { rawInput: overrides.rawInput } : {}),
       ...(isAskUser
         ? { input: { questions: [{ question: 'Pick one', options: [] }] } }
         : {}),
@@ -29778,6 +29780,41 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('only opens qualified transcript links within the workspace lock', async () => {
+    renderApp({ lockedWorkspaceCwd: '/locked' }, new EventTarget());
+    await flush();
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('qwen:open-session', {
+          detail: {
+            sessionId: 'other-session',
+            workspaceCwd: '/other',
+            source: 'session-link',
+          },
+        }),
+      );
+    });
+    expect(mockSessionActions.loadSession).not.toHaveBeenCalled();
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('qwen:open-session', {
+          detail: {
+            sessionId: 'locked-session',
+            workspaceCwd: '/locked',
+            source: 'session-link',
+          },
+        }),
+      );
+    });
+    expect(mockSessionActions.loadSession).toHaveBeenCalledExactlyOnceWith(
+      'locked-session',
+      {
+        workspaceCwd: '/locked',
+        sessionContext: { kind: 'workspace', cwd: '/locked' },
+      },
+    );
+  });
+
   it('keeps legacy window session links available with a workspace lock', async () => {
     renderApp({ lockedWorkspaceCwd: '/locked' }, new EventTarget());
     await flush();
@@ -38288,6 +38325,33 @@ describe('App session callbacks', () => {
     await flush();
     expect(firstHandler).not.toHaveBeenCalled();
     expect(secondHandler).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a named sub-session approval pending when switching to yolo', async () => {
+    testState.blocks = [
+      makePendingPermissionBlock({
+        toolName: 'create_sub_session',
+        kind: 'other',
+        rawInput: { workspace: '/repos/b' },
+        options: [
+          {
+            optionId: 'proceed_once',
+            label: 'Allow',
+            raw: { kind: 'allow_once' },
+          },
+        ],
+      }),
+    ];
+    renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestChatEditorProps?.onSelectMode?.('yolo');
+    });
+
+    expect(mockSessionActions.setApprovalMode).toHaveBeenCalledWith('yolo', {
+      planMode: false,
+    });
+    expect(mockSessionActions.submitPermission).not.toHaveBeenCalled();
   });
 
   it.each(['default', 'auto-edit', 'auto', 'yolo'])(
