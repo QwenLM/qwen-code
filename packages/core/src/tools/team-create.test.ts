@@ -229,6 +229,40 @@ describe('TeamCreateTool', () => {
     expect(result.llmContent).toContain('created');
   });
 
+  it('refuses to reclaim a dead session team with unread reports and names the old session', async () => {
+    const child = spawnSync(process.execPath, ['-e', '']);
+    const teamDir = path.join(tmpDir, 'teams', 'unread');
+    await fs.mkdir(path.join(teamDir, 'inboxes'), { recursive: true });
+    await fs.writeFile(
+      path.join(teamDir, 'config.json'),
+      JSON.stringify({
+        name: 'unread',
+        createdAt: 0,
+        leadAgentId: 'leader@unread',
+        leadSessionId: 'old-session-id',
+        leadPid: child.pid,
+        members: [],
+      }),
+      'utf-8',
+    );
+    await fs.writeFile(
+      path.join(teamDir, 'inboxes', 'leader.json'),
+      JSON.stringify([
+        { from: 'w', text: 'report', timestamp: 't', read: false },
+      ]),
+      'utf-8',
+    );
+
+    const result = await new TeamCreateTool(makeConfig())
+      .build({ team_name: 'unread' })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeDefined();
+    expect(result.llmContent).toContain('unread teammate reports');
+    expect(result.llmContent).toContain('old-session-id');
+    await expect(fs.access(teamDir)).resolves.toBeUndefined();
+  });
+
   it('refuses a name owned by a live session', async () => {
     const teamDir = path.join(tmpDir, 'teams', 'occupied');
     await fs.mkdir(teamDir, { recursive: true });
@@ -253,6 +287,69 @@ describe('TeamCreateTool', () => {
 
     expect(result.error).toBeDefined();
     expect(result.llmContent).toContain('live');
+  });
+
+  it('reports live-owner wording even when a live session also has unread mail', async () => {
+    const teamDir = path.join(tmpDir, 'teams', 'live-unread');
+    await fs.mkdir(path.join(teamDir, 'inboxes'), { recursive: true });
+    await fs.writeFile(
+      path.join(teamDir, 'config.json'),
+      JSON.stringify({
+        name: 'live-unread',
+        createdAt: 0,
+        leadAgentId: 'leader@live-unread',
+        leadSessionId: 'other-session-id',
+        leadPid: process.ppid,
+        members: [],
+      }),
+      'utf-8',
+    );
+    await fs.writeFile(
+      path.join(teamDir, 'inboxes', 'leader.json'),
+      JSON.stringify([
+        { from: 'w', text: 'report', timestamp: 't', read: false },
+      ]),
+      'utf-8',
+    );
+
+    const result = await new TeamCreateTool(makeConfig())
+      .build({ team_name: 'live-unread' })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeDefined();
+    expect(result.llmContent).toContain('owned by a live qwen-code session');
+    expect(result.llmContent).not.toContain('unread teammate reports');
+  });
+
+  it('refuses a dead session with a corrupt leader inbox without suggesting rm -rf', async () => {
+    const child = spawnSync(process.execPath, ['-e', '']);
+    const teamDir = path.join(tmpDir, 'teams', 'badbox');
+    await fs.mkdir(path.join(teamDir, 'inboxes'), { recursive: true });
+    await fs.writeFile(
+      path.join(teamDir, 'config.json'),
+      JSON.stringify({
+        name: 'badbox',
+        createdAt: 0,
+        leadAgentId: 'leader@badbox',
+        leadSessionId: 'old-session-id',
+        leadPid: child.pid,
+        members: [],
+      }),
+      'utf-8',
+    );
+    await fs.writeFile(
+      path.join(teamDir, 'inboxes', 'leader.json'),
+      '{ torn',
+      'utf-8',
+    );
+
+    const result = await new TeamCreateTool(makeConfig())
+      .build({ team_name: 'badbox' })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeDefined();
+    expect(result.llmContent).not.toContain('rm -rf');
+    await expect(fs.access(teamDir)).resolves.toBeUndefined();
   });
 
   it('returns TeamResultDisplay', async () => {

@@ -171,6 +171,9 @@ const { mockResolveSavedWorkflowScript } = vi.hoisted(() => ({
 const { mockAddDaemonRequestAttribute } = vi.hoisted(() => ({
   mockAddDaemonRequestAttribute: vi.fn(),
 }));
+const { mockReattachTeamForSession } = vi.hoisted(() => ({
+  mockReattachTeamForSession: vi.fn().mockResolvedValue(null),
+}));
 const { mockRestoreWorktreeContext } = vi.hoisted(() => ({
   mockRestoreWorktreeContext: vi.fn().mockResolvedValue({
     contextMessage: null,
@@ -415,6 +418,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   initializeTelemetry: vi.fn().mockResolvedValue(undefined),
   addDaemonRequestAttribute: mockAddDaemonRequestAttribute,
   restoreWorktreeContext: mockRestoreWorktreeContext,
+  reattachTeamForSession: mockReattachTeamForSession,
   observeToolResultBoundary: vi.fn(() => false),
   toolResultArtifactState: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
@@ -30588,6 +30592,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         sendUpdate: ReturnType<typeof vi.fn>;
         dispose: ReturnType<typeof vi.fn>;
         shouldHintAskUserQuestionRestore?: ReturnType<typeof vi.fn>;
+        pendingRecoveredAgentsNotice?: string | null;
       }
     | undefined;
   let processExitSpy: MockInstance<typeof process.exit>;
@@ -34712,6 +34717,101 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     expect(mockSessionStartSpan.setAttribute).toHaveBeenCalledWith(
       'qwen-code.daemon.session_restore.failed_stage',
       'existence_check',
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it.each(['loadSession', 'unstable_resumeSession'] as const)(
+    '%s re-attaches the session team after the background agents and tells the model once',
+    async (method) => {
+      const innerConfig = bindRestoreMocks({
+        sessionExists: true,
+        resumedConversation: { messages: [] },
+      });
+      mockReattachTeamForSession.mockResolvedValueOnce({
+        status: 'reattached',
+        teamName: 'crew',
+        deadMembers: ['worker'],
+        unassignedTaskCount: 2,
+      });
+      const { agent, agentPromise } = await spawnAgent();
+
+      await agent[method]({
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+      });
+
+      expect(mockReattachTeamForSession).toHaveBeenCalledWith(innerConfig);
+      expect(
+        innerConfig.loadPausedBackgroundAgents.mock.invocationCallOrder[0]!,
+      ).toBeLessThan(mockReattachTeamForSession.mock.invocationCallOrder[0]!);
+      expect(
+        mockReattachTeamForSession.mock.invocationCallOrder[0]!,
+      ).toBeLessThan(
+        lastSessionMock!.installRewriter.mock.invocationCallOrder[0]!,
+      );
+      expect(lastSessionMock!.pendingRecoveredAgentsNotice).toEqual(
+        expect.stringContaining('"crew" from this session was re-attached'),
+      );
+      expect(lastSessionMock!.pendingRecoveredAgentsNotice).toContain(
+        '(worker)',
+      );
+      expect(lastSessionMock!.pendingRecoveredAgentsNotice).toContain(
+        '2 in-progress task(s)',
+      );
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
+
+  it('keeps an earlier recovered-agents notice when the team is owned elsewhere', async () => {
+    const innerConfig = bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: { messages: [] },
+    });
+    innerConfig.consumePendingRecoveredAgentsNotice.mockReturnValue(
+      'agents recovered',
+    );
+    mockReattachTeamForSession.mockResolvedValueOnce({
+      status: 'owned_elsewhere',
+      teamName: 'crew',
+    });
+    const { agent, agentPromise } = await spawnAgent();
+
+    await agent.unstable_resumeSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+    });
+
+    expect(lastSessionMock!.pendingRecoveredAgentsNotice).toMatch(
+      /^agents recovered\n\nAgent team "crew" from this session is still led by another running qwen-code process/,
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('does not fail the load when re-attaching the team throws', async () => {
+    bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: { messages: [] },
+    });
+    mockReattachTeamForSession.mockRejectedValueOnce(new Error('disk full'));
+    const { agent, agentPromise } = await spawnAgent();
+
+    await expect(
+      agent.loadSession({
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+      }),
+    ).resolves.toMatchObject({ modes: expect.anything() });
+    expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Team reattach failed: Error: disk full'),
     );
 
     mockConnectionState.resolve();

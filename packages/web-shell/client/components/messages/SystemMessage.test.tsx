@@ -1046,6 +1046,37 @@ describe('background continuation', () => {
     ).not.toContain('View details');
     expect(details).not.toHaveBeenCalled();
   });
+  it('names a teammate report and offers no details to open', () => {
+    const details = vi.fn();
+    const container = render(
+      <SubagentDetailsProvider onOpen={vi.fn()} onOpenBackground={details}>
+        <SystemMessage
+          content="alpha: auth audit complete"
+          variant="info"
+          source="background_notification_turn_started"
+          data={{
+            turnId: 'turn-1',
+            taskId: 'team:crew',
+            kind: 'teammate',
+            startedAt: 100,
+            label: 'alpha: auth audit complete',
+            backgroundTask: { status: 'completed' },
+          }}
+        />
+      </SubagentDetailsProvider>,
+    );
+    expect(container.textContent).toContain(
+      'Teammate report·alpha: auth audit complete',
+    );
+    // Nothing in the task registry answers to a team:<name> id, so the details
+    // button would open a tab that can never load.
+    expect(
+      [...container.querySelectorAll('button')].map((button) =>
+        button.textContent?.trim(),
+      ),
+    ).not.toContain('View details');
+    expect(details).not.toHaveBeenCalled();
+  });
 
   it.each([
     ['failed', 'Background task failed'],

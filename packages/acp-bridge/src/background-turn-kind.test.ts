@@ -13,26 +13,30 @@ describe('parseBackgroundNotificationTurn', () => {
   // parser does not know is dropped on the floor — the client never learns
   // the turn happened — so every kind a session can emit has to be listed
   // here as well as in the type.
-  it.each(['agent', 'monitor', 'shell', 'workflow', 'peer'] as const)(
-    'carries a %s turn through',
-    (kind) => {
-      expect(
-        parseBackgroundNotificationTurn({
-          turnId: 't1',
-          taskId: 'k1',
-          kind,
-          startedAt: 1,
-          label: 'a label',
-        }),
-      ).toEqual({
+  it.each([
+    'agent',
+    'monitor',
+    'shell',
+    'workflow',
+    'peer',
+    'teammate',
+  ] as const)('carries a %s turn through', (kind) => {
+    expect(
+      parseBackgroundNotificationTurn({
         turnId: 't1',
         taskId: 'k1',
         kind,
         startedAt: 1,
         label: 'a label',
-      });
-    },
-  );
+      }),
+    ).toEqual({
+      turnId: 't1',
+      taskId: 'k1',
+      kind,
+      startedAt: 1,
+      label: 'a label',
+    });
+  });
 
   it('drops a kind it does not know', () => {
     expect(

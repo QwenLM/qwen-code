@@ -17,3 +17,4 @@ export * from './mailbox.js';
 export * from './tasks.js';
 export * from './promptAddendum.js';
 export * from './leaderPermissionBridge.js';
+export * from './reattach-team.js';
