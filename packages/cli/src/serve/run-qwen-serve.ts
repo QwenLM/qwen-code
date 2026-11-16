@@ -28,6 +28,7 @@ import express, {
   type RequestHandler,
   type Response,
 } from 'express';
+import { resolveChannelLocale } from '../utils/channel-locale.js';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import {
   validateHostedHarnessProfile,
@@ -4311,6 +4312,12 @@ async function runQwenServeImpl(
     process.env,
     writeStderrLine,
   );
+  // One locale for both PR-watch seams, read once at boot like the channel
+  // worker reads it at startup. The resolver is import-free so it stays out of
+  // the channel runtime's dependency chain.
+  const sessionPrWatchLanguage = resolveChannelLocale(
+    bootSettings?.general?.language,
+  );
   // Init daemon logger early so all subsequent lifecycle events
   // (bridge spawn diagnostics, shutdown errors) are captured to file.
   const daemonLogBaseDir = await resolveDaemonLogBaseDirForRun({
@@ -7745,6 +7752,7 @@ async function runQwenServeImpl(
               prWatchSources = {
                 workspaceRegistry,
                 wakeDormant: sessionPrWatchConfig.wakeDormant,
+                language: sessionPrWatchLanguage,
                 archiveCoordinator: () =>
                   (
                     app.locals as {
