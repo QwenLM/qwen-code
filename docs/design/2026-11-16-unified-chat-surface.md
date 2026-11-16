@@ -352,8 +352,8 @@ page.
    fake them. The generic admission/outcome vocabulary is the only async
    language the surface sees.
 5. **Parity follows backend facts.** Managed gains the shared status stack
-   and usage-stats strip where its events and diagnostics provide the facts
-   (the usage-stats fact source is `diagnostics.getStatistics`); the context
+   and the session usage statistics (`ComposerUsageStats`) where facts exist
+   (the managed fact source is `diagnostics.getStatistics`); the context
    ring already renders `modelContext` token observations today and is not a
    new gain. Regions without backend facts stay hidden rather than filled
    with invented data.
@@ -496,8 +496,9 @@ affected region has moved, so the migration does not race feature work.
    entry keeps working without a daemon.
 4. Existing daemon and managed unit suites and the managed Playwright specs
    pass; the visual preview shows no unexplained daemon-side change.
-5. Managed sessions show the shared status stack and usage display wherever
-   backend facts exist, with absent regions capability-gated.
+5. Managed sessions show the shared status stack and session usage
+   statistics (`ComposerUsageStats`) wherever backend facts exist, with
+   absent regions capability-gated.
 6. The admission-is-not-establishment invariant holds: per-adapter negative
    tests prove transport success alone never produces `established`;
    `unsettled` renders distinctly from `failed` and survives refresh;

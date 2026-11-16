@@ -305,10 +305,11 @@ managed 诊断/任务/恢复/终端）由所属页面以插槽传入。
 4. **操作保持封装。** 若把 Java 原始操作（幂等键、revision、回执）暴露进
    契约，managed 语义会泄漏进共享聊天面，并迫使 daemon 适配器伪造它们。
    通用的受理/结果语汇是聊天面可见的唯一异步语言。
-5. **一致性跟随后端事实。** managed 在其事件与诊断提供事实的范围内获得
-   共享状态栈与用量统计条（用量统计的事实来源是 `diagnostics.getStatistics`）；
-   context ring 今天已经渲染 `modelContext` 的 token 观测，不算新增。没有
-   后端事实的区域保持隐藏，而不是填入编造的数据。
+5. **一致性跟随后端事实。** managed 在事实存在处获得共享状态栈与会话级
+   用量统计（`ComposerUsageStats`，managed 侧事实来源是
+   `diagnostics.getStatistics`）；context ring 今天已经渲染 `modelContext`
+   的 token 观测，不算新增。没有后端事实的区域保持隐藏，而不是填入编造
+   的数据。
 6. **受理不等于确立。** 后端无关的 UI 状态不自动等于「动作已生效」的
    后端无关证明：一个笼统的 `completed` 标签可以对本地 API 调用为真、
    对用户的操作状态为假。两段结果把用户可见状态的真值条件留在共享契约
@@ -417,8 +418,8 @@ managed 诊断/任务/恢复/终端）由所属页面以插槽传入。
    Managed-only 入口继续在没有 daemon 的情况下工作。
 4. 现有 daemon 与 managed 单测套件及 managed Playwright 规格通过；
    视觉预览无无法解释的 daemon 侧变化。
-5. managed 会话在后端事实存在处展示共享状态栈与用量显示，缺席区域
-   按能力门控。
+5. managed 会话在后端事实存在处展示共享状态栈与会话级用量统计
+   （`ComposerUsageStats`），缺席区域按能力门控。
 6. 受理不等于确立的不变式成立：每适配器的负例测试证明传输层成功绝不
    单独产生 `established`；`unsettled` 与 `failed` 渲染可区分且跨刷新
    保留；被取代的审批渲染为 superseded，而不是 applied。
