@@ -84,6 +84,6 @@ Later S1/S2/S3 acceptance must separate source implementation, focused tests, CI
 
 ## References
 
-- [Resident deployment](../../deploy/k2-resident/README.md) and [bounded idle retirement](2026-10-20-k2-physical-retirement-progress.md).
+- [Resident deployment](../../packages/sdk-java/managed-kubernetes-archive/deploy/k2-resident/README.md) and [bounded idle retirement](2026-10-20-k2-physical-retirement-progress.md).
 - [Kubernetes deletion semantics](https://kubernetes.io/docs/reference/kubectl/generated/kubectl_delete/): force deletion does not wait for process termination.
 - [Kubernetes node shutdown](https://kubernetes.io/docs/concepts/cluster-administration/node-shutdown/): node failure and forced detach require special handling; an out-of-service taint requires prior shutdown/power-off verification.

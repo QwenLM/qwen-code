@@ -44,11 +44,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JdbcRuntimeBrokerMySqlIT {
     @Test
-    void residentMountPathsDoNotBlockIndependentStorageAfterRetirement() throws Exception {
-        inIsolatedSchema("resident_placement_", ResidentWorkspacePlacementTest::verify);
-    }
-
-    @Test
     void physicalAliasesReleaseOnlyTheirMatchingHolder() throws Exception {
         inIsolatedSchema("broker_physical_", JdbcPhysicalStorageReleaseTest::verify);
     }

@@ -1018,7 +1018,7 @@ public final class ManagedAgentPreflight {
      * Whether a property holds a secret, as the configuration reference
      * marks them: a password, token or key, or one of a map of keys, such as
      * previous-credential-keys.<id>. A path to a file that holds one, such as
-     * kubernetes-token-file, and credential-key-id hold none.
+     * key-store-file, and credential-key-id hold none.
      */
     static boolean secretProperty(String property) {
         for (String element : property.split("[./\\[\\]]+")) {
