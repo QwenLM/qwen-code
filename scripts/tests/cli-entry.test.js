@@ -637,6 +637,31 @@ describe('scripts/cli-entry.js production entry', () => {
         }
       });
 
+      it('ignores a QWEN_HOME in a ~/.qwen/.env left behind on an XDG install', async () => {
+        existsSyncMock.mockImplementation((file) =>
+          [
+            '/home/test-user/.qwen',
+            '/home/test-user/.config/qwen/.qwen-global-dir',
+          ].includes(normalizePath(file)),
+        );
+        const readFileSyncMock = vi.mocked(readFileSync);
+        const impl = readFileSyncMock.getMockImplementation();
+        readFileSyncMock.mockImplementation((file, ...rest) =>
+          normalizePath(file) === '/home/test-user/.qwen/.env'
+            ? 'QWEN_HOME=/data/qwen\n'
+            : impl(file, ...rest),
+        );
+        try {
+          await import('../cli-entry.js?xdg-legacy-dotenv');
+          expect(process.env.QWEN_HOME).toBeUndefined();
+          expect(normalizePath(process.env.QWEN_CODE_MANAGED_NPM_ROOT)).toBe(
+            '/home/test-user/.config/qwen/updates/npm',
+          );
+        } finally {
+          readFileSyncMock.mockImplementation(impl);
+        }
+      });
+
       it('pre-resolves only QWEN_HOME from the .env in an existing ~/.qwen', async () => {
         existsSyncMock.mockImplementation(
           (file) => normalizePath(file) === '/home/test-user/.qwen',
