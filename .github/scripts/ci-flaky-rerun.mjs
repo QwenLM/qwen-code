@@ -224,9 +224,9 @@ function redactLog(log) {
     );
 }
 
-// The post-strip pass. Keep these rules in sync with redactLog. Two
-// differences, both forced by the strip deleting characters that rules use as
-// terminators:
+// The post-strip pass. Keep these rules in sync with redactLog. Every
+// difference from it is forced by the strip deleting characters that rules use
+// as terminators:
 //   - the \b anchors are dropped: a control byte INSIDE a credential
 //     (`npm_\rABC…`) defeats every anchor on the first pass, and the same strip
 //     can weld a word character onto the token's front (`x\rnpm_…` → `xnpm_…`),
