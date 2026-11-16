@@ -33,6 +33,18 @@ const guardUrl = new URL('../vitest-global-setup.js', import.meta.url);
 // Mirrors the real manifest shapes: most channel packages declare their entry
 // via exports['.'].default, while acp-bridge/web-templates use exports['.'].import.
 function manifestFor(rel) {
+  if (rel === 'packages/channels/base') {
+    return {
+      name: 'fake-base',
+      exports: {
+        '.': { types: './dist/index.d.ts', default: './dist/index.js' },
+        './recallTokenizer': {
+          types: './dist/recall-tokenizer.d.ts',
+          default: './dist/recall-tokenizer.js',
+        },
+      },
+    };
+  }
   if (
     rel === 'packages/acp-bridge' ||
     rel === 'packages/web-templates' ||
@@ -63,6 +75,9 @@ function buildFixtureRoot() {
         JSON.stringify(manifestFor(rel)),
       );
       writeFileSync(path.join(root, rel, 'dist', 'index.js'), '');
+      if (rel === 'packages/channels/base') {
+        writeFileSync(path.join(root, rel, 'dist', 'recall-tokenizer.js'), '');
+      }
     }
   }
   for (const files of Object.values(GENERATED_PREREQUISITES)) {
@@ -104,6 +119,7 @@ describe('vitest-global-setup prerequisite guard', () => {
   it('reports an unbuilt workspace package and a missing generated file', () => {
     root = buildFixtureRoot();
     rmSync(path.join(root, 'packages/channels/base/dist/index.js'));
+    rmSync(path.join(root, 'packages/channels/base/dist/recall-tokenizer.js'));
     rmSync(path.join(root, 'packages/cli/src/generated/git-commit.ts'));
 
     const missing = findMissingPrerequisites('packages/cli', root);
@@ -136,6 +152,28 @@ describe('vitest-global-setup prerequisite guard', () => {
     expect(missing).toHaveLength(1);
     expect(missing[0]).toContain('packages/core');
     expect(missing[0]).toContain('has not been built');
+  });
+
+  it('reports an unbuilt channel-base dist for core tests', () => {
+    root = buildFixtureRoot();
+    rmSync(path.join(root, 'packages/channels/base/dist/index.js'));
+    rmSync(path.join(root, 'packages/channels/base/dist/recall-tokenizer.js'));
+
+    const missing = findMissingPrerequisites('packages/core', root);
+    expect(missing).toHaveLength(1);
+    expect(missing[0]).toContain('packages/channels/base');
+    expect(missing[0]).toContain('has not been built');
+  });
+
+  it('reports a missing channel-base subpath export for core tests', () => {
+    root = buildFixtureRoot();
+    rmSync(path.join(root, 'packages/channels/base/dist/recall-tokenizer.js'));
+
+    const missing = findMissingPrerequisites('packages/core', root);
+    expect(missing).toHaveLength(1);
+    expect(missing[0]).toContain('packages/channels/base');
+    expect(missing[0]).toContain('incomplete');
+    expect(missing[0]).toContain('recall-tokenizer.js');
   });
 
   it('names the fix command and the git-commit remedy only when applicable', () => {
@@ -518,6 +556,7 @@ describe('default export (the vitest globalSetup entry)', () => {
   it('subprocess: exits 1 and prints the fix command on a broken checkout', () => {
     root = buildFixtureRoot();
     rmSync(path.join(root, 'packages/channels/base/dist/index.js'));
+    rmSync(path.join(root, 'packages/channels/base/dist/recall-tokenizer.js'));
     const res = runGuardSubprocess(path.join(root, 'packages/cli'));
     expect(res.status).toBe(1);
     expect(res.stderr).toContain('npm run build');
