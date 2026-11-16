@@ -208,13 +208,17 @@ export class ExtensionFileWatcher {
     this.closeBootstrapWatcher();
     const parentDir = path.dirname(this.extensionsDir);
     const dirBasename = path.basename(this.extensionsDir);
+    const resolvedParentDir = path.resolve(parentDir);
     const generation = this.watchGeneration;
     this.bootstrapWatcher = watchFs(parentDir, {
       ignoreInitial: true,
       followSymlinks: false,
       depth: 0,
+      // Same as the settings bootstrap watcher: chokidar hands the root back
+      // with forward slashes on Windows, so compare resolved paths.
       ignored: (filePath: string) =>
-        filePath !== parentDir && path.basename(filePath) !== dirBasename,
+        path.resolve(filePath) !== resolvedParentDir &&
+        path.basename(filePath) !== dirBasename,
     })
       .on('all', (_event: string, changedPath: string) => {
         if (generation !== this.watchGeneration) return;
