@@ -458,7 +458,16 @@ describe('retained latest operation through compression', () => {
           type: 'system',
         },
       );
+      expect(
+        kept.some((record) => record.uuid === String(history.length - 1)),
+      ).toBe(false);
+      const payload = kept.findLast(
+        (record) => record.subtype === 'chat_compression',
+      )!.systemPayload as ChatCompressionRecordPayload;
       const restored = buildApiHistoryFromConversation({ messages: kept });
+      expect(JSON.stringify(restored)).toBe(
+        JSON.stringify(payload.compressedHistory),
+      );
       expect(JSON.stringify(restored)).not.toContain(
         'Unrelated follow-up task.',
       );
