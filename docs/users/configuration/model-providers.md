@@ -486,7 +486,7 @@ Things to know about this endpoint:
 
 ### HopBase
 
-[HopBase](https://hop-base.com) is a model API gateway that serves Claude, GPT, Gemini, DeepSeek, Qwen, GLM and other models through an OpenAI-compatible endpoint at `https://api.hop-base.com/v1` and authenticates with an API key sent as a Bearer token, so it works with the `openai` protocol and no extra code. Create a key in the HopBase console; the [API docs](https://hop-base.com/en/docs) describe the endpoint. `GET https://api.hop-base.com/v1/models`, called with the same key, returns the model ids that key can call.
+[HopBase](https://hop-base.com) is a model API gateway that serves Claude, GPT, Gemini, DeepSeek, Qwen, GLM and other models through an OpenAI-compatible endpoint at `https://api.hop-base.com/v1` and authenticates with an API key sent as a Bearer token, so it works with the `openai` protocol and no extra code. Create a key in the [HopBase console](https://api.hop-base.com); the [API docs](https://hop-base.com/en/docs) describe the endpoint. `GET https://api.hop-base.com/v1/models`, called with the same key, returns the model ids that key can call.
 
 ```json
 {
@@ -519,7 +519,7 @@ Things to know about this endpoint:
 
 - **Use the ids from `/v1/models` as written.** Claude ids use hyphens (`claude-sonnet-5-5`), and the list only contains the models the key can call; an id outside it returns an error rather than being routed to another model.
 - **Set `modalities` for `deepseek-v4.1-flash`.** It reads images on HopBase, but the built-in model lookup records it as text-only, so the example sets image input explicitly. `claude-sonnet-5-5` gets image input from the `^claude-` row.
-- **No `contextWindowSize` needed for these two.** `claude-sonnet-5-5` resolves to 200K and `deepseek-v4.1-flash` to 1M, neither larger than what HopBase serves. For an id the lookup does not know (for example `gpt-6.1-sol`, which falls to the generic `^gpt-` row), pin `contextWindowSize` to the model's documented window.
+- **No `contextWindowSize` needed for these two.** HopBase serves both with a 1,000,000-token window, and the bundled model catalog already resolves both to 1M. With the catalog turned off (`QWEN_CODE_MODELS_DEV=off`), `claude-sonnet-5-5` falls back to the 200K `^claude-` row, which only makes compaction start earlier; set `contextWindowSize: 1000000` if you want the full window there. For an id neither the catalog nor the lookup knows, pin `contextWindowSize` to the window listed in HopBase's docs.
 
 ### OpenAI Responses API (`openai-responses`)
 
