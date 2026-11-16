@@ -59,6 +59,14 @@ The function branch of `ManagedHookDefinition` gains the same two optional
 strings. Staging is unchanged: it already copies every key other than `once`
 and `async`. Planner keys and definition digests do not gain a new input.
 
+The HTTP allowlist also accepts `if` as an optional string under the same
+rule. `HttpHookConfig` and the serve hook contract already declare it and the
+interactive runtime forwards it, so an extension HTTP hook carrying a
+condition failed preparation with the same `managed_hook_invalid`, one key
+over. The condition stays on the stored manifest and does not leave the worker
+in the narrowed HTTP catalog. Deriving the allowlists from the core types is
+left to a follow-up; the lists stay closed and hand-written.
+
 ## Out of scope
 
 Managed command execution does not gain a progress channel for
@@ -70,13 +78,16 @@ Managed command execution does not gain a progress channel for
 - `packages/cli/src/serve/managed-extension-manifests.test.ts` stages the
   reported command hook, plus HTTP and prompt hooks, without the fields, with
   each field alone, and with both fields together, and expects those strings
-  on the staged config.
+  on the staged config. It also stages an HTTP hook with an `if` condition and
+  expects the condition on the staged config.
 - `packages/cli/src/serve/managed-hook-runtime.test.ts` accepts the strings on
   all four types and expects the parsed catalog pin to keep them. It expects
   command, HTTP, and function catalogs to expose only `{ type, name? }`, expects
   the prompt catalog to include the strings, rejects a numeric value with
   `managed_hook_manifest_invalid`, and rejects an unknown key with
-  `managed_hook_invalid`.
+  `managed_hook_invalid`. It accepts an HTTP `if` condition, keeps the
+  condition out of the exposed HTTP catalog, and rejects a non-string `if`
+  with `managed_hook_manifest_invalid`.
 
 ## Acceptance
 
@@ -87,6 +98,9 @@ Managed command execution does not gain a progress channel for
 - A command, HTTP, or function catalog does not contain the metadata text.
 - A prompt catalog contains the metadata text and remains inside the 60 KiB
   catalog bound.
+- An HTTP hook with an `if` condition stages and parses.
+- A non-string `if` is `managed_hook_manifest_invalid`.
+- An HTTP catalog does not contain the condition text.
 
 ## Open questions
 

@@ -729,10 +729,7 @@ describe('ManagedHookRuntime', () => {
       description: 'Collect tool output as session artifacts',
       statusMessage: 'Collecting artifacts',
     };
-    const catalog = async (
-      instance: ManagedHookRuntime,
-      operationId: string,
-    ) =>
+    const catalog = async (instance: ManagedHookRuntime, operationId: string) =>
       instance.control('runtime-session', {
         kind: 'hook-catalog',
         pin,
@@ -834,6 +831,46 @@ describe('ManagedHookRuntime', () => {
     });
     expect(JSON.stringify(fnView)).not.toContain('Collect');
   });
+  it('accepts an HTTP if condition and keeps it inside the worker', async () => {
+    const instance = runtime([
+      {
+        ...definition(),
+        config: {
+          type: HookType.Http,
+          name: 'artifact-adapter',
+          url: 'https://example.com/hooks/artifact',
+          if: 'Bash(git *)',
+        },
+      },
+    ]);
+    expect(instance.resolvePinnedCatalog(pin).hooks[0]?.config).toMatchObject({
+      url: 'https://example.com/hooks/artifact',
+      if: 'Bash(git *)',
+    });
+    const view = await instance.control('runtime-session', {
+      kind: 'hook-catalog',
+      pin,
+      operationId: 'catalog-http-if',
+      sessionKey: key,
+    });
+    expect(view.catalog?.hooks[0].config).toEqual({
+      type: 'http',
+      name: 'artifact-adapter',
+    });
+    expect(JSON.stringify(view)).not.toContain('Bash(git');
+    expect(() =>
+      runtime([
+        {
+          ...definition(),
+          config: {
+            type: HookType.Http,
+            url: 'https://example.com/hooks/artifact',
+            if: 1,
+          } as unknown as ManagedHookDefinition['config'],
+        },
+      ]),
+    ).toThrow('managed_hook_manifest_invalid');
+  });
   it('rejects non-string display metadata and unknown hook config fields', () => {
     for (const field of ['description', 'statusMessage'] as const)
       expect(() =>
@@ -856,7 +893,7 @@ describe('ManagedHookRuntime', () => {
             type: HookType.Command,
             command: 'printf x',
             unexpected: 'no',
-          },
+          } as unknown as ManagedHookDefinition['config'],
         },
       ]),
     ).toThrow('managed_hook_invalid');

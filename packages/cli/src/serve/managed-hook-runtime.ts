@@ -451,6 +451,7 @@ function parseManifest(value: unknown): ManagedHookManifest {
           'name',
           'description',
           'statusMessage',
+          'if',
           'url',
           'headers',
           'allowedEnvVars',
@@ -461,6 +462,7 @@ function parseManifest(value: unknown): ManagedHookManifest {
           !['http:', 'https:'].includes(url.protocol) ||
           url.username ||
           url.password ||
+          (config['if'] !== undefined && typeof config['if'] !== 'string') ||
           (config['allowedEnvVars'] !== undefined &&
             (!Array.isArray(config['allowedEnvVars']) ||
               !config['allowedEnvVars'].every(

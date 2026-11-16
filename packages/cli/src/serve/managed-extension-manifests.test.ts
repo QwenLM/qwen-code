@@ -430,7 +430,7 @@ createInterface({input:process.stdin}).on("line",line=>{
   },
 );
 
-it('preserves hook description and statusMessage while staging an extension', () => {
+it('preserves hook display metadata and the HTTP if condition while staging an extension', () => {
   const workspace = {
     tenantId: 'tenant',
     workspaceId: 'workspace',
@@ -519,4 +519,8 @@ it('preserves hook description and statusMessage while staging an extension', ()
         ?.config,
     ).toMatchObject({ ...hook, ...metadata });
   }
+  const conditionalHttp = { ...http, if: 'Bash(git *)' };
+  expect(
+    stage(conditionalHttp).hookManifest.catalogs[0]?.hooks[0]?.config,
+  ).toMatchObject(conditionalHttp);
 });
