@@ -3552,6 +3552,9 @@ export class LlmChat {
         onPreparedRequest,
         retractDeliveredOutputOnRetry: true,
         disableModelFallbacks: true,
+        // A prepared resume continues the live session turn, so it belongs to
+        // the ledger's turn boundary like the interactive path.
+        isSessionTurn: true,
       },
     );
   }

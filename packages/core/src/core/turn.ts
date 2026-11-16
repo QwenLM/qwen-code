@@ -773,14 +773,6 @@ export interface TurnRunOptions {
     responseId?: string;
     usageMetadata?: GenerateContentResponseUsageMetadata;
   }) => void;
-  /**
-   * Whether this send participates in the model-availability ledger. Defaults
-   * to true for the interactive session path; `turnModelRound` sets it false
-   * because every production caller of that helper is a background round
-   * (subagent shared loop, unified-loop speculation) sharing the session
-   * Config, which must not rotate the live turn's key or read its marks.
-   */
-  isSessionTurn?: boolean;
 }
 
 export class Turn {
@@ -801,6 +793,7 @@ export class Turn {
     private readonly suppressedHookContext?: string,
     private readonly onModelRequestDispatched?: () => void,
     private readonly isExplicitRetry?: boolean,
+    private readonly isSessionTurn?: boolean,
   ) {
     this.goalContext = goalContext ? { ...goalContext } : undefined;
   }
@@ -815,12 +808,12 @@ export class Turn {
     try {
       // Note: This assumes `sendMessageStream` yields events like
       // { type: StreamEventType.RETRY } or { type: StreamEventType.CHUNK, value: GenerateContentResponse }
-      // Mark the send for the model-availability ledger so only the interactive
-      // turn flow participates. Defaults to true; `turnModelRound` overrides it
-      // to false for background rounds that share the session Config. The
-      // remaining fields stay conditional.
+      // Membership in the model-availability ledger is decided by the sender
+      // (LlmClient sets isSessionTurn for the live turn's own sends), not
+      // inferred from "went through Turn": background rounds built on Turn
+      // (turnModelRound) leave it unset. The remaining fields stay conditional.
       const sendOptions = {
-        ...((runOptions?.isSessionTurn ?? true) ? { isSessionTurn: true } : {}),
+        ...(this.isSessionTurn ? { isSessionTurn: true } : {}),
         ...(this.onPreparedRequest
           ? { onPreparedRequest: this.onPreparedRequest }
           : {}),

@@ -8909,6 +8909,57 @@ describe('LlmChat', async () => {
       expect(fallbackB).toHaveBeenCalledTimes(1);
     });
 
+    it('does not record a fallback that failed after output on a non-eligible error', async () => {
+      const service = new ModelAvailabilityService();
+      vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(
+        true,
+      );
+      vi.mocked(mockConfig.getModelAvailabilityService).mockReturnValue(
+        service,
+      );
+
+      const fallbackA = vi.fn();
+      const fallbackB = vi.fn();
+      wireFallbacks(
+        ['fallback-a', 'fallback-b'],
+        vi
+          .fn()
+          .mockImplementation(async (modelId: string) =>
+            modelId === 'fallback-a'
+              ? fallbackRoute('fallback-a', fallbackA)
+              : fallbackRoute('fallback-b', fallbackB),
+          ),
+      );
+      const capacityError = tpmCapacityError();
+      const authError = Object.assign(
+        new StreamContentError(
+          '{"error":{"code":"401","message":"Unauthorized"}}',
+        ),
+        { status: 401 },
+      );
+      streamMock().mockRejectedValue(capacityError);
+      // fallback-a emits a chunk, then fails on a non-eligible auth error.
+      fallbackA.mockResolvedValue(
+        streamThenThrow([textChunk('fallback-a partial')], authError),
+      );
+      fallbackB.mockImplementation(async () => textStream('fallback-b ok'));
+
+      // Request 1: fallback-a emits output then fails on auth; the chain stops
+      // and the ledger must NOT record fallback-a (auth is not capacity).
+      await expect(
+        sendSessionCollect('test', 'prompt-output-auth'),
+      ).rejects.toThrow();
+      expect(fallbackA).toHaveBeenCalledTimes(1);
+
+      // Request 2, same turn: fallback-a was not recorded, so it is attempted
+      // again rather than skipped.
+      await expect(
+        sendSessionCollect('test', 'prompt-output-auth'),
+      ).rejects.toThrow();
+      expect(fallbackA).toHaveBeenCalledTimes(2);
+      expect(fallbackB).not.toHaveBeenCalled();
+    });
+
     it('skips by the resolved model id when resolution rewrites the entry', async () => {
       const service = new ModelAvailabilityService();
       vi.mocked(mockConfig.isModelAvailabilityTrackingEnabled).mockReturnValue(

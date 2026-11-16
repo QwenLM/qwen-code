@@ -75,21 +75,28 @@ no zod / no external deps, so no zod-4 migration is needed for it:
     even though a retry reuses the prompt id and even when the recovered primary
     serves the retry's first request.
   - Only session-turn sends participate, via an `isSessionTurn` flag the ledger
-    gate requires. `Turn.run` defaults it to true for the interactive
-    `LlmClient` → `Turn` path, and the ACP session send sets it explicitly.
-    `turnModelRound` overrides it to false because every production caller is a
-    background round (the subagent shared loop and unified-loop speculation)
-    sharing the session `Config`; direct background sends (forked queries,
-    legacy speculation/subagent, side queries, suggestions) call
-    `sendMessageStream` without the flag. Background operations therefore
-    neither rotate the live turn's key nor read or write its marks, and keep
-    the gate-off fallback behaviour. This is an allowlist, not a prompt-id
-    blacklist: background senders use ids (e.g. a subagent's
-    `session#agent#ordinal`) that no fixed blacklist matches, and the shared
-    `isInternalPromptId` filter must not be extended because it also gates
-    recording/telemetry. Without the exclusion a background send would wipe the
-    live turn's consumed state, and could skip a transiently-exhausted fallback
-    and fail a request the gate-off chain would have served.
+    gate requires. Membership is decided by the **sender**, not inferred from
+    "went through `Turn`": `LlmClient` constructs the live turn's `Turn` with
+    `isSessionTurn` set per `messageType` — true for the turn's own sends
+    (user query, retry, tool result, continuations), false for
+    `Notification`/`Teammate` (which carry fresh prompt ids) and for a concurrent
+    side query. `Turn` takes it as a constructor parameter (default unset) and
+    forwards it to the send options only when set. `turnModelRound` builds its
+    `Turn` without it because every production caller is a background round (the
+    subagent shared loop and unified-loop speculation) sharing the session
+    `Config`. The ACP session send and the hosted-harness prepared resume set it
+    true — both are genuine session sends (the prepared resume delegates to
+    `sendMessageStream`). Direct background sends (forked queries, legacy
+    speculation/subagent, side queries, suggestions) call `sendMessageStream`
+    without the flag. Background operations therefore neither rotate the live
+    turn's key nor read or write its marks, and keep the gate-off fallback
+    behaviour. This is an allowlist, not a prompt-id blacklist: background
+    senders use ids (e.g. a subagent's `session#agent#ordinal`) that no fixed
+    blacklist matches, and the shared `isInternalPromptId` filter must not be
+    extended because it also gates recording/telemetry. Without the exclusion a
+    background send would wipe the live turn's consumed state, and could skip a
+    transiently-exhausted fallback and fail a request the gate-off chain would
+    have served.
 - In the fallback chain itself, only fallback models are written to and read
   from the ledger; the primary is still attempted each request and is not
   marked (marking it would be a dead write, since the chain's two same-model
@@ -123,14 +130,14 @@ reversible; a later PR can flip the default once nightly evidence is in.
 
 ## Key design decisions
 
-| Decision                                                 | Rationale                                                                                                                                                                                                                                                                                                               |
-| -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Port the service logic (drop unused helpers), kebab-case | Pure state machine, well-tested in preview; no zod dependency so no zod-4 rework. `selectFirstAvailable`/`reset` have no caller here, so they are not ported.                                                                                                                                                           |
-| Session-scoped on Config                                 | Matches main's per-session Config and preview's ownership; avoids a process-global health singleton.                                                                                                                                                                                                                    |
-| Only capacity → sticky_retry in this port                | `isFallbackEligible` already bounds the scope; terminal/quota marking would touch auth/billing, deferred.                                                                                                                                                                                                               |
-| Setting gate default off                                 | Behavior change to the fallback chain must be opt-in and reversible first.                                                                                                                                                                                                                                              |
-| Turn boundary at request entry                           | `beginTurn`/`resetTurn` run in `sendMessageStream` before any model call, so an explicit Retry the primary serves still re-probes consumed fallbacks.                                                                                                                                                                   |
-| Allowlist session turns (`isSessionTurn`)                | Only `Turn`-driven sends participate; background senders (subagents, forked, speculation, side-query, suggestion) leave the flag unset. An allowlist, not a prompt-id blacklist, because background ids (e.g. `session#agent#ordinal`) match no fixed blacklist and the shared internal-id filter also gates telemetry. |
+| Decision                                                 | Rationale                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Port the service logic (drop unused helpers), kebab-case | Pure state machine, well-tested in preview; no zod dependency so no zod-4 rework. `selectFirstAvailable`/`reset` have no caller here, so they are not ported.                                                                                                                                                                                                                                                                                                                         |
+| Session-scoped on Config                                 | Matches main's per-session Config and preview's ownership; avoids a process-global health singleton.                                                                                                                                                                                                                                                                                                                                                                                  |
+| Only capacity → sticky_retry in this port                | `isFallbackEligible` already bounds the scope; terminal/quota marking would touch auth/billing, deferred.                                                                                                                                                                                                                                                                                                                                                                             |
+| Setting gate default off                                 | Behavior change to the fallback chain must be opt-in and reversible first.                                                                                                                                                                                                                                                                                                                                                                                                            |
+| Turn boundary at request entry                           | `beginTurn`/`resetTurn` run in `sendMessageStream` before any model call, so an explicit Retry the primary serves still re-probes consumed fallbacks.                                                                                                                                                                                                                                                                                                                                 |
+| Allowlist session turns (`isSessionTurn`)                | Membership is decided by the sender (`LlmClient` per `messageType`; the ACP session send and prepared resume set it true), not inferred from "went through `Turn`". Background senders (`turnModelRound` subagent/speculation, forked, side-query, suggestion, Notification/Teammate) leave it unset. An allowlist, not a prompt-id blacklist, because background ids (e.g. `session#agent#ordinal`) match no fixed blacklist and the shared internal-id filter also gates telemetry. |
 
 ## Files affected
 
@@ -142,7 +149,8 @@ reversible; a later PR can flip the default once nightly evidence is in.
   turns; `isExplicitRetry` and `isSessionTurn` on `LlmChatSendOptions`.
 - `packages/core/src/core/turn.ts` + `packages/core/src/core/client.ts` — thread
   the explicit-Retry flag from `SendMessageType.Retry` to the send options, and
-  mark every `Turn`-driven send with `isSessionTurn`.
+  decide ledger membership at the sender: `LlmClient` sets `isSessionTurn` per
+  `messageType`, `Turn` forwards it from a constructor parameter (default unset).
 - `packages/cli/src/config/settingsSchema.ts` + `packages/cli/src/config/config.ts`
   — `experimental.modelAvailabilityTracking` (default false) + propagation, with
   CLI wiring tests mirroring the `unifiedAgentLoop` opt-in/opt-out/unset shape.
@@ -163,7 +171,9 @@ reversible; a later PR can flip the default once nightly evidence is in.
 - Internal background sends neither wipe the live turn's consumed state nor
   fail on a skipped fallback; an explicit Retry the primary serves still
   re-probes consumed fallbacks (regression cases in `llm-chat.test.ts`).
-- Config pins the false default and a stable lazy service instance.
+- Config pins the false default, a stable lazy service instance, and that
+  derived Configs (via `deriveConfig`) share the session ledger through the
+  prototype chain once the session has created it.
 - build + typecheck + affected suites green; multi-pass self-audit.
 
 ## Out of scope (follow-ups)

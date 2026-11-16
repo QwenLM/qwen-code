@@ -275,7 +275,6 @@ describe('Turn', () => {
       }
       expect(dispatched).not.toHaveBeenCalled();
       expect(mockSendMessageStream.mock.lastCall?.[4]).toEqual({
-        isSessionTurn: true,
         onModelRequestDispatched: dispatched,
       });
     });
@@ -294,7 +293,7 @@ describe('Turn', () => {
         },
         'prompt-id-1',
         undefined,
-        { isSessionTurn: true, promptId: 'stable-prompt-id' },
+        { promptId: 'stable-prompt-id' },
       );
 
       expect(events).toEqual([contentEvent('Hello'), contentEvent(' world')]);
@@ -327,16 +326,16 @@ describe('Turn', () => {
         'prompt-id-1',
         undefined,
         {
-          isSessionTurn: true,
           promptId: 'stable-prompt-id',
           retractDeliveredOutputOnRetry: true,
         },
       );
     });
 
-    it('forwards isExplicitRetry to the chat send options', async () => {
+    it('forwards isExplicitRetry and isSessionTurn to the chat send options', async () => {
       // client.ts passes the explicit-Retry flag as Turn's 10th positional
-      // argument; pin that slot so a constructor reorder cannot misroute it.
+      // argument and ledger membership as the 11th; pin both slots so a
+      // constructor reorder cannot misroute them.
       turn = new Turn(
         {
           sendMessageStream: mockSendMessageStream,
@@ -353,6 +352,7 @@ describe('Turn', () => {
         undefined,
         undefined,
         undefined,
+        true,
         true,
       );
       await run([textChunk('Hello')]);

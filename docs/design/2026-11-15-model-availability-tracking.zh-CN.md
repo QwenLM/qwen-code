@@ -35,7 +35,7 @@ main 的模型 fallback（`core/llm-chat.ts`「Model fallback chain」）是**�
 - 在设置门控之下，轮边界在 `sendMessageStream` 入口每请求执行一次——不在 fallback 分支内——因此即使某请求根本没进入链也生效：
   - `beginTurn(prompt_id)`：轮键（用户 prompt id）变化时对 sticky 模型重探一次；同键请求保持 consumed 状态。
   - 显式用户 Retry（`SendMessageType.Retry`，经 `LlmClient` → `Turn` → `LlmChatSendOptions` 穿为 `isExplicitRetry`）调 `resetTurn()`，使 Retry 重探失败尝试已消费的 fallback——尽管 Retry 复用 prompt id，也尽管已恢复的 primary 服务了 Retry 的第一个请求。
-  - 只有会话轮发送参与，经由台账门要求的 `isSessionTurn` 标志。`Turn.run` 对交互式 `LlmClient` → `Turn` 路径默认置 true，ACP 会话发送显式置位。`turnModelRound` 将其覆盖为 false——它的每个生产调用方都是共享会话 `Config` 的后台轮（subagent 共享 loop 与 unified-loop speculation）；直接后台发送（forked 查询、legacy speculation/subagent、side query、建议）调 `sendMessageStream` 时不带该标志。因此后台操作既不轮换正在进行那一轮的键，也不读写其标记，并保持门关闭时的 fallback 行为。这是白名单而非 prompt id 黑名单：后台发送方用的 id（如 subagent 的 `session#agent#ordinal`）任何固定黑名单都匹配不到，且共用的 `isInternalPromptId` 过滤集合不能扩展——它同时门控记录/遥测。若不排除，一次后台发送会清掉正在进行那一轮的 consumed 状态，并可能跳过一个瞬时耗尽的 fallback，使一个门关闭时链本会服务的请求失败。
+  - 只有会话轮发送参与，经由台账门要求的 `isSessionTurn` 标志。成员资格由**发送方**判定，而非从「走了 `Turn`」推断：`LlmClient` 按 `messageType` 为正在进行那一轮的 `Turn` 置 `isSessionTurn`——本轮自身的发送（用户 query、retry、tool result、续轮）为 true，`Notification`/`Teammate`（携带全新 prompt id）与并发 side query 为 false。`Turn` 以构造参数接收（默认不设），仅在置位时转发到 send options。`turnModelRound` 构造其 `Turn` 时不带它——它的每个生产调用方都是共享会话 `Config` 的后台轮（subagent 共享 loop 与 unified-loop speculation）。ACP 会话发送与 hosted-harness prepared resume 置 true——二者都是真实的会话发送（prepared resume 委托给 `sendMessageStream`）。直接后台发送（forked 查询、legacy speculation/subagent、side query、建议）调 `sendMessageStream` 时不带该标志。因此后台操作既不轮换正在进行那一轮的键，也不读写其标记，并保持门关闭时的 fallback 行为。这是白名单而非 prompt id 黑名单：后台发送方用的 id（如 subagent 的 `session#agent#ordinal`）任何固定黑名单都匹配不到，且共用的 `isInternalPromptId` 过滤集合不能扩展——它同时门控记录/遥测。若不排除，一次后台发送会清掉正在进行那一轮的 consumed 状态，并可能跳过一个瞬时耗尽的 fallback，使一个门关闭时链本会服务的请求失败。
 - 在 fallback 链本身，只有 fallback 模型被写入/读取台账；primary 仍每请求被尝试、不被标记（标记它是死写——链上两处同模型守卫把它排除在跳过之外）：
   - 尝试某 fallback 模型前查 `snapshot(model)`；跳过报不可用的模型（记入既有 skip/debug 路径）。
   - 某 fallback 在 fallback-eligible 容量错误上耗尽重试时，调 `markRetryOncePerTurn(model)` 再 `consumeStickyAttempt(model)`，使其在本轮剩余被跳过。即使该 fallback 在失败前已产出内容也会标记（链仍在那里停止以避免重复用户可见输出）；标记仍以 `isFallbackEligible` 为门，故产出后的 auth/client 错误不会被记录。
@@ -49,21 +49,21 @@ main 的模型 fallback（`core/llm-chat.ts`「Model fallback chain」）是**�
 
 ## 关键设计决策
 
-| 决策                                   | 理由                                                                                                                                                                                                                                             |
-| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 移植服务逻辑（删无用助手），kebab-case | 纯状态机、preview 已充分测试；无 zod 依赖故无需 zod-4 改造。`selectFirstAvailable`/`reset` 在此无调用方，故不移植。                                                                                                                              |
-| 会话级挂 Config                        | 与 main 的按会话 Config 及 preview 归属一致；避免进程级健康单例。                                                                                                                                                                                |
-| 本次仅容量→sticky_retry                | `isFallbackEligible` 已限定范围；terminal/quota 会触碰 auth/billing，延后。                                                                                                                                                                      |
-| 设置门默认关                           | fallback 链的行为变更须先 opt-in、可回退。                                                                                                                                                                                                       |
-| 轮边界在请求入口                       | `beginTurn`/`resetTurn` 在 `sendMessageStream` 任何模型调用前执行，故被 primary 服务的显式 Retry 仍重探已消费的 fallback。                                                                                                                       |
-| 会话轮白名单（`isSessionTurn`）        | 只有 `Turn` 驱动的发送参与；后台发送方（subagent、forked、speculation、side-query、建议）不打该标志。用白名单而非 prompt id 黑名单，因为后台 id（如 `session#agent#ordinal`）任何固定黑名单都匹配不到，且共用 internal-id 过滤集合同时门控遥测。 |
+| 决策                                   | 理由                                                                                                                                                                                                                                                                                                                                                                                    |
+| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 移植服务逻辑（删无用助手），kebab-case | 纯状态机、preview 已充分测试；无 zod 依赖故无需 zod-4 改造。`selectFirstAvailable`/`reset` 在此无调用方，故不移植。                                                                                                                                                                                                                                                                     |
+| 会话级挂 Config                        | 与 main 的按会话 Config 及 preview 归属一致；避免进程级健康单例。                                                                                                                                                                                                                                                                                                                       |
+| 本次仅容量→sticky_retry                | `isFallbackEligible` 已限定范围；terminal/quota 会触碰 auth/billing，延后。                                                                                                                                                                                                                                                                                                             |
+| 设置门默认关                           | fallback 链的行为变更须先 opt-in、可回退。                                                                                                                                                                                                                                                                                                                                              |
+| 轮边界在请求入口                       | `beginTurn`/`resetTurn` 在 `sendMessageStream` 任何模型调用前执行，故被 primary 服务的显式 Retry 仍重探已消费的 fallback。                                                                                                                                                                                                                                                              |
+| 会话轮白名单（`isSessionTurn`）        | 成员资格由发送方判定（`LlmClient` 按 `messageType`；ACP 会话发送与 prepared resume 置 true），而非从「走了 `Turn`」推断。后台发送方（`turnModelRound` 的 subagent/speculation、forked、side-query、建议、Notification/Teammate）不打该标志。用白名单而非 prompt id 黑名单，因为后台 id（如 `session#agent#ordinal`）任何固定黑名单都匹配不到，且共用 internal-id 过滤集合同时门控遥测。 |
 
 ## 涉及文件
 
 - `packages/core/src/core/model-availability-service.ts`（新）+ 同址测试。
 - `packages/core/src/config/config.ts` — 持有服务的懒加载 getter + `modelAvailabilityTracking` 参数。
 - `packages/core/src/core/llm-chat.ts` — 请求入口的轮边界 + 门控下的 fallback 链查询/标记，会话轮白名单；`LlmChatSendOptions` 上的 `isExplicitRetry` 与 `isSessionTurn`。
-- `packages/core/src/core/turn.ts` + `packages/core/src/core/client.ts` — 把显式 Retry 标志从 `SendMessageType.Retry` 穿到 send options，并给每次 `Turn` 驱动的发送打上 `isSessionTurn`。
+- `packages/core/src/core/turn.ts` + `packages/core/src/core/client.ts` — 把显式 Retry 标志从 `SendMessageType.Retry` 穿到 send options，并在发送方判定台账成员资格：`LlmClient` 按 `messageType` 置 `isSessionTurn`，`Turn` 从构造参数（默认不设）转发。
 - `packages/cli/src/config/settingsSchema.ts` + `packages/cli/src/config/config.ts` — `experimental.modelAvailabilityTracking`（默认 false）+ 透传，CLI 接线测试镜像 `unifiedAgentLoop` 的 opt-in/opt-out/unset 形状。
 - `docs/users/configuration/settings.md` + `packages/web-shell/client/settings.ts` / `settings/messages.ts` — 设置参考行、Web Shell alias 与 zh-CN label/description。
 
@@ -73,7 +73,7 @@ main 的模型 fallback（`core/llm-chat.ts`「Model fallback chain」）是**�
 - 门关闭时 fallback 链行为逐字节不变（既有 llm-chat fallback 套件保持绿），并由一条用例钉住：注入真实 service 而门返回 false，断言耗尽的 fallback 仍被重试、getter 从未被调用。
 - 门开启时，容量错误耗尽的模型在同轮下一请求被跳过、下一轮重探一次。
 - 内部后台发送既不擦除正在进行那一轮的 consumed 状态，也不因跳过 fallback 而失败；被 primary 服务的显式 Retry 仍重探已消费的 fallback（`llm-chat.test.ts` 回归用例）。
-- Config 钉住 false 默认值与稳定的懒加载 service 单实例。
+- Config 钉住 false 默认值、稳定的懒加载 service 单实例，以及派生 Config（经 `deriveConfig`）在会话创建台账后通过原型链共享它。
 - build + typecheck + 受影响套件绿；多轮自审。
 
 ## 范围外（follow-up）

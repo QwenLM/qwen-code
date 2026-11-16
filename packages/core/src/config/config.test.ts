@@ -7470,6 +7470,12 @@ describe('Server Config (config.ts)', () => {
             modelAvailabilityTracking: true,
           }).getModelAvailabilityService(),
         ).not.toBe(first);
+        // A derived Config (deriveConfig = Object.create(base)) deliberately
+        // shares the session's ledger through the prototype chain once the
+        // session has created it — the load-bearing prototype-view contract,
+        // not a leak. Ledger membership is gated per send (isSessionTurn), so
+        // background rounds on a derived Config do not touch the live turn.
+        expect(deriveConfig(config).getModelAvailabilityService()).toBe(first);
       });
     });
 

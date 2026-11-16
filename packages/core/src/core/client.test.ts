@@ -12843,6 +12843,26 @@ Other open files:
         }
       });
 
+      it('marks ledger membership only for the live turn’s own sends', async () => {
+        retryChat({
+          stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
+        });
+        mockTurnRunFn.mockImplementation(() => textTurn('response'));
+
+        for (const [type, expectedMembership] of [
+          [SendMessageType.UserQuery, true],
+          [SendMessageType.Retry, true],
+          [SendMessageType.ToolResult, true],
+          [SendMessageType.Notification, false],
+          [SendMessageType.Teammate, false],
+        ] as const) {
+          await run([{ text: 'my prompt' }], 'session########6', { type });
+          expect(mockTurnConstructorFn.mock.calls.at(-1)?.[10]).toBe(
+            expectedMembership,
+          );
+        }
+      });
+
       it('restores stripped retry entries when only a concurrent send pushes', async () => {
         const orphanedPrompt: Content = userText('retry me');
         const mockChat = retryChat({

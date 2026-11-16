@@ -5182,6 +5182,13 @@ export class LlmClient {
         suppressedHookContext,
         workflowModeEligible ? () => onModelRequestDispatched?.() : undefined,
         messageType === SendMessageType.Retry,
+        // Ledger membership is decided here, where the sender is known: the
+        // live turn's own sends participate; Notification/Teammate carry fresh
+        // prompt ids and a concurrent side query is not this turn, so they must
+        // not rotate the live turn's key or read its marks.
+        messageType !== SendMessageType.Notification &&
+          messageType !== SendMessageType.Teammate &&
+          !options?.isConcurrentSideQuery,
       );
 
       // Assemble the outgoing request. IDE context is merged into the
