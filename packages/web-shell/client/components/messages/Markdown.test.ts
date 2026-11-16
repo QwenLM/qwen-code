@@ -22,6 +22,7 @@ import {
 import {
   isSafeHref,
   isSafeImageSrc,
+  isLocalFilesystemImageSrc,
   Markdown,
   markdownUrlTransform,
   resolveFenceLanguage,
@@ -207,6 +208,169 @@ describe('isSafeImageSrc', () => {
   });
 });
 
+describe('isLocalFilesystemImageSrc', () => {
+  it('detects POSIX absolute paths rooted at OS directories', () => {
+    expect(isLocalFilesystemImageSrc('/Users/foo/shot.png')).toBe(true);
+    expect(isLocalFilesystemImageSrc('/home/foo/shot.png')).toBe(true);
+    expect(isLocalFilesystemImageSrc('/tmp/shot.png')).toBe(true);
+    expect(isLocalFilesystemImageSrc('/var/log/shot.png')).toBe(true);
+    expect(isLocalFilesystemImageSrc('/private/var/folders/x/shot.png')).toBe(
+      true,
+    );
+    expect(isLocalFilesystemImageSrc('/Volumes/External/shot.png')).toBe(true);
+    expect(isLocalFilesystemImageSrc('/mnt/c/shot.png')).toBe(true);
+  });
+
+  it('detects Windows drive-letter and UNC paths', () => {
+    expect(isLocalFilesystemImageSrc('C:\\Users\\foo\\shot.png')).toBe(true);
+    expect(isLocalFilesystemImageSrc('d:/temp/shot.png')).toBe(true);
+    expect(isLocalFilesystemImageSrc('\\\\server\\share\\shot.png')).toBe(true);
+  });
+
+  it('detects ~ home paths', () => {
+    expect(isLocalFilesystemImageSrc('~/shot.png')).toBe(true);
+    expect(isLocalFilesystemImageSrc('~alice/shot.png')).toBe(true);
+  });
+
+  it('does not treat URLs and same-origin routes as filesystem paths', () => {
+    expect(isLocalFilesystemImageSrc('https://example.com/img.png')).toBe(
+      false,
+    );
+    expect(isLocalFilesystemImageSrc('/images/logo.png')).toBe(false);
+    expect(isLocalFilesystemImageSrc('//evil.com/img.png')).toBe(false);
+    expect(isLocalFilesystemImageSrc('data:image/png;base64,iVBOR')).toBe(
+      false,
+    );
+    expect(isLocalFilesystemImageSrc('img/logo.png')).toBe(false);
+    // A same-origin route whose first segment merely resembles an OS root.
+    expect(isLocalFilesystemImageSrc('/Users.png')).toBe(false);
+  });
+
+  it('returns false for empty/undefined', () => {
+    expect(isLocalFilesystemImageSrc(undefined)).toBe(false);
+    expect(isLocalFilesystemImageSrc('')).toBe(false);
+  });
+});
+
+describe('markdown image fallback', () => {
+  it('renders a local POSIX path as a chip, not a broken <img>', () => {
+    const view = renderMd('![screenshot](/Users/foo/shot.png)');
+    try {
+      expect(view.querySelector('img')).toBeNull();
+      const chip = view.querySelector(
+        '[data-web-shell-image-fallback="local-path"]',
+      );
+      expect(chip).toBeTruthy();
+      expect(chip!.textContent).toContain('/Users/foo/shot.png');
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('renders a Windows drive path without an <img>', () => {
+    // react-markdown sanitizes the drive-letter scheme to '', so the chip
+    // must still appear from the unsafe-src branch, not a broken image.
+    const view = renderMd('![screenshot](C:\\Users\\foo\\shot.png)');
+    try {
+      expect(view.querySelector('img')).toBeNull();
+      expect(
+        view.querySelector('[data-web-shell-image-fallback]'),
+      ).toBeTruthy();
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('renders a ~ home path as a local-path chip', () => {
+    const view = renderMd('![shot](~/shot.png)');
+    try {
+      expect(view.querySelector('img')).toBeNull();
+      const chip = view.querySelector(
+        '[data-web-shell-image-fallback="local-path"]',
+      );
+      expect(chip).toBeTruthy();
+      expect(chip!.textContent).toContain('~/shot.png');
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('replaces a file: scheme with a chip instead of a broken <img>', () => {
+    const view = renderMd('![secret](file:///tmp/private.png)');
+    try {
+      expect(view.querySelector('img')).toBeNull();
+      expect(
+        view.querySelector('[data-web-shell-image-fallback="unsafe-src"]'),
+      ).toBeTruthy();
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('degrades to a chip when the image load fails', () => {
+    const view = renderMd('![chart](https://example.com/chart.png)');
+    try {
+      const img = view.querySelector('img')!;
+      expect(img).toBeTruthy();
+      act(() => {
+        img.dispatchEvent(new Event('error'));
+      });
+      expect(view.querySelector('img')).toBeNull();
+      const chip = view.querySelector(
+        '[data-web-shell-image-fallback="load-error"]',
+      );
+      expect(chip).toBeTruthy();
+      expect(chip!.textContent).toContain('chart');
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('keeps loading a safe http image', () => {
+    const view = renderMd('![logo](https://example.com/logo.png)');
+    try {
+      const img = view.querySelector('img')!;
+      expect(img).toBeTruthy();
+      expect(img.getAttribute('src')).toBe('https://example.com/logo.png');
+      expect(view.querySelector('[data-web-shell-image-fallback]')).toBeNull();
+    } finally {
+      cleanup(view);
+    }
+  });
+
+  it('retries when the src changes after a failed load', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const setRender = (content: string) =>
+      act(() => {
+        root.render(
+          createElement(
+            I18nProvider,
+            { language: 'en' },
+            createElement(Markdown, { content }),
+          ),
+        );
+      });
+    try {
+      setRender('![a](https://example.com/missing.png)');
+      const img = container.querySelector('img')!;
+      act(() => {
+        img.dispatchEvent(new Event('error'));
+      });
+      expect(
+        container.querySelector('[data-web-shell-image-fallback="load-error"]'),
+      ).toBeTruthy();
+      // A new (different) src in the same position gets a fresh <img>.
+      setRender('![b](https://example.com/other.png)');
+      expect(container.querySelector('img')!).toBeTruthy();
+    } finally {
+      act(() => root.unmount());
+      container.remove();
+    }
+  });
+});
+
 describe('markdownUrlTransform', () => {
   it('lets the qwen-session scheme through untouched', () => {
     expect(markdownUrlTransform('qwen-session://abc-123')).toBe(
@@ -322,7 +486,8 @@ describe('document image policy', () => {
       );
     });
 
-    expect(container.querySelector('img')?.getAttribute('src')).toBeNull();
+    // The fallback chip must not write the URL into the export DOM.
+    expect(container.querySelector('img')).toBeNull();
     expect(container.innerHTML).not.toContain('https://example.com');
 
     act(() => root.unmount());

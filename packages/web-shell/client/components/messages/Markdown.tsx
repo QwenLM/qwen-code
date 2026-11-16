@@ -193,6 +193,23 @@ export function isSafeImageSrc(
   return SAFE_HREF_SCHEMES.test(trimmed);
 }
 
+/**
+ * Local filesystem paths that can never load in a browser: Windows
+ * drive-letter and UNC paths, `~` home paths, and POSIX absolute paths
+ * rooted at well-known OS directories. `isSafeImageSrc` accepts any single
+ * leading `/` (same-origin routes), so these need an explicit check —
+ * otherwise the browser requests e.g. `/Users/foo/shot.png` against the
+ * Web Shell origin, gets a 404, and the message keeps a broken `<img>`
+ * placeholder (#17452).
+ */
+const LOCAL_FILESYSTEM_IMAGE_SRC =
+  /^(?:[A-Za-z]:[\\/]|\\\\|~(?:\w+)?[/\\]|\/(?:Users|home|tmp|var|opt|private|Volumes|mnt|media|srv|data|root|etc|boot|bin|sbin|usr|lib64|lib|dev|run|proc|sys)[\\/])/i;
+
+export function isLocalFilesystemImageSrc(url: string | undefined): boolean {
+  if (!url) return false;
+  return LOCAL_FILESYSTEM_IMAGE_SRC.test(url.trim());
+}
+
 // Track last initialized theme to avoid redundant mermaid.initialize() calls.
 // mermaid.initialize() is idempotent but runs per-block; with N diagrams in a
 // transcript this saves N-1 redundant calls per render cycle.
@@ -978,10 +995,45 @@ function MarkdownLink({
 
 function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
   const renderMode = useTranscriptRenderMode();
-  const safeSrc = isSafeImageSrc(src, renderMode === 'document')
-    ? src
-    : undefined;
-  return <img src={safeSrc} alt={alt || ''} className={styles.image} />;
+  const documentMode = renderMode === 'document';
+  const trimmedSrc = (src ?? '').trim();
+  const isLocalPath = isLocalFilesystemImageSrc(trimmedSrc);
+  const [failedSrc, setFailedSrc] = useState<string | null>(null);
+  const loadFailed = failedSrc === trimmedSrc;
+  if (isLocalPath || loadFailed || !isSafeImageSrc(trimmedSrc, documentMode)) {
+    const reason = isLocalPath
+      ? 'local-path'
+      : loadFailed
+        ? 'load-error'
+        : 'unsafe-src';
+    // Document mode (export) never writes a src — remote or local — into the
+    // DOM: the export document must not contain machine paths or URLs the
+    // viewer did not author.
+    const pathText = documentMode ? '' : trimmedSrc;
+    const text = pathText
+      ? alt && alt !== pathText
+        ? `${alt} — ${pathText}`
+        : pathText
+      : alt ||
+        (documentMode ? '(image unavailable)' : '(missing image source)');
+    return (
+      <span
+        className={styles.imageFallback}
+        data-web-shell-image-fallback={reason}
+        title={documentMode ? undefined : text}
+      >
+        {text}
+      </span>
+    );
+  }
+  return (
+    <img
+      src={trimmedSrc}
+      alt={alt || ''}
+      className={styles.image}
+      onError={() => setFailedSrc(trimmedSrc)}
+    />
+  );
 }
 
 /**
