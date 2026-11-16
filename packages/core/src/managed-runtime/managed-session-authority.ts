@@ -3705,12 +3705,17 @@ export class LocalManagedSessionAuthority {
    * those records here. `absent` submits the same bytes once: the head not
    * having moved is not proof the holder rolled back, and dropping the batch
    * would fence the next commit if that holder then lands. An unsettled
-   * answer keeps the attempt so the next append asks again. Any other
-   * failure proves the log cannot be trusted and fences it for good.
+   * answer keeps the attempt so the next append asks again. A definite
+   * rejection drops the batch without stopping the writer. Other failures
+   * prove the log cannot be trusted and fence it for good.
    */
   private async settleUnsettledAppend(): Promise<void> {
     if (this.unsettledAppend === undefined) return;
-    await this.resumeUnsettledAppend();
+    try {
+      await this.resumeUnsettledAppend();
+    } catch (cause) {
+      if (!(cause instanceof ManagedSessionCommitRejectedError)) throw cause;
+    }
   }
 
   private async resumeUnsettledAppend(): Promise<ManagedSessionCommitReceipt> {
@@ -3733,13 +3738,9 @@ export class LocalManagedSessionAuthority {
       try {
         await this.journal.appendTransaction(pending.records);
       } catch (cause) {
-        if (
-          cause instanceof ManagedSessionAppendUnsettledError ||
-          cause instanceof ManagedSessionCommitRejectedError
-        ) {
-          throw cause;
-        }
+        if (cause instanceof ManagedSessionAppendUnsettledError) throw cause;
         this.unsettledAppend = undefined;
+        if (cause instanceof ManagedSessionCommitRejectedError) throw cause;
         this.writeFailure =
           cause instanceof Error ? cause : new Error(String(cause));
         throw cause;

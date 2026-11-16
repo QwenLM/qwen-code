@@ -93,7 +93,12 @@ Checkpoint ownership validation can choose a Session-wide reference index when m
    session as it does today.
 4. `ManagedSessionJournalFencedError`, a failed writer reacquire, and any
    other definite store failure clear the saved batch, stop this writer, and
-   park the session.
+   park the session, except for an explicit rollbackable non-commit rejection.
+5. `ManagedSessionCommitRejectedError` proves the resubmitted batch did not
+   commit. It clears that batch without applying events or stopping the
+   writer. The original caller receives its rejection. When a later operation
+   settles the old batch before starting, that old rejection is discarded so
+   the current operation can proceed and report its own result.
 
 The Harness still sets `session.blocked` only when that final failure
 surfaces as `HostedToolRecoveryRequiredError`. A resumed commit returns to
@@ -156,7 +161,9 @@ including an identity mismatch, still appends `environment.failed` /
 - Authority: a lost acknowledgement with `landed` applies the original
   events on that call. `absent` submits the same command once. A resubmit
   that is also unacknowledged leaves the events in `unsettledAppend`. A
-  fenced settle stops the writer. The budget allows one settle read after
+  rejected resubmit clears the batch without stopping later input, including
+  when rejection occurs during a later operation's settlement. A fenced
+  settle stops the writer. The budget allows one settle read after
   the deadline and does not wait out the wall clock.
 - Harness: a prompt whose first journal append loses its acknowledgement and
   then settles `landed` finishes with `recoveryBlocked` false. A fenced

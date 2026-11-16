@@ -319,6 +319,67 @@ describe('managed authority history reads', () => {
     ).toEqual([3, 4]);
   });
 
+  it('discards a rejected same-call resubmit without stopping later input', async () => {
+    const harness = await fixture(1);
+    harness.journal.settleAppend = async () => 'absent';
+    const append = vi
+      .spyOn(harness.journal, 'appendTransaction')
+      .mockRejectedValueOnce(
+        new ManagedSessionAppendUnsettledError(new Error('unknown')),
+      )
+      .mockRejectedValueOnce(
+        new ManagedSessionCommitRejectedError(new Error('rejected')),
+      );
+    await expect(harness.submit(harness.authority, 2)).rejects.toThrow(
+      'rejected',
+    );
+    expect(harness.authority.readEvents({ afterSequence: 2 })).toEqual([]);
+    await expect(harness.submit(harness.authority, 3)).resolves.toMatchObject({
+      replayed: false,
+    });
+    expect(append).toHaveBeenCalledTimes(3);
+    expect(
+      harness.authority.lastEventOfKind('input.accepted')?.payload['inputId'],
+    ).toBe('input-3');
+    expect(
+      harness.authority
+        .readEvents({ afterSequence: 2 })
+        .map((event) => event.sequence),
+    ).toEqual([3, 4]);
+  });
+
+  it('continues the current input when a previous unsettled resubmit is rejected', async () => {
+    const harness = await fixture(1);
+    harness.journal.settleAppend = async () => 'absent';
+    const append = vi
+      .spyOn(harness.journal, 'appendTransaction')
+      .mockRejectedValueOnce(
+        new ManagedSessionAppendUnsettledError(new Error('unknown')),
+      )
+      .mockRejectedValueOnce(
+        new ManagedSessionAppendUnsettledError(new Error('still unknown')),
+      )
+      .mockRejectedValueOnce(
+        new ManagedSessionCommitRejectedError(new Error('rejected')),
+      );
+    await expect(harness.submit(harness.authority, 2)).rejects.toThrow(
+      'still unknown',
+    );
+    expect(harness.authority.readEvents({ afterSequence: 2 })).toEqual([]);
+    await expect(harness.submit(harness.authority, 3)).resolves.toMatchObject({
+      replayed: false,
+    });
+    expect(append).toHaveBeenCalledTimes(4);
+    expect(
+      harness.authority.lastEventOfKind('input.accepted')?.payload['inputId'],
+    ).toBe('input-3');
+    expect(
+      harness.authority
+        .readEvents({ afterSequence: 2 })
+        .map((event) => event.sequence),
+    ).toEqual([3, 4]);
+  });
+
   it('stops the writer when settlement finds the journal was fenced', async () => {
     const harness = await fixture(1);
     harness.journal.settleAppend = async () => {

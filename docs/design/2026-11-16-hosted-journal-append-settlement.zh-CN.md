@@ -51,7 +51,8 @@ H2 默认等锁 2 秒。加长等锁时间不是这次改动。更长的等待�
 1. `settleAppend` 回答 `landed`：`applyCommitted` 应用保存的事件。调用方看到的是提交成功。
 2. `settleAppend` 回答 `absent`：`appendTransaction` 把保存的字节再提交一次。原事务已经提交时，服务端按 `operation` + `commandId`（含 `transactionId` 和 `recordDigest`）重放。原事务已回滚时，这一次是唯一写入。原事务仍开着时，这一次等在会话行锁上。这次续交自己的回执再丢失，就继续保留 `unsettledAppend`。`absent` 路径不丢掉事件。
 3. 续交的等待独立于已经耗尽的客户端预算。上限是 30 秒写事务预算，截止后再允许一次结算读。到点仍不能区分，就抛出 `ManagedSessionAppendUnsettledError`，Harness 按今天的方式停住会话。
-4. `ManagedSessionJournalFencedError`、写租约重新取得失败，以及其他确定的存储失败，会清掉保存的批次、停住这个 writer，并停住会话。
+4. `ManagedSessionJournalFencedError`、写租约重新取得失败，以及其他确定的存储失败，会清掉保存的批次、停住这个 writer，并停住会话，但显式的可回滚未提交拒绝除外。
+5. `ManagedSessionCommitRejectedError` 证明重交的批次没有提交。它清掉该批次，不应用事件，也不停住 writer。原调用方收到自己的拒绝。后续操作在开始前结算旧批次时，会丢弃该旧拒绝，让当前操作继续并返回它自己的结果。
 
 Harness 仍只在这个最终失败以 `HostedToolRecoveryRequiredError` 出现时设置 `session.blocked`。续交成功则作为成功回到工具轮次，模型循环从已提交的记录继续。
 
@@ -89,7 +90,7 @@ Harness 仍只在这个最终失败以 `HostedToolRecoveryRequiredError` 出现�
 
 ## 验证计划
 
-- 权威层：回执丢失且 `landed` 时，同一次调用应用原来的事件。`absent` 时按同一命令再提交一次。再提交仍然未被确认时，事件留在 `unsettledAppend`。结算被 fencing 时停住 writer。预算在截止后允许一次结算读，并且不等待墙上时钟。
+- 权威层：回执丢失且 `landed` 时，同一次调用应用原来的事件。`absent` 时按同一命令再提交一次。再提交仍然未被确认时，事件留在 `unsettledAppend`。重交被拒绝时清掉该批次，不阻塞后续输入，包含后续操作结算旧批次时才被拒绝的情形。结算被 fencing 时停住 writer。预算在截止后允许一次结算读，并且不等待墙上时钟。
 - Harness：提示词的第一次日志追加丢失回执并随后以 `landed` 结算时，结束状态的 `recoveryBlocked` 为 false。被 fencing 的追加结束时 `recoveryBlocked` 为 true。
 - Java：`/bin/sleep 20` 抛出 `MacOsIdentityProbeTimeoutException`。超时 cause 不追加 `environment.failed`。身份不匹配的 `IOException` 会追加。
 - 归属 SQL：重复引用不会导致扫描整个 Session 的资源引用；资源缺失、其他 scope、未来 revision、未提交或孤立 journal owner 仍被拒绝。真实 MySQL 8.4 验收仍需另行完成。
