@@ -6,7 +6,10 @@
 
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { resolvePrivatePolicy } from '@qwen-code/channel-base';
+import {
+  MANAGED_OUTBOUND_LIMIT,
+  resolvePrivatePolicy,
+} from '@qwen-code/channel-base';
 import type {
   ManagedChannelPolicy,
   ManagedInboundEvent,
@@ -16,6 +19,8 @@ import type {
 import {
   MANAGED_DINGTALK_PENDING_LIMIT,
   ManagedDingtalkStateStore,
+  RECENT_LIMIT,
+  WEBHOOK_LIMIT,
 } from './managed-state.js';
 import type { ManagedDingtalkState, ManagedReceipt } from './managed-state.js';
 
@@ -354,23 +359,17 @@ export class ManagedDingtalkAdapter {
     const conversationType = str(parsed['conversationType']);
     const rawText = extractText(parsed);
     const text = rawText ? fitInboundText(rawText) : rawText;
-    // Remember the newest webhook for the conversation before anything else:
-    // the reply may arrive after this webhook's own message is long gone.
-    if (conversationId && sessionWebhook) {
-      state.webhooks[conversationId] = sessionWebhook;
-      const keys = Object.keys(state.webhooks);
-      if (keys.length > 256) delete state.webhooks[keys[0]!];
-      this.persist();
-    }
     const eventId = `dingtalk:${msgId}`;
     const skip = () => {
-      state.recent = [...state.recent, eventId].slice(-256);
+      state.recent = [...state.recent, eventId].slice(-RECENT_LIMIT);
       this.persist();
     };
     // The managed path serves private chats under the private-chat policy.
     // A group frame would be answered into the group webhook for every member
     // to read, so drop it until an explicit group policy exists (Legacy's
-    // GroupGate defaults to disabled for the same reason).
+    // GroupGate defaults to disabled for the same reason). Drop it before the
+    // webhook cache write so group traffic never spends the cache budget the
+    // admission gate depends on (#17173 R3-2).
     if (conversationType === '2') {
       this.log(
         `Managed DingTalk group message ${item.messageId} is skipped; the managed path serves private chats only.`,
@@ -382,6 +381,40 @@ export class ManagedDingtalkAdapter {
       skip();
       return;
     }
+    // Evaluate the allowlist before touching the cache: a sender the policy
+    // refuses must not spend the webhook-cache budget admission depends on
+    // (#17173 R4-2).
+    if (!this.senderAllowed(senderId)) {
+      this.log(
+        `Managed DingTalk sender ${senderId} is not allowed; message skipped.`,
+      );
+      skip();
+      return;
+    }
+    // Remember the newest webhook for the conversation: the reply may arrive
+    // after this webhook's own message is long gone. Only private frames from
+    // allowed senders reach this point, so neither group traffic nor refused
+    // senders evict a private conversation (#17173 R3-2, R4-2).
+    if (sessionWebhook) {
+      this.touchWebhook(conversationId, sessionWebhook);
+    }
+    // A frame with no usable reply target — neither a committed sessionWebhook
+    // nor one cached for the conversation — can never be answered; drop it at
+    // admission instead of spending a claim slot and control-plane work on a
+    // reply the send path would only reject (#17173 R1-32). Own-key membership,
+    // not truthiness: a conversationId naming an Object.prototype member
+    // ('constructor', 'toString', ...) must not resolve on an empty cache
+    // (#17173 R2-2).
+    if (!Object.hasOwn(state.webhooks, conversationId)) {
+      skip();
+      return;
+    }
+    // A webhook-less frame admitted on the cached entry still counts as seen:
+    // refresh its recency so the busiest conversation is not the one evicted
+    // (#17173 R3-4).
+    if (!sessionWebhook) {
+      this.touchWebhook(conversationId, state.webhooks[conversationId]);
+    }
     // Dedupe against both the settled window and the in-flight claims: a frame
     // redelivered while its claim is still pending (its admission answer was
     // lost) must not be staged a second time before recent is updated.
@@ -389,13 +422,6 @@ export class ManagedDingtalkAdapter {
       state.recent.includes(eventId) ||
       state.pending.some((entry) => entry.eventId === eventId)
     ) {
-      return;
-    }
-    if (!this.senderAllowed(senderId)) {
-      this.log(
-        `Managed DingTalk sender ${senderId} is not allowed; message skipped.`,
-      );
-      skip();
       return;
     }
     const event: ManagedInboundEvent = {
@@ -416,7 +442,11 @@ export class ManagedDingtalkAdapter {
       attachments: [],
       replyContext: {
         conversationId,
-        sessionWebhook: sessionWebhook ?? '',
+        // Snapshot the reply target at admission: a frame admitted on the
+        // cached webhook must not lose its reply if the cache entry is evicted
+        // before the answer is claimed. send() still prefers the live cache, so
+        // a fresher webhook keeps winning (#17173 R3-3).
+        sessionWebhook: sessionWebhook ?? state.webhooks[conversationId] ?? '',
         senderId,
         robotCode: this.settings.clientId,
       } satisfies DingtalkReplyContext,
@@ -450,7 +480,7 @@ export class ManagedDingtalkAdapter {
       state.pending = state.pending.filter(
         (entry) => entry.eventId !== eventId,
       );
-      state.recent = [...state.recent, eventId].slice(-256);
+      state.recent = [...state.recent, eventId].slice(-RECENT_LIMIT);
       if (!admitted.replayed && wasHeld) {
         state.instanceRefusals = 0;
         this.instanceStalled = false;
@@ -500,7 +530,7 @@ export class ManagedDingtalkAdapter {
           `Managed DingTalk admission of ${eventId} was refused (${status}); the message is skipped.`,
         );
         state.pending = state.pending.filter((p) => p.eventId !== eventId);
-        state.recent = [...state.recent, eventId].slice(-256);
+        state.recent = [...state.recent, eventId].slice(-RECENT_LIMIT);
         this.liftStallWhenNothingHeld();
         this.persist();
         return;
@@ -610,14 +640,39 @@ export class ManagedDingtalkAdapter {
     }
   }
 
+  /**
+   * Record a conversation's webhook as the most recently seen. Reinsert at the
+   * end so the overflow evicts the least-recently-seen key, not the
+   * first-inserted one (#17173 R1-20). defineProperty writes an own key even
+   * for '__proto__', which a plain assignment would silently discard through
+   * the inherited setter (#17173 R3-5).
+   */
+  private touchWebhook(conversationId: string, value: string): void {
+    const state = this.state!;
+    delete state.webhooks[conversationId];
+    Object.defineProperty(state.webhooks, conversationId, {
+      value,
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+    const keys = Object.keys(state.webhooks);
+    if (keys.length > WEBHOOK_LIMIT) delete state.webhooks[keys[0]!];
+    this.persist();
+  }
+
   private async send(delivery: ManagedClaimedDelivery): Promise<void> {
     const state = this.state!;
     const context =
       delivery.replyContext as Partial<DingtalkReplyContext> | null;
     const conversationId = context?.conversationId;
+    // Own-key membership, not truthiness: a conversationId naming an
+    // Object.prototype member must not resolve the inherited value as a
+    // webhook on an empty cache (#17173 R2-2).
     const webhook =
-      (conversationId ? state.webhooks[conversationId] : undefined) ??
-      context?.sessionWebhook;
+      (conversationId && Object.hasOwn(state.webhooks, conversationId)
+        ? state.webhooks[conversationId]
+        : undefined) ?? context?.sessionWebhook;
     if (
       !conversationId ||
       !webhook ||
@@ -654,7 +709,7 @@ export class ManagedDingtalkAdapter {
           ordinal: segment.ordinal,
           messageId,
         },
-      ].slice(-64);
+      ].slice(-MANAGED_OUTBOUND_LIMIT);
       this.persist();
       let outcome: ManagedReceipt;
       try {

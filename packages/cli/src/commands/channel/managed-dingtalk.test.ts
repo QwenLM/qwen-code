@@ -78,6 +78,15 @@ beforeEach(() => {
 
 describe('managed-dingtalk command workspace resolution', () => {
   it('threads --cwd through channel config resolution, matching the Legacy daemon', async () => {
+    // Keep the resolved config cwd distinct from the raw --cwd: the adapter's
+    // state directory follows the resolved one, while the proxy reads the raw
+    // argument, so a swap of the two is observable (R1-5).
+    vi.mocked(parseConfiguredChannels).mockResolvedValueOnce([
+      {
+        name: 'ding',
+        config: { type: 'dingtalk', cwd: '/configured/workspace' },
+      },
+    ] as never);
     const running = handler(argv('/daemon/workspace'));
     await new Promise((resolve) => setImmediate(resolve));
     process.emit('SIGINT');
@@ -86,7 +95,8 @@ describe('managed-dingtalk command workspace resolution', () => {
     expect(parseConfiguredChannels).toHaveBeenCalledWith({}, ['ding'], {
       defaultCwd: '/daemon/workspace',
     });
-    expect(adapterInstances).toEqual([{ cwd: '/daemon/workspace' }]);
+    expect(adapterInstances).toEqual([{ cwd: '/configured/workspace' }]);
+    expect(loadSettings).toHaveBeenCalledWith('/daemon/workspace');
   });
 
   it('refuses a channel that is not DingTalk', async () => {

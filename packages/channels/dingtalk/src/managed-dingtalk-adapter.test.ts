@@ -4,20 +4,32 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type {
-  ManagedChannelControlPlane,
-  ManagedClaimedDelivery,
-  ManagedInboundEvent,
+import {
+  MANAGED_OUTBOUND_LIMIT,
+  type ManagedChannelControlPlane,
+  type ManagedClaimedDelivery,
+  type ManagedInboundEvent,
 } from '@qwen-code/channel-base';
 import {
   ManagedDingtalkAdapter,
   type ManagedDingtalkAdapterDeps,
   type DingtalkWebhookFailure,
 } from './managed-dingtalk-adapter.js';
+import {
+  MANAGED_DINGTALK_PENDING_LIMIT,
+  RECENT_LIMIT,
+  WEBHOOK_LIMIT,
+} from './managed-state.js';
 
 const CONFIG = {
   type: 'dingtalk',
@@ -107,6 +119,11 @@ function fakeControlPlane() {
       submitError = error;
     },
     submitAttempts: () => submitAttempts,
+    // Simulate an admission the server committed but whose answer was lost:
+    // the next re-submission of this event answers replayed, not fresh.
+    markAdmitted: (eventId: string) => {
+      admitted.set(eventId, `input-${admitted.size + 1}`);
+    },
     setRefuseSubmit: (value: { status: number; code?: string } | undefined) => {
       refuseSubmit = value;
     },
@@ -232,6 +249,244 @@ describe('managed DingTalk adapter inbound', () => {
     fake.push('msg-1', messageData());
     await adapter.tick();
     expect(plane.submit).toHaveLength(1);
+    await adapter.disconnect();
+  });
+
+  it('registers the dingtalk platform, clientId account and resolved policy (R1-19)', async () => {
+    const { adapter, plane } = await connectedAdapter();
+    expect(plane.register).toHaveLength(1);
+    expect(plane.register[0]).toEqual({
+      platform: 'dingtalk',
+      accountId: 'robot-app',
+      accountGeneration: 1,
+      policy: {
+        adapter: 'dingtalk',
+        senderPolicy: 'allowlist',
+        allowedSenders: ['staff-1'],
+        dispatchMode: 'followup',
+      },
+    });
+    await adapter.disconnect();
+  });
+
+  it('admits only frames with a usable reply target (R1-32)', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    // A conversationId naming an Object.prototype member must not resolve on
+    // an empty cache (R2-2): without own-key membership the inherited value
+    // reads truthy and the frame would be admitted.
+    fake.push(
+      'proto',
+      messageData({
+        msgId: 'proto',
+        conversationId: 'constructor',
+        sessionWebhook: '',
+      }),
+    );
+    await adapter.tick();
+    expect(plane.submit).toHaveLength(0);
+    // No committed webhook and none cached: the frame can never be answered,
+    // so it is dropped at admission rather than staged as a claim.
+    fake.push('no-hook', messageData({ msgId: 'no-hook', sessionWebhook: '' }));
+    await adapter.tick();
+    expect(plane.submit).toHaveLength(0);
+    // A later frame commits a webhook for the conversation; a subsequent frame
+    // without its own webhook is admitted against the cached target.
+    fake.push('with-hook', messageData({ msgId: 'with-hook' }));
+    await adapter.tick();
+    fake.push(
+      'cached-hook',
+      messageData({ msgId: 'cached-hook', sessionWebhook: '' }),
+    );
+    await adapter.tick();
+    expect(plane.submit.map((event) => event.platformEventId)).toEqual([
+      'dingtalk:with-hook',
+      'dingtalk:cached-hook',
+    ]);
+    await adapter.disconnect();
+  });
+
+  it('a group frame does not spend the webhook cache budget (R3-2)', async () => {
+    const { adapter, fake } = await connectedAdapter();
+    fake.push(
+      'priv',
+      messageData({ msgId: 'priv', conversationId: 'conv-private' }),
+    );
+    await adapter.tick();
+    // A group frame carrying a webhook must be dropped without caching it.
+    fake.push(
+      'grp',
+      messageData({
+        msgId: 'grp',
+        conversationId: 'conv-group',
+        conversationType: '2',
+      }),
+    );
+    await adapter.tick();
+    const store = (adapter as unknown as { store: { file: string } }).store;
+    const persisted = JSON.parse(readFileSync(store.file, 'utf8'));
+    expect(Object.hasOwn(persisted.webhooks, 'conv-group')).toBe(false);
+    expect(Object.hasOwn(persisted.webhooks, 'conv-private')).toBe(true);
+    await adapter.disconnect();
+  });
+
+  it('a refused sender does not spend the webhook cache budget (R4-2)', async () => {
+    const { adapter, fake } = await connectedAdapter();
+    // An intruder outside the allowlist DMs with a webhook; the frame must be
+    // dropped without caching its conversation.
+    fake.push(
+      'intruder',
+      messageData({
+        msgId: 'intruder',
+        conversationId: 'conv-intruder',
+        senderStaffId: 'intruder',
+      }),
+    );
+    await adapter.tick();
+    const store = (adapter as unknown as { store: { file: string } }).store;
+    const persisted = JSON.parse(readFileSync(store.file, 'utf8'));
+    expect(Object.hasOwn(persisted.webhooks, 'conv-intruder')).toBe(false);
+    await adapter.disconnect();
+  });
+
+  it('a frame admitted on a cached webhook snapshots it into the claim (R3-3)', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    fake.push(
+      'first',
+      messageData({ msgId: 'first', conversationId: 'conv-A' }),
+    );
+    await adapter.tick();
+    fake.push(
+      'second',
+      messageData({
+        msgId: 'second',
+        conversationId: 'conv-A',
+        sessionWebhook: '',
+      }),
+    );
+    await adapter.tick();
+    const second = plane.submit.find(
+      (event) => event.platformEventId === 'dingtalk:second',
+    );
+    expect(
+      (second!.replyContext as { sessionWebhook: string }).sessionWebhook,
+    ).toBe('https://oapi.dingtalk.com/robot/sendBySession?session=abc');
+    await adapter.disconnect();
+  });
+
+  it('a webhook-less frame admitted on the cache refreshes recency (R3-4)', async () => {
+    const { adapter, fake } = await connectedAdapter();
+    const hook = (session: string): string =>
+      `https://oapi.dingtalk.com/robot/sendBySession?session=${session}`;
+    for (let i = 0; i < WEBHOOK_LIMIT; i++) {
+      expect(
+        fake.push(
+          `fill-${i}`,
+          messageData({
+            msgId: `fill-${i}`,
+            conversationId: `conv-${i}`,
+            sessionWebhook: hook(`w${i}`),
+          }),
+        ),
+      ).toBe(true);
+      if ((i + 1) % MANAGED_DINGTALK_PENDING_LIMIT === 0) await adapter.tick();
+    }
+    // Re-seen conv-0 through webhook-less frames admitted on its cached entry.
+    for (let k = 0; k < 3; k++) {
+      expect(
+        fake.push(
+          `revisit-${k}`,
+          messageData({
+            msgId: `revisit-${k}`,
+            conversationId: 'conv-0',
+            sessionWebhook: '',
+          }),
+        ),
+      ).toBe(true);
+      await adapter.tick();
+    }
+    expect(
+      fake.push(
+        'overflow',
+        messageData({
+          msgId: 'overflow',
+          conversationId: 'conv-256',
+          sessionWebhook: hook('w256'),
+        }),
+      ),
+    ).toBe(true);
+    await adapter.tick();
+    const store = (adapter as unknown as { store: { file: string } }).store;
+    const persisted = JSON.parse(readFileSync(store.file, 'utf8'));
+    expect(Object.hasOwn(persisted.webhooks, 'conv-0')).toBe(true);
+    await adapter.disconnect();
+  }, 30_000);
+
+  it('a __proto__ conversationId with its own webhook is admitted and cached as an own key (R3-5)', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    fake.push(
+      'proto',
+      messageData({ msgId: 'proto', conversationId: '__proto__' }),
+    );
+    await adapter.tick();
+    expect(plane.submit.map((event) => event.platformEventId)).toEqual([
+      'dingtalk:proto',
+    ]);
+    const store = (adapter as unknown as { store: { file: string } }).store;
+    const persisted = JSON.parse(readFileSync(store.file, 'utf8'));
+    expect(Object.hasOwn(persisted.webhooks, '__proto__')).toBe(true);
+    await adapter.disconnect();
+  });
+
+  it('falls back to senderId when senderStaffId is absent (R4)', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    fake.push(
+      'fallback',
+      messageData({
+        msgId: 'fallback',
+        senderStaffId: undefined,
+        senderId: 'staff-1',
+      }),
+    );
+    await adapter.tick();
+    expect(plane.submit.map((event) => event.senderId)).toEqual(['staff-1']);
+    await adapter.disconnect();
+  });
+
+  it('upgrades a pre-field state file without poisoning instanceRefusals (R2-8)', async () => {
+    const cwd = tempCwd();
+    const plane = fakeControlPlane();
+    const fake = fakeDeps();
+    const adapter = new ManagedDingtalkAdapter({
+      name: 'ding-1',
+      cwd,
+      config: CONFIG,
+      controlPlane: plane.controlPlane,
+      deps: fake.deps,
+      pollLoop: false,
+    });
+    // A state file written before instanceRefusals existed: the field is absent.
+    const store = (
+      adapter as unknown as { store: { directory: string; file: string } }
+    ).store;
+    mkdirSync(store.directory, { recursive: true });
+    writeFileSync(
+      store.file,
+      JSON.stringify({
+        version: 1,
+        generation: 1,
+        pending: [],
+        outbound: [],
+        recent: [],
+        webhooks: {},
+      }),
+    );
+    await adapter.connect();
+    plane.setRefuseSubmit({ status: 404, code: 'workspace_not_found' });
+    fake.push('m1', messageData({ msgId: 'm1' }));
+    await adapter.tick();
+    // The first refusal increments the absent counter to 1, never NaN.
+    const persisted = JSON.parse(readFileSync(store.file, 'utf8'));
+    expect(persisted.instanceRefusals).toBe(1);
     await adapter.disconnect();
   });
 
@@ -455,6 +710,32 @@ describe('managed DingTalk adapter inbound', () => {
     ]);
     await second.adapter.disconnect();
   });
+
+  it('a replayed admission answer does not reset the refusal streak (R1-26)', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    plane.setRefuseSubmit({ status: 404, code: 'workspace_not_found' });
+    fake.push('m1', messageData({ msgId: 'm1' }));
+    fake.push('m2', messageData({ msgId: 'm2' }));
+    await adapter.tick();
+    // m1 dropped as the first-occurrence sacrifice; m2 held and the stall armed.
+    expect(plane.submitAttempts()).toBe(2);
+    // The server actually committed m2's admission; only the answer was lost,
+    // so the held claim's re-submission answers replayed rather than fresh.
+    plane.markAdmitted('dingtalk:m2');
+    plane.setRefuseSubmit(undefined);
+    await adapter.tick();
+    // A replay proves nothing about the binding: the streak must stand. The
+    // next instance-scoped refusal therefore re-stalls on its FIRST occurrence
+    // instead of paying another sacrifice.
+    plane.setRefuseSubmit({ status: 404, code: 'workspace_not_found' });
+    fake.push('m3', messageData({ msgId: 'm3' }));
+    await adapter.tick();
+    // The stall re-armed, so a further frame is refused at the gate. Had the
+    // replay reset the streak, m3 would have dropped as a fresh sacrifice and
+    // this frame would have been admitted.
+    expect(fake.push('m4', messageData({ msgId: 'm4' }))).toBe(false);
+    await adapter.disconnect();
+  });
 });
 
 describe('managed DingTalk adapter outbox', () => {
@@ -481,6 +762,52 @@ describe('managed DingTalk adapter outbox', () => {
     ).toBe(true);
     await adapter.disconnect();
   });
+
+  it('caps the persisted outbound ledger at the shared limit (R1-3)', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    // Receipt answers are lost so every sent segment stays in the ledger.
+    plane.setReceiptError(() =>
+      Object.assign(new Error('answer lost'), { status: 503 }),
+    );
+    plane.enqueue(
+      Array.from({ length: MANAGED_OUTBOUND_LIMIT + 1 }, (_, i) =>
+        delivery(`d-${i}`, 1),
+      ),
+    );
+    await adapter.tick();
+    expect(fake.sent).toHaveLength(MANAGED_OUTBOUND_LIMIT + 1);
+    // The append slices to the cap, so the persisted ledger stays loadable.
+    const store = (adapter as unknown as { store: { file: string } }).store;
+    const persisted = JSON.parse(readFileSync(store.file, 'utf8'));
+    expect(persisted.outbound).toHaveLength(MANAGED_OUTBOUND_LIMIT);
+    await adapter.disconnect();
+  });
+
+  it('keeps the recent window loadable at the shared cap (R2-1)', async () => {
+    const cwd = tempCwd();
+    const first = await connectedAdapter(cwd);
+    // Drive one past the recent cap; the writer must slice to the same cap the
+    // validator enforces, or the persisted state becomes unloadable on restart.
+    for (let i = 0; i < RECENT_LIMIT + 1; i++) {
+      expect(
+        first.fake.push(
+          `ev-${i}`,
+          messageData({ msgId: `ev-${i}`, conversationId: `conv-${i}` }),
+        ),
+      ).toBe(true);
+      if ((i + 1) % MANAGED_DINGTALK_PENDING_LIMIT === 0)
+        await first.adapter.tick();
+    }
+    await first.adapter.tick();
+    const store = (first.adapter as unknown as { store: { file: string } })
+      .store;
+    const persisted = JSON.parse(readFileSync(store.file, 'utf8'));
+    expect(persisted.recent).toHaveLength(RECENT_LIMIT);
+    await first.adapter.disconnect();
+    // Writer and validator share the cap, so the state still loads.
+    const second = await connectedAdapter(cwd);
+    await second.adapter.disconnect();
+  }, 30_000);
 
   it('reports a definitive webhook refusal as rejected and never resends', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
@@ -549,6 +876,66 @@ describe('managed DingTalk adapter outbox', () => {
     await adapter.disconnect();
   });
 
+  it('evicts the least-recently-seen webhook, not the first-inserted (R1-20)', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    const hook = (session: string): string =>
+      `https://oapi.dingtalk.com/robot/sendBySession?session=${session}`;
+    // Fill the webhook map to its cap with distinct conversations, asserting
+    // each frame is durably admitted — a refused push would silently shorten
+    // the fill. Pace the drain by the claim-table limit, not a literal batch.
+    for (let i = 0; i < WEBHOOK_LIMIT; i++) {
+      expect(
+        fake.push(
+          `fill-${i}`,
+          messageData({
+            msgId: `fill-${i}`,
+            conversationId: `conv-${i}`,
+            sessionWebhook: hook(`w${i}`),
+          }),
+        ),
+      ).toBe(true);
+      if ((i + 1) % MANAGED_DINGTALK_PENDING_LIMIT === 0) await adapter.tick();
+    }
+    // Re-seen the first-inserted conversation: its recency must refresh.
+    fake.push(
+      'revisit',
+      messageData({
+        msgId: 'revisit',
+        conversationId: 'conv-0',
+        sessionWebhook: hook('w0-new'),
+      }),
+    );
+    await adapter.tick();
+    // The 257th conversation overflows the map and evicts the least-recent key.
+    fake.push(
+      'overflow',
+      messageData({
+        msgId: 'overflow',
+        conversationId: 'conv-256',
+        sessionWebhook: hook('w256'),
+      }),
+    );
+    await adapter.tick();
+    // The fill must have landed at the cap; a short fill would red here rather
+    // than quietly letting the eviction go unexercised.
+    const store = (adapter as unknown as { store: { file: string } }).store;
+    const persisted = JSON.parse(readFileSync(store.file, 'utf8'));
+    expect(Object.keys(persisted.webhooks)).toHaveLength(WEBHOOK_LIMIT);
+    // conv-0 was re-seen, so its updated webhook must survive the eviction.
+    // The delivery carries no webhook of its own and relies on the cache.
+    const probe = delivery('d-0', 1);
+    probe.replyContext = {
+      conversationId: 'conv-0',
+      sessionWebhook: '',
+      senderId: 'staff-1',
+      robotCode: 'robot-app',
+    };
+    plane.enqueue([probe]);
+    await adapter.tick();
+    expect(fake.sent.map((entry) => entry.webhook)).toEqual([hook('w0-new')]);
+    await adapter.disconnect();
+  }, 30_000);
+
   it('drops a deterministically refused orphan receipt without wedging later ones', async () => {
     const { adapter, plane, fake } = await connectedAdapter();
     // Both sends land but their receipt answers are lost: both entries stay
@@ -573,6 +960,38 @@ describe('managed DingTalk adapter outbox', () => {
     await adapter.tick();
     expect(plane.receipts.map((entry) => entry.deliveryId)).toEqual(['d-B']);
     await adapter.disconnect();
+  });
+
+  it('the dropped orphan entry is gone from persisted outbound (R1-14)', async () => {
+    const cwd = tempCwd();
+    const first = await connectedAdapter(cwd);
+    first.plane.setReceiptError(() =>
+      Object.assign(new Error('answer lost'), { status: 503 }),
+    );
+    first.plane.enqueue([delivery('d-A', 1), delivery('d-B', 1)]);
+    await first.adapter.tick();
+    expect(first.fake.sent).toHaveLength(2);
+    first.plane.setReceiptError((id) =>
+      id === 'd-A'
+        ? Object.assign(new Error('gone'), {
+            status: 404,
+            code: 'delivery_not_found',
+          })
+        : undefined,
+    );
+    await first.adapter.tick();
+    expect(first.plane.receipts.map((entry) => entry.deliveryId)).toEqual([
+      'd-B',
+    ]);
+    await first.adapter.disconnect();
+    // Settling d-B this tick is not enough: the dropped d-A must also be gone
+    // from the persisted ledger, or a restart would re-drive it. Neither entry
+    // remains, so the restart replays nothing and re-sends nothing.
+    const second = await connectedAdapter(cwd);
+    await second.adapter.tick();
+    expect(second.plane.receipts).toHaveLength(0);
+    expect(second.fake.sent).toHaveLength(0);
+    await second.adapter.disconnect();
   });
 
   it('re-registers after an orphan receipt is refused as not registered', async () => {
@@ -638,6 +1057,24 @@ describe('managed DingTalk adapter outbox', () => {
       robotCode: 'robot-app',
     };
     plane.enqueue([noWebhook]);
+    await adapter.tick();
+    expect(fake.sent).toHaveLength(0);
+    expect((plane.receipts[0]!.receipt as { outcome: string }).outcome).toBe(
+      'rejected',
+    );
+    await adapter.disconnect();
+  });
+
+  it('rejects a delivery whose conversationId names a prototype member without sending (R3-1)', async () => {
+    const { adapter, plane, fake } = await connectedAdapter();
+    const proto = delivery('d-proto', 1);
+    proto.replyContext = {
+      conversationId: 'constructor',
+      sessionWebhook: '',
+      senderId: 'staff-1',
+      robotCode: 'robot-app',
+    };
+    plane.enqueue([proto]);
     await adapter.tick();
     expect(fake.sent).toHaveLength(0);
     expect((plane.receipts[0]!.receipt as { outcome: string }).outcome).toBe(
@@ -1198,16 +1635,36 @@ describe('managed DingTalk adapter review fixes', () => {
   it('a failed claim save leaves no in-memory claim, so redelivery re-stages instead of acking SUCCESS (R11-1)', async () => {
     const cwd = tempCwd();
     const first = await connectedAdapter(cwd);
+    // Seed the conversation's webhook and settle the seed claim, so the probe
+    // frame below passes the reply-target gate (R1-32) against the cached
+    // webhook without committing one of its own.
+    first.fake.push('seed', messageData({ msgId: 'seed' }));
+    await first.adapter.tick();
     const store = (
       first.adapter as unknown as { store: { save: (s: unknown) => void } }
     ).store;
-    const saveSpy = vi.spyOn(store, 'save').mockImplementation(() => {
-      throw new Error('disk full');
-    });
-    // No sessionWebhook, so the claim write is the first persist this frame hits.
+    // The webhook-less probe frame hits the recency-refresh persist first
+    // (claim table empty), then the claim-write persist (claim table non-empty).
+    // Fail only the claim write so the rollback under test is actually reached
+    // (#17173 R4-1).
+    const realSave = store.save.bind(store);
+    const saveSpy = vi
+      .spyOn(store, 'save')
+      .mockImplementation((state: unknown) => {
+        if ((state as { pending: unknown[] }).pending.length > 0) {
+          throw new Error('disk full');
+        }
+        realSave(state);
+      });
     const frame = messageData({ msgId: 'm1', sessionWebhook: '' });
     // The claim write fails: ack LATER, and no claim may remain in memory.
     expect(first.fake.push('m1', frame)).toBe(false);
+    // The rollback must have cleared the in-memory claim table; without it the
+    // leftover claim survives the failed save (#17173 R4-1).
+    const stateAfterFail = (
+      first.adapter as unknown as { state: { pending: unknown[] } }
+    ).state;
+    expect(stateAfterFail.pending).toHaveLength(0);
     // Redelivery while the save still fails must also be LATER, never SUCCESS.
     expect(first.fake.push('m1', frame)).toBe(false);
     saveSpy.mockRestore();
