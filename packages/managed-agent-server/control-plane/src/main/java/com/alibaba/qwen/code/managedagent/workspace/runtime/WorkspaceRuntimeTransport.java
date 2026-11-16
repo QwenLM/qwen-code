@@ -262,6 +262,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
         if (external(context)) {
             throw WorkspaceExecutionStore.unavailable();
         }
+        assertHeld(context);
         return delegate.installPublication(lease, session, grant);
     }
 

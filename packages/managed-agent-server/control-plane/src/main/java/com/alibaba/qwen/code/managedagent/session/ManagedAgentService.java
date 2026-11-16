@@ -674,6 +674,18 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             throw new ManagedAgentException(400, "invalid_tool_profile",
                     "Only the external Hosted Workspace profiles may be requested, for the built-in Agent.");
         }
+    }
+
+    /**
+     * The live-availability half of the profile negotiation, deliberately
+     * separated from the shape check above: a recorded create must replay
+     * even while the daemon's capability probe is failing, so this 409 check
+     * runs after the replay lookup.
+     */
+    private void requireToolProfileAvailability(String profile) {
+        if (profile == null) {
+            return;
+        }
         if (!externalFilesConfiguration || !harness.supportsLifecycle(profile)) {
             throw new ManagedAgentException(409, "unsupported_feature",
                     "The requested Hosted Workspace tool profile is unavailable.");
@@ -832,6 +844,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             dispatch(tenantId, recorded.get(), true);
             return response(recorded.get());
         }
+        requireToolProfileAvailability(requestedToolProfile);
         requireMemoryConfiguration(memoryStoreId);
         requireModelConfiguration(modelConfig);
         if (externalFilesConfiguration && !workspaces.externalFilesAvailable()
@@ -2356,8 +2369,8 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             return session.deletedAt() == null && ready(worktree)
                     && externalContextShapeAllowed(session)
                     && harness.supportsSavedLifecycle(session.toolProfile())
-                    && WorkspaceToolProfiles.supportsApprovalMode(session.approvalMode())
-                    && !"yolo".equals(session.approvalMode());
+                    && WorkspaceToolProfiles.admitsExternalApprovalMode(
+                            session.toolProfile(), session.approvalMode());
         }
         if (session.workspace() == null || !WorkspaceToolProfiles.isPublicShell(session.toolProfile())) {
             return null;

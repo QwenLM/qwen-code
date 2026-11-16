@@ -183,7 +183,7 @@ public final class ExternalShellPublicationProducer
         if (done.isDone()) {
             return;
         }
-        if (sequence >= (long) SEGMENTS_PER_PAGE * MAX_PAGES_PER_STREAM) {
+        if (sequence > (long) SEGMENTS_PER_PAGE * MAX_PAGES_PER_STREAM) {
             done.completeExceptionally(new RuntimeBrokerException(409,
                     "external_shell_publication_capacity",
                     "External Shell capture exceeds its retained segment bound.", false));

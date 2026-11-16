@@ -41,6 +41,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -110,17 +111,20 @@ class ExternalShellDrainProofTest {
     @Timeout(15)
     void reconcilingAnUndrainedShellRefusesBeforeAskingTheWorkerForItsStatus() {
         var fixture = new Fixture(ToolExecutionRecord.State.UNKNOWN);
-        when(fixture.transport.statusV3(fixture.lease, fixture.session,
-                fixture.requested.getReference(), 0L))
-                .thenReturn(CompletableFuture.completedFuture(
-                        Map.of("state", "settled", "result", fixture.workerEnvelope())));
-        var failure = assertThrows(CompletionException.class,
-                () -> fixture.reconciler.reconcileInContext(fixture.context, fixture.requested, true)
-                        .toCompletableFuture().join());
-        assertTrue(failure.getCause() instanceof RuntimeBrokerException);
-        var refused = (RuntimeBrokerException) failure.getCause();
-        assertEquals("workspace_close_identity_unverified", refused.getCode());
-        assertEquals(List.of("status", "finished"), fixture.events);
+        // `doAnswer` avoids the stubbing-time `thenAnswer` invocation that
+        // `when(...).thenReturn(...)` would trigger on a mock already stubbed
+        // with `thenAnswer`, so the events list reflects the production call
+        // order.
+        doAnswer(call -> {
+            fixture.events.add("status");
+            return CompletableFuture.completedFuture(
+                    Map.of("state", "settled", "result", fixture.workerEnvelope()));
+        }).when(fixture.transport).statusV3(any(), any(), any(), any(Long.class));
+        var reconciled = fixture.reconciler
+                .reconcileInContext(fixture.context, fixture.requested, true)
+                .toCompletableFuture().join();
+        assertEquals(ExecutionReconciliation.Outcome.UNRESOLVED, reconciled.getOutcome());
+        assertEquals(List.of("finished", "status"), fixture.events);
         assertNull(fixture.settled.get(), "A started call's worker answer must never settle this lane");
     }
 

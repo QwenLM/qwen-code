@@ -218,6 +218,7 @@ function begin(response, body) {
     requestDigest: digestOf(reference, capture, captureId),
     horizon: expiresAt,
     streams: { stdout: blocks(stdout), stderr: blocks(stderr) },
+    delivered: { stdout: -1, stderr: -1 },
     acknowledged: { stdout: -1, stderr: -1 },
   });
   respond(response, 200, { protocolVersion: 2, channelId });
@@ -263,9 +264,11 @@ function read(response, body) {
     sequence < 0 ||
     !Number.isSafeInteger(acknowledgedSequence) ||
     acknowledgedSequence < -1 ||
-    // Re-reading a delivered sequence is how the last one is acknowledged;
-    // a future ack would let the Broker skip bytes it never received.
-    acknowledgedSequence > sequence
+    // Mirror the shipped worker: an ack may not exceed the bytes already
+    // delivered on this stream, and the next read may not skip past the
+    // acknowledged cursor. (managed-external-publication.ts:354-358)
+    acknowledgedSequence > channel.delivered[streamId] ||
+    sequence > Math.max(channel.acknowledged[streamId], acknowledgedSequence) + 1
   ) {
     throw refusal('managed_runtime_publication_invalid', 'Publication cursor is invalid.', 400);
   }
@@ -274,6 +277,9 @@ function read(response, body) {
     throw refusal('managed_runtime_publication_invalid', 'Publication cursor is invalid.', 400);
   }
   channel.acknowledged[streamId] = Math.max(channel.acknowledged[streamId], acknowledgedSequence);
+  if (sequence > channel.delivered[streamId]) {
+    channel.delivered[streamId] = sequence;
+  }
   if (neverReady) {
     respond(response, 200, { protocolVersion: 2, state: 'pending' });
     return;
@@ -298,7 +304,7 @@ function read(response, body) {
 
 function renew(response, body) {
   const channel = live(body);
-  if (!Number.isSafeInteger(body.expiresAt) || body.expiresAt <= 0) {
+  if (!Number.isSafeInteger(body.expiresAt) || body.expiresAt <= Date.now()) {
     throw refusal('managed_runtime_publication_invalid', 'Publication renewal is invalid.', 400);
   }
   // Only ever forward: a stale renewal must not shorten a live channel.

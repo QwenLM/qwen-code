@@ -103,6 +103,10 @@ public class PublicAgentController {
         if (selection == null && worktree != null) {
             throw new ManagedAgentException(400, "unsupported_feature", "Session worktrees require a bound Workspace.");
         }
+        if (selection == null && request.toolProfile() != null) {
+            throw new ManagedAgentException(400, "invalid_tool_profile",
+                    "A requested tool profile requires a bound Workspace.");
+        }
         // Resolve the recorded identity before the commit so a construction
         // error can never strand a Session the create just persisted; the
         // trusted boundary already rejected an unrepresentable subject.

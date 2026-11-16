@@ -294,11 +294,11 @@ The acceptance packet above is historical evidence for `dd5c2d2fb2e2665dd593b27f
 
 ### Remaining goal and gates
 
-**C is partly implemented and wholly unverified:** foreground `run_shell_command`, its publication/capture lane and their close semantics now have a local implementation (§15), gated off by default and never run. `monitor` and background Shell are **not** implemented; `monitor` was in the initial §1 goal and remains a target, not a silently dropped requirement. True `LOST` recovery, Broker/adapter process-restart recovery, real concurrent ownership/recovery scenarios and real-provider acceptance remain open work, not completed or verified by this run. Full CI/fault suites, human review and acceptance/deployment gates remain pending. UI verification is pending; no viewer or screenshot success is claimed here. This closes the documentation comparison of user impact against the goal, not #15512 or the full phase-2 goal.
+**C is implemented locally and partly verified:** foreground `run_shell_command`, its publication/capture lane and their close semantics now have a local implementation (§15), gated off by default. Local verification covers the dispatch, cancel/reconcile and close/recovery fences on H2 and MySQL 8.4, plus the worker capture protocol over real HTTP; see §15 "Locally verified so far" for the exact list. `monitor` and background Shell are **not** implemented; `monitor` was in the initial §1 goal and remains a target, not a silently dropped requirement. True `LOST` recovery, Broker/adapter process-restart recovery, real concurrent ownership/recovery scenarios and real-provider acceptance remain open work, not completed or verified by this run. Full CI/fault suites, human review and acceptance/deployment gates remain pending. UI verification is pending; no viewer or screenshot success is claimed here. This closes the documentation comparison of user impact against the goal, not #15512 or the full phase-2 goal.
 
 ## 15. Slice C: external foreground Shell (`hosted-workspace-external-shell/1`)
 
-Status: **implemented locally; no test, build, typecheck, lint or acceptance run has been performed for this slice.** Everything below describes the code as written, not observed behavior.
+Status: **implemented locally; verified by the local evidence listed under "Locally verified so far" at the end of this section. No CI gate has run on this slice** (the PR targets a feature branch, so the main-filtered CI and managed-agent gates do not trigger). Everything below describes the code as written, plus the local test observations explicitly enumerated there.
 
 ### Boundary
 

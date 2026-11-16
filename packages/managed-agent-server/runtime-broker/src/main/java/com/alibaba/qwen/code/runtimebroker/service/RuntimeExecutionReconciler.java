@@ -464,6 +464,12 @@ final class RuntimeExecutionReconciler {
         try {
             result = immutableMap(status.get("result"), "status result");
             if (drainProofLane && !externalShellNoStartAnswer(result)) {
+                if (takeover) {
+                    // The row stays UNKNOWN — exactly what the fence intends —
+                    // without wedging the acquire that recovery depends on.
+                    return new ExecutionReconciliation(unknown,
+                            ExecutionReconciliation.Outcome.UNRESOLVED, null);
+                }
                 throw conflict("workspace_close_identity_unverified",
                         "External Shell capture has not been drained into its publication");
             }

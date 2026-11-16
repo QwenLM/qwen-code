@@ -157,15 +157,20 @@ public final class ExternalShellWorkerFixture implements AutoCloseable {
 
     /**
      * The Broker's own copy cursor: read a sequence, acknowledge it by
-     * re-reading it, and stop at the EOF. Every receipt is validated by the
-     * transport, including the block digest and the EOF carrying no bytes.
+     * reading the next sequence with it as the lagged ack, and stop at the EOF.
+     * An ack-on-first-read is the shape the shipped worker refuses (the ack
+     * would exceed the delivered cursor), so the cursor acks sequence N-1 while
+     * reading sequence N. The final EOF is acked by a no-op re-read of the EOF
+     * sequence. Every receipt is validated by the transport, including the
+     * block digest and the EOF carrying no bytes.
      */
     public Copied copy(HttpRuntimeTransport transport, String channel, String stream) {
         var bytes = new StringBuilder();
         var eofs = new ArrayList<Boolean>();
+        long acked = -1;
         for (long sequence = 0; sequence < 1024; sequence++) {
             var answer = transport.externalPublicationRead(lease, request, seed, revision,
-                    channel, stream, sequence, sequence).toCompletableFuture().join();
+                    channel, stream, sequence, acked).toCompletableFuture().join();
             assertEquals("ready", answer.get("state"));
             var block = (byte[]) answer.get("bytes");
             bytes.append(new String(block, StandardCharsets.UTF_8));
@@ -173,8 +178,14 @@ public final class ExternalShellWorkerFixture implements AutoCloseable {
             eofs.add(eof);
             assertEquals(block.length == 0, eof, "Only the EOF carries no bytes");
             if (eof) {
+                // Re-read the EOF sequence with the ack that covers it: the
+                // shipped worker's `stop-drained` requires every stream's EOF
+                // to be acknowledged, and an EOF arrives as its own sequence.
+                transport.externalPublicationRead(lease, request, seed, revision,
+                        channel, stream, sequence, sequence).toCompletableFuture().join();
                 return new Copied(bytes.toString(), eofs);
             }
+            acked = sequence;
         }
         throw new AssertionError("The stream never reached its EOF: " + stream);
     }

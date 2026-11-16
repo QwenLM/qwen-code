@@ -310,6 +310,10 @@ public class WebShellAgentController {
         if (selection == null && worktree != null) {
             throw new ManagedAgentException(400, "unsupported_feature", "Session worktrees require a bound Workspace.");
         }
+        if (selection == null && request.toolProfile() != null) {
+            throw new ManagedAgentException(400, "invalid_tool_profile",
+                    "A requested tool profile requires a bound Workspace.");
+        }
         // The WebShell handlers forward no metadata at all (null in its
         // slot): whatever the client sends is accepted and ignored, so no
         // clientId-only contract is asserted here and immediately

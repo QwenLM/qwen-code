@@ -129,7 +129,10 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
                                 BrokerValues.exactLong(response.get("protocolVersion")))) {
                             throw refuse("external_workspace_acquisition_unverified", "Original provider response is invalid.");
                         }
-                        requireOriginalReady(binding, observation(request, seed, handle, response, false));
+                        // This path brings the saved original up or repairs it,
+                        // so the establishing probe runs — the same contract the
+                        // base class documents for this flag.
+                        requireOriginalReady(binding, observation(request, seed, handle, response, true));
                         if (!(response.get("storage") instanceof Map<?, ?> evidence)
                                 || !(binding(request).ephemeral()
                                         ? "same-runtime"
@@ -313,9 +316,14 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
         }
         if (reported != null || shell) {
             if (shell && reported == null) {
-                // Absent continuity is not proof of loss, but it is not proof
-                // of readiness either: retry, adopt nothing, replace nothing.
-                return RuntimeObservation.unknown(handle);
+                // Absent continuity with RUNNING is not proof of readiness:
+                // retry, adopt nothing, replace nothing. Any other state
+                // (GONE included) must follow the base mapper — a vanished
+                // external worker is never silently replaced.
+                if ("RUNNING".equals(response.get("state"))) {
+                    return RuntimeObservation.unknown(handle);
+                }
+                return super.observation(request, seed, handle, response, establishing);
             }
             if (!"RUNNING".equals(response.get("state"))
                     || !(reported instanceof Map<?, ?> evidence)) {

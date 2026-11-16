@@ -95,12 +95,13 @@ final class RuntimeDispatchPayloadAdmission {
                     || shellInput.containsKey("is_monitor")
                     || publicationVerifier == null
                     || publicationVerifier.externalShell() == null) {
-                executionRepository.settlePrepared(record, Map.of(
-                        "executionStatus", "not_started", "responseParts", List.of(),
-                        "capture", null,
-                        "error", Map.of("type", "workspace_tool_unsupported",
-                                "message", "External Shell requires a foreground Tool v3 Shell payload")),
-                        clock.instant());
+                Map<String, Object> refusal = new LinkedHashMap<>();
+                refusal.put("executionStatus", "not_started");
+                refusal.put("responseParts", List.of());
+                refusal.put("capture", null);
+                refusal.put("error", Map.of("type", "workspace_tool_unsupported",
+                        "message", "External Shell requires a foreground Tool v3 Shell payload"));
+                executionRepository.settlePrepared(record, refusal, clock.instant());
                 throw invalid("runtime_payload_invalid",
                         "External Shell requires a foreground Tool v3 Shell payload");
             }

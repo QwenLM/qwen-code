@@ -112,9 +112,14 @@ class ExternalShellWorkerProtocolTest {
             // A stale renewal must not shorten the live channel. Its horizon is
             // already past by the time the copy runs, so a channel that took it
             // would be closed mid-command and no drain could ever finish.
-            transport.externalPublicationRenew(worker.lease, worker.request, worker.seed,
-                    REVISION, channel, System.currentTimeMillis() - 1_000)
-                    .toCompletableFuture().join();
+            // The shipped worker refuses an expired horizon outright (CLOSED),
+            // so the renewal round-trip fails instead of silently keeping the
+            // current horizon.
+            var staleRenewal = assertThrows(CompletionException.class,
+                    () -> transport.externalPublicationRenew(worker.lease, worker.request,
+                            worker.seed, REVISION, channel, System.currentTimeMillis() - 1_000)
+                            .toCompletableFuture().join());
+            assertTrue(staleRenewal.getCause() instanceof RuntimeBrokerException);
             assertEquals("witness\n", worker.copy(transport, channel, "stdout").bytes());
             worker.copy(transport, channel, "stderr");
             assertEquals("drained", worker.stopDrained(transport));
@@ -134,8 +139,10 @@ class ExternalShellWorkerProtocolTest {
             // Read both of stdout's sequences but acknowledge only the data
             // block. The EOF was delivered and never acked, so the bytes are
             // still owed and the stop must refuse to claim a drained lane.
+            // The lagged-ack shape is what the shipped worker accepts: ack one
+            // behind the sequence being read.
             transport.externalPublicationRead(worker.lease, worker.request, worker.seed,
-                    REVISION, channel, "stdout", 0, 0).toCompletableFuture().join();
+                    REVISION, channel, "stdout", 0, -1).toCompletableFuture().join();
             transport.externalPublicationRead(worker.lease, worker.request, worker.seed,
                     REVISION, channel, "stdout", 1, 0).toCompletableFuture().join();
 

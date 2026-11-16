@@ -631,6 +631,10 @@ final class AgentSessionPolicies {
         if (!WorkspaceToolProfiles.supportsApprovalMode(mode) || "auto".equals(mode) && !autoSupported) {
             throw new ManagedAgentException(400, "unsupported_approval_mode", "The approval mode is unavailable");
         }
+        if (!WorkspaceToolProfiles.admitsExternalApprovalMode(session.toolProfile(), mode)) {
+            throw new ManagedAgentException(400, "unsupported_approval_mode",
+                    "The approval mode is unavailable for this tool profile");
+        }
         var currentPolicy = jdbc.queryForMap("SELECT approval_revision, permission_rules_json, is_plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=? FOR UPDATE",
                 tenantId, sessionId);
         Map<String, List<String>> rules = requestedRules == null ? storeRows.readPermissionRules((String) currentPolicy.get("permission_rules_json"))

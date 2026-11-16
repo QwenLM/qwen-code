@@ -270,11 +270,11 @@ remote191 上指定的公开 files/close E2E（`ExternalPublicFilesE2E`，随第
 
 ### 剩余目标与门禁
 
-**C 已部分实现、完全未验证：**前台 `run_shell_command`、它的 publication/capture 通道及其关闭语义现在有了本地实现（§15），默认开关关闭，且从未运行过。`monitor` 与后台 Shell **没有**实现；`monitor` 在最初 §1 目标中，仍是目标，不能悄悄删除。真正的 `LOST` 恢复、Broker/adapter 进程重启恢复、真实并发归属/恢复场景及真实 provider 验收，仍是未完成工作，不能由本次运行宣布完成或验证通过。完整 CI/fault 套件、人工评审及验收/部署门禁仍待通过。UI 验证仍待完成；本文不声称查看器或截图已成功。本次只完成用户影响与目标差距的文档对照，不关闭 #15512 或第二阶段完整目标。
+**C 已完成本地实现并完成部分本地验证：**前台 `run_shell_command`、它的 publication/capture 通道及其关闭语义现在有了本地实现（§15），默认开关关闭。本地验证覆盖 dispatch、cancel/reconcile、close/recovery 在 H2 与 MySQL 8.4 上的围栏，以及经真实 HTTP 的 worker capture 协议；具体清单见 §15 末尾「本地已验证」。`monitor` 与后台 Shell **没有**实现；`monitor` 在最初 §1 目标中，仍是目标，不能悄悄删除。真正的 `LOST` 恢复、Broker/adapter 进程重启恢复、真实并发归属/恢复场景及真实 provider 验收，仍是未完成工作，不能由本次运行宣布完成或验证通过。完整 CI/fault 套件、人工评审及验收/部署门禁仍待通过。UI 验证仍待完成；本文不声称查看器或截图已成功。本次只完成用户影响与目标差距的文档对照，不关闭 #15512 或第二阶段完整目标。
 
 ## 15. 切片 C：外部前台 Shell（`hosted-workspace-external-shell/1`）
 
-状态：**仅完成本地实现；本切片没有跑过任何测试、build、typecheck、lint 或验收。**下面写的是代码写成了什么，不是观察到的行为。
+状态：**已完成本地实现；由本节末尾「本地已验证」列出的本地证据支撑。本切片未跑过任何 CI 门禁**（PR 的 base 是特性分支，按 main 过滤的 CI 与 managed-agent 门禁都不触发）。下面写的是代码写成了什么，加上那里明确列出的本地测试观察。
 
 ### 边界
 
