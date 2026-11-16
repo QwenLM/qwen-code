@@ -14616,30 +14616,38 @@ export function App({
         !e.shiftKey &&
         (key === 'c' || key === 'd');
 
-      // Enter/Space on an activatable control — button, link, field, menu
-      // item, tab, and the like — activate that control, and Escape inside
-      // the chip row belongs to the row's own handlers (close the list back
-      // to its chip). Escape inside a widget that owns Escape semantics
-      // (open menu, listbox, combobox, dialog, tree, grid) belongs to that
-      // widget — closing it must not dismiss the explanation instead. Every
-      // other key — Escape anywhere else, Ctrl+C/Ctrl+D — must reach the
-      // dismiss/cancel path below, which is what the panel's key hints
-      // advertise. The composer editor is never exempted: it is the dismiss
-      // shortcut's home surface. The selectors name activatable surfaces
-      // and Escape-owning widgets only — the chip row's own containers
-      // carry non-activatable roles (group, toolbar).
+      // Surfaces that own the keyboard outright yield first, using the same
+      // centralized markers the app-level handlers trust: an open modal
+      // (dialog/alertdialog/drawer, including component-local confirms
+      // portaled into the shell root), the waiting minigame, and
+      // keyboard-scoped subtrees. A key these widgets advertise is never
+      // swallowed to dismiss the explanation.
+      if (hasOpenModalSurface(portalRoot)) return;
+      if (waitingMinigameOpen) return;
+      if (target instanceof Element && target.closest('[data-keyboard-scope]'))
+        return;
+
+      // Enter/Space activate a control — button, link, field, menu item,
+      // tab, grid/tree row, and the like — and Escape inside the chip row or
+      // an open menu/listbox belongs to that widget. Every other key —
+      // Escape anywhere else, Ctrl+C/Ctrl+D — must reach the dismiss/cancel
+      // path below, which is what the panel's key hints advertise. The
+      // composer editor is never exempted: it is the dismiss shortcut's home
+      // surface. Grids and trees activate rows on Enter/Space but do not
+      // universally own Escape (the trajectory grid claims it only with a
+      // row selection), so they appear only in the activation list —
+      // exempting their Escape would leave the key unconsumed and let the
+      // app-level handler arm a surprise turn-cancel behind the panel.
       if (
         target instanceof Element &&
         !target.closest('[data-web-shell-composer-editor]') &&
         (((e.key === 'Enter' || e.key === ' ') &&
           target.closest(
-            'button, a[href], [role="button"], [role="menuitem"], [role="option"], [role="tab"], [role="switch"], [role="checkbox"], [role="radio"], summary, [contenteditable], input, select, textarea',
+            'button, a[href], [role="button"], [role="menuitem"], [role="option"], [role="tab"], [role="switch"], [role="checkbox"], [role="radio"], [role="grid"], [role="tree"], summary, [contenteditable], input, select, textarea',
           )) ||
           (e.key === 'Escape' &&
             (target.closest('[data-web-shell-composer-task-chips]') ||
-              target.closest(
-                '[role="menu"], [role="listbox"], [role="combobox"], [role="dialog"], [role="tree"], [role="grid"]',
-              ))))
+              target.closest('[role="menu"], [role="listbox"]'))))
       )
         return;
 
@@ -14664,7 +14672,14 @@ export function App({
 
     window.addEventListener('keydown', onBtwShortcut, true);
     return () => window.removeEventListener('keydown', onBtwShortcut, true);
-  }, [interactionBlocked, btwMessage, dismissBtwMessage, pendingApproval]);
+  }, [
+    interactionBlocked,
+    btwMessage,
+    dismissBtwMessage,
+    pendingApproval,
+    portalRoot,
+    waitingMinigameOpen,
+  ]);
 
   // Echo a local command into the transcript, or suppress it while a turn is
   // streaming so the injected user row can't split the active turn (see

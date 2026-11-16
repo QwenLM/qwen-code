@@ -19847,6 +19847,247 @@ describe('App session callbacks', () => {
     expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
   });
 
+  it('keeps a settled explanation when Escape closes a confirm dialog', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    testState.prompt = '';
+
+    // A component-local Radix confirm portals in as an open alert-dialog
+    // surface; it owns Escape, so the explanation must survive.
+    const dialog = document.createElement('div');
+    dialog.setAttribute('role', 'alertdialog');
+    dialog.setAttribute('data-slot', 'alert-dialog-content');
+    dialog.setAttribute('data-state', 'open');
+    const confirmButton = document.createElement('button');
+    dialog.append(confirmButton);
+    container.append(dialog);
+    const event = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      confirmButton.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+  });
+
+  it('keeps a settled explanation when Escape is inside a keyboard scope', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    testState.prompt = '';
+
+    const scope = document.createElement('div');
+    scope.setAttribute('data-keyboard-scope', '');
+    const inner = document.createElement('button');
+    scope.append(inner);
+    container.append(scope);
+    const event = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      inner.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+  });
+
+  it('keeps a settled explanation when Enter opens a grid row', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    testState.prompt = '';
+
+    // The trajectory grid opens the active row on Enter/Space.
+    const grid = document.createElement('div');
+    grid.setAttribute('role', 'grid');
+    grid.setAttribute('tabindex', '0');
+    container.append(grid);
+    const event = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      grid.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(false);
+    expect(document.querySelector('[class*="btwPanel"]')).not.toBeNull();
+  });
+
+  it('dismisses a settled explanation with Escape on a grid without a selection', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    testState.prompt = '';
+
+    // The grid claims Escape only with a row selection; with none, Escape
+    // belongs to the explanation, not to the grid.
+    const grid = document.createElement('div');
+    grid.setAttribute('role', 'grid');
+    grid.setAttribute('tabindex', '0');
+    container.append(grid);
+    const event = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      grid.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+  });
+
+  it('does not arm a turn cancel when Escape dismisses the explanation over a grid', async () => {
+    testState.streamingState = 'responding';
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    testState.prompt = '';
+
+    const grid = document.createElement('div');
+    grid.setAttribute('role', 'grid');
+    grid.setAttribute('tabindex', '0');
+    container.append(grid);
+    const event = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      grid.dispatchEvent(event);
+    });
+    await flush();
+    // The dismissal consumes the key (preventDefault), so the app-level
+    // Escape handler bails and never arms the two-press turn cancel.
+    expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+    expect(testState.latestChatEditorProps?.cancelArmed).toBe(false);
+  });
+
+  it('dismisses a settled explanation with Space on a non-activatable surface', async () => {
+    const shell: DaemonSessionShellTaskStatus = {
+      kind: 'shell',
+      id: 'shell-running',
+      label: 'npm run build',
+      description: 'npm run build',
+      status: 'running',
+      startTime: 2,
+      runtimeMs: 20,
+      command: 'npm run build',
+      cwd: '/tmp/project',
+    };
+    const { container } = renderApp();
+    await flush();
+    await act(async () => {
+      testState.latestTaskChipsOnExplainTask?.(shell);
+      await Promise.resolve();
+    });
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    testState.prompt = '';
+
+    // The footer advertises Space to dismiss; on a non-activatable surface
+    // with an empty composer, Space must reach the dismiss path.
+    const surface = document.createElement('div');
+    container.append(surface);
+    const event = new KeyboardEvent('keydown', {
+      key: ' ',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      surface.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.querySelector('[class*="btwPanel"]')).toBeNull();
+  });
+
   it('dismisses a settled explanation with Escape outside the chip row', async () => {
     const shell: DaemonSessionShellTaskStatus = {
       kind: 'shell',
